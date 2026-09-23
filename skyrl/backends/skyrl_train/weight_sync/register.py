@@ -144,11 +144,7 @@ def register_trainer_engines() -> None:
         if name not in WeightTransferTrainerFactory._registry:
             WeightTransferTrainerFactory.register_engine(name, module, cls)
 
-    # vLLM 0.29 owns this backend's wire transport. Its sender intentionally
-    # knows nothing about SkyRL's worker-memory bracket, so replace only the
-    # lazy loader with a capability-declaring subclass. The native init-info and
-    # implementation stay unchanged; a missing/changed native class therefore
-    # fails immediately when a trainer is constructed.
+    # Replace native RDT's lazy loader with SkyRL's capability-aware subclass.
     if RDT_BACKEND in WeightTransferTrainerFactory._registry:
         WeightTransferTrainerFactory._registry[RDT_BACKEND] = get_skyrl_rdt_trainer
     else:

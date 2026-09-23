@@ -66,8 +66,7 @@ class WeightSyncTrainerBase:
         self._ie_cfg = SimpleNamespace(
             weight_sync_backend=weight_sync_backend,
             model_dtype="bfloat16",
-            # Keep this minimal test config aligned with InferenceEngineConfig.
-            # The sender uses the configured packed-buffer size for IPC and NCCL.
+            # Match InferenceEngineConfig's packed-buffer setting.
             weight_transfer_threshold_cuda_ipc_GB=1.0,
         )
         self._colocate_all = colocate_all

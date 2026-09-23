@@ -595,21 +595,13 @@ async def _build_and_serve_vllm_server(
     # single-server path, so SO_REUSEPORT stays off.
     sock = create_server_socket(sock_addr, reuse_port=False)
 
-    # vLLM 0.30 gates its token-in/token-out endpoint
-    # (/inference/v1/generate) behind --enable-scale-out.  SkyRL's data plane
-    # uses that endpoint for normal generation and LoRA requests, so it is part
-    # of every SkyRL server's required API surface rather than an optional
-    # deployment mode.
+    # SkyRL uses the scale-out token-in/token-out endpoint for generation.
     cli_args.enable_scale_out = True
     app = build_app(cli_args)
 
     # Initialize the engine (this loads the model - takes time)
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
-    # ``vllm serve`` gets this from CUDA's platform defaults.  Our standalone
-    # launcher intentionally permits parsing before CUDA is initialized (for
-    # container entrypoints), which can leave the 0.29 ``auto`` sentinel
-    # unresolved and later make ``resolve_obj_by_qualname("auto")`` fail in
-    # EngineCore.  This server is CUDA-only, so make that default explicit.
+    # Standalone parsing can leave the CUDA worker class unresolved.
     if engine_args.worker_cls == "auto":
         engine_args.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 

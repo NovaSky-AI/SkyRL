@@ -141,9 +141,6 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
-
-    # vLLM 0.29 moved the frontend argument declarations out of the OpenAI
-    # package while retaining the FrontendArgs API.
     from vllm.entrypoints.launchers.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser

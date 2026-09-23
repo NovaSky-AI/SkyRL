@@ -41,10 +41,7 @@ def make_vllm_cli_args(
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-    # vLLM 0.29 instantiates DeviceConfig(device="auto") while defining the
-    # parser.  This helper runs on the GPU-less Ray head, so make the target
-    # explicit for parser construction; the servers themselves run on CUDA
-    # workers and receive the parsed CUDA device configuration.
+    # The Ray head has no GPU, but vLLM's parser requires a device type.
     if not current_platform.device_type:
         current_platform.device_type = "cuda"
 

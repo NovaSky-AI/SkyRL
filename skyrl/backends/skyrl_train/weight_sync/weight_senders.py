@@ -127,15 +127,7 @@ def get_skyrl_ipc_trainer() -> "tuple[type, type]":
 
 
 def get_skyrl_rdt_trainer() -> type:
-    """Return vLLM's native RDT sender with SkyRL's worker capabilities.
-
-    vLLM 0.29 now owns the ``sharded_rdt`` transport and registers it before
-    SkyRL's extension hook runs.  Its wire protocol is the one we want to use,
-    but the worker-side memory bracket is a SkyRL extension and deliberately
-    reads three declared capabilities from every trainer engine.  Keep native
-    RDT intact and adapt only that explicit, local contract rather than silently
-    falling back to the older vendored transport.
-    """
+    """Return the native RDT trainer with SkyRL worker capabilities."""
     if RDT_TRAINER_BACKEND not in _TRAINER_ENGINE_CACHE:
         from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
             ShardedRDTTrainerInitInfo,
@@ -145,9 +137,6 @@ def get_skyrl_rdt_trainer() -> type:
         class SkyrlShardedRDTTrainerWeightTransferEngine(
             SkyrlTrainerCapabilities, ShardedRDTTrainerWeightTransferEngine
         ):
-            # RDT exports CUDA-IPC buffers on every sync and keeps its producer
-            # buffers hot for the following step.  The prefix-cache reset still
-            # belongs to the inference worker's regular update sequence.
             skyrl_handles_prefix_cache_reset = False
             skyrl_force_disable_expandable_segments = True
             skyrl_empty_cache_after_send = False

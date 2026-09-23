@@ -22,21 +22,13 @@ class _ScaleForward(torch.autograd.Function):
 
 
 def apply_shared_expert_lora_tp_patch() -> None:
-    """Install #6089 before any ``ParallelLinearAdapter`` is constructed.
-
-    The Bridge adapter does not retain ``disable_tensor_parallel_comm``.  This
-    small init wrapper records the PR's predicate and a forward wrapper applies
-    the custom-autograd scale after Bridge's linear/communication path. Sequence
-    parallel communication and dropout are linear with respect to this value, so
-    that placement is value- and gradient-equivalent to the upstream insertion.
-    """
+    """Install #6089 before constructing ``ParallelLinearAdapter`` instances."""
     from megatron.bridge.peft import utils
 
     adapter_cls = utils.ParallelLinearAdapter
     if getattr(adapter_cls, "_skyrl_shared_expert_lora_tp_patch", False):
         return
-    # Do not double-scale after a future Megatron-Bridge bump that includes
-    # #6089 natively. The upstream implementation records this exact field.
+    # Skip the backport when Bridge includes #6089.
     if "_external_tp_reduce_scale" in inspect.getsource(adapter_cls):
         return
 
