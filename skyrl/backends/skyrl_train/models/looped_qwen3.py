@@ -12,7 +12,7 @@ from vllm.model_executor.layers.attention.encoder_only_attention import Attentio
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.interfaces import LocalArgmaxMixin, SupportsLoRA
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.models.qwen3 import Qwen3DecoderLayer, Qwen3Model
 from vllm.model_executor.models.utils import (
@@ -30,6 +30,13 @@ from skyrl.train.looped_lora import (
 )
 
 logger = init_logger(__name__)
+
+try:
+    from vllm.model_executor.models.interfaces import LocalArgmaxMixin
+except ImportError:
+
+    class LocalArgmaxMixin:  # vLLM < 0.30
+        pass
 
 
 def _apply_lora_delta(layer: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
@@ -127,7 +134,8 @@ class LoopedLoraQwen3DecoderLayer(Qwen3DecoderLayer):
     }
 )
 class LoopedLoraQwen3Model(Qwen2Model):
-    hf_to_vllm_mapper = Qwen3Model.hf_to_vllm_mapper
+    if hasattr(Qwen3Model, "hf_to_vllm_mapper"):
+        hf_to_vllm_mapper = Qwen3Model.hf_to_vllm_mapper
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         if vllm_config.parallel_config.pipeline_parallel_size != 1:
@@ -208,7 +216,8 @@ class LoopedLoraQwen3Model(Qwen2Model):
 
 
 class SkyRLLoopedQwen3ForCausalLM(LocalArgmaxMixin, nn.Module, SupportsLoRA):
-    hf_to_vllm_mapper = LoopedLoraQwen3Model.hf_to_vllm_mapper
+    if hasattr(LoopedLoraQwen3Model, "hf_to_vllm_mapper"):
+        hf_to_vllm_mapper = LoopedLoraQwen3Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -238,7 +247,12 @@ class SkyRLLoopedQwen3ForCausalLM(LocalArgmaxMixin, nn.Module, SupportsLoRA):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+            tie_weights = getattr(self.lm_head, "tie_weights", None)
+            self.lm_head = (
+                tie_weights(self.model.embed_tokens)
+                if tie_weights is not None
+                else self.model.embed_tokens
+            )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
