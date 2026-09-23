@@ -495,6 +495,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         generator_tasks = []
         generators_done_watcher = None
         generation_failure = None
+        shutdown_requested = set()
         self._profiler_start()
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
@@ -505,6 +506,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize)
 
                 # Maintain self.num_parallel_generation_workers concurrent group-generation workers
+                shutdown_requested.clear()
                 generator_tasks = [
                     asyncio.create_task(self._run_generate_for_a_group_loop(generation_output_group_buffer))
                     for _ in range(self.num_parallel_generation_workers)
@@ -655,7 +657,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early."
                         )
                         await self._stop_generation_workers(
-                            generator_tasks, generators_done_watcher, generation_failure
+                            generator_tasks, generators_done_watcher, generation_failure, shutdown_requested
                         )
                         if generation_failure.done():
                             raise generation_failure.result()
@@ -681,7 +683,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         await asyncio.to_thread(self.update_ref_with_policy)
 
                 # Cancel generator tasks for this epoch
-                await self._stop_generation_workers(generator_tasks, generators_done_watcher, generation_failure)
+                await self._stop_generation_workers(
+                    generator_tasks, generators_done_watcher, generation_failure, shutdown_requested
+                )
                 if generation_failure.done():
                     raise generation_failure.result()
 
@@ -697,11 +701,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # End of an epoch.
         finally:
-            await self._stop_generation_workers(generator_tasks, generators_done_watcher, generation_failure)
-            self._profiler_stop()
-            if self._ray_gpu_monitor is not None:
-                self._ray_gpu_monitor.stop()
-            pbar.close()
+            try:
+                await self._stop_generation_workers(
+                    generator_tasks, generators_done_watcher, generation_failure, shutdown_requested
+                )
+            finally:
+                self._profiler_stop()
+                if self._ray_gpu_monitor is not None:
+                    self._ray_gpu_monitor.stop()
+                pbar.close()
 
         if generation_failure is not None and generation_failure.done():
             raise generation_failure.result()
@@ -733,7 +741,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info("Training done!")
 
     @staticmethod
-    async def _stop_generation_workers(tasks, watcher, generation_failure):
+    async def _stop_generation_workers(tasks, watcher, generation_failure, shutdown_requested=None):
+        if shutdown_requested is None:
+            shutdown_requested = set()
+        for task in tasks:
+            if task not in shutdown_requested and (task.cancelled() or task.cancelling()):
+                if generation_failure is not None and not generation_failure.done():
+                    generation_failure.set_result(RuntimeError("Generation worker was cancelled unexpectedly."))
+        shutdown_requested.update(tasks)
         # Stop the watcher first so intentional cancellation is not reported as a worker failure.
         if watcher is not None:
             watcher.cancel()

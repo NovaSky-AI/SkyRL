@@ -158,6 +158,58 @@ def mock_env_cfg():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["cancel", "timeout", "error", "success", "close_error"])
+async def test_generate_closes_environment_and_session(
+    stop, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    mock_env.init.side_effect = lambda history: (history, {})
+    mock_env.step.side_effect = lambda action: BaseTextEnvStepOutput(
+        observations=[], reward=1.0, done=True, metadata={}
+    )
+    started = asyncio.Event()
+    if stop in ("cancel", "timeout", "error"):
+
+        async def inference(*args, **kwargs):
+            started.set()
+            if stop == "error":
+                raise ValueError("inference failed")
+            await asyncio.Event().wait()
+
+        mock_llm.generate.side_effect = inference
+    if stop == "close_error":
+        mock_env.close.side_effect = ValueError("environment close failed")
+    generator = SkyRLGymGenerator(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+    inputs = {
+        "prompts": [[{"role": "user", "content": "hello"}]],
+        "env_classes": ["gsm8k"],
+        "env_extras": [{}],
+    }
+    with patch("skyrl.train.generators.skyrl_gym_generator.skyrl_gym.make", return_value=mock_env):
+        task = asyncio.create_task(generator.generate(inputs, disable_tqdm=True))
+        try:
+            if stop in ("cancel", "timeout"):
+                await asyncio.wait_for(started.wait(), 2)
+                if stop == "cancel":
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                else:
+                    with pytest.raises(TimeoutError):
+                        await asyncio.wait_for(task, 0.05)
+            elif stop in ("error", "close_error"):
+                with pytest.raises(ValueError, match="inference failed|environment close failed"):
+                    await asyncio.wait_for(task, 2)
+            else:
+                await asyncio.wait_for(task, 2)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    mock_env.close.assert_called_once()
+    mock_llm.finish_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["cancel", "timeout", "error"])
 async def test_generate_joins_trajectory_tasks_on_failure(stop, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg):
     generator_cfg.batched = False

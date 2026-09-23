@@ -383,6 +383,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
+        env = None
         try:
             # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
             # This is no longer needed now given that step wise training is supported
@@ -638,8 +639,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # Get environment-specific metrics after the episode is done
             env_metrics = env.get_metrics()
-            # Close the environment
-            await self._run_in_executor_if_available(env.close)
 
             prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
             rollout_logprobs = None
@@ -740,7 +739,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             return agent_loop_output
 
         finally:
-            await self.inference_engine_client.finish_session(session_id)
+            try:
+                if env is not None:
+                    await self._run_in_executor_if_available(env.close)
+            finally:
+                await self.inference_engine_client.finish_session(session_id)
 
     def _build_per_token_rewards(
         self, per_step_rewards: List[Tuple[float, Optional[int]]], response_ids: List[int], appended_eos_token: bool

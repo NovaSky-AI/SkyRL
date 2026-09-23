@@ -7,7 +7,7 @@ UID tracking, and the consumer's exhaustion-aware buffer drain.
 import asyncio
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -452,7 +452,7 @@ async def test_successful_training_epoch_with_generation_deadline(sample_full_ba
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sample_full_batch", [False, True])
-@pytest.mark.parametrize("outcome", ["timeout", "error", "stop"])
+@pytest.mark.parametrize("outcome", ["timeout", "error", "cancelled_worker", "stop"])
 async def test_generation_failure_during_final_metrics(sample_full_batch, outcome):
     trainer = _complete_epoch_trainer(sample_full_batch, timeout=0.05 if outcome == "timeout" else None, count=4)
     trainer.cfg.trainer.max_training_steps = 1
@@ -463,13 +463,15 @@ async def test_generation_failure_during_final_metrics(sample_full_batch, outcom
         if int(inputs["trajectory_ids"][0].instance_id) >= 2:
             try:
                 await release.wait()
+                if outcome == "cancelled_worker":
+                    raise asyncio.CancelledError
                 raise ValueError("failure during metrics")
             finally:
                 failed.set()
         return {"rewards": [0.0, 1.0], "loss_masks": [[1], [1]]}
 
     async def metrics():
-        if outcome == "error":
+        if outcome in ("error", "cancelled_worker"):
             release.set()
         if outcome != "stop":
             await failed.wait()
@@ -481,11 +483,52 @@ async def test_generation_failure_during_final_metrics(sample_full_batch, outcom
         await asyncio.wait_for(trainer.train(), 2)
         trainer.tracker.finish.assert_called_once()
     else:
-        match = "exceeded 0.05 seconds" if outcome == "timeout" else "failure during metrics"
+        match = {
+            "timeout": "exceeded 0.05 seconds",
+            "error": "failure during metrics",
+            "cancelled_worker": "Generation worker was cancelled unexpectedly",
+        }[outcome]
         with pytest.raises(RuntimeError, match=match):
             await asyncio.wait_for(trainer.train(), 2)
         trainer.tracker.finish.assert_not_called()
     assert trainer._staleness_manager._stat.running == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_cleanup", [False, True])
+async def test_train_cancellation_stops_monitor_and_profiler(cancel_during_cleanup):
+    trainer = _complete_epoch_trainer(timeout=None)
+    trainer._ray_gpu_monitor = Mock()
+    cleaning = asyncio.Event()
+    generate = trainer.generator.generate
+
+    async def slow_cleanup(inputs):
+        try:
+            return await generate(inputs)
+        finally:
+            cleaning.set()
+            await asyncio.Event().wait()
+
+    if cancel_during_cleanup:
+        trainer.generator.generate = slow_cleanup
+    progress = MagicMock()
+    with patch("skyrl.train.fully_async_trainer.tqdm", return_value=progress):
+        task = asyncio.create_task(trainer.train())
+        try:
+            await asyncio.wait_for(trainer.generator.started.wait(), 2)
+            task.cancel()
+            if cancel_during_cleanup:
+                await asyncio.wait_for(cleaning.wait(), 2)
+                task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    trainer._profiler_stop.assert_called_once()
+    trainer._ray_gpu_monitor.stop.assert_called_once()
+    progress.close.assert_called_once()
+    assert trainer.generator.active == 0
 
 
 @pytest.mark.asyncio
