@@ -12,6 +12,7 @@ on:
       - 'pyproject.toml'
       - '!docs/**'
       - '!examples/**'
+      - 'examples/model_checks/**'
       - '.github/workflows/**'
   pull_request_target:
     types: [labeled]
