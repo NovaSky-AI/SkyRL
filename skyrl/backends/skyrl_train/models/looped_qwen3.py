@@ -48,6 +48,18 @@ def _apply_lora_delta(layer: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
     return layer._apply_lora_to_output(inputs, output)
 
 
+def _apply_projection(
+    layer: nn.Module,
+    inputs: torch.Tensor,
+    *,
+    lora_only: bool,
+) -> torch.Tensor:
+    if lora_only:
+        return _apply_lora_delta(layer, inputs)
+    output, _ = layer(inputs)
+    return output
+
+
 class LoopedLoraQwen3DecoderLayer(Qwen3DecoderLayer):
     def __init__(
         self,
@@ -71,7 +83,7 @@ class LoopedLoraQwen3DecoderLayer(Qwen3DecoderLayer):
             raise ValueError("Fast looped LoRA only supports causal Qwen3 models")
 
         model_prefix = prefix.rsplit(".layers.", 1)[0]
-        self.lora_only_attn = nn.ModuleDict()
+        self.looped_attn = nn.ModuleDict()
         for execution_index in lora_only_execution_indices:
             attention_kwargs = dict(
                 num_kv_heads=self.self_attn.num_kv_heads,
@@ -82,19 +94,21 @@ class LoopedLoraQwen3DecoderLayer(Qwen3DecoderLayer):
             )
             if "per_layer_sliding_window" in signature(Attention.__init__).parameters:
                 attention_kwargs["per_layer_sliding_window"] = per_layer_sliding_window
-            self.lora_only_attn[str(execution_index)] = Attention(
+            self.looped_attn[str(execution_index)] = Attention(
                 self.self_attn.num_heads,
                 self.self_attn.head_dim,
                 self.self_attn.scaling,
                 **attention_kwargs,
             )
 
-    def forward_lora_only(
+    def forward_looped(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         execution_index: int,
+        *,
+        lora_only: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -102,7 +116,11 @@ class LoopedLoraQwen3DecoderLayer(Qwen3DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        qkv = _apply_lora_delta(self.self_attn.qkv_proj, hidden_states)
+        qkv = _apply_projection(
+            self.self_attn.qkv_proj,
+            hidden_states,
+            lora_only=lora_only,
+        )
         q, k, v = qkv.split(
             [self.self_attn.q_size, self.self_attn.kv_size, self.self_attn.kv_size],
             dim=-1,
@@ -122,13 +140,25 @@ class LoopedLoraQwen3DecoderLayer(Qwen3DecoderLayer):
             )
         ).view(k.shape)
         q, k = self.self_attn.rotary_emb(positions, q, k)
-        hidden_states = self.lora_only_attn[str(execution_index)](q, k, v)
-        hidden_states = _apply_lora_delta(self.self_attn.o_proj, hidden_states)
+        hidden_states = self.looped_attn[str(execution_index)](q, k, v)
+        hidden_states = _apply_projection(
+            self.self_attn.o_proj,
+            hidden_states,
+            lora_only=lora_only,
+        )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = _apply_lora_delta(self.mlp.gate_up_proj, hidden_states)
+        hidden_states = _apply_projection(
+            self.mlp.gate_up_proj,
+            hidden_states,
+            lora_only=lora_only,
+        )
         hidden_states = self.mlp.act_fn(hidden_states)
-        hidden_states = _apply_lora_delta(self.mlp.down_proj, hidden_states)
+        hidden_states = _apply_projection(
+            self.mlp.down_proj,
+            hidden_states,
+            lora_only=lora_only,
+        )
         return hidden_states, residual
 
 
@@ -157,6 +187,12 @@ class LoopedLoraQwen3Model(Qwen2Model):
         sections = getattr(config, "looped_lora_sections", None)
         if not sections:
             raise ValueError("Fast looped LoRA requires at least one configured section")
+        self.looped_lora_mode = getattr(config, "looped_lora_mode", "lora_only")
+        if self.looped_lora_mode not in {"lora_only", "full_block"}:
+            raise ValueError(
+                "Fast looped LoRA mode must be 'lora_only' or 'full_block', "
+                f"got {self.looped_lora_mode!r}"
+            )
         schedule = build_looped_lora_schedule(config.num_hidden_layers, sections)
         lora_only_by_physical_layer = get_lora_only_executions_by_physical_layer(config.num_hidden_layers, schedule)
 
@@ -184,7 +220,8 @@ class LoopedLoraQwen3Model(Qwen2Model):
         )
         self.looped_lora_schedule: tuple[LayerExecution, ...] = schedule
         logger.info(
-            "Fast looped LoRA schedule: physical_layers=%d executions=%d lora_only_executions=%d sections=%s",
+            "Looped LoRA schedule: mode=%s physical_layers=%d executions=%d extra_executions=%d sections=%s",
+            self.looped_lora_mode,
             config.num_hidden_layers,
             len(schedule),
             sum(execution.lora_only for execution in schedule),
@@ -209,11 +246,12 @@ class LoopedLoraQwen3Model(Qwen2Model):
         for execution_index, execution in enumerate(self.looped_lora_schedule):
             layer = self.layers[execution.physical_layer]
             if execution.lora_only:
-                hidden_states, residual = layer.forward_lora_only(
+                hidden_states, residual = layer.forward_looped(
                     positions,
                     hidden_states,
                     residual,
                     execution_index,
+                    lora_only=self.looped_lora_mode == "lora_only",
                 )
             else:
                 hidden_states, residual = layer(positions, hidden_states, residual)

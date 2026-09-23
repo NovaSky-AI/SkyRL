@@ -140,6 +140,9 @@ class LoopedLoraConfig(BaseConfig):
     sections: List[Dict[str, int]] = field(default_factory=list)
     """Physical ``[start_layer, end_layer)`` ranges and their total ``repeat_count``."""
 
+    mode: Literal["lora_only", "full_block"] = "lora_only"
+    """Extra-pass compute path. ``full_block`` is a benchmark reference mode."""
+
 
 @dataclass
 class FakeInt4QatConfig(BaseConfig):

@@ -253,7 +253,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
-    looped_lora_sections = get_config_as_dict(cfg.trainer.policy.model.looped_lora)["sections"]
+    looped_lora_config = get_config_as_dict(cfg.trainer.policy.model.looped_lora)
+    looped_lora_sections = looped_lora_config["sections"]
     if looped_lora_sections:
         from skyrl.train.looped_lora import parse_looped_lora_sections
 
@@ -271,8 +272,13 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
             raise ValueError("Looped LoRA cannot be combined with a different hf_overrides.architectures value")
         hf_overrides["architectures"] = architecture
         hf_overrides["looped_lora_sections"] = looped_lora_sections
+        hf_overrides["looped_lora_mode"] = looped_lora_config["mode"]
         engine_kwargs["hf_overrides"] = hf_overrides
-        logger.info("vLLM fast looped LoRA enabled: sections=%s", looped_lora_sections)
+        logger.info(
+            "vLLM looped LoRA enabled: mode=%s sections=%s",
+            looped_lora_config["mode"],
+            looped_lora_sections,
+        )
 
     _apply_serialized_fp8_weight_sync_defaults(
         ie_cfg,
