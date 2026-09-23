@@ -17,7 +17,7 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
-from examples.model_checks.run_nemotron_logprobs import (
+from examples.model_checks.run_logprobs import (
     LoRALogprobWorker,
     check_logprobs,
 )

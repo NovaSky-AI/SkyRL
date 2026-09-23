@@ -118,7 +118,7 @@ def checks(monkeypatch):
         module = ModuleType(name)
         setattr(module, attribute, object)
         monkeypatch.setitem(sys.modules, name, module)
-    path = Path(__file__).parents[3] / "examples/model_checks/run_nemotron_logprobs.py"
+    path = Path(__file__).parents[3] / "examples/model_checks/run_logprobs.py"
     spec = importlib.util.spec_from_file_location("logprob_example_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -128,14 +128,19 @@ def checks(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replay", [False, True])
 @pytest.mark.parametrize("colocated", [False, True])
-@pytest.mark.parametrize("fault", [None, "stale", "parity", "repeat", "leaked_update", "routes"])
-async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatch, checks, fault, colocated, replay):
+@pytest.mark.parametrize(
+    "lora,fault",
+    [(True, fault) for fault in [None, "stale", "parity", "repeat", "leaked_update", "routes"]] + [(False, None)],
+)
+async def test_check_detects_missing_update_mismatch_and_repeat_noise(
+    monkeypatch, checks, fault, colocated, replay, lora
+):
     current = {"updated": False, "published": False, "trainer_on_gpu": True, "inference": "asleep"}
     calls = []
     route = np.zeros((2, 1, 1), dtype=np.uint8)
     monkeypatch.setattr(checks, "build_probe_sequences", lambda _: [[1, 2]])
     monkeypatch.setattr(checks, "resolve_policy_model_name", lambda _: "adapter")
-    monkeypatch.setattr(checks, "perturb_trainer", lambda _: current.update(updated=True))
+    monkeypatch.setattr(checks.ray, "get", lambda value: value)
 
     def build_batch(sequences, pad_id, routes=None):
         assert sequences == [[1, 2]]
@@ -157,9 +162,13 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatc
     monkeypatch.setattr(checks, "score_trainer", score_trainer)
 
     def offload(offload_optimizer, offload_model):
-        assert current["trainer_on_gpu"] and current["inference"] == "asleep"
-        assert offload_optimizer and offload_model
-        current["trainer_on_gpu"] = False
+        assert current["trainer_on_gpu"]
+        if offload_optimizer:
+            assert current["inference"] == "asleep" and offload_model == lora
+        else:
+            assert not lora and current["inference"] == "weights" and offload_model
+        if offload_model:
+            current["trainer_on_gpu"] = False
 
     def backload(backload_optimizer, backload_model):
         assert current["inference"] == "asleep"
@@ -167,11 +176,12 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatc
         current["trainer_on_gpu"] = True
 
     async def wake_up(tags):
-        assert not current["trainer_on_gpu"]
         if tags == ["weights"]:
+            assert current["trainer_on_gpu"] == (not lora)
             assert current["inference"] == "asleep"
             current["inference"] = "weights"
         else:
+            assert not current["trainer_on_gpu"]
             assert tags == ["kv_cache"] and current["inference"] == "weights"
             current["inference"] = "ready"
 
@@ -179,12 +189,16 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatc
         assert current["inference"] == "ready" and not current["trainer_on_gpu"]
         current["inference"] = "asleep"
 
-    policy = SimpleNamespace(offload_to_cpu=offload, backload_to_gpu=backload)
-    client = SimpleNamespace(wake_up=wake_up, sleep=sleep)
+    policy = SimpleNamespace(
+        offload_to_cpu=offload,
+        backload_to_gpu=backload,
+        async_run_ray_method=lambda *_: current.update(updated=True),
+    )
+    client = SimpleNamespace(wake_up=wake_up, sleep=sleep, model_name="base")
 
     async def publish(*_):
         if colocated:
-            assert not current["trainer_on_gpu"] and current["inference"] == "weights"
+            assert current["trainer_on_gpu"] == (not lora) and current["inference"] == "weights"
         if fault != "stale":
             current["published"] = current["updated"]
 
@@ -198,20 +212,15 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatc
         if updated and fault == "repeat" and len(calls) == 4:
             value += 0.001
         calls.append(value)
-        return [value]
-
-    async def score_routes(*args):
-        values = await score(*args)
         captured = route + 1 if fault == "routes" and len(calls) == 5 else route
-        return values, [captured]
+        return [value], [captured] if replay else None
 
     monkeypatch.setattr(checks, "publish", publish)
     monkeypatch.setattr(checks, "score_sampler", score)
-    monkeypatch.setattr(checks, "score_sampler_with_routes", score_routes)
     cfg = SimpleNamespace(
         trainer=SimpleNamespace(
             policy=SimpleNamespace(
-                model=SimpleNamespace(lora=SimpleNamespace(rank=8)),
+                model=SimpleNamespace(lora=SimpleNamespace(rank=8 if lora else 0)),
                 megatron_config=SimpleNamespace(moe_enable_routing_replay=replay),
             ),
             placement=SimpleNamespace(colocate_all=colocated),
@@ -227,15 +236,20 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(monkeypatc
     else:
         result = await call
         assert result is report
-        assert result["perturbed"]["trainer"] == result["perturbed"]["inference"] == [-1.0]
-        assert result["perturbed"]["stale"] == [-2.0]
+        if lora:
+            assert result["perturbed"]["trainer"] == result["perturbed"]["inference"] == [-1.0]
+            assert result["perturbed"]["stale"] == [-2.0]
+        else:
+            assert result["full_ft"]["trainer"] == result["full_ft"]["inference"] == [-2.0]
+            assert not current["updated"]
         if colocated:
             assert current["trainer_on_gpu"] and current["inference"] == "asleep"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capture_routes", [False, True])
 @pytest.mark.parametrize("fault", [None, "tokens", "short_routes", "float_routes", "missing_routes", "nonfinite"])
-async def test_completion_pairs_scores_with_exact_prompt_routes(checks, fault):
+async def test_completion_pairs_scores_with_exact_prompt_routes(checks, fault, capture_routes):
     tokens = [3, 7, 11]
     routes = np.arange(6, dtype=np.int64).reshape(3, 2, 1)
     if fault == "short_routes":
@@ -256,23 +270,32 @@ async def test_completion_pairs_scores_with_exact_prompt_routes(checks, fault):
 
     async def completion(payload):
         body = payload["json"]
-        assert body["prompt"] == tokens and body["routed_experts_prompt_start"] == 0
+        assert body["prompt"] == tokens
+        assert ("routed_experts_prompt_start" in body) == capture_routes
+        if capture_routes:
+            assert body["routed_experts_prompt_start"] == 0
         assert body["max_tokens"] == 1 and not body["add_special_tokens"]
         return {"choices": [choice]}
 
     async def reset():
         pass
 
-    call = checks.score_sampler_with_routes(
-        SimpleNamespace(completion=completion, reset_prefix_cache=reset), [tokens], "adapter"
+    call = checks.score_sampler(
+        SimpleNamespace(completion=completion, reset_prefix_cache=reset),
+        [tokens],
+        "adapter",
+        capture_routes=capture_routes,
     )
-    if fault:
+    if fault in ("tokens", "nonfinite") or (capture_routes and fault):
         with pytest.raises((AssertionError, ValueError, KeyError)):
             await call
     else:
         scores, captured = await call
         assert scores == [-0.2, -0.3]
-        np.testing.assert_array_equal(captured, [routes])
-        batch = checks.build_batch([tokens, tokens[:2]], 0, [captured[0], captured[0][:2]])
-        assert batch["router_padding_mask"].tolist() == [[False, False, False], [True, False, False]]
-        assert batch["response_mask"].sum().item() == 3
+        if capture_routes:
+            np.testing.assert_array_equal(captured, [routes])
+            batch = checks.build_batch([tokens, tokens[:2]], 0, [captured[0], captured[0][:2]])
+            assert batch["router_padding_mask"].tolist() == [[False, False, False], [True, False, False]]
+            assert batch["response_mask"].sum().item() == 3
+        else:
+            assert captured is None
