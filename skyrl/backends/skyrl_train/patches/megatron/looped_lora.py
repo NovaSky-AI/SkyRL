@@ -29,6 +29,18 @@ def _gather_sequence_parallel_input(inputs: torch.Tensor, group: Any) -> torch.T
     return gather_from_sequence_parallel_region(inputs, group=group)
 
 
+def _is_megatron_checkpointing() -> bool:
+    try:
+        from megatron.core.tensor_parallel.random import is_checkpointing
+    except ModuleNotFoundError:
+        return False
+    return is_checkpointing()
+
+
+def _schedule_is_active() -> bool:
+    return _loop_schedule_active.get() or _is_megatron_checkpointing()
+
+
 def _normalize_adapter_input(linear: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
     base = linear.to_wrap
     weight = getattr(base, "layer_norm_weight", None)
@@ -82,7 +94,7 @@ class _LoopedModuleList(nn.ModuleList):
         )
 
     def __iter__(self):
-        if _loop_schedule_active.get():
+        if _schedule_is_active():
             return self._iter_executions()
         return super().__iter__()
 
@@ -92,12 +104,12 @@ class _LoopedModuleList(nn.ModuleList):
                 yield layer
 
     def __len__(self) -> int:
-        if _loop_schedule_active.get():
+        if _schedule_is_active():
             return len(self._executions)
         return super().__len__()
 
     def __getitem__(self, index):
-        if _loop_schedule_active.get():
+        if _schedule_is_active():
             if isinstance(index, slice):
                 return tuple(layer for layer, _ in self._executions[index])
             layer, lora_only = self._executions[index]

@@ -127,6 +127,22 @@ def test_megatron_block_uses_vllm_section_order(repeat_count: int) -> None:
     assert [layer.layer_number for layer in block.layers] == list(range(1, 7))
 
 
+def test_megatron_checkpoint_recompute_uses_logical_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+    schedule = build_looped_lora_schedule(
+        6,
+        [{"start_layer": 2, "end_layer": 4, "repeat_count": 2}],
+    )
+    block = _RecordingBlock(6, schedule)
+    monkeypatch.setattr(looped_lora, "_is_megatron_checkpointing", lambda: True)
+
+    replayed_layer = block.layers[4]
+
+    assert len(block.layers) == 8
+    assert replayed_layer.layer_number == 3
+    assert _adapter_only.get()
+    _adapter_only.set(False)
+
+
 @pytest.mark.parametrize(
     ("repeat_count", "expected_length", "expected_lora_only"),
     [(1, 36, 0), (2, 44, 8), (4, 60, 24)],
