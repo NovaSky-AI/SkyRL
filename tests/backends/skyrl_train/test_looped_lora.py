@@ -19,22 +19,23 @@ from skyrl.train.looped_lora import (
 
 
 class _RecordingLayer(nn.Module):
-    def __init__(self, layer_number: int, calls: list[int]) -> None:
+    def __init__(self, layer_number: int, calls: list[tuple[int, bool]]) -> None:
         super().__init__()
         self.layer_number = layer_number
         self.calls = calls
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        self.calls.append(self.layer_number - 1)
+        self.calls.append((self.layer_number - 1, _adapter_only.get()))
         return hidden_states + self.layer_number
 
 
 class _RecordingBlock(nn.Module):
     def __init__(self, num_layers: int, schedule) -> None:
         super().__init__()
-        self.calls: list[int] = []
+        self.calls: list[tuple[int, bool]] = []
         layers = [_RecordingLayer(index + 1, self.calls) for index in range(num_layers)]
         self.layers = _LoopedModuleList(layers, schedule)
+        self.num_layers_per_pipeline_rank = num_layers
         self._looped_lora_original_forward = self.forward
         self.forward = MethodType(_looped_block_forward, self)
 
@@ -96,9 +97,12 @@ def test_megatron_block_uses_vllm_section_order(repeat_count: int) -> None:
 
     output = block(torch.zeros(1))
 
-    expected_calls = [0, 1, 2, 3] + [1, 2, 3] * (repeat_count - 1) + [4, 5]
+    physical_calls = [0, 1, 2, 3] + [1, 2, 3] * (repeat_count - 1) + [4, 5]
+    expected_calls = [
+        (physical_layer, execution.lora_only) for physical_layer, execution in zip(physical_calls, schedule)
+    ]
     assert block.calls == expected_calls
-    assert output.item() == sum(index + 1 for index in expected_calls)
+    assert output.item() == sum(index + 1 for index in physical_calls)
     assert [layer.layer_number for layer in block.layers] == list(range(1, 7))
 
 

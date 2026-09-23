@@ -59,33 +59,26 @@ def _looped_linear_forward(linear: nn.Module, inputs: torch.Tensor, *args: Any, 
     return output
 
 
-class _LayerExecutionCall:
-    def __init__(self, layer: nn.Module, lora_only: bool) -> None:
-        self._layer = layer
-        self._lora_only = lora_only
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._layer, name)
-
-    def __call__(self, *args: Any, **kwargs: Any):
-        with _set_context(_adapter_only, self._lora_only):
-            return self._layer(*args, **kwargs)
-
-
 class _LoopedModuleList(nn.ModuleList):
     def __init__(self, layers: Sequence[nn.Module], schedule: Sequence[LayerExecution]) -> None:
         super().__init__(layers)
         self._executions = tuple(
-            _LayerExecutionCall(
-                super(_LoopedModuleList, self).__getitem__(execution.physical_layer), execution.lora_only
+            (
+                super(_LoopedModuleList, self).__getitem__(execution.physical_layer),
+                execution.lora_only,
             )
             for execution in schedule
         )
 
     def __iter__(self):
         if _loop_schedule_active.get():
-            return iter(self._executions)
+            return self._iter_executions()
         return super().__iter__()
+
+    def _iter_executions(self):
+        for layer, lora_only in self._executions:
+            with _set_context(_adapter_only, lora_only):
+                yield layer
 
     def __len__(self) -> int:
         if _loop_schedule_active.get():
@@ -94,13 +87,22 @@ class _LoopedModuleList(nn.ModuleList):
 
     def __getitem__(self, index):
         if _loop_schedule_active.get():
-            return self._executions[index]
+            if isinstance(index, slice):
+                return tuple(layer for layer, _ in self._executions[index])
+            layer, lora_only = self._executions[index]
+            _adapter_only.set(lora_only)
+            return layer
         return super().__getitem__(index)
 
 
 def _looped_block_forward(block: nn.Module, *args: Any, **kwargs: Any):
-    with _set_context(_loop_schedule_active, True):
-        return block._looped_lora_original_forward(*args, **kwargs)
+    with _set_context(_loop_schedule_active, True), _set_context(_adapter_only, False):
+        physical_layer_count = block.num_layers_per_pipeline_rank
+        block.num_layers_per_pipeline_rank = len(block.layers)
+        try:
+            return block._looped_lora_original_forward(*args, **kwargs)
+        finally:
+            block.num_layers_per_pipeline_rank = physical_layer_count
 
 
 def install_looped_lora(model: nn.Module, sections: Sequence[dict[str, int]], mode: str) -> None:
