@@ -16,9 +16,8 @@ mixin, no named actors and no special actor options.
 See docs/training/weight_transfer/sharded_rdt.md for the publish -> serve ->
 free_group -> release lifecycle and the ownership model.
 
-Derived from the ``vllm-rdt-weight-sync`` fork's
-``vllm/distributed/weight_transfer/sharded_rdt_trainer.py``. SkyRL owns this
-implementation and registers it as ``sharded_rdt``.
+NOTE: vLLM natively has the same RDT engine in >=0.29. However, we retain this 
+in SkyRL for faster iteration on improvements.
 """
 
 import contextlib

@@ -48,9 +48,8 @@ blob into the queue would keep both alive for the scatter's lifetime.
 See docs/training/weight_transfer/sharded_rdt.md for the design and the measured
 results behind the choices here.
 
-Derived from the ``vllm-rdt-weight-sync`` fork's
-``vllm/distributed/weight_transfer/sharded_rdt_engine.py``. SkyRL owns this
-implementation and registers it as ``sharded_rdt``.
+NOTE: vLLM natively has the same RDT engine in >=0.29. However, we retain this
+in SkyRL for faster iteration on improvements.
 """
 
 import time
