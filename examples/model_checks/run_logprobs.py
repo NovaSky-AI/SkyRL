@@ -193,7 +193,8 @@ async def check_logprobs(policy, client, cfg, tokenizer, report=None):
     colocated = cfg.trainer.placement.colocate_all
     scores = {} if report is None else report
     scores["tokens"] = sequences
-    for phase in ["zero", "perturbed"] if lora else ["full_ft"]:
+    phases = ["zero", "perturbed"] if lora else ["full_ft"]
+    for phase in phases:
         if phase == "perturbed":
             ray.get(policy.async_run_ray_method("pass_through", "perturb_test_adapter"))
         current = scores[phase] = {}
@@ -226,10 +227,12 @@ async def check_logprobs(policy, client, cfg, tokenizer, report=None):
         current["trainer"] = score_trainer(policy, build_batch(sequences, pad_id, routes))
         difference = compare_logprobs(current["trainer"], current["inference"])
         print(f"{phase}: {difference}", flush=True)
-        check_agreement(difference, mean_atol=0.05, max_atol=0.5)
         assert compare_logprobs(current["inference"], current["repeat"])["max_abs"] <= 1e-6
         if replay:
             assert all(np.array_equal(route, repeat) for route, repeat in zip(routes, repeat_routes, strict=True))
+    for phase in phases:
+        current = scores[phase]
+        check_agreement(compare_logprobs(current["trainer"], current["inference"]), mean_atol=0.05, max_atol=0.5)
     if lora:
         for backend in ("trainer", "inference"):
             assert compare_logprobs(scores["zero"][backend], scores["perturbed"][backend])["max_abs"] > 1e-6

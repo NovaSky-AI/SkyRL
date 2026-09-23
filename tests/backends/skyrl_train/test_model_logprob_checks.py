@@ -130,7 +130,10 @@ def checks(monkeypatch):
 @pytest.mark.parametrize("colocated", [False, True])
 @pytest.mark.parametrize(
     "lora,fault",
-    [(True, fault) for fault in [None, "stale", "parity", "repeat", "leaked_update", "routes", "repeat_exception"]]
+    [
+        (True, fault)
+        for fault in [None, "stale", "parity", "repeat", "leaked_update", "routes", "repeat_exception", "zero_parity"]
+    ]
     + [(False, None)],
 )
 async def test_check_detects_missing_update_mismatch_and_repeat_noise(
@@ -208,7 +211,7 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(
             assert not current["trainer_on_gpu"] and current["inference"] == "ready"
         updated = current["published"] or (fault == "leaked_update" and current["updated"])
         value = -1.0 if updated else -2.0
-        if updated and fault == "parity":
+        if (updated and fault == "parity") or (not updated and fault == "zero_parity"):
             value += 0.1
         if updated and fault == "repeat" and len(calls) == 4:
             value += 0.001
@@ -243,6 +246,10 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(
         with pytest.raises(AssertionError):
             await call
         assert report["perturbed"]
+        if fault == "zero_parity":
+            assert report["perturbed"]["trainer"] == report["perturbed"]["inference"] == [-1.0]
+            assert report["perturbed"]["repeat"] == [-1.0]
+            assert report["perturbed"]["stale"] == [-1.9]
     else:
         result = await call
         assert result is report
