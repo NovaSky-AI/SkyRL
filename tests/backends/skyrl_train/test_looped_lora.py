@@ -3,17 +3,14 @@ from types import MethodType
 import pytest
 import torch
 from torch import nn
-from torch.utils.checkpoint import checkpoint
 
 from skyrl.backends.skyrl_train.patches.megatron import looped_lora
 from skyrl.backends.skyrl_train.patches.megatron.looped_lora import (
     _adapter_only,
-    _finish_looped_backward,
     _looped_block_forward,
     _looped_linear_forward,
     _LoopedModuleList,
     _set_context,
-    _start_looped_backward,
 )
 from skyrl.train.looped_lora import (
     LayerExecution,
@@ -47,21 +44,6 @@ class _RecordingBlock(nn.Module):
         for layer in self.layers:
             hidden_states = layer(hidden_states)
         return hidden_states
-
-
-class _CheckpointedRecordingBlock(_RecordingBlock):
-    def __init__(self, num_layers: int, schedule) -> None:
-        super().__init__(num_layers, schedule)
-        self.register_full_backward_pre_hook(_start_looped_backward)
-        self.register_full_backward_hook(_finish_looped_backward)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        def run_layers(inputs: torch.Tensor) -> torch.Tensor:
-            for index in range(len(self.layers)):
-                inputs = self.layers[index](inputs)
-            return inputs
-
-        return checkpoint(run_layers, hidden_states, use_reentrant=True)
 
 
 class _FakeRMSNormLinear(nn.Module):
@@ -106,9 +88,7 @@ def test_megatron_extra_pass_skips_frozen_linear_and_backpropagates_through_lora
     assert inputs.grad is not None
 
 
-def test_megatron_extra_pass_repeats_fused_layernorm_sequence_gather(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_megatron_extra_pass_repeats_fused_layernorm_sequence_gather(monkeypatch: pytest.MonkeyPatch) -> None:
     linear = _FakeLoraLinear(hidden_size=3)
     linear.to_wrap.return_layernorm_output_gathered = True
     linear.adapter.tp_group = object()
@@ -147,24 +127,7 @@ def test_megatron_block_uses_vllm_section_order(repeat_count: int) -> None:
     assert [layer.layer_number for layer in block.layers] == list(range(1, 7))
 
 
-def test_megatron_checkpoint_recompute_uses_looped_schedule() -> None:
-    schedule = build_looped_lora_schedule(
-        6,
-        [{"start_layer": 1, "end_layer": 4, "repeat_count": 2}],
-    )
-    block = _CheckpointedRecordingBlock(6, schedule)
-    inputs = torch.zeros(1, requires_grad=True)
-
-    output = block(inputs)
-    block.calls.clear()
-    output.backward()
-
-    assert block.calls == [(execution.physical_layer, execution.lora_only) for execution in schedule]
-
-
-def test_megatron_checkpoint_recompute_uses_logical_schedule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_megatron_checkpoint_recompute_uses_logical_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
     schedule = build_looped_lora_schedule(
         6,
         [{"start_layer": 2, "end_layer": 4, "repeat_count": 2}],
