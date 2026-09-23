@@ -23,6 +23,12 @@ def _set_context(variable: ContextVar[bool], value: bool) -> Iterator[None]:
         variable.reset(token)
 
 
+def _gather_sequence_parallel_input(inputs: torch.Tensor, group: Any) -> torch.Tensor:
+    from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
+
+    return gather_from_sequence_parallel_region(inputs, group=group)
+
+
 def _normalize_adapter_input(linear: nn.Module, inputs: torch.Tensor) -> torch.Tensor:
     base = linear.to_wrap
     weight = getattr(base, "layer_norm_weight", None)
@@ -34,16 +40,21 @@ def _normalize_adapter_input(linear: nn.Module, inputs: torch.Tensor) -> torch.T
     if getattr(base, "zero_centered_gamma", False):
         weight = weight + 1
     if normalization == "RMSNorm":
-        return F.rms_norm(inputs, (inputs.shape[-1],), weight, eps)
-    if normalization == "LayerNorm":
-        return F.layer_norm(
+        normalized = F.rms_norm(inputs, (inputs.shape[-1],), weight, eps)
+    elif normalization == "LayerNorm":
+        normalized = F.layer_norm(
             inputs,
             (inputs.shape[-1],),
             weight,
             getattr(base, "layer_norm_bias", None),
             eps,
         )
-    raise ValueError(f"Unsupported looped LoRA normalization: {normalization!r}")
+    else:
+        raise ValueError(f"Unsupported looped LoRA normalization: {normalization!r}")
+
+    if getattr(base, "return_layernorm_output_gathered", False):
+        normalized = _gather_sequence_parallel_input(normalized, linear.adapter.tp_group)
+    return normalized
 
 
 def _looped_linear_forward(linear: nn.Module, inputs: torch.Tensor, *args: Any, **kwargs: Any):

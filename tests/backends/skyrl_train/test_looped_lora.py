@@ -4,6 +4,7 @@ import pytest
 import torch
 from torch import nn
 
+from skyrl.backends.skyrl_train.patches.megatron import looped_lora
 from skyrl.backends.skyrl_train.patches.megatron.looped_lora import (
     _adapter_only,
     _looped_block_forward,
@@ -85,6 +86,26 @@ def test_megatron_extra_pass_skips_frozen_linear_and_backpropagates_through_lora
     assert linear.adapter.weight.grad is not None
     assert linear.to_wrap.weight.grad is None
     assert inputs.grad is not None
+
+
+def test_megatron_extra_pass_repeats_fused_layernorm_sequence_gather(monkeypatch: pytest.MonkeyPatch) -> None:
+    linear = _FakeLoraLinear(hidden_size=3)
+    linear.to_wrap.return_layernorm_output_gathered = True
+    linear.adapter.tp_group = object()
+    gathered_group = None
+
+    def gather(inputs: torch.Tensor, group: object) -> torch.Tensor:
+        nonlocal gathered_group
+        gathered_group = group
+        return torch.cat((inputs, inputs), dim=0)
+
+    monkeypatch.setattr(looped_lora, "_gather_sequence_parallel_input", gather)
+
+    with _set_context(_adapter_only, True):
+        output, _ = _looped_linear_forward(linear, torch.ones(2, 3))
+
+    assert output.shape == (4, 3)
+    assert gathered_group is linear.adapter.tp_group
 
 
 @pytest.mark.parametrize("repeat_count", [1, 2, 4])
