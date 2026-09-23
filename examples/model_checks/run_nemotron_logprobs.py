@@ -15,17 +15,14 @@ Flow (the same for LoRA and full fine-tuning; only the perturbed tensors differ)
 
 No optimizer is created. With LoRA the adapter is exported to ``--lora-sync-path``,
 which every node's inference engines must be able to read (a shared mount).
-A JSON report with every phase's statistics is written to ``--output``.
+Each phase prints its error statistics; the first failing check raises.
 """
 
 import argparse
 import asyncio
-import json
 import math
-import time
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import ray
 import torch
@@ -88,7 +85,6 @@ def build_config(args: argparse.Namespace) -> SkyRLTrainConfig:
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.remove_microbatch_padding = True
     cfg.trainer.logger = "console"
-    cfg.trainer.log_path = str(args.output.parent / "runtime-logs")
     parallel = cfg.trainer.policy.megatron_config
     parallel.tensor_model_parallel_size = args.tp
     parallel.expert_model_parallel_size = args.ep
@@ -225,59 +221,45 @@ async def publish(policy: PPORayActorGroup, client, cfg: SkyRLTrainConfig) -> No
         await client.resume_generation()
 
 
-async def run_check(policy, client, cfg: SkyRLTrainConfig, tokenizer, args: argparse.Namespace, report: Dict[str, Any]):
+async def run_check(policy, client, cfg: SkyRLTrainConfig, tokenizer, args: argparse.Namespace) -> None:
     sequences = build_probe_sequences(tokenizer)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     batch = build_batch(sequences, pad_token_id)
     lora = cfg.trainer.policy.model.lora.rank > 0
     model = resolve_policy_model_name(cfg)
-    report["tokens"] = sequences
-    report["model"] = model
 
     if lora:
         # The adapter name only exists on the engines after a sync.
         await publish(policy, client, cfg)
     trainer_base = score_trainer(policy, batch)
     inference_base = await score_inference(client, sequences, model)
-    report["base"] = compare_logprobs(trainer_base, inference_base)
-    print(f"base: {report['base']}", flush=True)
-    check_agreement(report["base"], args.mean_atol, args.max_atol, "base")
+    base = compare_logprobs(trainer_base, inference_base)
+    print(f"base: {base}", flush=True)
+    check_agreement(base, args.mean_atol, args.max_atol, "base")
 
-    report["perturbation"] = ray.get(
+    receipt = ray.get(
         policy.async_run_ray_method("pass_through", "perturb", "lora" if lora else "full", args.perturb_multiplier)
     )[0]
+    print(f"perturbation: {receipt}", flush=True)
     trainer_updated = score_trainer(policy, batch)
-    report["stale"] = compare_logprobs(trainer_updated, inference_base)
-    print(f"stale: {report['stale']}", flush=True)
-    if report["stale"]["mean_abs"] <= args.mean_atol:
+    stale = compare_logprobs(trainer_updated, inference_base)
+    print(f"stale: {stale}", flush=True)
+    if stale["mean_abs"] <= args.mean_atol:
         raise AssertionError(
-            f"perturbed trainer differs from the stale inference scores by only {report['stale']['mean_abs']:.6f}; "
+            f"perturbed trainer differs from the stale inference scores by only {stale['mean_abs']:.6f}; "
             f"raise --perturb-multiplier so a missed sync fails the {args.mean_atol} agreement check"
         )
 
     await publish(policy, client, cfg)
     inference_updated = await score_inference(client, sequences, model)
     inference_repeat = await score_inference(client, sequences, model)
-    report["updated"] = compare_logprobs(trainer_updated, inference_updated)
-    report["repeat"] = compare_logprobs(inference_updated, inference_repeat)
-    print(f"updated: {report['updated']}", flush=True)
-    print(f"repeat: {report['repeat']}", flush=True)
-    check_agreement(report["updated"], args.mean_atol, args.max_atol, "updated")
-    if report["repeat"]["max_abs"] > args.repeat_atol:
-        raise AssertionError(f"repeated inference scoring differs by {report['repeat']['max_abs']:.2e}")
-    report["scores"] = {
-        "trainer_base": trainer_base,
-        "inference_base": inference_base,
-        "trainer_updated": trainer_updated,
-        "inference_updated": inference_updated,
-    }
-
-
-def write_report(path: Path, report: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(report, indent=2))
-    tmp.replace(path)
+    updated = compare_logprobs(trainer_updated, inference_updated)
+    repeat = compare_logprobs(inference_updated, inference_repeat)
+    print(f"updated: {updated}", flush=True)
+    print(f"repeat: {repeat}", flush=True)
+    check_agreement(updated, args.mean_atol, args.max_atol, "updated")
+    if repeat["max_abs"] > args.repeat_atol:
+        raise AssertionError(f"repeated inference scoring differs by {repeat['max_abs']:.2e}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -305,13 +287,11 @@ def parse_args() -> argparse.Namespace:
         default=10.0,
         help="scales the perturbation (1e-3 noise std on LoRA B; 1e-3 relative noise on full weights)",
     )
-    parser.add_argument("--output", type=Path, default=Path("logprob_check/logprobs.json"))
     args = parser.parse_args()
     for name in ("mean_atol", "max_atol", "repeat_atol", "perturb_multiplier"):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive and finite")
-    args.output = args.output.resolve()
     return args
 
 
@@ -319,16 +299,9 @@ async def main() -> None:
     args = parse_args()
     cfg = build_config(args)
     tokenizer = get_tokenizer(cfg.trainer.policy.model.path)
-    report: Dict[str, Any] = {"passed": False, "args": {k: str(v) for k, v in vars(args).items()}}
-    started = time.perf_counter()
-    try:
-        async with open_runtime(cfg, tokenizer) as (policy, client):
-            await run_check(policy, client, cfg, tokenizer, args, report)
-        report["passed"] = True
-    finally:
-        report["seconds"] = time.perf_counter() - started
-        write_report(args.output, report)
-        print(f"report written to {args.output} (passed={report['passed']})", flush=True)
+    async with open_runtime(cfg, tokenizer) as (policy, client):
+        await run_check(policy, client, cfg, tokenizer, args)
+    print("logprob check passed", flush=True)
 
 
 if __name__ == "__main__":

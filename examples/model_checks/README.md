@@ -35,11 +35,11 @@ that every node's inference engines can read.
 ```bash
 # LoRA adapter sync
 uv run --isolated --extra megatron -m examples.model_checks.run_nemotron_logprobs \
-  --lora-sync-path /shared/skyrl-logprob-adapter --output results/lora/logprobs.json
+  --lora-sync-path /shared/skyrl-logprob-adapter
 
 # Full fine-tuning weight sync
 uv run --isolated --extra megatron -m examples.model_checks.run_nemotron_logprobs \
-  --full-ft --output results/full_ft/logprobs.json
+  --full-ft
 ```
 
 Other models and meshes: `--model`, `--trainer-gpus`, `--tp`, `--ep`, `--etp`,
@@ -49,10 +49,8 @@ Other models and meshes: `--model`, `--trainer-gpus`, `--tp`, `--ep`, `--etp`,
 
 ## Output
 
-Each phase prints its statistics as it completes, and the JSON report at `--output` holds
-every phase, the perturbation receipt, the raw per-token scores and `passed`. The report is
-written on failure too, so a failed run keeps its numbers. Infrastructure logs go to
-`runtime-logs/` next to the report.
+Each phase prints its statistics as it completes, and the first failing check raises with the
+offending number. Redirect stdout to a file to keep a record of a run.
 
 `logprob_checks.py` holds the pure helpers (probe sequences, error statistics, the two
 perturbations) and has CPU unit tests under `tests/backends/skyrl_train/`.
