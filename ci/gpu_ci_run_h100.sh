@@ -11,9 +11,7 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s -vvv -m h100 
     tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
 
 # Run Megatron h100 tests.
-uv run --directory . --isolated --extra dev --extra megatron pytest -q examples/model_checks/tests
 uv run --directory . --isolated --extra dev --extra megatron pytest -s -vvv -m h100 \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py \
-    tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_lora_logprobs.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_kimi_k25_bridge.py

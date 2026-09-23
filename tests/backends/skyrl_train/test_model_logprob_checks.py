@@ -1,8 +1,11 @@
 import pytest
 import torch
 
-from examples.model_checks.logprob_checks import check_agreement, compare_logprobs
-from examples.model_checks.lora_logprobs import perturb_adapters
+from examples.model_checks.logprob_checks import (
+    check_agreement,
+    compare_logprobs,
+    perturb_adapters,
+)
 
 
 def test_logprob_check_preserves_alignment_and_reports_tail_errors():
