@@ -33,6 +33,23 @@ def test_base_checkpoint_path_parses() -> None:
     assert EngineConfig.model_validate(vars(args)).base_model_checkpoint_path == "/models/custom"
 
 
+def test_runtime_role_flag_parses() -> None:
+    parser = argparse.ArgumentParser()
+    add_model(parser, EngineConfig)
+
+    args = parser.parse_args(
+        [
+            "--base-model",
+            "test-model",
+            "--runtime-role",
+            "trainer",
+        ]
+    )
+    config = EngineConfig.model_validate(vars(args))
+
+    assert config.runtime_role == "trainer"
+
+
 @pytest.mark.asyncio
 async def test_forwarding_client_uses_configured_timeout_and_connection_limit() -> None:
     config = EngineConfig(

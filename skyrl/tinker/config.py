@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,6 +20,9 @@ class EngineConfig(BaseModel):
         default=None,
         description="Compatible base-weight directory to load instead of base_model",
         json_schema_extra={"argparse_type": str},
+    )
+    runtime_role: Literal["trainer", "inference", "combined"] = Field(
+        default="combined", description="GPU runtime role", json_schema_extra={"argparse_type": str}
     )
     backend: str = Field(default="megatron", description="Backend to use for training and inference")
     backend_config: dict = Field(

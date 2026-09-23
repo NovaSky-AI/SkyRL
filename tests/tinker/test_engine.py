@@ -64,7 +64,38 @@ def test_engine_loads_alternate_base_weights(monkeypatch):
 
     assert captured == {
         "model": "/models/custom",
-        "config": {"generator.inference_engine.served_model_name": BASE_MODEL},
+        "config": {"generator.inference_engine.served_model_name": BASE_MODEL, "runtime_role": "combined"},
+    }
+
+
+def test_engine_forwards_runtime_role(monkeypatch):
+    captured = {}
+
+    class BackendConfig:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs
+
+    class Backend:
+        def __init__(self, model, _config):
+            captured["model"] = model
+
+        def has_model(self, _model_id):
+            return False
+
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_args, **_kwargs: (Backend, BackendConfig))
+
+    TinkerEngine(
+        EngineConfig(
+            base_model=BASE_MODEL,
+            runtime_role="trainer",
+            backend="fsdp",
+            database_url="sqlite:///:memory:",
+        )
+    )
+
+    assert captured == {
+        "model": BASE_MODEL,
+        "config": {"runtime_role": "trainer"},
     }
 
 
