@@ -80,7 +80,7 @@ a venv inside an un-ignored directory makes the upload multi-GB and every actor 
 ## 3. Run the client
 
 ```bash
-TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
+TINKER_API_KEY=tml-dummy uv run --isolated --extra tinker --extra skyrl-train \
   python examples/tinker/dapo/dapo_client.py --lora-rank 128     # or --lora-rank 0
 ```
 

@@ -5,11 +5,11 @@ Usage:
     bash examples/tinker/dapo/run_tinker_server.sh
 
     # Terminal 2, LoRA recipe (rank/alpha 128, LR 1e-5)
-    TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
+    TINKER_API_KEY=tml-dummy uv run --isolated --extra tinker --extra skyrl-train \
         python examples/tinker/dapo/dapo_client.py --lora-rank 128
 
     # Terminal 2, full fine-tuning (LR 1e-6; pair with FULL_FT=1 on the server)
-    TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
+    TINKER_API_KEY=tml-dummy uv run --isolated --extra tinker --extra skyrl-train \
         python examples/tinker/dapo/dapo_client.py --lora-rank 0
 
 Reproduces examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_{lora_,}megatron_aime.sh through the
