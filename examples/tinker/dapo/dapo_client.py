@@ -412,30 +412,29 @@ def compute_advantages(
     if not trajectories:
         return
 
-    id2score = defaultdict(list)
-    id2mean = dict()
-    id2std = dict()
+    id2score: dict[int, list[float]] = defaultdict(list)
+    id2mean: dict[int, float] = {}
+    id2std: dict[int, float] = {}
 
-    for _, trajectory in enumerate(trajectories):
+    for trajectory in trajectories:
         id2score[trajectory.prompt_group].append(trajectory.reward)
 
-    for prompt_id, trajectory_list in id2score.items():
-        if len(trajectory_list) == 1:
-            id2mean[prompt_id] = torch.tensor(0.0)
-            id2std[prompt_id] = torch.tensor(1.0)
-        elif len(trajectory_list) > 1:
-            id2mean[prompt_id] = torch.mean(torch.tensor(id2score[prompt_id]))
-            id2std[prompt_id] = torch.std(torch.tensor(id2score[prompt_id]))
+    for prompt_id, scores in id2score.items():
+        if len(scores) == 1:
+            id2mean[prompt_id] = 0.0
+            id2std[prompt_id] = 1.0
         else:
-            raise ValueError(f"No score in prompt id: {prompt_id}")
+            # torch.std is the unbiased estimator, matching the native GRPO estimator.
+            scores_tensor = torch.tensor(scores)
+            id2mean[prompt_id] = scores_tensor.mean().item()
+            id2std[prompt_id] = scores_tensor.std().item()
+
     for trajectory in trajectories:
+        advantage = trajectory.reward - id2mean[trajectory.prompt_group]
         if grpo_norm_by_std:
-            advantage = (trajectory.reward - id2mean[trajectory.prompt_group]) / (
-                id2std[trajectory.prompt_group] + epsilon
-            )
-        else:
-            advantage = trajectory.reward - id2mean[trajectory.prompt_group]
-        trajectory.advantages = advantage.repeat(len(trajectory.response_tokens)).tolist()
+            advantage /= id2std[trajectory.prompt_group] + epsilon
+        # GRPO gives one scalar per response, broadcast to every response token.
+        trajectory.advantages = [advantage] * len(trajectory.response_tokens)
 
 
 def default_policy_learning_rate(lora_rank: int) -> float:
