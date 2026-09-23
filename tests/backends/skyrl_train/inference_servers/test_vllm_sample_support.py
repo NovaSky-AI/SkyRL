@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 pytest.importorskip("vllm")
 
+from vllm.lora.request import LoRARequest
+
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedField,
     decode_packed_sample_support,
@@ -94,9 +96,11 @@ def test_flat_logprobs_top_k_one_repairs_single_support_column():
 
 class FakeEngine:
     sampling_params = None
+    lora_request = None
 
-    async def generate(self, prompt, sampling_params, request_id):
+    async def generate(self, prompt, sampling_params, request_id, lora_request=None):
         self.sampling_params = sampling_params
+        self.lora_request = lora_request
         yield SimpleNamespace(
             outputs=[
                 SimpleNamespace(
@@ -149,3 +153,72 @@ def test_skyrl_generate_returns_packed_sample_support():
     assert engine.sampling_params.logprobs == 2
     packed = response.json()["choices"][0][PackedField.ROLLOUT_SAMPLE_SUPPORT]
     np.testing.assert_array_equal(decode_packed_sample_support(packed), [[7, 8]])
+
+
+class FakeLoraEngine(FakeEngine):
+    async def generate(self, prompt, sampling_params, request_id, lora_request=None):
+        self.sampling_params = sampling_params
+        self.lora_request = lora_request
+        yield SimpleNamespace(
+            outputs=[SimpleNamespace(token_ids=[7], finish_reason="stop", logprobs=None, routed_experts=None)]
+        )
+
+
+class FakeServingModels:
+    def __init__(self, base_model, lora_requests):
+        self.base_model = base_model
+        self.lora_requests = lora_requests
+
+    def is_base_model(self, model_name):
+        return model_name == self.base_model
+
+
+def _lora_app(engine):
+    app = FastAPI()
+    VLLMServerActor._add_custom_endpoints(app, engine, SimpleNamespace(enable_lora=True))
+    app.state.openai_serving_models = FakeServingModels(
+        base_model="base-model",
+        lora_requests={"skyrl-lora": LoRARequest(lora_name="skyrl-lora", lora_int_id=1, lora_path="/tmp/lora")},
+    )
+    return app
+
+
+def test_skyrl_generate_resolves_lora_adapter_from_model():
+    engine = FakeLoraEngine()
+
+    with TestClient(_lora_app(engine)) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={"model": "skyrl-lora", "token_ids": [1, 2], "sampling_params": {"temperature": 1.0}},
+        )
+
+    assert response.status_code == 200
+    assert engine.lora_request.lora_name == "skyrl-lora"
+    assert engine.lora_request.lora_int_id == 1
+
+
+def test_skyrl_generate_base_model_skips_lora_with_lora_enabled():
+    engine = FakeLoraEngine()
+
+    with TestClient(_lora_app(engine)) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={"model": "base-model", "token_ids": [1, 2], "sampling_params": {"temperature": 1.0}},
+        )
+
+    assert response.status_code == 200
+    assert engine.lora_request is None
+
+
+def test_skyrl_generate_rejects_unknown_model_with_lora_enabled():
+    engine = FakeLoraEngine()
+
+    with TestClient(_lora_app(engine)) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={"model": "missing-lora", "token_ids": [1, 2], "sampling_params": {"temperature": 1.0}},
+        )
+
+    assert response.status_code == 404
+    assert "missing-lora" in response.json()["detail"]
+    assert engine.sampling_params is None

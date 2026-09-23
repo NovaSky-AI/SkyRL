@@ -529,16 +529,26 @@ class VLLMServerActor(ServerActorProtocol):
                 "lora_int_id": lora_int_id,
             }
 
-        # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
-        # endpoint /inference/v1/generate does not support returning routed expert IDs.
-        # TODO (sumanthrh): Migrate back to /inference/v1/generate once this is fixed on the vllm side
+        # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate as a temporary state
+        # since the native /inference/v1/generate endpoint does not support sample-support capture with flashinfer
+        # TODO (sumanthrh): Migrate back to /inference/v1/generate once flashinfer is supported with returning top-k logprobs.
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
-            if getattr(cli_args, "enable_lora", False):
-                raise HTTPException(status_code=400, detail="/skyrl/v1/generate does not support LoRA.")
-
             body = await request.json()
+
+            # Resolve `model` to a loaded LoRA adapter, as the native endpoint does
+            # (`OpenAIServing._maybe_get_adapters`). Looked up per request so an
+            # in-place adapter reload is picked up on the next generate.
+            lora_request = None
+            model_name = body.get("model")
+            if getattr(cli_args, "enable_lora", False) and model_name:
+                models = request.app.state.openai_serving_models
+                if model_name in models.lora_requests:
+                    lora_request = models.lora_requests[model_name]
+                elif not models.is_base_model(model_name):
+                    raise HTTPException(status_code=404, detail=f"The model `{model_name}` does not exist.")
+
             token_ids = body["token_ids"]
             sampling_params_dict = body.get("sampling_params", {})
             cache_salt = body.get("cache_salt")
@@ -566,7 +576,7 @@ class VLLMServerActor(ServerActorProtocol):
             request_id = random_uuid()
 
             final_res = None
-            async for res in engine.generate(prompt, sampling_params, request_id=request_id):
+            async for res in engine.generate(prompt, sampling_params, request_id=request_id, lora_request=lora_request):
                 final_res = res
 
             if final_res is None:
@@ -673,10 +683,16 @@ async def _build_and_serve_vllm_server(
     # One uvicorn per port (no api_server_count fan-out), matching vLLM's own
     # single-server path, so SO_REUSEPORT stays off.
     sock = create_server_socket(sock_addr, reuse_port=False)
+
+    # SkyRL uses the scale-out token-in/token-out endpoint for generation.
+    cli_args.enable_scale_out = True
     app = build_app(cli_args)
 
     # Initialize the engine (this loads the model - takes time)
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
+    # Standalone parsing can leave the CUDA worker class unresolved.
+    if engine_args.worker_cls == "auto":
+        engine_args.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
     stat_loggers = None
     if enable_ray_prometheus_stats:
@@ -727,7 +743,7 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     ``--worker-extension-cls``, ...).
     """
     from vllm import AsyncEngineArgs as _AsyncEngineArgs
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
