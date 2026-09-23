@@ -11,7 +11,7 @@ description: Operational guide for choosing and combining parallelism strategies
 >
 > **SkyRL adaptation.** Upstream uses `cfg.model.<field>`. In SkyRL these are surfaced through `MegatronConfig` (`skyrl/train/config.py`) and set on the CLI as e.g. `trainer.megatron.tensor_model_parallel_size=...` for SFT and `trainer.policy.megatron_config.` for RL. Field names are otherwise identical.
 >
-> **Scope.** Megatron backend only. FSDP and JAX backends do not use TP/PP/EP — see `.claude/docs/backends/fsdp.md` and `.claude/docs/backends/jax.md`.
+> **Scope.** Megatron backend only. FSDP and JAX backends do not use TP/PP/EP — see `.agents/docs/backends/fsdp.md` and `.agents/docs/backends/jax.md`.
 
 ## Decision by Model Size
 
@@ -182,7 +182,7 @@ parallel_state.initialize_model_parallel(
 
 1. **TP across nodes destroys throughput.** Always keep TP within a single NVLink domain.
 2. **PP without interleaving has large pipeline bubbles.** Use `virtual_pipeline_model_parallel_size` when possible.
-3. **SP requires `tensor_model_parallel_size > 1`.** Enabling SP alone without TP is a config error. (SkyRL note: SP is auto-enabled when TP > 1; no separate config knob — see `.claude/docs/backends/megatron.md`.)
+3. **SP requires `tensor_model_parallel_size > 1`.** Enabling SP alone without TP is a config error. (SkyRL note: SP is auto-enabled when TP > 1; no separate config knob — see `.agents/docs/backends/megatron.md`.)
 4. **CP requires `seq_length % (2 * context_parallel_size) == 0`.**
 5. **EP is only for MoE models.** Setting `expert_model_parallel_size` on a dense model is a no-op or error.
 6. The model-size-to-parallelism table is a starting heuristic. Always profile the first iteration to check memory and communication.

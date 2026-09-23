@@ -47,6 +47,9 @@ def test_process_unload_model():
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
+        # CPU-only test: build the jax backend explicitly instead of whatever
+        # EngineConfig currently defaults to.
+        backend="jax",
         backend_config={"max_lora_adapters": 4, "max_lora_rank": 32},
     )
     engine = TinkerEngine(config)
@@ -68,6 +71,9 @@ def test_cleanup_stale_sessions():
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
+        # CPU-only test: build the jax backend explicitly instead of whatever
+        # EngineConfig currently defaults to.
+        backend="jax",
         backend_config={"max_lora_adapters": 4, "max_lora_rank": 32},
         session_timeout_sec=60,
         database_url="sqlite:///:memory:",  # Use in-memory DB for test isolation

@@ -66,7 +66,6 @@ class WeightSyncTrainerBase:
         self._ie_cfg = SimpleNamespace(
             weight_sync_backend=weight_sync_backend,
             model_dtype="bfloat16",
-            # Match InferenceEngineConfig's packed-buffer setting.
             weight_transfer_threshold_cuda_ipc_GB=1.0,
         )
         self._colocate_all = colocate_all
