@@ -130,7 +130,8 @@ def checks(monkeypatch):
 @pytest.mark.parametrize("colocated", [False, True])
 @pytest.mark.parametrize(
     "lora,fault",
-    [(True, fault) for fault in [None, "stale", "parity", "repeat", "leaked_update", "routes"]] + [(False, None)],
+    [(True, fault) for fault in [None, "stale", "parity", "repeat", "leaked_update", "routes", "repeat_exception"]]
+    + [(False, None)],
 )
 async def test_check_detects_missing_update_mismatch_and_repeat_noise(
     monkeypatch, checks, fault, colocated, replay, lora
@@ -211,6 +212,8 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(
             value += 0.1
         if updated and fault == "repeat" and len(calls) == 4:
             value += 0.001
+        if fault == "repeat_exception" and len(calls) == 1:
+            raise RuntimeError("repeat completion failed")
         calls.append(value)
         captured = route + 1 if fault == "routes" and len(calls) == 5 else route
         return [value], [captured] if replay else None
@@ -229,7 +232,14 @@ async def test_check_detects_missing_update_mismatch_and_repeat_noise(
     )
     report = {}
     call = checks.check_logprobs(policy, client, cfg, SimpleNamespace(pad_token_id=0), report)
-    if fault and (fault != "routes" or replay):
+    if fault == "repeat_exception":
+        with pytest.raises(RuntimeError, match="repeat completion failed"):
+            await call
+        assert report["zero"]["inference"] == [-2.0]
+        if replay:
+            assert report["zero"]["routes"] == [route.tolist()]
+        assert "repeat" not in report["zero"]
+    elif fault and (fault != "routes" or replay):
         with pytest.raises(AssertionError):
             await call
         assert report["perturbed"]

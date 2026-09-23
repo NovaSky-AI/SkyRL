@@ -215,11 +215,11 @@ async def check_logprobs(policy, client, cfg, tokenizer, report=None):
                 policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
             await client.wake_up(tags=["kv_cache"])
         current["inference"], routes = await score_sampler(client, sequences, model, replay)
+        if replay:
+            current["routes"] = [route.tolist() for route in routes]
         current["repeat"], repeat_routes = await score_sampler(client, sequences, model, replay)
         if replay:
-            current.update(
-                routes=[route.tolist() for route in routes], repeat_routes=[r.tolist() for r in repeat_routes]
-            )
+            current["repeat_routes"] = [route.tolist() for route in repeat_routes]
         if colocated:
             await client.sleep()
             policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
