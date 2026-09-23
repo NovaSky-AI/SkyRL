@@ -53,6 +53,10 @@ from skyrl.train.config.sft_config import (
     _normalize_dataset_cfg,
     build_skyrl_config_for_sft,
 )
+from skyrl.train.dataset.collators import (
+    PACKED_SFT_REAL_EXAMPLES_KEY,
+    PACKED_SFT_REAL_TOKENS_KEY,
+)
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
 from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
 from skyrl.train.generators.utils import (
@@ -2052,20 +2056,17 @@ class SFTTrainer:
                     step_result = self.train_step(batch, self.global_step)
                     all_timings.update(step_result["timings"])
 
-                # Compute throughput using actual (non-padding) tokens. A padded
-                # tail batch appends ``pad_size`` rows (copies of row 0) that are
-                # masked out of the loss; exclude them from the token count so the
-                # throughput metric reflects only real tokens.
+                # Count original examples and tokens, excluding padding rows.
                 batch_padded_seq_len = batch["sequences"].shape[1]
-                pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
-                real_rows = batch["attention_mask"].shape[0] - pad_size
-                # Packed rows are bins; count the original examples inside them.
-                actual_batch_size = (
-                    sum(lengths.numel() for lengths in batch["sub_seq_lengths"])
-                    if self.sft_cfg.use_sequence_packing
-                    else real_rows
-                )
-                actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
+                if self.sft_cfg.use_sequence_packing:
+                    assert batch.metadata is not None
+                    actual_batch_size = batch.metadata[PACKED_SFT_REAL_EXAMPLES_KEY]
+                    actual_num_tokens = batch.metadata[PACKED_SFT_REAL_TOKENS_KEY]
+                else:
+                    pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
+                    real_rows = batch["attention_mask"].shape[0] - pad_size
+                    actual_batch_size = real_rows
+                    actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
                 self._total_tokens_processed += actual_num_tokens
                 tokens_per_second = actual_num_tokens / all_timings["step"]
 
