@@ -21,8 +21,9 @@ importable without the vLLM wheel. ``skyrl_nccl`` / ``skyrl_ipc`` are the
 exception: they are built dynamically as subclasses of vLLM's engines, so there
 is no importable module attribute to name and the class itself is passed.
 
-REMOVAL: the ``sharded_rdt`` receive entry goes away once SkyRL's pinned vLLM
-registers that engine in ``WeightTransferEngineFactory`` natively.
+vLLM 0.29 registers the ``sharded_rdt`` receive engine natively. SkyRL uses it
+directly, while adapting its native trainer engine with the three explicit
+worker-memory capability declarations described in ``weight_senders``.
 """
 
 import logging
@@ -126,6 +127,7 @@ def register_trainer_engines() -> None:
         SKYRL_NCCL_TRAINER_BACKEND,
         get_skyrl_ipc_trainer,
         get_skyrl_nccl_trainer,
+        get_skyrl_rdt_trainer,
     )
 
     # Direct-class registration: like their receive-side counterparts these are
@@ -138,12 +140,21 @@ def register_trainer_engines() -> None:
         if name not in WeightTransferTrainerFactory._registry:
             WeightTransferTrainerFactory.register_engine(name, build()[1])
 
-    for name, module, cls in (
-        (DELTA_BACKEND, _DELTA_TRAINER_MODULE, "DeltaTrainerWeightTransferEngine"),
-        (RDT_BACKEND, _RDT_TRAINER_MODULE, "ShardedRDTTrainerWeightTransferEngine"),
-    ):
+    for name, module, cls in ((DELTA_BACKEND, _DELTA_TRAINER_MODULE, "DeltaTrainerWeightTransferEngine"),):
         if name not in WeightTransferTrainerFactory._registry:
             WeightTransferTrainerFactory.register_engine(name, module, cls)
+
+    # vLLM 0.29 owns this backend's wire transport. Its sender intentionally
+    # knows nothing about SkyRL's worker-memory bracket, so replace only the
+    # lazy loader with a capability-declaring subclass. The native init-info and
+    # implementation stay unchanged; a missing/changed native class therefore
+    # fails immediately when a trainer is constructed.
+    if RDT_BACKEND in WeightTransferTrainerFactory._registry:
+        WeightTransferTrainerFactory._registry[RDT_BACKEND] = get_skyrl_rdt_trainer
+    else:
+        WeightTransferTrainerFactory.register_engine(
+            RDT_BACKEND, _RDT_TRAINER_MODULE, "ShardedRDTTrainerWeightTransferEngine"
+        )
 
     _TRAINER_REGISTERED = True
     logger.debug("Registered trainer-side weight transfer engines.")

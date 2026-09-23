@@ -115,6 +115,30 @@ def test_entrypoint_chat_completion(standalone_server):
 
 
 @pytest.mark.vllm
+def test_entrypoint_native_generate(standalone_server):
+    """The vLLM token-in/token-out endpoint is part of SkyRL's data plane."""
+    tok = httpx.post(
+        f"{standalone_server}/tokenize",
+        json={"model": MODEL, "prompt": "The capital of France is"},
+        timeout=30.0,
+    )
+    assert tok.status_code == 200, tok.text
+
+    resp = httpx.post(
+        f"{standalone_server}/inference/v1/generate",
+        json={
+            "model": MODEL,
+            "token_ids": tok.json()["tokens"],
+            "sampling_params": {"max_tokens": 8, "temperature": 0.0},
+        },
+        timeout=60.0,
+    )
+    assert resp.status_code == 200, resp.text
+    choice = resp.json()["choices"][0]
+    assert isinstance(choice["token_ids"], list) and choice["token_ids"], resp.text
+
+
+@pytest.mark.vllm
 def test_entrypoint_skyrl_generate(standalone_server):
     """`/skyrl/v1/generate` is a SkyRL-specific endpoint (token-in/token-out) that a
     vanilla vLLM OpenAI server does not expose — confirms the entrypoint wired up

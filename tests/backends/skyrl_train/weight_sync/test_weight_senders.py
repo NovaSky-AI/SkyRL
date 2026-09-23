@@ -246,7 +246,7 @@ def test_unknown_backend_is_rejected():
 
 
 def test_skyrl_trainer_engines_are_registered():
-    """``delta`` and ``sharded_rdt`` are ours; vLLM registers the rest."""
+    """SkyRL extends the native trainers with its additional backends."""
     from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
     _init_info("ipc")  # any call performs the registration
@@ -374,11 +374,12 @@ class TestCapabilityDeclarations:
         assert DeltaTrainerWeightTransferEngine.skyrl_handles_prefix_cache_reset is True
         assert DeltaTrainerWeightTransferEngine.skyrl_empty_cache_after_send is True
 
-    def test_rdt_declares_its_two_memory_flags(self):
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
-            ShardedRDTTrainerWeightTransferEngine as E,
+    def test_native_rdt_adapter_declares_its_memory_flags(self):
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            get_skyrl_rdt_trainer,
         )
 
+        E = get_skyrl_rdt_trainer()
         assert E.skyrl_handles_prefix_cache_reset is False
         assert E.skyrl_force_disable_expandable_segments is True
         assert E.skyrl_empty_cache_after_send is False

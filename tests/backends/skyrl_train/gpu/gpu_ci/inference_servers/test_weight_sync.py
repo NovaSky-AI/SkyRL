@@ -63,7 +63,13 @@ class WeightSyncTrainerBase:
         self._model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to("cuda")
         # The two config values the backend is resolved from, so this exercises
         # the same resolution the driver uses to configure the servers.
-        self._ie_cfg = SimpleNamespace(weight_sync_backend=weight_sync_backend, model_dtype="bfloat16")
+        self._ie_cfg = SimpleNamespace(
+            weight_sync_backend=weight_sync_backend,
+            model_dtype="bfloat16",
+            # Keep this minimal test config aligned with InferenceEngineConfig.
+            # The sender uses the configured packed-buffer size for IPC and NCCL.
+            weight_transfer_threshold_cuda_ipc_GB=1.0,
+        )
         self._colocate_all = colocate_all
         self._server_urls = list(server_urls)
         self._data_parallel_size = int(data_parallel_size)

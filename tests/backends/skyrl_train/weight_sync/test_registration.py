@@ -48,6 +48,9 @@ class TestTrainerFactory:
         from vllm.distributed.weight_transfer.factory import (
             WeightTransferTrainerFactory,
         )
+        from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
+            ShardedRDTTrainerWeightTransferEngine,
+        )
 
         from skyrl.backends.skyrl_train.weight_sync.delta.trainer import (
             DeltaTrainerWeightTransferEngine,
@@ -55,14 +58,16 @@ class TestTrainerFactory:
         from skyrl.backends.skyrl_train.weight_sync.register import (
             register_trainer_engines,
         )
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
-            ShardedRDTTrainerWeightTransferEngine,
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            get_skyrl_rdt_trainer,
         )
 
         register_trainer_engines()
         registry = WeightTransferTrainerFactory._registry
         assert _resolve(registry, "delta") is DeltaTrainerWeightTransferEngine
-        assert _resolve(registry, "sharded_rdt") is ShardedRDTTrainerWeightTransferEngine
+        rdt_engine = _resolve(registry, "sharded_rdt")
+        assert rdt_engine is get_skyrl_rdt_trainer()
+        assert issubclass(rdt_engine, ShardedRDTTrainerWeightTransferEngine)
 
     def test_vllms_own_engines_are_still_there(self):
         """SkyRL registers alongside vLLM's, never over them."""

@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 SKYRL_NCCL_TRAINER_BACKEND = "skyrl_nccl"
 SKYRL_IPC_TRAINER_BACKEND = "skyrl_ipc"
+RDT_TRAINER_BACKEND = "sharded_rdt"
 
 
 class SkyrlTrainerCapabilities:
@@ -123,6 +124,39 @@ def get_skyrl_ipc_trainer() -> "tuple[type, type]":
     if SKYRL_IPC_TRAINER_BACKEND not in _TRAINER_ENGINE_CACHE:
         _TRAINER_ENGINE_CACHE[SKYRL_IPC_TRAINER_BACKEND] = _build_skyrl_ipc_trainer()
     return _TRAINER_ENGINE_CACHE[SKYRL_IPC_TRAINER_BACKEND]
+
+
+def get_skyrl_rdt_trainer() -> type:
+    """Return vLLM's native RDT sender with SkyRL's worker capabilities.
+
+    vLLM 0.29 now owns the ``sharded_rdt`` transport and registers it before
+    SkyRL's extension hook runs.  Its wire protocol is the one we want to use,
+    but the worker-side memory bracket is a SkyRL extension and deliberately
+    reads three declared capabilities from every trainer engine.  Keep native
+    RDT intact and adapt only that explicit, local contract rather than silently
+    falling back to the older vendored transport.
+    """
+    if RDT_TRAINER_BACKEND not in _TRAINER_ENGINE_CACHE:
+        from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
+            ShardedRDTTrainerInitInfo,
+            ShardedRDTTrainerWeightTransferEngine,
+        )
+
+        class SkyrlShardedRDTTrainerWeightTransferEngine(
+            SkyrlTrainerCapabilities, ShardedRDTTrainerWeightTransferEngine
+        ):
+            # RDT exports CUDA-IPC buffers on every sync and keeps its producer
+            # buffers hot for the following step.  The prefix-cache reset still
+            # belongs to the inference worker's regular update sequence.
+            skyrl_handles_prefix_cache_reset = False
+            skyrl_force_disable_expandable_segments = True
+            skyrl_empty_cache_after_send = False
+
+        _TRAINER_ENGINE_CACHE[RDT_TRAINER_BACKEND] = (
+            ShardedRDTTrainerInitInfo,
+            SkyrlShardedRDTTrainerWeightTransferEngine,
+        )
+    return _TRAINER_ENGINE_CACHE[RDT_TRAINER_BACKEND][1]
 
 
 def build_trainer_engine(

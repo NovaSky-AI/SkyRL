@@ -36,11 +36,21 @@ def make_vllm_cli_args(
     load_format: str = "auto",
 ) -> argparse.Namespace:
     """Create CLI args for vLLM server using official parser."""
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    from vllm import AsyncEngineArgs
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+    # vLLM 0.29 instantiates DeviceConfig(device="auto") while defining the
+    # parser.  This helper runs on the GPU-less Ray head, so make the target
+    # explicit for parser construction; the servers themselves run on CUDA
+    # workers and receive the parsed CUDA device configuration.
+    if not current_platform.device_type:
+        current_platform.device_type = "cuda"
+
     parser = FlexibleArgumentParser(description="vLLM server")
-    parser = make_arg_parser(parser)
+    parser = FrontendArgs.add_cli_args(parser)
+    parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args(
         [
             "--model",
