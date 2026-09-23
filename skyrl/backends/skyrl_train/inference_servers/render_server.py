@@ -76,7 +76,7 @@ def _run_render_server(model_path: str, port: int, log_file: Optional[str]) -> N
     from vllm import envs
     from vllm.config import DeviceConfig, VllmConfig
     from vllm.engine.arg_utils import AsyncEngineArgs
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
     from vllm.entrypoints.openai.api_server import (
         build_and_serve_renderer,
         setup_server,
@@ -87,12 +87,10 @@ def _run_render_server(model_path: str, port: int, log_file: Optional[str]) -> N
         # Mirrors vLLM's `vllm launch render` (entrypoints/cli/launch.py)
         # except for the explicit cpu DeviceConfig, which the CLI hardcodes
         # to "auto" (platform inference).
-        parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
-        parser = AsyncEngineArgs.add_cli_args(parser)
+        parser = make_arg_parser(FlexibleArgumentParser())
         args = parser.parse_args(
             ["--model", model_path, "--host", _RENDER_HOST, "--port", str(port), "--trust-remote-code"]
         )
-        args.model_tag = None
 
         listen_address, sock = setup_server(args, reuse_port=False)
         engine_args = AsyncEngineArgs.from_cli_args(args)
