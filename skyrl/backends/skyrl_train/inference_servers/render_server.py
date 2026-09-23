@@ -92,6 +92,7 @@ def _run_render_server(model_path: str, port: int, log_file: Optional[str]) -> N
         args = parser.parse_args(
             ["--model", model_path, "--host", _RENDER_HOST, "--port", str(port), "--trust-remote-code"]
         )
+        args.model_tag = None
 
         listen_address, sock = setup_server(args, reuse_port=False)
         engine_args = AsyncEngineArgs.from_cli_args(args)
