@@ -529,9 +529,9 @@ class VLLMServerActor(ServerActorProtocol):
                 "lora_int_id": lora_int_id,
             }
 
-        # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
-        # endpoint /inference/v1/generate does not support sample-support capture,
-        # `routed_experts_prompt_start`, or the packed side-channel payload in `generate_wire`.
+        # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate as a temporary state
+        # since the native /inference/v1/generate endpoint does not support sample-support capture with flashinfer
+        # TODO (sumanthrh): Migrate back to /inference/v1/generate once flashinfer is supported with returning top-k logprobs.
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
