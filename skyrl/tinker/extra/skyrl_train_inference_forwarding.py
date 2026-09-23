@@ -4,7 +4,6 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 ``EngineStateDB`` instead of from a user-supplied ``external_inference_url``.
 """
 
-import asyncio
 from datetime import datetime, timezone
 
 import httpx
@@ -34,8 +33,6 @@ class SkyRLTrainInferenceForwardingClient:
         self.engine_config = engine_config
         self.db_engine = db_engine
         self.external_future_store = external_future_store
-        self._cached_proxy_url: str | None = None
-        self._cache_lock = asyncio.Lock()
         # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
         # Default `forwarding_inference_max_connections=None` is unlimited;
         # the only cost is file descriptors (raise `ulimit -n` accordingly).
@@ -65,17 +62,12 @@ class SkyRLTrainInferenceForwardingClient:
                 return None
             return row.inference_proxy_url
 
-    async def _resolve_proxy_url(self, *, force_refresh: bool = False) -> str:
-        # Skip the lock when the cache is warm so concurrent samples don't serialize.
-        if not force_refresh and self._cached_proxy_url is not None:
-            return self._cached_proxy_url
-        async with self._cache_lock:
-            if force_refresh or self._cached_proxy_url is None:
-                url = await self._read_proxy_url_from_db()
-                if url is None:
-                    raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
-                self._cached_proxy_url = url
-            return self._cached_proxy_url
+    async def _resolve_proxy_url(self) -> str:
+        # The API outlives model unload/recreation, which can replace the router.
+        url = await self._read_proxy_url_from_db()
+        if url is None:
+            raise RuntimeError("inference engine not ready: no proxy URL published to EngineStateDB")
+        return url
 
     async def call_and_store_result(
         self,
@@ -129,11 +121,11 @@ class SkyRLTrainInferenceForwardingClient:
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 logger.warning(
                     "Connection error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
-                    self._cached_proxy_url,
+                    proxy_url,
                     type(e).__name__,
                     e,
                 )
-                proxy_url = await self._resolve_proxy_url(force_refresh=True)
+                proxy_url = await self._resolve_proxy_url()
                 return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
         except httpx.ReadTimeout as e:
             # Not retried (see above). Long-context requests routinely exceed the
@@ -141,7 +133,7 @@ class SkyRLTrainInferenceForwardingClient:
             # message is stored in the FutureDB ErrorResponse and shown to clients.
             timeout_sec = self.engine_config.forwarding_inference_timeout_sec
             raise RuntimeError(
-                f"Inference request to {self._cached_proxy_url} timed out after {timeout_sec:g}s waiting for "
+                f"Inference request to {proxy_url} timed out after {timeout_sec:g}s waiting for "
                 "a response (httpx.ReadTimeout). The request was not retried because vLLM may still be "
                 "executing it. If requests are expected to take this long (long prompts, large max_tokens, "
                 "or queueing behind other requests), increase the deadline with "
