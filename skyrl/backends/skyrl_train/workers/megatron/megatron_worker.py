@@ -1268,7 +1268,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.optimizer is None:
             return None
         if isinstance(self.optimizer, ChainedOptimizer):
-            return self.optimizer.chained_optimizers[0].param_groups[0]["lr"]
+            # Skip stub sub-optimizers that own no params (e.g. the dense group under
+            # expert-only LoRA); their `param_groups` would dereference a None optimizer.
+            opt = next(o for o in self.optimizer.chained_optimizers if o.optimizer is not None)
+            return opt.param_groups[0]["lr"]
         return self.optimizer.param_groups[0]["lr"]
 
     def set_lr(self, learning_rate: float) -> None:
@@ -1288,6 +1291,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if isinstance(self.optimizer, ChainedOptimizer):
             # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
             for opt in self.optimizer.chained_optimizers:
+                if opt.optimizer is None:
+                    continue
                 for param_group in opt.param_groups:
                     param_group["lr"] = learning_rate
         else:

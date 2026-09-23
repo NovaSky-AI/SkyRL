@@ -561,6 +561,10 @@ def offload_megatron_optimizer(optimizers):
         return [opt]
 
     for _opt in _iter_opts(optimizers):
+        if _opt.optimizer is None:
+            # Stub sub-optimizer with no params on this rank, e.g. the dense group when
+            # LoRA only targets expert linears.
+            continue
         offload_megatron_copy_params(_opt)
         opt_state_dict_values = _opt.optimizer.state.values()
         for v in opt_state_dict_values:
@@ -578,6 +582,8 @@ def load_megatron_optimizer(optimizers):
         return [opt]
 
     for _opt in _iter_opts(optimizers):
+        if _opt.optimizer is None:
+            continue
         load_megatron_copy_params(_opt)
         # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu
         if hasattr(_opt.optimizer, "_move_new_state_to_right_device"):
