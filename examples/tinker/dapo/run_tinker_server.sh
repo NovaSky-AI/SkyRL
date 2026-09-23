@@ -49,7 +49,8 @@ if [[ "$FULL_FT" == "1" ]]; then
 else
   MICRO_TRAIN_BATCH_SIZE_PER_GPU="${MICRO_TRAIN_BATCH_SIZE_PER_GPU:-4}"
 fi
-# Keep DAPO_MICRO_TRAIN_BATCH_SIZE in the client equal to MICRO_TRAIN_BATCH_SIZE_PER_GPU.
+# The client must use the same value: dapo_client.py picks 4 (LoRA) or 2 (full FT) from --lora-rank; if you
+# override MICRO_TRAIN_BATCH_SIZE_PER_GPU here, pass the same number as --micro-train-batch-size there.
 
 # DAPO loss settings (client sends eps_clip_low/high per request)
 CLIP_RATIO_C="${CLIP_RATIO_C:-10.0}"

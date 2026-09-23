@@ -99,9 +99,11 @@ POLICY_LOSS = "ppo"
 CLIP_RATIO_LOW = 0.2  # eps_clip_low: ratio floor is 1 - 0.2 = 0.8
 CLIP_RATIO_HIGH = 0.28  # eps_clip_high: ratio ceiling is 1 + 0.28 = 1.28
 LOSS_REDUCTION = "token_mean_legacy"
-# Keep aligned with trainer.micro_train_batch_size_per_gpu in run_tinker_server.sh
-# (4 for the LoRA recipe, 2 for full fine-tuning).
-MICRO_TRAIN_BATCH_SIZE = _env_int("MICRO_TRAIN_BATCH_SIZE", 4)
+# Must equal trainer.micro_train_batch_size_per_gpu in run_tinker_server.sh, because token_mean_legacy
+# normalizes advantages per micro-batch. Recipe dependent, so resolved from --lora-rank at startup
+# (see `default_micro_train_batch_size`); DAPO_MICRO_TRAIN_BATCH_SIZE or --micro-train-batch-size overrides.
+LORA_MICRO_TRAIN_BATCH_SIZE = 4
+FULL_FT_MICRO_TRAIN_BATCH_SIZE = 2
 # Sequences per `forward` request when recomputing old logprobs; the server micro-batches internally.
 FORWARD_BATCH_SIZE = POLICY_MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT
 
@@ -308,6 +310,12 @@ def parse_args() -> argparse.Namespace:
         default=_env_float("POLICY_LEARNING_RATE", None),
         help="Peak policy LR; defaults to 1e-5 for LoRA (--lora-rank > 0) and 1e-6 for full fine-tuning",
     )
+    parser.add_argument(
+        "--micro-train-batch-size",
+        type=int,
+        default=_env_int("MICRO_TRAIN_BATCH_SIZE", 0) or None,
+        help="Server trainer.micro_train_batch_size_per_gpu; defaults to 4 for LoRA and 2 for full fine-tuning",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--max-eval-steps", type=int, default=None)
@@ -442,6 +450,11 @@ def default_policy_learning_rate(lora_rank: int) -> float:
     return LORA_LEARNING_RATE if lora_rank > 0 else FULL_FT_LEARNING_RATE
 
 
+def default_micro_train_batch_size(lora_rank: int) -> int:
+    """Server micro train batch size for the recipe selected by `lora_rank`: 4 for LoRA, 2 for full FT."""
+    return LORA_MICRO_TRAIN_BATCH_SIZE if lora_rank > 0 else FULL_FT_MICRO_TRAIN_BATCH_SIZE
+
+
 def policy_learning_rate(optim_step: int, peak_lr: float) -> float:
     """Constant LR with linear warmup, counted in optimizer (mini-batch) steps.
 
@@ -479,6 +492,7 @@ def average_metrics(metrics_list: Sequence[dict[str, float]]) -> dict[str, float
 
 def normalize_policy_minibatch_advantage(
     minibatch: Sequence[Trajectory],
+    micro_train_batch_size: int,
 ) -> list[list[float]]:
     max_len = max(len(t.response_tokens) for t in minibatch)
     advantages = torch.zeros((len(minibatch), max_len), dtype=torch.float32)
@@ -493,7 +507,7 @@ def normalize_policy_minibatch_advantage(
         advantages=advantages,
         loss_mask=loss_mask,
         loss_reduction=LOSS_REDUCTION,
-        micro_batch_size=MICRO_TRAIN_BATCH_SIZE,
+        micro_batch_size=micro_train_batch_size,
         max_seq_len=MAX_PROMPT_LENGTH + MAX_GENERATE_LENGTH,
     )
 
@@ -578,12 +592,15 @@ def train_policy(
     trajectories: Sequence[Trajectory],
     optim_step: int,
     peak_lr: float,
+    micro_train_batch_size: int,
 ) -> tuple[dict[str, float], int]:
     """Run one DAPO update over `trajectories`.
 
     Args:
         optim_step: Number of optimizer steps taken so far (drives LR warmup).
         peak_lr: Learning rate after warmup (recipe dependent, see `default_policy_learning_rate`).
+        micro_train_batch_size: The server's micro train batch size per GPU, used to scale advantages
+            the way `token_mean_legacy` normalizes the loss per micro-batch.
 
     Returns:
         Averaged per-minibatch metrics and the updated optimizer step count.
@@ -594,7 +611,7 @@ def train_policy(
     for _ in range(UPDATE_EPOCHS_PER_BATCH):
         for minibatch in grouped_minibatches(trajectories, POLICY_MINI_BATCH_SIZE):
             optimizer = adam_params(policy_learning_rate(optim_step, peak_lr))
-            normalized_advantages = normalize_policy_minibatch_advantage(minibatch)
+            normalized_advantages = normalize_policy_minibatch_advantage(minibatch, micro_train_batch_size)
             data = [
                 build_policy_train_datum(
                     t.prompt_tokens,
@@ -805,9 +822,19 @@ def run_training(args: argparse.Namespace) -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     peak_lr = args.learning_rate if args.learning_rate is not None else default_policy_learning_rate(args.lora_rank)
+    micro_train_batch_size = (
+        args.micro_train_batch_size
+        if args.micro_train_batch_size is not None
+        else default_micro_train_batch_size(args.lora_rank)
+    )
     wandb_logger = WandbLogger(
         args.output_dir,
-        run_config={"base_model": args.model, "lora_rank": args.lora_rank, "policy_learning_rate": peak_lr},
+        run_config={
+            "base_model": args.model,
+            "lora_rank": args.lora_rank,
+            "policy_learning_rate": peak_lr,
+            "micro_train_batch_size": micro_train_batch_size,
+        },
     )
     logger.info(
         "wandb status: enabled=%s project=%s run_name=%s entity=%s",
@@ -834,13 +861,15 @@ def run_training(args: argparse.Namespace) -> None:
 
     logger.info(
         "Starting DAPO Tinker training: train_examples=%s, eval_examples=%s, model=%s, lora_rank=%s, "
-        "policy_learning_rate=%s (reference: 1e-5 for LoRA, 1e-6 for full FT), policy_loss=%s, "
+        "policy_learning_rate=%s (reference: 1e-5 for LoRA, 1e-6 for full FT), micro_train_batch_size=%s "
+        "(must equal the server's; 4 for LoRA, 2 for full FT), policy_loss=%s, "
         "recompute_old_logprobs=%s",
         len(train_records),
         len(eval_records),
         args.model,
         args.lora_rank,
         peak_lr,
+        micro_train_batch_size,
         POLICY_LOSS,
         RECOMPUTE_OLD_LOGPROBS,
     )
@@ -881,7 +910,9 @@ def run_training(args: argparse.Namespace) -> None:
                     compute_old_logprobs(policy_client, trajectories)
                 overlong_metrics = apply_soft_overlong_punishment(trajectories)
                 compute_advantages(trajectories)
-                policy_metrics, optim_step = train_policy(policy_client, trajectories, optim_step, peak_lr)
+                policy_metrics, optim_step = train_policy(
+                    policy_client, trajectories, optim_step, peak_lr, micro_train_batch_size
+                )
 
                 global_step += 1
                 train_steps += 1
