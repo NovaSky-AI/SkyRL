@@ -730,6 +730,28 @@ class SkyRLTrainBackend(AbstractBackend):
         rollout_logprobs_list = []
         # `all_rollout_logprobs` defaults to [] for batches built before the field existed.
         all_rollout_logprobs = prepared_batch.all_rollout_logprobs or [[] for _ in full_sequences]
+        # Per-datum validation of the optional `rollout_logprobs`: when provided it must cover every
+        # response token; when omitted the datum falls back to its own `logprobs` (ratio == 1, i.e. the
+        # documented behaviour for clients that do not use the extension). Datums from concurrent
+        # requests for the same model can be batched together, so a mix must not fail the batch.
+        num_with_rollout_logprobs = 0
+        for rollout_lps, weights in zip(all_rollout_logprobs, prepared_batch.all_token_weights):
+            if len(rollout_lps) == 0:
+                continue
+            num_with_rollout_logprobs += 1
+            if len(rollout_lps) != len(weights):
+                raise ValueError(
+                    "`rollout_logprobs` must have one entry per response token when provided "
+                    f"(got {len(rollout_lps)} for {len(weights)} tokens)"
+                )
+        has_rollout_logprobs = num_with_rollout_logprobs > 0
+        if has_rollout_logprobs and num_with_rollout_logprobs < len(full_sequences):
+            logger.warning(
+                "Mixed batch: %d of %d datums provide `rollout_logprobs`; the rest fall back to their `logprobs` "
+                "(off-policy correction is a no-op for those datums).",
+                num_with_rollout_logprobs,
+                len(full_sequences),
+            )
 
         for seq, weights, logprobs, advs, values, returns, rollout_lps in zip(
             full_sequences,
@@ -750,7 +772,8 @@ class SkyRLTrainBackend(AbstractBackend):
             advantages_list.append([0.0] * action_pad + [float(a) for a in advs])
             values_list.append([0.0] * action_pad + [float(v) for v in values])
             returns_list.append([0.0] * action_pad + [float(r) for r in returns])
-            rollout_logprobs_list.append([0.0] * action_pad + [float(lp) for lp in rollout_lps])
+            effective_rollout_lps = rollout_lps if len(rollout_lps) > 0 else logprobs
+            rollout_logprobs_list.append([0.0] * action_pad + [float(lp) for lp in effective_rollout_lps])
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
@@ -766,7 +789,6 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Include RL fields (action_log_probs, advantages) when data is present
         has_logprobs = any(len(lp) > 0 for lp in prepared_batch.all_sampling_logprobs)
-        has_rollout_logprobs = any(len(lp) > 0 for lp in all_rollout_logprobs)
         has_advantages = any(len(a) > 0 for a in prepared_batch.all_advantages)
         has_values = any(len(v) > 0 for v in prepared_batch.all_values)
         has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
@@ -779,12 +801,8 @@ class SkyRLTrainBackend(AbstractBackend):
                 # policy's logprobs at sampling time. This matches the native trainer, where
                 # `action_log_probs` come from a forward pass and `rollout_logprobs` from the
                 # engine, so `off_policy_correction` (geometric/product sequence masking, TIS)
-                # measures the real train/inference mismatch.
-                if any(
-                    len(rollout_lps) != len(weights)
-                    for rollout_lps, weights in zip(all_rollout_logprobs, prepared_batch.all_token_weights)
-                ):
-                    raise ValueError("`rollout_logprobs` must have one entry per response token when provided")
+                # measures the real train/inference mismatch. Datums without the field carry
+                # their own `logprobs` here (validated above).
                 batch_dict["rollout_logprobs"] = torch.tensor(rollout_logprobs_list, dtype=torch.float32)
             else:
                 # Tinker datums carry the *sampling* (rollout-engine) logprobs.
