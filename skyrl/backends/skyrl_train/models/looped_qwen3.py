@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from inspect import signature
 
 import torch
 from torch import nn
@@ -57,29 +58,35 @@ class LoopedLoraQwen3DecoderLayer(Qwen3DecoderLayer):
         prefix: str = "",
         per_layer_sliding_window: int | None = None,
     ) -> None:
-        super().__init__(
+        decoder_kwargs = dict(
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
-            per_layer_sliding_window=per_layer_sliding_window,
         )
+        if "per_layer_sliding_window" in signature(Qwen3DecoderLayer.__init__).parameters:
+            decoder_kwargs["per_layer_sliding_window"] = per_layer_sliding_window
+        super().__init__(**decoder_kwargs)
         if not getattr(config, "is_causal", True):
             raise ValueError("Fast looped LoRA only supports causal Qwen3 models")
 
         model_prefix = prefix.rsplit(".layers.", 1)[0]
         self.lora_only_attn = nn.ModuleDict()
         for execution_index in lora_only_execution_indices:
+            attention_kwargs = dict(
+                num_kv_heads=self.self_attn.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{model_prefix}.looped_lora_layers.{execution_index}.self_attn.attn",
+                attn_type=AttentionType.DECODER,
+            )
+            if "per_layer_sliding_window" in signature(Attention.__init__).parameters:
+                attention_kwargs["per_layer_sliding_window"] = per_layer_sliding_window
             self.lora_only_attn[str(execution_index)] = Attention(
                 self.self_attn.num_heads,
                 self.self_attn.head_dim,
                 self.self_attn.scaling,
-                num_kv_heads=self.self_attn.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                per_layer_sliding_window=per_layer_sliding_window,
-                prefix=f"{model_prefix}.looped_lora_layers.{execution_index}.self_attn.attn",
-                attn_type=AttentionType.DECODER,
+                **attention_kwargs,
             )
 
     def forward_lora_only(
