@@ -187,6 +187,14 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
             # pool fits ~163 blocks, and the vLLM default max_num_seqs=1024
             # fails CUDA-graph capture. The test runs <= 80 concurrent seqs.
             overrides["max_num_seqs"] = 128
+    if "qwen3.5-0.8b" in model_name.lower() and not fp8_mode:
+        # vLLM 0.30 captures extra graph/memory state during startup on the
+        # 24 GB L4 CI shape. The test prompts are <=512 and generation is
+        # capped at 128, so a 4k context and 128 sequences leave headroom
+        # without reducing the exercised behavior.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["max_num_seqs"] = 128
+        overrides["gpu_memory_utilization"] = 0.7
     if "glm-4.7-flash" in model_name.lower():
         # GLM-4.7-Flash's 202k default context would size the KV pool far past
         # what is left next to the colocated Megatron policy shard.

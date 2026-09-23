@@ -27,6 +27,7 @@ from skyrl.train.generators.skyrl_gym_generator import (
     SkyRLGymGenerator,
     TurnOutput,
 )
+from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 # Mock constants, where 4 is the eos token id
@@ -279,8 +280,8 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
     [
         (False, 3, None, None),  # disabled -> no salt
         (True, 3, None, "3"),  # enabled, no model name -> bare version
-        (True, 5, "my-model", "my-model@5"),  # enabled with model name
-        (True, 0, "my-model", "my-model@0"),  # pre-first-sync version (0) still salts
+        (True, 5, "my-model", "my-model:5"),  # enabled with model name
+        (True, 0, "my-model", "my-model:0"),  # pre-first-sync version (0) still salts
     ],
 )
 async def test_cache_salt_threaded_to_engine_input(
@@ -339,6 +340,18 @@ async def test_cache_salt_threaded_to_engine_input(
     await generator.generate(input_batch, disable_tqdm=True)
 
     assert captured["cache_salt"] == expected_salt
+
+
+def test_cache_salt_is_vllm_safe_for_hf_model_names():
+    salt = build_vllm_cache_salt(123, f"Qwen/{'x' * 160}@adapter")
+
+    assert len(salt) <= 128
+    assert "@" not in salt
+    assert "/" not in salt
+    assert "\\" not in salt
+    assert "\x00" not in salt
+    assert salt.endswith(":123")
+    assert build_vllm_cache_salt(3, None) == "3"
 
 
 @pytest.mark.asyncio
