@@ -263,7 +263,7 @@ def _backward_autotune_configs():
     key=["num_tokens_bucket", "hidden_size", "vocab_size", "COMPUTE_ENTROPY"],
     cache_results=True,
 )
-@triton.jit(do_not_specialize=["num_tokens", "num_tokens_bucket"])
+@triton.jit(do_not_specialize=["num_tokens", "num_tokens_bucket", "rank"])
 def efficient_entropy_kernel_general_mainloop(
     rank,
     hidden_ptr,
@@ -877,7 +877,7 @@ def efficient_entropy_forward(
     key=["num_tokens_bucket", "hidden_size", "vocab_size", "COMPUTE_ENTROPY"],
     cache_results=True,
 )
-@triton.jit(do_not_specialize=["split_idx", "num_tokens", "num_tokens_bucket"])
+@triton.jit(do_not_specialize=["split_idx", "num_tokens", "num_tokens_bucket", "rank"])
 def efficient_entropy_backward_kernel_general_d_logits_split_N(
     split_idx: int,
     num_tokens: int,
