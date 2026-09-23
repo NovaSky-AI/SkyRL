@@ -11,6 +11,8 @@ Two properties matter:
   whole model.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -136,6 +138,25 @@ class TestMegatronWeightSource:
         bridge = _FakeBridge(self._tensors())
         meta, pairs = _assert_channels_agree(MegatronWeightSource(bridge, object(), torch.bfloat16))
         assert [m.name for m in meta] == [n for n, _ in self._tensors()]
+
+    @pytest.mark.parametrize("quantized", [False, True])
+    def test_quantized_exports_preserve_native_dtypes(self, quantized):
+        tensors = [
+            ("expert.weight", torch.tensor([[0xF7, 0xE6]], dtype=torch.uint8)),
+            ("expert.weight_scale", torch.tensor([[127, 128]], dtype=torch.uint8)),
+            ("attention.weight", torch.tensor([[1.0, -2.0]]).to(torch.float8_e4m3fn)),
+            ("attention.weight_scale_inv", torch.tensor([[1.001]], dtype=torch.float32)),
+            ("norm.weight", torch.ones(2, dtype=torch.bfloat16)),
+        ]
+        bridge = _FakeBridge(tensors)
+        bridge.hf_pretrained = SimpleNamespace(
+            config=SimpleNamespace(quantization_config={"quant_method": "fp8"} if quantized else None)
+        )
+        meta, pairs = _assert_channels_agree(MegatronWeightSource(bridge, object(), torch.bfloat16))
+        for declared, (_, actual), (_, original) in zip(meta, pairs, tensors):
+            expected = original if quantized else original.to(torch.bfloat16)
+            assert declared.dtype == expected.dtype
+            torch.testing.assert_close(actual.float(), expected.float(), rtol=0, atol=0)
 
     def test_exports_the_whole_model_in_one_call(self):
         """`_accumulate_grouped_export` needs every task of a `group_key` in one
