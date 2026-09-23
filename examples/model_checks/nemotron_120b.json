@@ -1,0 +1,22 @@
+{
+  "trainer.strategy": "megatron",
+  "trainer.policy.model.path": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "trainer.placement.colocate_all": false,
+  "trainer.placement.policy_num_nodes": 1,
+  "trainer.placement.policy_num_gpus_per_node": 8,
+  "trainer.policy.megatron_config.tensor_model_parallel_size": 8,
+  "trainer.policy.megatron_config.expert_model_parallel_size": 8,
+  "trainer.policy.megatron_config.expert_tensor_parallel_size": 1,
+  "trainer.policy.megatron_config.lora_config.merge_lora": false,
+  "trainer.policy.model.lora.rank": 8,
+  "trainer.policy.model.lora.alpha": 16,
+  "trainer.policy.model.lora.target_modules": ["linear_proj", "linear_fc1", "linear_fc2"],
+  "trainer.policy.model.lora.lora_sync_path": "/shared/skyrl-logprob-adapter",
+  "trainer.micro_forward_batch_size_per_gpu": 2,
+  "trainer.remove_microbatch_padding": true,
+  "trainer.logger": "console",
+  "generator.inference_engine.run_engines_locally": true,
+  "generator.inference_engine.tensor_parallel_size": 8,
+  "generator.inference_engine.num_engines": 1,
+  "generator.inference_engine.engine_init_kwargs": {"max_model_len": 4096}
+}

@@ -1,4 +1,4 @@
-"""Native SkyRL calls used by the standalone LoRA score diagnostic."""
+"""Megatron setup and scoring for the logprob check."""
 
 import math
 from contextlib import asynccontextmanager
@@ -18,7 +18,6 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
-    make_router_padding_mask,
 )
 from skyrl.train.utils.utils import initialize_ray
 
@@ -42,7 +41,10 @@ async def open_runtime(cfg, tokenizer):
             ray.get(policy.async_init_model(cfg.trainer.policy.model.path))
             ray.get(
                 policy.async_run_ray_method(
-                    "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+                    "pass_through",
+                    "init_weight_sync_state",
+                    client,
+                    cfg.generator.inference_engine,
                 )
             )
             yield policy, client
@@ -73,11 +75,11 @@ class LoRALogprobWorker(MegatronPolicyWorkerBase):
         return perturb_adapters(parameters, multiplier=multiplier)
 
 
-def build_batch(sequences, pad_token_id, routes=None):
+def build_batch(sequences, pad_token_id):
     responses = [tokens[1:] for tokens in sequences]
     masks = [[1] * len(tokens) for tokens in responses]
     tokens, attention, response, rewards, loss_mask, _, replay_routes, _ = convert_prompts_responses_to_batch_tensors(
-        pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks, rollout_expert_indices=routes
+        pad_token_id, [[tokens[0]] for tokens in sequences], responses, masks, masks
     )
     batch = TrainingInputBatch(
         {
@@ -93,8 +95,6 @@ def build_batch(sequences, pad_token_id, routes=None):
             "advantages": torch.zeros_like(loss_mask),
         }
     )
-    if routes is not None:
-        batch["router_padding_mask"] = make_router_padding_mask(attention, [len(route) for route in routes])
     batch.metadata = {"response_length": response.shape[1]}
     return batch
 
@@ -140,7 +140,10 @@ async def publish(policy, client, cfg):
     try:
         ray.get(
             policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+                "pass_through",
+                "broadcast_to_inference_engines",
+                client,
+                cfg.generator.inference_engine,
             )
         )
     finally:

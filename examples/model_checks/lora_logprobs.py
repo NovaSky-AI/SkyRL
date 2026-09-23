@@ -24,7 +24,12 @@ def perturb_adapters(named_parameters, seed=0, multiplier=10):
         name_seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little")
         generator = torch.Generator(device=parameter.device).manual_seed((seed + name_seed) % (2**63))
         parameter.add_(
-            torch.randn(parameter.shape, generator=generator, device=parameter.device, dtype=parameter.dtype),
+            torch.randn(
+                parameter.shape,
+                generator=generator,
+                device=parameter.device,
+                dtype=parameter.dtype,
+            ),
             alpha=1e-3,
         )
         parameter.mul_(multiplier)
