@@ -34,29 +34,32 @@ fi
 python3 integrations/rocm_amd/probe_megatron_compat.py || true
 
 declare -a CASES=()
-# name|gpus|nodes|megatron_tp|megatron_pp|megatron_cp|megatron_ep|vllm_tp|num_engines
+# name|gpus|nodes|mtp|mpp|mcp|mep|vtp|neng|vpp
+# Validated one-engine layouts (Qwen2.5-0.5B: vLLM TP is 1 or 2; larger GPU
+# counts use vLLM PP so engines*TP*PP matches NUM_GPUS).
 CASES+=(
-  "sn2_megatron_dp2_tp1_pp1_vllm_tp2|2|1|1|1|1|1|2|1"
-  "sn2_megatron_tp2_vllm_tp2|2|1|2|1|1|1|2|1"
-  "sn2_megatron_pp2_vllm_tp2|2|1|1|2|1|1|2|1"
-  "sn2_megatron_cp2_vllm_tp2|2|1|1|1|2|1|2|1"
-  "sn2_vllm_dp2_engines_tp1|2|1|1|1|1|1|1|2"
+  "sn2_megatron_dp2_tp1_pp1_vllm_tp2|2|1|1|1|1|1|2|1|1"
+  "sn2_megatron_tp2_vllm_tp2|2|1|2|1|1|1|2|1|1"
+  "sn2_megatron_pp2_vllm_tp2|2|1|1|2|1|1|2|1|1"
+  "sn2_megatron_cp2_vllm_tp2|2|1|1|1|2|1|2|1|1"
 )
 
 if [ "${MATRIX_GPUS}" -ge 4 ]; then
   CASES+=(
-    "sn4_megatron_tp2_dp2_vllm_tp4|4|1|2|1|1|1|4|1"
-    "sn4_megatron_tp2_pp2_vllm_tp4|4|1|2|2|1|1|4|1"
-    "sn4_megatron_tp4_vllm_tp4|4|1|4|1|1|1|4|1"
-    "sn4_megatron_pp4_vllm_tp4|4|1|1|4|1|1|4|1"
+    "sn4_vllm_tp2_pp2_one_engine|4|1|1|1|1|1|2|1|2"
+    "sn4_megatron_dp4_vllm_tp2_pp2|4|1|1|1|1|1|2|1|2"
+    "sn4_megatron_tp2_dp2_vllm_tp2_pp2|4|1|2|1|1|1|2|1|2"
+    "sn4_megatron_pp2_dp2_vllm_tp2_pp2|4|1|1|2|1|1|2|1|2"
+    "sn4_megatron_cp2_dp2_vllm_tp2_pp2|4|1|1|1|2|1|2|1|2"
+    "sn4_megatron_tp2_pp2_vllm_tp2_pp2|4|1|2|2|1|1|2|1|2"
+    "sn4_megatron_tp2_cp2_vllm_tp2_pp2|4|1|2|1|2|1|2|1|2"
   )
 fi
 
-if [ "${MATRIX_NODES}" -ge 2 ]; then
+if [ "${MATRIX_GPUS}" -ge 8 ]; then
   CASES+=(
-    "mn2x2_megatron_dp4_vllm_tp2|2|2|1|1|1|1|2|1"
-    "mn2x2_megatron_tp2_vllm_tp2|2|2|2|1|1|1|2|1"
-    "mn2x2_vllm_tp4_cross_node|2|2|1|1|1|1|4|1"
+    "sn8_vllm_tp2_pp4_one_engine|8|1|1|1|1|1|2|1|4"
+    "sn8_megatron_tp2_pp2_dp2_vllm_tp2_pp4|8|1|2|2|1|1|2|1|4"
   )
 fi
 
@@ -66,14 +69,16 @@ if [ ! -f "${RESULT_MD}" ]; then
 
 Updated automatically by \`run_parallelism_matrix.sh\`.
 
-| Case | GPUs/node | Nodes | Megatron TP/PP/CP/EP | vLLM engines x TP | Result | Log |
-|------|-----------|-------|----------------------|-------------------|--------|-----|
+| Case | GPUs/node | Nodes | Megatron TP/PP/CP/EP | vLLM engines x TP x PP | Result | Log |
+|------|-----------|-------|----------------------|------------------------|--------|-----|
 EOF
 fi
 
 run_case() {
   local spec="$1"
-  IFS='|' read -r name gpus nodes mtp mpp mcp mep vtp neng <<<"${spec}"
+  local name gpus nodes mtp mpp mcp mep vtp neng vpp
+  IFS='|' read -r name gpus nodes mtp mpp mcp mep vtp neng vpp <<<"${spec}"
+  vpp="${vpp:-1}"
   if [ -n "${FILTER}" ] && [[ "${name}" != *"${FILTER}"* ]]; then
     echo "SKIP ${name} (filter=${FILTER})"
     return 0
@@ -93,6 +98,7 @@ run_case() {
   MEGATRON_CP="${mcp}" \
   MEGATRON_EP="${mep}" \
   VLLM_TP="${vtp}" \
+  VLLM_PP="${vpp}" \
   NUM_ENGINES="${neng}" \
     bash examples/train/gsm8k/run_gsm8k_megatron_rocm.sh \
     > "${log}" 2>&1
@@ -105,9 +111,9 @@ run_case() {
     result="FAIL rc=${rc}"
   fi
   echo "[$(ts)] ${result} ${name}"
-  printf '| `%s` | %s | %s | %s/%s/%s/%s | %sx%s | %s | `%s` |\n' \
+  printf '| `%s` | %s | %s | %s/%s/%s/%s | %sx%sx%s | %s | `%s` |\n' \
     "${name}" "${gpus}" "${nodes}" "${mtp}" "${mpp}" "${mcp}" "${mep}" \
-    "${neng}" "${vtp}" "${result}" "$(basename "${log}")" >> "${RESULT_MD}"
+    "${neng}" "${vtp}" "${vpp}" "${result}" "$(basename "${log}")" >> "${RESULT_MD}"
   bash integrations/rocm_amd/gpu_cleanup.sh >/dev/null 2>&1 || true
 }
 

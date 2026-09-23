@@ -11,7 +11,7 @@ Megatron training (`trainer.strategy=megatron`) and vLLM inference on AMD Instin
 
 This README covers **how the colocated path works**, **which parallelisms are validated**, and **Megatron-Bridge / core compatibility**.
 
-**Status:** End-to-end Megatron GRPO + vLLM rollout validated on MI355X, including DP, TP=2, PP=2, and CP=2 on two GPUs. Upstream branch: `feat/rocm-amd-upstream`.
+**Status:** End-to-end Megatron GRPO + vLLM rollout validated on MI355X for 2-, 4-, and 8-GPU colocated layouts. Upstream branch: `feat/rocm-amd-upstream`.
 
 ## Supported GPUs
 
@@ -43,7 +43,9 @@ The GSM8K recipe keeps vLLM awake (`enable_sleep_mode=false`) so sleep/wake does
 
 ## Parallelism
 
-Colocated Megatron GRPO + one vLLM engine, validated end-to-end on 2 Instinct GPUs (MI355X; same recipe is intended for MI300X/MI325X). Each layout below completed GSM8K smoke in a fresh container (`Training done!`).
+Colocated Megatron GRPO + **one** vLLM engine, validated end-to-end on MI355X (same recipe is intended for MI300X/MI325X). Each layout below completed GSM8K smoke in a fresh container (`Training done!`). Rollout GPUs must match policy GPUs: `NUM_ENGINES * VLLM_TP * VLLM_PP == NUM_GPUS`. Qwen2.5-0.5B has 14 heads, so vLLM `TP` is 1 or 2; larger node counts use vLLM `PP` on that single engine.
+
+### 2 GPUs
 
 | Layout | Megatron | vLLM | How to run |
 |--------|----------|------|------------|
@@ -52,7 +54,25 @@ Colocated Megatron GRPO + one vLLM engine, validated end-to-end on 2 Instinct GP
 | Pipeline parallel | `PP=2` | 1 engine, `TP=2` | `MEGATRON_PP=2 VLLM_TP=2` |
 | Context parallel | `CP=2` | 1 engine, `TP=2` | `MEGATRON_CP=2 VLLM_TP=2` |
 
-Recipe knobs: `NUM_GPUS`, `MEGATRON_TP`, `MEGATRON_PP`, `MEGATRON_CP`, `VLLM_TP`, `NUM_ENGINES`. This integration is Megatron + vLLM. On ROCm, SkyRL uses `distributed_executor_backend=mp` when `TP*PP` fits on one node.
+### 4 GPUs (vLLM `TP=2` `PP=2`)
+
+| Megatron | How to run |
+|----------|------------|
+| `DP=4` | `NUM_GPUS=4 VLLM_TP=2 VLLM_PP=2` |
+| `TP=2` `DP=2` | `NUM_GPUS=4 MEGATRON_TP=2 VLLM_TP=2 VLLM_PP=2` |
+| `PP=2` `DP=2` | `NUM_GPUS=4 MEGATRON_PP=2 VLLM_TP=2 VLLM_PP=2` |
+| `CP=2` `DP=2` | `NUM_GPUS=4 MEGATRON_CP=2 VLLM_TP=2 VLLM_PP=2` |
+| `TP=2` `PP=2` | `NUM_GPUS=4 MEGATRON_TP=2 MEGATRON_PP=2 VLLM_TP=2 VLLM_PP=2` |
+| `TP=2` `CP=2` | `NUM_GPUS=4 MEGATRON_TP=2 MEGATRON_CP=2 VLLM_TP=2 VLLM_PP=2` |
+
+### 8 GPUs (vLLM `TP=2` `PP=4`)
+
+| Megatron | How to run |
+|----------|------------|
+| `DP=8` | `NUM_GPUS=8 VLLM_TP=2 VLLM_PP=4` |
+| `TP=2` `PP=2` `DP=2` | `NUM_GPUS=8 MEGATRON_TP=2 MEGATRON_PP=2 VLLM_TP=2 VLLM_PP=4` |
+
+Recipe knobs: `NUM_GPUS`, `MEGATRON_TP`, `MEGATRON_PP`, `MEGATRON_CP`, `VLLM_TP`, `VLLM_PP`, `NUM_ENGINES`. This integration is Megatron + vLLM. On ROCm, SkyRL uses `distributed_executor_backend=mp` when vLLM `TP*PP` fits on one node.
 
 ## Compatibility (Megatron-Bridge / megatron-core)
 

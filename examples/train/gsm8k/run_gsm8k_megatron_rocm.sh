@@ -21,6 +21,7 @@ cd "$ROOT"
 : "${MEGATRON_EP:=1}"
 : "${NUM_NODES:=1}"
 : "${VLLM_TP:=${NUM_GPUS}}"
+: "${VLLM_PP:=1}"
 : "${NUM_ENGINES:=1}"
 : "${LOG_DIR:=/tmp/skyrl-logs-rocm}"
 : "${CKPT_DIR:=$HOME/ckpts/gsm8k_megatron_rocm}"
@@ -76,6 +77,7 @@ python3 -m skyrl.train.entrypoints.main_base \
   trainer.placement.critic_num_gpus_per_node=0 \
   generator.inference_engine.num_engines="${NUM_ENGINES}" \
   generator.inference_engine.tensor_parallel_size="${VLLM_TP}" \
+  generator.inference_engine.pipeline_parallel_size="${VLLM_PP}" \
   trainer.policy.megatron_config.tensor_model_parallel_size="${MEGATRON_TP}" \
   trainer.policy.megatron_config.pipeline_model_parallel_size="${MEGATRON_PP}" \
   trainer.policy.megatron_config.context_parallel_size="${MEGATRON_CP}" \
