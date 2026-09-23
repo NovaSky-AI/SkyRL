@@ -152,13 +152,6 @@ class LossFnInputs(BaseModel):
     values: TensorData = Field(default_factory=lambda: TensorData(data=[]))
     returns: TensorData = Field(default_factory=lambda: TensorData(data=[]))
     rollout_logprobs: TensorData = Field(default_factory=lambda: TensorData(data=[]))
-    """SkyRL extension: per-token logprobs from the rollout (inference) engine.
-
-    When set, ``logprobs`` is treated as the *training* policy's logprobs at sampling time
-    (the PPO ratio denominator) and ``rollout_logprobs`` feeds off-policy correction
-    (``trainer.algorithm.off_policy_correction``: sequence/token masking, TIS). When empty,
-    the backend mirrors ``logprobs`` into both roles and any train/inference-mismatch
-    correction is a no-op."""
 
 
 class Datum(BaseModel):

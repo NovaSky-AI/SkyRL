@@ -4,8 +4,7 @@
 # Mirrors the server-side settings of
 #   examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_lora_megatron_aime.sh  (LoRA, default)
 #   examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_megatron_aime.sh       (full fine-tuning, FULL_FT=1)
-# but sized for ONE node of 8xH100 (the reference scripts use 2 nodes: 2 engines at TP=8). Set NUM_NODES=2 /
-# NUM_INFERENCE_ENGINES=2 to match the reference layout.
+# on the reference layout: 2 nodes of 8xH100, Megatron TP4/EP8, 2 vLLM engines at TP=8 (one per node).
 #
 # The algorithm knobs a Tinker client cannot express live here in backend_config:
 #   - dual-clip loss type + clip_ratio_c (the client sends loss_fn="ppo" with the clip thresholds)
@@ -18,16 +17,15 @@
 #   FULL_FT=1 bash examples/tinker/dapo/run_tinker_server.sh       # full fine-tuning recipe (client --lora-rank 0, LR 1e-6)
 # The learning rate lives on the CLIENT (dapo_client.py picks 1e-5 or 1e-6 from --lora-rank); pair FULL_FT=1
 # with --lora-rank 0 and vice versa.
-#   BASE_MODEL=Qwen/Qwen3-1.7B-Base MEGATRON_TP=1 MEGATRON_EP=1 ... bash ...   # smaller smoke test
 set -euo pipefail
 
 BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3-30B-A3B-Base}"
 PORT="${PORT:-8000}"
 FULL_FT="${FULL_FT:-0}"
 
-NUM_NODES="${NUM_NODES:-1}"
+NUM_NODES="${NUM_NODES:-2}"
 NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-8}"
-NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-1}"
+NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-2}"
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE="${INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE:-8}"
 # The native reference scripts use 0.7. On the Tinker path the trainer keeps ~25 GiB/GPU resident after
 # offload once optimizer state exists (measured on the 30B LoRA recipe, 16xH100), while vLLM sizes its KV

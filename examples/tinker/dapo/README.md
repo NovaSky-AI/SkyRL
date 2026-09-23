@@ -45,10 +45,9 @@ as responses lengthen, so compare step for step, not against a mean.
 
 ## Hardware
 
-| Purpose | GPUs |
-|---|---|
-| Full recipes (as configured here) | 1 node x 8 H100. Reference runs used 2 nodes; set `NUM_NODES=2 NUM_INFERENCE_ENGINES=2`. |
-| Smoke test of the loop | 1 to 8 GPUs with a small model (below) |
+2 nodes x 8 H100, the reference layout: Megatron TP4 / EP8 and two vLLM engines at TP8, one per node. The
+launcher defaults to this; `NUM_NODES`, `NUM_GPUS_PER_NODE`, `NUM_INFERENCE_ENGINES` and
+`INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE` override it.
 
 ## 1. Prepare data
 
@@ -66,9 +65,9 @@ FULL_FT=1 bash examples/tinker/dapo/run_tinker_server.sh    # full fine-tuning
 Every setting is an environment variable with the reference value as default (see the script). Pass your own
 `BACKEND_CONFIG='{...}'` to replace the whole dictionary. Extra arguments are forwarded to `skyrl.tinker.api`.
 
-**Multi-node runs must pass `--checkpoints-base <shared path>`** (for example
-`NUM_NODES=2 NUM_INFERENCE_ENGINES=2 bash examples/tinker/dapo/run_tinker_server.sh --checkpoints-base /mnt/shared/skyrl_checkpoints/dapo`).
-The default `/tmp/skyrl_checkpoints` is node-local, and on the Tinker path it is on the critical path of every
+**Pass `--checkpoints-base <shared path>`** (for example
+`bash examples/tinker/dapo/run_tinker_server.sh --checkpoints-base /mnt/shared/skyrl_checkpoints/dapo`): this is
+a 2-node run and the default `/tmp/skyrl_checkpoints` is node-local. On the Tinker path it is on the critical path of every
 sampling round: the LoRA sampler archive is written by the engine process and read by the vLLM engines on every
 node for `load_lora_adapter`, and checkpoint staging happens next to it (see `_staging_root` in
 `skyrl/backends/skyrl_train_backend.py`). Also set the client's `--output-dir` to shared storage so
@@ -91,34 +90,6 @@ The `skyrl-train` extra is required: the client imports `skyrl_gym` (the AIME ve
 Set `WANDB_API_KEY` (and optionally `WANDB_PROJECT` / `WANDB_RUN_NAME` / `WANDB_ENTITY`) for W&B logging;
 metrics are also appended to `<output-dir>/metrics.jsonl`, which is the live source of truth for a running job
 (train, checkpoint and eval payloads for one step share one W&B row, committed at the end of the step).
-
-## Smoke test on a small model
-
-Server (e.g. 4 GPUs, Qwen3-1.7B-Base, no expert parallelism):
-
-```bash
-BASE_MODEL=Qwen/Qwen3-1.7B-Base NUM_GPUS_PER_NODE=4 MEGATRON_TP=1 MEGATRON_EP=1 \
-INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1 NUM_INFERENCE_ENGINES=4 MAX_RESPONSE_LENGTH=1024 \
-LORA_ALPHA=32 \
-bash examples/tinker/dapo/run_tinker_server.sh
-```
-
-`LORA_ALPHA` must be set to match the client's `--lora-rank`: megatron-bridge scales every adapter by
-`alpha / rank`, so leaving the default `LORA_ALPHA=128` while sampling `--lora-rank 32` multiplies the
-adapter update by 4 (the full recipe has alpha = rank = 128, i.e. scale 1). The symptom is entropy
-collapse within ~50 steps -- `policy/entropy_loss` falling by an order of magnitude while
-`reward/avg_pass_at_N` peaks and then drops back below its starting value.
-
-Client, shrinking the recipe with `DAPO_*` overrides (keep `DAPO_MICRO_TRAIN_BATCH_SIZE` equal to the
-server's `MICRO_TRAIN_BATCH_SIZE_PER_GPU`):
-
-```bash
-DAPO_TRAIN_BATCH_SIZE=16 DAPO_POLICY_MINI_BATCH_SIZE=4 DAPO_N_SAMPLES_PER_PROMPT=4 \
-DAPO_EVAL_N_SAMPLES_PER_PROMPT=2 DAPO_MAX_GENERATE_LENGTH=1024 DAPO_OVERLONG_BUFFER_LEN=256 \
-DAPO_NUM_WARMUP_STEPS=4 DAPO_EVAL_BATCH_SIZE=32 DAPO_EVAL_INTERVAL=2 \
-TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
-  python examples/tinker/dapo/dapo_client.py --model Qwen/Qwen3-1.7B-Base --lora-rank 32 --max-train-steps 4
-```
 
 ## What to watch
 
@@ -163,6 +134,9 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --extra skyrl-train \
 - KL loss is disabled (as in the reference scripts; the Tinker backend does not support it).
 - LoRA alpha cannot be sent through the Tinker SDK (the API server records 32). The launcher sets
   `trainer.policy.model.lora.alpha=128` in `backend_config`, which the SkyRL-Train backend now honors.
+  Keep `LORA_ALPHA` equal to the client's `--lora-rank`: megatron-bridge scales every adapter by `alpha / rank`,
+  so a mismatch multiplies the adapter update (rank 32 with the default alpha 128 is a 4x update, and the
+  symptom is entropy collapse within ~50 steps while `reward/avg_pass_at_N` peaks and then drops).
 - Router replay (R3) for MoE models is not available through the Tinker datum path, so it is not enabled.
 - The reference scripts use TIS (`use_tis=true`); this example deliberately does not.
 - The launcher sets `megatron_config.lora_config.merge_lora=false`. On the Tinker path this is required,
