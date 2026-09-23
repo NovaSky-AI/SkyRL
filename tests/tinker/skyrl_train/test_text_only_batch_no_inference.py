@@ -123,14 +123,13 @@ def test_rollout_logprobs_length_mismatch_rejected():
         )
 
 
-def test_mixed_batch_falls_back_per_datum():
-    """A datum that omits `rollout_logprobs` uses its own `logprobs` (ratio 1), even when a
-    batch-mate provides them; concurrent requests for one model can share a batch."""
-    batch = skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
-        _fake_backend(), _rl_prepared_batch([[-1.5, -2.5, -3.5], []]), role="policy"
-    )
-    assert batch["rollout_logprobs"].tolist() == [[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]
-    assert batch["action_log_probs"].tolist() == [[-1.0, -2.0, -3.0]] * 2
+def test_mixed_batch_rejected():
+    """`rollout_logprobs` is all-or-nothing per batch: a datum that omits it while a batch-mate
+    provides it is a client inconsistency and fails loudly instead of silently losing correction."""
+    with pytest.raises(ValueError, match="every datum"):
+        skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+            _fake_backend(), _rl_prepared_batch([[-1.5, -2.5, -3.5], []]), role="policy"
+        )
 
 
 def test_image_batch_uses_render_server_not_engines():
