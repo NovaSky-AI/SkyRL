@@ -743,7 +743,12 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     ``--worker-extension-cls``, ...).
     """
     from vllm import AsyncEngineArgs as _AsyncEngineArgs
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    try:
+        from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.entrypoints.launchers":
+            raise
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
