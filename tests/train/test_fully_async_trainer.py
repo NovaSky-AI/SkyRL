@@ -532,6 +532,74 @@ async def test_train_cancellation_stops_monitor_and_profiler(cancel_during_clean
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sample_full_batch", [False, True])
+@pytest.mark.parametrize("max_steps", [None, 1])
+async def test_shutdown_preserves_timeout_and_finishes_generation_cleanup(sample_full_batch, max_steps):
+    trainer = _complete_epoch_trainer(sample_full_batch, timeout=0.05, count=4)
+    trainer.cfg.trainer.max_training_steps = max_steps
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    metrics_finished = asyncio.Event()
+    cleaned = []
+
+    async def generate(inputs):
+        uid = inputs["trajectory_ids"][0].instance_id
+        if int(uid) >= 2:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                cleaned.append(uid)
+        return {"rewards": [0.0, 1.0], "loss_masks": [[1], [1]]}
+
+    async def metrics():
+        await cleanup_started.wait()
+        metrics_finished.set()
+        return {}
+
+    trainer.generator.generate = generate
+    trainer._vllm_metrics_scraper = SimpleNamespace(sample=metrics, aclose=AsyncMock())
+    task = asyncio.create_task(trainer.train())
+    try:
+        await asyncio.wait_for(metrics_finished.wait(), 2)
+        release_cleanup.set()
+        with pytest.raises(RuntimeError, match="Generation for prompt '[23]' exceeded 0.05 seconds"):
+            await asyncio.wait_for(task, 2)
+    finally:
+        release_cleanup.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert set(cleaned) == {"2", "3"}
+    assert trainer._staleness_manager._stat.running == 0
+    trainer.tracker.finish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_preserves_pending_external_cancellation():
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def generate():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    worker = asyncio.create_task(generate())
+    failure = asyncio.get_running_loop().create_future()
+    watcher = asyncio.create_task(FullyAsyncRayPPOTrainer._watch_generation_workers([worker], asyncio.Event(), failure))
+    await started.wait()
+    worker.cancel()
+    await FullyAsyncRayPPOTrainer._stop_generation_workers([worker], watcher, failure)
+    assert cleaned.is_set()
+    assert worker.cancelled()
+    assert str(failure.result()) == "Generation worker was cancelled unexpectedly."
+
+
+@pytest.mark.asyncio
 async def test_shutdown_preserves_failure_not_yet_seen_by_watcher():
     error = RuntimeError("worker finished before watcher ran")
 

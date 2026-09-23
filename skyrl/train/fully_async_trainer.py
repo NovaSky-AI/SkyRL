@@ -744,26 +744,35 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _stop_generation_workers(tasks, watcher, generation_failure, shutdown_requested=None):
         if shutdown_requested is None:
             shutdown_requested = set()
-        for task in tasks:
-            if task not in shutdown_requested and (task.cancelled() or task.cancelling()):
-                if generation_failure is not None and not generation_failure.done():
-                    generation_failure.set_result(RuntimeError("Generation worker was cancelled unexpectedly."))
-        shutdown_requested.update(tasks)
         # Stop the watcher first so intentional cancellation is not reported as a worker failure.
         if watcher is not None:
             watcher.cancel()
         for task in tasks:
-            task.cancel()
+            # An expiring deadline may already be unwinding the worker's cleanup.
+            if not task.done() and not task.cancelling():
+                if task.cancel():
+                    shutdown_requested.add(task)
         await asyncio.gather(*tasks, *([watcher] if watcher is not None else []), return_exceptions=True)
         for task in tasks:
-            if not task.cancelled() and task.exception() is not None:
-                if generation_failure is not None and not generation_failure.done():
-                    generation_failure.set_result(task.exception())
+            if generation_failure is None or generation_failure.done():
+                break
+            if task.cancelled():
+                if task not in shutdown_requested:
+                    generation_failure.set_result(RuntimeError("Generation worker was cancelled unexpectedly."))
+            elif task.exception() is not None:
+                generation_failure.set_result(task.exception())
 
     @staticmethod
     async def _watch_generation_workers(tasks, all_generators_done: asyncio.Event, generation_failure: asyncio.Future):
         try:
-            await asyncio.gather(*tasks)
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.cancelled():
+                        raise asyncio.CancelledError
+                    if task.exception() is not None:
+                        raise task.exception()
         except asyncio.CancelledError:
             if asyncio.current_task().cancelling():
                 raise
