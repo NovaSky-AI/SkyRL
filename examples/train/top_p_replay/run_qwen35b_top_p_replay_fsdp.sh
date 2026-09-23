@@ -34,6 +34,8 @@ export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 # Capture the bounded post-filter support set for replay.
 SAMPLE_SUPPORT_REPLAY="${SAMPLE_SUPPORT_REPLAY:-true}"
 TOP_P="${TOP_P:-0.95}"
+# NOTE: For top-p sampler replay, we need a bounded support i.e top-k> 0. 
+# We use a constrained top-k=20 value here for demonstration
 TOP_K="${TOP_K:-20}"
 MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-40}"
 RUN_LABEL="${RUN_LABEL:-top_p${TOP_P}_top_k${TOP_K}_sample_support_${SAMPLE_SUPPORT_REPLAY}}"

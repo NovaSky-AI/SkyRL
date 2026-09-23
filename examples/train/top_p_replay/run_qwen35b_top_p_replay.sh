@@ -33,14 +33,6 @@ ENGINE_INIT_KWARGS='{"gdn_prefill_backend": "triton", "kernel_config": {"moe_bac
 # Use Triton GDN on Blackwell.
 export FLA_TILELANG=0
 
-# Disable unconfigured gIB NCCL settings for local TP.
-set +x
-set -a
-source .env.mc
-set +a
-unset NCCL_NET
-unset NCCL_NET_PLUGIN
-export NCCL_TUNER_PLUGIN=none
 # Allow model download and compilation during engine startup.
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 set -x
@@ -48,6 +40,8 @@ set -x
 # Capture the bounded post-filter support set for replay.
 SAMPLE_SUPPORT_REPLAY="${SAMPLE_SUPPORT_REPLAY:-true}"
 TOP_P="${TOP_P:-0.95}"
+# NOTE: For top-p sampler replay, we need a bounded support i.e top-k> 0. 
+# We use a constrained top-k=20 value here for demonstration
 TOP_K="${TOP_K:-20}"
 MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-40}"
 RUN_LABEL="${RUN_LABEL:-top_p${TOP_P}_top_k${TOP_K}_sample_support_${SAMPLE_SUPPORT_REPLAY}}"
