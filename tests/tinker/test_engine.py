@@ -42,6 +42,32 @@ def test_process_load_weights_forwards_optimizer_choice(load_optimizer):
     assert result.type == "load_weights"
 
 
+def test_engine_loads_alternate_base_weights(monkeypatch):
+    captured = {}
+
+    class BackendConfig:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs
+
+    class Backend:
+        def __init__(self, model, _config):
+            captured["model"] = model
+
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_args, **_kwargs: (Backend, BackendConfig))
+    TinkerEngine(
+        EngineConfig(
+            base_model=BASE_MODEL,
+            base_model_checkpoint_path="/models/custom",
+            database_url="sqlite:///:memory:",
+        )
+    )
+
+    assert captured == {
+        "model": "/models/custom",
+        "config": {"generator.inference_engine.served_model_name": BASE_MODEL},
+    }
+
+
 def test_process_unload_model():
     """Test that process_unload_model removes model from backend."""
     config = EngineConfig(

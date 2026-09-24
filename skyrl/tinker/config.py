@@ -15,6 +15,11 @@ class EngineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
+    base_model_checkpoint_path: str | None = Field(
+        default=None,
+        description="Compatible base-weight directory to load instead of base_model",
+        json_schema_extra={"argparse_type": str},
+    )
     backend: str = Field(default="megatron", description="Backend to use for training and inference")
     backend_config: dict = Field(
         default_factory=dict,
