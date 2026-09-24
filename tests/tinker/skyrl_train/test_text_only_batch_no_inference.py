@@ -113,6 +113,7 @@ def test_engine_init_invalidates_cpu_render_state():
 
     render_server = _RenderServerStub()
     fake_self = SimpleNamespace(
+        config=SimpleNamespace(runtime_role="combined"),
         _inference_engines_initialized=False,
         _inference_engine_client=object(),
         _create_new_inference_client=lambda: None,

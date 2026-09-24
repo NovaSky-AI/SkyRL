@@ -21,6 +21,23 @@ def test_forwarding_timeout_reads_environment(monkeypatch) -> None:
     assert config.forwarding_inference_timeout_sec == 1800.0
 
 
+def test_runtime_role_flag_parses() -> None:
+    parser = argparse.ArgumentParser()
+    add_model(parser, EngineConfig)
+
+    args = parser.parse_args(
+        [
+            "--base-model",
+            "test-model",
+            "--runtime-role",
+            "trainer",
+        ]
+    )
+    config = EngineConfig.model_validate(vars(args))
+
+    assert config.runtime_role == "trainer"
+
+
 def test_forwarding_client_uses_configured_timeout() -> None:
     config = EngineConfig(
         base_model="test-model",

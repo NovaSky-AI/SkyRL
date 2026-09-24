@@ -343,7 +343,9 @@ async def lifespan(app: FastAPI):
     backend_cfg = app.state.engine_config.backend_config or {}
     # SkyRL-Train default is colocate_all=True; only opt into forwarding
     # when the operator explicitly sets it to False.
-    is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    is_colocated = app.state.engine_config.runtime_role == "inference" or bool(
+        backend_cfg.get("trainer.placement.colocate_all", True)
+    )
     if app.state.engine_config.external_inference_url:
         app.state.external_future_store = ExternalFutureStore()
         await app.state.external_future_store.start()

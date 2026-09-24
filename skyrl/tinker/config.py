@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +16,9 @@ class EngineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
+    runtime_role: Literal["trainer", "inference", "combined"] = Field(
+        default="combined", description="GPU runtime role", json_schema_extra={"argparse_type": str}
+    )
     backend: str = Field(default="megatron", description="Backend to use for training and inference")
     backend_config: dict = Field(
         default_factory=dict,
