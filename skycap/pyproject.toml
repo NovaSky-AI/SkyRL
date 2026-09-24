@@ -7,14 +7,19 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{ name = "NovaSkyAI AI Team" }]
 dependencies = [
+    "aiohttp>=3.9",
     "orjson>=3.10",
 ]
+
+[project.scripts]
+skycap = "skycap.cli:main"
 
 [project.urls]
 Repository = "https://github.com/NovaSky-AI/SkyRL"
 
 [dependency-groups]
 dev = [
+    "openai>=1.40",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
 ]
