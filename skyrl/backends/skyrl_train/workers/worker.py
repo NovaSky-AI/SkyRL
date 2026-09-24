@@ -48,6 +48,10 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.score_centering_support import (
+    sampled_in_head_fraction,
+    sampler_head_for_actions,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -1083,6 +1087,8 @@ class PolicyWorkerBase(Worker):
         response_mask = experience.response_mask
         rollout_action_logprobs = experience.rollout_logprobs
         sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
+        score_centering = self.cfg.algorithm.score_centering.enabled
+        needs_sample_support = sample_support_replay or score_centering
 
         # Determine which loss function to use
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
@@ -1117,10 +1123,35 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
-                sample_support=experience.rollout_sample_support if sample_support_replay else None,
-                loss_mask=loss_mask if sample_support_replay else None,
+                sample_support=experience.rollout_sample_support if needs_sample_support else None,
+                loss_mask=loss_mask if needs_sample_support else None,
                 enable_sample_support_replay=sample_support_replay,
+                score_centering_head=score_centering,
             )
+            # Score centering needs the sampler head (ids + sampler logprobs) at the response positions
+            # and the trainer's logprobs of the same members; only pass them when enabled so registered
+            # losses keep their existing signature otherwise.
+            score_centering_kwargs = {}
+            score_centering_metrics = {}
+            if score_centering:
+                if experience.rollout_sample_support_logprobs is None:
+                    raise ValueError(
+                        "score centering is enabled but the microbatch has no rollout_sample_support_logprobs; "
+                        "set generator.inference_engine.enable_return_sample_support_logprobs=true"
+                    )
+                head = sampler_head_for_actions(
+                    experience.rollout_sample_support,
+                    experience.rollout_sample_support_logprobs,
+                    attention_mask,
+                    num_actions,
+                )
+                score_centering_kwargs = dict(
+                    rollout_topk_logprobs=head.logprobs,
+                    topk_log_probs=output["score_centering_head_logprobs"],
+                )
+                score_centering_metrics["score_centering_sampled_in_head_frac"] = sampled_in_head_fraction(
+                    head.ids, sequences, num_actions, loss_mask
+                )
             # loss function
             # TODO: recompute advantages
             policy_loss, loss_metrics = current_loss_fn(
@@ -1130,7 +1161,9 @@ class PolicyWorkerBase(Worker):
                 config=loss_config,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                **score_centering_kwargs,
             )
+            loss_metrics = {**loss_metrics, **score_centering_metrics}
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":

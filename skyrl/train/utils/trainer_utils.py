@@ -15,7 +15,10 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_LOGPROBS_FIELD,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
@@ -704,6 +707,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "trajectory_ids",
             "rollout_expert_indices",
             "rollout_sample_support",
+            "rollout_sample_support_logprobs",
             "is_last_step",
             "pixel_values",
             "image_grid_thw",
@@ -759,6 +763,7 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
     """Validate side-channel row counts against their token domains."""
     rollout_expert_indices = generator_output.get("rollout_expert_indices")
     rollout_sample_support = generator_output.get(SAMPLE_SUPPORT_FIELD)
+    rollout_sample_support_logprobs = generator_output.get(SAMPLE_SUPPORT_LOGPROBS_FIELD)
     prompt_token_ids = generator_output["prompt_token_ids"]
     response_ids = generator_output["response_ids"]
 
@@ -796,6 +801,18 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
             assert len(sample_support) == len(response_ids[i]), (
                 f"{SAMPLE_SUPPORT_FIELD}[{i}] has {len(sample_support)} support rows for "
                 f"{len(response_ids[i])} response tokens, expected one row per response token"
+            )
+
+    if rollout_sample_support_logprobs is not None:
+        assert rollout_sample_support is not None, f"{SAMPLE_SUPPORT_LOGPROBS_FIELD} requires {SAMPLE_SUPPORT_FIELD}"
+        for i, support_logprobs in enumerate(rollout_sample_support_logprobs):
+            assert (
+                support_logprobs is not None
+            ), f"{SAMPLE_SUPPORT_LOGPROBS_FIELD}[{i}] is None, expected captured support logprobs"
+            # ``np.shape`` also covers the nested-list form some callers build in tests.
+            assert np.shape(support_logprobs) == np.shape(rollout_sample_support[i]), (
+                f"{SAMPLE_SUPPORT_LOGPROBS_FIELD}[{i}] has shape {np.shape(support_logprobs)} for support rows of "
+                f"shape {np.shape(rollout_sample_support[i])}, expected row-aligned arrays"
             )
 
 

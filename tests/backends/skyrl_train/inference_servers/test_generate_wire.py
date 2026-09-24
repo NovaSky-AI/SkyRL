@@ -17,10 +17,12 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     build_logprobs_content,
     decode_packed_routed_experts,
     decode_packed_sample_support,
+    decode_packed_sample_support_logprobs,
     load_packed_body,
     pack_ndarray,
     pack_routed_experts,
     pack_sample_support,
+    pack_sample_support_logprobs,
     unpack_ndarray,
 )
 
@@ -212,6 +214,33 @@ def test_packed_sample_support_round_trip():
     assert decoded.dtype == np.int32
     assert decoded.flags.c_contiguous
     assert np.array_equal(decoded, support)
+
+
+def test_packed_sample_support_logprobs_round_trip_keeps_neg_inf_padding():
+    support = np.array([[7, 9, -1], [12, -1, -1]], dtype=np.int32)
+    logprobs = np.array([[-0.5, -1.25, -np.inf], [-0.01, -np.inf, -np.inf]], dtype=np.float32)
+
+    payload = orjson.loads(orjson.dumps(pack_sample_support_logprobs(logprobs)))
+    decoded = decode_packed_sample_support_logprobs(payload)
+
+    assert decoded.dtype == np.float32
+    assert np.array_equal(decoded, logprobs)
+    # Row-aligned with the support: -inf exactly where the support holds padding.
+    assert np.array_equal(np.isneginf(decoded), support == -1)
+
+
+@pytest.mark.parametrize(
+    "logprobs,message",
+    [
+        (np.array([[-0.5, np.nan]], dtype=np.float32), "finite or -inf"),
+        (np.array([[-0.5, np.inf]], dtype=np.float32), "finite or -inf"),
+        (np.array([[-0.5, -1.0]], dtype=np.float64), "float32"),
+        (np.array([-0.5, -1.0], dtype=np.float32), "float32"),
+    ],
+)
+def test_sample_support_logprobs_wire_rejects_bad_values(logprobs, message):
+    with pytest.raises(ValueError, match=message):
+        pack_sample_support_logprobs(logprobs)
 
 
 # Shape, base64, byte-size and dtype allow-listing are covered generically by the

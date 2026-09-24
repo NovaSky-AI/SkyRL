@@ -4,7 +4,7 @@ uv run --isolated --extra dev pytest -s tests/train/test_config.py
 
 import pathlib
 import typing
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Annotated, Optional
 
@@ -12,6 +12,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
+from skyrl.backends.skyrl_train.utils.sample_support import sample_support_width
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
@@ -1336,3 +1337,114 @@ class TestMegatronRouterReplayValidation:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = 2
 
         validate_megatron_cfg(cfg)
+
+
+class TestScoreCenteringValidation:
+    def _cfg(self):
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = "fsdp"
+        cfg.trainer.algorithm.policy_loss_type = "rollout_is"
+        cfg.trainer.algorithm.score_centering.enabled = True
+        return cfg
+
+    def test_disabled_by_default_and_rejects_logprobs_above_one(self):
+        cfg = _make_validated_test_config()
+        assert not cfg.trainer.algorithm.score_centering.enabled
+        cfg.generator.sampling_params.logprobs = 8
+        with pytest.raises(ValueError, match="score_centering"):
+            validate_cfg(cfg)
+
+    def test_untruncated_sampler_records_top_k_head_over_the_support_channel(self):
+        cfg = self._cfg()
+        cfg.trainer.algorithm.score_centering.top_k = 16
+        assert cfg.generator.sampling_params.top_k == -1
+        validate_cfg(cfg)
+        assert cfg.generator.sampling_params.logprobs == 16
+        assert cfg.generator.inference_engine.enable_return_sample_support_set
+        assert cfg.generator.inference_engine.enable_return_sample_support_logprobs
+
+    def test_truncating_sampler_keeps_its_own_support_width(self):
+        cfg = self._cfg()
+        cfg.generator.sampling_params.top_k = 50
+        validate_cfg(cfg)
+        # The sampled-token logprob request stays at most 1; the head width comes from top_k.
+        assert (cfg.generator.sampling_params.logprobs or 0) <= 1
+        assert sample_support_width(asdict(cfg.generator.sampling_params)) == 50
+        assert cfg.generator.inference_engine.enable_return_sample_support_set
+
+    def test_rejects_conflicting_sampler_logprobs(self):
+        cfg = self._cfg()
+        cfg.generator.sampling_params.logprobs = 5
+        with pytest.raises(ValueError, match="conflicts"):
+            validate_cfg(cfg)
+
+    def test_requires_rollout_is_or_reinforce(self):
+        cfg = self._cfg()
+        cfg.trainer.algorithm.policy_loss_type = "regular"
+        with pytest.raises(ValueError, match="reinforce"):
+            validate_cfg(cfg)
+        cfg.trainer.algorithm.policy_loss_type = "reinforce"
+        validate_cfg(cfg)
+
+    def test_rejects_tis_ratio(self):
+        cfg = self._cfg()
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
+        with pytest.raises(ValueError, match="tis_ratio_type"):
+            validate_cfg(cfg)
+
+    def test_composes_with_geometric_sequence_mask(self):
+        cfg = self._cfg()
+        cfg.trainer.algorithm.off_policy_correction.sequence_mask_metric = "geometric"
+        validate_cfg(cfg)
+        assert cfg.generator.sampling_params.logprobs == cfg.trainer.algorithm.score_centering.top_k
+
+    def test_supports_fsdp_and_megatron_only(self):
+        cfg = self._cfg()
+        cfg.trainer.strategy = "megatron"
+        validate_cfg(cfg)
+        cfg = self._cfg()
+        cfg.trainer.strategy = "jax"
+        with pytest.raises(NotImplementedError, match="megatron"):
+            validate_cfg(cfg)
+
+    def test_rejects_step_wise_trajectories(self):
+        cfg = self._cfg()
+        cfg.generator.step_wise_trajectories = True
+        with pytest.raises(NotImplementedError, match="step-wise"):
+            validate_cfg(cfg)
+
+    def test_rejects_invalid_top_k(self):
+        with pytest.raises(ValueError, match="top_k"):
+            SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.score_centering.top_k=1"])
+
+
+class TestSampleSupportLogprobsValidation:
+    def test_logprobs_channel_requires_support_channel(self):
+        cfg = _make_validated_test_config()
+        cfg.generator.inference_engine.enable_return_sample_support_logprobs = True
+        with pytest.raises(ValueError, match="enable_return_sample_support_set"):
+            cfg.__post_init__()
+
+    def test_capture_accepts_untruncated_sampler_with_logprobs(self):
+        cfg = _make_validated_test_config()
+        cfg.generator.inference_engine.enable_return_sample_support_set = True
+        cfg.generator.sampling_params.top_k = -1
+        cfg.generator.sampling_params.logprobs = 8
+        cfg.__post_init__()
+
+    def test_capture_rejects_untruncated_sampler_without_logprobs(self):
+        cfg = _make_validated_test_config()
+        cfg.generator.inference_engine.enable_return_sample_support_set = True
+        cfg.generator.sampling_params.top_k = -1
+        with pytest.raises(ValueError, match="top_k > 1 or"):
+            cfg.__post_init__()
+
+    def test_replay_still_requires_truncating_sampler(self):
+        cfg = _make_validated_test_config()
+        cfg.generator.inference_engine.enable_return_sample_support_set = True
+        cfg.trainer.algorithm.enable_sample_support_replay = True
+        cfg.generator.use_conversation_multi_turn = True
+        cfg.generator.sampling_params.top_k = -1
+        cfg.generator.sampling_params.logprobs = 8
+        with pytest.raises(ValueError, match="replay requires"):
+            cfg.__post_init__()

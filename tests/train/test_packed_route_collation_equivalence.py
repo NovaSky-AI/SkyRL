@@ -181,6 +181,7 @@ def _run_both_paths(
         _logprobs,
         packed_routes,
         _sample_support,
+        _sample_support_logprobs,
     ) = convert_prompts_responses_to_batch_tensors(
         PAD_TOKEN_ID,
         prompts,
@@ -339,7 +340,7 @@ def test_packed_routes_match_under_context_parallelism(monkeypatch, parallel_sta
 def test_packed_collation_allocates_no_padded_rectangle(distribution):
     """The packed buffer must hold exactly the batch's real tokens."""
     prompts, responses, rewards, loss_masks, routes = _make_batch(LENGTH_DISTRIBUTIONS[distribution])
-    *_, packed_routes, _ = convert_prompts_responses_to_batch_tensors(
+    *_, packed_routes, _, _ = convert_prompts_responses_to_batch_tensors(
         PAD_TOKEN_ID,
         prompts,
         responses,

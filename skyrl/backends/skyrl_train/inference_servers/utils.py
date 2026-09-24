@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 from argparse import Namespace
+from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
@@ -10,6 +11,7 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import sample_support_width
 
 # The receive-side engines must be registered in vLLM's factory before the
 # WeightTransferConfig below is built: `backend` is validated against the
@@ -206,7 +208,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     # Sample-support capture asks for one logprob per top-k candidate, post-filter, so the
     # -inf entries that mark filtered candidates survive to the capture path.
     if ie_cfg.enable_return_sample_support_set:
-        overrides["max_logprobs"] = cfg.generator.sampling_params.top_k
+        overrides["max_logprobs"] = sample_support_width(asdict(cfg.generator.sampling_params))
         overrides["logprobs_mode"] = "processed_logprobs"
     for key, value in overrides.items():
         setattr(args, key, value)

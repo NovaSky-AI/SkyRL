@@ -76,10 +76,14 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedField,
     decode_packed_routed_experts,
     decode_packed_sample_support,
+    decode_packed_sample_support_logprobs,
     load_packed_body,
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
-from skyrl.backends.skyrl_train.utils.sample_support import SampleSupport
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SampleSupport,
+    SampleSupportLogprobs,
+)
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
@@ -175,6 +179,7 @@ class RemoteGenerateResult:
     stop_reason: str
     routed_experts: Optional[RoutedExpertIndices]
     sample_support: Optional[SampleSupport]
+    sample_support_logprobs: Optional[SampleSupportLogprobs]
 
 
 @dataclass
@@ -270,10 +275,13 @@ class RemoteGenerateClient:
         return_routed_experts: bool = False,
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
+        return_sample_support_logprobs: bool = False,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
     ) -> RemoteGenerateResult:
         """Generate one raw-token completion with optional per-token replay metadata."""
+        if return_sample_support_logprobs and not return_sample_support:
+            raise ValueError("return_sample_support_logprobs requires return_sample_support=True")
         if routed_experts_prompt_start is not None:
             if not return_routed_experts:
                 raise ValueError("routed_experts_prompt_start requires return_routed_experts=True")
@@ -296,6 +304,8 @@ class RemoteGenerateClient:
         }
         if return_sample_support:
             payload["return_sample_support"] = True
+        if return_sample_support_logprobs:
+            payload["return_sample_support_logprobs"] = True
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
@@ -336,6 +346,15 @@ class RemoteGenerateClient:
                 raise ValueError("/skyrl/v1/generate must return packed rollout_sample_support")
             sample_support = decode_packed_sample_support(packed_sample_support)
 
+        sample_support_logprobs = None
+        if return_sample_support_logprobs:
+            packed_logprobs = choice.get(PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS)
+            if not isinstance(packed_logprobs, dict):
+                raise ValueError("/skyrl/v1/generate must return packed rollout_sample_support_logprobs")
+            sample_support_logprobs = decode_packed_sample_support_logprobs(packed_logprobs)
+            if sample_support is None or sample_support_logprobs.shape != sample_support.shape:
+                raise ValueError("rollout_sample_support_logprobs must be row-aligned with rollout_sample_support")
+
         return RemoteGenerateResult(
             raw_response=response,
             response_ids=token_ids,
@@ -343,6 +362,7 @@ class RemoteGenerateClient:
             stop_reason=choice["finish_reason"],
             routed_experts=routed_experts,
             sample_support=sample_support,
+            sample_support_logprobs=sample_support_logprobs,
         )
 
     async def aclose(self) -> None:
@@ -420,6 +440,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
     enable_return_sample_support_set: bool = False
     """Whether the engine may return the sampler's bounded top-k support per generated token.
     Capture is per-request: callers opt a batch in with ``InferenceEngineInput.return_sample_support``."""
+
+    enable_return_sample_support_logprobs: bool = False
+    """Whether the engine may also return the sampler logprobs of the support members. Per-request opt-in
+    with ``InferenceEngineInput.return_sample_support_logprobs``; requires ``enable_return_sample_support_set``."""
 
     uses_lora_weight_sync: bool = False
     """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
@@ -571,6 +595,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return_sample_support = self.enable_return_sample_support_set and input_batch.get(
             "return_sample_support", False
         )
+        return_sample_support_logprobs = (
+            return_sample_support
+            and self.enable_return_sample_support_logprobs
+            and input_batch.get("return_sample_support_logprobs", False)
+        )
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -598,6 +627,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                         routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
                     ),
                     return_sample_support=return_sample_support,
+                    return_sample_support_logprobs=return_sample_support_logprobs,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -611,6 +641,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                         routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
                     ),
                     return_sample_support=return_sample_support,
+                    return_sample_support_logprobs=return_sample_support_logprobs,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -630,6 +661,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         rollout_sample_support = (
             [result[PackedField.ROLLOUT_SAMPLE_SUPPORT] for result in raw_results] if return_sample_support else None
         )
+        rollout_sample_support_logprobs = (
+            [result[PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS] for result in raw_results]
+            if return_sample_support_logprobs
+            else None
+        )
 
         return InferenceEngineOutput(
             responses=responses,
@@ -638,6 +674,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
             rollout_expert_indices=rollout_expert_indices,
             rollout_sample_support=rollout_sample_support,
+            rollout_sample_support_logprobs=rollout_sample_support_logprobs,
         )
 
     async def _generate_single(
@@ -650,6 +687,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         cache_salt: Optional[str] = None,
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
+        return_sample_support_logprobs: bool = False,
     ) -> Dict[str, Any]:
         result = await self._get_generate_client().generate(
             prompt_token_ids=prompt_token_ids,
@@ -659,6 +697,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             return_routed_experts=self.enable_return_routed_experts,
             routed_experts_prompt_start=routed_experts_prompt_start,
             return_sample_support=return_sample_support,
+            return_sample_support_logprobs=return_sample_support_logprobs,
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
@@ -668,6 +707,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "response_logprobs": result.response_logprobs,
             "routed_experts": result.routed_experts,
             PackedField.ROLLOUT_SAMPLE_SUPPORT.value: result.sample_support,
+            PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS.value: result.sample_support_logprobs,
         }
 
     async def _render_for_sample(

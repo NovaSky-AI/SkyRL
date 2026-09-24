@@ -317,6 +317,62 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         }
 
 
+def validate_score_centering_cfg(cfg: SkyRLTrainConfig) -> None:
+    """Validate ``trainer.algorithm.score_centering`` and derive the sampler settings it needs.
+
+    Score centering needs the sampler's head (ids and logprobs) for every generated token. It rides on
+    the sample-support channel: ``enable_return_sample_support_set`` records the head ids and
+    ``enable_return_sample_support_logprobs`` adds their sampler logprobs. With an untruncated sampler
+    (``top_k = -1``) the head is the top-``score_centering.top_k`` tokens, so ``sampling_params.logprobs``
+    is set to that value; with a truncating sampler (``top_k > 1``) the head is the sampler's support.
+    """
+    score_centering = cfg.trainer.algorithm.score_centering
+    if not score_centering.enabled:
+        return
+    algorithm = cfg.trainer.algorithm
+    if cfg.trainer.strategy not in ("fsdp", "megatron"):
+        raise NotImplementedError(
+            "`trainer.algorithm.score_centering` is only supported with `trainer.strategy=fsdp` or "
+            f"`megatron`, got {cfg.trainer.strategy}."
+        )
+    if algorithm.policy_loss_type not in ("rollout_is", "reinforce"):
+        raise ValueError(
+            "`trainer.algorithm.score_centering` requires `trainer.algorithm.policy_loss_type` to be "
+            f"`reinforce` or `rollout_is`, got {algorithm.policy_loss_type}."
+        )
+    if algorithm.off_policy_correction.tis_ratio_type is not None:
+        raise ValueError(
+            "`trainer.algorithm.score_centering` cannot be combined with "
+            "`trainer.algorithm.off_policy_correction.tis_ratio_type`; the truncated importance weight is "
+            "computed against the old policy and is not folded into the centering weights."
+        )
+    if cfg.generator.step_wise_trajectories:
+        raise NotImplementedError("`trainer.algorithm.score_centering` does not support step-wise trajectories.")
+    if cfg.generator.vision_language_generator:
+        raise NotImplementedError("`trainer.algorithm.score_centering` does not support vision_language_generator.")
+    sampling_params = cfg.generator.sampling_params
+    if sampling_params.top_k <= 1:
+        num_logprobs = sampling_params.logprobs
+        if num_logprobs is not None and num_logprobs > 1 and num_logprobs != score_centering.top_k:
+            raise ValueError(
+                f"`generator.sampling_params.logprobs`={num_logprobs} conflicts with "
+                f"`trainer.algorithm.score_centering.top_k`={score_centering.top_k}; leave `logprobs` unset."
+            )
+        sampling_params.logprobs = score_centering.top_k
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_return_sample_support_set = True
+    ie_cfg.enable_return_sample_support_logprobs = True
+    if cfg.trainer.strategy == "megatron" and not cfg.trainer.fused_lm_head_logprob:
+        # With materialized logits the head members would be gathered from a [tokens, vocab] tensor and
+        # their backward would allocate a second gradient of that size; the fused path projects the
+        # members through the LM head instead, so the head costs O(tokens * k).
+        logger.warning(
+            "`trainer.algorithm.score_centering` on Megatron requires `trainer.fused_lm_head_logprob=true`; "
+            "enabling it."
+        )
+        cfg.trainer.fused_lm_head_logprob = True
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -462,6 +518,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
         cfg.trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high = cfg.trainer.algorithm.tis_imp_ratio_cap
 
+    validate_score_centering_cfg(cfg)
+
     # off_policy_correction config validation
     off_policy_correction = cfg.trainer.algorithm.off_policy_correction
     tis_ratio_type = off_policy_correction.tis_ratio_type
@@ -559,10 +617,11 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
-        if cfg.generator.sampling_params.logprobs > 1:
+        if cfg.generator.sampling_params.logprobs > 1 and not cfg.trainer.algorithm.score_centering.enabled:
             raise ValueError(
                 f"`logprobs` if set should be 0 or 1 (both return only the chosen token's logprob), "
-                f"got {cfg.generator.sampling_params.logprobs}"
+                f"got {cfg.generator.sampling_params.logprobs}. Values above 1 are only used by "
+                "`trainer.algorithm.score_centering`."
             )
 
     if cfg.trainer.strategy == "megatron":

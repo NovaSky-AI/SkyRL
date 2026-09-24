@@ -46,12 +46,17 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     build_logprobs_content,
     pack_routed_experts,
     pack_sample_support,
+    pack_sample_support_logprobs,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
+    SAMPLE_SUPPORT_LOGPROBS_DTYPE,
+    SAMPLE_SUPPORT_LOGPROBS_PADDING,
     SAMPLE_SUPPORT_PADDING,
     SampleSupport,
+    SampleSupportLogprobs,
+    sample_support_width,
 )
 from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
@@ -65,10 +70,11 @@ logger = logging.getLogger(__name__)
 def _sample_support_from_flat_logprobs(
     logprobs: FlatLogprobs,
     top_k: int,
-) -> tuple[list[dict[str, float]], SampleSupport]:
-    """Extract sampled scores and post-filter support from vLLM's flat rows.
+) -> tuple[list[dict[str, float]], SampleSupport, SampleSupportLogprobs]:
+    """Extract sampled scores, post-filter support and its sampler logprobs from vLLM's flat rows.
 
-    Each row is ``[sampled token, top-1, ..., top-k]``; filtered candidates are ``-inf``.
+    Each row is ``[sampled token, top-1, ..., top-k]``; filtered candidates are ``-inf``. The
+    returned logprobs are row-aligned with the support ids, ``-inf`` on padding entries.
     """
     row_width = top_k + 1
     token_ids = np.asarray(logprobs.token_ids, dtype=SAMPLE_SUPPORT_DTYPE).reshape(-1, row_width)
@@ -79,12 +85,17 @@ def _sample_support_from_flat_logprobs(
     candidate_ids = token_ids[:, 1:]
     candidate_logprobs = processed_logprobs[:, 1:]
     support_ids = np.full(candidate_ids.shape, SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_DTYPE)
+    support_logprobs = np.full(
+        candidate_ids.shape, SAMPLE_SUPPORT_LOGPROBS_PADDING, dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE
+    )
     for row_index, (row_ids, row_logprobs) in enumerate(zip(candidate_ids, candidate_logprobs)):
         # vLLM emits filtered candidates as -inf. Treat all non-finite values
         # (including NaN and +inf) as absent, then compact the remaining IDs so
         # the packed representation retains its required trailing padding.
-        finite_ids = row_ids[np.isfinite(row_logprobs)]
+        finite = np.isfinite(row_logprobs)
+        finite_ids = row_ids[finite]
         support_ids[row_index, : len(finite_ids)] = finite_ids
+        support_logprobs[row_index, : len(finite_ids)] = row_logprobs[finite]
     sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
 
     # vLLM's approximate top-k/top-p pivot can omit the sampled token. Replace the
@@ -97,6 +108,7 @@ def _sample_support_from_flat_logprobs(
         rows = np.flatnonzero(missing)
         weakest_col = valid.sum(axis=1) - 1
         support_ids[rows, weakest_col[rows]] = sampled[rows]
+        support_logprobs[rows, weakest_col[rows]] = sampled_logprobs_values[rows]
         logger.warning(
             "sample-support repair: %d token(s) had the sampled id absent from top-%d support; "
             "overwrote the weakest member to preserve the invariant (vLLM approx top-k/top-p "
@@ -106,7 +118,7 @@ def _sample_support_from_flat_logprobs(
             int(sampled[rows[0]]),
             int(rows[0]),
         )
-    return sampled_logprobs, support_ids
+    return sampled_logprobs, support_ids, support_logprobs
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -554,19 +566,34 @@ class VLLMServerActor(ServerActorProtocol):
             cache_salt = body.get("cache_salt")
 
             capture_sample_support = body.get("return_sample_support", False)
+            capture_sample_support_logprobs = body.get("return_sample_support_logprobs", False)
+            if capture_sample_support_logprobs and not capture_sample_support:
+                raise HTTPException(
+                    status_code=400, detail="return_sample_support_logprobs requires return_sample_support"
+                )
+            support_width = 0
             if capture_sample_support:
-                # Sample support requires a bounded, non-degenerate top-k set.
-                top_k = sampling_params_dict.get("top_k")
-                if not isinstance(top_k, int) or top_k <= 1:
+                # The recorded rows are the sampler's post-filter top-k set when it truncates
+                # (top_k > 1, required by sample-support replay), otherwise the top-`logprobs` head of
+                # the untruncated sampler (score centering). Either way the width must be non-degenerate.
+                support_width = sample_support_width(sampling_params_dict)
+                if support_width <= 1:
                     raise HTTPException(
                         status_code=400,
                         detail=(
-                            "return_sample_support requires sampling_params.top_k > 1, got "
-                            f"{top_k!r}. Sample-support capture is opt-in per request."
+                            "return_sample_support requires sampling_params.top_k > 1 or sampling_params.logprobs > 1, "
+                            f"got top_k={sampling_params_dict.get('top_k')!r} and "
+                            f"logprobs={sampling_params_dict.get('logprobs')!r}. Sample-support capture is opt-in "
+                            "per request."
                         ),
                     )
                 sampling_params_dict["flat_logprobs"] = True
-                sampling_params_dict["logprobs"] = top_k
+                sampling_params_dict["logprobs"] = support_width
+                # This endpoint returns token ids only, so the API-server process need not detokenize
+                # the k + 1 candidates per token; that work otherwise starves the event loop that also
+                # serves pause/weight-sync. Stop strings still need the decoded text.
+                if not sampling_params_dict.get("stop"):
+                    sampling_params_dict.setdefault("detokenize", False)
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
             if cache_salt is not None:
@@ -588,13 +615,16 @@ class VLLMServerActor(ServerActorProtocol):
 
             logprobs = None
             sample_support = None
+            sample_support_logprobs = None
             if capture_sample_support:
-                content, support_ids = _sample_support_from_flat_logprobs(
+                content, support_ids, support_logprobs = _sample_support_from_flat_logprobs(
                     resp.logprobs,
-                    sampling_params_dict["top_k"],
+                    support_width,
                 )
                 logprobs = {"content": content}
                 sample_support = pack_sample_support(support_ids)
+                if capture_sample_support_logprobs:
+                    sample_support_logprobs = pack_sample_support_logprobs(support_logprobs)
             elif resp.logprobs is not None:
                 content, num_clamped = build_logprobs_content(token_ids_out, resp.logprobs)
                 if num_clamped:
@@ -616,6 +646,7 @@ class VLLMServerActor(ServerActorProtocol):
                         "logprobs": logprobs,
                         PackedField.ROUTED_EXPERTS.value: routed_experts,
                         PackedField.ROLLOUT_SAMPLE_SUPPORT.value: sample_support,
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS.value: sample_support_logprobs,
                     }
                 ]
             }

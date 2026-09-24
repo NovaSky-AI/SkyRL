@@ -32,14 +32,22 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_NO_ROW,
+    SAMPLE_SUPPORT_PADDING,
+)
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     missing_sample_support_message,
     sample_support_row_ids_in_batch_positions,
     score_aligned_sample_support,
 )
+from skyrl.backends.skyrl_train.utils.score_centering_support import (
+    gather_packed_rows,
+    score_head_members,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
+    logprobs_and_topk_logprobs_from_logits,
     logprobs_from_logits,
 )
 
@@ -316,15 +324,22 @@ class HFModelWrapper(nn.Module):
         sample_support: Optional[PackedTensor] = None,
         loss_mask: Optional[torch.Tensor] = None,
         enable_sample_support_replay: bool = False,
+        score_centering_head: bool = False,
     ) -> torch.Tensor:
-        """Returns action log probs"""
+        """Returns action log probs.
+
+        With ``score_centering_head`` the returned ``output`` also carries
+        ``"score_centering_head_logprobs"``: the trainer's logprobs of the sampler head members recorded in
+        ``sample_support``, ``[batch, num_actions, k]`` with ``-inf`` on padding members (under the
+        full-vocabulary softmax, or renormalized over the head when sample-support replay is on).
+        """
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
         support_channels = None
-        if enable_sample_support_replay:
+        if enable_sample_support_replay or score_centering_head:
             if sample_support is None:
                 raise ValueError(missing_sample_support_message("FSDP"))
             if loss_mask is None:
-                raise ValueError("sample-support replay is enabled but the microbatch has no loss mask")
+                raise ValueError("sample-support scoring is enabled but the microbatch has no loss mask")
             support_channels = _SampleSupportChannels.build(sequences, attention_mask, sample_support, loss_mask)
         if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
@@ -413,7 +428,7 @@ class HFModelWrapper(nn.Module):
         logits_BSV.div_(temperature)
 
         support_entropy = None
-        if support_channels is not None:
+        if enable_sample_support_replay:
             # FSDP supplies unsharded, temperature-scaled logits.
             support_scores = score_aligned_sample_support(
                 logits_BSV,
@@ -429,6 +444,19 @@ class HFModelWrapper(nn.Module):
             )
             log_probs = support_scores.logprobs
             support_entropy = support_scores.entropy
+        elif score_centering_head:
+            # Head ids at the logit positions that predict them; padding members stay -1. Label and head
+            # logprobs come out of one chunked pass whose backward writes a single [tokens, vocab]
+            # gradient in place; a separate gather over the logits would allocate a second one.
+            head_ids = gather_packed_rows(sample_support, support_channels.row_ids, SAMPLE_SUPPORT_PADDING).long()
+            log_probs, head_log_probs = logprobs_and_topk_logprobs_from_logits(
+                logits_BSV,
+                sequences_rolled,
+                head_ids.clamp(min=0),
+                chunk_size=self.logprobs_chunk_size,
+                inplace_backward=True,
+            )
+            head_log_probs = torch.where(head_ids >= 0, head_log_probs, float("-inf"))
         else:
             # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
             log_probs = logprobs_from_logits(
@@ -437,20 +465,44 @@ class HFModelWrapper(nn.Module):
                 inplace_backward=True,
             )
 
+        if score_centering_head and enable_sample_support_replay:
+            # Under replay the trainer's distribution is the support renormalization, so the head is
+            # renormalized over its members (a gather; replay already pays that cost for `log_probs`).
+            head_ids = gather_packed_rows(sample_support, support_channels.row_ids, SAMPLE_SUPPORT_PADDING).long()
+            head_log_probs = score_head_members(
+                logits_BSV,
+                sequences_rolled,
+                head_ids,
+                vocab_start_index=0,
+                vocab_end_index=logits_BSV.shape[-1],
+                tp_group=None,
+                sampled_logprobs=None,
+                renormalize_over_head=True,
+            )
+        elif not score_centering_head:
+            head_log_probs = None
+
         batch_size, seqlen = attention_mask.shape
 
         def to_canonical_batch_positions(values: torch.Tensor) -> torch.Tensor:
-            """Undo the Ulysses slice and microbatch unpadding."""
+            """Undo the Ulysses slice and microbatch unpadding (token dim is 1, trailing dims are kept)."""
             if self.sequence_parallel_size > 1:
-                dim = values.ndim - 1
-                values = gather_outputs_and_unpad(values, gather_dim=dim, unpad_dim=dim, padding_size=pad_size)
+                values = gather_outputs_and_unpad(values, gather_dim=1, unpad_dim=1, padding_size=pad_size)
             if self.remove_microbatch_padding:
-                values = pad_input(
-                    values.transpose(0, 1), indices=nnz_indices, batch=batch_size, seqlen=seqlen
-                ).squeeze(-1)
+                # pad_input expects [nnz, *row]; a scalar-per-token row comes back as a trailing dim of 1.
+                rows = values.transpose(0, 1) if values.ndim == 2 else values.squeeze(0)
+                values = pad_input(rows, indices=nnz_indices, batch=batch_size, seqlen=seqlen)
+                if values.ndim == 3 and values.shape[-1] == 1 and rows.ndim == 2 and rows.shape[-1] == 1:
+                    values = values.squeeze(-1)
             return values
 
         log_probs = to_canonical_batch_positions(log_probs)
+        if head_log_probs is not None:
+            # Unpadding fills the padded positions with zeros; restore -inf on padding members so the
+            # returned head is well defined everywhere (the loss ignores them either way).
+            head_valid = to_canonical_batch_positions((head_ids >= 0).to(torch.int8)) > 0
+            head_log_probs = torch.where(head_valid, to_canonical_batch_positions(head_log_probs), float("-inf"))
+            output["score_centering_head_logprobs"] = head_log_probs[:, -num_actions - 1 : -1, :]
 
         if compute_entropy:
             if support_entropy is not None:

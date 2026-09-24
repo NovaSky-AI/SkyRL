@@ -45,7 +45,10 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     get_kl_controller,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_LOGPROBS_FIELD,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -892,6 +895,7 @@ class RayPPOTrainer:
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
         rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
         rollout_sample_support = generator_output.get("rollout_sample_support", None)
+        rollout_sample_support_logprobs = generator_output.get(SAMPLE_SUPPORT_LOGPROBS_FIELD, None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -915,6 +919,7 @@ class RayPPOTrainer:
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
             rollout_sample_support_tensor,
+            rollout_sample_support_logprobs_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer.pad_token_id,
             prompt_ids,
@@ -925,6 +930,7 @@ class RayPPOTrainer:
             rollout_expert_indices,
             rollout_sample_support,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+            rollout_sample_support_logprobs=rollout_sample_support_logprobs,
         )
         router_padding_mask = None
         if rollout_expert_indices is not None:
@@ -955,6 +961,7 @@ class RayPPOTrainer:
                 "rollout_expert_indices": rollout_expert_indices_tensor,
                 "router_padding_mask": router_padding_mask,
                 SAMPLE_SUPPORT_FIELD: rollout_sample_support_tensor,
+                SAMPLE_SUPPORT_LOGPROBS_FIELD: rollout_sample_support_logprobs_tensor,
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             },

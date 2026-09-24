@@ -10,7 +10,10 @@ import pytest
 
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
+    SAMPLE_SUPPORT_LOGPROBS_DTYPE,
+    SAMPLE_SUPPORT_LOGPROBS_PADDING,
     SAMPLE_SUPPORT_PADDING,
+    SampleSupportLogprobsTrace,
     SampleSupportTrace,
 )
 from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
@@ -51,6 +54,34 @@ def test_turn_output_masks_uncaptured_suffix():
         np.array([[10, 100], [11, 101], [-1, -1], [-1, -1], [-1, -1]], dtype=np.int32),
     )
     assert output.get_turn_loss_mask() == [1, 1, 0, 0, 0]
+
+
+def test_turn_output_pads_support_logprobs_with_negative_infinity():
+    output = TurnOutput(
+        output="answer",
+        output_ids=[10, 11, 4],
+        output_logprobs=None,
+        new_obs=[],
+        obs_ids=[20, 21],
+        reward=1.0,
+        rollout_sample_support=np.array([[10, 100], [11, 101]], dtype=np.int32),
+        rollout_sample_support_logprobs=np.array([[-0.1, -2.0], [-0.2, -3.0]], dtype=np.float32),
+        added_eos=True,
+    )
+
+    neg_inf = SAMPLE_SUPPORT_LOGPROBS_PADDING
+    np.testing.assert_array_equal(
+        output.get_turn_rollout_sample_support_logprobs(),
+        np.array(
+            [[-0.1, -2.0], [-0.2, -3.0], [neg_inf, neg_inf], [neg_inf, neg_inf], [neg_inf, neg_inf]], dtype=np.float32
+        ),
+    )
+    assert (
+        TurnOutput(
+            output="answer", output_ids=[10], output_logprobs=None, new_obs=[], obs_ids=[], reward=None
+        ).get_turn_rollout_sample_support_logprobs()
+        is None
+    )
 
 
 # TODO (erictang000): clean up the mocking for tests in this file
@@ -279,8 +310,11 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
     [
         (False, 3, None, None),  # disabled -> no salt
         (True, 3, None, "3"),  # enabled, no model name -> bare version
-        (True, 5, "my-model", "my-model@5"),  # enabled with model name
-        (True, 0, "my-model", "my-model@0"),  # pre-first-sync version (0) still salts
+        (True, 5, "my-model", "my-model-5"),  # enabled with model name
+        (True, 0, "my-model", "my-model-0"),  # pre-first-sync version (0) still salts
+        # vLLM rejects '@', '/', backslashes and NUL in a salt (and > 128 chars); model paths carry '/'.
+        (True, 5, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "deepseek-ai_DeepSeek-R1-Distill-Qwen-1.5B-5"),
+        (True, 7, "x" * 200, "x" * 126 + "-7"),
     ],
 )
 async def test_cache_salt_threaded_to_engine_input(
@@ -504,10 +538,88 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("top_k, logprobs, width", [(2, None, 2), (-1, 3, 3)])
+@patch("skyrl_gym.make")
+async def test_agent_loop_traces_sample_support_logprobs_alongside_the_support(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    mock_env_cfg,
+    top_k,
+    logprobs,
+    width,
+):
+    """The logprobs channel follows the support row for row: captured rows per turn, -inf over the
+    observation tokens in between, and the row width comes from ``top_k`` or, for an untruncated
+    sampler, from ``logprobs``."""
+    generator_cfg.batched = False
+    generator_cfg.max_turns = 2
+    generator_cfg.use_conversation_multi_turn = True
+    generator_cfg.inference_engine.enable_return_sample_support_set = True
+    generator_cfg.inference_engine.enable_return_sample_support_logprobs = True
+    generator_cfg.sampling_params.top_k = top_k
+    generator_cfg.sampling_params.logprobs = logprobs
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = [
+        BaseTextEnvStepOutput(observations=[{"role": "user", "content": "next"}], reward=1.0, done=done, metadata={})
+        for done in (False, True)
+    ]
+    generation_index = 0
+
+    def generate(input_batch, model=None):
+        nonlocal generation_index
+        assert input_batch["return_sample_support"] is True
+        assert input_batch["return_sample_support_logprobs"] is True
+        support = np.full((2, width), SAMPLE_SUPPORT_PADDING, dtype=np.int32)
+        support[:, :2] = [[10, 100 + generation_index], [11, 110 + generation_index]]
+        support_logprobs = np.full((2, width), SAMPLE_SUPPORT_LOGPROBS_PADDING, dtype=np.float32)
+        support_logprobs[:, :2] = [[-0.1, -1.0 - generation_index], [-0.2, -2.0 - generation_index]]
+        generation_index += 1
+        return {
+            "responses": ["mocked output"],
+            "response_ids": [[10, 11]],
+            "stop_reasons": ["stop"],
+            "rollout_sample_support": [support],
+            "rollout_sample_support_logprobs": [support_logprobs],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=generate)
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    output = await generator.agent_loop(
+        [{"role": "user", "content": "Start"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=32,
+        max_input_length=64,
+    )
+
+    support = output.rollout_sample_support
+    support_logprobs = output.rollout_sample_support_logprobs
+    assert support.shape == support_logprobs.shape == (len(output.response_ids), width)
+    assert support_logprobs.dtype == SAMPLE_SUPPORT_LOGPROBS_DTYPE
+    np.testing.assert_array_equal(support_logprobs[:2, :2], np.array([[-0.1, -1.0], [-0.2, -2.0]], dtype=np.float32))
+    np.testing.assert_array_equal(support_logprobs[-2:, :2], np.array([[-0.1, -2.0], [-0.2, -3.0]], dtype=np.float32))
+    # Observation rows and padding members carry -inf exactly where the support carries padding.
+    assert np.all(np.isinf(support_logprobs[2:-2]))
+    np.testing.assert_array_equal(np.isinf(support_logprobs), support == SAMPLE_SUPPORT_PADDING)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
 @pytest.mark.parametrize("batch_sampling_params", [{"temperature": 1.0, "top_k": 2, "max_tokens": 32}, None])
 @pytest.mark.parametrize("training_phase", [TRAINING_PHASE_TRAIN, TRAINING_PHASE_EVAL])
 @pytest.mark.parametrize("enable_capture", [True, False])
+@pytest.mark.parametrize("enable_logprobs", [True, False])
 @patch("skyrl_gym.make")
 async def test_generate_requests_sample_support_capture_only_for_the_train_phase(
     mock_make,
@@ -516,6 +628,7 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
     mock_env,
     generator_cfg,
     mock_env_cfg,
+    enable_logprobs,
     enable_capture,
     training_phase,
     batch_sampling_params,
@@ -524,6 +637,7 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
     generator_cfg.batched = batched
     generator_cfg.max_turns = 1
     generator_cfg.inference_engine.enable_return_sample_support_set = enable_capture
+    generator_cfg.inference_engine.enable_return_sample_support_logprobs = enable_logprobs
     generator_cfg.sampling_params.top_k = 2
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
@@ -540,6 +654,11 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
             "rollout_sample_support": (
                 [np.array([[10, 100], [11, 110]], dtype=np.int32)] * num_prompts
                 if input_batch["return_sample_support"]
+                else None
+            ),
+            "rollout_sample_support_logprobs": (
+                [np.array([[-0.1, -1.0], [-0.2, -2.0]], dtype=np.float32)] * num_prompts
+                if input_batch["return_sample_support_logprobs"]
                 else None
             ),
         }
@@ -564,11 +683,18 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
     output = await generator.generate(input_batch)
 
     expected_capture = enable_capture and training_phase == TRAINING_PHASE_TRAIN
+    expected_logprobs = expected_capture and enable_logprobs
     assert captured["return_sample_support"] is expected_capture
+    assert captured["return_sample_support_logprobs"] is expected_logprobs
     if expected_capture:
         assert output["rollout_sample_support"] is not None
     else:
         assert output.get("rollout_sample_support", None) is None
+    if expected_logprobs:
+        assert output["rollout_sample_support_logprobs"] is not None
+        assert output["rollout_sample_support_logprobs"][0].shape == output["rollout_sample_support"][0].shape
+    else:
+        assert output.get("rollout_sample_support_logprobs", None) is None
 
 
 def test_validate_cfg_refuses_routed_experts_without_conversation_multi_turn(
@@ -640,6 +766,7 @@ def test_retokenizing_state_update_refuses_a_live_side_channel_trace(
         response_end_idx=None,
         done=False,
         sample_support_trace=SampleSupportTrace(),
+        sample_support_logprobs_trace=SampleSupportLogprobsTrace(),
     )
     turn_output = TurnOutput(
         output="answer",
@@ -735,6 +862,7 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
     generator_cfg.max_turns = 1
     generator_cfg.use_conversation_multi_turn = False
     generator_cfg.inference_engine.enable_return_sample_support_set = True
+    generator_cfg.inference_engine.enable_return_sample_support_logprobs = True
     generator_cfg.sampling_params.top_k = 2
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
@@ -742,6 +870,7 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
         BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={}),
     ]
     eos_support_row = [12, 112]
+    eos_logprobs_row = [-0.3, -3.0]
 
     def generate(input_batch, model=None):
         return {
@@ -749,6 +878,9 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
             "response_ids": [[10, 11, 4]],
             "stop_reasons": ["stop"],
             "rollout_sample_support": [np.array([[10, 110], [11, 111], eos_support_row], dtype=np.int32)],
+            "rollout_sample_support_logprobs": [
+                np.array([[-0.1, -1.0], [-0.2, -2.0], eos_logprobs_row], dtype=np.float32)
+            ],
         }
 
     mock_llm.generate = AsyncMock(side_effect=generate)
@@ -774,6 +906,10 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
         output.rollout_sample_support,
         np.array([[10, 110], [11, 111], eos_support_row], dtype=SAMPLE_SUPPORT_DTYPE),
     )
+    np.testing.assert_array_equal(
+        output.rollout_sample_support_logprobs,
+        np.array([[-0.1, -1.0], [-0.2, -2.0], eos_logprobs_row], dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE),
+    )
 
 
 @pytest.mark.asyncio
@@ -790,6 +926,7 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
     generator_cfg.max_turns = 1
     generator_cfg.use_conversation_multi_turn = False
     generator_cfg.inference_engine.enable_return_sample_support_set = True
+    generator_cfg.inference_engine.enable_return_sample_support_logprobs = True
     generator_cfg.sampling_params.top_k = 2
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
@@ -803,6 +940,7 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
             "response_ids": [[10, 11]],
             "stop_reasons": ["stop"],
             "rollout_sample_support": [np.array([[10, 110], [11, 111]], dtype=np.int32)],
+            "rollout_sample_support_logprobs": [np.array([[-0.1, -1.0], [-0.2, -2.0]], dtype=np.float32)],
         }
 
     mock_llm.generate = AsyncMock(side_effect=generate)
@@ -827,6 +965,11 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
     np.testing.assert_array_equal(
         output.rollout_sample_support,
         np.array([[10, 110], [11, 111], padding_row], dtype=SAMPLE_SUPPORT_DTYPE),
+    )
+    logprobs_padding_row = [SAMPLE_SUPPORT_LOGPROBS_PADDING, SAMPLE_SUPPORT_LOGPROBS_PADDING]
+    np.testing.assert_array_equal(
+        output.rollout_sample_support_logprobs,
+        np.array([[-0.1, -1.0], [-0.2, -2.0], logprobs_padding_row], dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE),
     )
 
 

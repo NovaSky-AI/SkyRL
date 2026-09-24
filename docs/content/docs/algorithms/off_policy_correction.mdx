@@ -45,6 +45,14 @@ trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_low=1e-4
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_high=100
 # ------------ #
+
+# score centering: an additive correction that removes the drift toward the sampler under
+# training-inference mismatch. Stacks on top of masking; requires policy_loss_type=rollout_is
+# and the fsdp backend. Sets generator.sampling_params.logprobs=top_k automatically.
+trainer.algorithm.policy_loss_type="rollout_is"
+trainer.algorithm.score_centering.enabled=true
+trainer.algorithm.score_centering.top_k=32
+# ------------ #
 ```
 
 # Setup
@@ -265,6 +273,40 @@ Token masking can be combined with other corrections (TIS, sequence masking, out
 
 When enabled, the metric `token_mask_ratio` is logged, representing the fraction of originally-valid tokens that were zeroed by the token mask.
 
+## Score Centering
+
+[Marek & Ryabinin 2026](https://arxiv.org/abs/2609.20807) show that under training-inference mismatch the policy-gradient update decomposes, at every prefix, into a *signal* term and a *drift* term:
+
+$$
+\mathbb{E}_{q}[R \, s_{y_t}] = \underbrace{\mathbb{E}_{q}[R] \, \bar{s}}_{\text{drift}} + \underbrace{\mathrm{Cov}_{q}(R, s_{y_t})}_{\text{signal}}, \qquad \bar{s} = \sum_{v} q_v \, \nabla_\theta \log p_v
+$$
+
+where $q$ is the sampler's next-token distribution, $p$ the trainer's, and $s_v = \nabla_\theta \log p_v$ the score. On-policy $\bar{s} = 0$, but with a stale or numerically mismatched sampler the drift term distills the trainer toward the sampler at every prefix, and because the sampler is periodically synced back from the trainer the error compounds. Group centering does not remove it: the expected advantage at a given prefix is not zero.
+
+Score centering subtracts the sampler-expected score from every token's score, $\tilde{s}_{y_t} = s_{y_t} - \bar{s}$, which cancels drift exactly without importance ratios, masking or clipping. It composes with importance-sampling corrections by centering the *weighted* score: for a weight function $f$ (e.g. the `rollout_is` calibration that zeroes ratios outside $(1-\epsilon_{\text{low}}, 1+\epsilon_{\text{high}})$), the per-token loss becomes
+
+$$
+\mathcal{L} = -A \left( \text{sg}[w_{y_t}] \log p_{y_t} - \textcolor{red}{\sum_{v \in H} \text{sg}\left[q_v w_v - \alpha \, p_v\right] \log p_v} \right), \qquad w_v = f\!\left(\tfrac{p_v}{q_v}\right), \quad \alpha = \rho \, f(1/\rho), \quad \rho = \frac{1 - \sum_{v \in H} q_v}{1 - \sum_{v \in H} p_v}
+$$
+
+Storing the sampler's full distribution is impractical, so $H$ is the sampler's top-$k$ head and the tail is modeled with the trainer's distribution rescaled to the sampler's tail mass ($\rho$). The paper finds $k = 32$ and $k = 128$ match full-vocabulary centering.
+
+```yaml
+trainer:
+  algorithm:
+    policy_loss_type: rollout_is
+    score_centering:
+      enabled: true
+      top_k: 32       # sampler top-k logprobs returned per generated token
+      tail_eps: 1e-6  # floor for the tail masses
+```
+
+To enable score centering in SkyRL, set `trainer.algorithm.score_centering.enabled=true` with either `trainer.algorithm.policy_loss_type=reinforce` (plain policy gradient on the rollouts, $f = 1$: the paper's "SC" arm) or `policy_loss_type=rollout_is` (the calibration function of `rollout_is` is used as $f$). Note that with $f(r) = r$ inside the band, $q_v f(p_v/q_v) = p_v$ and $\alpha = 1$, so the centering coefficient vanishes for every in-band token: composed with `rollout_is`, score centering only acts on tokens the calibration zeroes out, and its effect is small unless many tokens fall outside $(1-\epsilon_{\text{low}}, 1+\epsilon_{\text{high}})$.
+
+The sampler head rides on the sample-support channel that sample-support replay (`trainer.algorithm.enable_sample_support_replay`) also uses: SkyRL turns on `generator.inference_engine.enable_return_sample_support_set` (the head ids, `rollout_sample_support`) and `enable_return_sample_support_logprobs` (their sampler logprobs, `rollout_sample_support_logprobs`), both shipped per token as packed side channels. With an untruncated sampler (`generator.sampling_params.top_k=-1`, the paper's setting) the head is the sampler's top-`top_k` tokens and `generator.sampling_params.logprobs` is set to `top_k`; with a truncating sampler (`top_k > 1`) the recorded support *is* the whole sampler distribution, the tail mass is zero, and the centering term is exact without the tail model. vLLM records the head in `processed_logprobs` mode, i.e. after temperature and filtering, so it is the distribution that was actually sampled from. On the trainer side the head members are scored against the model's own next-token distribution without materializing their vocabulary logits: their logits are gathered (or projected through the LM head on the fused Megatron path), summed across tensor-parallel shards, and normalized with the sampled token's already-computed logprob ($\log Z = \ell_{y_t} - \log p_{y_t}$); with `trainer.algorithm.enable_sample_support_replay` the members are renormalized over the support instead, matching the replayed policy. Score centering is supported on the `fsdp` and `megatron` backends (tensor, pipeline and data parallelism; Ulysses sequence parallelism on FSDP; context parallelism is not supported yet). FSDP scores the label and the head in one chunked pass over the logits with a single in-place gradient; Megatron requires the fused LM-head path (`trainer.fused_lm_head_logprob=true`, enabled automatically), since gathering the members from materialized logits would allocate a second `[tokens, vocab]` gradient. Sequence and token masks from `off_policy_correction` compose with it (a masked token has $f = 0$, so its centering term vanishes); combining with `tis_ratio_type` is rejected because that weight is computed against the old policy rather than the current one.
+
+Logged metrics under `policy/loss_metrics`: `score_centering_sampler_head_mass` and `score_centering_trainer_head_mass` (probability mass covered by the head), `score_centering_tail_mass_ratio` ($\rho$), `score_centering_residual_abs_sum` (magnitude of the centering coefficients, a proxy for how far the sampler head is from the trainer's), `score_centering_term_abs_mean` (mean magnitude of the per-token correction), `score_centering_loss_abs_mean` (the same after advantage scaling) and `score_centering_sampled_in_head_frac` (fraction of loss-active tokens whose sampled id is in the recorded head; near one when the head is aligned, near zero if it is not). These are masked means over each microbatch averaged across microbatches, so with `apply_overlong_filtering` and many truncated responses a fully masked microbatch contributes zeros and pulls them down.
+
 # Metrics and Monitoring
 If off-policy correction is enabled, you can view relevant metrics, like the mean/std of the importance sampling ratio, the mean/std of logprob diffs, and the fraction of masked sequences in the logger of your choice under `policy/loss_metrics`.
 
@@ -305,3 +347,4 @@ The full WandB report is available [here](https://api.wandb.ai/links/sky-posttra
 - [When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch](https://yingru.notion.site/When-Speed-Kills-Stability-Demystifying-RL-Collapse-from-the-Training-Inference-Mismatch-271211a558b7808d8b12d403fd15edda)
 - [Your Efficient RL Framework Secretly Brings You Off-Policy RL Training](https://fengyao.notion.site/off-policy-rl)
 - [Stabilizing Reinforcement Learning with LLMs: Formulation and Practices](https://arxiv.org/pdf/2512.01374)
+- [Score Centering Stabilizes Off-policy Reinforcement Learning](https://arxiv.org/abs/2609.20807)

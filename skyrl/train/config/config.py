@@ -883,6 +883,34 @@ class OffPolicyCorrectionConfig(BaseConfig):
     """Set to mask per-token when IS ratio > `token_mask_is_threshold_high`. ``None`` to disable."""
 
 
+# see https://docs.skyrl.ai/docs/algorithms/off_policy_correction#score-centering for more details
+@dataclass
+class ScoreCenteringConfig(BaseConfig):
+    enabled: bool = False
+    """Add the score-centering correction (https://arxiv.org/abs/2609.20807) to the policy loss.
+    Subtracts the sampler-expected score at every prefix so the update carries no drift toward
+    the (stale or numerically mismatched) sampler. Requires ``policy_loss_type="reinforce"`` (the
+    paper's SC arm) or ``"rollout_is"`` (centering of the calibrated score, which is nonzero only
+    for tokens outside the calibration band). Works on the ``fsdp`` and ``megatron`` backends. Turns on
+    ``generator.inference_engine.enable_return_sample_support_set`` and
+    ``enable_return_sample_support_logprobs`` and sets ``generator.sampling_params.logprobs`` to
+    ``top_k`` so the sampler ships its top-k head (ids and logprobs) for every generated token."""
+    top_k: int = 32
+    """Number of sampler top-k next-token logprobs used to build the centering term when the sampler
+    is untruncated (``sampling_params.top_k = -1``). With a truncating sampler (``top_k > 1``) the
+    recorded support is the whole sampler distribution and this value is ignored. The remaining
+    sampler mass is modeled with the trainer's distribution. The paper reports ``32`` and ``128``
+    matching full-vocabulary centering; larger values cost more memory."""
+    tail_eps: float = 1e-6
+    """Floor for the sampler and trainer tail masses outside the recorded head."""
+
+    def __post_init__(self):
+        if self.top_k < 2:
+            raise ValueError(f"score_centering.top_k must be >= 2, got {self.top_k}")
+        if self.tail_eps <= 0:
+            raise ValueError(f"score_centering.tail_eps must be > 0, got {self.tail_eps}")
+
+
 @dataclass
 class AlgorithmConfig(BaseConfig):
     advantage_estimator: str = "grpo"
@@ -933,6 +961,9 @@ class AlgorithmConfig(BaseConfig):
     - ``"rollout_is"``: the agentic loss from section 4.1.2 of the GLM-5 tech report
       (https://arxiv.org/pdf/2602.15763). Uses rollout logprobs and Icepop-style clipping with an
       additional stop gradient for masked tokens.
+    - ``"reinforce"``: plain policy gradient ``-A * log pi`` on the sampled rollouts with no
+      importance ratio; the base objective of the score-centering paper
+      (https://arxiv.org/abs/2609.20807), usually paired with ``score_centering.enabled``.
     - ``"cross_entropy"`` and ``"importance_sampling"``: also registered; see ``PolicyLossRegistry``.
     - ``"dppo"``: DPPO, from Rethinking the Trust Region in LLM Reinforcement Learning
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability
@@ -981,6 +1012,8 @@ class AlgorithmConfig(BaseConfig):
     Enabled Truncated Importance Sampling (TIS) as proposed in https://fengyao.notion.site/off-policy-rl."""
     off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     """See https://docs.skyrl.ai/docs/algorithms/off_policy_correction for a full guide."""
+    score_centering: ScoreCenteringConfig = field(default_factory=ScoreCenteringConfig)
+    """Score centering (https://arxiv.org/abs/2609.20807); composes with ``off_policy_correction`` masks."""
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
@@ -1231,6 +1264,10 @@ class InferenceEngineConfig(BaseConfig):
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
     enable_return_sample_support_set: bool = False
     """Return the bounded sampler support used to renormalize rollout logprobs."""
+    enable_return_sample_support_logprobs: bool = False
+    """Also return the sampler's logprob of every support member (``rollout_sample_support_logprobs``),
+    row-aligned with the support. Requires ``enable_return_sample_support_set``; set automatically by
+    ``trainer.algorithm.score_centering``."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -1850,13 +1887,29 @@ class SkyRLTrainConfig(BaseConfig):
                     "use_conversation_multi_turn=False appends a synthetic loss-active EOS without captured support"
                 )
 
+        if (
+            self.generator.inference_engine.enable_return_sample_support_logprobs
+            and not self.generator.inference_engine.enable_return_sample_support_set
+        ):
+            raise ValueError(
+                "generator.inference_engine.enable_return_sample_support_logprobs requires "
+                "generator.inference_engine.enable_return_sample_support_set"
+            )
+
         # Eval requests opt out of capture and do not use these constraints.
         if self.generator.inference_engine.enable_return_sample_support_set:
             sampling_params = self.generator.sampling_params
             if sampling_params.temperature <= 0:
                 raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")
-            if sampling_params.top_k <= 1:
-                raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            # Replay needs the complete post-filter support, hence a truncating sampler. Score centering
+            # also accepts an untruncated sampler and records its top-`logprobs` head instead.
+            if self.trainer.algorithm.enable_sample_support_replay and sampling_params.top_k <= 1:
+                raise ValueError("sample-support replay requires generator.sampling_params.top_k > 1")
+            if sampling_params.top_k <= 1 and (sampling_params.logprobs is None or sampling_params.logprobs <= 1):
+                raise ValueError(
+                    "sample-support capture requires generator.sampling_params.top_k > 1 or "
+                    "generator.sampling_params.logprobs > 1"
+                )
             if sampling_params.repetition_penalty != 1.0:
                 raise ValueError("sample-support capture requires repetition_penalty=1.0")
             if sampling_params.additional_kwargs:
