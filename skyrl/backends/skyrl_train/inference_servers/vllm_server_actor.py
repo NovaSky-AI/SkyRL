@@ -27,7 +27,7 @@ from vllm.entrypoints.openai.api_server import (
     init_app_state,
 )
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse as OpenAIErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse as OpenAIErrorResponse
 from vllm.inputs import TokensPrompt
 from vllm.logprobs import FlatLogprobs
 from vllm.lora.request import LoRARequest

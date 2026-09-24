@@ -23,7 +23,7 @@ from vllm.entrypoints.openai.completion.protocol import (  # noqa: E402
     CompletionResponse,
     CompletionResponseChoice,
 )
-from vllm.entrypoints.openai.engine.protocol import (  # noqa: E402
+from vllm.entrypoints.serve.engine.protocol import (  # noqa: E402
     ErrorInfo,
     ErrorResponse,
     UsageInfo,
