@@ -333,6 +333,8 @@ async def lifespan(app: FastAPI):
     #   2. backend in (megatron, fsdp) and colocate_all=False: install
     #      SkyRLTrainInferenceForwardingClient so sample requests go directly
     #      to the SkyRL-Train-managed vLLM, bypassing the engine's serial loop.
+    #      (R3 needs no handling here: rollout routing stays on the vLLM
+    #      servers and the trainer pulls it at forward_backward time.)
     #   3. otherwise (JAX, colocated SkyRL-Train, etc.): route everything
     #      through the engine subprocess.
     #

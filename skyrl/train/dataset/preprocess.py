@@ -121,7 +121,7 @@ def _fill_routed_expert_segment(
     segment[captured:] = replay_padding_row(segment.shape[-1], dtype=packed.dtype)
 
 
-def _collate_rollout_expert_indices(
+def collate_rollout_expert_indices(
     rollout_expert_indices: List[RoutedExpertIndices],
     total_real: np.ndarray,
 ) -> PackedTensor:
@@ -399,7 +399,7 @@ def convert_prompts_responses_to_batch_tensors(
         if len(rollout_expert_indices) != num_samples:
             raise ValueError("rollout_expert_indices must contain routes for every trajectory")
 
-        rollout_expert_indices_tensor = _collate_rollout_expert_indices(rollout_expert_indices, total_real)
+        rollout_expert_indices_tensor = collate_rollout_expert_indices(rollout_expert_indices, total_real)
 
     sample_support_tensor = None
     if rollout_sample_support is not None:

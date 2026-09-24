@@ -60,7 +60,11 @@ def test_sample_with_remote_client_sets_session_id(monkeypatch):
         _base_lora_signature=None,
         _model_ids_to_role={},
         _inference_engine_client=spy,
+        _router_replay_enabled=lambda: False,
         _aggregate_sample_results=lambda prepared_batch, outputs: {},
+    )
+    fake_self._resolve_inference_model_name = (
+        skyrl_train_backend.SkyRLTrainBackend._resolve_inference_model_name.__get__(fake_self)
     )
     # We test the helper function `_sample_with_remote_client_async` used internally by `SkyRLTrainBackend.sample`
     sample_async = skyrl_train_backend.SkyRLTrainBackend._sample_with_remote_client_async

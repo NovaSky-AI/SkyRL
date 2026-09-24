@@ -194,16 +194,22 @@ class SkyRLTrainInferenceForwardingClient:
         if session_id is not None:
             headers["X-Session-ID"] = session_id
 
-        url = f"{proxy_url}/v1/completions"
+        # /skyrl/v1/completions is vLLM's completions endpoint plus server-side
+        # Rollout Routing Replay (R3) handling: when the engine was launched
+        # with routing capture, each choice's routing is stashed on the server
+        # (keyed by the sampled sequence) for the trainer to fetch at
+        # forward_backward time, and stripped from the response. Passthrough
+        # when routing capture is off.
+        url = f"{proxy_url}/skyrl/v1/completions"
         response = await self._http_client.post(url, json=payload, headers=headers)
         if response.status_code >= 400:
-            raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
+            raise RuntimeError(f"vLLM /skyrl/v1/completions returned {response.status_code}: {response.text}")
         try:
             result = response.json()
         except ValueError as e:
             # vllm-router can return HTML on transient errors even with 2xx status.
             raise RuntimeError(
-                f"vLLM /v1/completions returned non-JSON ({response.status_code}, "
+                f"vLLM /skyrl/v1/completions returned non-JSON ({response.status_code}, "
                 f"content-type={response.headers.get('content-type')!r}): {response.text[:512]}"
             ) from e
 

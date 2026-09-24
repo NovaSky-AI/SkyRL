@@ -8,9 +8,10 @@ import tarfile
 import tempfile
 from typing import Callable
 
+import numpy as np
 import ray
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
@@ -20,11 +21,18 @@ from skyrl.backends.renderer import (
     VLLMRenderer,
     render_model_input,
 )
+from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
+    sequence_digest,
+)
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
     pad_training_input_batch,
+)
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.routed_experts import (
+    compact_routed_expert_indices,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -37,6 +45,10 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.train.dataset.preprocess import (
+    collate_rollout_expert_indices,
+    make_router_padding_mask,
+)
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
@@ -44,6 +56,38 @@ from skyrl.train.utils.utils import (
 )
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
+
+
+def _build_rollout_expert_indices(
+    full_sequences: list[list[int]],
+    all_routed_experts: list[np.ndarray | None] | None,
+    attention_mask: torch.Tensor,
+) -> tuple[PackedTensor, torch.Tensor] | None:
+    """Build the R3 replay inputs (``rollout_expert_indices``, ``router_padding_mask``).
+
+    The inference engine returns routing for every forwarded token (prompt +
+    response minus the last sampled token), i.e. a prefix of each training
+    sequence. Packing and the padding mask are the native RL path's
+    (``convert_prompts_responses_to_batch_tensors`` + ``make_router_padding_mask``):
+    the uncovered tail gets dummy routes excluded from router accounting.
+
+    Megatron replays every token of a batch, so a sample without routing would
+    run on dummy routes; returns ``None`` (the whole batch uses Megatron's
+    router) unless every sample has routing.
+
+    Args:
+        full_sequences: list of per-sample token id lists (prompt + last target).
+        all_routed_experts: list of per-sample ``np.ndarray`` of shape
+            ``[num_forwarded_tokens, num_layers, topk]`` (or ``None`` entries).
+        attention_mask: ``[batch, max_seq_len]`` mask of the left-padded ``sequences``.
+    """
+    if not all_routed_experts or any(r is None for r in all_routed_experts):
+        return None
+
+    routes = [routing[: len(seq)] for seq, routing in zip(full_sequences, all_routed_experts)]
+    rollout_expert_indices = collate_rollout_expert_indices(routes, np.array([len(seq) for seq in full_sequences]))
+    router_padding_mask = make_router_padding_mask(attention_mask, [routing.shape[0] for routing in routes])
+    return rollout_expert_indices, router_padding_mask
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -64,6 +108,18 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
+
+    routed_experts_stash_max_staleness: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Rollout Routing Replay (R3): number of weight syncs a never-trained entry in the "
+            "inference servers' routing stash may outlive before it is deleted (trained-on "
+            "entries are deleted at the model's very next sync). The default of 1 covers "
+            "on-policy and one-step-async loops; increase it for deeper async pipelines. "
+            "Ignored unless moe_enable_routing_replay is set."
+        ),
+    )
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -129,6 +185,13 @@ def _build_skyrl_train_config(
     cfg.trainer.critic.optimizer_config.scheduler = "constant_with_warmup"
     cfg.trainer.critic.optimizer_config.num_warmup_steps = 0
 
+    # Rollout Routing Replay (R3): enabling replay on the Megatron policy
+    # requires the inference engine to return per-token routed experts, so the
+    # two flags are kept in lockstep here (the operator only sets the replay
+    # flag). No-op for FSDP / non-MoE models.
+    if getattr(cfg.trainer.policy.megatron_config, "moe_enable_routing_replay", False):
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
 
@@ -170,6 +233,12 @@ class SkyRLTrainBackend(AbstractBackend):
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
 
+        # Rollout Routing Replay (R3): routing lives on the vLLM servers
+        # (see routed_experts_stash.py); sampling stashes it there and
+        # forward_backward pulls it back by sequence digest. This backend only
+        # drives the lifecycle (weight-sync / model-deletion fan-outs).
+        self._routed_experts_missing_warned = False
+
         # New inference infrastructure
         self._server_groups: list = []
         self._inference_router = None
@@ -189,6 +258,115 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def has_model(self, model_id: str) -> bool:
         return model_id in self._model_ids_to_role
+
+    def _router_replay_enabled(self) -> bool:
+        """Whether Rollout Routing Replay (R3) is active for this backend.
+
+        Reads the single source of truth on the built config. Only the Megatron
+        policy exposes ``moe_enable_routing_replay``; returns False otherwise
+        (FSDP, or before the config is built).
+        """
+        if self._cfg is None or self._cfg.trainer.strategy != "megatron":
+            return False
+        return bool(getattr(self._cfg.trainer.policy.megatron_config, "moe_enable_routing_replay", False))
+
+    def _resolve_inference_model_name(self, model_id: str | None) -> str:
+        """The name vLLM knows this Tinker model by: the LoRA adapter name in
+        multi-tenant serving (== the Tinker model_id), else the policy name.
+        Single source of truth for sampling requests and R3 stash keys."""
+        if not model_id:
+            # Base-model sampling targets the served base model directly:
+            # resolve_policy_model_name would return the LoRA adapter alias under
+            # LoRA weight sync, which (a) does not exist on the engines until the
+            # first sampler-weight save and (b) would wrongly apply adapter
+            # deltas to a base-model request.
+            return self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
+        if self._base_lora_signature is not None and model_id in self._model_ids_to_role:
+            return model_id
+        return resolve_policy_model_name(self._cfg)
+
+    def _run_client_call(self, coro_fn, *args, best_effort_what: str | None = None, **kwargs):
+        """Run one inference-client coroutine to completion on a fresh loop.
+
+        When ``best_effort_what`` is set, failures are logged and swallowed —
+        used for R3 lifecycle fan-outs, where a failure only delays memory
+        reclaim on the servers and must not fail the training operation.
+        """
+
+        async def _call():
+            try:
+                return await coro_fn(*args, **kwargs)
+            finally:
+                await self._inference_engine_client.aclose()
+
+        try:
+            return asyncio.run(_call())
+        except Exception as e:
+            if best_effort_what is None:
+                raise
+            logger.warning("R3: %s failed: %s", best_effort_what, e)
+
+    def _fetch_rollout_routing(self, model_ids: list[str], full_sequences: list[list[int]]) -> list:
+        """Pull each training sequence's rollout routing from the servers' R3 stash.
+
+        ``full_sequences[i]`` reconstructs exactly the sampled sequence, so its
+        digest addresses the stash directly. Batches are single-model (split
+        upstream), so one fan-out fetch covers everything; missing digests
+        yield ``None``. The fetch marks entries consumed so the model's next
+        weight sync deletes them.
+        """
+        model_name = self._resolve_inference_model_name(model_ids[0])
+        digest_hexes = [sequence_digest(seq).hex() for seq in full_sequences]
+        fetched = self._run_client_call(
+            self._inference_engine_client.fetch_routed_experts, model_name, sorted(set(digest_hexes))
+        )
+
+        per_sample_routing = []
+        for digest_hex in digest_hexes:
+            arr = fetched.get(digest_hex)
+            if arr is not None:
+                try:
+                    arr = compact_routed_expert_indices(arr)
+                except (TypeError, ValueError) as e:
+                    logger.warning("R3: ignoring invalid stashed routing: %s", e)
+                    arr = None
+            per_sample_routing.append(arr if arr is not None and arr.shape[0] > 0 else None)
+        return per_sample_routing
+
+    def _notify_routed_experts_weight_sync(self, model_id: str) -> None:
+        """Best-effort R3 fan-out: a weight sync starts the model's next rollout
+        round, so the servers delete consumed entries and expire stale ones."""
+        model_name = self._resolve_inference_model_name(model_id)
+        self._run_client_call(
+            self._inference_engine_client.routed_experts_weight_sync,
+            model_name,
+            max_staleness=getattr(self.config, "routed_experts_stash_max_staleness", 1),
+            best_effort_what=f"weight-sync stash notification for {model_name}",
+        )
+
+    def _clear_routed_experts_for_model(self, model_name: str) -> None:
+        """Best-effort R3 fan-out: drop a deleted model's stashed routing."""
+        self._run_client_call(
+            self._inference_engine_client.clear_routed_experts,
+            model_name,
+            best_effort_what=f"stash clear for deleted model {model_name}",
+        )
+
+    def _warn_on_missing_routing(self, per_sample_routing: list) -> None:
+        """Warn once if R3 is on but some forward_backward samples have no
+        stashed routing (sampling ran without capture, the sequence was altered
+        between sample and train, or the entry aged out); batches containing
+        such samples are not replayed and run on Megatron's own router."""
+        if self._routed_experts_missing_warned:
+            return
+        if any(r is None for r in per_sample_routing):
+            logger.warning(
+                "Router replay (R3) is enabled but %d/%d forward_backward samples had no stashed rollout "
+                "routing; this batch is not replayed and runs on Megatron's router.",
+                sum(1 for r in per_sample_routing if r is None),
+                len(per_sample_routing),
+            )
+            self._routed_experts_missing_warned = True
 
     def _get_role(self, model_id: str) -> str:
         try:
@@ -641,6 +819,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 self._dispatch.delete_adapter("policy", model_id)
                 del self._model_ids_to_role[model_id]
                 self._model_metadata.pop(model_id, None)
+                # R3: stashed routing for a deleted adapter can never be
+                # replayed. The adapter is registered on vLLM under model_id.
+                if self._router_replay_enabled() and self._inference_engines_initialized:
+                    self._clear_routed_experts_for_model(model_id)
                 logger.info(f"Removed LoRA adapter '{model_id}'; shared runtime stays up")
                 return
             # Fall through to teardown for non-LoRA roles or unexpected mixes.
@@ -678,6 +860,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._renderer = None
         self._colocate_pg = None
         self._base_lora_signature = None
+        # R3: the routing stash lives on the vLLM servers and died with them.
         # Local state is fully reset above. Notify the host last so a
         # publisher failure can't leave the controller half-torn-down.
         # Next _create_new_inference_client repopulates.
@@ -798,6 +981,16 @@ class SkyRLTrainBackend(AbstractBackend):
             if ref is not None:
                 placeholder = torch.empty(0, *ref.shape[1:], dtype=ref.dtype, device=ref.device)
                 batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
+
+        # Rollout Routing Replay (R3): pull each sequence's rollout routing
+        # from the servers' stash by digest and pack it the way the native RL
+        # path does, aligned with ``sequences``.
+        if self._router_replay_enabled():
+            per_sample_routing = self._fetch_rollout_routing(prepared_batch.all_model_ids, full_sequences)
+            self._warn_on_missing_routing(per_sample_routing)
+            replay_inputs = _build_rollout_expert_indices(full_sequences, per_sample_routing, attention_mask_tensor)
+            if replay_inputs is not None:
+                batch_dict["rollout_expert_indices"], batch_dict["router_padding_mask"] = replay_inputs
 
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
@@ -1273,25 +1466,7 @@ class SkyRLTrainBackend(AbstractBackend):
         persistent loop and reuses the session across requests instead.
         """
 
-        # Resolve the inference-engine model name per request. With multi-LoRA
-        # the adapter name on vLLM IS the Tinker model_id (registered by
-        # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
-        # FFT path falls back to resolve_policy_model_name(cfg). An empty
-        # model_id is base-model sampling and must target the served base
-        # model directly: resolve_policy_model_name would return the LoRA
-        # adapter alias under LoRA weight sync, which (a) does not exist on
-        # the engines until the first sampler-weight save and (b) would wrongly
-        # apply adapter deltas to a base-model request.
-        fallback_model_name = resolve_policy_model_name(self._cfg)
-        base_model_name = self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
-        per_request_models = []
-        for mid in prepared_batch.all_model_ids:
-            if not mid:
-                per_request_models.append(base_model_name)
-            elif self._base_lora_signature is not None and mid in self._model_ids_to_role:
-                per_request_models.append(mid)
-            else:
-                per_request_models.append(fallback_model_name)
+        per_request_models = [self._resolve_inference_model_name(mid) for mid in prepared_batch.all_model_ids]
 
         # Prompt logprobs are a property of the prompt, and all `num_samples`
         # samples of a request share one prompt, so only ask for them on the
@@ -1302,6 +1477,10 @@ class SkyRLTrainBackend(AbstractBackend):
         for _, _, start_idx, _, prompt_logprobs_requested, topk in prepared_batch.request_batch_slices:
             if prompt_logprobs_requested and start_idx < num_samples_total:
                 prompt_logprobs_at[start_idx] = topk
+
+        # Rollout Routing Replay (R3): sample through the stash endpoint so the
+        # servers keep each sample's routing for forward_backward to fetch.
+        stash_routed_experts = self._router_replay_enabled()
 
         async def sample_all():
             tasks = []
@@ -1314,6 +1493,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     "prompt": model_input.model_dump(),
                     "num_samples": 1,
                     "sampling_params": sampling_params.model_dump(),
+                    "stash_routed_experts": stash_routed_experts,
                 }
 
                 if i in prompt_logprobs_at:
@@ -1540,6 +1720,11 @@ class SkyRLTrainBackend(AbstractBackend):
             # so delete_model can unload it.
             self._inference_adapter_ids.add(model_id)
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
+
+        # Rollout Routing Replay (R3): let the servers' routing stash evict
+        # entries whose rollout round is over (see routed_experts_stash.py).
+        if self._router_replay_enabled():
+            self._notify_routed_experts_weight_sync(model_id)
 
         if persist:
             if adapter_only_sync:
