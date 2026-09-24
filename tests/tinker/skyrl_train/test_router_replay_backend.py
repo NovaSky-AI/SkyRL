@@ -5,12 +5,13 @@ pulls it back by digest (see routed_experts_stash.py); the backend holds no
 routing state and nothing is exposed through the client-facing Tinker types.
 Covers the digest fetch (dedupe, dtype narrowing, shape validation,
 live-router fallback), stash-key model-name resolution, sample-time gating,
-the lifecycle fan-outs, and the replay tensor assembly. No GPU needed. Run:
+the lifecycle fan-outs, and the replay input packing. No GPU needed. Run:
   uv run --extra dev --extra fsdp pytest tests/tinker/skyrl_train/test_router_replay_backend.py
 """
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -26,9 +27,13 @@ from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import ( 
 )
 from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
+from skyrl.train.config import SkyRLTrainConfig  # noqa: E402
+from skyrl.train.dataset.preprocess import (  # noqa: E402
+    convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
+)
 
 _build_rollout_expert_indices = skyrl_train_backend._build_rollout_expert_indices
-_narrow_routing_dtype = skyrl_train_backend._narrow_routing_dtype
 SkyRLTrainBackend = skyrl_train_backend.SkyRLTrainBackend
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -96,15 +101,20 @@ def _bind(fake):
 
 
 def test_resolve_inference_model_name(monkeypatch):
-    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: BASE_MODEL)
+    monkeypatch.setattr(skyrl_train_backend, "resolve_policy_model_name", lambda cfg: "policy-alias")
 
     # Multi-LoRA: the adapter registered on vLLM IS the Tinker model_id.
     fake = _bind(_fetch_backend(lora=True, model_ids_to_role={"model_a": "policy"}))
+    fake._cfg = SkyRLTrainConfig()
+    fake._cfg.trainer.policy.model.path = BASE_MODEL
     assert fake._resolve_inference_model_name("model_a") == "model_a"
-    # Unknown / empty ids and non-LoRA setups fall back to the policy name.
-    assert fake._resolve_inference_model_name("unknown") == BASE_MODEL
+    # Unknown ids and non-LoRA setups fall back to the policy name.
+    assert fake._resolve_inference_model_name("unknown") == "policy-alias"
+    assert _bind(_fetch_backend(lora=False))._resolve_inference_model_name("model_a") == "policy-alias"
+    # An empty id is base-model sampling: the served base model, never the adapter alias.
     assert fake._resolve_inference_model_name("") == BASE_MODEL
-    assert _bind(_fetch_backend(lora=False))._resolve_inference_model_name("model_a") == BASE_MODEL
+    fake._cfg.generator.inference_engine.served_model_name = "served-base"
+    assert fake._resolve_inference_model_name("") == "served-base"
 
 
 def test_fetch_maps_digests_back_to_samples(monkeypatch):
@@ -185,40 +195,53 @@ def test_lifecycle_fanouts_carry_args_and_are_best_effort(monkeypatch):
     fake._clear_routed_experts_for_model("model_a")  # no exception
 
 
-def test_build_rollout_expert_indices_left_pads_and_aligns():
+def _left_padded_attention_mask(full_sequences: list[list[int]]) -> torch.Tensor:
+    max_seq_len = max(len(seq) for seq in full_sequences)
+    return torch.tensor([[0] * (max_seq_len - len(seq)) + [1] * len(seq) for seq in full_sequences])
+
+
+def test_build_rollout_expert_indices_matches_native_path():
+    """Routing packs exactly as the native RL path packs it: one segment per
+    sample, captured rows first, dummy routes for the uncaptured last token."""
     # Two samples of differing length; routing has one fewer row than the full
     # sequence (the last token has no routing), matching the inference engine.
-    full_sequences = [[10, 11, 12, 13], [20, 21]]  # lens 4 and 2
-    num_layers, topk = 2, 3
-    routing_a = np.array([[[t] * topk for _ in range(num_layers)] for t in range(3)], dtype=np.int32)
-    routing_b = np.array([[[100 + t] * topk for _ in range(num_layers)] for t in range(1)], dtype=np.int32)
-    max_seq_len = 4
+    full_sequences = [[10, 11, 12, 13], [20, 21]]
+    routing_a = (np.arange(3 * 2 * 3).reshape(3, 2, 3) % 7).astype(np.uint8)
+    routing_b = np.full((1, 2, 3), 5, dtype=np.uint8)
+    attention_mask = _left_padded_attention_mask(full_sequences)
 
-    tensor = _build_rollout_expert_indices(full_sequences, [routing_a, routing_b], max_seq_len)
-    assert tensor is not None
-    assert tuple(tensor.shape) == (2, max_seq_len, num_layers, topk)
+    packed, router_padding_mask = _build_rollout_expert_indices(full_sequences, [routing_a, routing_b], attention_mask)
 
-    # Sample A: no left pad; routing at positions [0,1,2]; last position (3) zero.
-    assert tensor[0, 2, 1, 2].item() == 2
-    assert tensor[0, 3].sum().item() == 0
-    # Sample B: left pad of 2; routing lands at position 2; last position (3) zero.
-    assert tensor[1, 0].sum().item() == 0
-    assert tensor[1, 1].sum().item() == 0
-    assert tensor[1, 2, 0, 0].item() == 100
-    assert tensor[1, 3].sum().item() == 0
+    # Same inputs through the native trainer's collation + mask.
+    native = convert_prompts_responses_to_batch_tensors(
+        0,
+        [seq[:1] for seq in full_sequences],
+        [seq[1:] for seq in full_sequences],
+        [[0.0] * (len(seq) - 1) for seq in full_sequences],
+        [[1] * (len(seq) - 1) for seq in full_sequences],
+        rollout_expert_indices=[routing_a, routing_b],
+    )
+    native_packed, native_attention_mask = native[6], native[1]
+    assert torch.equal(attention_mask, native_attention_mask)
+    assert torch.equal(packed.values, native_packed.values)
+    assert torch.equal(packed.cu_seqlens, native_packed.cu_seqlens)
+    assert torch.equal(router_padding_mask, make_router_padding_mask(native_attention_mask, [3, 1]))
+
+    assert packed.values.dtype == torch.uint8
+    assert packed.cu_seqlens.tolist() == [0, 4, 6]
+    np.testing.assert_array_equal(packed.segment(0)[:3].numpy(), routing_a)
+    # Only real tokens that have a captured route are replayed.
+    assert router_padding_mask.tolist() == [[False, False, False, True], [True, True, False, True]]
 
 
-def test_build_rollout_expert_indices_none_when_absent():
-    assert _build_rollout_expert_indices([[1, 2]], None, 2) is None
-    assert _build_rollout_expert_indices([[1, 2]], [None], 2) is None
-
-
-def test_build_rollout_expert_indices_downcasts_dtype():
-    full_sequences = [[1, 2, 3]]
-    small = np.ones((2, 1, 2), dtype=np.int32)  # expert ids < 256 -> uint8
-    assert _build_rollout_expert_indices(full_sequences, [small], 3).dtype == torch.uint8
-    big = np.full((2, 1, 2), 300, dtype=np.int32)  # 256..2**15 -> int16
-    assert _build_rollout_expert_indices(full_sequences, [big], 3).dtype == torch.int16
+def test_build_rollout_expert_indices_requires_routing_for_every_sample():
+    """Megatron replays a whole batch, so one sample without routing means no replay."""
+    full_sequences = [[1, 2, 3], [4, 5, 6]]
+    attention_mask = _left_padded_attention_mask(full_sequences)
+    routing = np.zeros((2, 1, 2), dtype=np.uint8)
+    assert _build_rollout_expert_indices(full_sequences, None, attention_mask) is None
+    assert _build_rollout_expert_indices(full_sequences, [routing, None], attention_mask) is None
+    assert _build_rollout_expert_indices(full_sequences, [routing, routing], attention_mask) is not None
 
 
 def _sample_input(**kwargs) -> types.SampleInput:
@@ -271,7 +294,7 @@ def test_sample_requests_stash_gated_on_replay(monkeypatch, replay_enabled):
 
     spy = _SpyClient()
     fake_self = SimpleNamespace(
-        _cfg=None,
+        _cfg=SkyRLTrainConfig(),
         _base_lora_signature=None,
         _model_ids_to_role={},
         _inference_engine_client=spy,
@@ -279,10 +302,10 @@ def test_sample_requests_stash_gated_on_replay(monkeypatch, replay_enabled):
         _aggregate_sample_results=lambda prepared_batch, outputs: {},
     )
     fake_self._resolve_inference_model_name = SkyRLTrainBackend._resolve_inference_model_name.__get__(fake_self)
-    sample = SkyRLTrainBackend._sample_with_remote_client
+    sample_async = SkyRLTrainBackend._sample_with_remote_client_async
 
     batch = prepare_sample_batch({"req": ("", _sample_input())})
-    sample(fake_self, batch)
+    asyncio.run(sample_async(fake_self, batch, close_client=True))
 
     assert len(spy.payloads) == 1
     assert spy.payloads[0]["json"]["stash_routed_experts"] is replay_enabled

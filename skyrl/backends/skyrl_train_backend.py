@@ -30,6 +30,10 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.routed_experts import (
+    compact_routed_expert_indices,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -41,6 +45,10 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.train.dataset.preprocess import (
+    collate_rollout_expert_indices,
+    make_router_padding_mask,
+)
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
@@ -50,54 +58,36 @@ from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
 
-def _narrow_routing_dtype(arr: np.ndarray) -> np.ndarray:
-    """Downcast routing expert ids to the narrowest torch-safe integer dtype.
-
-    Also converts ``uint16`` (which torch cannot represent) coming from the
-    inference servers into ``int16``/``int32`` by value.
-    """
-    max_expert = int(arr.max()) if arr.size else 0
-    dtype = np.uint8 if max_expert < 2**8 else np.int16 if max_expert < 2**15 else np.int32
-    return arr.astype(dtype, copy=False)
-
-
-def _build_rollout_expert_indices(full_sequences, all_routed_experts, max_seq_len: int):
-    """Build the left-padded R3 routing tensor aligned with ``sequences``.
+def _build_rollout_expert_indices(
+    full_sequences: list[list[int]],
+    all_routed_experts: list[np.ndarray | None] | None,
+    attention_mask: torch.Tensor,
+) -> tuple[PackedTensor, torch.Tensor] | None:
+    """Build the R3 replay inputs (``rollout_expert_indices``, ``router_padding_mask``).
 
     The inference engine returns routing for every forwarded token (prompt +
-    response minus the last sampled token), so each sample's routing lands in the
-    leftmost real-token positions; the final token (the appended last target) has
-    no routing and stays zero. Mirrors ``convert_prompts_responses_to_batch_tensors``
-    on the native RL path. Returns ``None`` when no routing is present.
+    response minus the last sampled token), i.e. a prefix of each training
+    sequence. Packing and the padding mask are the native RL path's
+    (``convert_prompts_responses_to_batch_tensors`` + ``make_router_padding_mask``):
+    the uncovered tail gets dummy routes excluded from router accounting.
+
+    Megatron replays every token of a batch, so a sample without routing would
+    run on dummy routes; returns ``None`` (the whole batch uses Megatron's
+    router) unless every sample has routing.
 
     Args:
         full_sequences: list of per-sample token id lists (prompt + last target).
         all_routed_experts: list of per-sample ``np.ndarray`` of shape
             ``[num_forwarded_tokens, num_layers, topk]`` (or ``None`` entries).
-        max_seq_len: padded sequence length the batch is aligned to.
+        attention_mask: ``[batch, max_seq_len]`` mask of the left-padded ``sequences``.
     """
-    if not all_routed_experts or all(r is None for r in all_routed_experts):
+    if not all_routed_experts or any(r is None for r in all_routed_experts):
         return None
 
-    ref = next(r for r in all_routed_experts if r is not None)
-    num_layers, topk = int(ref.shape[1]), int(ref.shape[2])
-    rollout_expert_indices = torch.zeros((len(full_sequences), max_seq_len, num_layers, topk), dtype=torch.int32)
-    for i, (seq, sample_routing) in enumerate(zip(full_sequences, all_routed_experts)):
-        if sample_routing is None or sample_routing.shape[0] == 0:
-            continue
-        left_pad = max_seq_len - len(seq)
-        n = min(sample_routing.shape[0], max_seq_len - left_pad)
-        rollout_expert_indices[i, left_pad : left_pad + n] = torch.as_tensor(
-            np.asarray(sample_routing[:n]), dtype=torch.int32
-        )
-
-    # Downcast to save memory (worker upcasts to int32 before replay).
-    max_expert = int(rollout_expert_indices.max().item())
-    if max_expert < 2**8:
-        rollout_expert_indices = rollout_expert_indices.to(torch.uint8)
-    elif max_expert < 2**15:
-        rollout_expert_indices = rollout_expert_indices.to(torch.int16)
-    return rollout_expert_indices
+    routes = [routing[: len(seq)] for seq, routing in zip(full_sequences, all_routed_experts)]
+    rollout_expert_indices = collate_rollout_expert_indices(routes, np.array([len(seq) for seq in full_sequences]))
+    router_padding_mask = make_router_padding_mask(attention_mask, [routing.shape[0] for routing in routes])
+    return rollout_expert_indices, router_padding_mask
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -322,8 +312,8 @@ class SkyRLTrainBackend(AbstractBackend):
         ``full_sequences[i]`` reconstructs exactly the sampled sequence, so its
         digest addresses the stash directly. Batches are single-model (split
         upstream), so one fan-out fetch covers everything; missing digests
-        yield ``None`` (live-router fallback). The fetch marks entries consumed
-        so the model's next weight sync deletes them.
+        yield ``None``. The fetch marks entries consumed so the model's next
+        weight sync deletes them.
         """
         model_name = self._resolve_inference_model_name(model_ids[0])
         digest_hexes = [sequence_digest(seq).hex() for seq in full_sequences]
@@ -334,10 +324,13 @@ class SkyRLTrainBackend(AbstractBackend):
         per_sample_routing = []
         for digest_hex in digest_hexes:
             arr = fetched.get(digest_hex)
-            if arr is not None and arr.ndim != 3:
-                logger.warning("R3: stashed routing has shape %s (expected 3-D); ignoring.", arr.shape)
-                arr = None
-            per_sample_routing.append(_narrow_routing_dtype(arr) if arr is not None else None)
+            if arr is not None:
+                try:
+                    arr = compact_routed_expert_indices(arr)
+                except (TypeError, ValueError) as e:
+                    logger.warning("R3: ignoring invalid stashed routing: %s", e)
+                    arr = None
+            per_sample_routing.append(arr if arr is not None and arr.shape[0] > 0 else None)
         return per_sample_routing
 
     def _notify_routed_experts_weight_sync(self, model_id: str) -> None:
@@ -361,15 +354,15 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _warn_on_missing_routing(self, per_sample_routing: list) -> None:
         """Warn once if R3 is on but some forward_backward samples have no
-        stashed routing; those samples fall back to Megatron's own router
-        (sampling ran without capture, the sequence was altered between sample
-        and train, or the entry aged out)."""
+        stashed routing (sampling ran without capture, the sequence was altered
+        between sample and train, or the entry aged out); batches containing
+        such samples are not replayed and run on Megatron's own router."""
         if self._routed_experts_missing_warned:
             return
         if any(r is None for r in per_sample_routing):
             logger.warning(
                 "Router replay (R3) is enabled but %d/%d forward_backward samples had no stashed rollout "
-                "routing; those samples fall back to Megatron's router.",
+                "routing; this batch is not replayed and runs on Megatron's router.",
                 sum(1 for r in per_sample_routing if r is None),
                 len(per_sample_routing),
             )
@@ -990,15 +983,14 @@ class SkyRLTrainBackend(AbstractBackend):
                 batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
         # Rollout Routing Replay (R3): pull each sequence's rollout routing
-        # from the servers' stash by digest and assemble it into a left-padded
-        # [batch, max_seq_len, num_layers, topk] tensor aligned with
-        # ``sequences``.
+        # from the servers' stash by digest and pack it the way the native RL
+        # path does, aligned with ``sequences``.
         if self._router_replay_enabled():
             per_sample_routing = self._fetch_rollout_routing(prepared_batch.all_model_ids, full_sequences)
             self._warn_on_missing_routing(per_sample_routing)
-            rollout_expert_indices = _build_rollout_expert_indices(full_sequences, per_sample_routing, max_seq_len)
-            if rollout_expert_indices is not None:
-                batch_dict["rollout_expert_indices"] = rollout_expert_indices
+            replay_inputs = _build_rollout_expert_indices(full_sequences, per_sample_routing, attention_mask_tensor)
+            if replay_inputs is not None:
+                batch_dict["rollout_expert_indices"], batch_dict["router_padding_mask"] = replay_inputs
 
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
