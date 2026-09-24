@@ -21,7 +21,9 @@ from transformers import AutoConfig
 
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
+    fold_lora_alpha_for_vllm,
     fold_lora_rank_scale_for_vllm,
+    mark_alpha_folded,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
@@ -1561,6 +1563,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     ", ".join(f"{n} tensors at rank {r} x{config_rank / r:g}" for r, n in sorted(rescaled.items())),
                 )
 
+            # Same artifact as the in-memory path: alpha / r folded into lora_B
+            # and published with lora_alpha == r (see fold_lora_alpha_for_vllm).
+            adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self.lora_cls.alpha)
+
             # Rewrite fused-MoE expert LoRA into vLLM's flat PEFT layout so
             # merge_lora=False on-policy sync is accepted (otherwise
             # load_lora_adapter rejects `experts.down_proj`). See
@@ -1575,10 +1581,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
             )
-            adapter_config = build_adapter_config_dict(
-                self.lora_cls,
-                target_modules=target_modules,
-                base_model_name_or_path=base_model_name_or_path,
+            adapter_config = mark_alpha_folded(
+                build_adapter_config_dict(
+                    self.lora_cls,
+                    target_modules=target_modules,
+                    base_model_name_or_path=base_model_name_or_path,
+                )
             )
 
             # Atomic renames so concurrent writers (shared filesystem) and the

@@ -250,6 +250,15 @@ Memory and lifecycle, per inference GPU:
   files, here it re-reads the stage. A resync for the same name replaces the stage;
   `RemoteInferenceClient.unload_lora_adapter` also issues `skyrl_discard_in_memory_lora` so
   an unloaded tenant frees its tensors.
+- **The stage must never be written by vLLM.** vLLM applies `lora_alpha / r` by multiplying
+  `lora_b` *in place* on every load (`LoRALayerWeights.optimize`), and since the `LoRAModel`
+  shares the staged storage, a non-unit scale would compound on every LRU rebuild (dense and
+  packed-linear modules; `pack_moe` copies experts into a stacked tensor, so they would stay
+  correct, making the drift hard to spot). Both publication paths therefore fold `alpha / r`
+  into `lora_B` (`fold_lora_alpha_for_vllm`, after the per-module rank fold) and publish
+  `lora_alpha == r`, so vLLM's scale is exactly 1 and `optimize` is a no-op; the in-memory
+  loader rejects a config where they differ. The published adapter is vLLM-shaped, not the
+  trainer's raw tensors: a consumer reading `lora_B` directly sees it pre-scaled.
 - **The registered `LoRAModel` lives on the GPU**, unlike the directory path where it lives
   on pinned CPU memory. vLLM packs per-expert LoRA into stacked tensors sized to the local
   experts, so a MoE adapter costs roughly its *local un-deduplicated* size per registered

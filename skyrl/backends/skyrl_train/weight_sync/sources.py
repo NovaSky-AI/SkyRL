@@ -333,7 +333,9 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         )
 
         from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
+            fold_lora_alpha_for_vllm,
             fold_lora_rank_scale_for_vllm,
+            mark_alpha_folded,
         )
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             _convert_moe_experts_lora_to_vllm,
@@ -353,11 +355,17 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
                 config_rank,
                 ", ".join(f"{n} tensors at rank {r} x{config_rank / r:g}" for r, n in sorted(rescaled.items())),
             )
+        # vLLM multiplies lora_B by lora_alpha / r in place on every load, and the
+        # staged tensors are handed to it by reference and reused for LRU reloads.
+        # Fold that scale here and publish lora_alpha == r so vLLM's scale is 1.
+        adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self._lora_cls.alpha)
         adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
         target_modules = sorted(set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"})
-        adapter_config = build_adapter_config_dict(
-            self._lora_cls,
-            target_modules=target_modules,
-            base_model_name_or_path=self._base_model_name_or_path,
+        adapter_config = mark_alpha_folded(
+            build_adapter_config_dict(
+                self._lora_cls,
+                target_modules=target_modules,
+                base_model_name_or_path=self._base_model_name_or_path,
+            )
         )
         return adapter_state, adapter_config

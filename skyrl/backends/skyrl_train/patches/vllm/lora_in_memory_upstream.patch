@@ -1,3 +1,15 @@
+Upstream-shaped change for vLLM 0.28.0: load a LoRA adapter from tensors staged
+on the worker (``LoRARequest.lora_path = "memory://<name>"``) instead of a
+directory. Apply inside a vllm checkout with ``git apply -p1``. SkyRL itself
+installs the equivalent behaviour at runtime (``patch_lora_in_memory.py``).
+
+Caveat for upstreaming: ``LoRALayerWeights.optimize`` multiplies ``lora_b`` in
+place by ``lora_alpha / r`` on every load. Because staged tensors are kept for
+LRU rebuilds and shared with the ``LoRAModel``, a caller must either stage
+tensors with the scale already folded and ``lora_alpha == r`` (what SkyRL does
+and enforces in its loader), or ``optimize`` must be made out-of-place for
+staged adapters. An upstream PR should pick one and enforce it in
+``_load_staged_adapter``.
 
 diff -ruN a/vllm/lora/lora_model.py b/vllm/lora/lora_model.py
 --- a/vllm/lora/lora_model.py	2026-09-15 21:50:36.537646759 +0000

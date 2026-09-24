@@ -36,6 +36,12 @@ nothing, and it lets vLLM rebuild the adapter after an LRU eviction the way it
 would re-read a directory. The next sync for the same name replaces them;
 ``discard_in_memory_adapter`` frees them on unload.
 
+Sharing storage has one consequence: vLLM applies ``lora_alpha / r`` by
+multiplying ``lora_b`` *in place* on every load (``LoRALayerWeights.optimize``),
+so a non-unit scale would compound on each LRU rebuild. Staged adapters must
+therefore arrive with the scale already folded into ``lora_B`` and
+``lora_alpha == r`` in their config; the loader rejects anything else.
+
 Equivalent upstream change: ``patches/vllm/lora_in_memory_upstream.patch``.
 Remove this module once vLLM ships a tensor-backed LoRA request.
 """
@@ -137,6 +143,19 @@ def _load_in_memory_adapter(manager, lora_request, staged: StagedLoRAAdapter):
     from vllm.lora.peft_helper import PEFTHelper
 
     adapter_manager = manager._adapter_manager
+    # vLLM applies lora_alpha / r by multiplying lora_b in place on every load
+    # (LoRALayerWeights.optimize), and the staged tensors are handed over by
+    # reference and reused to rebuild an LRU-evicted adapter. A non-unit scale
+    # would therefore compound on each reload. The trainer folds the scale into
+    # lora_B and publishes lora_alpha == r; refuse anything else.
+    r = staged.peft_config.get("r")
+    lora_alpha = staged.peft_config.get("lora_alpha", r)
+    if lora_alpha != r:
+        raise ValueError(
+            f"in-memory LoRA adapter {lora_request.lora_name!r} has lora_alpha={lora_alpha} != r={r}. "
+            "Staged adapters must carry alpha / r folded into lora_B and publish lora_alpha == r "
+            "(fold_lora_alpha_for_vllm), because vLLM scales lora_b in place on every load."
+        )
     peft_helper = PEFTHelper.from_dict(staged.peft_config)
     peft_helper.validate_legal(manager.lora_config)
 

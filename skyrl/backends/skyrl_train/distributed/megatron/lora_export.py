@@ -80,3 +80,50 @@ def fold_lora_rank_scale_for_vllm(
                 rescaled[rank] = rescaled.get(rank, 0) + 1
         folded[key] = tensor
     return folded, rescaled
+
+
+def fold_lora_alpha_for_vllm(
+    adapter_state: Dict[str, torch.Tensor], *, config_rank: int, alpha: float
+) -> Dict[str, torch.Tensor]:
+    """Fold the adapter-wide ``alpha / config_rank`` into every ``lora_B``.
+
+    Together with :func:`fold_lora_rank_scale_for_vllm` this leaves each module's
+    ``lora_B`` carrying the trainer's full ``alpha / effective_rank``, so the
+    adapter must be published with ``lora_alpha == r`` (see
+    :func:`mark_alpha_folded`) and vLLM's own scale is exactly 1.
+
+    That matters because vLLM applies its scale by multiplying ``lora_b`` *in
+    place* (``LoRALayerWeights.optimize``) on every load, including the reload
+    of an LRU-evicted adapter. The in-memory sync hands vLLM the staged tensors
+    by reference, so a non-unit scale would compound on each reload. With the
+    scale folded here, ``optimize`` returns early and the stage is never written.
+
+    The multiply runs in float32 and casts back (exact in bf16 for power-of-two
+    ratios such as alpha 64 / r 32). A no-op when ``alpha == config_rank``.
+    """
+    if config_rank <= 0:
+        raise ValueError(f"config_rank must be positive, got {config_rank}")
+    if alpha <= 0:
+        raise ValueError(f"alpha must be positive, got {alpha}")
+    scale = alpha / config_rank
+    if scale == 1:
+        return dict(adapter_state)
+    folded: Dict[str, torch.Tensor] = {}
+    for key, tensor in adapter_state.items():
+        if key.endswith(LORA_B_SUFFIX):
+            tensor = (tensor.to(torch.float32) * scale).to(tensor.dtype)
+        folded[key] = tensor
+    return folded
+
+
+def mark_alpha_folded(adapter_config: Dict[str, object]) -> Dict[str, object]:
+    """Return ``adapter_config`` with ``lora_alpha`` set to ``r``.
+
+    Pairs with :func:`fold_lora_alpha_for_vllm`: the scale already lives in
+    ``lora_B``, so any consumer computing ``lora_alpha / r`` must get 1.
+    """
+    if adapter_config.get("alpha_pattern"):
+        raise ValueError("alpha_pattern is not supported: the alpha fold assumes one adapter-wide alpha")
+    marked = dict(adapter_config)
+    marked["lora_alpha"] = marked["r"]
+    return marked
