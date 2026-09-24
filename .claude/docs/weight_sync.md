@@ -266,8 +266,9 @@ Memory and lifecycle, per inference GPU:
   stayed 0.4-0.5 s across syncs) and size utilization so `total * util - weights - activations`
   leaves both a KV cache and headroom for the stage.
 - **Measured (4xH100-80G, one node).** GLM-4.7-Flash (31B, 64 routed experts),
-  Megatron EP2 -> vLLM TP2, non-colocated, LoRA rank 32, via
-  `tests/train/gpu_e2e_test/lora_sync_mode_compare.sh`. Mean `timing/sync_weights`
+  Megatron EP2 -> vLLM TP2, non-colocated, LoRA rank 32, GSM8K GRPO with
+  `use_kl_loss=false`, 48 prompts at batch 16 (3 syncs), the same job run once per
+  `sync_mode`. Mean `timing/sync_weights`
   over three syncs, two runs: **disk 6.74 s then 5.83 s, memory 0.486 s then
   0.490 s -- 12-14x, and ~5.5 s saved per sync.** The disk path is what varies
   (file write, then a read per worker); the memory path is stable to a
@@ -557,10 +558,6 @@ uv run --isolated --extra dev --extra fsdp \
 uv run --isolated --extra dev --extra megatron \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_weight_source.py -v
 
-# GPU — adapter-only LoRA sync, disk vs memory, on one 4xH100 node (not a pytest;
-# prints per-sync timings and the rollout/trainer logprob gap for each mode)
-bash tests/train/gpu_e2e_test/lora_sync_mode_compare.sh
-
 # GPU — end-to-end delta sync (sparse perturbation, fsdp and megatron)
 uv run --isolated --extra dev --extra fsdp \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/test_delta_weight_sync_e2e.py -m "not megatron" -v
@@ -580,7 +577,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `weight_senders.py` / a trainer engine | `test_weight_senders.py` (CPU) **and** GPU `test_weight_sync.py` |
 | `register.py` (either factory) | `test_registration.py` (CPU) — it *resolves* each entry, not just membership |
 | `weight_receivers.py` (receive side) | GPU `test_weight_sync.py` — it runs inside the vLLM worker. The LoRA staging mixin is the exception: `test_lora_receive.py` covers it on CPU against a stand-in engine |
-| The LoRA target (`lora_target.py`, the LoRA source, `patch_lora_in_memory.py`) | `test_lora_target.py` + `test_lora_receive.py` + `test_sources.py::TestLoraAdapterWeightSource` (CPU), then `tests/train/gpu_e2e_test/lora_sync_mode_compare.sh` on a 4xH100 node |
+| The LoRA target (`lora_target.py`, the LoRA source, `patch_lora_in_memory.py`) | `test_lora_target.py` + `test_lora_receive.py` + `test_sources.py::TestLoraAdapterWeightSource` (CPU), then a Megatron LoRA `merge_lora=false` run with `sync_mode=disk` and `=memory` on a GPU node, comparing `timing/sync_weights` and `rollout_train_logprobs_abs_diff_mean` (the measured config is above) |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |
