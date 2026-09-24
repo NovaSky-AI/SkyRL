@@ -222,9 +222,10 @@ async def test_lora_logprobs_matching_roundtrip(
             cfg.trainer.micro_train_batch_size_per_gpu = 2
 
             # Build the policy with the engines asleep. Adapter rows publish the zero
-            # adapter before the first rollout, as the trainer does; merged rows leave
-            # the engines on the checkpoint weights they loaded.
-            await client.sleep()
+            # adapter before the first rollout, as the trainer does; merged rows sample
+            # on the checkpoint weights they loaded, which a level-1 sleep keeps in CPU
+            # memory (level 2 would discard them).
+            await client.sleep(level=1)
             policy = init_worker_with_type(
                 "policy",
                 shared_pg=pg,
