@@ -8,7 +8,7 @@ description: Operational guide for choosing and combining parallelism strategies
 > **Source.** Adapted from NVIDIA Megatron-Bridge docs:
 > `https://docs.nvidia.com/nemo/megatron-bridge/latest/skills/perf-techniques/parallelism-strategies/SKILL.html`
 > Re-fetch from upstream when bumping the `megatron-bridge` pin in `pyproject.toml`.
-> Refreshed against `b244f2457790df364fab46ab4d522cd9c7e36d67`
+> Refreshed against `574fc53505492acda3bc8b5eae913a85b6e24840`
 > (`skills/nemo-mbridge-perf-parallelism-strategies/SKILL.md`); the sizing and
 > parallelism guidance below remains applicable.
 >

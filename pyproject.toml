@@ -485,7 +485,7 @@ torchvision = [
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
 # MiMo-V2.6 checkpoint conversion (Megatron-Bridge #6201).
-megatron-bridge = {git = "https://github.com/kalectory/Megatron-Bridge", rev = "b244f2457790df364fab46ab4d522cd9c7e36d67", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/kalectory/Megatron-Bridge", rev = "574fc53505492acda3bc8b5eae913a85b6e24840", marker = "sys_platform == 'linux'"}
 # megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
