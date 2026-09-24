@@ -558,6 +558,10 @@ uv run --isolated --extra dev --extra fsdp \
 uv run --isolated --extra dev --extra megatron \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_weight_source.py -v
 
+# GPU — LoRA weight sync incl. the adapter-only rows: disk and in-memory, colocated and not
+uv run --isolated --extra dev --extra megatron \
+  pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron_adapter" -v
+
 # GPU — end-to-end delta sync (sparse perturbation, fsdp and megatron)
 uv run --isolated --extra dev --extra fsdp \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/test_delta_weight_sync_e2e.py -m "not megatron" -v
@@ -577,7 +581,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `weight_senders.py` / a trainer engine | `test_weight_senders.py` (CPU) **and** GPU `test_weight_sync.py` |
 | `register.py` (either factory) | `test_registration.py` (CPU) — it *resolves* each entry, not just membership |
 | `weight_receivers.py` (receive side) | GPU `test_weight_sync.py` — it runs inside the vLLM worker. The LoRA staging mixin is the exception: `test_lora_receive.py` covers it on CPU against a stand-in engine |
-| The LoRA target (`lora_target.py`, the LoRA source, `patch_lora_in_memory.py`) | `test_lora_target.py` + `test_lora_receive.py` + `test_sources.py::TestLoraAdapterWeightSource` (CPU), then a Megatron LoRA `merge_lora=false` run with `sync_mode=disk` and `=memory` on a GPU node, comparing `timing/sync_weights` and `rollout_train_logprobs_abs_diff_mean` (the measured config is above) |
+| The LoRA target (`lora_target.py`, the LoRA source, `patch_lora_in_memory.py`) | `test_lora_target.py` + `test_lora_receive.py` + `test_sources.py::TestLoraAdapterWeightSource` (CPU), then GPU `test_lora.py -k megatron_adapter` (disk and memory, colocated and not; the memory rows assert nothing was written to `lora_sync_path`) |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |
