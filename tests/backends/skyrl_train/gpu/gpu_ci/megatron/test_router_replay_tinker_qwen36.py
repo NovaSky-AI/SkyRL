@@ -1,4 +1,4 @@
-"""GPU test: Rollout Routing Replay (R3) through the Tinker/Megatron path on Qwen3.6-35B-A3B.
+"""GPU test: Rollout Routing Replay (R3) through the Tinker sample path on Qwen3.6-35B-A3B.
 
 R3 records the MoE expert selections vLLM makes during rollout and replays them in
 the Megatron training forward, so training activates the same experts inference did.
@@ -8,17 +8,20 @@ that destabilizes RL on MoE models.
 R3 is enabled purely by a launch flag (``moe_enable_routing_replay``); routing is
 stashed on the vLLM servers keyed by the full sampled sequence, and forward_backward
 pulls it back by digest, with no client-facing Tinker fields. This test drives that
-exact data path: it captures routing during sampling, stores it in the server-side
-``RoutedExpertsStash``, rebuilds the training tensor via a digest fetch keyed by the
-training sequence, and asserts R3 lowers the mean |vLLM logprob - Megatron logprob|
-versus replay disabled.
+data path against real vLLM servers: it samples through ``RemoteInferenceClient.sample``
+with ``stash_routed_experts`` (``/skyrl/v1/completions`` stashes each choice's routing
+and strips it from the response), fetches it back with the ``/skyrl/v1/routed_experts/fetch``
+fan-out keyed by each training sequence's digest, packs it with the backend's
+``_build_rollout_expert_indices``, and asserts replay lowers the mean
+|vLLM logprob - Megatron logprob| versus the same worker without replay.
 
-Runs on 1 node of 8xH200. Run with:
-  NVTE_FLASH_ATTN=0 uv run --isolated --extra dev --extra megatron --extra tinker -- \
+Runs on 1 node of 8 GPUs (two vLLM engines, so the fetch fans out across servers). Run with:
+  uv run --isolated --extra dev --extra megatron --extra tinker -- \
     pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay_tinker_qwen36.py
 """
 
-import numpy as np
+import asyncio
+
 import pytest
 import ray
 import torch
@@ -28,23 +31,21 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
-from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
-    get_sampling_params_for_backend,
-)
 from skyrl.backends.skyrl_train.inference_servers.routed_experts_stash import (
-    RoutedExpertsStash,
     sequence_digest,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train_backend import (
-    _build_rollout_expert_indices,
-    _narrow_routing_dtype,
+from skyrl.backends.skyrl_train.inference_servers.utils import (
+    resolve_policy_model_name,
 )
-from skyrl.train.config import SamplingParams, SkyRLTrainConfig
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.routed_experts import (
+    compact_routed_expert_indices,
+)
+from skyrl.backends.skyrl_train_backend import _build_rollout_expert_indices
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
-from skyrl.train.generators.base import GeneratorInput
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
@@ -56,6 +57,7 @@ MODEL_NAME = "Qwen/Qwen3.6-35B-A3B"
 NUM_PROMPTS = 8
 N_SAMPLES_PER_PROMPT = 2
 MAX_GENERATE_LENGTH = 256
+NUM_ENGINES = 2
 
 
 def get_test_actor_config() -> SkyRLTrainConfig:
@@ -75,7 +77,8 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
-    cfg.generator.inference_engine.tensor_parallel_size = 8
+    cfg.generator.inference_engine.num_engines = NUM_ENGINES
+    cfg.generator.inference_engine.tensor_parallel_size = 8 // NUM_ENGINES
     cfg.generator.inference_engine.enable_return_routed_experts = True
     # validate_cfg ties capture to replay; set both so the sampling config is valid.
     cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
@@ -92,22 +95,28 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     return cfg
 
 
+@pytest.mark.asyncio
 @pytest.mark.megatron
-def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
+async def test_r3_reduces_train_rollout_mismatch_via_tinker_path():
     """R3 (server-side routing stash + Megatron replay) lowers train-vs-rollout logprob mismatch."""
-    try:
+    with ray_init():
         cfg = get_test_actor_config()
-        cfg.generator.sampling_params = SamplingParams(
-            max_generate_length=MAX_GENERATE_LENGTH,
-            logprobs=1,
-            temperature=1.0,
-        )
-        cfg.generator.batched = False
-        cfg.generator.max_turns = 1
-
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        model_name = resolve_policy_model_name(cfg)
 
-        with InferenceEngineState.create(
+        generator_input = get_test_generator_input(
+            model=MODEL_NAME,
+            num_prompts=NUM_PROMPTS,
+            n_samples_per_prompt=1,
+            max_prompt_length=512,
+            env_class="gsm8k",
+        )
+        prompt_ids = [
+            tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=False)
+            for messages in generator_input["prompts"]
+        ]
+
+        async with InferenceEngineState.create(
             cfg=cfg,
             model=MODEL_NAME,
             use_local=True,
@@ -116,127 +125,110 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
             sleep_level=1,
             gpu_memory_utilization=0.6,
         ) as engines:
-            import asyncio
-
             client, pg = engines.client, engines.pg
-            asyncio.run(client.wake_up())
+            await client.wake_up()
 
-            generator = SkyRLGymGenerator(
-                generator_cfg=cfg.generator,
-                skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                inference_engine_client=client,
-                tokenizer=tokenizer,
+            async def sample(seed: int, ids: list[int]) -> dict:
+                return await client.sample(
+                    {
+                        "json": {
+                            "model": model_name,
+                            "prompt": {"chunks": [{"type": "encoded_text", "tokens": ids}]},
+                            "num_samples": N_SAMPLES_PER_PROMPT,
+                            "sampling_params": {
+                                "temperature": 1.0,
+                                "max_tokens": MAX_GENERATE_LENGTH,
+                                "seed": seed,
+                                "top_k": -1,
+                                "top_p": 1.0,
+                            },
+                            "stash_routed_experts": True,
+                        }
+                    }
+                )
+
+            with Timer("sample_with_routing_stash"):
+                outputs = await asyncio.gather(*[sample(seed, ids) for seed, ids in enumerate(prompt_ids)])
+
+            prompts, responses, rollout_logprobs = [], [], []
+            for ids, output in zip(prompt_ids, outputs):
+                for sequence in output["sequences"]:
+                    assert "routed_experts" not in sequence, "sample responses must not carry routing"
+                    prompts.append(ids)
+                    responses.append(list(sequence["tokens"]))
+                    rollout_logprobs.append(list(sequence["logprobs"]))
+
+            # forward_backward reconstructs each sample as prompt + response and
+            # addresses the stash by its digest; the fetch fans out to every server.
+            full_sequences = [p + r for p, r in zip(prompts, responses)]
+            digest_hexes = [sequence_digest(seq).hex() for seq in full_sequences]
+            with Timer("fetch_stashed_routing"):
+                fetched = await client.fetch_routed_experts(model_name, digest_hexes)
+            assert set(fetched) == set(digest_hexes), "every sampled sequence must be found in the servers' stash"
+            per_sample_routing = [compact_routed_expert_indices(fetched[h]) for h in digest_hexes]
+            for seq, routing in zip(full_sequences, per_sample_routing):
+                # vLLM routes every forwarded token: the prompt plus all but the last sampled token.
+                assert routing.shape[0] == len(seq) - 1, (routing.shape, len(seq))
+
+            await client.sleep()
+
+            sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _, _ = (
+                convert_prompts_responses_to_batch_tensors(
+                    pad_token_id=tokenizer.pad_token_id,
+                    prompts=prompts,
+                    responses=responses,
+                    rewards=[[0.0] * len(r) for r in responses],
+                    loss_masks=[[1] * len(r) for r in responses],
+                    logprobs=rollout_logprobs,
+                )
+            )
+            rollout_expert_indices, router_padding_mask = _build_rollout_expert_indices(
+                full_sequences, per_sample_routing, attention_mask
             )
 
-            input_batch: GeneratorInput = get_test_generator_input(
-                model=MODEL_NAME,
-                num_prompts=NUM_PROMPTS,
-                n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
-                max_prompt_length=512,
-                env_class="gsm8k",
+            num_actions = response_mask.shape[1]
+            batch_size = sequences.shape[0]
+            training_input = TrainingInputBatch(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "response_mask": response_mask,
+                    "rewards": rewards_t,
+                    "loss_mask": loss_mask_t,
+                    "rollout_logprobs": logprobs_t,
+                    "rollout_expert_indices": rollout_expert_indices,
+                    "router_padding_mask": router_padding_mask,
+                    "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                    "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                    "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                }
             )
-            input_batch["sampling_params"] = get_sampling_params_for_backend(
-                "vllm",
-                SamplingParams(
-                    temperature=1.0,
-                    top_p=1.0,
-                    top_k=-1,
-                    max_generate_length=MAX_GENERATE_LENGTH,
-                    min_p=0.0,
-                    logprobs=1,
-                ),
+            training_input.metadata = {"response_length": num_actions}
+            no_replay_input = training_input.select(
+                [k for k in training_input if k not in ("rollout_expert_indices", "router_padding_mask")]
             )
 
-            with Timer("generate_with_routing_capture"):
-                generator_output = asyncio.run(generator.generate(input_batch))
+            # One worker scores both batches: it skips replay for a batch without
+            # routes, so the comparison runs on identical weights.
+            policy = init_worker_with_type("policy", shared_pg=pg, colocate_all=True, num_gpus_per_node=8, cfg=cfg)
 
-            indices = generator_output["rollout_expert_indices"]
-            responses = generator_output["response_ids"]
-            prompt_token_ids = generator_output["prompt_token_ids"]
-            assert indices is not None, "rollout_expert_indices is None; vLLM routing capture failed for Qwen3.6"
-            assert len(indices) == len(responses)
-            asyncio.run(client.sleep())
+            def run_megatron_forward(data: TrainingInputBatch) -> torch.Tensor:
+                results = ray.get(policy.async_run_ray_method("mesh", "forward", data=data))
+                output = WorkerOutput.cat(policy.actor_infos, results)
+                return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
-        # Exercise the real server-side stash: store each sample's routing keyed by
-        # (model, digest of the full sampled sequence), exactly as the vLLM server's
-        # /skyrl/v1/completions endpoint does at sample time.
-        model_name = "r3_test_model"
-        stash = RoutedExpertsStash(max_entries=1 << 20)
-        for prompt_ids, response, sample_routing in zip(prompt_token_ids, responses, indices):
-            if sample_routing:
-                stash.put(model_name, list(prompt_ids) + list(response), np.asarray(sample_routing))
+            r3_logprobs = run_megatron_forward(training_input)
+            no_r3_logprobs = run_megatron_forward(no_replay_input)
 
-        rewards = generator_output["rewards"]
-        if rewards and not isinstance(rewards[0], list):
-            rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
-
-        # Reference tensors (sequences/masks/rollout logprobs) via the native helper.
-        sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _ = (
-            convert_prompts_responses_to_batch_tensors(
-                tokenizer=tokenizer,
-                prompts=prompt_token_ids,
-                responses=responses,
-                rewards=rewards,
-                loss_masks=generator_output["loss_masks"],
-                logprobs=generator_output.get("rollout_logprobs"),
-            )
-        )
-        assert logprobs_t is not None
-
-        # forward_backward reconstructs the sequence as prompt + response; fetch
-        # routing from the stash by digest and build the training tensor,
-        # mirroring the backend's _fetch_rollout_routing.
-        max_seq_len = sequences.shape[1]
-        full_sequences = [list(p) + list(r) for p, r in zip(prompt_token_ids, responses)]
-        digest_hexes = [sequence_digest(fs).hex() for fs in full_sequences]
-        fetched = stash.get_many(model_name, digest_hexes)
-        per_sample = [_narrow_routing_dtype(fetched[h]) if h in fetched else None for h in digest_hexes]
-        assert any(r is not None for r in per_sample), "no stashed routing matched the training sequences"
-        rii_tensor = _build_rollout_expert_indices(full_sequences, per_sample, max_seq_len)
-        assert rii_tensor is not None
-
-        num_actions = response_mask.shape[1]
-        batch_size = sequences.shape[0]
-
-        def build_training_input(with_replay: bool) -> TrainingInputBatch:
-            batch = {
-                "sequences": sequences,
-                "attention_mask": attention_mask,
-                "response_mask": response_mask,
-                "rewards": rewards_t,
-                "loss_mask": loss_mask_t,
-                "rollout_logprobs": logprobs_t,
-                "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-                "action_mask": response_mask.to(dtype=torch.int64),
-            }
-            if with_replay:
-                batch["rollout_expert_indices"] = rii_tensor
-            ti = TrainingInputBatch(batch)
-            ti.metadata = {"response_length": num_actions}
-            return ti
-
-        def run_megatron_forward(enable_replay: bool) -> torch.Tensor:
-            cfg.trainer.policy.megatron_config.moe_enable_routing_replay = enable_replay
-            actor_group = init_worker_with_type("policy", shared_pg=pg, colocate_all=True, num_gpus_per_node=8, cfg=cfg)
-            training_input = build_training_input(with_replay=enable_replay)
-            refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
-            output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
-            logprobs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
-            for actor in actor_group._actor_handlers:
+            for actor in policy._actor_handlers:
                 ray.kill(actor)
-            return logprobs
-
-        r3_logprobs = run_megatron_forward(enable_replay=True)
-        no_r3_logprobs = run_megatron_forward(enable_replay=False)
 
         mask = response_mask.bool()
         vllm_valid = logprobs_t[mask]
         r3_diff = (vllm_valid - r3_logprobs[mask]).abs()
         no_r3_diff = (vllm_valid - no_r3_logprobs[mask]).abs()
 
-        print(f"vLLM logprobs     - mean: {vllm_valid.mean().item():.6f}")
+        print(f"vLLM logprobs  - mean: {vllm_valid.mean().item():.6f} over {vllm_valid.numel()} tokens")
         print(f"With replay    - |logprob diff| mean: {r3_diff.mean().item():.6f}, max: {r3_diff.max().item():.6f}")
         print(
             f"Without replay - |logprob diff| mean: {no_r3_diff.mean().item():.6f}, max: {no_r3_diff.max().item():.6f}"
@@ -247,5 +239,3 @@ def test_r3_reduces_train_rollout_mismatch_via_tinker_path(ray_init_fixture):
             f"mismatch, but with_replay={r3_diff.mean().item():.6f} >= "
             f"without_replay={no_r3_diff.mean().item():.6f}"
         )
-    finally:
-        ray.shutdown()
