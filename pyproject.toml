@@ -81,7 +81,7 @@ skyrl-train = [
     "ninja",
     "tensorboard",
     "func_timeout",
-    "hydra-core==1.3.2",
+    "hydra-core==1.3.4",
     "accelerate",
     "torchdata",
     "omegaconf",
@@ -116,7 +116,8 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.30.0; sys_platform == 'linux'",
+    "vllm==0.29.1rc1.dev496+g8644d2af2; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "vllm==0.30.0; sys_platform == 'linux' and platform_machine != 'x86_64' and platform_machine != 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -152,7 +153,8 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
-    "vllm==0.30.0; sys_platform == 'linux'",
+    "vllm==0.29.1rc1.dev496+g8644d2af2; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "vllm==0.30.0; sys_platform == 'linux' and platform_machine != 'x86_64' and platform_machine != 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -165,6 +167,7 @@ megatron = [
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core; sys_platform == 'linux'",
+    "nvidia-resiliency-ext; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
@@ -280,7 +283,6 @@ no-build-isolation-package = [
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
 # unpinned dependencies.
 override-dependencies = [
-    "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.16.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.16.1; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
@@ -322,10 +324,6 @@ override-dependencies = [
     "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
     "nvidia-cutlass-dsl[cu13]==4.7.1; sys_platform == 'linux'",
     "quack-kernels[cu13]==0.6.5; sys_platform == 'linux'",
-    # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
-    # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
-    # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
-    "xgrammar==0.2.3",
     "torch==2.13.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
     # torch: 0.30.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.30.0 pulls
@@ -485,17 +483,19 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
-# megatron-bridge main branch: latest as of 9/8/26
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "8e5f0e13b7dff8a951c6676e2f7b4a1853a34845", marker = "sys_platform == 'linux'"}
+nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
+# MiMo-V2.6 checkpoint conversion (Megatron-Bridge #6201).
+megatron-bridge = {git = "https://github.com/kalectory/Megatron-Bridge", rev = "574fc53505492acda3bc8b5eae913a85b6e24840", marker = "sys_platform == 'linux'"}
 # megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
-# `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`. This one is on the Megatron-LM
-# main branch (https://github.com/NVIDIA/Megatron-LM/tree/main), dated 9/7/26. Megatron-LM main
-# is 3 commits ahead of it at the time of this bump; the extra commits rework
-# `experimental_attention_variant/dsa.py` (NVIDIA/Megatron-LM#6402), which the GLM 5 sparse
-# attention path builds on, so this stays on the rev Bridge validates rather than main's tip.
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "b3393bbb0b223223ee3f8becf95f408d231d0036", marker = "sys_platform == 'linux'"}
+# `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`.
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "6a3660905a2736b5670baed1ca5954372937918b", marker = "sys_platform == 'linux'"}
+# Official CUDA 13 build with the v0.30 release fixes plus MiMo QKV/router fixes.
+vllm = [
+    { url = "https://wheels.vllm.ai/8644d2af2fb7c4588190a8d7f6c26a3cbef78a0f/vllm-0.29.1rc1.dev496%2Bg8644d2af2-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://wheels.vllm.ai/8644d2af2fb7c4588190a8d7f6c26a3cbef78a0f/vllm-0.29.1rc1.dev496%2Bg8644d2af2-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
