@@ -959,7 +959,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                 await self._run_in_executor_if_available(env.close)
 
         if parallel_env_steps:
-            await asyncio.gather(*[self._run_in_executor_if_available(env.close) for env in envs])
+            results = await asyncio.gather(
+                *[self._run_in_executor_if_available(env.close) for env in envs],
+                return_exceptions=True,
+            )
+            for res in results:
+                if isinstance(res, Exception):
+                    logger.error(f"Error closing environment: {res}")
 
         rollout_metrics = get_rollout_metrics(truncated_responses, rewards, env_metrics, env_classes, loss_masks)
 
