@@ -481,10 +481,12 @@ class SkyRLTrainBackend(AbstractBackend):
             raise RuntimeError("Sampling is unavailable in a trainer-only runtime")
         if self._inference_engines_initialized:
             return
-        if self.config.runtime_role == "inference" and self._cfg is None:
+        if self.config.runtime_role == "inference" and getattr(self, "_cfg", None) is None:
             self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config=None)
             if not ray.is_initialized():
                 initialize_ray(self._cfg)
+        elif hasattr(self, "_cfg") and self._cfg is None:
+            raise RuntimeError("Create a model before sampling from a combined runtime")
 
         # A preceding training op (another tenant's forward/forward_backward)
         # may have left the trainer GPU-resident; under colocate_all the
@@ -523,8 +525,8 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{model_id}' already exists")
 
         is_lora = lora_config is not None and lora_config.rank > 0
-        if self.config.runtime_role == "inference" and is_lora:
-            raise ValueError("LoRA models are unavailable in an inference-only runtime")
+        if self.config.runtime_role == "inference" and (is_lora or model_role == "critic"):
+            raise ValueError("Training models are unavailable in an inference-only runtime")
 
         # Multi-LoRA path: register additional policy adapters against the
         # already-built shared runtime. Gate on the runtime being alive rather
@@ -1448,6 +1450,8 @@ class SkyRLTrainBackend(AbstractBackend):
     def _validate_model_state(self, model_id: str) -> None:
         """Validate that model exists and is initialized."""
         self._get_role(model_id)
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training and weight synchronization are unavailable in an inference-only runtime")
         if self._dispatch is None:
             raise RuntimeError("Model not initialized")
 

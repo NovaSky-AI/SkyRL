@@ -61,10 +61,38 @@ def test_inference_runtime_rejects_training():
         backend.forward(SimpleNamespace(all_model_inputs=[]))
 
 
-def test_inference_runtime_rejects_lora_models():
+def test_combined_runtime_requires_a_model_before_sampling():
+    backend = object.__new__(SkyRLTrainBackend)
+    backend.config = MegatronBackendOverrides(runtime_role="combined")
+    backend._inference_engines_initialized = False
+    backend._cfg = None
+
+    with pytest.raises(RuntimeError, match="Create a model"):
+        backend._ensure_inference_engines()
+
+
+def test_inference_runtime_rejects_training_models():
     backend = object.__new__(SkyRLTrainBackend)
     backend.config = MegatronBackendOverrides(runtime_role="inference")
     backend._model_ids_to_role = {}
 
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(ValueError, match="Training models"):
         backend.create_model("adapter-a", types.LoraConfig(rank=8, alpha=16, seed=0))
+
+    with pytest.raises(ValueError, match="Training models"):
+        backend.create_model("critic-a", types.LoraConfig(rank=0, alpha=16, seed=0), model_role="critic")
+
+
+@pytest.mark.parametrize("operation", ["save_checkpoint", "load_checkpoint", "save_sampler_checkpoint"])
+def test_inference_runtime_rejects_weight_operations(operation):
+    backend = object.__new__(SkyRLTrainBackend)
+    backend.config = MegatronBackendOverrides(runtime_role="inference")
+    backend._model_ids_to_role = {"model-a": "policy"}
+
+    with pytest.raises(RuntimeError, match="weight synchronization"):
+        if operation == "save_checkpoint":
+            backend.save_checkpoint("/checkpoints/model.tar", "model-a")
+        elif operation == "load_checkpoint":
+            backend.load_checkpoint("/checkpoints/model.tar", "model-a", load_optimizer=False)
+        else:
+            backend.save_sampler_checkpoint("/checkpoints/model.tar", "model-a", persist=False)

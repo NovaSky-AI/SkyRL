@@ -73,6 +73,18 @@ def test_engine_forwards_runtime_role(monkeypatch):
     }
 
 
+def test_engine_rejects_single_role_jax_backend():
+    with pytest.raises(ValueError, match="fsdp or megatron"):
+        TinkerEngine(
+            EngineConfig(
+                base_model=BASE_MODEL,
+                backend="jax",
+                runtime_role="trainer",
+                database_url="sqlite:///:memory:",
+            )
+        )
+
+
 def test_process_unload_model():
     """Test that process_unload_model removes model from backend."""
     config = EngineConfig(
