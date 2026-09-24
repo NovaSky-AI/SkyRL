@@ -49,6 +49,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
 from skyrl.backends.skyrl_train.patches.megatron.patch_shared_expert_lora_tp import (
     apply_shared_expert_lora_tp_patch,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_vision_attention_backend import (
+    patch_vision_attention_backend,
+)
 from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
@@ -477,6 +480,11 @@ class MegatronWorker:
         # Delete along with the patch module once the megatron-core pin includes
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
+
+        # Give the Qwen3-VL ViT the language model's attention backend; megatron-core
+        # now asserts NVTE_* attention env vars agree across all models in a process.
+        # Delete along with the patch module once Bridge's get_vision_model_config copies it.
+        patch_vision_attention_backend()
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)
