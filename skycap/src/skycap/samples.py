@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from skycap.graph import MessageGraph, Node
-from skycap.tokens.engine import pack
+from skycap.tokens.engine import pack, unpack
 
 
 @dataclass(slots=True)
@@ -48,6 +48,27 @@ class Sample:
             out["routed_experts"] = pack(self.routed_experts) if self.routed_experts is not None else None
             out["sampling_mask"] = _csr(self.sampling_mask) if self.sampling_mask is not None else None
         return out
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Sample:
+        """The inverse of ``to_json``: arrays decoded."""
+        routed = data.get("routed_experts")
+        mask = data.get("sampling_mask")
+        return cls(
+            leaf=data["leaf"],
+            path=data["path"],
+            messages=data["messages"],
+            targets=data["targets"],
+            input_ids=data.get("input_ids"),
+            loss_mask=data.get("loss_mask"),
+            logprobs=data.get("logprobs"),
+            routed_experts=unpack(routed) if routed is not None else None,
+            sampling_mask=(
+                [mask["ids"][a:b] for a, b in zip(mask["offsets"], mask["offsets"][1:], strict=False)]
+                if mask is not None
+                else None
+            ),
+        )
 
 
 def build_samples(graph: MessageGraph) -> list[Sample]:
