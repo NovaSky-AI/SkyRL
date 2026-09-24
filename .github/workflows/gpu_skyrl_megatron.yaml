@@ -1,4 +1,4 @@
-name: SkyRL-Train-GPU-Megatron
+name: SkyRL-GPU-Megatron
 
 on: 
   push: 
@@ -26,9 +26,10 @@ permissions:
 
 jobs:
   
-  skyrl_train_tests_megatron:
-    # Match the label that fired this event to avoid duplicate runs from bulk
-    # labeling. This job executes the PR head with secrets, so reject forks.
+  skyrl_gpu_tests_megatron:
+    # Gate on the label that fired this event. `types: [labeled]` delivers one event
+    # per label added, and `contains(...labels.*.name, ...)` tests the whole label
+    # set, so labelling in bulk launched one identical GPU run per label.
     # Forks inherit these workflows but not the secrets they need -- only run upstream.
     if: >
       github.repository == 'NovaSky-AI/SkyRL' &&
@@ -39,7 +40,7 @@ jobs:
           github.event_name == 'pull_request_target' &&
           !github.event.pull_request.draft &&
           github.event.pull_request.head.repo.full_name == github.repository &&
-          github.event.label.name == 'run_train_megatron_gpu_ci'
+          github.event.label.name == 'run_megatron_gpu_ci'
         )
       )
     runs-on: ubuntu-latest
@@ -53,7 +54,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
           # The Anyscale job uploads this working dir, so we need the PR head.
-          # Don't leave the base repo token in the uploaded checkout.
+          # Do not leave the base repo token in the uploaded checkout.
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -74,11 +75,11 @@ jobs:
           ANYSCALE_HOST: https://console.anyscale.com
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          envsubst < ci/anyscale_gpu_ci_skyrl_train_megatron.yaml > ci/anyscale_gpu_ci_skyrl_train_megatron_envsubst.yaml
+          envsubst < ci/anyscale_gpu_ci_skyrl_megatron.yaml > ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-train-gpu-ci-megatron-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
-          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_train_megatron_envsubst.yaml "$JOB_NAME" 15000
-          rm -f ci/anyscale_gpu_ci_skyrl_train_megatron_envsubst.yaml
+          JOB_NAME="skyrl-gpu-ci-megatron-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml "$JOB_NAME" 15000
+          rm -f ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
       # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
       - name: Terminate Anyscale jobs on cancellation

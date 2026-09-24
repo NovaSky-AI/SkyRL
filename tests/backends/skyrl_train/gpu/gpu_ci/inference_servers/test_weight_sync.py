@@ -14,7 +14,7 @@ FSDP/Megatron only -- it holds a plain HF model on one GPU, which
    against ``skyrl_ipc``, and the ``nccl`` + ``colocate_all`` -> ``ipc``
    resolution.
 3. Non-colocated sharded RDT (NIXL pull), TP=1. Covers
-   ``ShardedRDTTrainerWeightTransferEngine``, the ownership-aware source, and the
+   ``SkyRLShardedRDTTrainerWeightTransferEngine``, the ownership-aware source, and the
    ``replica_rank`` rewrite in ``rdt_init_payloads``.
 
 Run:
@@ -63,7 +63,11 @@ class WeightSyncTrainerBase:
         self._model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to("cuda")
         # The two config values the backend is resolved from, so this exercises
         # the same resolution the driver uses to configure the servers.
-        self._ie_cfg = SimpleNamespace(weight_sync_backend=weight_sync_backend, model_dtype="bfloat16")
+        self._ie_cfg = SimpleNamespace(
+            weight_sync_backend=weight_sync_backend,
+            model_dtype="bfloat16",
+            weight_transfer_threshold_cuda_ipc_GB=1.0,
+        )
         self._colocate_all = colocate_all
         self._server_urls = list(server_urls)
         self._data_parallel_size = int(data_parallel_size)
