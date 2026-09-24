@@ -16,21 +16,8 @@ mixin, no named actors and no special actor options.
 See docs/training/weight_transfer/sharded_rdt.md for the publish -> serve ->
 free_group -> release lifecycle and the ownership model.
 
-VENDORED from the ``vllm-rdt-weight-sync`` fork's
-``vllm/distributed/weight_transfer/sharded_rdt_trainer.py``. Keep the two in sync;
-the intended differences are the import paths, the LIBFABRIC shim below, and the
-absence of engine fault tolerance: the fork's ``send_weights`` takes a live
-consumer set and its engine exposes ``get_worker_init_payload`` for a restarted
-consumer to rejoin, both of which are deliberately omitted here. The consumer set
-is the provisioned fleet, fixed at ``trainer_init``. Do not "restore" them when
-syncing; the producer-side stall watchdog IS kept, because the slot-sharing
-rendezvous relies on it as its failure mode. This copy also carries the
-``skyrl_*`` capability flags the workers probe; they are additive, so the fork can
-be re-synced over them.
-
-REMOVAL: delete this module once SkyRL's pinned vLLM ships the trainer-side
-engine, and repoint ``weight_sync/weight_senders.py``'s registration at
-``vllm.distributed.weight_transfer.sharded_rdt_trainer``.
+NOTE: vLLM natively has the same RDT engine in >=0.29. However, we retain this 
+in SkyRL for faster iteration on improvements.
 """
 
 import contextlib
@@ -166,7 +153,7 @@ class _SharedPack:
 
 
 @dataclass
-class ShardedRDTTrainerInitInfo(TrainerInitInfo):
+class SkyRLShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Trainer init info for the sharded-RDT backend.
 
     Identical on every rank except ``rank`` (rank 0 is the sender). Carries only
@@ -789,7 +776,7 @@ class _RDTProducerServer:
             self._pack_dsts.clear()
 
 
-class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedRDTTrainerInitInfo]):
+class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[SkyRLShardedRDTTrainerInitInfo]):
     """Trainer-side engine for the pull-based sharded-RDT backend.
 
     Lives on every trainer rank. Owns a per-rank `_RDTProducerServer` actor
@@ -799,7 +786,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
     the workers pull. Non-sender ranks only gather (staying in the collective).
     """
 
-    init_info_cls = ShardedRDTTrainerInitInfo
+    init_info_cls = SkyRLShardedRDTTrainerInitInfo
 
     # Worker capability probes (see workers/worker.py).
     #
@@ -822,7 +809,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         client: VLLMWeightSyncClient,
         source: WeightSource,
         is_sender: bool = True,
-        init_info: ShardedRDTTrainerInitInfo,
+        init_info: SkyRLShardedRDTTrainerInitInfo,
     ) -> None:
         super().__init__(client=client, source=source, is_sender=is_sender)
         self._init_info = init_info
@@ -958,7 +945,7 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
     @classmethod
     def trainer_init(
         cls,
-        init_info: ShardedRDTTrainerInitInfo,
+        init_info: SkyRLShardedRDTTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
         source: WeightSource | None = None,
@@ -1214,14 +1201,14 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
 
     def _build_worker_init_info(self, server_names: list[str]):
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
-            ShardedRDTWeightTransferInitInfo,
+            SkyRLShardedRDTWeightTransferInitInfo,
         )
 
         group_lens = [len(g) for g in self._groups]
         names = [m.name for m in self._meta]
         dtype_names = [str(m.dtype).split(".")[-1] for m in self._meta]
         shapes = [list(m.shape) for m in self._meta]
-        return ShardedRDTWeightTransferInitInfo(
+        return SkyRLShardedRDTWeightTransferInitInfo(
             trainer_actor_names=server_names,
             trainer_actor_namespace=self._init_info.trainer_actor_namespace,
             produce_method_name=PRODUCE_METHOD_NAME,
@@ -1254,10 +1241,10 @@ class ShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[ShardedR
         self.client.start_weight_update()
 
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
-            ShardedRDTWeightTransferUpdateInfo,
+            SkyRLShardedRDTWeightTransferUpdateInfo,
         )
 
-        empty_update = asdict(ShardedRDTWeightTransferUpdateInfo())
+        empty_update = asdict(SkyRLShardedRDTWeightTransferUpdateInfo())
         with ThreadPoolExecutor(max_workers=1) as exe:
             # The workers block inside update_weights until they've pulled every
             # group, so it runs concurrently with the gather/publish loop.

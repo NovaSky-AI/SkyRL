@@ -1,4 +1,4 @@
-name: skyrl-train-gpu-e2e-test-megatron
+name: skyrl-gpu-e2e-test-megatron
 entrypoint: bash ci/gpu_e2e_test_run_megatron.sh
 image_uri: novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron # (Optional) Exclusive with `containerfile`.
 cloud: sky-anyscale-aws-us-east-1

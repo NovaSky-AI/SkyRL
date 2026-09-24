@@ -20,10 +20,10 @@ Start off any modification or debugging with SkyRL using this file as the primar
 
 ## Contribution Checklist
 
-- Go through the development guide: `.claude/docs/development.md`.
+- Go through the development guide: `.agents/docs/development.md`.
 - Ensure you've updated relevant example scripts and documentation for any changes
-- Ensure you've updated `.claude/` files and `CLAUDE.md` for any changes in paths, naming, etc.
-- When bumping the `megatron-bridge` version, refresh the parallelism strategies skill which is based on content in `megatron-bridge`: `.claude/skills/parallelism-strategies/SKILL.md`
+- Ensure you've updated `.agents/` files and `AGENTS.md` for any changes in paths, naming, etc.
+- When bumping the `megatron-bridge` version, refresh the parallelism strategies skill which is based on content in `megatron-bridge`: `.agents/skills/parallelism-strategies/SKILL.md`
 - If making documentation changes, ensure that docs build can succeed: `cd docs/; npm install; npm run build`
 
 ## New Model Support (Megatron)
