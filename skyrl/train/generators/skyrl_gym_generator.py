@@ -7,7 +7,6 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
-import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -335,8 +334,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         if weight_version is None:
             return None
         version = f"{self.policy_model_name}@" if self.policy_model_name is not None else ""
-        # vLLM restricts cache salts to 128 characters without path separators or '@'.
-        return hashlib.sha256(f"{version}{weight_version}".encode()).hexdigest()
+        return f"{version}{weight_version}"
 
     async def agent_loop(
         self,

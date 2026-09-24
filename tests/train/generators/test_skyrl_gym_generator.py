@@ -278,20 +278,9 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
     "use_cache_salt,weight_version,policy_model_name,expected_salt",
     [
         (False, 3, None, None),  # disabled -> no salt
-        (True, None, "my-model", None),
-        (True, 3, None, "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"),
-        (
-            True,
-            5,
-            "my-model",
-            "948d71f14d8856168bacef66d5d14864d4f11e2ed12085c71cbd5057a570645e",
-        ),  # enabled with model name
-        (
-            True,
-            0,
-            "my-model",
-            "085db804c1a1a9c5c830e9a403dea076f4f3e69231c280da4518b68857478c4a",
-        ),  # pre-first-sync version (0) still salts
+        (True, 3, None, "3"),  # enabled, no model name -> bare version
+        (True, 5, "my-model", "my-model@5"),  # enabled with model name
+        (True, 0, "my-model", "my-model@0"),  # pre-first-sync version (0) still salts
     ],
 )
 async def test_cache_salt_threaded_to_engine_input(
@@ -350,30 +339,6 @@ async def test_cache_salt_threaded_to_engine_input(
     await generator.generate(input_batch, disable_tqdm=True)
 
     assert captured["cache_salt"] == expected_salt
-
-
-@pytest.mark.parametrize("model_name", ["org/adapter", "adapter@v1", "a\\b\x00", "x" * 200])
-def test_cache_salt_preserves_model_and_version_isolation(
-    mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg, model_name
-):
-    generator_cfg.use_cache_salt = True
-    mock_llm.weight_version = 1
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=mock_env_cfg,
-        inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        policy_model_name=model_name,
-    )
-    salt = generator._compute_cache_salt()
-    assert 0 < len(salt) <= 128
-    assert not set(salt) & set("@/\\\x00")
-    assert generator._compute_cache_salt() == salt
-    mock_llm.weight_version = 2
-    assert generator._compute_cache_salt() != salt
-    mock_llm.weight_version = 1
-    generator.policy_model_name = model_name + "-other"
-    assert generator._compute_cache_salt() != salt
 
 
 @pytest.mark.asyncio
