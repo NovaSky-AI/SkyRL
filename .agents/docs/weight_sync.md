@@ -225,9 +225,8 @@ Arming lasts exactly one round — `finish_weight_update` disarms — so a missi
 arm can never apply an adapter stream to the base model, or the reverse.
 
 The vLLM side is a runtime patch, `patches/vllm/patch_lora_in_memory.py`, applied by the
-worker-extension import like the other vLLM patches: stock vLLM 0.28 can only load an
-adapter from a directory. The equivalent upstream diff is
-`patches/vllm/lora_in_memory_upstream.patch`. The adapter is built on the GPU so the
+worker-extension import like the other vLLM patches: stock vLLM can only load an
+adapter from a directory. The adapter is built on the GPU so the
 sender's dtype cast makes vLLM's per-key `.to()` a no-op and aliases keep sharing storage;
 building on CPU would pin a private copy per key and re-inflate a deduplicated adapter to
 its public size (30.77 GB vs 0.62 GB on GLM-5.3 rank 32).

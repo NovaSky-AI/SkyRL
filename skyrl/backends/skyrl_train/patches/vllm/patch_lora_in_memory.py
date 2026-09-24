@@ -42,7 +42,6 @@ so a non-unit scale would compound on each LRU rebuild. Staged adapters must
 therefore arrive with the scale already folded into ``lora_B`` and
 ``lora_alpha == r`` in their config; the loader rejects anything else.
 
-Equivalent upstream change: ``patches/vllm/lora_in_memory_upstream.patch``.
 Remove this module once vLLM ships a tensor-backed LoRA request.
 """
 
