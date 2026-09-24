@@ -171,6 +171,40 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             "model": body.get("model"),
         }
 
+    @app.post("/skyrl/v1/completions")
+    async def skyrl_completions(request: Request):
+        """R3 stash endpoint: OpenAI completions, routing already stripped."""
+        body = await request.json()
+        app.state.last_skyrl_completions_body = body
+        prompt = body["prompt"]
+        pl = body.get("prompt_logprobs")
+        prompt_logprobs = None
+        if pl is not None:
+            prompt_logprobs = [None] + [
+                {str(tok): {"logprob": -0.5 * idx, "rank": 1, "decoded_token": None}}
+                for idx, tok in enumerate(prompt[1:], start=1)
+            ]
+        return {
+            "choices": [
+                {
+                    "index": i,
+                    "text": "",
+                    "token_ids": [i, i + 1],
+                    "prompt_token_ids": prompt,
+                    "logprobs": {"token_logprobs": [-0.1 * (i + 1), -0.2 * (i + 1)]},
+                    "prompt_logprobs": prompt_logprobs,
+                    "finish_reason": "stop",
+                    "routed_experts": None,
+                }
+                for i in range(body.get("n", 1))
+            ],
+            "model": body.get("model"),
+        }
+
+    @app.get("/test/last_skyrl_completions_body")
+    async def get_last_skyrl_completions_body():
+        return app.state.last_skyrl_completions_body
+
     @app.post("/skyrl/v1/generate")
     @app.post("/inference/v1/generate")
     async def generate(request: Request):
@@ -1087,6 +1121,45 @@ class TestSample:
         result = await client.sample(request_payload)
 
         assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("capture_enabled", [True, False])
+    async def test_sample_stash_routed_experts(self, mock_servers, capture_enabled):
+        """R3 sampling goes through the stash endpoint only when the servers capture
+        routing, and still returns prompt logprobs."""
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
+            enable_return_routed_experts=capture_enabled,
+        )
+        request_payload = {
+            "json": {
+                "model": client.model_name,
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 2,
+                "sampling_params": {"temperature": 0.7, "max_tokens": 64, "seed": 3},
+                "include_prompt_logprobs": True,
+                "stash_routed_experts": True,
+            }
+        }
+        try:
+            result = await client.sample(request_payload)
+        finally:
+            await client.teardown()
+
+        assert result["prompt_logprobs"] == [None, pytest.approx(-0.5), pytest.approx(-1.0)]
+        if not capture_enabled:
+            # Without routing capture the flag is ignored: regular generate path.
+            assert result["sequences"][0]["tokens"] == [0, 1, 2]
+            return
+
+        body = httpx.get(f"{mock_servers['proxy_url']}/test/last_skyrl_completions_body").json()
+        assert body["prompt"] == [10, 20, 30]
+        assert (body["n"], body["seed"], body["prompt_logprobs"]) == (2, 3, 0)
+        assert [s["tokens"] for s in result["sequences"]] == [[0, 1], [1, 2]]
+        assert result["sequences"][1]["logprobs"] == pytest.approx([-0.2, -0.4])
         assert result["topk_prompt_logprobs"] is None
 
     @pytest.mark.asyncio

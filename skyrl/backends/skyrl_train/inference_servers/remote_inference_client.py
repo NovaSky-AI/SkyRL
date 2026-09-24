@@ -765,6 +765,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         num_samples: int,
         tinker_params: Dict[str, Any],
         session_id: Optional[str],
+        prompt_logprobs: Optional[int],
     ) -> SampleResponse:
         """Sample via ``/skyrl/v1/completions`` so rollout routing stays
         server-side (R3): the endpoint stashes each choice's routing and strips
@@ -778,6 +779,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "stream": False,
             "return_token_ids": True,
         }
+        if prompt_logprobs is not None:
+            payload["prompt_logprobs"] = prompt_logprobs
         for tinker_key, openai_key in _TINKER_SAMPLE_TO_VLLM_PARAM_MAP.items():
             val = tinker_params.get(tinker_key)
             if val is not None:
@@ -795,8 +798,20 @@ class RemoteInferenceClient(InferenceEngineInterface):
             async with gen_sem:
                 response = await self._post(url, json=payload, headers=headers)
 
+        choices = response.get("choices", [])
+        result_prompt_logprobs: Optional[List[Optional[float]]] = None
+        result_topk_prompt_logprobs: Optional[List[Optional[List[Tuple[int, float]]]]] = None
+        if prompt_logprobs is not None:
+            # All `n` choices share one prompt, so vLLM repeats the same prompt
+            # logprobs on each choice; read them off the first.
+            result_prompt_logprobs, result_topk_prompt_logprobs = convert_vllm_prompt_logprobs(
+                token_ids,
+                choices[0].get("prompt_logprobs") if choices else None,
+                topk=prompt_logprobs,
+            )
+
         sequences = []
-        for choice in response.get("choices", []):
+        for choice in choices:
             lp = choice.get("logprobs") or {}
             sequences.append(
                 {
@@ -809,8 +824,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return {
             "type": "sample",
             "sequences": sequences,
-            "prompt_logprobs": None,
-            "topk_prompt_logprobs": None,
+            "prompt_logprobs": result_prompt_logprobs,
+            "topk_prompt_logprobs": result_topk_prompt_logprobs,
         }
 
     async def sample(
@@ -859,9 +874,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         # Rollout Routing Replay (R3): sample through /skyrl/v1/completions so
         # the server stashes each choice's routing for the trainer to pull by
-        # digest later; the response itself carries no routing. This branch does
-        # not populate prompt_logprobs (unused for R3) or multimodal features
-        # (R3 targets text MoE models).
+        # digest later; the response itself carries no routing. R3 targets text
+        # MoE models, so multimodal prompts are rejected.
         if stash_routed_experts:
             if mm_features is not None:
                 raise ValueError("R3 sampling (stash_routed_experts) does not support multimodal prompts")
@@ -871,6 +885,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 num_samples=num_samples,
                 tinker_params=tinker_params,
                 session_id=session_id,
+                prompt_logprobs=prompt_logprobs_sp,
             )
 
         # Map Tinker SamplingParams → vLLM format
