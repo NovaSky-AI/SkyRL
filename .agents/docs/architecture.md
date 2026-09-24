@@ -42,7 +42,7 @@ Training weights are synced to inference engines via:
 - **CUDA IPC strategy**: For colocated setups (`colocate_all=true`).
 - **Delta strategy**: Checkpoint deltas through a shared directory or object store, for
   non-colocated setups where the two sides are not NCCL-reachable. See
-  `.claude/docs/weight_sync.md`.
+  `.agents/docs/weight_sync.md`.
 
 ## Environments
 

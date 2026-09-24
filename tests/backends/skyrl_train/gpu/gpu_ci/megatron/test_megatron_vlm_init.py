@@ -174,10 +174,12 @@ async def test_megatron_vlm_forward(ray_init_fixture, worker_type, tp, pp, gpus_
 async def test_vlm_sft_hf_parity(ray_init_fixture):
     cfg = get_test_actor_config(model_name=MODEL_NAME)
     cfg.trainer.strategy = "megatron"
-    # fp32 + fused (non-flash) attention so the two forwards are numerically
-    # comparable; flash attention requires fp16/bf16.
+    # fp32 so the two forwards are numerically comparable. Neither flash nor cuDNN
+    # fused attention supports fp32, so pin TE's unfused backend explicitly;
+    # megatron-core asserts the NVTE_* env vars match the configured backend.
     cfg.trainer.bf16 = False
     cfg.trainer.flash_attn = False
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["attention_backend"] = "unfused"
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1

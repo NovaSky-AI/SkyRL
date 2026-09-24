@@ -45,6 +45,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     get_kl_controller,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -58,7 +59,7 @@ from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
-from skyrl.train.evaluate import evaluate, evaluate_step_wise
+from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -244,29 +245,16 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
-        if self.cfg.generator.step_wise_trajectories:
-            eval_metrics = await evaluate_step_wise(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_logger=self.trajectory_logger,
-                tracker=self.tracker,
-                vllm_metrics_scraper=vllm_metrics_scraper,
-            )
-        else:
-            eval_metrics = await evaluate(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_logger=self.trajectory_logger,
-                tracker=self.tracker,
-                vllm_metrics_scraper=vllm_metrics_scraper,
-            )
-        return eval_metrics
+        return await evaluate(
+            eval_dataloader=self.eval_dataloader,
+            generator=self.generator,
+            cfg=self.cfg,
+            global_step=self.global_step,
+            tokenizer=self.tokenizer,
+            trajectory_logger=self.trajectory_logger,
+            tracker=self.tracker,
+            vllm_metrics_scraper=vllm_metrics_scraper,
+        )
 
     async def train(self):
         """
@@ -890,6 +878,7 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
         rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
+        rollout_sample_support = generator_output.get("rollout_sample_support", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -912,6 +901,7 @@ class RayPPOTrainer:
             loss_masks_tensor,
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
+            rollout_sample_support_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer.pad_token_id,
             prompt_ids,
@@ -920,6 +910,7 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
             rollout_expert_indices,
+            rollout_sample_support,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
         router_padding_mask = None
@@ -950,6 +941,7 @@ class RayPPOTrainer:
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
                 "router_padding_mask": router_padding_mask,
+                SAMPLE_SUPPORT_FIELD: rollout_sample_support_tensor,
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             },
@@ -1345,6 +1337,9 @@ class RayPPOTrainer:
             fwd_keys.append("rollout_expert_indices")
         if training_input.get("router_padding_mask") is not None:
             fwd_keys.append("router_padding_mask")
+        if training_input.get(SAMPLE_SUPPORT_FIELD) is not None:
+            # The scorer validates that captured support backs every loss-active target.
+            fwd_keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:

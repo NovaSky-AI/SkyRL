@@ -14,7 +14,7 @@ FSDP/Megatron only -- it holds a plain HF model on one GPU, which
    against ``skyrl_ipc``, and the ``nccl`` + ``colocate_all`` -> ``ipc``
    resolution.
 3. Non-colocated sharded RDT (NIXL pull), TP=1. Covers
-   ``ShardedRDTTrainerWeightTransferEngine``, the ownership-aware source, and the
+   ``SkyRLShardedRDTTrainerWeightTransferEngine``, the ownership-aware source, and the
    ``replica_rank`` rewrite in ``rdt_init_payloads``.
 
 Run:

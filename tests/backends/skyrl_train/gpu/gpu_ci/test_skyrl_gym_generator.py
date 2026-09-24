@@ -5,6 +5,7 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 import os
 from typing import Any, Dict
 
+import numpy as np
 import pytest
 from loguru import logger
 from transformers import AutoTokenizer
@@ -25,6 +26,7 @@ from tests.backends.skyrl_train.gpu.utils import (
 )
 
 OBSERVATION_PROMPT = "give me another solution"
+SAMPLE_SUPPORT_TOP_K = 4
 
 
 def get_test_config(
@@ -39,6 +41,7 @@ def get_test_config(
     temperature,
     get_logprobs,
     enable_return_routed_experts,
+    enable_return_sample_support_set=False,
 ):
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
@@ -46,6 +49,8 @@ def get_test_config(
         max_generate_length=max_generate_length,
         logprobs=1 if get_logprobs else None,
         temperature=temperature,
+        top_p=0.95 if enable_return_sample_support_set else 1.0,
+        top_k=SAMPLE_SUPPORT_TOP_K if enable_return_sample_support_set else -1,
     )
     cfg.generator.append_eos_token_after_stop_str_in_multi_turn = True
     cfg.generator.max_input_length = max_input_length
@@ -57,6 +62,7 @@ def get_test_config(
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.step_wise_trajectories = is_step_wise
     cfg.generator.inference_engine.enable_return_routed_experts = enable_return_routed_experts
+    cfg.generator.inference_engine.enable_return_sample_support_set = enable_return_sample_support_set
     cfg.environment.skyrl_gym.search.log_requests = True
     cfg.environment.skyrl_gym.search.search_url = "http://127.0.0.1:8000/retrieve"
     cfg.environment.skyrl_gym.max_env_workers = max_env_workers
@@ -122,6 +128,7 @@ async def run_generator_end_to_end(
     temperature=1.0,
     get_logprobs: bool = False,
     enable_return_routed_experts: bool = False,
+    enable_return_sample_support_set: bool = False,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -141,6 +148,7 @@ async def run_generator_end_to_end(
         temperature,
         get_logprobs,
         enable_return_routed_experts,
+        enable_return_sample_support_set,
     )
 
     # Use InferenceEngineState to launch and clean up local inference servers.
@@ -181,8 +189,8 @@ async def run_generator_end_to_end(
             "vllm",
             SamplingParams(
                 temperature=1.0,
-                top_p=1.0,
-                top_k=-1,
+                top_p=0.95 if enable_return_sample_support_set else 1.0,
+                top_k=SAMPLE_SUPPORT_TOP_K if enable_return_sample_support_set else -1,
                 max_generate_length=max_generate_length,
                 min_p=0.0,
                 logprobs=1 if get_logprobs else None,
@@ -504,3 +512,53 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
     assert len(rollout_expert_indices[0]) < max_input_length
     assert len(rollout_expert_indices[0][0]) == 16  # 16 layers in OLMoE-1B-7B-0924
     assert len(rollout_expert_indices[0][0][0]) == 8  # 8 topk for each layer
+
+
+@pytest.mark.asyncio
+async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
+    """Capture top-p/top-k support through the multi-turn agent-loop trace."""
+    num_prompts = 5
+    n_samples_per_prompt = 2
+    generator_output: GeneratorOutput = await run_generator_end_to_end(
+        batched=False,
+        n_samples_per_prompt=n_samples_per_prompt,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_prompt_length=2048,
+        max_input_length=4096,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
+        env_class="gsm8k_multi_turn",
+        num_prompts=num_prompts,
+        max_turns=2,
+        use_conversation_multi_turn=True,
+        max_env_workers=0,
+        is_step_wise=False,
+        temperature=1.0,
+        enable_return_sample_support_set=True,
+    )
+
+    rollout_sample_support = generator_output["rollout_sample_support"]
+    assert rollout_sample_support is not None
+    assert len(rollout_sample_support) == num_prompts * n_samples_per_prompt
+
+    for response_ids, loss_mask, support_rows in zip(
+        generator_output["response_ids"],
+        generator_output["loss_masks"],
+        rollout_sample_support,
+    ):
+        assert len(support_rows) == len(response_ids) == len(loss_mask)
+        for token_id, is_loss_active, support_row in zip(response_ids, loss_mask, support_rows):
+            support_row = np.asarray(support_row).tolist()
+            assert len(support_row) == SAMPLE_SUPPORT_TOP_K
+            assert all(candidate_id >= -1 for candidate_id in support_row)
+            first_padding = next(
+                (index for index, candidate_id in enumerate(support_row) if candidate_id == -1),
+                len(support_row),
+            )
+            assert all(candidate_id == -1 for candidate_id in support_row[first_padding:])
+            if is_loss_active:
+                assert token_id in support_row
+            else:
+                assert support_row == [-1] * SAMPLE_SUPPORT_TOP_K

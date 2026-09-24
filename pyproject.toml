@@ -10,7 +10,7 @@ name = "skyrl"
 dynamic = ["version"]
 description = "Unified API for training and inference"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"
 dependencies = [
     "datasets>=4.0.0",
     "pillow>=11.3.0",
@@ -34,11 +34,12 @@ gpu = [
 ]
 
 tpu = [
-    "jax[tpu]>=0.7.2; sys_platform == 'linux'",
+    # libtpu is published for Linux x86_64, not Linux aarch64.
+    "jax[tpu]>=0.7.2; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 tinker = [
-    "tinker>=0.3.0,<=0.24.1",
+    "tinker>=0.25.0,<0.26.0",
     "fastapi[standard]",
     "sqlmodel",
     "sqlalchemy[asyncio]",
@@ -80,7 +81,7 @@ skyrl-train = [
     "ninja",
     "tensorboard",
     "func_timeout",
-    "hydra-core==1.3.2",
+    "hydra-core==1.3.4",
     "accelerate",
     "torchdata",
     "omegaconf",
@@ -115,7 +116,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.28.0; sys_platform == 'linux'",
+    "vllm==0.30.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -127,9 +128,9 @@ fsdp = [
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -151,7 +152,7 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
-    "vllm==0.28.0; sys_platform == 'linux'",
+    "vllm==0.30.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -160,12 +161,13 @@ megatron = [
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-resiliency-ext; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
@@ -211,8 +213,9 @@ harbor = [
 # Mooncake distributed KV for vLLM: the store connector (MooncakeStoreConnector,
 # KV-cache offloading) and P2P PD transfer (MooncakeConnector). Provides the python
 # bindings and the `mooncake_master` binary. Off-the-shelf PyPI wheel; Linux-only.
+# Mooncake currently has Linux wheels through CPython 3.13 only.
 mooncake = [
-    "mooncake-transfer-engine-cuda13; sys_platform == 'linux'",
+    "mooncake-transfer-engine-cuda13; sys_platform == 'linux' and python_version < '3.14'",
 ]
 
 dev = [
@@ -248,9 +251,11 @@ version = {attr = "skyrl.__version__"}
 # The following is for supporting the skyrl-train dependency
 
 [tool.uv]
-# Resolve for both Linux (production) and macOS (dev)
+# Resolve only the Linux architectures covered by the CUDA wheels, plus the
+# supported macOS development target. CUDA-only extras cannot resolve on other
+# Linux architectures.
 required-environments = [
-    "sys_platform == 'linux'",
+    "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
@@ -276,7 +281,6 @@ no-build-isolation-package = [
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
 # unpinned dependencies.
 override-dependencies = [
-    "nvidia-resiliency-ext; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.16.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.16.1; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
@@ -285,7 +289,7 @@ override-dependencies = [
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
     # Megatron-Bridge pins flashinfer-python==0.6.8.post1, which conflicts with
-    # our pin, so all three flashinfer packages are held here. vLLM 0.28.0 needs
+    # our pin, so all three flashinfer packages are held here. vLLM 0.30.0 needs
     # >=0.6.16: it imports `flashinfer.autotuner.set_autotune_process_group`,
     # which 0.6.14 does not have, and the engine fails to start without it.
     # flashinfer hard-errors when an installed cubin's version differs from its
@@ -297,11 +301,11 @@ override-dependencies = [
     # flashinfer-cubin is not published to PyPI past 0.6.13, so it (like
     # flashinfer-jit-cache) comes from flashinfer's own index -- see the
     # `flashinfer` index and [tool.uv.sources] below.
-    "flashinfer-python==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.16.post3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
-    # vLLM 0.28.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
+    # vLLM 0.30.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
     # overridden here; these two MUST be bumped together.
     #
     # FA4 requires apache-tvm-ffi>=0.1.12, newer than either package's metadata
@@ -316,15 +320,15 @@ override-dependencies = [
     # 0.1.13 is the first tilelang whose bound (`>=0.1.11,<0.1.13`) admits 0.1.12.
     "tilelang==0.1.13; sys_platform == 'linux'",
     "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
-    "nvidia-cutlass-dsl[cu13]==4.6.2; sys_platform == 'linux'",
-    "quack-kernels[cu13]==0.6.4; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl[cu13]==4.7.1; sys_platform == 'linux'",
+    "quack-kernels[cu13]==0.6.5; sys_platform == 'linux'",
     # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
     # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
     # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
     "xgrammar==0.2.3",
     "torch==2.13.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
-    # torch: 0.28.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.28.0 pulls
+    # torch: 0.30.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.30.0 pulls
     # torchvision==0.28.0, so without this the torch override above would resolve
     # a torchvision that cannot import against the torch we actually install.
     "torchvision==0.28.0; sys_platform == 'linux'",
@@ -337,6 +341,10 @@ fast-hadamard-transform = ["torch==2.13.0", "ninja"]
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 fast-hadamard-transform = { FAST_HADAMARD_TRANSFORM_FORCE_BUILD = "TRUE"}
+# SkyRL only uses NVRx's async checkpointing. Its CUPTI straggler-detection extension
+# only adds CUPTI's include dir and fails with `cuda.h: No such file or directory` unless
+# the toolkit's headers are on the default include path, so skip building it.
+nvidia-resiliency-ext = { STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD = "1" }
 
 
 [[tool.uv.index]]
@@ -481,17 +489,15 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
-# megatron-bridge main branch: latest as of 9/8/26
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "8e5f0e13b7dff8a951c6676e2f7b4a1853a34845", marker = "sys_platform == 'linux'"}
+# NVRx 0.6 wheels require glibc 2.39; its supported source build also works on Ubuntu 22.04.
+nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
+# Megatron-Bridge upstream snapshot, with the matching Core revision below.
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0", marker = "sys_platform == 'linux'"}
 # megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
-# `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`. This one is on the Megatron-LM
-# main branch (https://github.com/NVIDIA/Megatron-LM/tree/main), dated 9/7/26. Megatron-LM main
-# is 3 commits ahead of it at the time of this bump; the extra commits rework
-# `experimental_attention_variant/dsa.py` (NVIDIA/Megatron-LM#6402), which the GLM 5 sparse
-# attention path builds on, so this stays on the rev Bridge validates rather than main's tip.
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "b3393bbb0b223223ee3f8becf95f408d231d0036", marker = "sys_platform == 'linux'"}
+# `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`.
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "d476c21be396dc666d2e04fa8c199c3851a1551f", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },

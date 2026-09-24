@@ -56,13 +56,14 @@ class TestTrainerFactory:
             register_trainer_engines,
         )
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
-            ShardedRDTTrainerWeightTransferEngine,
+            SkyRLShardedRDTTrainerWeightTransferEngine,
         )
 
         register_trainer_engines()
         registry = WeightTransferTrainerFactory._registry
         assert _resolve(registry, "delta") is DeltaTrainerWeightTransferEngine
-        assert _resolve(registry, "sharded_rdt") is ShardedRDTTrainerWeightTransferEngine
+        rdt_engine = _resolve(registry, "sharded_rdt")
+        assert rdt_engine is SkyRLShardedRDTTrainerWeightTransferEngine
 
     def test_vllms_own_engines_are_still_there(self):
         """SkyRL registers alongside vLLM's, never over them."""
@@ -87,7 +88,7 @@ class TestReceiveFactory:
             DeltaWeightTransferEngine,
         )
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
-            ShardedRDTWeightTransferEngine,
+            SkyRLShardedRDTWeightTransferEngine,
         )
         from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
             get_skyrl_ipc_engine,
@@ -99,7 +100,7 @@ class TestReceiveFactory:
         assert _resolve(registry, "skyrl_nccl") is get_skyrl_nccl_engine()
         assert _resolve(registry, "skyrl_ipc") is get_skyrl_ipc_engine()
         assert _resolve(registry, "delta") is DeltaWeightTransferEngine
-        assert _resolve(registry, "sharded_rdt") is ShardedRDTWeightTransferEngine
+        assert _resolve(registry, "sharded_rdt") is SkyRLShardedRDTWeightTransferEngine
 
     def test_skyrl_nccl_and_ipc_subclass_vllms_engines(self):
         """The new names exist because ``register_engine`` refuses a duplicate,
@@ -153,20 +154,16 @@ def test_weight_transfer_config_accepts_the_skyrl_backends():
         assert WeightTransferConfig(backend=name).backend == name
 
 
-def test_the_per_engine_registration_helpers_stand_alone():
-    """``register_delta_weight_transfer_engine`` / ``register_rdt_weight_transfer_engine``
-    are callable on their own, not only through ``register_receive_engines``."""
+def test_delta_registration_helper_stands_alone():
+    """The SkyRL delta registration helper works outside the bulk registration."""
     from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 
     from skyrl.backends.skyrl_train.weight_sync.register import (
         register_delta_weight_transfer_engine,
-        register_rdt_weight_transfer_engine,
     )
 
     register_delta_weight_transfer_engine()
-    register_rdt_weight_transfer_engine()
-    for name in ("delta", "sharded_rdt"):
-        assert _resolve(WeightTransferEngineFactory._registry, name) is not None
+    assert _resolve(WeightTransferEngineFactory._registry, "delta") is not None
 
 
 def test_registration_is_idempotent():

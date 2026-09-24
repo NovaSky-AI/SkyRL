@@ -1,12 +1,12 @@
-name: Tinker-SkyRL-Train-Backend-GPU
+name: Tinker-SkyRL-Backend-GPU
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'ci/anyscale_tinker_skyrl_train_backend_gpu.yaml'
-      - 'ci/gpu_ci_run_tinker_skyrl_train_backend.sh'
+      - 'ci/anyscale_tinker_skyrl_backend_gpu.yaml'
+      - 'ci/gpu_ci_run_tinker_skyrl_backend.sh'
       - 'skyrl/backends/skyrl_train/workers/megatron/**'
       - 'skyrl/backends/skyrl_train/workers/worker_dispatch.py'
       - 'skyrl/backends/skyrl_train_backend.py'
@@ -15,7 +15,7 @@ on:
       - 'pyproject.toml'
       - '!docs/**'
       - '!examples/**'
-      - '.github/workflows/tinker_skyrl_train_backend_gpu.yaml'
+      - '.github/workflows/tinker_skyrl_backend_gpu.yaml'
   pull_request_target:
     types: [labeled]
   workflow_dispatch:
@@ -27,7 +27,7 @@ permissions:
 
 jobs:
 
-  tinker_skyrl_train_backend_gpu_tests:
+  tinker_skyrl_backend_gpu_tests:
     # Gate on the label that fired this event. `types: [labeled]` delivers one event
     # per label added, and `contains(...labels.*.name, ...)` tests the whole label
     # set, so labelling in bulk launched one identical GPU run per label.
@@ -40,7 +40,7 @@ jobs:
         (
           github.event_name == 'pull_request_target' &&
           !github.event.pull_request.draft &&
-          github.event.label.name == 'run_tinker_skyrl_train_backend_gpu_ci'
+          github.event.label.name == 'run_tinker_skyrl_backend_gpu_ci'
         )
       )
     runs-on: ubuntu-latest
@@ -77,11 +77,11 @@ jobs:
           ANYSCALE_HOST: https://console.anyscale.com
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          envsubst < ci/anyscale_tinker_skyrl_train_backend_gpu.yaml > ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml
+          envsubst < ci/anyscale_tinker_skyrl_backend_gpu.yaml > ci/anyscale_tinker_skyrl_backend_gpu_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="tinker-skyrl-train-backend-gpu-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
-          bash ci/submit_anyscale_job.sh ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml "$JOB_NAME" 5000
-          rm -f ci/anyscale_tinker_skyrl_train_backend_gpu_envsubst.yaml
+          JOB_NAME="tinker-skyrl-backend-gpu-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          bash ci/submit_anyscale_job.sh ci/anyscale_tinker_skyrl_backend_gpu_envsubst.yaml "$JOB_NAME" 5000
+          rm -f ci/anyscale_tinker_skyrl_backend_gpu_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
       # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
       - name: Terminate Anyscale jobs on cancellation
