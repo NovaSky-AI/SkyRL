@@ -28,12 +28,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument(
+        "--record-dir",
+        default=None,
+        help="where ended trajectories are written; without it they stay in memory (development only)",
+    )
+    serve.add_argument(
+        "--ttl",
+        type=float,
+        default=3600.0,
+        help="seconds an open trajectory may be idle before it is written as abandoned (default: %(default)s)",
+    )
     return parser
 
 
 def build_server(args: argparse.Namespace) -> CaptureServer:
     backend = TextBackend(args.upstream_url, api_key=os.environ.get(args.upstream_api_key_env))
-    return CaptureServer(backend)
+    return CaptureServer(backend, record_dir=args.record_dir, ttl=args.ttl)
 
 
 def main(argv: list[str] | None = None) -> int:

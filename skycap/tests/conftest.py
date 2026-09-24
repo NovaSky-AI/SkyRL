@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -62,15 +64,30 @@ async def _close_openai_clients() -> AsyncIterator[None]:
         await _openai_clients.pop().close()
 
 
-@pytest.fixture
-async def stack() -> AsyncIterator[Stack]:
+@asynccontextmanager
+async def running_stack(**server_options: Any) -> AsyncIterator[Stack]:
+    """A mock upstream and a capture server in front of it, both on real sockets."""
     upstream = MockOpenAI()
     upstream_server = TestServer(upstream.app())
     await upstream_server.start_server()
-    server = CaptureServer(TextBackend(str(upstream_server.make_url("/v1")), api_key=API_KEY))
+    server = CaptureServer(TextBackend(str(upstream_server.make_url("/v1")), api_key=API_KEY), **server_options)
     capture_server = TestServer(server.app())
     await capture_server.start_server()
-    async with aiohttp.ClientSession() as http:
-        yield Stack(upstream, server, str(capture_server.make_url("")).rstrip("/"), http)
-    await capture_server.close()
-    await upstream_server.close()
+    try:
+        async with aiohttp.ClientSession() as http:
+            yield Stack(upstream, server, str(capture_server.make_url("")).rstrip("/"), http)
+    finally:
+        await capture_server.close()
+        await upstream_server.close()
+
+
+@pytest.fixture
+async def stack() -> AsyncIterator[Stack]:
+    async with running_stack() as running:
+        yield running
+
+
+@pytest.fixture
+async def recorded_stack(tmp_path: Path) -> AsyncIterator[Stack]:
+    async with running_stack(record_dir=tmp_path / "record") as running:
+        yield running

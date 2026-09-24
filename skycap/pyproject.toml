@@ -8,7 +8,9 @@ license = "Apache-2.0"
 authors = [{ name = "NovaSkyAI AI Team" }]
 dependencies = [
     "aiohttp>=3.9",
+    "numpy>=1.24",
     "orjson>=3.10",
+    "zstandard>=0.22",
 ]
 
 [project.scripts]
