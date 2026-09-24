@@ -9,7 +9,7 @@ The example requires [Megatron-Bridge #6201](https://github.com/NVIDIA-NeMo/Mega
 the Bridge/Core dependency update in [SkyRL #2284](https://github.com/NovaSky-AI/SkyRL/pull/2284),
 and [native quantized-export dtype preservation](https://github.com/NovaSky-AI/SkyRL/pull/2282).
 The dependency update pins the official CUDA 13 vLLM nightly at
-[`9b2f34ca`](https://github.com/vllm-project/vllm/commit/9b2f34cad446f73b1699e8236ec0b611a65f48af),
+[`8644d2af`](https://github.com/vllm-project/vllm/commit/8644d2af2fb7c4588190a8d7f6c26a3cbef78a0f),
 which includes fused-QKV sharding and BF16-router support. No serving source
 patches are needed. This is a configuration example; full-model execution and
 trainer/sampler parity are not yet validated.
