@@ -36,6 +36,7 @@ The decompressed document is a UTF-8 JSON object:
 | `created_at`, `finished_at` | float or null | Unix seconds |
 | `tools` | object | tool-set hash → the tool list, as sent |
 | `failures` | array | calls that produced no node: `{t, status, error, input_leaf}` |
+| `retries` | object | SDK retries answered from the original call: `{replayed, coalesced}` counts |
 | `nodes` | array | the graph, in creation order (below) |
 | `sidecars` | object | kind → sidecar manifest (below). Empty in text mode |
 

@@ -215,6 +215,9 @@ def load(record_dir: Path, trajectory_id: str) -> Trajectory:
         finished_at=document["finished_at"],
         ended=document["ended"],
     )
+    retries = document.get("retries") or {}
+    trajectory.replay.replayed = retries.get("replayed", 0)
+    trajectory.replay.coalesced = retries.get("coalesced", 0)
     graph = trajectory.graph
     graph.tools.update(document["tools"])
     for entry in document["nodes"]:

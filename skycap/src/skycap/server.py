@@ -29,7 +29,7 @@ from typing import Any, Protocol
 import orjson
 from aiohttp import web
 
-from skycap import record
+from skycap import record, retry
 from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
 from skycap.samples import build_samples
 from skycap.trajectory import Status, Trajectory, new_trajectory_id
@@ -265,10 +265,53 @@ class CaptureServer:
                 chat = parse_request(orjson.loads(raw))
             except (orjson.JSONDecodeError, RequestError) as error:
                 return _openai_error(str(error), 400)
-            return await self.backend.chat(trajectory, request, chat, raw)
+            return await self._call(trajectory, request, chat, raw)
         finally:
             trajectory.inflight.discard(task)
             trajectory.touch()
+
+    async def _call(
+        self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
+    ) -> web.StreamResponse:
+        """One call, or the replay of the call it retries (see ``skycap.retry``)."""
+        cache = trajectory.replay
+        digest = retry.body_digest(raw)
+        explicit = request.headers.get(retry.IDEMPOTENCY_KEY_HEADER)
+        key = f"key:{explicit}" if explicit else f"body:{digest}"
+        previous = cache.get(key) if explicit or retry.is_retry(request.headers) else None
+        if previous is not None:
+            if previous.digest != digest:
+                return _openai_error("Idempotency-Key was reused with a different request", 400)
+            if not previous.future.done():
+                cache.coalesced += 1
+            reply = await asyncio.shield(previous.future)
+            if reply is not None:
+                cache.replayed += 1
+                return web.Response(body=reply.body, status=reply.status, headers=reply.headers)
+        entry = cache.start(key, digest)
+        # The call runs in its own task, so a client that disconnects (an SDK
+        # timing out, about to retry) doesn't cancel it: it finishes and leaves
+        # its reply for the retry. `finish` still cancels it, as in-flight work.
+        work = asyncio.ensure_future(self.backend.chat(trajectory, request, chat, raw))
+        trajectory.inflight.add(work)
+
+        def settle(task: asyncio.Future[web.StreamResponse]) -> None:
+            trajectory.inflight.discard(task)  # type: ignore[arg-type]
+            cache.complete(key, entry, _replayable(task))
+
+        work.add_done_callback(settle)
+        return await asyncio.shield(work)
+
+
+def _replayable(task: asyncio.Future[web.StreamResponse]) -> retry.Replay | None:
+    """The finished call's reply, if a retry may be answered with it."""
+    if task.cancelled() or task.exception() is not None:
+        return None
+    response = task.result()
+    if type(response) is not web.Response or response.status != 200 or not isinstance(response.body, bytes):
+        return None
+    headers = {k: v for k, v in response.headers.items() if k.lower() not in {"content-length", "date", "server"}}
+    return retry.Replay(body=response.body, status=response.status, headers=headers)
 
 
 def _changes(current: dict[str, Any], update: dict[str, Any] | None) -> bool:

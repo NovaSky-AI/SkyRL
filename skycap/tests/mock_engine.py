@@ -11,6 +11,7 @@ Each sampled token's support is ``[token, token + 1]``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 from typing import Any
@@ -37,6 +38,8 @@ class MockEngine:
         self.released: list[str] = []
         #: Return routed experts that cover the wrong number of positions.
         self.bad_routing = False
+        #: Seconds to wait before answering.
+        self.delay = 0.0
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=1024**3)
@@ -60,6 +63,7 @@ class MockEngine:
 
     async def vllm(self, request: web.Request) -> web.Response:
         body = await request.json()
+        await asyncio.sleep(self.delay)
         self.requests.append(body)
         self.headers.append(dict(request.headers))
         generated = self._generate(body)
