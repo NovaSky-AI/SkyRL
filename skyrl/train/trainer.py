@@ -45,7 +45,10 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     get_kl_controller,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_PADDING,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -983,12 +986,26 @@ class RayPPOTrainer:
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
         logger.info(f"batch_num_seq: {batch_num_seq}, batch_padded_seq_len: {batch_padded_seq_len}")
-        self.all_metrics.update(
-            {
-                "generate/batch_num_seq": batch_num_seq,
-                "generate/batch_padded_seq_len": batch_padded_seq_len,
-            }
-        )
+        batch_metrics = {
+            "generate/batch_num_seq": batch_num_seq,
+            "generate/batch_padded_seq_len": batch_padded_seq_len,
+        }
+        # Add metrics for sample support replay if enabled
+        if rollout_sample_support_tensor is not None:
+            sample_support = rollout_sample_support_tensor.values
+            valid_per_token = (sample_support != SAMPLE_SUPPORT_PADDING).sum(dim=1)
+            valid_per_token = valid_per_token[valid_per_token > 0]
+            if valid_per_token.numel() > 0:
+                batch_metrics.update(
+                    {
+                        "generate/sample_support_size_mean": valid_per_token.float().mean().item(),
+                        "generate/sample_support_full_fraction": (valid_per_token == sample_support.shape[1])
+                        .float()
+                        .mean()
+                        .item(),
+                    }
+                )
+        self.all_metrics.update(batch_metrics)
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
