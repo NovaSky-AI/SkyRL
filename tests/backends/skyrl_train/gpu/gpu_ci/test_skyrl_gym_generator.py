@@ -5,6 +5,7 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 import os
 from typing import Any, Dict
 
+import numpy as np
 import pytest
 from loguru import logger
 from transformers import AutoTokenizer
@@ -549,6 +550,7 @@ async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
     ):
         assert len(support_rows) == len(response_ids) == len(loss_mask)
         for token_id, is_loss_active, support_row in zip(response_ids, loss_mask, support_rows):
+            support_row = np.asarray(support_row).tolist()
             assert len(support_row) == SAMPLE_SUPPORT_TOP_K
             assert all(candidate_id >= -1 for candidate_id in support_row)
             first_padding = next(

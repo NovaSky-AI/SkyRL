@@ -15,14 +15,17 @@ from tqdm import tqdm
 from harbor.models.agent.rollout_detail import RolloutDetail
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
-from skyrl.backends.skyrl_train.inference_servers.base import ConversationType, InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_servers.base import (
+    ConversationType,
+    InferenceEngineInterface,
+)
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
     TrajectoryID,
 )
-from skyrl.train.generators.utils import get_rollout_metrics
+from skyrl.train.generators.utils import build_vllm_cache_salt, get_rollout_metrics
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 litellm.suppress_debug_info = True  # Suppress the "Provider List" output
@@ -300,8 +303,7 @@ class HarborGenerator(GeneratorInterface):
         weight_version = getattr(self.inference_engine_client, "weight_version", None)
         if weight_version is None:
             return None
-        version = f"{self._served_model_name}@" if self._served_model_name is not None else ""
-        return f"{version}{weight_version}"
+        return build_vllm_cache_salt(weight_version, self._served_model_name)
 
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         prompts = input_batch["prompts"]

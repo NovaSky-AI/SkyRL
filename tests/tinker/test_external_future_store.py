@@ -6,10 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+import tinker.types as sdk_types
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from starlette.requests import Request
+from tinker.proto.request_conv import forward_backward_request_to_proto
 
 from skyrl.tinker import api, types
 from skyrl.tinker.config import EngineConfig
@@ -42,6 +44,11 @@ def _sample_input(seq_id: int) -> types.SampleInput:
     )
 
 
+async def _still_connected() -> bool:
+    """Stand-in for ``Request.is_disconnected`` on a client that is still waiting."""
+    return False
+
+
 class _CompletingForwarder:
     def __init__(self, store: ExternalFutureStore):
         self.store = store
@@ -62,26 +69,25 @@ class _CompletingForwarder:
 
 
 def _forward_backward_request(seq_id: int, db_write_lock: asyncio.Lock) -> Request:
-    body = (
-        api.ForwardBackwardRequest(
+    """A forward_backward request encoded the way the tinker SDK sends it: protobuf."""
+    body = forward_backward_request_to_proto(
+        sdk_types.ForwardBackwardRequest(
             model_id="model_a",
             seq_id=seq_id,
-            forward_backward_input=api.ForwardBackwardInput(
+            forward_backward_input=sdk_types.ForwardBackwardInput(
                 data=[
-                    api.Datum(
-                        model_input=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[1, 2])]),
+                    sdk_types.Datum(
+                        model_input=sdk_types.ModelInput.from_ints([1, 2]),
                         loss_fn_inputs={
-                            "target_tokens": api.TensorData(data=[2, 3]),
-                            "weights": api.TensorData(data=[1.0, 1.0]),
+                            "target_tokens": sdk_types.TensorData(data=[2, 3], dtype="int64", shape=[2]),
+                            "weights": sdk_types.TensorData(data=[1.0, 1.0], dtype="float32", shape=[2]),
                         },
                     )
                 ],
                 loss_fn="cross_entropy",
             ),
         )
-        .model_dump_json()
-        .encode()
-    )
+    ).SerializeToString()
     body_sent = False
 
     async def receive():
@@ -97,7 +103,7 @@ def _forward_backward_request(seq_id: int, db_write_lock: asyncio.Lock) -> Reque
             "type": "http",
             "method": "POST",
             "path": "/api/v1/forward_backward",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [(b"content-type", api.PROTO_CONTENT_TYPE.encode())],
             "app": app,
         },
         receive,
@@ -137,9 +143,11 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
                 sampling_model_cache_lock=asyncio.Lock(),
                 validated_sampler_checkpoints=set(),
                 sampler_checkpoint_validation_lock=asyncio.Lock(),
+                proto_serialization_lock=asyncio.Lock(),
             )
         ),
         headers={},
+        is_disconnected=_still_connected,
     )
 
     async with AsyncSession(engine) as session:
@@ -182,7 +190,10 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
     future_poller = asyncio.create_task(
         api.poll_futures(engine, sample_request.app.state.future_waiters, poll_interval_sec=0.001)
     )
-    expected_sample = types.SampleOutput(sequences=[]).model_dump_json().encode()
+    # Sample results are always served in proto wire format.
+    expected_sample = api._serialize_proto_result(
+        types.RequestType.SAMPLE, types.SampleOutput(sequences=[]).model_dump_json()
+    )
     try:
         request_ids = []
         for wave in range(4):
@@ -294,6 +305,7 @@ async def test_retrieve_future_bounds_protobuf_serialization_off_event_loop(monk
             )
         ),
         headers={"accept": api.PROTO_CONTENT_TYPE},
+        is_disconnected=_still_connected,
     )
 
     responses = await asyncio.gather(
@@ -643,6 +655,7 @@ async def test_retrieve_future_serializes_in_memory_result_as_proto(future_store
             )
         ),
         headers={"accept": "application/x-protobuf, application/json"},
+        is_disconnected=_still_connected,
     )
     response = await api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_id)), request)
 

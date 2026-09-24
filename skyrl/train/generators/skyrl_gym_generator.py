@@ -46,6 +46,7 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import (
     apply_overlong_filtering,
+    build_vllm_cache_salt,
     get_custom_chat_template,
     get_generation_prompt_ids,
     get_rollout_metrics,
@@ -333,8 +334,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         weight_version = getattr(self.inference_engine_client, "weight_version", None)
         if weight_version is None:
             return None
-        version = f"{self.policy_model_name}@" if self.policy_model_name is not None else ""
-        return f"{version}{weight_version}"
+        return build_vllm_cache_salt(weight_version, self.policy_model_name)
 
     async def agent_loop(
         self,

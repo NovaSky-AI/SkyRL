@@ -5,7 +5,10 @@ from typing import Any, Callable, Dict, List, Optional
 import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
-from megatron.core.distributed import finalize_model_grads
+from megatron.bridge.peft.utils import (
+    enable_expert_parallel_grad_sync_in_finalize,
+    finalize_model_grads_with_expert_adapter_sync,
+)
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
@@ -237,6 +240,10 @@ class MegatronModelWrapper:
         # parallelism dimensions -- but deferred to optim_step rather than run per
         # forward_backward. See `_defer_finalize_model_grads`.
         config.finalize_model_grads_func = self._defer_finalize_model_grads
+        # Shared expert LoRA weights are replicated across EP; `run_pending_grad_sync`
+        # sums their grads over EP once per step, so drop Bridge's per-microbatch
+        # fallback hooks (which also miss grads under gradient_accumulation_fusion).
+        enable_expert_parallel_grad_sync_in_finalize(self.actor_module)
         # Wire up the optimizer's loss scaler so Megatron's pipeline schedule can scale
         # the loss before backward (critical for fp16 dynamic loss scaling, MoE aux loss
         # scaling, and any explicit loss_scale configuration).
@@ -277,7 +284,7 @@ class MegatronModelWrapper:
         """
         pending = self._pending_grad_sync
         self._pending_grad_sync = None
-        finalize_model_grads(self.actor_module, pending["num_tokens"] if pending else None)
+        finalize_model_grads_with_expert_adapter_sync(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
         [module.train() for module in self.actor_module]

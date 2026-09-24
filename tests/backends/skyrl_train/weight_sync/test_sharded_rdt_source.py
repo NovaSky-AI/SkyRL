@@ -292,9 +292,9 @@ class TestExpertNameResolution:
     which is what lets this be a CPU test.
     """
 
+    @pytest.mark.megatron
     @pytest.mark.parametrize("projection", ["fc1", "fc2"])
     def test_lora_expert_template_resolves_in_qwen_registry(self, projection):
-        pytest.importorskip("megatron.bridge", reason="needs the megatron extra")
         from megatron.bridge.models.qwen.qwen3_moe_bridge import Qwen3MoEBridge
 
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
@@ -329,6 +329,7 @@ class TestExpertNameResolution:
         t = S._mg_expert_template("language_model.decoder.layers.3.mlp.experts.linear_fc2.weight5")
         assert t.format(layer=0, e=2) == "language_model.decoder.layers.0.mlp.experts.linear_fc2.weight2"
 
+    @pytest.mark.megatron
     @pytest.mark.parametrize(
         "module,cls_hint,mg_prefix,hf_prefix",
         [
@@ -349,7 +350,6 @@ class TestExpertNameResolution:
         import importlib
         import inspect
 
-        pytest.importorskip("megatron.bridge", reason="needs the megatron extra")
         mod = importlib.import_module(module)
         bridge_cls = next(
             o for n, o in vars(mod).items() if inspect.isclass(o) and cls_hint in n and o.__module__ == mod.__name__

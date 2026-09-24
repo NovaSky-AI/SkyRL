@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.megatron
+
 
 def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
     """Build the minimal ``self.cfg`` view that ``save_weights_for_sampler``
