@@ -9,6 +9,7 @@ reply always finds that reply recorded.
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import aiohttp
 import orjson
@@ -33,6 +34,9 @@ class TextBackend:
         self.api_key = api_key
         self._session: aiohttp.ClientSession | None = None
 
+    def describe(self) -> dict[str, Any]:
+        return {"mode": "text"}
+
     async def start(self) -> None:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=30),
@@ -45,6 +49,9 @@ class TextBackend:
 
     async def release(self, trajectory: Trajectory) -> None:
         """Nothing is held upstream per trajectory in text mode."""
+
+    async def finalize(self, trajectory: Trajectory) -> None:
+        """Text mode records no tokens, so there is nothing to add before writing."""
 
     @property
     def session(self) -> aiohttp.ClientSession:

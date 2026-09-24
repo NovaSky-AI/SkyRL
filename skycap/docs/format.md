@@ -30,6 +30,7 @@ The decompressed document is a UTF-8 JSON object:
 | `id` | string | the trajectory id |
 | `status` | string | `finished`, `failed`, `abandoned` (idle past the TTL) or `open` (written at shutdown) |
 | `meta` | object | what the creator passed at create |
+| `capture` | object | how it was captured: `mode` (`text` or `tokens`), and for tokens the `engine`, `tokenizer`, `logprobs_mode` (`processed_logprobs` means logprobs are over the truncated, renormalized distribution) and any `sampling_overrides` |
 | `annotations` | object | what the creator passed at finish, e.g. `{"reward": 1.0}` |
 | `created_at`, `finished_at` | float or null | Unix seconds |
 | `tools` | object | tool-set hash → the tool list, as sent |

@@ -32,6 +32,8 @@ class Failure:
 class Trajectory:
     id: str
     meta: dict[str, Any] = field(default_factory=dict)
+    #: How this server captured it: mode, and for tokens the tokenizer and logprobs mode.
+    capture: dict[str, Any] = field(default_factory=dict)
     status: Status = "open"
     annotations: dict[str, Any] = field(default_factory=dict)
     graph: MessageGraph = field(default_factory=MessageGraph)
@@ -41,6 +43,9 @@ class Trajectory:
     last_active: float = field(default_factory=time.monotonic)
     #: Handlers serving this trajectory right now; sealing cancels them.
     inflight: set[asyncio.Task[Any]] = field(default_factory=set)
+    #: Set once the server has released and written it. Sealed is not ended:
+    #: a trajectory can fail mid-run and still be waiting for its ``finish``.
+    ended: bool = False
 
     @property
     def is_open(self) -> bool:
@@ -68,6 +73,7 @@ class Trajectory:
             "id": self.id,
             "status": self.status,
             "meta": self.meta,
+            "capture": self.capture,
             "annotations": self.annotations,
             "created_at": self.created_at,
             "finished_at": self.finished_at,

@@ -17,6 +17,7 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import numpy as np
 import orjson
 
 #: Request fields that shape the distribution a model node was sampled from.
@@ -69,3 +70,22 @@ def model_delta_hash(match: str, sampling: Mapping[str, Any] | None) -> str:
     the sample is trainable.
     """
     return digest(["model", match, sampling_key(sampling)])
+
+
+def _token_digest(token_ids: Sequence[int]) -> str:
+    return hashlib.blake2b(np.asarray(token_ids, dtype=np.int64).tobytes(), digest_size=16).hexdigest()
+
+
+def client_token_delta_hash(match: str, token_ids: Sequence[int]) -> str:
+    """A client node's identity in token mode: its match hash and its exact tokens.
+
+    Two identical messages that tokenized differently are two nodes, so a path's
+    tokens are always the tokens its nodes were committed with.
+    """
+    return digest(["client", match, _token_digest(token_ids)])
+
+
+def model_token_delta_hash(
+    match: str, sampling: Mapping[str, Any] | None, token_ids: Sequence[int], sampled_start: int
+) -> str:
+    return digest(["model", match, sampling_key(sampling), sampled_start, _token_digest(token_ids)])
