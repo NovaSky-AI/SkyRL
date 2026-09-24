@@ -237,7 +237,8 @@ def patch_packed_per_expert_sharded_state_dict():
     tensor without the required ``pg_collection`` kwarg, so dist-checkpoint
     saving with ``experts_shared_outer_loras=True`` raises ``TypeError``. This
     supplies the same MPU-backed collection the other grouped-expert adapters
-    resolve via ``_get_pg_collection``.
+    resolve via ``_get_pg_collection``. Remove once the upstream fix
+    (NVIDIA-NeMo/Megatron-Bridge#6184) is in the pinned rev.
     """
     try:
         from megatron.bridge.peft import utils as bridge_peft_utils
