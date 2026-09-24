@@ -119,6 +119,9 @@ class SkyRLLoraConfig(BaseConfig):
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
 
+    share_expert_adapters: bool = True
+    """Share one LoRA adapter across local grouped experts."""
+
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
     single GPU batch. Maps to vLLM's ``max_loras``. Increase past 1 to enable
@@ -139,7 +142,7 @@ class FakeInt4QatConfig(BaseConfig):
     BF16 masters, enabling this fake-quantizes the frozen expert GEMMs onto the
     same INT4 grid in the forward pass (straight-through backward), removing the
     train/infer weight mismatch. See
-    ``skyrl.backends.skyrl_train.workers.megatron.fake_int4_qat``.
+    ``skyrl.backends.skyrl_train.workers.megatron.quantization.fake_int4_qat``.
     """
 
     enabled: bool = False
@@ -252,6 +255,10 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    fp8_param_gather: bool = False
+    """Keep the DDP parameter all-gather in FP8.
+    Must be ``True`` when training with ``transformer_config_kwargs.fp8_param=true`` so persistent
+    FP8 params stay FP8 through the distributed-optimizer all-gather."""
     average_in_collective: bool = True
 
 
@@ -314,6 +321,10 @@ class TorchProfilerConfig(BaseConfig):
     """Passed to ``torch.profiler.profile``."""
     with_modules: bool = False
     """Passed to ``torch.profiler.profile``."""
+    use_gzip: bool = False
+    """Gzip chrome traces (``*.pt.trace.json.gz``). Traces are repetitive JSON and
+    compress several-fold, which matters most when they are uploaded to cloud storage.
+    The gzip runs inside ``on_trace_ready``, i.e. on the training thread."""
     export_type: str = "chrome_trace"
     """Either ``chrome_trace`` or ``stacks``.
     ``chrome_trace`` writes ``*.pt.trace.json``; ``stacks`` writes self-CUDA-time stacks and
@@ -415,6 +426,23 @@ class MegatronLoraConfig(BaseConfig):
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
     """Merge LoRA weights into the base weights during weight sync."""
+    normalize_moe_lora: bool = False
+    """When True, grouped MoE expert linears use ``rank // moe_router_topk`` as
+    their LoRA rank (non-expert layers keep the full rank), normalizing total
+    adapter capacity to be comparable to a dense model. Strongly recommended for
+    large expert counts with ``merge_lora=False``: the exported PEFT adapter
+    stores per-expert tensors, so at full rank a 384-expert model produces a
+    multi-GB adapter that is re-gathered, written, and re-read by every
+    inference engine on every weight sync.
+
+    Scaling contract: megatron-bridge applies ``alpha / dim`` per module with
+    the module's *effective* rank (``alpha / (rank // topk)`` on the experts),
+    whereas vLLM applies a single ``lora_alpha / r`` from ``adapter_config.json``
+    to every module and ignores ``rank_pattern``. The on-policy sync therefore
+    folds ``rank / effective_rank`` into the reduced-rank ``lora_B`` tensors
+    before writing them (``fold_lora_rank_scale_for_vllm``) so the sampled
+    policy matches the trained one. The synced adapter is a vLLM-layout
+    artifact, not a loadable HF PEFT checkpoint."""
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
@@ -495,13 +523,37 @@ class MegatronConfig(BaseConfig):
     https://docs.skyrl.ai/docs/examples/megatron for the accepted names and per-field checks.
     ``use_precision_aware_optimizer=True`` can cause checkpointing to fail
     (https://github.com/nvidia/megatron-lm/issues/1820); leaving it ``False`` is recommended."""
+    fp8: Optional[str] = None
+    """TransformerEngine FP8 compute format for linear-layer GEMMs, e.g. ``"e4m3"`` or
+    ``"hybrid"``. ``None`` (default) trains without FP8. Folded into
+    ``transformer_config_kwargs["fp8"]``; an explicit kwarg takes precedence."""
+    fp8_recipe: Optional[str] = None
+    """TransformerEngine FP8 scaling recipe. ``"auto"`` resolves to the architecture-native
+    recipe — ``blockwise``/FP32 scales on Hopper, native MXFP8 on Blackwell/SM100+ (where TE
+    also requires every weight dim to be divisible by 32). Folded into
+    ``transformer_config_kwargs["fp8_recipe"]``; an explicit kwarg takes precedence."""
+    fp8_param: Optional[bool] = None
+    """Store Megatron primary parameters in FP8 (E4M3). Supported with
+    ``fp8_recipe=blockwise`` + FP32 block scales only and requires
+    ``ddp_config.fp8_param_gather=true``. Folded into
+    ``transformer_config_kwargs["fp8_param"]``; an explicit kwarg takes precedence."""
+    fp8_amax_compute_algo: Optional[str] = None
+    """TransformerEngine amax history reduction, e.g. ``"most_recent"`` or ``"max"``. Folded
+    into ``transformer_config_kwargs["fp8_amax_compute_algo"]``; an explicit kwarg takes
+    precedence."""
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
     """Pass-through kwargs for Megatron's ``TransformerConfig``:
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py
     Also the place to put HuggingFace config overrides (e.g. ``rope_parameters``) for the Megatron
-    backend, where FSDP would use ``model_config_kwargs``."""
+    backend, where FSDP would use ``model_config_kwargs``.
+
+    FP8 training is configured through the top-level ``fp8``, ``fp8_recipe``, ``fp8_param``, and
+    ``fp8_amax_compute_algo`` fields above, which fold into these kwargs; setting the same keys
+    here directly overrides them. The block-scale env contract
+    (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
+    validated per architecture at startup and forwarded to all Ray actors."""
     empty_cuda_cache: Optional[bool] = True
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
     This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
@@ -564,6 +616,16 @@ class MegatronConfig(BaseConfig):
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
             self.transformer_config_kwargs = {}
+        # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly
+        # configured kwargs take precedence.
+        for key, value in (
+            ("fp8", self.fp8),
+            ("fp8_recipe", self.fp8_recipe),
+            ("fp8_param", self.fp8_param),
+            ("fp8_amax_compute_algo", self.fp8_amax_compute_algo),
+        ):
+            if value is not None:
+                self.transformer_config_kwargs.setdefault(key, value)
         for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
             self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
         if self.optimizer_config_kwargs is None:
@@ -636,8 +698,9 @@ class PolicyConfig(BaseConfig):
     Backend-specific behavior:
     - FSDP: initialize weights in bf16 instead of fp32 (skipping the fp32 master weights
       that mixed-precision training requires) and skip optimizer/LR-scheduler construction.
-    - Megatron: skip optimizer/LR-scheduler construction (DistributedOptimizer eagerly
-      materializes fp32 master + AdamW state on GPU)."""
+    - Megatron: skip the DDP wrap, whose ``_ParamAndGradBuffer`` holds a param and a
+      grad copy of the model, and skip optimizer/LR-scheduler construction
+      (DistributedOptimizer eagerly materializes fp32 master + AdamW state on GPU)."""
 
 
 @dataclass
@@ -918,6 +981,9 @@ class AlgorithmConfig(BaseConfig):
     Enabled Truncated Importance Sampling (TIS) as proposed in https://fengyao.notion.site/off-policy-rl."""
     off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     """See https://docs.skyrl.ai/docs/algorithms/off_policy_correction for a full guide."""
+    enable_sample_support_replay: bool = False
+    """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
+    ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1083,7 +1149,7 @@ class DeltaWeightSyncConfig(BaseConfig):
     """Number of worker threads for ``vllm_multi_thread_safetensors``."""
 
     def __post_init__(self) -> None:
-        from skyrl.backends.skyrl_train.weight_sync.delta_checkpoint import (
+        from skyrl.backends.skyrl_train.weight_sync.delta.checkpoint import (
             _default_local_checkpoint_dir,
             _default_publish_staging_dir,
         )
@@ -1094,6 +1160,13 @@ class DeltaWeightSyncConfig(BaseConfig):
             self.publish_staging_dir = str(_default_publish_staging_dir(self.sync_dir))
 
 
+#: vLLM speculative-decoding methods SkyRL supports, validated in
+#: ``validate_inference_engine_cfg``.
+#:
+#: Only ``mtp`` is supported
+SUPPORTED_SPECULATIVE_DECODING_METHODS = ("mtp",)
+
+
 @dataclass
 class InferenceEngineConfig(BaseConfig):
     """Configuration for inference engine instantiation and management."""
@@ -1102,6 +1175,14 @@ class InferenceEngineConfig(BaseConfig):
     """Should match the dtype used by the inference engine.
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
     to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
+    fp8_weight_sync_mode: Optional[str] = None
+    """Optional rollout weight format. ``"blockwise"`` sends FP8 checkpoint weights and
+    scales (one FP32 scale per 128x128 block) instead of ``model_dtype`` tensors, halving transfer
+    volume and letting vLLM serve FP8. Requires ``trainer.strategy="megatron"`` and a model with a
+    registered FP8 spec (see ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The
+    vLLM engine settings this needs (``quantization="fp8"``, ``load_format="dummy"``, and the
+    matching ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
+    automatically; the first weight sync supplies real weights before any generation."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
@@ -1115,7 +1196,11 @@ class InferenceEngineConfig(BaseConfig):
     Use ``"nccl"`` (colocated ``nccl`` uses CUDA IPC internally), or ``"delta"`` for checkpoint-delta sync through
     shared storage in non-colocated vLLM runs. See https://docs.skyrl.ai/docs/examples/delta_weight_sync"""
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
-    """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
+    """Size (GB) of the reusable packed buffer the trainer streams weights through.
+
+    Applies to both push backends -- ``nccl`` and colocated ``ipc``. Raised to fit the
+    model's largest single parameter when that exceeds it, since a tensor too large for
+    the buffer cannot be packed at all."""
     delta_weight_sync: Optional[DeltaWeightSyncConfig] = None
     """Required when ``weight_sync_backend="delta"``."""
     tensor_parallel_size: int = 1
@@ -1144,6 +1229,8 @@ class InferenceEngineConfig(BaseConfig):
     enable_return_routed_experts: bool = False
     """Return per-layer expert routing indices, for rollout router replay (R3) when training an MoE model.
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
+    enable_return_sample_support_set: bool = False
+    """Return the bounded sampler support used to renormalize rollout logprobs."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -1194,7 +1281,7 @@ class InferenceEngineConfig(BaseConfig):
     ``trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters`` (Megatron). The two
     must agree, and are validated against each other."""
     speculative_config: Optional[Dict[str, Any]] = None
-    """Speculative-decoding config passed through to vLLM for MTP drafter decoding. 
+    """Speculative-decoding config passed through to vLLM for MTP drafter decoding.
     (needs ``policy.megatron_config.mtp_num_layers`` > 0 to train mtp). ``None`` disables it."""
     external_proxy_url: Optional[str] = None
     """Data-plane URL (load-balanced router) for the new inference layer.
@@ -1747,6 +1834,40 @@ class SkyRLTrainConfig(BaseConfig):
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
 
+        if self.trainer.algorithm.enable_sample_support_replay:
+            if not self.generator.inference_engine.enable_return_sample_support_set:
+                raise ValueError(
+                    "trainer.algorithm.enable_sample_support_replay requires "
+                    "generator.inference_engine.enable_return_sample_support_set"
+                )
+            if self.trainer.strategy not in ("megatron", "fsdp"):
+                raise ValueError(
+                    "sample-support replay requires trainer.strategy=megatron or fsdp, got " f"{self.trainer.strategy}"
+                )
+            if not self.generator.use_conversation_multi_turn:
+                raise ValueError(
+                    "sample-support replay requires generator.use_conversation_multi_turn=True because "
+                    "use_conversation_multi_turn=False appends a synthetic loss-active EOS without captured support"
+                )
+
+        # Eval requests opt out of capture and do not use these constraints.
+        if self.generator.inference_engine.enable_return_sample_support_set:
+            sampling_params = self.generator.sampling_params
+            if sampling_params.temperature <= 0:
+                raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")
+            if sampling_params.top_k <= 1:
+                raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            if sampling_params.repetition_penalty != 1.0:
+                raise ValueError("sample-support capture requires repetition_penalty=1.0")
+            if sampling_params.additional_kwargs:
+                raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
+            if self.generator.vision_language_generator:
+                raise ValueError("sample-support capture does not support vision_language_generator")
+
+        # The VLM generator does not populate routed-expert indices.
+        if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:
+            raise ValueError("rollout router replay (r3) does not support vision_language_generator")
+
         if self.data.dataloader.num_workers is None:
             self.data.dataloader.num_workers = 8
         if self.data.dataloader.persistent_workers and self.data.dataloader.num_workers == 0:
@@ -1761,6 +1882,22 @@ class SkyRLTrainConfig(BaseConfig):
         )
 
         ie_cfg = self.generator.inference_engine
+        if ie_cfg.fp8_weight_sync_mode is not None:
+            from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+            from skyrl.backends.skyrl_train.weight_sync.fp8 import BLOCKWISE_FP8
+
+            if ie_cfg.fp8_weight_sync_mode != BLOCKWISE_FP8:
+                raise ValueError(
+                    f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}. "
+                    f"Supported value: {BLOCKWISE_FP8!r}."
+                )
+            if self.trainer.strategy != "megatron":
+                raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")
+            backend = get_transfer_strategy(ie_cfg.weight_sync_backend, self.trainer.placement.colocate_all)
+            if backend not in {"nccl", "ipc"}:
+                raise ValueError(
+                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}."
+                )
         if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings
 

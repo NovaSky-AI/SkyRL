@@ -391,7 +391,8 @@ def ray_init_for_tests():
         env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
-    env_vars["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH")
+    if "LD_LIBRARY_PATH" in os.environ:
+        env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
     ray.init(runtime_env={"env_vars": env_vars})
 
 
@@ -603,6 +604,7 @@ class InferenceEngineState:
             server_urls=server_urls,
             model_name=base_model_name,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+            enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
             uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
             data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=get_tokenizer(cfg.trainer.policy.model.path),

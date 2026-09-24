@@ -61,7 +61,7 @@ RUN_TIMEOUT_S="$3"
 START_TIMEOUT_S="${4:-$RUN_TIMEOUT_S}"
 
 CLOUD="${ANYSCALE_CLOUD:-sky-anyscale-aws-us-east-1}"
-MAX_ATTEMPTS="${CAPACITY_MAX_ATTEMPTS:-5}"
+MAX_ATTEMPTS="${CAPACITY_MAX_ATTEMPTS:-10}"
 RETRY_DELAY_S="${CAPACITY_RETRY_DELAY_S:-300}"
 API_ATTEMPTS="${ANYSCALE_API_ATTEMPTS:-6}"
 # Tries at getting the job into a terminal state before we refuse to resubmit.
