@@ -3,8 +3,8 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import numpy as np
@@ -95,6 +95,7 @@ class _SampleSupportChannels:
             )[0],
             loss_mask=ulysses_pad_and_slice_inputs(self.loss_mask, sp_size=sp_size)[0],
         )
+
 
 def _language_model_only_lora_exclusions(model: nn.Module, exclude_modules):
     prefixes = [
