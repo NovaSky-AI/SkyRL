@@ -8,11 +8,11 @@ and packed sequences are disabled.
 The example requires [Megatron-Bridge #6201](https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/6201),
 the Bridge/Core dependency update in [SkyRL #2284](https://github.com/NovaSky-AI/SkyRL/pull/2284),
 and [native quantized-export dtype preservation](https://github.com/NovaSky-AI/SkyRL/pull/2282).
-The serving build must include vLLM's
-[fused-QKV sharding fix](https://github.com/vllm-project/vllm/commit/211e252d0b4f8429f9b15fc52bdfed07782c7f70)
-and [MiMo BF16-router support](https://github.com/vllm-project/vllm/commit/9b2f34cad446f73b1699e8236ec0b611a65f48af).
-SkyRL's current vLLM 0.30 pin lacks these fixes. This is a configuration example;
-full-model execution and trainer/sampler parity are not yet validated.
+The dependency update pins the official CUDA 13 vLLM nightly at
+[`9b2f34ca`](https://github.com/vllm-project/vllm/commit/9b2f34cad446f73b1699e8236ec0b611a65f48af),
+which includes fused-QKV sharding and BF16-router support. No serving source
+patches are needed. This is a configuration example; full-model execution and
+trainer/sampler parity are not yet validated.
 
 Use an existing 16-H200 Ray cluster with the same environment on both nodes.
 Set `NVTE_FLASH_ATTN=0` and `NVTE_FUSED_ATTN=1` before starting Ray. Mount
