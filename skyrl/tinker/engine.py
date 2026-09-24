@@ -359,8 +359,11 @@ class TinkerEngine:
         # Initialize the backend (handles model state, computation, and adapter management)
         use_ray = config.backend_config.get("use_ray", False)
         backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
-        backend_config = backend_config_class(**config.backend_config)
-        self.backend = backend_class(config.base_model, backend_config)
+        backend_overrides = dict(config.backend_config)
+        if config.backend in ("fsdp", "megatron"):
+            backend_overrides["generator.inference_engine.served_model_name"] = config.base_model
+        backend_config = backend_config_class(**backend_overrides)
+        self.backend = backend_class(config.base_model_checkpoint_path or config.base_model, backend_config)
 
         # Backends that support async sample routing notify us when their
         # inference endpoint changes; we persist it to EngineStateDB so the

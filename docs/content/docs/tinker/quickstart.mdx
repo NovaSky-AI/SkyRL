@@ -42,6 +42,7 @@ The server is ready when you see `Uvicorn running on http://0.0.0.0:8000`.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--base-model` | (required) | HuggingFace model name or path |
+| `--base-model-checkpoint-path` | unset | Compatible base-weight directory to load instead of `--base-model` |
 | `--backend` | (required) | Backend type (`fsdp` or `megatron`) |
 | `--port` | 8000 | API server port |
 | `--checkpoints-base` | `/tmp/skyrl_checkpoints` | Directory for checkpoint storage |
