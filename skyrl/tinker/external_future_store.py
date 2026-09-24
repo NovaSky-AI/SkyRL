@@ -44,8 +44,10 @@ class ExternalFutureStore:
     # retry following a lost HTTP response still finds it. Measured from
     # delivery (mark_retrieved), never from the in-store read: a large result
     # can spend minutes being serialized and sent, and starting the clock at
-    # read would evict it mid-delivery.
-    _RETRIEVED_TTL_SECONDS = 120.0
+    # read would evict it mid-delivery. The SDK re-polls after a 45s client
+    # timeout plus up to 30s of backoff, so two consecutive misses span 150s;
+    # the grace has to outlast that.
+    _RETRIEVED_TTL_SECONDS = 300.0
     # Completed but not yet delivered — governs the read/serialize/send window
     # and clients that never come back.
     _COMPLETED_TTL_SECONDS = 600.0

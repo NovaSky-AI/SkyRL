@@ -1,9 +1,54 @@
+from collections.abc import Sequence
 from typing import TypeAlias
 
 import numpy as np
 
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    TokenMetadataTrace,
+)
+
 RoutedExpertIndices: TypeAlias = np.ndarray
 ROUTED_EXPERT_DTYPES = frozenset({np.dtype(np.uint8), np.dtype(np.int16), np.dtype(np.int32)})
+
+
+class RoutedExpertTrace:
+    """Accumulate routed experts across incremental generation calls."""
+
+    def __init__(self) -> None:
+        self._metadata = TokenMetadataTrace()
+
+    @property
+    def prompt_start(self) -> int:
+        return self._metadata.num_rows
+
+    def record_generation(
+        self,
+        *,
+        prompt_token_count: int,
+        generated_token_count: int,
+        routed_experts: RoutedExpertIndices,
+    ) -> None:
+        if prompt_token_count < self.prompt_start:
+            raise ValueError("routed-expert prompt start exceeds prompt length")
+        if generated_token_count < 1:
+            raise ValueError("routed-expert generation must produce at least one token")
+
+        expected_rows = prompt_token_count - self.prompt_start + generated_token_count - 1
+        self._metadata.append(compact_routed_expert_indices(routed_experts), expected_rows=expected_rows)
+
+    def finalize(self, *, token_count: int, loss_mask: Sequence[int]) -> RoutedExpertIndices:
+        """Return the captured route prefix without fabricating rows for its uncovered tail."""
+        if len(loss_mask) != token_count:
+            raise ValueError(f"loss mask has {len(loss_mask)} entries, expected {token_count}")
+        if self.prompt_start > token_count:
+            raise ValueError(f"routed-expert trace has {self.prompt_start} rows for {token_count} tokens")
+
+        if any(loss_mask[self.prompt_start + 1 : token_count]):
+            for source_index in range(self.prompt_start, token_count - 1):
+                if loss_mask[source_index + 1] != 0:
+                    raise ValueError(f"missing routed-expert row for loss-active target at token {source_index + 1}")
+
+        return self._metadata.finalize(expected_rows=self.prompt_start)
 
 
 def compact_routed_expert_indices(routed_experts: RoutedExpertIndices) -> RoutedExpertIndices:

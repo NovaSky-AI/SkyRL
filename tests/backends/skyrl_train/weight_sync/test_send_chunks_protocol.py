@@ -1,51 +1,29 @@
-"""Every sender must implement the full ``send_chunks`` protocol.
-
-``megatron_worker`` passes ``derive_metadata_from_chunks`` to whichever sender
-strategy is active, so a sender that omits it from its signature raises
-``TypeError`` on every Megatron sync — even with FP8 off.
-"""
-
-import asyncio
-import inspect
+"""FP8 stream compatibility with the trainer-engine source contract."""
 
 import pytest
-
-from skyrl.backends.skyrl_train.weight_sync.broadcast_strategy import (
-    BroadcastWeightTransferSender,
-)
-from skyrl.backends.skyrl_train.weight_sync.cuda_ipc_strategy import (
-    CudaIpcWeightTransferSender,
-)
-from skyrl.backends.skyrl_train.weight_sync.delta_strategy import (
-    DeltaWeightTransferSender,
-)
-
-SENDER_CLASSES = (
-    BroadcastWeightTransferSender,
-    CudaIpcWeightTransferSender,
-    DeltaWeightTransferSender,
-)
+import torch
 
 
-@pytest.mark.parametrize("sender_cls", SENDER_CLASSES, ids=lambda c: c.__name__)
-def test_send_chunks_accepts_protocol_arguments(sender_cls):
-    signature = inspect.signature(sender_cls.send_chunks)
-    signature.bind_partial(
-        object(),
-        chunks=[],
-        weight_metadata=None,
-        derive_metadata_from_chunks=False,
-    )
+def test_serialized_fp8_source_metadata_matches_the_weight_stream():
+    """The engine's declared stream includes FP8 scales and batched MoE names."""
+    pytest.importorskip("vllm")
 
+    from skyrl.backends.skyrl_train.weight_sync.fp8 import SerializedFp8Config
+    from skyrl.backends.skyrl_train.weight_sync.fp8.models import QWEN35_FP8_SPEC
+    from skyrl.backends.skyrl_train.weight_sync.sources import SerializedFp8WeightSource
 
-def test_delta_sender_rejects_serialized_fp8_chunks():
-    """Delta checkpoints cannot represent serialized-FP8 wire chunks."""
+    class Source:
+        def __iter__(self):
+            yield "model.layers.0.mlp.down_proj.weight", torch.ones(128, 128, dtype=torch.bfloat16)
 
-    with pytest.raises(ValueError, match="serialized FP8"):
-        asyncio.run(
-            DeltaWeightTransferSender.send_chunks(
-                object(),
-                chunks=[],
-                derive_metadata_from_chunks=True,
-            )
-        )
+    source = SerializedFp8WeightSource(Source(), SerializedFp8Config(spec=QWEN35_FP8_SPEC))
+    metadata = source.metadata()
+    streamed = list(source)
+
+    assert [(item.name, item.dtype, item.shape) for item in metadata] == [
+        (name, tensor.dtype, tuple(tensor.shape)) for name, tensor in streamed
+    ]
+    assert [name for name, _ in streamed] == [
+        "model.layers.0.mlp.down_proj.weight",
+        "model.layers.0.mlp.down_proj.weight_scale_inv",
+    ]

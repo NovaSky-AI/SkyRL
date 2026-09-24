@@ -23,16 +23,34 @@ _fake_mcore_utils = types.ModuleType("megatron.core.utils")
 _fake_mcore_utils.unwrap_model = lambda m: m
 _fake_mtp_mod = types.ModuleType("megatron.core.transformer.multi_token_prediction")
 _fake_mtp_mod.get_mtp_layer_offset = lambda config, vp_stage=None: 0
-sys.modules.setdefault("megatron", types.ModuleType("megatron"))
-sys.modules.setdefault("megatron.core", types.ModuleType("megatron.core"))
-sys.modules.setdefault("megatron.core.transformer", types.ModuleType("megatron.core.transformer"))
-sys.modules["megatron.core.utils"] = _fake_mcore_utils
-sys.modules["megatron.core.transformer.multi_token_prediction"] = _fake_mtp_mod
+
+_MEGATRON_MODULES = {
+    "megatron": types.ModuleType("megatron"),
+    "megatron.core": types.ModuleType("megatron.core"),
+    "megatron.core.transformer": types.ModuleType("megatron.core.transformer"),
+    "megatron.core.utils": _fake_mcore_utils,
+    "megatron.core.transformer.multi_token_prediction": _fake_mtp_mod,
+}
 
 from skyrl.backends.skyrl_train.mtp.adapter import (  # noqa: E402
     project_mtp_hidden_to_logits,
 )
 from skyrl.backends.skyrl_train.mtp.hidden_capture import MTPHiddenCapture  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stub_megatron_modules():
+    """Provide the tiny Megatron surface these tests need without leaking it."""
+    saved = {name: sys.modules.get(name) for name in _MEGATRON_MODULES}
+    sys.modules.update(_MEGATRON_MODULES)
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 class _FakeMTPBlock(nn.Module):

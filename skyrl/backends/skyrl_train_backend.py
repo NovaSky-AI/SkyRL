@@ -387,6 +387,19 @@ class SkyRLTrainBackend(AbstractBackend):
         except Exception as e:
             logger.warning(f"Inference-state publisher failed (proxy_url={proxy_url!r}): {e}")
 
+    @property
+    def _adapter_only_sync(self) -> bool:
+        """True when sampler syncs ship standalone LoRA adapters to vLLM
+        (megatron + lora.rank>0 + merge_lora=False) instead of broadcasting
+        full weights — the path that never backloads the frozen masters."""
+        lora_cfg = self._cfg.trainer.policy.model.lora
+        return (
+            self._cfg.trainer.strategy == "megatron"
+            and lora_cfg is not None
+            and lora_cfg.rank > 0
+            and not self._cfg.trainer.policy.megatron_config.lora_config.merge_lora
+        )
+
     def _create_new_inference_client(self):
         """Create new HTTP-based inference client."""
         from skyrl.backends.skyrl_train.inference_servers.setup import (
@@ -413,7 +426,17 @@ class SkyRLTrainBackend(AbstractBackend):
         # woken before sampling. sleep() is async with no running loop here, hence
         # asyncio.run. Defaulting to level 2 (the client clamps to level 1 when
         # LoRA weight sync is in use, since level 2 would discard the base model).
-        if is_colocated:
+        #
+        # Adapter-only LoRA sync is the exception: engines are created lazily by
+        # the first save_weights_for_sampler, which exports the adapter from the
+        # always-GPU-resident LoRA buffers and loads it onto *awake* engines —
+        # no trainer backload happens, so nothing needs the GPUs freed. Sleeping
+        # here would back up ~TBs of engine weights to CPU (evicting the frozen-
+        # offload page cache, minutes per node) only for the sync to wake them
+        # right back up. Training paths (forward/optim/checkpoint) sleep the
+        # engines on demand via _sleep_inference_engines(), so skipping the
+        # eager sleep keeps the colocation contract.
+        if is_colocated and not self._adapter_only_sync:
             asyncio.run(client.sleep())
             # Record the effective level: sleep() defaults to 2 but the client
             # clamps to 1 when LoRA weight sync keeps a CPU base-model backup.
@@ -1164,43 +1187,111 @@ class SkyRLTrainBackend(AbstractBackend):
             error = types.ErrorResponse(error=wake_error, status="error")
             return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
 
-        # 2. Validate every model_id in the batch is a known policy. Multi-LoRA
-        # mixes adapters in one batched sample call (the engine batches across
-        # model_ids in find_batchable_sample); we route each request via the
-        # `model` field in _sample_with_remote_client below.
+        # 2. Validate model ids, 3. dispatch to the sampling path.
+        errors = self._validate_sample_models(prepared_batch)
+        if errors is not None:
+            return errors
+        return self._sample_with_remote_client(prepared_batch)
+
+    def prepare_for_sampling(self) -> None:
+        """Ensure inference engines exist and are awake for sampling.
+
+        Idempotent and cheap when the engines are already up and awake. The
+        Tinker engine's continuous sampler calls this from its main loop
+        before admitting sample requests to the background executor, so the
+        executor's coroutines never have to touch engine lifecycle (which is
+        not thread-safe) — they only issue data-plane HTTP calls.
+        """
+        self._ensure_inference_engines()
+        wake_error = self._wake_inference_engines_for_sampling()
+        if wake_error:
+            raise RuntimeError(f"Waking up inference engines failed: {wake_error}")
+
+    def _validate_sample_models(
+        self, prepared_batch: types.PreparedSampleBatch
+    ) -> dict[str, types.ErrorResponse] | None:
+        """Validate every model_id in the batch is a known policy; None if OK.
+
+        Multi-LoRA mixes adapters in one batched sample call (the engine
+        batches across model_ids in find_batchable_sample); we route each
+        request via the `model` field in _sample_with_remote_client. An empty
+        model_id is base-model sampling (create_sampling_client(base_model=...):
+        the API maps it to model_id "") and must not be treated as unknown --
+        _sample_with_remote_client routes it to the served base model name.
+        """
         unique_models = set(prepared_batch.all_model_ids)
-        unknown = [mid for mid in unique_models if mid not in self._model_ids_to_role]
+        unknown = [mid for mid in unique_models if mid and mid not in self._model_ids_to_role]
         if unknown:
             error = types.ErrorResponse(
                 error=f"Sampling requested for unknown model_id(s): {sorted(unknown)}", status="error"
             )
             return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
-        non_policy = [mid for mid in unique_models if self._model_ids_to_role.get(mid) != "policy"]
+        non_policy = [mid for mid in unique_models if mid and self._model_ids_to_role.get(mid) != "policy"]
         if non_policy:
             error = types.ErrorResponse(
                 error=f"Sampling is only supported for policy models, got non-policy: {sorted(non_policy)}",
                 status="error",
             )
             return {req_id: error for req_id, *_ in prepared_batch.request_batch_slices}
+        return None
 
-        # 3. Dispatch to the sampling path
-        return self._sample_with_remote_client(prepared_batch)
+    async def sample_batch_async(
+        self, prepared_batch: types.PreparedSampleBatch
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Awaitable sample path for the engine's continuous sampler.
+
+        The caller (engine main loop) must have called prepare_for_sampling()
+        before scheduling this, and must not sleep the engines, swap adapters,
+        or tear down the runtime while calls are in flight (the engine drains
+        the sampler before such ops). This coroutine runs on the sampler
+        thread's event loop and touches only read-only backend state plus the
+        data-plane HTTP client, which recreates its session/semaphores per
+        event loop.
+        """
+        errors = self._validate_sample_models(prepared_batch)
+        if errors is not None:
+            return errors
+        return await self._sample_with_remote_client_async(prepared_batch, close_client=False)
 
     def _sample_with_remote_client(
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Sample using RemoteInferenceClient, forwarding model input chunks directly."""
+        """Sync wrapper over the async sampling core (serial engine-loop path)."""
+        return asyncio.run(self._sample_with_remote_client_async(prepared_batch, close_client=True))
+
+    async def _sample_with_remote_client_async(
+        self,
+        prepared_batch: types.PreparedSampleBatch,
+        close_client: bool,
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Sample using RemoteInferenceClient, forwarding model input chunks directly.
+
+        ``close_client`` closes the HTTP session when done: the serial path
+        runs each batch on a throwaway event loop (asyncio.run), so its
+        session must not outlive the loop. The continuous sampler runs on a
+        persistent loop and reuses the session across requests instead.
+        """
 
         # Resolve the inference-engine model name per request. With multi-LoRA
         # the adapter name on vLLM IS the Tinker model_id (registered by
         # save_sampler_checkpoint via load_lora_adapter). Single-tenant /
-        # FFT path falls back to resolve_policy_model_name(cfg).
+        # FFT path falls back to resolve_policy_model_name(cfg). An empty
+        # model_id is base-model sampling and must target the served base
+        # model directly: resolve_policy_model_name would return the LoRA
+        # adapter alias under LoRA weight sync, which (a) does not exist on
+        # the engines until the first sampler-weight save and (b) would wrongly
+        # apply adapter deltas to a base-model request.
         fallback_model_name = resolve_policy_model_name(self._cfg)
-        per_request_models = [
-            mid if (self._base_lora_signature is not None and mid in self._model_ids_to_role) else fallback_model_name
-            for mid in prepared_batch.all_model_ids
-        ]
+        base_model_name = self._cfg.generator.inference_engine.served_model_name or self._cfg.trainer.policy.model.path
+        per_request_models = []
+        for mid in prepared_batch.all_model_ids:
+            if not mid:
+                per_request_models.append(base_model_name)
+            elif self._base_lora_signature is not None and mid in self._model_ids_to_role:
+                per_request_models.append(mid)
+            else:
+                per_request_models.append(fallback_model_name)
 
         # Prompt logprobs are a property of the prompt, and all `num_samples`
         # samples of a request share one prompt, so only ask for them on the
@@ -1238,10 +1329,11 @@ class SkyRLTrainBackend(AbstractBackend):
             try:
                 return await asyncio.gather(*tasks, return_exceptions=True)
             finally:
-                await self._inference_engine_client.aclose()
+                if close_client:
+                    await self._inference_engine_client.aclose()
 
-        sample_outputs = asyncio.run(sample_all())
-        logger.info(f"Collected {len(sample_outputs)} sample outputs")
+        sample_outputs = await sample_all()
+        logger.debug(f"Collected {len(sample_outputs)} sample outputs")
         return self._aggregate_sample_results(prepared_batch, sample_outputs)
 
     def _aggregate_sample_results(
@@ -1250,7 +1342,7 @@ class SkyRLTrainBackend(AbstractBackend):
         sample_outputs: list,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Convert sample outputs to Tinker format."""
-        logger.info(f"Aggregating sample results for {len(sample_outputs)} samples")
+        logger.debug(f"Aggregating sample results for {len(sample_outputs)} samples")
 
         def _extract_sequences(output):
             """Yield (tokens, logprobs, stop_reason) from a single sample output."""
@@ -1430,9 +1522,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # Lazily create inference engines on first sampling-related call
         self._ensure_inference_engines()
 
-        # The colocated sync dance (wake weights -> broadcast -> wake KV cache)
-        # assumes engines start asleep; a preceding sample leaves them awake.
-        self._sleep_inference_engines()
+        adapter_only_sync = self._adapter_only_sync
 
         # Multi-LoRA: pass model_id so the dispatch swaps the right adapter in
         # before broadcasting and the worker registers it on vLLM under that
@@ -1441,9 +1531,9 @@ class SkyRLTrainBackend(AbstractBackend):
         try:
             asyncio.run(self._dispatch.save_weights_for_sampler(model_id=sync_id))
         finally:
-            # The colocated sync path wakes the engines (weights + KV cache)
-            # even when the broadcast then fails partway; mark them awake so
-            # the next sleep is issued for real.
+            # Dispatch owns the sync-time sleep/wake sequence. After a sync
+            # attempt, force the next backend sleep to issue a real engine
+            # call instead of relying on stale local state.
             self._engines_sleep_level = None
         if sync_id is not None:
             # The sync registered this tenant's adapter on vLLM; remember it
@@ -1452,14 +1542,29 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
-            # TODO(tyler): For LoRA, only save the adapters instead of the full merged model
-            # Stage on the same (shared) filesystem as output_path so the remote
-            # worker that exports the HF model and the engine that tars it agree
-            # on the path (they may run on different nodes).
-            with tempfile.TemporaryDirectory(dir=self._staging_root(output_path)) as temp_dir:
-                hf_dir = os.path.join(temp_dir, "model")
-                self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
-                self._create_tar_from_directory(hf_dir, output_path)
+            if adapter_only_sync:
+                # The sync above just exported the live PEFT adapter files to
+                # the per-node lora_sync_path; tar those (GBs) instead of
+                # streaming a full merged HF export (TBs for Kimi-scale MoE,
+                # and save_hf_model would need the engines slept again for
+                # the trainer backload). The tarred adapter serves directly
+                # via vLLM's load_lora_adapter against the released base.
+                base_sync_path = self._cfg.trainer.policy.model.lora.lora_sync_path
+                adapter_dir = (
+                    os.path.join(base_sync_path, os.path.basename(model_id)) if sync_id is not None else base_sync_path
+                )
+                self._create_tar_from_directory(adapter_dir, output_path)
+            else:
+                # save_hf_model backloads the trainer; awake colocated engines
+                # must release the GPUs first.
+                self._sleep_inference_engines()
+                # Stage on the same (shared) filesystem as output_path so the remote
+                # worker that exports the HF model and the engine that tars it agree
+                # on the path (they may run on different nodes).
+                with tempfile.TemporaryDirectory(dir=self._staging_root(output_path)) as temp_dir:
+                    hf_dir = os.path.join(temp_dir, "model")
+                    self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
+                    self._create_tar_from_directory(hf_dir, output_path)
             logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")
         else:
             # Hot path: write a lightweight marker so the engine's checkpoint

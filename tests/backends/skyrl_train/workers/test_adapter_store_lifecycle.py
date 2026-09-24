@@ -14,9 +14,13 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.megatron
+
 try:
     from skyrl.backends.skyrl_train.workers.megatron.adapter_store import AdapterStore
-except Exception as e:  # noqa: BLE001 — megatron/TE also raise RuntimeError without CUDA libs
+except ModuleNotFoundError as e:
+    if not e.name or (e.name != "megatron" and not e.name.startswith("megatron.")):
+        raise
     pytest.skip(f"megatron adapter store unavailable: {e}", allow_module_level=True)
 
 SIGNATURE = object()
