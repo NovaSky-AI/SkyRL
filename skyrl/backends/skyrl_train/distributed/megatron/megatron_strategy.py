@@ -16,13 +16,13 @@ from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
 )
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncCallsQueue
 from torch import distributed as dist
 from torch import optim
 from transformers import PreTrainedTokenizer
@@ -75,8 +75,8 @@ def _stage_async_request_to_host(async_request):
     permission. Reference:
     https://github.com/NVIDIA/Megatron-LM/blob/b78cfd5279be41ced082d344e9380a09a146c458/megatron/core/dist_checkpointing/strategies/async_utils.py#L578-L584
 
-    Takes and returns an ``AsyncRequest``; both the ``mcore`` and ``nvrx`` request types
-    are named tuples with the same ``async_fn_args``/``preload_fn`` fields. The attribute
+    Takes and returns NVRx's ``AsyncRequest``, a named tuple with
+    ``async_fn_args``/``preload_fn`` fields. The attribute
     access is deliberately unguarded so a future upstream change to that contract fails
     loudly here rather than silently restoring the hang.
     """
@@ -229,7 +229,7 @@ class MegatronStrategy(DistributedStrategy):
         ``optimizer is None`` (e.g. ``policy.inference_only_init=True`` flows).
         """
         if offload_model:
-            offload_megatron_model_to_cpu(model)
+            offload_megatron_model_to_cpu(model, is_lora=self.is_lora)
         if offload_optimizer:
             offload_megatron_grads_to_cpu(model)
             if optimizer is not None:
@@ -244,7 +244,7 @@ class MegatronStrategy(DistributedStrategy):
         from optimizer existence.
         """
         if backload_model:
-            load_megatron_model_to_gpu(model)
+            load_megatron_model_to_gpu(model, is_lora=self.is_lora)
         if backload_optimizer:
             load_megatron_grads_to_gpu(model)
             if optimizer is not None:
@@ -362,7 +362,6 @@ class MegatronStrategy(DistributedStrategy):
                 checkpoint_dir=work_dir,
                 sharded_strategy=save_strategy,
                 async_sharded_save=async_save,
-                async_strategy=self.megatron_config.async_dist_ckpt_strategy,
                 validate_access_integrity=True,
             )
             if async_save:

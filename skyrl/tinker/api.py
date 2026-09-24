@@ -29,16 +29,23 @@ from pydantic import (
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlmodel import SQLModel, func, select
+from sqlmodel import SQLModel, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, add_model, config_to_argv
+from skyrl.tinker.config import (
+    EngineConfig,
+    TinkerTorchProfilerConfig,
+    add_model,
+    config_to_argv,
+)
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
     FutureDB,
     ModelDB,
+    ProfilerControlDB,
+    ProfilerState,
     RequestStatus,
     SamplingSessionDB,
     SessionDB,
@@ -70,6 +77,21 @@ SHUTDOWN_TIMEOUT_SECONDS = 10
 
 # How long retrieve_future waits for a result before returning 408
 RETRIEVE_FUTURE_TIMEOUT_SECONDS = 300
+
+# Interactive defaults, a bit different from TorchProfilerConfig's
+# (skip_first=10, active=1), to also capture traces for very short
+# training sessions.
+DEFAULT_PROFILER_SCHEDULE = {"skip_first": 0, "wait": 0, "warmup": 1, "active": 5, "repeat": 1}
+# with_stack records a Python stack per operator: high per-step overhead, which
+# distorts the timings being measured, and much larger traces. Off here even
+# though the trainer path defaults it on.
+DEFAULT_PROFILER_OPTIONS = {"activities": ["cpu", "cuda"], "with_stack": False, "use_gzip": True}
+
+_MISSING_PROFILER_ROW = "profiler control row is missing; the server did not initialize it at startup"
+
+PROFILER_START_ACK_TIMEOUT_SEC = 30.0
+PROFILER_STOP_ACK_TIMEOUT_SEC = 600.0
+
 
 # How often poll_futures looks for newly finished requests. A single query
 # covers every waiter, so this can stay tight without the load scaling up with
@@ -278,6 +300,20 @@ async def lifespan(app: FastAPI):
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+
+    # Fail fast on a bad --torch-profiler rather than at the first request.
+    app.state.profiler_cfg = None
+    if app.state.engine_config.torch_profiler:
+        app.state.profiler_cfg = TinkerTorchProfilerConfig(**app.state.engine_config.torch_profiler)
+        app.state.profiler_cfg.validate_startup(app.state.engine_config.backend)
+
+    # The profiler CAS updates an existing row: without this insert every claim
+    # would match zero rows and 409 forever.
+    async with AsyncSession(app.state.db_engine) as session:
+        if await session.get(ProfilerControlDB, 1) is None:
+            session.add(ProfilerControlDB(singleton_id=1))
+            with suppress(IntegrityError):
+                await session.commit()
 
     app.state.future_waiters = {}
     app.state.future_poller = asyncio.create_task(poll_futures(app.state.db_engine, app.state.future_waiters))
@@ -690,12 +726,6 @@ class ForwardBackwardRequest(BaseModel):
     seq_id: int | None = None
 
 
-class ForwardRequest(BaseModel):
-    model_id: str
-    forward_input: ForwardBackwardInput
-    seq_id: int | None = None
-
-
 class AdamParams(BaseModel):
     learning_rate: float = Field(default=1e-4, ge=0.0)
     beta1: float = Field(default=0.9, ge=0.0, lt=1.0)
@@ -937,6 +967,262 @@ async def client_config():
     return ClientConfigResponse()
 
 
+# ----------------------------------------------------------------------
+# torch.profiler control. A SkyRL extension, not part of the Tinker API --
+# these are called with a plain HTTP client, never the Tinker SDK, so they
+# live at the root rather than under /api/v1.
+# ----------------------------------------------------------------------
+
+
+def _export_path_occupied(export_path: str) -> bool:
+    """Whether the target dir already holds traces. Best effort.
+
+    Repeat sessions are an explicit goal, so the same global_step with no
+    export_path_extra is a real collision rather than a hypothetical. Note this
+    is checked from the API process: authoritative for a cloud export_dir (all
+    ranks share one prefix), and for a local export_dir only on this node.
+    """
+    from skyrl.backends.skyrl_train.utils.io import io as skyrl_io
+
+    try:
+        if not skyrl_io.exists(export_path):
+            return False
+        return bool(skyrl_io.list_dir(export_path))
+    except Exception:
+        # If we cannot tell, do not block the user.
+        return False
+
+
+def _validate_worker_profiler_config(worker_config: dict, engine_config: EngineConfig) -> None:
+    """Reuse TorchProfilerConfig's validation for the schedule and profile options.
+
+    save_path is swapped for a dummy local path first: it may legitimately be a
+    cloud URI here (the worker stages locally and uploads), which the validator
+    rejects, and export_dir was already validated at startup.
+    """
+    from skyrl.train.config.config import TorchProfilerConfig
+
+    backend_cfg = engine_config.backend_config or {}
+    probe = TorchProfilerConfig(**{**worker_config, "save_path": "/tmp/skyrl_profiler_validate"})
+    probe.validate(
+        strategy=engine_config.backend,
+        colocate_all=bool(backend_cfg.get("trainer.placement.colocate_all", True)),
+        fsdp_cpu_offload=bool(backend_cfg.get("trainer.policy.fsdp_config.cpu_offload", False)),
+    )
+
+
+class StartProfilingRequest(BaseModel):
+    model_id: str
+    global_step: int
+    export_path_extra: str | None = None
+    schedule_options: dict[str, Any] = Field(default_factory=dict)
+    profile_options: dict[str, Any] = Field(default_factory=dict)
+    overwrite: bool = False
+
+
+class StopProfilingRequest(BaseModel):
+    model_id: str
+
+
+class ProfilingStatusResponse(BaseModel):
+    active: bool
+    model_id: str | None = None
+    export_path: str | None = None
+    step: int = 0
+    error: str | None = None
+
+
+def _require_profiling_enabled(request: Request) -> TinkerTorchProfilerConfig:
+    cfg = getattr(request.app.state, "profiler_cfg", None)
+    if cfg is None:
+        raise HTTPException(
+            status_code=404,
+            detail="torch profiling is not enabled; start the server with --torch-profiler",
+        )
+    if request.app.state.engine_config.backend == "jax":
+        raise HTTPException(status_code=400, detail="torch profiling is not supported for the jax backend")
+    return cfg
+
+
+def _resolve_export_path(cfg: TinkerTorchProfilerConfig, req: StartProfilingRequest) -> str:
+    """Build {export_dir}/{global_step}[_{export_path_extra}]."""
+    name = str(req.global_step)
+    if req.export_path_extra:
+        extra = req.export_path_extra
+        # Treated as a single path component: the client picks part of a
+        # server-side write path, so separators would let it escape export_dir.
+        if "/" in extra or "\\" in extra or extra in (".", "..") or extra.startswith("."):
+            raise HTTPException(
+                status_code=400,
+                detail="export_path_extra must be a single path component with no separators",
+            )
+        name = f"{name}_{extra}"
+    base = cfg.export_dir.rstrip("/")
+    return f"{base}/{name}"
+
+
+async def _wait_for_profiler_ack(db_engine, version: int, timeout: float) -> ProfilerControlDB:
+    """Poll until the engine has applied ``version``, so the HTTP result reflects
+    what actually happened on the workers rather than what we wrote to a row."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        async with AsyncSession(db_engine) as session:
+            row = await session.get(ProfilerControlDB, 1)
+            if row is not None:
+                if row.applied_version > version:
+                    # Only the API advances `version`, and it holds the slot for the
+                    # duration of this request, so the engine cannot be ahead of it.
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            f"profiler control row is inconsistent: applied_version "
+                            f"{row.applied_version} is ahead of version {version}"
+                        ),
+                    )
+                if row.applied_version == version:
+                    return row
+        if asyncio.get_event_loop().time() >= deadline:
+            raise HTTPException(
+                status_code=504,
+                detail=f"engine did not apply the profiling request within {timeout}s",
+            )
+        await asyncio.sleep(0.05)
+
+
+@app.post("/start_profiling", response_model=ProfilingStatusResponse)
+async def start_profiling(req: StartProfilingRequest, request: Request):
+    """Claim the single profiling slot and start a session."""
+    cfg = _require_profiling_enabled(request)
+    export_path = _resolve_export_path(cfg, req)
+    db_engine = request.app.state.db_engine
+
+    async with AsyncSession(db_engine) as session:
+        model = (await session.exec(select(ModelDB).where(ModelDB.model_id == req.model_id))).first()
+        if model is None:
+            raise HTTPException(status_code=409, detail=f"model {req.model_id!r} is not loaded")
+
+    if not req.overwrite and await asyncio.to_thread(_export_path_occupied, export_path):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{export_path} already exists; pass a different export_path_extra " f"or overwrite=true"),
+        )
+
+    worker_config = {
+        **DEFAULT_PROFILER_SCHEDULE,
+        **DEFAULT_PROFILER_OPTIONS,
+        **req.profile_options,
+        **req.schedule_options,
+        "enable": True,
+        "ranks": cfg.ranks,
+        "save_path": export_path,
+    }
+    try:
+        _validate_worker_profiler_config(worker_config, request.app.state.engine_config)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Compare-and-swap: claim the slot only if it is free. Two simultaneous
+    # requests cannot both win, which matters because Kineto is process-global --
+    # a second concurrent profiler either raises or silently corrupts traces.
+    now = datetime.now(timezone.utc)
+    async with AsyncSession(db_engine) as session:
+        result = await session.exec(
+            update(ProfilerControlDB)
+            .where(
+                ProfilerControlDB.singleton_id == 1,
+                ProfilerControlDB.desired_state == ProfilerState.STOPPED,
+            )
+            .values(
+                desired_state=ProfilerState.RUNNING,
+                owner_model_id=req.model_id,
+                config_json=json.dumps(worker_config),
+                # A SQL expression, not a Python read-then-write: the latter
+                # reopens the race the CAS exists to close.
+                version=ProfilerControlDB.version + 1,
+                started_at=now,
+                step=0,
+                error=None,
+            )
+        )
+        if result.rowcount == 0:
+            await session.rollback()
+            row = await session.get(ProfilerControlDB, 1)
+            if row is None:
+                raise HTTPException(status_code=500, detail=_MISSING_PROFILER_ROW)
+            raise HTTPException(
+                status_code=409,
+                detail=f"a profiling session is already active for model {row.owner_model_id!r}",
+            )
+        await session.commit()
+        row = await session.get(ProfilerControlDB, 1)
+        version = row.version
+
+    row = await _wait_for_profiler_ack(db_engine, version, PROFILER_START_ACK_TIMEOUT_SEC)
+    if row.desired_state != ProfilerState.RUNNING:
+        raise HTTPException(status_code=500, detail=row.error or "profiling failed to start")
+    return ProfilingStatusResponse(active=True, model_id=req.model_id, export_path=export_path, step=row.step)
+
+
+@app.post("/stop_profiling", response_model=ProfilingStatusResponse)
+async def stop_profiling(req: StopProfilingRequest, request: Request):
+    """Stop the session, flushing and uploading its final window before returning."""
+    _require_profiling_enabled(request)
+    db_engine = request.app.state.db_engine
+
+    async with AsyncSession(db_engine) as session:
+        result = await session.exec(
+            update(ProfilerControlDB)
+            .where(
+                ProfilerControlDB.singleton_id == 1,
+                ProfilerControlDB.desired_state == ProfilerState.RUNNING,
+                ProfilerControlDB.owner_model_id == req.model_id,
+            )
+            .values(desired_state=ProfilerState.STOPPED, version=ProfilerControlDB.version + 1)
+        )
+        if result.rowcount == 0:
+            await session.rollback()
+            row = await session.get(ProfilerControlDB, 1)
+            if row is None or row.desired_state != ProfilerState.RUNNING:
+                detail = "no profiling session is active"
+                if row is not None and row.error:
+                    detail = f"{detail}: {row.error}"
+                raise HTTPException(status_code=409, detail=detail)
+            raise HTTPException(
+                status_code=409,
+                detail=(f"profiling session is owned by model {row.owner_model_id!r}, " f"not {req.model_id!r}"),
+            )
+        await session.commit()
+        row = await session.get(ProfilerControlDB, 1)
+        version = row.version
+
+    # Blocks through the final window's upload, so a 200 means the traces landed.
+    row = await _wait_for_profiler_ack(db_engine, version, PROFILER_STOP_ACK_TIMEOUT_SEC)
+    if row.error:
+        raise HTTPException(status_code=500, detail=row.error)
+    return ProfilingStatusResponse(active=False, step=row.step)
+
+
+@app.get("/profiling_status", response_model=ProfilingStatusResponse)
+async def profiling_status(request: Request):
+    """Report the single slot's state: whose session, how far along, any error."""
+    _require_profiling_enabled(request)
+    async with AsyncSession(request.app.state.db_engine) as session:
+        row = await session.get(ProfilerControlDB, 1)
+    if row is None:
+        raise HTTPException(status_code=500, detail=_MISSING_PROFILER_ROW)
+    active = row.desired_state == ProfilerState.RUNNING
+    export_path = None
+    if active and row.config_json:
+        export_path = json.loads(row.config_json).get("save_path")
+    return ProfilingStatusResponse(
+        active=active,
+        model_id=row.owner_model_id if active else None,
+        export_path=export_path,
+        step=row.step,
+        error=row.error,
+    )
+
+
 @app.get("/api/v1/healthz", response_model=HealthResponse)
 async def healthz():
     """Checks if the API server is ready."""
@@ -1134,31 +1420,31 @@ _MAX_FWDBWD_BODY_BYTES = 1 << 30  # 1 GiB
 
 
 async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackwardRequest, bool]:
-    """Read a forward_backward body in either wire format.
+    """Read a protobuf forward_backward body.
 
-    tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
-    passes here via the proto's ``forward_only`` flag instead of calling
-    ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
-    Large proto bodies may arrive zstd-compressed (``Content-Encoding: zstd``);
-    ASGI servers do not decode request bodies, so decompress here.
+    The tinker SDK submits the body as protobuf and routes forward-only passes
+    here via the proto's ``forward_only`` flag. Large bodies may arrive
+    zstd-compressed (``Content-Encoding: zstd``); ASGI servers do not decode
+    request bodies, so decompress here.
     """
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != PROTO_CONTENT_TYPE:
+        raise HTTPException(
+            status_code=415,
+            detail=f"forward_backward requires a {PROTO_CONTENT_TYPE} body (tinker SDK >= 0.25.0)",
+        )
     body = await request.body()
     if request.headers.get("content-encoding", "").strip().lower() == "zstd":
         try:
             body = zstandard.ZstdDecompressor().decompress(body, max_output_size=_MAX_FWDBWD_BODY_BYTES)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"failed to zstd-decompress request body: {exc}") from exc
-    if PROTO_CONTENT_TYPE in request.headers.get("content-type", "").lower():
-        try:
-            request_dict, forward_only = parse_forward_backward_request(body)
-        except (DecodeError, ValueError) as e:
-            raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
-    else:
-        request_dict, forward_only = None, False
     try:
-        if request_dict is not None:
-            return ForwardBackwardRequest.model_validate(request_dict), forward_only
-        return ForwardBackwardRequest.model_validate_json(body), forward_only
+        request_dict, forward_only = parse_forward_backward_request(body)
+    except (DecodeError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
+    try:
+        return ForwardBackwardRequest.model_validate(request_dict), forward_only
     except ValidationError as e:
         # Match FastAPI's native body validation error shape (422).
         raise FastAPIRequestValidationError(e.errors())
@@ -1177,28 +1463,6 @@ async def forward_backward(request: Request, session: AsyncSession = Depends(get
             request_data=req.forward_backward_input.to_types(),
             seq_id=req.seq_id,
         )
-        await session.commit()
-
-    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
-
-
-@app.post("/api/v1/forward", response_model=FutureResponse)
-async def forward(request: ForwardRequest, raw_request: Request, session: AsyncSession = Depends(get_session)):
-    """Forward pass to obtain logprobs without accumulating gradients"""
-    # Serialize before the first SQL statement: AsyncSession checks out its
-    # pool connection lazily, so waiters queue on the lock holding nothing and
-    # a burst of forwards cannot exhaust the connection pool.
-    async with raw_request.app.state.db_write_lock:
-        await get_model(session, request.model_id)
-
-        request_id = await create_future(
-            session=session,
-            request_type=types.RequestType.FORWARD,
-            model_id=request.model_id,
-            request_data=request.forward_input.to_types(),
-            seq_id=request.seq_id,
-        )
-
         await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
@@ -1498,13 +1762,9 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
 
     status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
-        # The SDK retrieves sample/forward/forward_backward results in proto
-        # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
-        # for these types. Errors and other result types stay JSON.
-        if (
-            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
-            and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
-        ):
+        # The SDK only accepts sample/forward/forward_backward results in proto
+        # wire format. Errors and other result types stay JSON.
+        if types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES:
             async with req.app.state.proto_serialization_lock:
                 content = await asyncio.to_thread(
                     _serialize_proto_result,

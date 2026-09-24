@@ -53,6 +53,15 @@ def get_uvicorn_log_config() -> dict:
                 **RICH_HANDLER_KWARGS,
                 "formatter": "default",
             },
+            # Plain handler for the per-request access log: RichHandler renders
+            # each record through a rich Table (~1.5ms of event-loop CPU per
+            # record), which at thousands of requests per second is the API
+            # server's single largest CPU cost.
+            "access": {
+                "class": "logging.StreamHandler",
+                "formatter": "default",
+                "stream": "ext://sys.stderr",
+            },
         },
         "loggers": {
             # Main uvicorn logger (general server messages)
@@ -60,7 +69,7 @@ def get_uvicorn_log_config() -> dict:
             # Uvicorn error logger (startup, shutdown, exceptions)
             "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
             # HTTP access logs (request/response logging)
-            "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
         },
     }
 
