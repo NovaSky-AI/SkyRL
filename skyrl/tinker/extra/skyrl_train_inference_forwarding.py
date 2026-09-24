@@ -5,7 +5,6 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
-from datetime import datetime, timezone
 
 import aiohttp
 import orjson
@@ -15,12 +14,9 @@ from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
-from skyrl.tinker.external_future_store import ExternalFutureStore, PreparedResult
-from skyrl.tinker.proto_serialization import (
-    sample_output_json_from_proto,
-    serialize_sample_output,
-)
+from skyrl.tinker.db_models import EngineStateDB, RequestStatus
+from skyrl.tinker.external_future_store import ExternalFutureStore
+from skyrl.tinker.proto_serialization import serialize_sample_output
 from skyrl.utils.log import logger
 
 
@@ -34,14 +30,11 @@ _ROUTER_CONNECT_TIMEOUT_SECONDS = 60.0
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    # TODO: make `external_future_store` required and remove the FutureDB
-    # write-back path in `call_and_store_result` — every production
-    # construction (api.py lifespan) already passes a store.
     def __init__(
         self,
         engine_config: EngineConfig,
         db_engine,
-        external_future_store: ExternalFutureStore | None = None,
+        external_future_store: ExternalFutureStore,
     ):
         self.engine_config = engine_config
         self.db_engine = db_engine
@@ -119,11 +112,7 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and resolve its future.
-
-        With an ExternalFutureStore the result stays in memory; without one it
-        is written back to the request's FutureDB row.
-        """
+        """Forward a sample request to vLLM and resolve its in-memory future."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
@@ -132,29 +121,9 @@ class SkyRLTrainInferenceForwardingClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
-        if self.external_future_store is not None:
-            await self.external_future_store.complete(request_id, result, status)
-            return
+        await self.external_future_store.complete(request_id, result, status)
 
-        # TODO: remove this FutureDB write-back once `external_future_store`
-        # is required (see __init__).
-        async with AsyncSession(self.db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future is None:
-                # Row was deleted between scheduling and completion (cancelled
-                # request, stale-session GC). Nothing to write back.
-                logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
-                return
-            # `result_data` is a text column holding pre-serialized JSON.
-            if isinstance(result, PreparedResult):
-                future.result_data = result.json or sample_output_json_from_proto(result.proto)
-            else:
-                future.result_data = result.model_dump_json()
-            future.status = status
-            future.completed_at = datetime.now(timezone.utc)
-            await session.commit()
-
-    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> PreparedResult:
+    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> bytes:
         # Retry only failures where the request demonstrably did not execute:
         # connect-phase errors and 5xx rejections from the router. Read and
         # write failures are ambiguous: vLLM may still be executing the
@@ -175,7 +144,7 @@ class SkyRLTrainInferenceForwardingClient:
         except aiohttp.SocketTimeoutError as e:
             # Not retried (see above). Long-context requests routinely exceed the
             # default read deadline, so tell the caller how to raise it. The
-            # message is stored in the FutureDB ErrorResponse and shown to clients.
+            # message is stored in the ErrorResponse and shown to clients.
             timeout_sec = self.engine_config.forwarding_inference_timeout_sec
             raise RuntimeError(
                 f"Inference request to {self._cached_proxy_url} timed out after {timeout_sec:g}s waiting for "
@@ -186,7 +155,7 @@ class SkyRLTrainInferenceForwardingClient:
                 "the SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC environment variable."
             ) from e
 
-    async def _forward(self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None) -> PreparedResult:
+    async def _forward(self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None) -> bytes:
         # model_id matches the LoRA name registered with vLLM during
         # save_weights_for_sampler; base_model is used for non-LoRA sampling.
         model_name = base_model if base_model else model_id
@@ -274,5 +243,5 @@ class SkyRLTrainInferenceForwardingClient:
             sequences.append((stop_reason, tokens, logprobs))
 
         # Encode straight to the proto wire form the SDK retrieves; no pydantic
-        # model or JSON text is built for the result (see PreparedResult).
-        return PreparedResult(proto=serialize_sample_output(sequences, prompt_logprobs, topk))
+        # model or JSON text is built for the result.
+        return serialize_sample_output(sequences, prompt_logprobs, topk)

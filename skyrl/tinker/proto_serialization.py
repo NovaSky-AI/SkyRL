@@ -22,7 +22,6 @@ import base64
 from collections.abc import Iterable, Sequence
 
 import numpy as np
-import orjson
 from tinker.proto import tinker_public_pb2 as pb
 
 from skyrl.tinker import types
@@ -184,49 +183,6 @@ def serialize_sample_output(
         )
 
     return proto.SerializeToString()
-
-
-_PROTO_TO_STOP_REASON = {value: key for key, value in _STOP_REASON_TO_PROTO.items()}
-
-
-def sample_output_json_from_proto(proto_bytes: bytes) -> str:
-    """Inverse of :func:`serialize_sample_output`, as ``SampleOutput`` JSON text.
-
-    Serves clients that predate proto results (SDK < 0.25) from a result that
-    was stored as proto. Logprobs come back at float32 precision, the same
-    values proto clients receive.
-    """
-    proto = pb.SampleResponse.FromString(proto_bytes)
-    sequences = [
-        {
-            "stop_reason": _PROTO_TO_STOP_REASON[seq.stop_reason],
-            "tokens": np.frombuffer(seq.tokens, dtype=np.int32).tolist(),
-            "logprobs": np.frombuffer(seq.logprobs, dtype=np.float32).tolist(),
-        }
-        for seq in proto.sequences
-    ]
-
-    prompt_logprobs = None
-    if proto.prompt_logprobs:
-        values = np.frombuffer(proto.prompt_logprobs, dtype=np.float32)
-        prompt_logprobs = [None if np.isnan(value) else float(value) for value in values]
-
-    topk = None
-    if proto.HasField("topk_prompt_logprobs"):
-        block = proto.topk_prompt_logprobs
-        shape = (block.prompt_length, block.k)
-        token_ids = np.frombuffer(block.token_ids, dtype=np.int32).reshape(shape)
-        logprobs = np.frombuffer(block.logprobs, dtype=np.float32).reshape(shape)
-        masked = (token_ids == _TOPK_MASK_TOKEN_ID) & (logprobs == np.float32(_TOPK_MASK_LOGPROB))
-        topk = []
-        for row_ids, row_lps, row_mask in zip(token_ids, logprobs, masked):
-            row = [[int(t), float(lp)] for t, lp, m in zip(row_ids, row_lps, row_mask) if not m]
-            # A fully masked row encodes an undefined position (None).
-            topk.append(row or None)
-
-    return orjson.dumps(
-        {"sequences": sequences, "prompt_logprobs": prompt_logprobs, "topk_prompt_logprobs": topk}
-    ).decode()
 
 
 def _serialize_forward_backward_output(result_data: dict) -> bytes:

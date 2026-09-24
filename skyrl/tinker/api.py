@@ -1791,9 +1791,6 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
                             external_future_store.cache_proto(request_id, content)
             response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
         else:
-            if result_data is None and found_in_memory:
-                # Stored as proto only; a pre-proto client wants JSON.
-                result_data = external_future_store.json_result(request_id)
             response = raw_json_response(result_data)
         # Start the retry-grace clock now that the response is built and about to
         # be sent, so a large result is never evicted mid-delivery -- but only if

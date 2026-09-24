@@ -1,24 +1,20 @@
 """Forwarded sample results are encoded to proto once and served as-is.
 
 The forwarding client decodes the vLLM body and encodes straight to the
-``SampleResponse`` wire form; no pydantic model or JSON text is built unless a
-pre-proto client asks for JSON, in which case it is derived from the proto and
-cached. These tests pin the fast path to the validated path byte for byte.
+``SampleResponse`` wire form; no pydantic model or JSON text is built. These
+tests pin the fast path to the validated path byte for byte.
 """
 
 import asyncio
-import json
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from skyrl.tinker import api, types
 from skyrl.tinker.db_models import RequestStatus
-from skyrl.tinker.external_future_store import ExternalFutureStore, PreparedResult
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.proto_serialization import (
     PROTO_CONTENT_TYPE,
-    sample_output_json_from_proto,
     serialize_result,
     serialize_sample_output,
 )
@@ -45,46 +41,17 @@ def test_fast_path_matches_validated_serialization_bytes():
     assert serialize_sample_output(SEQUENCES, PROMPT_LOGPROBS, TOPK) == _validated_bytes(PROMPT_LOGPROBS, TOPK)
 
 
-def test_json_from_proto_round_trips_sample_output():
-    text = sample_output_json_from_proto(serialize_sample_output(SEQUENCES, PROMPT_LOGPROBS, TOPK))
-    output = types.SampleOutput.model_validate_json(text)
-
-    assert [(s.stop_reason, s.tokens) for s in output.sequences] == [(s, t) for s, t, _ in SEQUENCES]
-    for seq, (_, _, logprobs) in zip(output.sequences, SEQUENCES):
-        # Logprobs travel as float32 on the wire.
-        assert seq.logprobs == np.asarray(logprobs, dtype=np.float32).tolist()
-    assert output.prompt_logprobs[0] is None
-    assert output.prompt_logprobs[1:] == np.asarray(PROMPT_LOGPROBS[1:], dtype=np.float32).tolist()
-    assert output.topk_prompt_logprobs[0] is None
-    assert output.topk_prompt_logprobs[1] == [(11, -0.5), (12, -1.5)]
-    assert output.topk_prompt_logprobs[2] == [(13, -0.25)]
-    # Same key layout as pydantic's own dump, so JSON clients see nothing new.
-    assert list(json.loads(text)) == ["sequences", "prompt_logprobs", "topk_prompt_logprobs"]
-
-
-def test_json_from_proto_without_optional_fields():
-    output = types.SampleOutput.model_validate_json(
-        sample_output_json_from_proto(serialize_sample_output(SEQUENCES, None, None))
-    )
-    assert output.prompt_logprobs is None
-    assert output.topk_prompt_logprobs is None
-
-
 @pytest.mark.asyncio
-async def test_store_serves_proto_directly_and_derives_json_lazily():
+async def test_store_keeps_proto_bytes_as_is():
     store = ExternalFutureStore()
     request_id = store.create("model_a", SimpleNamespace())
     proto = serialize_sample_output(SEQUENCES, None, None)
 
-    await store.complete(request_id, PreparedResult(proto=proto), RequestStatus.COMPLETED)
+    await store.complete(request_id, proto, RequestStatus.COMPLETED)
 
     status, request_type, result_data = await store.wait(request_id, timeout=1)
     assert (status, request_type, result_data) == (RequestStatus.COMPLETED, types.RequestType.EXTERNAL, None)
     assert store.proto_result(request_id) is proto
-    text = store.json_result(request_id)
-    assert types.SampleOutput.model_validate_json(text).sequences[1].tokens == [7]
-    # Derived once, then cached for retries.
-    assert store.json_result(request_id) is text
 
 
 @pytest.mark.asyncio
@@ -129,7 +96,7 @@ async def test_retrieve_future_passes_stored_proto_through_without_reencoding(mo
     store = ExternalFutureStore()
     request_id = store.create("model_a", SimpleNamespace())
     proto = serialize_sample_output(SEQUENCES, None, None)
-    await store.complete(request_id, PreparedResult(proto=proto), RequestStatus.COMPLETED)
+    await store.complete(request_id, proto, RequestStatus.COMPLETED)
     serialize_calls: list = []
     monkeypatch.setattr(api, "_serialize_proto_result", lambda *a: serialize_calls.append(a) or b"unexpected")
 
@@ -140,22 +107,6 @@ async def test_retrieve_future_passes_stored_proto_through_without_reencoding(mo
     assert response.media_type == PROTO_CONTENT_TYPE
     assert response.body == proto
     assert serialize_calls == []
-
-
-@pytest.mark.asyncio
-async def test_retrieve_future_serves_json_client_from_stored_proto():
-    store = ExternalFutureStore()
-    request_id = store.create("model_a", SimpleNamespace())
-    await store.complete(
-        request_id, PreparedResult(proto=serialize_sample_output(SEQUENCES, None, None)), RequestStatus.COMPLETED
-    )
-
-    response = await api.retrieve_future(
-        api.RetrieveFutureRequest(request_id=str(request_id)), _request(store, "application/json", [])
-    )
-
-    assert response.media_type == "application/json"
-    assert types.SampleOutput.model_validate_json(response.body).sequences[0].tokens == [1, 2, 3, 40000]
 
 
 @pytest.mark.asyncio

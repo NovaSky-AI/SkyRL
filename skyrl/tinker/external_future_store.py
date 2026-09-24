@@ -9,20 +9,7 @@ from pydantic import BaseModel
 
 from skyrl.tinker import types
 from skyrl.tinker.db_models import RequestStatus
-from skyrl.tinker.proto_serialization import sample_output_json_from_proto
 from skyrl.utils.log import logger
-
-
-@dataclass
-class PreparedResult:
-    """A completed sample result already in wire form.
-
-    Forwarded samples are encoded to proto once, straight from the decoded vLLM
-    body; JSON text is produced only if a pre-proto client asks for it.
-    """
-
-    proto: bytes | None = None
-    json: str | None = None
 
 
 @dataclass
@@ -30,6 +17,8 @@ class ExternalFuture:
     request_id: int
     model_id: str | None
     status: RequestStatus = RequestStatus.PENDING
+    # Exactly one of these is set on completion: forwarded sample results are
+    # stored as SampleResponse proto wire bytes, errors as JSON text.
     result_data: str | None = None
     result_proto: bytes | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -101,15 +90,6 @@ class ExternalFutureStore:
         if entry is not None:
             entry.result_proto = proto
 
-    def json_result(self, request_id: int) -> str | None:
-        """JSON text for a completed result, deriving it from proto on first use."""
-        entry = self._entries.get(request_id)
-        if entry is None:
-            return None
-        if entry.result_data is None and entry.result_proto is not None:
-            entry.result_data = sample_output_json_from_proto(entry.result_proto)
-        return entry.result_data
-
     async def wait(self, request_id: int, timeout: float) -> tuple[RequestStatus, types.RequestType, str | None] | None:
         entry = self._entries.get(request_id)
         if entry is None:
@@ -132,15 +112,19 @@ class ExternalFutureStore:
         if entry is not None:
             entry.retrieved_at = datetime.now(timezone.utc)
 
-    async def complete(self, request_id: int, result_data: BaseModel | PreparedResult, status: RequestStatus) -> None:
+    async def complete(self, request_id: int, result_data: BaseModel | bytes, status: RequestStatus) -> None:
+        """Resolve a future with either proto wire bytes or a pydantic result.
+
+        Forwarded samples arrive as ``SampleResponse`` bytes and are served
+        as-is by ``retrieve_future``; anything else is stored as JSON text.
+        """
         entry = self._entries.get(request_id)
         if entry is None:
             # Swept as abandoned before the forwarding task finished.
             logger.warning("External future %s was evicted before its result arrived — dropping", request_id)
             return
-        if isinstance(result_data, PreparedResult):
-            entry.result_data = result_data.json
-            entry.result_proto = result_data.proto
+        if isinstance(result_data, bytes):
+            entry.result_proto = result_data
         else:
             entry.result_data = result_data.model_dump_json()
         entry.status = status

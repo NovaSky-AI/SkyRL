@@ -6,6 +6,7 @@ import aiohttp
 import pytest
 
 from skyrl.tinker.config import EngineConfig, add_model
+from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
     SkyRLTrainInferenceForwardingClient,
     TransientInferenceError,
@@ -30,7 +31,7 @@ async def test_forwarding_client_uses_configured_timeout_and_connection_limit() 
         forwarding_inference_timeout_sec=1800.0,
         forwarding_inference_max_connections=64,
     )
-    client = SkyRLTrainInferenceForwardingClient(config, db_engine=None)
+    client = SkyRLTrainInferenceForwardingClient(config, db_engine=None, external_future_store=ExternalFutureStore())
     try:
         session = client._get_session()
         assert session.timeout.sock_connect == 60.0
@@ -45,7 +46,9 @@ async def test_forwarding_client_uses_configured_timeout_and_connection_limit() 
 
 @pytest.mark.asyncio
 async def test_forwarding_client_default_connection_limit_is_unlimited() -> None:
-    client = SkyRLTrainInferenceForwardingClient(EngineConfig(base_model="test-model"), db_engine=None)
+    client = SkyRLTrainInferenceForwardingClient(
+        EngineConfig(base_model="test-model"), db_engine=None, external_future_store=ExternalFutureStore()
+    )
     try:
         assert client._get_session().connector.limit == 0
     finally:
