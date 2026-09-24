@@ -232,6 +232,14 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         if lora_cfg.max_cpu_loras is not None:
             args.max_cpu_loras = lora_cfg.max_cpu_loras
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
+        # Megatron-Bridge exports MoE expert adapters per expert
+        # (``experts.<i>.<proj>``). vLLM only accepts that layout on models whose
+        # checkpoint is also per-expert; for fused-expert checkpoints
+        # (``is_3d_moe_weight``, e.g. Qwen3.5-MoE) it expects the stacked PEFT
+        # layout and rejects the adapter at load. This flag makes vLLM serve
+        # both layouts through its universal 2D MoE LoRA wrapper; it is a
+        # no-op for dense models and for 2D-checkpoint MoE models.
+        args.enable_mixed_moe_lora_format = True
 
         if not cfg.trainer.placement.colocate_all:
             lora_path = cfg.trainer.policy.model.lora.lora_sync_path
