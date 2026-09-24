@@ -919,9 +919,22 @@ class SkyRLGymGenerator(GeneratorInterface):
         truncated_indices: Optional[List[RoutedExpertIndices]] = [] if raw_rollout_expert_indices is not None else None
         truncated_sample_support: Optional[List[SampleSupport]] = [] if raw_rollout_sample_support is not None else None
 
+        parallel_env_steps = self.skyrl_gym_cfg.parallel_env_steps
+        env_step_outputs = None
+        if parallel_env_steps:
+            env_step_outputs = await asyncio.gather(
+                *[
+                    self._run_in_executor_if_available(env.step, output)
+                    for env, output in zip(envs, outputs)
+                ]
+            )
+
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            if parallel_env_steps:
+                env_step_output = env_step_outputs[i]
+            else:
+                env_step_output = await self._run_in_executor_if_available(env.step, output)
             reward = env_step_output["reward"]
             rewards.append(reward)
 
@@ -942,7 +955,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Get environment-specific metrics
             env_metrics.append(env.get_metrics())
             # Close the environment
-            await self._run_in_executor_if_available(env.close)
+            if not parallel_env_steps:
+                await self._run_in_executor_if_available(env.close)
+
+        if parallel_env_steps:
+            await asyncio.gather(*[self._run_in_executor_if_available(env.close) for env in envs])
 
         rollout_metrics = get_rollout_metrics(truncated_responses, rewards, env_metrics, env_classes, loss_masks)
 

@@ -1392,6 +1392,9 @@ class GSM8kLLMJudgeEnvConfig(BaseConfig):
 @dataclass
 class SkyRLGymConfig(BaseConfig):
     max_env_workers: int = 32
+    parallel_env_steps: bool = False
+    """When True and generator.batched=True, run env.step/close concurrently in
+    generate_batched via asyncio.gather. Concurrency is capped by max_env_workers."""
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
