@@ -148,6 +148,9 @@ def handle_base(x) -> str:
     return x
 
 
+_PI_ARITHMETIC = re.compile(r"[0-9eE+\-*/().\s]+")
+
+
 def handle_pi(string, pi):
     if isinstance(string, str) and "\\pi" in string:
         # Find the first occurrence of "\pi"
@@ -165,9 +168,10 @@ def handle_pi(string, pi):
             # Find the next occurrence of "\pi"
             idx = string.find("\\pi", idx + 1)
 
-        # Evaluate the expression using eval() function
-        with contextlib.suppress(Exception):
-            string = eval(string)
+        # The string comes from model output, so only plain arithmetic is evaluated.
+        if _PI_ARITHMETIC.fullmatch(string) and "**" not in string:
+            with contextlib.suppress(Exception):
+                string = eval(string, {"__builtins__": {}}, {})
 
     return string
 
