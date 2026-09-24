@@ -1,0 +1,44 @@
+name: skycap
+
+# Only what is inside the package, so a change elsewhere does not spend a
+# runner on it, and a change in here does not wait on the rest of the matrix.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'skycap/**'
+      - '.github/workflows/cpu_skycap.yaml'
+  pull_request:
+    paths:
+      - 'skycap/**'
+      - '.github/workflows/cpu_skycap.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # CI runs only in the upstream repo, as for the rest of the repository.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+      - name: Lint and format, with the repository's hooks
+        run: |
+          uv tool install pre-commit
+          pre-commit run --config .pre-commit-config.yaml --files $(git ls-files skycap)
+      - name: Test
+        working-directory: skycap
+        run: |
+          uv sync
+          uv run pytest

@@ -1,0 +1,38 @@
+[project]
+name = "skycap"
+version = "0.0.1"
+description = "Trajectory capture for RL rollouts: an OpenAI-compatible proxy that records each rollout as a context graph and returns training samples"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "NovaSkyAI AI Team" }]
+dependencies = [
+    "orjson>=3.10",
+]
+
+[project.urls]
+Repository = "https://github.com/NovaSky-AI/SkyRL"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skycap"]
+
+# Formatting and lint follow the repository's: black and ruff at 120 columns,
+# run by the root pre-commit config. Only black needs telling, because it reads
+# the nearest pyproject.toml; ruff falls through to the root's.
+[tool.black]
+line-length = 120
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"

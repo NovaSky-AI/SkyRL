@@ -19,6 +19,7 @@ survives only where it names a real thing (the `skyrl_train` package, the
 | `H100-GPU-CI` | `gpu_ci_h100.yaml` | `anyscale_gpu_ci_h100.yaml` / `gpu_ci_run_h100.sh` | H100-only suites |
 | `Tinker-SkyRL-Backend-GPU` | `tinker_skyrl_backend_gpu.yaml` | `anyscale_tinker_skyrl_backend_gpu.yaml` / `gpu_ci_run_tinker_skyrl_backend.sh` | `tests/tinker/skyrl_train` |
 | `SkyRL-JAX-CPU` | `cpu_jax.yaml` | — | `tests/tx`, `tests/backends/test_jax_backend.py`, engine benchmark |
+| `skycap` | `cpu_skycap.yaml` | — | pre-commit on `skycap/`, and `skycap/tests` in the package's own environment |
 | `SkyRL-JAX-GPU` | `gpu_jax.yaml` | `anyscale_gpu_ci_jax.yaml` / `gpu_ci_run_jax.sh` | `tests/tx/gpu` |
 | `SkyRL-GPU-E2E-CI*` | `gpu_e2e_ci*.yaml` | `anyscale_gpu_e2e_test*.yaml` / `gpu_e2e_test_run*.sh` | end-to-end training runs |
 
