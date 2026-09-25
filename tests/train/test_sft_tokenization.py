@@ -976,3 +976,30 @@ def test_load_and_tokenize_cache_hit_skips_retokenization(tokenizer, tmp_path, m
         assert a["attention_mask"] == b["attention_mask"]
         assert a["num_actions"] == b["num_actions"]
         assert a["loss_mask"] == b["loss_mask"]
+
+
+def test_load_and_tokenize_cache_backed_is_memory_mapped(tokenizer, tmp_path, monkeypatch):
+    """With caching enabled the tokenize-on-load path returns a memory-mapped
+    SFTDataset served from the arrow cache (nothing materialized); with
+    caching disabled it returns the in-memory list. Rows are identical."""
+    from skyrl.train import sft_trainer as sft_mod
+    from skyrl.train.dataset.pretokenized import MemoryMappedDataset
+
+    dataset = _make_inmem_dataset()
+    monkeypatch.setattr(sft_mod, "load_dataset", lambda *a, **kw: dataset)
+
+    cached_cfg = SFTConfig(num_workers=0, cache_dir=str(tmp_path), disable_cache=False)
+    mmapped = _build_trainer(tokenizer, cached_cfg)._load_and_tokenize("dummy/ds", "train")
+    assert isinstance(mmapped, MemoryMappedDataset)
+    assert list(mmapped.sequence_lengths) == [len(ex["input_ids"]) for ex in mmapped]
+
+    uncached_cfg = SFTConfig(num_workers=0, disable_cache=True)
+    materialized = _build_trainer(tokenizer, uncached_cfg)._load_and_tokenize("dummy/ds", "train")
+    assert isinstance(materialized, list)
+
+    assert len(mmapped) == len(materialized)
+    for a, b in zip(mmapped, materialized):
+        assert a["input_ids"] == b["input_ids"]
+        assert a["attention_mask"] == b["attention_mask"]
+        assert a["num_actions"] == b["num_actions"]
+        assert a["loss_mask"] == b["loss_mask"]
