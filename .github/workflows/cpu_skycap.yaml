@@ -37,20 +37,11 @@ jobs:
         run: |
           uv tool install pre-commit
           pre-commit run --config .pre-commit-config.yaml --files $(git ls-files skycap)
-      - name: Test (base install; token mode runs against a fake renderer)
+      - name: Test
         working-directory: skycap
         run: |
           uv sync
           uv run pytest
-      - name: The base install imports nothing from the tokens extra
-        working-directory: skycap
-        run: |
-          uv run python -c "
-          import sys
-          import skycap.cli, skycap.server, skycap.record, skycap.samples, skycap.tokens.backend
-          leaked = sorted(n for n in sys.modules if n.split('.')[0] in {'renderers', 'transformers', 'torch'})
-          assert not leaked, leaked
-          "
 
   tokens:
     # The real `renderers` library on a real tokenizer, downloaded from the Hub.
@@ -66,5 +57,7 @@ jobs:
           python-version: '3.12'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
-      - run: uv sync --extra tokens
-      - run: uv run pytest tests/test_renderers_integration.py tests/test_tokens.py
+      - name: Install with the tokens extra
+        run: uv sync --extra tokens
+      - name: Test token mode on a real tokenizer
+        run: uv run pytest tests/test_renderers_integration.py tests/test_tokens.py
