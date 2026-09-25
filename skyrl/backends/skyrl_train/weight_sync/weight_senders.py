@@ -48,7 +48,8 @@ SKYRL_IPC_TRAINER_BACKEND = "skyrl_ipc"
 
 
 class SkyrlTrainerCapabilities:
-    """The three things the worker's memory bracket needs from a trainer engine.
+    """What the worker needs from a trainer engine: the three flags its memory
+    bracket reads, plus the spec-decode draft source (documented at the attribute).
 
     Declared, not probed. Every SkyRL trainer engine inherits or overrides these,
     so ``Worker._sync_weights_to_inference_engines`` reads plain attributes and a
