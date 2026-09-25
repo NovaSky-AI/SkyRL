@@ -8,14 +8,14 @@ no Python and no tokenizer.
 
 A record directory holds, per trajectory `{id}`:
 
-| File | Always | Holds |
+| File | Always Outputted | Holds |
 | --- | --- | --- |
-| `{id}.json.zst` | yes | the document |
+| `{id}.json.zst` | yes | the document (graph) |
 | `{id}.tokens.zst` | token mode | token ids, logprobs, the text the tokens decode to, and each token's byte offset in it |
 | `{id}.experts.zst` | when routed experts were captured | routed experts (R3) |
 | `{id}.sampling_mask.zst` | when sampling masks were captured | per sampled token, the ids it could have been drawn from |
 
-Every file is one zstd frame. A trajectory is written once, when it ends.
+Every file is one zstd frame. A trajectory is not partially written when it is live, it is only written when it ends.
 Sidecars are written before the document, and every file is written to a
 temporary name and renamed, so a document that exists always has its sidecars.
 A reader lists trajectories by listing `*.json.zst`.
@@ -26,8 +26,7 @@ The decompressed document is a UTF-8 JSON object:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `format_version` | int | `1`. A reader refuses a version it doesn't know |
-| `version` | int | the document shape's own version (`1`) |
+| `format_version` | int | `1`. Covers both this document's shape and the files' encoding. A reader refuses a version it doesn't know |
 | `id` | string | the trajectory id |
 | `status` | string | `finished`, `failed`, `abandoned` (idle past the TTL) or `open` (written at shutdown) |
 | `meta` | object | what the creator passed at create |

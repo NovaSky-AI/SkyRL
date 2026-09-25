@@ -13,8 +13,6 @@ from skycap.graph import MessageGraph
 
 Status = Literal["open", "finished", "failed", "abandoned"]
 
-DOCUMENT_VERSION = 1
-
 
 def new_trajectory_id() -> str:
     return f"tr_{secrets.token_hex(8)}"
@@ -67,7 +65,6 @@ class Trajectory:
     def document(self) -> dict[str, Any]:
         """Everything but the token arrays, as JSON-ready data."""
         return {
-            "version": DOCUMENT_VERSION,
             "id": self.id,
             "status": self.status,
             "meta": self.meta,
