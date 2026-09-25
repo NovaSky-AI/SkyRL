@@ -8,6 +8,7 @@ from contextlib import AsyncExitStack
 
 import numpy as np
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from skycap import CaptureError, CapturePool, Sample
@@ -58,12 +59,13 @@ async def test_the_context_manager_finishes_and_returns_samples(servers) -> None
             model="policy", messages=[{"role": "user", "content": "q"}]
         )
         result = await trajectory.finish({"reward": 1.0})
+        document = await trajectory.document()
 
     assert result.status == "finished"
     (sample,) = result.samples
     assert isinstance(sample, Sample)
     assert [m["content"] for m in sample.messages] == ["q", "re: q"]
-    assert (await trajectory.document())["annotations"] == {"reward": 1.0}
+    assert document["annotations"] == {"reward": 1.0}
 
 
 async def test_a_block_that_raises_still_finishes_the_trajectory(servers) -> None:
@@ -91,6 +93,56 @@ async def test_an_unreachable_server_is_skipped(servers) -> None:
     async with CapturePool(["http://127.0.0.1:1", urls[0]]) as pool:
         trajectories = [await pool.create() for _ in range(3)]
     assert {t.server for t in trajectories} == {urls[0]}
+
+
+async def test_a_server_answering_5xx_is_skipped(servers) -> None:
+    urls, captures = servers
+
+    async def unavailable(request: web.Request) -> web.Response:
+        return web.Response(text="<html>503 Service Unavailable</html>", status=503, content_type="text/html")
+
+    broken = web.Application()
+    broken.router.add_post("/trajectories", unavailable)
+    server = TestServer(broken)
+    await server.start_server()
+    try:
+        async with CapturePool([str(server.make_url("")).rstrip("/"), urls[0]]) as pool:
+            trajectories = [await pool.create() for _ in range(3)]
+    finally:
+        await server.close()
+    assert {t.server for t in trajectories} == {urls[0]}
+
+
+async def test_a_4xx_on_create_is_raised(servers) -> None:
+    urls, _ = servers
+    async with CapturePool([f"{urls[0]}/nowhere"]) as pool:
+        with pytest.raises(CaptureError) as raised:
+            await pool.create()
+    assert raised.value.status == 404
+
+
+async def test_a_failed_finish_is_sent_again_with_its_annotations(servers) -> None:
+    urls, captures = servers
+    async with CapturePool(urls) as pool:
+        with pytest.raises(CaptureError):
+            async with pool.trajectory() as trajectory:
+                trajectory.id, real = "tr_missing", trajectory.id
+                try:
+                    await trajectory.finish({"reward": 1.0})
+                finally:
+                    trajectory.id = real
+        document = await trajectory.document()
+
+    assert document["status"] == "finished"
+    assert document["annotations"] == {"reward": 1.0}
+
+
+async def test_a_closed_pool_refuses_calls(servers) -> None:
+    urls, _ = servers
+    async with CapturePool(urls) as pool:
+        trajectory = await pool.create()
+    with pytest.raises(RuntimeError):
+        await trajectory.document()
 
 
 async def test_no_reachable_server_is_an_error() -> None:
