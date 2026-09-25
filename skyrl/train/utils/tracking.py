@@ -17,6 +17,7 @@
 
 import dataclasses
 import pprint
+import re
 import traceback
 from enum import Enum
 from functools import partial
@@ -27,6 +28,12 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
+from skyrl.train.utils.metrics import ScalarGauges
+
+
+def _prometheus_name(key: str) -> str:
+    """Metric key to a skyrl_-prefixed Prometheus gauge name, with non-alphanumeric characters replaced by underscores."""
+    return "skyrl_" + re.sub(r"[^a-zA-Z0-9_]", "_", key)
 
 
 # TODO(tgriggs): Test all backends.
@@ -75,12 +82,16 @@ class Tracking:
             self.logger = ConsoleLogger()
 
         self._exception_logged = False
+        self._prometheus = ScalarGauges()
 
     def log(self, data, step, commit=False):
         if self.backend == "wandb":
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
+        for key, value in data.items():
+            if isinstance(value, (int, float)):
+                self._prometheus.set(_prometheus_name(key), value)
 
     def finish(self):
         if self.backend == "console":
