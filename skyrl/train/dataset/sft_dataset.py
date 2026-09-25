@@ -2,7 +2,7 @@
 
 ``SFTTrainer.load_dataset`` returns a :class:`SFTDataset` regardless of the
 ingestion path: :class:`TextDataset` for tokenize-on-load sources,
-:class:`~skyrl.train.dataset.pretokenized.PretokenizedDataset` for
+:class:`~skyrl.train.dataset.pretokenized.MemoryMappedDataset` for
 pretokenized stores, and :class:`ConcatSFTDataset` when multiple sources are
 configured. All are map-style (samplers, ``StatefulDataLoader`` prefetching
 and resume, and the collators are agnostic to which one they receive) and
@@ -42,9 +42,11 @@ class SFTDataset(torch.utils.data.Dataset, abc.ABC):
 class TextDataset(SFTDataset):
     """In-memory dataset of tokenized examples (the tokenize-on-load path).
 
-    Wraps the ``list[dict]`` produced by ``SFTTrainer._load_and_tokenize``.
-    Rows are fully materialized; making this path lazy is a possible
-    follow-up, independent of the interface.
+    Wraps the ``list[dict]`` produced by ``SFTTrainer._load_and_tokenize``
+    when caching is disabled. With caching enabled (the default), the trainer
+    instead serves the tokenized arrow cache memory-mapped through
+    ``MemoryMappedDataset``, so this fully-materialized form is only resident
+    for ``disable_cache=True`` runs.
     """
 
     def __init__(self, examples: list):
