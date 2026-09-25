@@ -8,8 +8,8 @@ import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
     get_unpacked_seq_align_size,
+    packed_segment_layout,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
@@ -68,19 +68,19 @@ def build_token_metadata_layout(
         )
 
     cp_size = mpu.get_context_parallel_world_size()
-    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
-    padded_sequence_lengths_tensor = sequence_lengths_tensor + (-sequence_lengths_tensor % align_size)
-    padded_sequence_lengths = padded_sequence_lengths_tensor.tolist()
-    cu_seqlens_padded = torch.cat(
-        (
-            torch.zeros(1, dtype=torch.int32, device=device),
-            padded_sequence_lengths_tensor.cumsum(dim=0),
-        )
+    layout = packed_segment_layout(
+        sequence_lengths,
+        tp_size=tp_size,
+        cp_size=cp_size,
+        fp8_enabled=fp8_enabled,
+        fp8_recipe=fp8_recipe,
     )
+    padded_sequence_lengths = list(layout.padded_lengths)
+    cu_seqlens_padded = torch.tensor(layout.cu_seqlens_padded, dtype=torch.int32, device=device)
     return TokenMetadataLayout(
         attention_mask=aligned_attention_mask,
         sequence_lengths=sequence_lengths,
-        aligned_sequence_length=sum(padded_sequence_lengths),
+        aligned_sequence_length=layout.total,
         padded_sequence_lengths=padded_sequence_lengths,
         cu_seqlens_padded=cu_seqlens_padded,
         context_parallel_size=cp_size,
