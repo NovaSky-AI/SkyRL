@@ -21,7 +21,8 @@ import torch
 
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
+    get_packing_align_size_sequence,
+    get_packing_align_size_total,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_fp8_enabled,
@@ -483,15 +484,10 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
             trainer = SFTTrainer(sft_cfg, skyrl_cfg=skyrl_cfg)
             trainer.collator = trainer._build_collator(tokenizer)
             collated = trainer.collate_batch(examples, batch_size=GLOBAL_BATCH_SIZE)
-            # Recompute flat_bins + align_size deterministically (same FFD call).
+            # Recompute flat_bins + align_size deterministically (same MFFD call).
             flat_bins = _recompute_flat_bins(trainer, examples)
             tp = 1
-            transformer_config_kwargs = sft_cfg.megatron_config.transformer_config_kwargs or {}
-            align_size = get_packed_seq_align_size(
-                tp,
-                cp,
-                fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
-            )
+            align_size = get_packing_align_size_sequence(tp, cp)
             collated.metadata["align_size"] = align_size
         else:
             collated = collate_sft_batch(examples, tokenizer)
@@ -581,20 +577,27 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
 
 
 def _recompute_flat_bins(trainer: SFTTrainer, examples: List[dict]) -> List[List[int]]:
-    """Reproduce the collator's flat_bins permutation (shard-major FFD order)
+    """Reproduce the collator's flat_bins permutation (shard-major MFFD order)
     so we can invert the example reordering for the comparison."""
     from skyrl.train.dataset.bin_packing import (
+        PackingStrategy,
         make_seq_packer,
     )
 
     seq_lengths = [len(ex["input_ids"]) for ex in examples]
     dp_size = trainer._dp_size()
     bin_count_multiple = dp_size
+    tp_size = trainer.sft_cfg.megatron_config.tensor_model_parallel_size
+    cp_size = trainer.sft_cfg.megatron_config.context_parallel_size
+    transformer_config_kwargs = trainer.sft_cfg.megatron_config.transformer_config_kwargs or {}
+    fp8_enabled = is_fp8_enabled(transformer_config_kwargs.get("fp8"))
     packer = make_seq_packer(
-        "first_fit_decreasing",
+        PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
         bin_capacity=trainer.sft_cfg.resolved_bin_capacity(),
         min_bin_count=bin_count_multiple,
         bin_count_multiple=bin_count_multiple,
+        sequence_length_multiple=get_packing_align_size_sequence(tp_size, cp_size),
+        packed_length_multiple=get_packing_align_size_total(tp_size, cp_size, fp8_enabled=fp8_enabled),
     )
     bins = packer.pack(seq_lengths)
     shard_bins: List[List[List[int]]] = [[] for _ in range(dp_size)]

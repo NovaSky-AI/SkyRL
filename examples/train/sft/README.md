@@ -151,7 +151,7 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `dataloader_persistent_workers` | `false` | Keep dataloader workers alive across epochs (only with `dataloader_num_workers > 0`) |
 | `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
 | `use_sequence_packing` | `false` | Enable controller-level bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
-| `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be a positive multiple of `max_length` (gives `max_tokens_per_microbatch / max_length` bin rows per micro-batch). `null` = `max_length` (one bin row per micro-batch). |
+| `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be `>= max_length`. `null` = `max_length` (one bin row per micro-batch). |
 | `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
 | `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |
 | `resume_from` | `""` | Resume training: `""` = fresh start, `"latest"` = latest checkpoint, or path to `global_step_N` dir |
@@ -175,13 +175,13 @@ python -m skyrl.train.main_sft [key=value overrides...]
 See [`skyrl/train/main_sft.py`](../../../skyrl/train/main_sft.py) for the CLI entrypoint and
 [`skyrl/train/sft_trainer.py`](../../../skyrl/train/sft_trainer.py) for the full implementation.
 
-## Minibatch packing (controller-level FFD, Megatron only)
+## Minibatch packing (controller-level MFFD, Megatron only)
 
 When `use_sequence_packing=true`, `SFTTrainer` collates with
 `PackedDataCollator` instead of `DefaultCollator`. Every training step:
 
-1. The controller's collator runs FFD bin-packing over the global
-   mini-batch using `max_length` as the bin capacity.
+1. The controller's collator runs MFFD bin-packing over the global mini-batch
+   using `max_tokens_per_microbatch` as the bin capacity.
 2. The bin count is forced to a multiple of `dp_size` via empty-bin
    padding (`min_bin_count`/`bin_count_multiple` knobs in
    [`bin_packing._adjust_bin_count`](../../../skyrl/train/dataset/bin_packing.py)).
@@ -195,7 +195,6 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
     use_sequence_packing=true \
     max_tokens_per_microbatch=4096
 ```
-
 
 ## Samplers and the stateful dataloader
 
