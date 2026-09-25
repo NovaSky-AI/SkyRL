@@ -210,6 +210,11 @@ miniswe = [
 harbor = [
     "harbor[daytona,modal]",
 ]
+# Harbor with skycap capturing each rollout (examples/train_integrations/harbor_skycap).
+harbor-skycap = [
+    "harbor[daytona,modal]",
+    "skycap[tokens]",
+]
 # Mooncake distributed KV for vLLM: the store connector (MooncakeStoreConnector,
 # KV-cache offloading) and P2P PD transfer (MooncakeConnector). Provides the python
 # bindings and the `mooncake_master` binary. Off-the-shelf PyPI wheel; Linux-only.
@@ -385,6 +390,7 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
+skycap = { path = "./skycap", editable = true }
 # Match torch's CUDA variant (cu130).
 flashinfer-jit-cache = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
