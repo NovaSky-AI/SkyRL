@@ -1,0 +1,136 @@
+{
+  "configuration": {
+    "requests_per_arm": 3000,
+    "load_processes": 2,
+    "concurrency_per_process": 4,
+    "aggregate_concurrency": 8,
+    "streaming": false,
+    "duration_seconds": null,
+    "target_rps": 300.0,
+    "python": "3.13.3",
+    "platform": "darwin",
+    "cpu_count": 10,
+    "uvloop": true
+  },
+  "arms": {
+    "baseline_capture_off": {
+      "name": "capture-off",
+      "requests": 3000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 11.8814,
+      "throughput_rps": 252.5,
+      "latency_ms": {
+        "min": 1.6737,
+        "p50": 3.3902,
+        "p95": 7.0251,
+        "p99": 9.4737,
+        "max": 30.2897,
+        "mean": 3.8537,
+        "samples": 3000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "dropped": 0,
+        "ingested_exchanges": 0,
+        "note": "capture disabled"
+      }
+    },
+    "capture_on_split_ingestion": {
+      "name": "capture-on (split ingestion)",
+      "requests": 3000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 11.8495,
+      "throughput_rps": 253.2,
+      "latency_ms": {
+        "min": 1.7928,
+        "p50": 3.4771,
+        "p95": 6.3841,
+        "p99": 8.9453,
+        "max": 46.388,
+        "mean": 3.9108,
+        "samples": 3000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 3008,
+        "dropped": 0,
+        "max_ring_depth": 5,
+        "ring_capacity": 262144,
+        "spool_records": 3008,
+        "spool_bytes": 6091200,
+        "ingested_exchanges": 3008,
+        "ingestion": "separate process"
+      }
+    },
+    "capture_on_in_process_ingestion": {
+      "name": "capture-on (in-process ingestion)",
+      "requests": 3000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 11.7608,
+      "throughput_rps": 255.1,
+      "latency_ms": {
+        "min": 1.7692,
+        "p50": 3.2884,
+        "p95": 6.0322,
+        "p99": 8.7102,
+        "max": 32.6225,
+        "mean": 3.6455,
+        "samples": 3000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 3008,
+        "dropped": 0,
+        "max_ring_depth": 5,
+        "ring_capacity": 262144,
+        "spool_records": 3008,
+        "spool_bytes": 6091200,
+        "ingested_exchanges": 3008,
+        "ingestion": "in process"
+      }
+    }
+  },
+  "deltas": {
+    "capture_on_split_ingestion": {
+      "throughput_ratio_pct": 100.28,
+      "added_latency_p50_ms": 0.0869,
+      "added_latency_p95_ms": -0.641,
+      "added_latency_p99_ms": -0.5284,
+      "added_latency_mean_ms": 0.0571,
+      "added_error_rate_pct_points": 0.0
+    },
+    "capture_on_in_process_ingestion": {
+      "throughput_ratio_pct": 101.03,
+      "added_latency_p50_ms": -0.1018,
+      "added_latency_p95_ms": -0.9929,
+      "added_latency_p99_ms": -0.7635,
+      "added_latency_mean_ms": -0.2082,
+      "added_error_rate_pct_points": 0.0
+    }
+  },
+  "thresholds": {
+    "throughput_at_least_99pct_of_baseline": {
+      "passed": true,
+      "observed": "100.28% of baseline"
+    },
+    "added_p99_latency_at_most_1ms": {
+      "passed": true,
+      "observed": "-0.5284 ms"
+    },
+    "added_error_rate_at_most_0.01pct_points": {
+      "passed": true,
+      "observed": "0.0 points"
+    },
+    "zero_dropped_capture_events": {
+      "passed": true,
+      "observed": "0 dropped"
+    },
+    "all_exchanges_ingested": {
+      "passed": true,
+      "observed": "3008 of 3000 successful requests"
+    }
+  }
+}

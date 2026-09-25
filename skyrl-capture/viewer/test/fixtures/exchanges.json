@@ -1,0 +1,117 @@
+{
+ "data": [
+  {
+   "id": "ex_01M310327TZJJBDY50SXYRJZGK",
+   "sequence": 0,
+   "provider": "tokens",
+   "model": "mock-tokens-model",
+   "endpoint_kind": "chat_completions",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "http_status": 200,
+   "streaming": false,
+   "transport_error": null,
+   "provider_error": null,
+   "retry_attempt": 0,
+   "completion_reason": "stop",
+   "request_start_at": "2026-09-21T03:27:55.641167+00:00",
+   "response_end_at": "2026-09-21T03:27:55.642639+00:00",
+   "ttft_ms": 1.469224,
+   "duration_ms": 1.469224,
+   "gap_ms": null,
+   "overlapping": false,
+   "chunk_count": 1,
+   "stream_summary": {
+    "chunk_count": 0
+   },
+   "usage": {
+    "prompt_tokens": 29,
+    "completion_tokens": 6,
+    "total_tokens": 35,
+    "cached_tokens": null,
+    "reasoning_tokens": null,
+    "raw": {
+     "prompt_tokens": 29,
+     "completion_tokens": 6,
+     "total_tokens": 35
+    }
+   },
+   "request_byte_count": 96,
+   "response_byte_count": 330,
+   "provider_request_id": null,
+   "provider_response_id": "chatcmpl-ex_01M310327TZJJBDY50SXYRJZGK",
+   "previous_response_id": null,
+   "input_prefix_node_id": null,
+   "input_node_ids": [
+    "nd_01M310327T3MCBZZY5QQX4JGB3"
+   ],
+   "input_leaf_node_id": "nd_01M310327T3MCBZZY5QQX4JGB3",
+   "output_node_id": "nd_01M310327T3R45S4C955YXHQXP",
+   "parent_output_node_id": null,
+   "previous_exchange_id": null,
+   "is_duplicate_retry": false,
+   "late": false,
+   "has_payload": true,
+   "schema_version": 4,
+   "derivation_version": 2
+  },
+  {
+   "id": "ex_01M310327XVAQBK0AXEG1XKVZ8",
+   "sequence": 1,
+   "provider": "tokens",
+   "model": "mock-tokens-model",
+   "endpoint_kind": "chat_completions",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "http_status": 200,
+   "streaming": false,
+   "transport_error": null,
+   "provider_error": null,
+   "retry_attempt": 0,
+   "completion_reason": "stop",
+   "request_start_at": "2026-09-21T03:27:55.644396+00:00",
+   "response_end_at": "2026-09-21T03:27:55.645246+00:00",
+   "ttft_ms": 0.846563,
+   "duration_ms": 0.846563,
+   "gap_ms": null,
+   "overlapping": false,
+   "chunk_count": 1,
+   "stream_summary": {
+    "chunk_count": 0
+   },
+   "usage": {
+    "prompt_tokens": 67,
+    "completion_tokens": 6,
+    "total_tokens": 73,
+    "cached_tokens": null,
+    "reasoning_tokens": null,
+    "raw": {
+     "prompt_tokens": 67,
+     "completion_tokens": 6,
+     "total_tokens": 73
+    }
+   },
+   "request_byte_count": 176,
+   "response_byte_count": 330,
+   "provider_request_id": null,
+   "provider_response_id": "chatcmpl-ex_01M310327XVAQBK0AXEG1XKVZ8",
+   "previous_response_id": null,
+   "input_prefix_node_id": null,
+   "input_node_ids": [
+    "nd_01M310327X7C46BVBTJYC5Y8G6",
+    "nd_01M310327X0TE0RXPK7HS4BVM9"
+   ],
+   "input_leaf_node_id": "nd_01M310327X0TE0RXPK7HS4BVM9",
+   "output_node_id": "nd_01M310327X19G08P76ESSR2EFW",
+   "parent_output_node_id": null,
+   "previous_exchange_id": null,
+   "is_duplicate_retry": false,
+   "late": false,
+   "has_payload": true,
+   "schema_version": 4,
+   "derivation_version": 2
+  }
+ ],
+ "next_cursor": null,
+ "has_more": false
+}

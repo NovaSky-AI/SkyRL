@@ -1,0 +1,160 @@
+{
+  "configuration": {
+    "requests_per_arm": 2000,
+    "load_processes": 2,
+    "concurrency_per_process": 4,
+    "aggregate_concurrency": 8,
+    "streaming": false,
+    "duration_seconds": null,
+    "target_rps": null,
+    "python": "3.13.3",
+    "platform": "darwin",
+    "cpu_count": 10,
+    "uvloop": true
+  },
+  "arms": {
+    "calibration_upstream_direct": {
+      "name": "upstream direct (no proxy)",
+      "requests": 2000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 0.7721,
+      "throughput_rps": 2590.4,
+      "latency_ms": {
+        "min": 1.545,
+        "p50": 2.1936,
+        "p95": 2.9615,
+        "p99": 4.0726,
+        "max": 5.5701,
+        "mean": 2.3042,
+        "samples": 2000
+      },
+      "first_byte_ms": null,
+      "capture": {}
+    },
+    "baseline_capture_off": {
+      "name": "capture-off",
+      "requests": 2000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 2.759,
+      "throughput_rps": 724.9,
+      "latency_ms": {
+        "min": 2.8047,
+        "p50": 9.0826,
+        "p95": 18.4371,
+        "p99": 24.0222,
+        "max": 42.8374,
+        "mean": 10.1047,
+        "samples": 2000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "dropped": 0,
+        "ingested_exchanges": 0,
+        "note": "capture disabled"
+      }
+    },
+    "capture_on_split_ingestion": {
+      "name": "capture-on (split ingestion)",
+      "requests": 2000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 3.6045,
+      "throughput_rps": 554.9,
+      "latency_ms": {
+        "min": 4.4827,
+        "p50": 11.9288,
+        "p95": 26.128,
+        "p99": 42.1328,
+        "max": 114.6392,
+        "mean": 13.5699,
+        "samples": 2000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 2008,
+        "dropped": 0,
+        "max_ring_depth": 3,
+        "ring_capacity": 262144,
+        "spool_records": 2008,
+        "spool_bytes": 4066200,
+        "ingested_exchanges": 2008,
+        "ingestion": "separate process"
+      }
+    },
+    "capture_on_in_process_ingestion": {
+      "name": "capture-on (in-process ingestion)",
+      "requests": 2000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 3.2227,
+      "throughput_rps": 620.6,
+      "latency_ms": {
+        "min": 4.1983,
+        "p50": 11.1604,
+        "p95": 22.6589,
+        "p99": 33.0068,
+        "max": 75.9027,
+        "mean": 11.9683,
+        "samples": 2000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 2008,
+        "dropped": 0,
+        "max_ring_depth": 5,
+        "ring_capacity": 262144,
+        "spool_records": 2008,
+        "spool_bytes": 4066200,
+        "ingested_exchanges": 2008,
+        "ingestion": "in process"
+      }
+    }
+  },
+  "deltas": {
+    "capture_on_split_ingestion": {
+      "throughput_ratio_pct": 76.55,
+      "added_latency_p50_ms": 2.8462,
+      "added_latency_p95_ms": 7.6909,
+      "added_latency_p99_ms": 18.1106,
+      "added_latency_mean_ms": 3.4652,
+      "added_error_rate_pct_points": 0.0
+    },
+    "capture_on_in_process_ingestion": {
+      "throughput_ratio_pct": 85.61,
+      "added_latency_p50_ms": 2.0778,
+      "added_latency_p95_ms": 4.2218,
+      "added_latency_p99_ms": 8.9846,
+      "added_latency_mean_ms": 1.8636,
+      "added_error_rate_pct_points": 0.0
+    }
+  },
+  "thresholds": {
+    "throughput_at_least_99pct_of_baseline": {
+      "passed": false,
+      "observed": "76.55% of baseline"
+    },
+    "added_p99_latency_at_most_1ms": {
+      "passed": false,
+      "observed": "18.1106 ms"
+    },
+    "added_error_rate_at_most_0.01pct_points": {
+      "passed": true,
+      "observed": "0.0 points"
+    },
+    "zero_dropped_capture_events": {
+      "passed": true,
+      "observed": "0 dropped"
+    },
+    "all_exchanges_ingested": {
+      "passed": true,
+      "observed": "2008 of 2000 successful requests"
+    }
+  },
+  "harness": {
+    "ceiling_rps": 2590.4,
+    "baseline_fraction_of_ceiling_pct": 28.0,
+    "note": "Ceiling is what this machine reaches with no proxy in the path. Every other number in this report is bounded by it, so it is what tells a reader whether a result is a proxy limit or a harness limit."
+  }
+}

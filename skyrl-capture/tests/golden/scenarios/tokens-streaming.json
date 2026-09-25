@@ -1,0 +1,808 @@
+{
+ "exports": {
+  "graph": [
+   {
+    "schema_version": 4,
+    "trajectory_id": "<tr#1>",
+    "project": "golden",
+    "run_id": "run-k",
+    "task_id": "k4",
+    "step": 1,
+    "mode": "tokens",
+    "status": "finished",
+    "command_result": null,
+    "labels": [],
+    "annotations": {},
+    "upstream": {
+     "type": "tokens",
+     "url": "http://127.0.0.1:<port>/generate",
+     "model": "mock-tokens-model",
+     "tokenizer": "builtin"
+    },
+    "integrity": {
+     "complete": true,
+     "calls_missing": 0,
+     "calls_after_close": 0
+    },
+    "bodies": "full",
+    "created_at": "<volatile>",
+    "finished_at": "<volatile>",
+    "derivation_version": 2,
+    "nodes": [
+     {
+      "node_id": "<nd#1>",
+      "parent": null,
+      "children": [
+       "<nd#2>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "stream please",
+       "role": "user"
+      },
+      "message_hash": "e9e94da840945405166edf77ed118de47a704744af09696d119d01143711512e",
+      "context_hash": "35cb794597e0f4bffe37d7d2974c2aa4f2e798ad69f4fbbf4c42c273ebb96348",
+      "tokens": {
+       "ids": [
+        256,
+        117,
+        115,
+        101,
+        114,
+        258,
+        115,
+        116,
+        114,
+        101,
+        97,
+        109,
+        32,
+        112,
+        108,
+        101,
+        97,
+        115,
+        101,
+        257,
+        258
+       ],
+       "sampled_start": null,
+       "sampled_mask": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+       ],
+       "logprobs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+       ],
+       "routed_experts": null
+      }
+     },
+     {
+      "node_id": "<nd#2>",
+      "parent": "<nd#1>",
+      "children": [],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "",
+       "role": "assistant"
+      },
+      "message_hash": "4798d4b5ad3fa59b7957a4f29e4358fae499eab7c3904109c8cc0734a9814190",
+      "context_hash": "4225d81b426fac5d24f68a3bdc939e144ed79a8471ecf24b80398e8e38a5aa2f",
+      "tokens": {
+       "ids": [
+        256,
+        97,
+        115,
+        115,
+        105,
+        115,
+        116,
+        97,
+        110,
+        116,
+        258,
+        1306,
+        1313,
+        1320,
+        1327
+       ],
+       "sampled_start": 11,
+       "sampled_mask": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true
+       ],
+       "logprobs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -0.05,
+        -0.1,
+        -0.15,
+        -0.2
+       ],
+       "routed_experts": null
+      },
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-tokens-model",
+       "status": 200,
+       "streaming": true,
+       "finish_reason": "stop",
+       "tools_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "sampling": {
+        "max_tokens": 4
+       },
+       "usage": {
+        "prompt_tokens": 32,
+        "completion_tokens": 4,
+        "total_tokens": 36,
+        "cached_tokens": null,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 32,
+         "completion_tokens": 4,
+         "total_tokens": 36
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     }
+    ]
+   }
+  ],
+  "replay": [
+   {
+    "schema_version": 4,
+    "session_id": "<tr#1>-s0000",
+    "trajectory_id": "<tr#1>",
+    "parent_session_id": null,
+    "delay_ms": null,
+    "arrival_ms": "<volatile>",
+    "forks": [],
+    "turns": [
+     {
+      "delay_ms": null,
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-tokens-model",
+       "messages": [
+        {
+         "content": "stream please",
+         "role": "user"
+        }
+       ],
+       "max_tokens": 4
+      }
+     }
+    ]
+   }
+  ],
+  "text_samples": [
+   {
+    "schema_version": 4,
+    "path_id": "<tr#1>-p0000",
+    "trajectory_id": "<tr#1>",
+    "node_ids": [
+     "<nd#1>",
+     "<nd#2>"
+    ],
+    "abandoned": false,
+    "labels": [],
+    "annotations": {},
+    "model": "mock-tokens-model",
+    "tools": null,
+    "trainable_count": 1,
+    "messages": [
+     {
+      "node_id": "<nd#1>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "stream please",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#2>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "",
+       "role": "assistant"
+      }
+     }
+    ]
+   }
+  ],
+  "token_samples": [
+   {
+    "schema_version": 4,
+    "path_id": "<tr#1>-p0000",
+    "trajectory_id": "<tr#1>",
+    "node_ids": [
+     "<nd#1>",
+     "<nd#2>"
+    ],
+    "abandoned": false,
+    "labels": [],
+    "annotations": {},
+    "model": "mock-tokens-model",
+    "tools": null,
+    "trainable_count": 4,
+    "input_ids": [
+     256,
+     117,
+     115,
+     101,
+     114,
+     258,
+     115,
+     116,
+     114,
+     101,
+     97,
+     109,
+     32,
+     112,
+     108,
+     101,
+     97,
+     115,
+     101,
+     257,
+     258,
+     256,
+     97,
+     115,
+     115,
+     105,
+     115,
+     116,
+     97,
+     110,
+     116,
+     258,
+     1306,
+     1313,
+     1320,
+     1327
+    ],
+    "node_spans": [
+     [
+      0,
+      21
+     ],
+     [
+      21,
+      36
+     ]
+    ],
+    "loss_mask": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
+     1,
+     1,
+     1
+    ],
+    "rollout_logprobs": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     -0.05,
+     -0.1,
+     -0.15,
+     -0.2
+    ],
+    "rollout_expert_indices": null,
+    "stop_reason": null,
+    "tokenizer": "builtin"
+   }
+  ]
+ },
+ "api": {
+  "/": {
+   "id": "<tr#1>",
+   "project": "golden",
+   "run_id": "run-k",
+   "task_id": "k4",
+   "step": 1,
+   "upstream": {
+    "mode": "tokens",
+    "type": "tokens",
+    "protocol": "openai",
+    "url": "http://127.0.0.1:<port>/generate",
+    "model": "mock-tokens-model",
+    "tokenizer": "builtin",
+    "config": {
+     "max_model_len": 4096
+    }
+   },
+   "mode": "tokens",
+   "status": "finished",
+   "labels": [],
+   "annotations": {},
+   "bodies": "full",
+   "created_at": "<volatile>",
+   "first_event_at": "<volatile>",
+   "finished_at": "<volatile>",
+   "capture": {
+    "exchange_count": 1,
+    "node_count": 2,
+    "calls_after_close": 0,
+    "complete": true,
+    "calls_missing": 0,
+    "recovery_uncertain": false,
+    "delivery_uncertain": [],
+    "errors": []
+   },
+   "command_result": null,
+   "source_metadata": {},
+   "schema_version": 4,
+   "revision": 0,
+   "gap_distribution": {
+    "samples": 0,
+    "min_ms": null,
+    "max_ms": null,
+    "mean_ms": null,
+    "p50_ms": null,
+    "p95_ms": null,
+    "p99_ms": null,
+    "overlapping": 0,
+    "total_wait_ms": "<volatile>"
+   }
+  },
+  "/exchanges": {
+   "data": [
+    {
+     "id": "<ex#1>",
+     "sequence": 0,
+     "provider": "tokens",
+     "model": "mock-tokens-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": true,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": null,
+     "overlapping": false,
+     "chunk_count": 3,
+     "stream_summary": {
+      "chunk_count": 0,
+      "event_count": 3,
+      "frame_count": 3
+     },
+     "usage": {
+      "prompt_tokens": 32,
+      "completion_tokens": 4,
+      "total_tokens": 36,
+      "cached_tokens": null,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 32,
+       "completion_tokens": 4,
+       "total_tokens": 36
+      }
+     },
+     "request_byte_count": 113,
+     "response_byte_count": 489,
+     "provider_request_id": null,
+     "provider_response_id": "chatcmpl-<ex#1>",
+     "previous_response_id": null,
+     "input_prefix_node_id": null,
+     "input_node_ids": [
+      "<nd#1>"
+     ],
+     "input_leaf_node_id": "<nd#1>",
+     "output_node_id": "<nd#2>",
+     "parent_output_node_id": null,
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    }
+   ],
+   "next_cursor": null,
+   "has_more": false
+  },
+  "/graph": {
+   "trajectory": "<tr#1>",
+   "nodes": [
+    {
+     "node_id": "<nd#1>",
+     "parent_node_id": null,
+     "exchange_id": "<ex#1>",
+     "depth": 0,
+     "role": "user",
+     "author": "client",
+     "message_hash": "e9e94da840945405166edf77ed118de47a704744af09696d119d01143711512e",
+     "delta_hash": "76a6e0ed4f2e5882800e5b0b2f239835a7bf5a9e9dbb060bab885abe4033d70a",
+     "content_block_count": 1,
+     "char_count": 13,
+     "token_count": 21,
+     "sampled_start": null,
+     "sampled_token_count": 0,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": "builtin",
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "renderer": "builtin:mock-tokens-model",
+      "reused_prefix_length": 0,
+      "matched_message_count": 0,
+      "bridge_transition_id": null,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#2>",
+     "parent_node_id": "<nd#1>",
+     "exchange_id": "<ex#1>",
+     "depth": 1,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "4798d4b5ad3fa59b7957a4f29e4358fae499eab7c3904109c8cc0734a9814190",
+     "delta_hash": "e7894adf702586082dd340cccbf06a63cd04508069fd7136e8740e1289b7a1b1",
+     "content_block_count": 1,
+     "char_count": 0,
+     "token_count": 15,
+     "sampled_start": 11,
+     "sampled_token_count": 4,
+     "has_logprobs": true,
+     "has_routed_experts": false,
+     "tokenizer": "builtin",
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "renderer": "builtin:mock-tokens-model",
+      "reused_prefix_length": 0,
+      "matched_message_count": 0,
+      "bridge_transition_id": null,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    }
+   ],
+   "leaf_node_ids": [
+    "<nd#2>"
+   ],
+   "leaf_assistant_node_ids": [
+    "<nd#2>"
+   ],
+   "branch_points": []
+  },
+  "/paths": {
+   "trajectory": "<tr#1>",
+   "mode": "tokens",
+   "tokenizer": "builtin",
+   "paths": [
+    {
+     "path_id": "<tr#1>-p0000",
+     "node_ids": [
+      "<nd#1>",
+      "<nd#2>"
+     ],
+     "leaf_node_id": "<nd#2>",
+     "abandoned": false,
+     "masked_reason": null,
+     "stop_reason": null,
+     "token_count": 36,
+     "trainable_count": 4,
+     "blocking": "mask+turns",
+     "blocks": [
+      {
+       "trainable": false,
+       "role": "user",
+       "start": 0,
+       "end": 21,
+       "token_count": 21,
+       "text": "<|im_start|>user\nstream please<|im_end|>\n",
+       "token_ids": [
+        256,
+        117,
+        115,
+        101,
+        114,
+        258,
+        115,
+        116,
+        114,
+        101,
+        97,
+        109,
+        32,
+        112,
+        108,
+        101,
+        97,
+        115,
+        101,
+        257,
+        258
+       ],
+       "token_offsets": [
+        0,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        40,
+        41
+       ],
+       "kind": "given",
+       "node_id": "<nd#1>"
+      },
+      {
+       "trainable": false,
+       "role": "assistant",
+       "start": 21,
+       "end": 32,
+       "token_count": 11,
+       "text": "<|im_start|>assistant\n",
+       "token_ids": [
+        256,
+        97,
+        115,
+        115,
+        105,
+        115,
+        116,
+        97,
+        110,
+        116,
+        258
+       ],
+       "token_offsets": [
+        0,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22
+       ],
+       "kind": "scaffold",
+       "node_id": "<nd#2>"
+      },
+      {
+       "trainable": true,
+       "role": null,
+       "start": 32,
+       "end": 36,
+       "token_count": 4,
+       "text": "",
+       "token_ids": [
+        1306,
+        1313,
+        1320,
+        1327
+       ],
+       "token_offsets": [
+        0,
+        0,
+        0,
+        0,
+        0
+       ],
+       "kind": "sampled",
+       "node_id": "<nd#2>"
+      }
+     ],
+     "messages": [
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 44
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 36
+      }
+     ],
+     "token_offsets": "exact",
+     "logprob_count": 36,
+     "logprobs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      -0.05,
+      -0.1,
+      -0.15,
+      -0.2
+     ]
+    }
+   ]
+  }
+ }
+}

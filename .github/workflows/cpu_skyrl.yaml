@@ -9,6 +9,9 @@ on:
       - 'ci/**'
       - 'skyrl/**'
       - 'tests/**'
+      # The harbor_capture tests import the example, so a change to it has to
+      # trigger them.
+      - 'examples/train_integrations/harbor_capture/**'
       - 'pyproject.toml'
       - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl.yaml'
@@ -17,6 +20,9 @@ on:
       - 'ci/**'
       - 'skyrl/**'
       - 'tests/**'
+      # The harbor_capture tests import the example, so a change to it has to
+      # trigger them.
+      - 'examples/train_integrations/harbor_capture/**'
       - 'pyproject.toml'
       - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl.yaml'
