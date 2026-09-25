@@ -249,7 +249,9 @@ def _node_tokens(meta: dict[str, Any] | None, arrays: dict[str, dict[str, np.nda
         start = meta["experts_offset"]
         routed = experts["routed_experts"][start : start + meta["experts_rows"]].copy()
     rows = None
-    if meta["mask_offset"] is not None:
+    if meta["mask_offset"] is not None and meta["mask_rows"] == 0:
+        rows = []
+    elif meta["mask_offset"] is not None:
         mask = arrays["sampling_mask"]
         assert mask is not None
         ids, bounds = mask["ids"], mask["offsets"]

@@ -263,3 +263,79 @@ async def test_a_failed_write_still_finishes(tmp_path: Path) -> None:
 
         assert finished["status"] == "finished"
         assert created["id"] in running.server.trajectories
+
+
+async def test_a_failed_write_is_retried_by_the_next_finish(tmp_path: Path) -> None:
+    record_dir = tmp_path / "record"
+    record_dir.write_text("")  # a file where the directory should be: every write fails
+    async with running_stack(record_dir=record_dir) as running:
+        created = await running.create()
+        await running.finish(created["id"], {"reward": 1.0})
+        assert created["id"] in running.server.trajectories
+
+        record_dir.unlink()
+        again = await running.finish(created["id"], {"reward": 1.0})
+
+        assert again["status"] == "finished"
+        assert created["id"] not in running.server.trajectories
+        assert record.read_document(record_dir, created["id"])["annotations"] == {"reward": 1.0}
+
+
+async def test_shutdown_writes_a_trajectory_whose_write_failed(tmp_path: Path) -> None:
+    record_dir = tmp_path / "record"
+    record_dir.write_text("")
+    async with running_stack(record_dir=record_dir) as running:
+        created = await running.create()
+        await running.finish(created["id"])
+        record_dir.unlink()
+
+    assert record.read_document(record_dir, created["id"])["status"] == "finished"
+
+
+async def test_the_sweep_skips_a_trajectory_that_became_active(tmp_path: Path) -> None:
+    async with running_stack(record_dir=tmp_path, ttl=0.0) as running:
+        first, second = await running.create(), await running.create()
+        server = running.server
+        persist = server._persist
+
+        async def persist_and_wake_the_second(trajectory):  # noqa: ANN001, ANN202
+            server.trajectories[second["id"]].touch()
+            server.ttl = 3600.0
+            return await persist(trajectory)
+
+        server._persist = persist_and_wake_the_second  # type: ignore[method-assign]
+        swept = await server.sweep()
+
+        assert swept == [first["id"]]
+        assert server.trajectories[second["id"]].is_open
+
+
+async def test_without_a_record_nothing_expires() -> None:
+    async with running_stack(ttl=0.0) as running:
+        assert running.server._sweeper is None
+
+
+async def test_models_on_an_ended_route_is_410(recorded_stack: Stack) -> None:
+    created = await recorded_stack.create()
+    await recorded_stack.finish(created["id"])
+
+    async with recorded_stack.http.get(f"{created['base_url']}/models") as response:
+        assert response.status == 410
+
+
+def test_an_empty_sampling_mask_round_trips(tmp_path: Path) -> None:
+    trajectory = Trajectory(id="tr_empty_mask")
+    trajectory.graph.add(
+        None,
+        role="assistant",
+        author="model",
+        message={"role": "assistant", "content": ""},
+        match_hash="m",
+        delta_hash="d",
+        created_at=0.0,
+        tokens=NodeTokens(token_ids=[1], sampled_start=1, sampling_mask=[]),
+    )
+    record.write(tmp_path, trajectory)
+    (node,) = record.load(tmp_path, "tr_empty_mask").graph
+
+    assert node.tokens is not None and node.tokens.sampling_mask == []

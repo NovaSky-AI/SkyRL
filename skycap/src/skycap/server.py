@@ -88,29 +88,34 @@ class CaptureServer:
 
     async def _on_startup(self, app: web.Application) -> None:
         await self.backend.start()
-        self._sweeper = asyncio.create_task(self._sweep_forever())
+        # Without a record, ending a trajectory would neither record it nor free it, so nothing expires.
+        if self.record_dir is not None:
+            self._sweeper = asyncio.create_task(self._sweep_forever())
 
     async def _on_cleanup(self, app: web.Application) -> None:
         if self._sweeper is not None:
             self._sweeper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._sweeper
-        # Graceful shutdown: whatever is still open is written as it stands.
-        for trajectory in [t for t in self.trajectories.values() if t.is_open]:
+        # Graceful shutdown: everything still in memory is unwritten, and is written as it stands.
+        for trajectory in list(self.trajectories.values()):
             await self._persist(trajectory)
         await self.backend.close()
 
     # -- ending a trajectory -----------------------------------------------------
     async def end(self, trajectory: Trajectory, status: Status, annotations: dict[str, Any] | None = None) -> None:
-        """Seal, release the upstream session, write, and drop from memory."""
-        if not trajectory.is_open:
-            return
-        trajectory.seal(status, annotations)
-        try:
-            await self.backend.release(trajectory)
-        except Exception:
-            logger.exception("releasing %s failed", trajectory.id)
-        if await self._persist(trajectory):
+        """Seal, release the upstream session, write, and drop from memory.
+
+        A trajectory still in memory has not been written, so ending it again
+        retries the write of one whose earlier write failed.
+        """
+        if trajectory.is_open:
+            trajectory.seal(status, annotations)
+            try:
+                await self.backend.release(trajectory)
+            except Exception:
+                logger.exception("releasing %s failed", trajectory.id)
+        if self.trajectories.get(trajectory.id) is trajectory and await self._persist(trajectory):
             self.trajectories.pop(trajectory.id, None)
 
     async def _persist(self, trajectory: Trajectory) -> bool:
@@ -127,11 +132,19 @@ class CaptureServer:
     async def sweep(self) -> list[str]:
         """Abandon open trajectories idle for longer than the TTL. Returns their ids."""
         cutoff = time.monotonic() - self.ttl
-        idle = [t for t in self.trajectories.values() if t.is_open and not t.inflight and t.last_active < cutoff]
-        for trajectory in idle:
+
+        def idle(trajectory: Trajectory) -> bool:
+            return trajectory.is_open and not trajectory.inflight and trajectory.last_active < cutoff
+
+        abandoned = []
+        for trajectory in [t for t in self.trajectories.values() if idle(t)]:
+            # Checked again: a request may have arrived while an earlier one was being written.
+            if not idle(trajectory):
+                continue
             logger.info("abandoning %s after %.0fs idle", trajectory.id, self.ttl)
             await self.end(trajectory, "abandoned")
-        return [t.id for t in idle]
+            abandoned.append(trajectory.id)
+        return abandoned
 
     async def _sweep_forever(self) -> None:
         while True:
@@ -141,14 +154,21 @@ class CaptureServer:
             except Exception:
                 logger.exception("sweep failed")
 
-    def _lookup(self, trajectory_id: str) -> Trajectory | None:
+    async def _lookup(self, trajectory_id: str) -> Trajectory | None:
         """A live trajectory, or an ended one read back from disk."""
         trajectory = self.trajectories.get(trajectory_id)
         if trajectory is not None or self.record_dir is None:
             return trajectory
-        if not record.document_path(self.record_dir, trajectory_id).exists():
+        try:
+            return await asyncio.to_thread(record.load, self.record_dir, trajectory_id)
+        except FileNotFoundError:
             return None
-        return record.load(self.record_dir, trajectory_id)
+
+    def _ended_or_unknown(self, trajectory_id: str) -> web.Response:
+        """The answer to a harness call for a trajectory not in memory: 410 if it was recorded, else 404."""
+        if self.record_dir is not None and record.document_path(self.record_dir, trajectory_id).exists():
+            return _openai_error("trajectory has ended", 410, code="trajectory_closed")
+        return _openai_error("unknown trajectory", 404)
 
     # -- control plane --------------------------------------------------------
     async def healthz(self, request: web.Request) -> web.Response:
@@ -171,7 +191,7 @@ class CaptureServer:
         annotations = body.get("annotations") if isinstance(body, dict) else None
         if annotations is not None and not isinstance(annotations, dict):
             return _json({"error": "`annotations` must be an object"}, 400)
-        trajectory = self._lookup(request.match_info["id"])
+        trajectory = await self._lookup(request.match_info["id"])
         if trajectory is None:
             return _json({"error": "unknown trajectory"}, 404)
         if not trajectory.is_open and _changes(trajectory.annotations, annotations):
@@ -192,24 +212,26 @@ class CaptureServer:
         trajectory = self.trajectories.get(trajectory_id)
         if trajectory is not None:
             return _json(trajectory.document())
-        if self.record_dir is not None and record.document_path(self.record_dir, trajectory_id).exists():
-            # The stored document, as written: no sidecar is opened.
-            return _json(await asyncio.to_thread(record.read_document, self.record_dir, trajectory_id))
+        if self.record_dir is not None:
+            try:
+                # The stored document, as written: no sidecar is opened.
+                return _json(await asyncio.to_thread(record.read_document, self.record_dir, trajectory_id))
+            except FileNotFoundError:
+                pass
         return _json({"error": "unknown trajectory"}, 404)
 
     # -- data plane -------------------------------------------------------------
     async def models(self, request: web.Request) -> web.Response:
-        if request.match_info["id"] not in self.trajectories:
-            return _openai_error("unknown trajectory", 404)
+        trajectory_id = request.match_info["id"]
+        if trajectory_id not in self.trajectories:
+            return self._ended_or_unknown(trajectory_id)
         return await self.backend.models(request)
 
     async def chat(self, request: web.Request) -> web.StreamResponse:
         trajectory_id = request.match_info["id"]
         trajectory = self.trajectories.get(trajectory_id)
         if trajectory is None:
-            if self.record_dir is not None and record.document_path(self.record_dir, trajectory_id).exists():
-                return _openai_error("trajectory has ended", 410, code="trajectory_closed")
-            return _openai_error("unknown trajectory", 404)
+            return self._ended_or_unknown(trajectory_id)
         if not trajectory.is_open:
             return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
         # In flight from here on, so a finish that lands during the body read cancels this call.
