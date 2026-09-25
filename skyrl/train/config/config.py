@@ -106,7 +106,15 @@ class SkyRLLoraConfig(BaseConfig):
     """Dropout probability applied to LoRA layers, to help prevent overfitting."""
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
-    Must be accessible to all workers in distributed setups."""
+    Must be accessible to all workers in distributed setups. Unused when ``sync_mode="memory"``."""
+    sync_mode: str = "disk"
+    """How adapter-only weight sync (Megatron ``merge_lora=false``) reaches the inference engines.
+    ``"disk"`` writes PEFT files to ``lora_sync_path`` and vLLM reads them back.
+    ``"memory"`` ships the adapter tensors through the configured
+    ``generator.inference_engine.weight_sync_backend`` transport (``nccl``: NCCL broadcast when
+    non-colocated, CUDA IPC when colocated) and vLLM builds the adapter from the received GPU
+    tensors; nothing is written. Shared expert adapters are sent once and aliased on the receiver.
+    Megatron only."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module

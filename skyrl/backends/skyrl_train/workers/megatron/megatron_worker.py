@@ -21,7 +21,9 @@ from transformers import AutoConfig
 
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank, WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
+    fold_lora_alpha_for_vllm,
     fold_lora_rank_scale_for_vllm,
+    mark_alpha_folded,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
@@ -734,6 +736,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Per-worker store of LoRA adapter snapshots. Allocated only for the
         # LoRA path; FFT runs single-tenant exactly as before.
         self.adapter_store: Optional[AdapterStore] = AdapterStore() if self._is_lora else None
+        # The engine's WeightSource under lora.sync_mode=memory, kept for the
+        # per-sync set_lora_name / prepare. Built in _build_weight_source.
+        self._lora_weight_source = None
 
     def init_worker_process_group(self):
         """
@@ -1314,6 +1319,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
     def _build_weight_source(self, dtype: "torch.dtype", backend: str):
         """``WeightSource`` over the Megatron policy model, via Megatron-Bridge."""
+        if self._lora_sync_mode_is_memory():
+            # With merge_lora=false every sync is adapter-only (see
+            # broadcast_to_inference_engines), so the engine's source IS the
+            # adapter: the base model is never pushed and the two never
+            # interleave. Held for the per-sync set_lora_name / prepare.
+            self._lora_weight_source = self._build_lora_weight_source(dtype)
+            return self._lora_weight_source
+
         if backend == "sharded_rdt":
             # RDT pulls, so it needs the ownership + group channels its own
             # source subclasses add, and can serve PP/EP-local exports.
@@ -1385,6 +1398,115 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 )
         return cached
 
+    def _lora_sync_mode_is_memory(self) -> bool:
+        """Whether adapter sync ships tensors instead of writing PEFT files."""
+        return (
+            self._is_lora
+            and not self.cfg.policy.megatron_config.lora_config.merge_lora
+            and self.cfg.policy.model.lora.sync_mode == "memory"
+        )
+
+    def _build_lora_weight_source(self, dtype: "torch.dtype"):
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            MegatronLoraAdapterSource,
+        )
+
+        lora_cfg = self.cfg.policy.model.lora
+        megatron_lora_cfg = self.cfg.policy.megatron_config.lora_config
+        # How many consecutive expert keys carry one identical adapter tensor.
+        # Under share_expert_adapters one adapter serves every expert an EP rank
+        # owns, so that span is num_experts / ep_size; the source sends each span
+        # once. Any other layout sends every key. The span is verified
+        # tensor-by-tensor, so it is only a hint.
+        experts_per_shared_adapter = 1
+        num_moe_experts = getattr(self.provider, "num_moe_experts", None)
+        if lora_cfg.share_expert_adapters and megatron_lora_cfg.lora_type == "lora" and num_moe_experts:
+            ep_size = max(1, int(self.cfg.policy.megatron_config.expert_model_parallel_size))
+            experts_per_shared_adapter = max(1, num_moe_experts // ep_size)
+        return MegatronLoraAdapterSource(
+            dtype=dtype,
+            experts_per_shared_adapter=experts_per_shared_adapter,
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            lora_cls=self.lora_cls,
+            base_model_name_or_path=str(
+                getattr(self, "_logical_model_path", "")
+                or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
+                or getattr(self.bridge.hf_pretrained, "name_or_path", "")
+            ),
+        )
+
+    async def _publish_lora_adapter_in_memory(
+        self,
+        lora_name: str,
+        inference_engine_client,
+    ) -> None:
+        """Adapter-only sync over the base-model transport; no files.
+
+        Four steps, and the order is the point:
+
+        1. ``prepare()`` on every rank -- the bridge's adapter export is a
+           collective, and only after it has run are the alias map and the
+           adapter config known.
+        2. rank 0 arms every inference worker with that target. It has to land
+           before ``send_weights()``, whose round trip carries only names,
+           dtypes and shapes.
+        3. every rank runs the send. The receivers stage the tensors instead of
+           loading them into the base model.
+        4. rank 0 asks the servers to register the adapter from the staged
+           tensors under ``lora_name``.
+        """
+        import time
+
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
+
+        if not isinstance(inference_engine_client, RemoteInferenceClient):
+            raise TypeError("lora.sync_mode='memory' requires the RemoteInferenceClient (new inference path)")
+        source = self._lora_weight_source
+        engine = getattr(self, "_weight_sync_engine", None)
+        if source is None or engine is None:
+            raise RuntimeError("init_weight_sync_state must run before publishing a LoRA adapter")
+
+        rank = torch.distributed.get_rank()
+        started = time.perf_counter()
+        source.set_lora_name(lora_name)
+        await self._weight_sync_thread(source.prepare)
+        exported = time.perf_counter()
+
+        unique = aliased = 0
+        if rank == 0:
+            receive_target = source.receive_target
+            # Read while the export is still prepared: the send consumes the
+            # stream and drops it, and re-reading afterwards would be a
+            # collective this rank would run alone.
+            unique = len(source.metadata())
+            aliased = len(receive_target["aliases"])
+            await inference_engine_client.set_lora_receive_target(receive_target)
+        # No rank may enter the transfer before every worker is armed: rank 0
+        # opens the round trip, the others only join its collectives.
+        torch.distributed.barrier()
+
+        with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
+            await self._weight_sync_thread(engine.send_weights)
+        sent = time.perf_counter()
+
+        if rank == 0:
+            await inference_engine_client.load_lora_adapter(lora_name, in_memory=True)
+            logger.info(
+                "LoRA sync (memory): adapter {!r} {} unique tensors (+{} aliased, {:.1f}x dedupe), "
+                "exported in {:.2f}s, sent in {:.2f}s, registered on vLLM in {:.2f}s",
+                lora_name,
+                unique,
+                aliased,
+                (unique + aliased) / max(unique, 1),
+                exported - started,
+                sent - exported,
+                time.perf_counter() - sent,
+            )
+        torch.distributed.barrier()
+
     async def _save_lora_adapters_and_sync(
         self, lora_sync_path, inference_engine_client, lora_name: str = SKYRL_LORA_ADAPTER_NAME
     ):
@@ -1441,6 +1563,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     ", ".join(f"{n} tensors at rank {r} x{config_rank / r:g}" for r, n in sorted(rescaled.items())),
                 )
 
+            # Same artifact as the in-memory path: alpha / r folded into lora_B
+            # and published with lora_alpha == r (see fold_lora_alpha_for_vllm).
+            adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self.lora_cls.alpha)
+
             # Rewrite fused-MoE expert LoRA into vLLM's flat PEFT layout so
             # merge_lora=False on-policy sync is accepted (otherwise
             # load_lora_adapter rejects `experts.down_proj`). See
@@ -1455,10 +1581,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
             )
-            adapter_config = build_adapter_config_dict(
-                self.lora_cls,
-                target_modules=target_modules,
-                base_model_name_or_path=base_model_name_or_path,
+            adapter_config = mark_alpha_folded(
+                build_adapter_config_dict(
+                    self.lora_cls,
+                    target_modules=target_modules,
+                    base_model_name_or_path=base_model_name_or_path,
+                )
             )
 
             # Atomic renames so concurrent writers (shared filesystem) and the
@@ -1505,7 +1633,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
             torch.cuda.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
-            await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
+            if self._lora_sync_mode_is_memory():
+                await self._publish_lora_adapter_in_memory(lora_name, inference_engine_client)
+            else:
+                await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client, lora_name=lora_name)
             if cache_reset_task is not None:
                 await cache_reset_task
             if self.cfg.placement.colocate_all:

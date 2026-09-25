@@ -233,7 +233,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
             args.max_cpu_loras = lora_cfg.max_cpu_loras
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
 
-        if not cfg.trainer.placement.colocate_all:
+        if not cfg.trainer.placement.colocate_all and lora_cfg.sync_mode != "memory":
             lora_path = cfg.trainer.policy.model.lora.lora_sync_path
             logger.warning(
                 "LoRA weight sync is enabled but training and inference are not "
