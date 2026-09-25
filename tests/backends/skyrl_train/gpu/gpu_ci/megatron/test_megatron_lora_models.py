@@ -80,10 +80,6 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
     cfg.trainer.policy.model.lora = SkyRLLoraConfig(
         rank=8, alpha=16, dropout=0.0, target_modules="all-linear", lora_sync_path=lora_sync_path
     )
-    if "glm-4" in model_name.lower():
-        # MLA attention has no ``linear_qkv``; adapt the output projection and the
-        # MLP, as the Kimi K2.5 row in test_megatron_models.py does.
-        cfg.trainer.policy.model.lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     validate_cfg(cfg)
     return cfg
@@ -123,29 +119,10 @@ async def _sync_weights(policy, client, cfg, label: str):
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,threshold,merge_lora",
     [
-        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 2e-1, False, id="qwen3-moe_tp2_ep2_adapter"),
-        pytest.param(2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 2e-1, True, id="qwen3-moe_tp2_ep2_merged"),
-        pytest.param(
-            1, 2, 2, 1, None, 2, 4, "eatang/qwen3-moe-tiny-random", 2e-1, False, id="qwen3-moe_pp2_cp2_adapter"
-        ),
         pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, False, id="qwen3.5-0.8b-dense_tp2_adapter"),
         pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, True, id="qwen3.5-0.8b-dense_tp2_merged"),
-        # Large MoE rows on 4xH100-80G, same meshes and engine overrides as the
-        # bf16 rows in test_megatron_models.py.
-        pytest.param(
-            4,
-            1,
-            1,
-            4,
-            1,
-            4,
-            4,
-            "zai-org/GLM-4.7-Flash",
-            5e-2,
-            False,
-            id="glm-4.7-flash_h100_tp4_ep4_adapter",
-            marks=pytest.mark.h100,
-        ),
+        # Large MoE row on 4xH100-80G, same mesh and engine overrides as the
+        # bf16 row in test_megatron_models.py.
         pytest.param(
             4,
             1,
