@@ -3,7 +3,7 @@ title: "Multi-Turn VLM RL on Geometry-3K"
 ---
 
 <Callout type="info">
-Uses the `fsdp` backend. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags and local vLLM source override).
+Supports the `fsdp` and `megatron` backends. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl) for the VLM setup background (required flags and dataset record shape).
 </Callout>
 
 In this example we train a vision-language model to solve geometry problems from the [Geometry-3K dataset](https://huggingface.co/datasets/hiyouga/geometry3k). The model sees a geometry diagram plus a text question, reasons, and iteratively checks its answer with a `calc_score` tool before committing to a final boxed answer.
@@ -38,7 +38,7 @@ The training script auto-generates the dataset on first run. To prepare it expli
 uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir ~/data/geometry_3k
 ```
 
-This downloads `hiyouga/geometry3k`, base64-encodes each PIL diagram as a JPEG data URI, and writes `train.parquet` / `val.parquet`. Each row's `prompt` is a chat-format message with an `image_url` content part followed by the question text. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl#dataset-record-shape) for the record format.
+This downloads `hiyouga/geometry3k`, base64-encodes each PIL diagram as a JPEG data URI, and writes `train.parquet`, `val.parquet` and `test.parquet`. The run scripts evaluate on `test.parquet`. Each row's `prompt` is a chat-format message with an `image_url` content part followed by the question text. See the [Vision-Language RL tutorial](../tutorials/vision_language_rl#dataset-record-shape) for the record format.
 
 ## Tool-Calling Protocol
 
@@ -95,6 +95,31 @@ bash examples/train/geometry3k/run_geometry3k_lora.sh
 
 For the full parameter reference (`rank`, `alpha`, `dropout`, `target_modules`, `exclude_modules`, `lora_sync_path`, `init_method`) and general guidance on choosing LoRA hyperparameters, see the [LoRA example](../examples/lora).
 
+## Megatron Backend
+
+The recipe also runs on the Megatron backend. `examples/train/geometry3k/run_geometry3k_megatron.sh` uses the same configuration as `run_geometry3k.sh`, with these differences:
+
+```bash title="delta vs. run_geometry3k.sh"
+uv run --isolated --extra megatron \
+  ...
+  trainer.strategy=megatron \
+  trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
+```
+
+It defaults to `MEGATRON_TP=2`, `MEGATRON_PP=1` (data parallel size 4 on 8 GPUs):
+
+```bash
+bash examples/train/geometry3k/run_geometry3k_megatron.sh
+
+# Different parallelism
+MEGATRON_TP=1 MEGATRON_PP=2 bash examples/train/geometry3k/run_geometry3k_megatron.sh
+```
+
+As with FSDP, VLM training on Megatron does not support sample packing (`trainer.remove_microbatch_padding=false`) or context parallelism.
+
+On 8xH100 80GB, a full 6-epoch run (96 steps) took about 3h50m. Eval pass@1 on `test.parquet` went from 0.539 before training to 0.729 at its best (step 90), and peak GPU memory was about 72 GiB per GPU.
+
 ## Launching
 
 ```bash
@@ -109,7 +134,14 @@ LOGGER=wandb bash examples/train/geometry3k/run_geometry3k.sh
 
 # Custom data dir
 DATA_DIR=/path/to/data bash examples/train/geometry3k/run_geometry3k.sh
+
+# Custom export and checkpoint dirs
+EXPORT_PATH=/path/to/exports CKPT_PATH=/path/to/ckpts bash examples/train/geometry3k/run_geometry3k.sh
 ```
+
+<Callout type="info">
+On a multi-node Ray cluster, the training entrypoint may be scheduled on a different node than the one you launch from. Point `DATA_DIR`, `EXPORT_PATH` and `CKPT_PATH` at storage that every node can read and write (for example, a shared NFS mount). Otherwise the run fails with `FileNotFoundError` for `train.parquet`.
+</Callout>
 
 ## Results
 

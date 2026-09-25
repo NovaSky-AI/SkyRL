@@ -7,10 +7,6 @@ set -x
 # in docs/content/docs/examples/geometry3k.mdx for a walkthrough of the
 # VLM-specific overrides below.
 #
-# Prereq: VLM runs need a newer vLLM than the repo's pinned 0.19.0. See
-# docs/content/docs/tutorials/vision_language_rl.mdx for the one-line
-# [tool.uv.sources] override you need to add to the root pyproject.toml.
-#
 # uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir $HOME/data/geometry_3k
 # bash examples/train/geometry3k/run_geometry3k_lora.sh
 
@@ -23,6 +19,7 @@ if [ ! -f "$DATA_DIR/train.parquet" ]; then
 fi
 : "${LOGGER:=console}"
 : "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm_lora"}"
+: "${CKPT_PATH:="$HOME/ckpts/geometry3k_vlm_lora_ckpt"}"
 
 uv run --isolated --extra fsdp --with pylatexenc \
   python examples/train/geometry3k/geometry3k_entrypoint.py \
@@ -70,6 +67,6 @@ uv run --isolated --extra fsdp --with pylatexenc \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.export_path="$EXPORT_PATH" \
   trainer.dump_eval_results=true \
-  trainer.ckpt_path="$HOME/ckpts/geometry3k_vlm_lora_ckpt" \
+  trainer.ckpt_path="$CKPT_PATH" \
   trainer.algorithm.loss_reduction=token_mean_legacy \
   "$@"
