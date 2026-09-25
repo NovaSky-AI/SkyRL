@@ -123,3 +123,25 @@ engine, so its row is a copy of the previous one.
 
 A node's rows are `[mask_offset, mask_offset + mask_rows)`, one per sampled
 token, in order.
+
+## Sizes
+
+Before compression, per token of the trajectory (`N` tokens, `S` of them sampled):
+
+| Sidecar | Per unit | Scales as |
+| --- | --- | --- |
+| `tokens` | per token: 4 B id + 8 B logprob + 4 B text offset + its UTF-8 text (~4 B for English BPE) ≈ 20 B | `O(N)` |
+| `experts` | per token: `layers × k × itemsize`, where `k` is the experts each token is routed to (top-k) and `itemsize` is 1 B while expert ids fit in uint8 (≤ 256 experts), 2 B above | `O(N × layers × k)` |
+| `sampling_mask` | per sampled token: `4 B × support + 8 B`, where support is at most the sampling `top_k` | `O(S × top_k)` |
+
+The total number of experts only sets `itemsize`. The document's size follows the messages' text.
+
+For example, a 32k-token trajectory with 8k sampled tokens, on a Qwen3-30B-A3B-style model (48 layers, top-8 of 128 experts) sampled with `top_k = 50`:
+
+| Sidecar | Per unit | Total |
+| --- | --- | --- |
+| `tokens` | ~20 B × 32k | ~0.6 MB |
+| `experts` | 48 × 8 × 1 B = 384 B × 32k | ~12 MB |
+| `sampling_mask` | up to 208 B × 8k | up to ~1.7 MB |
+
+Routed experts dominate, which is why they have their own file that only training reads.
