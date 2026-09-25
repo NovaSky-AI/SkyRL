@@ -1,0 +1,81 @@
+---
+title: "On-Policy Distillation"
+---
+
+On-policy distillation (OPD) trains a student on its own rollouts while a frozen teacher grades every
+token: the negative per-token reverse KL to the teacher, `log π_teacher − log π_student`, is the
+advantage. It keeps the on-policy character of RL and adds a dense, per-token signal
+([Thinking Machines](https://thinkingmachines.ai/blog/on-policy-distillation/)).
+
+SkyRL's entrypoint, `skyrl.train.entrypoints.main_opd` (library code under `skyrl/train/opd/`, run scripts under `examples/train/on_policy_distillation/`), serves the teacher from an
+inference engine rather than a training worker: it never syncs weights, can be much larger than the
+student, and scores each prompt's group of rollouts as soon as it finishes, while the other groups are
+still generating, so teacher latency overlaps with generation. The generator is untouched: any
+`GeneratorInterface` works.
+
+## Quickstart
+
+```bash
+export FIREWORKS_API_KEY=<your key>
+
+# Serverless smoke test: gpt-oss-20b student, gpt-oss-120b teacher on Fireworks serverless.
+uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+bash examples/train/on_policy_distillation/run_opd_gsm8k_gptoss_fireworks.sh
+
+# The math recipe: Qwen3-4B-Base student, DAPO-17k prompts, AIME24 eval, a Qwen3-family teacher on a
+# dedicated Fireworks deployment.
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+TEACHER_MODEL=accounts/<account>/deployments/<id> \
+  bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh
+```
+
+The only OPD-specific flags are the teacher and, optionally, the mixing knobs:
+
+```bash
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
+  trainer.policy.model.path=Qwen/Qwen3-4B-Base \
+  trainer.teacher.model=accounts/<account>/deployments/<id> \
+  trainer.algorithm.opd.kl_coef=1.0 \
+  trainer.algorithm.opd.use_task_reward=false \
+  ...
+```
+
+<Callout type="warn">
+The student and the teacher must share a tokenizer: the teacher scores the student's token ids verbatim.
+</Callout>
+
+## Teacher backends
+
+- `trainer.teacher.backend=fireworks` (default): a Fireworks model id or a dedicated deployment id
+  (`accounts/<account>/deployments/<id>`), scored through the completions API with an integer prompt and
+  `echo_last`. Serverless is fine for checking the plumbing; use a dedicated deployment for training,
+  because serverless replicas disagree on logprobs by more than the OPD signal itself and the Qwen3 (2025)
+  family is not served serverless.
+- `trainer.teacher.backend=vllm`: vLLM servers you started (a stock `vllm serve` or SkyRL's `serve`
+  entrypoint), given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible
+  `/v1/completions` with vLLM's `prompt_logprobs` parameter. `trainer.teacher.model` is the served model name.
+
+There are no preflight checks yet: nothing verifies the teacher's tokenizer, context length, or
+reproducibility before training (a TODO in `skyrl/train/entrypoints/main_opd.py` records what other
+frameworks check). Pick a teacher from the student's model family, serve it with enough context, and
+prefer a dedicated deployment over serverless.
+
+## Pure and mixed distillation
+
+`trainer.algorithm.opd.use_task_reward=false` (default) is pure distillation: the environment reward is
+logged but zeroed before the advantage estimator, so the advantage is the teacher term alone.
+`use_task_reward=true` keeps the reward: the configured estimator (GRPO by default) produces its
+advantages and the teacher term, `kl_coef · (log π_student − log π_teacher)`, is subtracted per token after
+it. Applying the term after the estimator is what lets it compose with any estimator in mixed mode, and
+with any reward-only estimator in pure mode (`gae` is rejected there: a critic's whitened residuals would
+replace the teacher signal). GRPO would otherwise sum the per-token signal into one scalar per sequence.
+
+## Metrics
+
+`opd/reverse_kl` is the headline curve and approaches 0 as the student matches the teacher.
+`opd/adv_rl_abs_mean` and `opd/adv_opd_abs_mean` compare the scale of the reward term and the teacher term
+when tuning `kl_coef` in mixed mode. `opd/teacher_time_exposed` is the seconds the step waited on the
+teacher after the last rollout of the batch came back, the only scoring cost the overlap cannot hide.
+`reward/avg_pass_at_n` still reports the verifier's pass rate on training rollouts in pure mode.
+
+See `examples/train/on_policy_distillation/README.md` for the full configuration table and the caveats.
