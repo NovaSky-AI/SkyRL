@@ -101,6 +101,58 @@ class SkyrlDrafterReloadMixin:
             self.model = model
 
 
+def skyrl_before_weight_update() -> None:
+    """Serialized-FP8 hooks that must be in place before the reload runs.
+
+    MXFP8 TRT-LLM MoE prepare re-derives a fixed per-layer weight/scale
+    relocation on every sync. Replace it with a learned, bitwise-validated
+    permutation cache; it falls back to the original on any mismatch, and is a
+    no-op for non-MXFP8 wires. Installed here rather than at worker-extension
+    import so the wrap lands in the process that owns the engine, and only once
+    a sync actually happens.
+    """
+    from skyrl.backends.skyrl_train.inference_servers.trtllm_moe_prepare_cache import (
+        install as install_trtllm_moe_prepare_cache,
+    )
+
+    install_trtllm_moe_prepare_cache()
+
+
+def skyrl_after_weight_update() -> None:
+    """Re-assert the serialized-FP8 wire's KV/attention scale contract.
+
+    The wire ships no KV/attention scale calibration, so those scales are 1.0 by
+    contract. vLLM corrupts them at boot (compressed-tensors copies the
+    dummy-load placeholders verbatim) and after a level-2 wake
+    (``init_fp8_kv_scales`` resets only the k/v tensors — q wakes as 0.0 and the
+    float mirrors keep garbage), which serves NaN on the quantized-Q path or
+    silently wrong logprobs on the bf16-Q path under ``kv_cache_dtype=fp8_*``.
+    Both of those are patched in ``vllm_compat``; a reload re-runs
+    ``process_weights_after_loading``, so re-assert it here too.
+
+    Gated on a dummy-weight boot: these engines also serve models started from a
+    real FP8 checkpoint, whose calibrated k/v scales must survive a sync that
+    carries no replacement for them.
+    """
+    from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+        booted_without_checkpoint_weights,
+        normalize_serialized_fp8_kv_scales,
+    )
+
+    if not booted_without_checkpoint_weights():
+        return
+    from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
+        current_model_runner,
+    )
+
+    model_runner = current_model_runner()
+    if model_runner is None:
+        return
+    count = normalize_serialized_fp8_kv_scales(model_runner)
+    if count:
+        logger.info("Normalized FP8 KV/attention scales to 1.0 on %d layers after weight sync", count)
+
+
 # Each engine brackets its lifecycle in `torch.device(self.device)`. vLLM's own
 # path passes `device=` where it matters instead; SkyRL's loaders rely on it
 # being the default device that weight loading sees.
@@ -113,6 +165,7 @@ def _build_skyrl_nccl_engine() -> type:
         """vLLM's dense NCCL receive engine plus the drafter reload."""
 
         def start_weight_update(self) -> None:
+            skyrl_before_weight_update()
             with torch.device(self.device):
                 super().start_weight_update()
 
@@ -123,6 +176,7 @@ def _build_skyrl_nccl_engine() -> type:
         def finish_weight_update(self) -> None:
             with torch.device(self.device):
                 super().finish_weight_update()
+            skyrl_after_weight_update()
             empty_cuda_cache_rocm()
 
     return SkyrlNCCLWeightTransferEngine
@@ -135,6 +189,7 @@ def _build_skyrl_ipc_engine() -> type:
         """vLLM's CUDA IPC receive engine plus the drafter reload."""
 
         def start_weight_update(self) -> None:
+            skyrl_before_weight_update()
             with torch.device(self.device):
                 super().start_weight_update()
 
@@ -145,6 +200,7 @@ def _build_skyrl_ipc_engine() -> type:
         def finish_weight_update(self) -> None:
             with torch.device(self.device):
                 super().finish_weight_update()
+            skyrl_after_weight_update()
             empty_cuda_cache_rocm()
 
     return SkyrlIPCWeightTransferEngine

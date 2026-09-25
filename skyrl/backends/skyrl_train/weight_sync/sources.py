@@ -122,7 +122,10 @@ class MegatronWeightSource(WeightSource):
 
 
 class SerializedFp8WeightSource(WeightSource):
-    """Serialize a dense source into blockwise-FP8 checkpoint tensors.
+    """Serialize a dense source into FP8 checkpoint tensors on the configured wire.
+
+    The wire (``blockwise`` or ``mxfp8``) is carried by ``config``; this class is
+    agnostic to it.
 
     The vLLM trainer engines require metadata and iteration to expose the same
     expanded stream. The first metadata call therefore runs one dry conversion

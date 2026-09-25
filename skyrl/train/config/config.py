@@ -1173,12 +1173,21 @@ class InferenceEngineConfig(BaseConfig):
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
     to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
     fp8_weight_sync_mode: Optional[str] = None
-    """Optional rollout weight format. ``"blockwise"`` sends FP8 checkpoint weights and
-    scales (one FP32 scale per 128x128 block) instead of ``model_dtype`` tensors, halving transfer
-    volume and letting vLLM serve FP8. Requires ``trainer.strategy="megatron"`` and a model with a
-    registered FP8 spec (see ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The
-    vLLM engine settings this needs (``quantization="fp8"``, ``load_format="dummy"``, and the
-    matching ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
+    """Optional rollout weight format: ``"blockwise"``, ``"mxfp8"``, or ``"auto"``.
+
+    Sends FP8 checkpoint weights and scales instead of ``model_dtype`` tensors, halving transfer
+    volume and letting vLLM serve FP8. ``"blockwise"`` ships one FP32 scale per 128x128 block;
+    ``"mxfp8"`` ships one E8M0 exponent per 32-element group, matching the recipe Transformer
+    Engine trains with on Blackwell.
+
+    ``"auto"`` selects the format matching the policy's resolved ``fp8_recipe`` -- so trainer and
+    rollout quantize identically. It follows the *recipe*, not the architecture: an explicit
+    ``fp8_recipe="blockwise"`` on Blackwell keeps a blockwise wire.
+
+    Requires ``trainer.strategy="megatron"`` and a model with a registered FP8 spec (see
+    ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
+    this needs (``quantization``, ``load_format="dummy"``, and the matching
+    ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
     automatically; the first weight sync supplies real weights before any generation."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
@@ -1881,12 +1890,20 @@ class SkyRLTrainConfig(BaseConfig):
         ie_cfg = self.generator.inference_engine
         if ie_cfg.fp8_weight_sync_mode is not None:
             from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-            from skyrl.backends.skyrl_train.weight_sync.fp8 import BLOCKWISE_FP8
+            from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+                AUTO_FP8,
+                WIRE_FORMATS,
+            )
 
-            if ie_cfg.fp8_weight_sync_mode != BLOCKWISE_FP8:
+            # "auto" is still unresolved here -- validate_megatron_cfg turns it
+            # into a concrete wire from the policy's fp8_recipe, long after the
+            # config object is built. Accept it and let the entrypoint-specific
+            # validation (validate_inference_engine_cfg) reject it where there
+            # is no recipe to resolve from.
+            if ie_cfg.fp8_weight_sync_mode not in (*WIRE_FORMATS, AUTO_FP8):
                 raise ValueError(
                     f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}. "
-                    f"Supported value: {BLOCKWISE_FP8!r}."
+                    f"Supported values: {(*WIRE_FORMATS, AUTO_FP8)!r}."
                 )
             if self.trainer.strategy != "megatron":
                 raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")
