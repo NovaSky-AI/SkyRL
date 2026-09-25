@@ -187,6 +187,15 @@ class MegatronWorker:
         tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config_original = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
+        if getattr(hf_config_original, "model_type", None) == "iquestloopcoder":
+            if lora_config is None or lora_config.rank <= 0:
+                raise ValueError("IQuest LoopCoder is supported only for LoRA training")
+            if self.cfg.policy.megatron_config.lora_config.merge_lora:
+                raise ValueError(
+                    "IQuest LoopCoder requires policy.megatron_config.lora_config.merge_lora=false "
+                    "so the shared physical-layer adapters are served through vLLM's LoRA path"
+                )
+
         if not language_model_only:
             # VLM detection mirrors the FSDP path: a non-null ``vision_config`` on the
             # HF config means a vision tower is present. Megatron's TransformerConfig
@@ -308,6 +317,19 @@ class MegatronWorker:
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+
+        if (
+            getattr(hf_config_original, "model_type", None) == "iquestloopcoder"
+            and provider.recompute_granularity == "full"
+        ):
+            logger.info(
+                "LoopCoder: replacing full-block activation recomputation with selective MLP "
+                "recomputation so loop-2 gradients retain the loop-1 KV dependency"
+            )
+            provider.recompute_granularity = "selective"
+            provider.recompute_method = None
+            provider.recompute_num_layers = None
+            provider.recompute_modules = ["mlp"]
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
