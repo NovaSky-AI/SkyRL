@@ -115,6 +115,14 @@ def test_build_config_from_dict_config_invalid_config():
         _SimpleConfig.from_dict_config(cfg)
 
 
+def test_lora_dtype_defaults_to_model_and_accepts_float32_override():
+    default = SkyRLTrainConfig.from_cli_overrides([]).trainer.policy.model.lora
+    overridden = SkyRLTrainConfig.from_cli_overrides(["trainer.policy.model.lora.dtype=float32"])
+
+    assert default.dtype is None
+    assert overridden.trainer.policy.model.lora.dtype == "float32"
+
+
 def test_dtype_resolution():
     assert not _resolve_class_type(typing.Optional[int])
     assert _resolve_class_type(typing.Optional[_SimpleConfig]) is _SimpleConfig
