@@ -125,16 +125,17 @@ class CaptureServer:
             return _openai_error("unknown trajectory", 404)
         if not trajectory.is_open:
             return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
-        raw = await request.read()
-        try:
-            chat = parse_request(orjson.loads(raw))
-        except (orjson.JSONDecodeError, RequestError) as error:
-            return _openai_error(str(error), 400)
+        # In flight from here on, so a finish that lands during the body read cancels this call.
         task = asyncio.current_task()
         assert task is not None
         trajectory.inflight.add(task)
         trajectory.touch()
         try:
+            raw = await request.read()
+            try:
+                chat = parse_request(orjson.loads(raw))
+            except (orjson.JSONDecodeError, RequestError) as error:
+                return _openai_error(str(error), 400)
             return await self.backend.chat(trajectory, request, chat, raw)
         finally:
             trajectory.inflight.discard(task)
@@ -147,10 +148,13 @@ def _changes(current: dict[str, Any], update: dict[str, Any] | None) -> bool:
 
 
 async def _read_json(request: web.Request, *, default: Any) -> Any:
+    """The request's JSON body, ``default`` when it is empty, or a 400 when it doesn't parse."""
     raw = await request.read()
     if not raw:
         return default
     try:
         return orjson.loads(raw)
-    except orjson.JSONDecodeError:
-        return default
+    except orjson.JSONDecodeError as error:
+        raise web.HTTPBadRequest(
+            text=orjson.dumps({"error": f"request body is not JSON: {error}"}).decode(), content_type="application/json"
+        ) from error

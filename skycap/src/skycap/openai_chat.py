@@ -143,7 +143,7 @@ class StreamAssembler:
 
     def _tool_call(self, call: dict[str, Any]) -> None:
         slot = self.tool_calls.setdefault(
-            int(call.get("index", 0)),
+            int(call.get("index") or 0),
             {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
         )
         if call.get("id"):

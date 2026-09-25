@@ -7,6 +7,8 @@ something else through a ``mock`` field in the body:
     {"tool_call": "name"}    reply with one tool call instead
     {"status": 500}          fail with that status
     {"delay": 0.5}           sleep before answering
+    {"linger": 0.5}          streamed: keep the connection open this long after [DONE]
+    {"abort": true}          streamed: drop the connection after the first chunk
 """
 
 from __future__ import annotations
@@ -81,8 +83,14 @@ class MockOpenAI:
         await response.prepare(request)
         for delta in _deltas(message):
             await response.write(_frame(response_id, body.get("model"), delta, None))
+            if mock.get("abort"):
+                assert request.transport is not None
+                request.transport.close()
+                return response
         await response.write(_frame(response_id, body.get("model"), {}, finish))
         await response.write(b"data: [DONE]\n\n")
+        if mock.get("linger"):
+            await asyncio.sleep(mock["linger"])
         await response.write_eof()
         return response
 

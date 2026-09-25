@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 
 import aiohttp
+import orjson
 from aiohttp import web
 
 from skycap.graph import CallInfo
@@ -76,7 +77,7 @@ class TextBackend:
                     _fail(trajectory, up.status, body.decode(errors="replace")[:2000])
                     return response
                 try:
-                    reply = parse_response(await up.json(content_type=None))
+                    reply = parse_response(orjson.loads(body))
                 except ValueError as error:
                     _fail(trajectory, up.status, f"unreadable reply: {error}")
                     return response
@@ -103,14 +104,31 @@ class TextBackend:
         )
         await response.prepare(request)
         assembler = StreamAssembler()
-        async for chunk in up.content.iter_any():
-            assembler.feed(chunk)
-            await response.write(chunk)
+        # From the event carrying the finish_reason on, chunks are held back until the reply
+        # is committed: a client that stops at the end of the stream and finishes at once
+        # must find its last reply recorded.
+        held: list[bytes] = []
+        try:
+            async for chunk in up.content.iter_any():
+                assembler.feed(chunk)
+                if held or assembler.finish_reason is not None:
+                    held.append(chunk)
+                    if assembler.saw_done:
+                        break
+                    continue
+                await response.write(chunk)
+        except aiohttp.ClientError as error:
+            _fail(trajectory, up.status, f"upstream stream interrupted: {error}")
+            # The response has started, so it can't become an error response. Dropping the
+            # connection makes the client see a failed stream rather than a short one.
+            raise ConnectionResetError("upstream stream interrupted") from error
         assembler.feed(b"\n\n")
         try:
             commit(trajectory, chat, assembler.reply(), started)
         except ValueError as error:
             _fail(trajectory, up.status, f"unreadable stream: {error}")
+        for chunk in held:
+            await response.write(chunk)
         await response.write_eof()
         return response
 

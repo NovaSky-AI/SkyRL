@@ -6,9 +6,11 @@ import asyncio
 
 import aiohttp
 import openai
+import orjson
 import pytest
 from aiohttp.test_utils import TestServer
 
+from skycap.openai_chat import StreamAssembler
 from skycap.server import CaptureServer
 from skycap.text import TextBackend
 from tests.conftest import Stack, openai_client
@@ -258,3 +260,81 @@ async def test_many_concurrent_trajectories_stay_separate(stack: Stack) -> None:
     assert len({trajectory_id for trajectory_id, _ in results}) == 32
     for index, (_, contents) in enumerate(results):
         assert contents == [f"task {index}", f"re: task {index}", "t0", "re: t0", "t1", "re: t1"]
+
+
+async def test_a_streamed_reply_is_recorded_before_its_stream_ends(stack: Stack) -> None:
+    """A client that stops at [DONE] and finishes at once finds its reply recorded."""
+    created = await stack.create()
+    llm = client(created["base_url"])
+    stream = await llm.chat.completions.create(
+        model=MODEL, messages=[user("q")], stream=True, extra_body={"mock": {"linger": 0.5}}
+    )
+    text = "".join([chunk.choices[0].delta.content or "" async for chunk in stream])
+    finished = await stack.finish(created["id"])
+
+    assert text == "re: q"
+    (sample,) = finished["samples"]
+    assert [message["content"] for message in sample["messages"]] == ["q", "re: q"]
+
+
+async def test_a_broken_upstream_stream_fails_the_call(stack: Stack) -> None:
+    created = await stack.create()
+    llm = client(created["base_url"])
+    with pytest.raises(openai.APIError):
+        stream = await llm.chat.completions.create(
+            model=MODEL, messages=[user("q")], stream=True, extra_body={"mock": {"abort": True}}
+        )
+        async for _ in stream:
+            pass
+    document = await stack.document(created["id"])
+
+    assert document["nodes"] == []
+    assert [failure["error"].split(":")[0] for failure in document["failures"]] == ["upstream stream interrupted"]
+
+
+async def test_malformed_json_on_the_control_plane_is_a_400(stack: Stack) -> None:
+    created = await stack.create()
+    finish_url = f"{stack.url}/trajectories/{created['id']}/finish"
+    async with stack.http.post(finish_url, data=b'{"annotations": {"reward": 1.0', headers=_JSON) as response:
+        assert response.status == 400
+    async with stack.http.post(f"{stack.url}/trajectories", data=b"{nope", headers=_JSON) as response:
+        assert response.status == 400
+    finished = await stack.finish(created["id"], {"reward": 1.0})
+
+    assert finished["status"] == "finished"
+    assert (await stack.document(created["id"]))["annotations"] == {"reward": 1.0}
+
+
+async def test_a_finish_during_the_body_read_cancels_the_call(stack: Stack) -> None:
+    created = await stack.create()
+    body_started = asyncio.Event()
+
+    async def slow_body():  # noqa: ANN202
+        yield b'{"model": "policy", '
+        body_started.set()
+        await asyncio.sleep(0.3)
+        yield b'"messages": [{"role": "user", "content": "q"}]}'
+
+    call = asyncio.create_task(
+        stack.http.post(f"{created['base_url']}/chat/completions", data=slow_body(), headers=_JSON)
+    )
+    await body_started.wait()
+    await asyncio.sleep(0.05)
+    await stack.finish(created["id"])
+    with pytest.raises(aiohttp.ClientError):
+        response = await call
+        await response.read()
+
+    assert stack.upstream.requests == []
+    assert (await stack.document(created["id"]))["nodes"] == []
+
+
+def test_a_tool_call_delta_with_a_null_index_is_the_first_call() -> None:
+    frame = {"choices": [{"delta": {"tool_calls": [{"index": None, "id": "c", "function": {"name": "f"}}]}}]}
+    assembler = StreamAssembler()
+    assembler.feed(b"data: " + orjson.dumps(frame) + b"\n\n")
+
+    assert assembler.tool_calls[0]["function"]["name"] == "f"
+
+
+_JSON = {"Content-Type": "application/json"}
