@@ -55,6 +55,8 @@ class CallInfo:
     sampling: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
+    #: The tool set the call was made with, as a key into ``MessageGraph.tools``; None without tools.
+    tools: str | None = None
 
 
 @dataclass(slots=True)
@@ -220,6 +222,7 @@ class MessageGraph:
         tools_key = hashing.tools_hash(tools)
         if tools_key and tools is not None:
             self.tools.setdefault(tools_key, [dict(tool) for tool in tools])
+        call.tools = tools_key or None
         matches = [hashing.match_hash(m, tools=tools_key, model=model) for m in messages]
         matched = self.match(matches)
         parent = matched[-1] if matched else None

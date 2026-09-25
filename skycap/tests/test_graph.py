@@ -287,6 +287,19 @@ def test_tool_change_midway_duplicates_the_prefix_as_client() -> None:
     ]
 
 
+def test_each_call_names_the_tool_set_it_was_made_with() -> None:
+    h = Harness()
+    first = h.call([user("q")], assistant("a"), tools=SEARCH)
+    second = h.call([user("q"), assistant("a"), user("edit it")], assistant("edited"), tools=SEARCH + EDIT)
+    plain = h.call([user("hi")], assistant("hello"))
+
+    (first_call,) = h.graph.nodes[first.output].calls
+    (second_call,) = h.graph.nodes[second.output].calls
+    assert h.graph.tools[first_call.tools] == SEARCH
+    assert h.graph.tools[second_call.tools] == SEARCH + EDIT
+    assert h.graph.nodes[plain.output].calls[0].tools is None
+
+
 def test_changed_model_starts_a_new_root() -> None:
     h = Harness()
     h.call([user("q")], assistant("a"), model="large")
