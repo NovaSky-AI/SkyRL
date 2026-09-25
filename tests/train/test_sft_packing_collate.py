@@ -4,13 +4,22 @@ Run with:
   uv run --extra dev --extra megatron -- pytest tests/train/test_sft_packing_collate.py
 """
 
+import random
 from unittest.mock import MagicMock
 
 import pytest
 
 from skyrl.train.config import MegatronConfig
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
-from skyrl.train.dataset.collators import PackedDataCollator
+from skyrl.train.dataset.collators import (
+    PACKED_SFT_REAL_EXAMPLES_KEY,
+    PACKED_SFT_REAL_TOKENS_KEY,
+    PackedDataCollator,
+)
+from skyrl.train.dataset.samplers import (
+    DPAlignedPackingBatchSampler,
+    StatefulSequentialSampler,
+)
 from skyrl.train.sft_trainer import SFTTrainer
 
 
@@ -71,6 +80,58 @@ def _make_example(seq_len: int, num_actions: int, base_token: int = 100) -> dict
 
 
 class TestPackingCollator:
+    @pytest.mark.parametrize("count,batch_size,dp_size", [(264, 128, 8), (44, 20, 4)])
+    @pytest.mark.parametrize("cardinality_reset_batch", [None, 2, 3])
+    def test_dp_aligned_sampling_preserves_packable_epoch_tail(
+        self, count, batch_size, dp_size, cardinality_reset_batch
+    ):
+        rng = random.Random(42)
+        lengths = [rng.randrange(2, 1_001) for _ in range(count)]
+        examples = [_make_example(length, length - 1) for length in lengths]
+        collator = _make_collator(num_gpus=dp_size, batch_size=batch_size, max_length=1_000)
+        sampler = DPAlignedPackingBatchSampler(
+            sampler=StatefulSequentialSampler(examples),
+            sequence_lengths=lengths,
+            batch_size=batch_size,
+            dp_size=dp_size,
+            allowed_variation=0.05,
+            bin_capacity=1_000,
+            tp_size=1,
+            cp_size=1,
+            cardinality_reset_batch=cardinality_reset_batch,
+        )
+
+        # The fixed-size baseline already has a packable tail.
+        for start in range(0, count, batch_size):
+            collator(examples[start : start + batch_size], batch_size=batch_size)
+
+        batches = list(sampler)
+        assert len(batches) == len(sampler)
+        assert [index for batch in batches for index in batch] == list(range(count))
+        for indices in batches:
+            packed = collator([examples[index] for index in indices], batch_size=batch_size)
+            assert packed.batch_size >= dp_size
+            assert packed.batch_size % dp_size == 0
+            assert sum(len(lengths) for lengths in packed["sub_seq_lengths"]) == len(indices)
+
+    def test_uses_modified_first_fit_decreasing(self):
+        lengths = [14, 91, 25, 37, 33, 22, 34, 99, 30]
+        collator = _make_collator(
+            num_gpus=1,
+            batch_size=len(lengths),
+            max_length=100,
+            max_tokens_per_microbatch=100,
+        )
+
+        batch = collator([_make_example(length, length) for length in lengths], batch_size=len(lengths))
+
+        assert [row.tolist() for row in batch["sub_seq_lengths"]] == [
+            [99],
+            [91],
+            [37, 34, 25],
+            [33, 30, 22, 14],
+        ]
+
     def test_bin_count_is_multiple_of_dp(self):
         collator = _make_collator(num_gpus=4, batch_size=8)
         examples = [_make_example(10, 5, base_token=100 + 100 * i) for i in range(8)]
@@ -83,7 +144,7 @@ class TestPackingCollator:
         assert len(batch["sub_seq_lengths"]) == 4
 
     def test_bin_capacity_is_token_budget(self):
-        # max_tokens_per_microbatch is the FFD bin capacity. With dp_size=1 and
+        # max_tokens_per_microbatch is the MFFD bin capacity. With dp_size=1 and
         # four length-100 seqs: a 128-token budget fits one seq per bin (4
         # bins); a 256-token budget fits two seqs per bin (2 bins).
         examples = [_make_example(100, 50, base_token=100 + 100 * i) for i in range(4)]
@@ -93,6 +154,34 @@ class TestPackingCollator:
 
         wide = _make_collator(num_gpus=1, batch_size=4, max_length=128, max_tokens_per_microbatch=256)
         assert wide(examples, batch_size=4).batch_size == 2
+
+    def test_aligned_singleton_can_exceed_token_budget(self):
+        collator = _make_collator(num_gpus=2, batch_size=2, max_length=101, cp=2, max_tokens_per_microbatch=101)
+        batch = collator([_make_example(101, 10), _make_example(3, 2)], batch_size=2)
+
+        assert sorted(row.tolist() for row in batch["sub_seq_lengths"]) == [[3], [101]]
+        assert batch["sequences"].shape[1] == 104
+
+    @pytest.mark.parametrize("cp", [1, 2])
+    def test_short_tail_uses_zero_loss_dp_rows(self, cp):
+        collator = _make_collator(num_gpus=4 * cp, batch_size=4, max_length=16, cp=cp)
+        batch = collator([_make_example(3, 2)], batch_size=4)
+
+        assert batch.batch_size == 4
+        assert [row.tolist() for row in batch["sub_seq_lengths"]] == [[3], [1], [1], [1]]
+        assert batch["attention_mask"].sum(dim=1).tolist() == [3, 1, 1, 1]
+        assert batch["loss_mask"][1:].count_nonzero().item() == 0
+        assert batch["loss_mask"][0].sum().item() == pytest.approx(1.0)
+        assert batch.metadata[PACKED_SFT_REAL_EXAMPLES_KEY] == 1
+        assert batch.metadata[PACKED_SFT_REAL_TOKENS_KEY] == 3
+
+    def test_real_one_token_sample_is_distinct_from_padding_rows(self):
+        collator = _make_collator(num_gpus=4, batch_size=4, max_length=16)
+        batch = collator([_make_example(1, 1)], batch_size=4)
+
+        assert [row.tolist() for row in batch["sub_seq_lengths"]] == [[1], [1], [1], [1]]
+        assert batch.metadata[PACKED_SFT_REAL_EXAMPLES_KEY] == 1
+        assert batch.metadata[PACKED_SFT_REAL_TOKENS_KEY] == 1
 
     def test_all_examples_included(self):
         collator = _make_collator(num_gpus=2, batch_size=4)
@@ -184,7 +273,7 @@ class TestPackingCollator:
     def test_pp_padding_makes_rows_uniform(self):
         """With pp_size > 1, all packed rows are padded to the global max."""
         collator = _make_collator(num_gpus=2, batch_size=4, max_length=64, pp=2)
-        # Two different-sized bins after FFD.
+        # Two different-sized bins after MFFD.
         examples = [
             _make_example(30, 15),
             _make_example(28, 14),
@@ -196,34 +285,31 @@ class TestPackingCollator:
         row_widths = [batch["sequences"][r].shape[0] for r in range(batch.batch_size)]
         assert len(set(row_widths)) == 1
 
-    def test_tp_alignment_pads_each_sub_seq(self):
-        """With tp_size > 1, each sub-seq's footprint in the row is
-        rounded up to a multiple of tp_size."""
+    def test_tp_alignment_pads_the_aggregate(self):
+        """Without CP, TP alignment is paid once for the packed row."""
         # Need num_gpus % (tp*pp*cp) == 0; use 4 GPUs with tp=4 -> dp=1.
         collator = _make_collator(num_gpus=4, batch_size=2, max_length=128, tp=4)
         examples = [
-            _make_example(7, 3),  # 7 tokens -> rounded to 8
-            _make_example(5, 3),  # 5 tokens -> rounded to 8
+            _make_example(7, 3),
+            _make_example(5, 3),
         ]
         batch = collator(examples, batch_size=2)
-        # BF16/layout-only path: two sub-seqs each padded to 8.
-        assert batch["sequences"].shape[1] == 16
+        assert batch["sequences"].shape[1] == 12
         # Both seqs are in the same row.
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sum(subseq_lengths) == 12  # raw, un-padded
 
-    def test_fp8_tp_alignment_cost_prevents_overpacking(self):
-        """Packing uses each sequence's aligned FP8/TP footprint."""
+    def test_fp8_tp_alignment_pads_the_aggregate(self):
+        """FP8 rounds the combined TP-only row once."""
         collator = _make_collator(num_gpus=4, batch_size=2, max_length=128, tp=4, fp8="hybrid")
         examples = [
             _make_example(7, 3),
             _make_example(5, 3),
         ]
         batch = collator(examples, batch_size=2)
-        # TP4 gives each sequence a 512-token footprint, so the 128-token budget
-        # expands to one footprint without packing both sequences together.
-        assert batch["sequences"].shape == (2, 512)
-        assert sorted(lengths.tolist() for lengths in batch["sub_seq_lengths"]) == [[5], [7]]
+        assert batch["sequences"].shape == (1, 512)
+        subseq_lengths = batch["sub_seq_lengths"][0].tolist()
+        assert sum(subseq_lengths) == 12
 
     def test_bf16_cp_alignment_does_not_apply_fp8_padding(self):
         """With CP>1 and BF16, keep only TP/CP layout padding."""
@@ -237,25 +323,41 @@ class TestPackingCollator:
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sorted(subseq_lengths) == [5, 6]
 
-    def test_fp8_cp_alignment_pads_each_sub_seq(self):
-        """With cp_size > 1, each sub-seq's footprint is rounded up to a
-        multiple that leaves each CP rank's local shard 16-aligned."""
-        # tp=1, cp=2 -> align_size = lcm(1*2*2, 16*2) = 32.
+    def test_aligned_subsequences_respect_bin_capacity(self):
+        """MFFD budgets the TP/CP-aligned footprint, not only raw tokens."""
+        tokenizer = MagicMock()
+        tokenizer.pad_token_id = 0
+        collator = PackedDataCollator(
+            tokenizer=tokenizer,
+            batch_size=2,
+            max_tokens_per_microbatch=32,
+            tp_size=4,
+            pp_size=1,
+            cp_size=2,
+            dp_size=1,
+            micro_train_batch_size_per_gpu=1,
+        )
+        examples = [_make_example(17, 8), _make_example(15, 7)]
+
+        batch = collator(examples, batch_size=2)
+
+        assert batch.batch_size == 2
+        assert batch["sequences"].shape[1] == 32
+        assert sorted(lengths.item() for lengths in batch["sub_seq_lengths"]) == [15, 17]
+
+    def test_fp8_cp_alignment_pads_the_aggregate(self):
+        """FP8 padding is paid once after CP-aligning each sub-sequence."""
+        # tp=1, cp=2 -> per-sequence layout alignment 4, aggregate alignment 32.
         collator = _make_collator(num_gpus=2, batch_size=2, max_length=128, cp=2, fp8="hybrid")
         examples = [
             _make_example(6, 3),  # 6 tokens -> rounded up to 32
             _make_example(5, 3),  # 5 tokens -> rounded up to 32
         ]
         batch = collator(examples, batch_size=2)
-        # Both sub-seqs in one row (dp=1), each padded to 32 -> row width >= 64.
-        assert batch["sequences"].shape[1] >= 64
+        # Per-sequence footprints are 8 + 8; the aggregate is padded once to 32.
+        assert batch["sequences"].shape[1] == 32
         subseq_lengths = batch["sub_seq_lengths"][0].tolist()
         assert sorted(subseq_lengths) == [5, 6]  # raw, un-padded
-        # Each sub-seq's padded footprint must produce 16-aligned local CP rank
-        # slabs after dividing by cp_size=2.
-        for s in subseq_lengths:
-            padded = ((s + 31) // 32) * 32
-            assert (padded // 2) % 16 == 0
 
     def test_fp8_alignment_is_conditional(self):
         examples = [
@@ -271,8 +373,8 @@ class TestPackingCollator:
 
         fp8 = _make_collator(num_gpus=1, batch_size=2, max_length=64, fp8=True)
         fp8_batch = fp8(examples, batch_size=2)
-        assert fp8_batch["sequences"].shape[1] == 32
-        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 16:19].tolist()]
+        assert fp8_batch["sequences"].shape[1] == 16
+        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 3:6].tolist()]
         assert sorted(fp8_chunks) == [[100, 101, 102], [200, 201, 202]]
 
     def test_tp_gt_1_fp8_alignment_uses_local_128(self):
@@ -285,8 +387,8 @@ class TestPackingCollator:
         fp8 = _make_collator(num_gpus=2, batch_size=2, max_length=512, tp=2, fp8=True)
         fp8_batch = fp8(examples, batch_size=2)
 
-        assert fp8_batch["sequences"].shape[1] == 512
-        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 256:259].tolist()]
+        assert fp8_batch["sequences"].shape[1] == 256
+        fp8_chunks = [fp8_batch["sequences"][0, :3].tolist(), fp8_batch["sequences"][0, 3:6].tolist()]
         assert sorted(fp8_chunks) == [[100, 101, 102], [200, 201, 202]]
 
     def test_eval_path_falls_back_to_super(self):
