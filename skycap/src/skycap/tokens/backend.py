@@ -128,8 +128,16 @@ class TokensBackend:
             tokens.text, tokens.text_offsets = self.renderer.decode_spans(tokens.token_ids, context)
 
     async def models(self, request: web.Request) -> web.Response:
-        model = self.model or "skycap"
-        return web.json_response({"object": "list", "data": [{"id": model, "object": "model", "owned_by": "skycap"}]})
+        """The configured ``--model``, or else the engine's own model list."""
+        if self.model:
+            return web.json_response(
+                {"object": "list", "data": [{"id": self.model, "object": "model", "owned_by": "skycap"}]}
+            )
+        try:
+            async with self.session.get(f"{self.engine_url}/v1/models", headers=self._headers()) as up:
+                return web.Response(body=await up.read(), status=up.status, content_type=up.content_type)
+        except aiohttp.ClientError as error:
+            return _error(f"engine: {error}", 502, kind="api_error")
 
     async def chat(
         self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
@@ -153,8 +161,10 @@ class TokensBackend:
         except turn.TokenError as error:
             return _error(str(error), 400)
 
-        sampling = {**chat.sampling, **self.sampling_overrides}
-        max_tokens = sampling.pop("max_completion_tokens", None) or sampling.get("max_tokens")
+        # `max_completion_tokens` is an alias of `max_tokens`; resolving it on each side before
+        # merging is what lets an override win over a caller's alias.
+        sampling = {**_resolve_max_tokens(chat.sampling), **_resolve_max_tokens(self.sampling_overrides)}
+        max_tokens = sampling.get("max_tokens")
         if self.max_model_len is not None:
             room = self.max_model_len - len(planned.prompt_ids)
             if room <= 0:
@@ -251,3 +261,12 @@ class TokensBackend:
     def _fail(trajectory: Trajectory, status: int | None, error: str) -> None:
         if trajectory.is_open:
             trajectory.failures.append(Failure(t=time.time(), status=status, error=error))
+
+
+def _resolve_max_tokens(sampling: Mapping[str, Any]) -> dict[str, Any]:
+    """``sampling`` with ``max_completion_tokens`` folded into ``max_tokens``, which it takes precedence over."""
+    resolved = dict(sampling)
+    alias = resolved.pop("max_completion_tokens", None)
+    if alias is not None:
+        resolved["max_tokens"] = alias
+    return resolved

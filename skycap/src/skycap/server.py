@@ -100,8 +100,14 @@ class CaptureServer:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._sweeper
         # Graceful shutdown: everything still in memory is unwritten, and is written as it stands.
+        # Sessions of trajectories that never ended are released: nothing here will continue them.
         for trajectory in list(self.trajectories.values()):
             await self._persist(trajectory)
+            if not trajectory.ended:
+                try:
+                    await self.backend.release(trajectory)
+                except Exception:
+                    logger.exception("releasing %s failed", trajectory.id)
         await self.backend.close()
 
     # -- ending a trajectory -----------------------------------------------------
@@ -109,12 +115,12 @@ class CaptureServer:
         """Seal, release the upstream session, write, and drop from memory.
 
         A trajectory that already failed keeps its status; ``annotations`` are
-        still recorded on it. It is written when this call sealed it (including
+        still recorded on it. It is written when this call ended it (including
         one read back from a shutdown-time record) or when it is still in
         memory, which means an earlier write failed and is retried.
         """
-        sealed_now = trajectory.is_open
-        if sealed_now:
+        ended_now = not trajectory.ended
+        if trajectory.is_open:
             trajectory.seal(status, annotations)
         elif not trajectory.ended:
             trajectory.annotations.update(annotations or {})
@@ -125,7 +131,7 @@ class CaptureServer:
             except Exception:
                 logger.exception("releasing %s failed", trajectory.id)
         unwritten = self.trajectories.get(trajectory.id) is trajectory
-        if (sealed_now or unwritten) and await self._persist(trajectory):
+        if (ended_now or unwritten) and await self._persist(trajectory):
             self.trajectories.pop(trajectory.id, None)
 
     async def _persist(self, trajectory: Trajectory) -> bool:

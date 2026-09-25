@@ -74,6 +74,7 @@ class Trajectory:
             "status": self.status,
             "meta": self.meta,
             "capture": self.capture,
+            "ended": self.ended,
             "annotations": self.annotations,
             "created_at": self.created_at,
             "finished_at": self.finished_at,

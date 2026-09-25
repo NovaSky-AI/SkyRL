@@ -112,8 +112,11 @@ class RenderersRenderer:
 
         #: (renderer, its tokenizer) pairs, each used by one thread at a time.
         self._slots: queue.Queue[tuple[Any, Any]] = queue.Queue()
+        # The first slot loads on this thread, so a tokenizer that isn't cached yet is
+        # downloaded once; the rest load from the cache in parallel.
+        self._slots.put(build())
         with ThreadPoolExecutor(max_workers=min(size, 8)) as pool:
-            for slot in pool.map(lambda _: build(), range(size)):
+            for slot in pool.map(lambda _: build(), range(size - 1)):
                 self._slots.put(slot)
         with self._checkout() as (renderer, _):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
@@ -197,7 +200,9 @@ class RenderersRenderer:
         from tokenizers.decoders import DecodeStream
 
         with self._checkout() as (_, tokenizer):
-            backend = getattr(tokenizer, "backend_tokenizer", None) or tokenizer._tokenizer
+            backend = getattr(tokenizer, "backend_tokenizer", None) or getattr(tokenizer, "_tokenizer", None)
+            if backend is None:
+                raise TypeError(f"decoding token spans needs a fast tokenizer; {self.name} loaded a slow one")
             stream = DecodeStream(skip_special_tokens=False)
             for token in context:
                 stream.step(backend, int(token))

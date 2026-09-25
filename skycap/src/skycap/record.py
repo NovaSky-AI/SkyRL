@@ -213,8 +213,7 @@ def load(record_dir: Path, trajectory_id: str) -> Trajectory:
         failures=[Failure(**failure) for failure in document["failures"]],
         created_at=document["created_at"],
         finished_at=document["finished_at"],
-        # A record written at shutdown is still open: its finish is still to come.
-        ended=document["status"] != "open",
+        ended=document["ended"],
     )
     graph = trajectory.graph
     graph.tools.update(document["tools"])

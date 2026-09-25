@@ -217,8 +217,10 @@ class _Routing:
             raise TokenError(f"routed experts cover {start}+{array.shape[0]} of {total} positions")
 
     def slice(self, position: int, length: int) -> np.ndarray | None:
-        if self.array is None or length == 0:
+        if self.array is None:
             return None
+        if length == 0:
+            return self.array[0:0].copy()
         begin, end = position - self.start, position - self.start + length
         if begin < 0:
             return None

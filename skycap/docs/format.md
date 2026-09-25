@@ -29,6 +29,7 @@ The decompressed document is a UTF-8 JSON object:
 | `format_version` | int | `1`. Covers both this document's shape and the files' encoding. A reader refuses a version it doesn't know |
 | `id` | string | the trajectory id |
 | `status` | string | `finished`, `failed`, `abandoned` (idle past the TTL) or `open` (written at shutdown) |
+| `ended` | bool | whether the trajectory was ended (by `finish` or the TTL). False for one written at shutdown, which may be sealed as `failed` and still waiting for its finish |
 | `meta` | object | what the creator passed at create |
 | `capture` | object | how it was captured: `mode` (`text` or `tokens`), and for tokens the `engine`, `tokenizer`, `logprobs_mode` (`processed_logprobs` means logprobs are over the truncated, renormalized distribution) and any `sampling_overrides` |
 | `annotations` | object | what the creator passed at finish, e.g. `{"reward": 1.0}` |

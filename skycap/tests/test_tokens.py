@@ -355,3 +355,65 @@ async def test_the_vllm_engine_has_no_session_to_release() -> None:
         await stack.finish(created["id"])
 
         assert stack.engine.released == []
+
+
+async def test_an_override_wins_over_a_callers_max_completion_tokens() -> None:
+    async with token_stack(sampling_overrides={"max_tokens": 50}) as stack:
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(
+            model="policy", messages=[user("q")], max_completion_tokens=100
+        )
+
+        assert stack.engine.requests[0]["sampling_params"]["max_tokens"] == 50
+
+
+async def test_models_is_the_engines_list_without_a_configured_model() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        models = await client(created["base_url"]).models.list()
+
+        assert [model.id for model in models.data] == ["engine-model"]
+
+
+async def test_a_failed_trajectory_flushed_at_shutdown_still_takes_its_finish(tmp_path: Path) -> None:
+    async with token_stack(record_dir=tmp_path) as stack:
+        created = await stack.create()
+        stack.engine.bad_routing = True
+        await client(created["base_url"]).chat.completions.with_raw_response.create(
+            model="policy", messages=[user("q")]
+        )
+    assert record.read_document(tmp_path, created["id"])["ended"] is False
+
+    async with token_stack(record_dir=tmp_path) as restarted:
+        finished = await restarted.finish(created["id"], {"reward": 0.0})
+
+    document = record.read_document(tmp_path, created["id"])
+    assert finished["status"] == "failed"
+    assert (document["ended"], document["annotations"]) == (True, {"reward": 0.0})
+
+
+async def test_shutdown_releases_sessions_of_trajectories_that_never_ended(tmp_path: Path) -> None:
+    async with token_stack(engine=SessionEngine(), record_dir=tmp_path) as stack:
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")])
+
+    assert stack.engine.released == [created["id"]]
+
+
+async def test_ending_a_trajectory_drops_its_turn_lock() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")])
+        assert created["id"] in stack.server.backend._locks
+        await stack.finish(created["id"])
+
+        assert created["id"] not in stack.server.backend._locks
+
+
+def test_a_node_with_no_tokens_keeps_the_paths_routed_experts() -> None:
+    from skycap.tokens.turn import _Routing
+
+    routing = _Routing(np.zeros((5, 2, 2), dtype=np.uint8), 0, 6)
+    empty = routing.slice(3, 0)
+
+    assert empty is not None and empty.shape == (0, 2, 2)

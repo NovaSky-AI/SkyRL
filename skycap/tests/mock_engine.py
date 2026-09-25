@@ -42,6 +42,7 @@ class MockEngine:
         app = web.Application(client_max_size=1024**3)
         app.router.add_post("/inference/v1/generate", self.vllm)
         app.router.add_post("/finish_session", self.finish_session)
+        app.router.add_get("/v1/models", self.models)
         return app
 
     def _generate(self, body: dict[str, Any]) -> tuple[list[int], list[float]] | None:
@@ -77,6 +78,9 @@ class MockEngine:
             "sampling_mask": [[t, t + 1] for t in completion],
         }
         return web.json_response({"choices": [choice]})
+
+    async def models(self, request: web.Request) -> web.Response:
+        return web.json_response({"object": "list", "data": [{"id": "engine-model", "object": "model"}]})
 
     async def finish_session(self, request: web.Request) -> web.Response:
         self.released.append(request.query["session_id"])
