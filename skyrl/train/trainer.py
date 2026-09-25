@@ -94,6 +94,7 @@ from skyrl.train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     extract_step_from_path,
     finalize_minibatch_rollout_logprob_diff_std,
+    reward_variance_filter,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -1104,8 +1105,40 @@ class RayPPOTrainer:
         responses: List[List[int]] = generator_output["response_ids"]
         per_token_rewards: List[List[float]] = []
 
+        # Reduce token-level rewards to sequence returns for group selection, matching the
+        # fully-async path. The original token rewards are preserved for training below.
+        token_level_rewards = bool(rewards and isinstance(rewards[0], list))
+        sequence_rewards = [float(sum(reward)) for reward in rewards] if token_level_rewards else rewards
+
+        rv_filter_config = self.cfg.trainer.algorithm.reward_variance_filtering
+        if rv_filter_config.enabled:
+            filter_indices = list(range(len(sequence_rewards)))
+            if self.cfg.generator.step_wise_trajectories and not self.cfg.generator.merge_stepwise_output:
+                # Advantages are computed from final-step rewards and then broadcast to every
+                # step in a trajectory, so RV selection must use the same final-step signal.
+                filter_indices = [i for i, is_last_step in enumerate(generator_output["is_last_step"]) if is_last_step]
+            filter_rewards = [sequence_rewards[i] for i in filter_indices]
+            filter_uids = [uids[i] for i in filter_indices]
+            filter_loss_masks = [generator_output["loss_masks"][i] for i in filter_indices]
+            kept_indices, filter_metrics = reward_variance_filter(
+                filter_rewards,
+                filter_uids,
+                loss_masks=filter_loss_masks,
+                strategy=rv_filter_config.strategy,
+                top_p=rv_filter_config.top_p,
+                top_k=rv_filter_config.top_k,
+                include_zero=rv_filter_config.include_zero,
+                variance_ddof=rv_filter_config.variance_ddof,
+                selection_eps=rv_filter_config.selection_eps,
+            )
+            kept_uids = {filter_uids[i] for i in kept_indices}
+            generator_output["loss_masks"] = [
+                mask if uid in kept_uids else [0] * len(mask) for uid, mask in zip(uids, generator_output["loss_masks"])
+            ]
+            self.all_metrics.update({f"reward/variance_filter_{name}": value for name, value in filter_metrics.items()})
+
         # Check if rewards are already token-level (List[List[float]]) or response-level (List[float])
-        if rewards and isinstance(rewards[0], list):
+        if token_level_rewards:
             # Token-level rewards: rewards is List[List[float]]
             per_token_rewards = rewards
         else:

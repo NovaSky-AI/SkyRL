@@ -794,6 +794,38 @@ class DynamicSamplingConfig(BaseConfig):
 
 
 @dataclass
+class RewardVarianceFilteringConfig(BaseConfig):
+    """Reward-variance-aware top-p or top-k prompt-group filtering."""
+
+    enabled: bool = False
+    """Enable post-rollout loss masking based on prompt-group reward-variance mass."""
+    strategy: str = "top_p"
+    """Selection strategy: ``"top_p"`` for cumulative variance mass or ``"top_k"`` for a fixed group count."""
+    top_p: float = 0.9
+    """Fraction of total reward-variance mass that the selected prompt groups must cover."""
+    top_k: int = 1
+    """Maximum number of highest-variance prompt groups to retain with ``strategy="top_k"``."""
+    include_zero: bool = False
+    """Make zero-variance prompt groups eligible for selection."""
+    variance_ddof: int = 1
+    """Delta degrees of freedom used for group reward variance; 1 is sample variance."""
+    selection_eps: float = 0.01
+    """Numerical slack subtracted from the target mass; near-zero-signal batches may be fully masked."""
+
+    def __post_init__(self):
+        if self.strategy not in ("top_p", "top_k"):
+            raise ValueError(f"strategy must be 'top_p' or 'top_k', got {self.strategy!r}")
+        if not 0.0 < self.top_p <= 1.0:
+            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}")
+        if self.top_k < 1:
+            raise ValueError(f"top_k must be positive, got {self.top_k}")
+        if self.variance_ddof < 0:
+            raise ValueError(f"variance_ddof must be non-negative, got {self.variance_ddof}")
+        if self.selection_eps < 0.0:
+            raise ValueError(f"selection_eps must be non-negative, got {self.selection_eps}")
+
+
+@dataclass
 class ClipCovConfig(BaseConfig):
     """Clip-Cov parameters. Only used when ``policy_loss_type="clip_cov"``."""
 
@@ -969,6 +1001,8 @@ class AlgorithmConfig(BaseConfig):
     Only used when ``zero_variance_filter=True``. Defaults to 1e-6 so float (LLM-judge) rewards that are
     effectively identical are still treated as zero-variance; this is a no-op for integer rewards (e.g.
     0/1) where the spread is either 0 or >= 1. Set to 0.0 for exact equality."""
+    reward_variance_filtering: RewardVarianceFilteringConfig = field(default_factory=RewardVarianceFilteringConfig)
+    """Reward-variance-aware top-p or top-k filtering. Disabled by default."""
     lambd: float = 1.0
     """Lambda parameter for GAE."""
     gamma: float = 1.0
