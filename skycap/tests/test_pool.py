@@ -100,7 +100,7 @@ async def test_no_reachable_server_is_an_error() -> None:
 
 
 async def test_token_samples_arrive_decoded() -> None:
-    async with token_stack(engine="skyrl", sampling_mask=True) as stack, CapturePool([stack.url]) as pool:
+    async with token_stack(sampling_mask=True) as stack, CapturePool([stack.url]) as pool:
         async with pool.trajectory() as trajectory:
             await converse(client(trajectory.base_url), "hi", "more")
             result = await trajectory.finish()
@@ -109,7 +109,6 @@ async def test_token_samples_arrive_decoded() -> None:
     assert isinstance(sample.routed_experts, np.ndarray)
     assert sample.routed_experts.shape == (len(sample.input_ids), 2, 2)
     assert sample.sampling_mask is not None and len(sample.sampling_mask) == len(sample.input_ids)
-    assert stack.engine.released == [trajectory.id]
 
 
 def test_a_pool_needs_servers() -> None:

@@ -25,14 +25,13 @@ with logprobs, routed experts and sampling masks:
 
 ```bash
 uv sync --extra tokens
-uv run skycap serve --mode tokens --engine skyrl --upstream-url http://router:8000 \
+uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
   --tokenizer Qwen/Qwen3-8B --max-model-len 32768 \
   --sampling-overrides '{"top_k": 50}' --sampling-mask --record-dir ./record
 ```
 
-`--engine vllm` speaks vLLM's own `/inference/v1/generate`. `--engine skyrl`
-speaks SkyRL's `/skyrl/v1/generate` and releases the router session when a
-trajectory ends.
+The engine is vLLM, over its own `/inference/v1/generate`. Another engine's wire
+is a subclass of `skycap.tokens.engine.VLLMEngine`.
 
 ## Capture a rollout
 
