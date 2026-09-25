@@ -15,7 +15,7 @@ training row.
 ## Running
 
 ```bash
-uv run --isolated --extra fsdp --extra harbor-skycap \
+uv run --isolated --extra fsdp --extra harbor --extra skycap \
   -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \
   trainer.policy.model.path=Qwen/Qwen3-8B \
   generator.inference_engine.served_model_name=policy \
@@ -62,7 +62,7 @@ Masking is the sibling's:
 ## Tests
 
 ```bash
-uv run --isolated --extra skyrl-train --extra harbor-skycap --extra dev pytest tests/integrations/harbor_skycap
+uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations/harbor_skycap
 ```
 
 A fake Harbor trial talks HTTP to a real skycap server, which calls a mock of

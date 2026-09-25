@@ -151,7 +151,8 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
 
     assert len(out["response_ids"]) == 2
     assert out["is_last_step"] == [False, True]
-    assert out["rewards"] == [0.0, 1.0]
+    # The reward is the trial's, so every path carries it; the advantage is computed once, from the last row.
+    assert out["rewards"] == [1.0, 1.0]
     assert len({t.to_string() for t in out["trajectory_ids"]}) == 1
     assert out["rollout_metrics"]["generate/avg_num_paths"] == 2
 
@@ -169,6 +170,7 @@ async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials) -
 @pytest.mark.asyncio
 async def test_a_timeout_masks_the_whole_instance(skycap, trials) -> None:
     out = await generator(skycap).generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
+    # 4 prompts: two instances ("timeout", "linear"), two repetitions each.
     validate_generator_output(4, out, step_wise=True)
 
     timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
