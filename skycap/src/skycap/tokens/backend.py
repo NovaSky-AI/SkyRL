@@ -22,7 +22,7 @@ import aiohttp
 import orjson
 from aiohttp import web
 
-from skycap import hashing
+from skycap import hashing, retry
 from skycap.graph import CallInfo
 from skycap.openai_chat import ChatRequest, error_body
 from skycap.tokens import response, turn
@@ -221,6 +221,7 @@ class TokensBackend:
             tools=tools_key or None,
         )
         status = "ok"
+        recorded = False
         if trajectory.is_open:
             try:
                 turn.commit(
@@ -233,6 +234,7 @@ class TokensBackend:
                     output=output,
                     call=call,
                 )
+                recorded = True
             except turn.TokenError as error:
                 logger.warning("trajectory %s failed: %s", trajectory.id, error)
                 self._fail(trajectory, None, f"token attribution: {error}")
@@ -247,14 +249,16 @@ class TokensBackend:
         )
         headers = {STATUS_HEADER: status}
         if not chat.stream:
-            return web.Response(body=orjson.dumps(body_out), content_type="application/json", headers=headers)
-        # The whole completion exists already, so the stream is one buffered
-        # body: identical to the client, and replayable for a retry.
-        return web.Response(
-            body=b"".join(response.stream_frames(body_out)),
-            content_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", **headers},
-        )
+            out = web.Response(body=orjson.dumps(body_out), content_type="application/json", headers=headers)
+        else:
+            # The whole completion exists already, so the stream is one buffered
+            # body: identical to the client, and replayable for a retry.
+            out = web.Response(
+                body=b"".join(response.stream_frames(body_out)),
+                content_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", **headers},
+            )
+        return retry.committed(out) if recorded else out
 
     @staticmethod
     def _fail(trajectory: Trajectory, status: int | None, error: str) -> None:

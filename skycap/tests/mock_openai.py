@@ -6,6 +6,8 @@ something else through a ``mock`` field in the body:
     {"reply": "text"}        the assistant content
     {"tool_call": "name"}    reply with one tool call instead
     {"status": 500}          fail with that status
+    {"fail_first": 500}      fail with that status the first time, then answer
+    {"garbage": true}        answer 200 with a body that isn't JSON
     {"delay": 0.5}           sleep before answering
     {"linger": 0.5}          streamed: keep the connection open this long after [DONE]
     {"abort": true}          streamed: drop the connection after the first chunk
@@ -28,6 +30,7 @@ class MockOpenAI:
         self.requests: list[dict[str, Any]] = []
         self.headers: list[dict[str, str]] = []
         self._ids = itertools.count()
+        self._failed_once = False
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -47,6 +50,11 @@ class MockOpenAI:
             await asyncio.sleep(mock["delay"])
         if request.headers.get("Authorization") != f"Bearer {API_KEY}":
             return web.json_response({"error": {"message": "bad key"}}, status=401)
+        if mock.get("fail_first") and not self._failed_once:
+            self._failed_once = True
+            return web.json_response({"error": {"message": "boom", "type": "api_error"}}, status=mock["fail_first"])
+        if mock.get("garbage"):
+            return web.Response(body=b"not json", content_type="application/json")
         if mock.get("status"):
             return web.json_response({"error": {"message": "boom", "type": "api_error"}}, status=mock["status"])
 

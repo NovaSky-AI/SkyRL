@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
@@ -99,25 +98,73 @@ async def test_a_relayed_text_stream_is_not_cached(stack: Stack) -> None:
 
 async def test_token_mode_coalesces_a_retry_onto_one_engine_call() -> None:
     async with token_stack() as tokens:
-        tokens.engine.delay = 0.3
+        # The retry lands after the timeout plus the SDK's 0.375-0.5 s backoff, while the
+        # call still runs, and waits less than its own timeout for it.
+        tokens.engine.delay = 1.0
         created = await tokens.create()
-        llm = openai_client(created["base_url"], timeout=0.15, max_retries=1)
+        llm = openai_client(created["base_url"], timeout=0.4, max_retries=1)
         await llm.chat.completions.create(model="policy", messages=[user("q")], stream=True)
 
         assert len(tokens.engine.requests) == 1
-        graph = tokens.server.trajectories[created["id"]].graph
-        assert len(graph) == 2 and len(graph.nodes[1].calls) == 1
+        trajectory = tokens.server.trajectories[created["id"]]
+        assert len(trajectory.graph) == 2 and len(trajectory.graph.nodes[1].calls) == 1
+        assert (trajectory.replay.replayed, trajectory.replay.coalesced) == (1, 1)
 
 
 async def test_the_cache_forgets_old_and_excess_entries() -> None:
     cache = RetryCache(ttl=0.05, max_entries=2)
     for key in ("a", "b", "c"):
         entry = cache.start(key, key)
-        cache.complete(key, entry, None if key == "b" else object())  # type: ignore[arg-type]
-    assert cache.get("b") is None
+        cache.complete(key, entry, object())  # type: ignore[arg-type]
+    assert cache.get("a") is None
     assert len(cache) == 2
-    time.sleep(0.06)
-    assert cache.get("a") is None and cache.get("c") is None
+    await asyncio.sleep(0.06)
+    assert cache.get("b") is None and cache.get("c") is None
+
+
+async def test_the_cache_limit_holds_once_a_burst_of_calls_finishes() -> None:
+    cache = RetryCache(max_entries=2)
+    running = [(key, cache.start(key, key)) for key in ("a", "b", "c")]
+    assert len(cache) == 3  # a running call is never dropped
+    for key, entry in running:
+        cache.complete(key, entry, object())  # type: ignore[arg-type]
+    assert len(cache) == 2
+
+
+async def test_retries_waiting_on_a_failed_call_share_one_new_call(stack: Stack) -> None:
+    created = await stack.create()
+    body = {**URL_BODY, "mock": {"delay": 0.2, "fail_first": 500}}
+    retry = {"x-stainless-retry-count": "1"}
+    original = asyncio.create_task(_post(stack, created["base_url"], body))
+    await asyncio.sleep(0.05)
+    retries = await asyncio.gather(*(_post(stack, created["base_url"], body, retry) for _ in range(2)))
+
+    assert (await original)[0] == 500
+    assert retries[0] == retries[1] and retries[0][0] == 200
+    assert len(stack.upstream.requests) == 2
+    document = await stack.document(created["id"])
+    assert len(document["nodes"]) == 2
+    assert document["retries"] == {"replayed": 1, "coalesced": 1}
+
+
+async def test_a_failed_keyed_call_still_refuses_a_different_body(stack: Stack) -> None:
+    created = await stack.create()
+    key = {"Idempotency-Key": "abc"}
+    await _post(stack, created["base_url"], {**URL_BODY, "mock": {"status": 500}}, key)
+    status, _ = await _post(stack, created["base_url"], URL_BODY, key)
+
+    assert status == 400
+    assert len(stack.upstream.requests) == 1
+
+
+async def test_an_unreadable_reply_is_not_replayed(stack: Stack) -> None:
+    created = await stack.create()
+    body = {**URL_BODY, "mock": {"garbage": True}}
+    await _post(stack, created["base_url"], body)
+    await _post(stack, created["base_url"], body, {"x-stainless-retry-count": "1"})
+
+    assert len(stack.upstream.requests) == 2
+    assert (await stack.document(created["id"]))["retries"]["replayed"] == 0
 
 
 @pytest.mark.parametrize("value", ["0", "", "x"])
