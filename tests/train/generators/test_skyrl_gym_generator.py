@@ -152,6 +152,7 @@ def generator_cfg():
 def mock_env_cfg():
     cfg = MagicMock()
     cfg.max_env_workers = 0
+    cfg.parallel_env_steps = False
     cfg.env_class = "gsm8k"
     return cfg
 
@@ -874,6 +875,55 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert generator_output["rewards"][0] == 1.0
     assert generator_output["stop_reasons"][0] == "stop"
     assert generator_output["loss_masks"][0] == [1] * len(MOCK_LLM_OUTPUT_IDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_env_steps", [False, True])
+@patch("skyrl_gym.make")
+async def test_generate_batched_parallel_env_steps(
+    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg, parallel_env_steps
+):
+    """Sequential and parallel env.step paths produce identical batched outputs."""
+
+    def make_env():
+        env = MagicMock()
+        env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+        env.step.side_effect = lambda x: BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
+        )
+        env.close.return_value = None
+        env.get_metrics.return_value = {}
+        return env
+
+    mock_make.side_effect = lambda *args, **kwargs: make_env()
+    mock_env_cfg.parallel_env_steps = parallel_env_steps
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    prompts = [
+        [{"role": "user", "content": "What is 3 + 5?"}],
+        [{"role": "user", "content": "What is 4 + 6?"}],
+    ]
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": [{"answer": "8"}, {"answer": "10"}],
+        "env_classes": [mock_env_cfg.env_class for _ in prompts],
+    }
+
+    output: GeneratorOutput = await generator.generate(input_batch)
+
+    assert len(output["response_ids"]) == 2
+    assert output["response_ids"][0] == MOCK_LLM_OUTPUT_IDS
+    assert output["response_ids"][1] == MOCK_LLM_OUTPUT_IDS
+    assert output["rewards"] == [1.0, 1.0]
+    assert output["loss_masks"] == [[1] * len(MOCK_LLM_OUTPUT_IDS)] * 2
+    assert output["stop_reasons"] == ["stop", "stop"]
 
 
 @pytest.mark.asyncio
