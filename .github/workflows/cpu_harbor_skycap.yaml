@@ -45,4 +45,4 @@ jobs:
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
       - name: Test
-        run: uv run --isolated --extra skyrl-train --extra harbor-skycap --extra dev pytest tests/integrations/harbor_skycap
+        run: uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations/harbor_skycap

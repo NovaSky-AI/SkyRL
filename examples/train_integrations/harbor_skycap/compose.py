@@ -9,8 +9,9 @@ token twice.
 One Harbor trial is one rollout with one reward, however many paths it has.
 SkyRL's step-wise shape already says "several rows, one rollout": a trial's
 paths are emitted contiguously under its ``TrajectoryID``, the last marked
-``is_last_step``, with the reward on that row as the sibling ``harbor``
-integration does. Each row is a complete multi-turn sample, split at its first
+``is_last_step``. Every row carries the trial's reward, since every sampled
+token in the trial earned it. The trainer computes the advantage once per
+trial, from the last row, and applies it to all of the trial's rows. Each row is a complete multi-turn sample, split at its first
 trained token: everything before is prompt, and the loss mask says which of the
 rest the model sampled.
 
@@ -124,7 +125,7 @@ def compose(outcomes: List[TrialOutcome], *, overlong_filtering: bool, top_k: in
             last = position == len(rows) - 1
             out["prompt_token_ids"].append(row.prompt)
             out["response_ids"].append(row.response)
-            out["rewards"].append(outcome.reward if last and not masked else 0.0)
+            out["rewards"].append(0.0 if masked else outcome.reward)
             out["loss_masks"].append(row.loss_mask)
             out["stop_reasons"].append("error" if masked else outcome.stop_reason)
             out["rollout_logprobs"].append(row.logprobs)

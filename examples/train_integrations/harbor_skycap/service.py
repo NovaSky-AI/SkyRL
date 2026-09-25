@@ -50,16 +50,19 @@ class SkycapService:
         logger.info(f"skycap serving at {self.url}")
         return self.url
 
-    def stop(self, timeout: float = 120.0) -> None:
-        """Stop serving, writing what is still in memory. Idempotent."""
-        thread, self._thread = self._thread, None
+    def stop(self, timeout: float = 120.0) -> bool:
+        """Stop serving, writing what is still in memory. Returns whether that finished in time."""
+        thread = self._thread
         if thread is None:
-            return
-        if self._loop is not None and self._stopping is not None:
+            return True
+        if self._loop is not None and self._stopping is not None and not self._stopping.is_set():
             self._loop.call_soon_threadsafe(self._stopping.set)
         thread.join(timeout)
         if thread.is_alive():
             logger.warning(f"skycap did not stop within {timeout}s")
+            return False
+        self._thread = None
+        return True
 
     def _run(self) -> None:
         try:
