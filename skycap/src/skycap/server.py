@@ -106,16 +106,19 @@ class CaptureServer:
     async def end(self, trajectory: Trajectory, status: Status, annotations: dict[str, Any] | None = None) -> None:
         """Seal, release the upstream session, write, and drop from memory.
 
-        A trajectory still in memory has not been written, so ending it again
-        retries the write of one whose earlier write failed.
+        It is written when this call sealed it (including one read back from a
+        shutdown-time record) or when it is still in memory, which means an
+        earlier write failed and is retried.
         """
-        if trajectory.is_open:
+        sealed_now = trajectory.is_open
+        if sealed_now:
             trajectory.seal(status, annotations)
             try:
                 await self.backend.release(trajectory)
             except Exception:
                 logger.exception("releasing %s failed", trajectory.id)
-        if self.trajectories.get(trajectory.id) is trajectory and await self._persist(trajectory):
+        unwritten = self.trajectories.get(trajectory.id) is trajectory
+        if (sealed_now or unwritten) and await self._persist(trajectory):
             self.trajectories.pop(trajectory.id, None)
 
     async def _persist(self, trajectory: Trajectory) -> bool:

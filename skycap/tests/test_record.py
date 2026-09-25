@@ -339,3 +339,16 @@ def test_an_empty_sampling_mask_round_trips(tmp_path: Path) -> None:
     (node,) = record.load(tmp_path, "tr_empty_mask").graph
 
     assert node.tokens is not None and node.tokens.sampling_mask == []
+
+
+async def test_finish_after_a_restart_updates_a_shutdown_record(tmp_path: Path) -> None:
+    async with running_stack(record_dir=tmp_path) as running:
+        created = await running.create()
+    assert record.read_document(tmp_path, created["id"])["status"] == "open"
+
+    async with running_stack(record_dir=tmp_path) as restarted:
+        finished = await restarted.finish(created["id"], {"reward": 1.0})
+
+    document = record.read_document(tmp_path, created["id"])
+    assert finished["status"] == "finished"
+    assert (document["status"], document["annotations"]) == ("finished", {"reward": 1.0})
