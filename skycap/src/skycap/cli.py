@@ -41,7 +41,6 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8080)
     tokens = serve.add_argument_group("tokens mode")
-    tokens.add_argument("--engine", choices=("vllm", "skyrl"), default="vllm", help="engine wire")
     tokens.add_argument("--tokenizer", help="Hugging Face tokenizer name, rendered through `renderers`")
     tokens.add_argument("--model", default=None, help="model name sent to the engine (default: the request's)")
     tokens.add_argument("--max-model-len", type=int, default=None, help="clamp max_tokens to fit this context")
@@ -54,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     tokens.add_argument(
         "--sampling-mask",
         action="store_true",
-        help="ask the engine for each sampled token's support (vLLM: also start it with return_sampling_mask)",
+        help="record each sampled token's support (start vLLM with return_sampling_mask)",
     )
     tokens.add_argument("--logprobs-mode", default="processed_logprobs", help="recorded on every trajectory")
     tokens.add_argument("--renderer-pool-size", type=int, default=8)
@@ -79,13 +78,11 @@ def build_backend(args: argparse.Namespace) -> Backend:
     if not args.tokenizer:
         raise SystemExit("--mode tokens needs --tokenizer")
     from skycap.tokens.backend import TokensBackend
-    from skycap.tokens.engine import ENGINES
     from skycap.tokens.renderer import RenderersRenderer
 
     return TokensBackend(
         args.upstream_url,
         RenderersRenderer(args.tokenizer, size=args.renderer_pool_size),
-        engine=ENGINES[args.engine](),
         api_key=api_key,
         model=args.model,
         max_model_len=args.max_model_len,

@@ -18,7 +18,7 @@ from skycap import record
 from skycap.samples import build_samples
 from skycap.server import CaptureServer
 from skycap.tokens.backend import STATUS_HEADER, TokensBackend
-from skycap.tokens.engine import ENGINES, unpack
+from skycap.tokens.engine import VLLMEngine, unpack
 from skycap.tokens.turn import TokenError, attribute
 from tests.conftest import openai_client
 from tests.fake_renderer import END, FakeRenderer, encode
@@ -46,13 +46,13 @@ class TokenStack:
 
 @asynccontextmanager
 async def token_stack(
-    *, engine: str = "vllm", completion: Any = None, record_dir: Path | None = None, **options: Any
+    *, engine: VLLMEngine | None = None, completion: Any = None, record_dir: Path | None = None, **options: Any
 ) -> AsyncIterator[TokenStack]:
     mock = MockEngine(completion)
     engine_server = TestServer(mock.app())
     await engine_server.start_server()
     renderer = FakeRenderer()
-    backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, engine=ENGINES[engine](), **options)
+    backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, engine=engine, **options)
     server = CaptureServer(backend, record_dir=record_dir)
     capture = TestServer(server.app())
     await capture.start_server()
@@ -148,12 +148,11 @@ async def test_routed_experts_align_and_the_placeholder_is_replaced() -> None:
 
 
 async def test_the_sampling_mask_covers_each_trained_token() -> None:
-    async with token_stack(engine="skyrl", sampling_mask=True) as stack:
+    async with token_stack(sampling_mask=True) as stack:
         created = await stack.create()
         await converse(client(created["base_url"]), "hi")
         (sample,) = build_samples(stack.server.trajectories[created["id"]].graph)
 
-        assert stack.engine.requests[0]["return_sample_support"] is True
         assert sample.sampling_mask is not None
         for position, bit in enumerate(sample.loss_mask):
             token = sample.input_ids[position]
@@ -297,8 +296,14 @@ async def test_a_turn_that_cannot_commit_exactly_fails_the_trajectory_but_answer
         assert document["annotations"] == {"reward": 0.0}
 
 
-async def test_finish_releases_the_engine_session_on_skyrl() -> None:
-    async with token_stack(engine="skyrl") as stack:
+class SessionEngine(VLLMEngine):
+    """An engine behind a router that holds per-session state."""
+
+    release_path = "/finish_session"
+
+
+async def test_finish_releases_the_engine_session_when_the_engine_has_one() -> None:
+    async with token_stack(engine=SessionEngine()) as stack:
         created = await stack.create()
         await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")])
         finished = await stack.finish(created["id"])
@@ -341,3 +346,12 @@ async def test_the_record_carries_each_nodes_text_and_token_spans(tmp_path: Path
     for node in graph:
         assert node.tokens is not None and node.tokens.text is not None
         assert len(node.tokens.text_offsets) == len(node.tokens.token_ids)
+
+
+async def test_the_vllm_engine_has_no_session_to_release() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")])
+        await stack.finish(created["id"])
+
+        assert stack.engine.released == []

@@ -1,4 +1,4 @@
-"""A deterministic token-in/token-out engine speaking both skycap wires.
+"""A deterministic token-in/token-out engine speaking vLLM's generate wire.
 
 The completion is a function of the prompt (and the ``seed`` sampling param):
 ``re<n>`` where ``n`` is the prompt length, followed by ``END``. A prompt
@@ -41,7 +41,6 @@ class MockEngine:
     def app(self) -> web.Application:
         app = web.Application(client_max_size=1024**3)
         app.router.add_post("/inference/v1/generate", self.vllm)
-        app.router.add_post("/skyrl/v1/generate", self.skyrl)
         app.router.add_post("/finish_session", self.finish_session)
         return app
 
@@ -79,37 +78,6 @@ class MockEngine:
         }
         return web.json_response({"choices": [choice]})
 
-    async def skyrl(self, request: web.Request) -> web.Response:
-        body = await request.json()
-        self.requests.append(body)
-        self.headers.append(dict(request.headers))
-        generated = self._generate(body)
-        if generated is None:
-            return web.json_response({"error": "boom"}, status=500)
-        completion, logprobs = generated
-        routed = routed_rows(len(body["token_ids"]) + len(completion))
-        choice: dict[str, Any] = {
-            "index": 0,
-            "token_ids": completion,
-            "finish_reason": "stop",
-            "logprobs": {"content": [{"token": "", "logprob": lp} for lp in logprobs]},
-            "routed_experts": _pack(routed),
-        }
-        if body.get("return_sample_support"):
-            support = np.full((len(completion), 3), -1, dtype=np.int32)
-            support[:, 0] = completion
-            support[:, 1] = np.asarray(completion) + 1
-            choice["rollout_sample_support"] = _pack(support)
-        return web.json_response({"choices": [choice]})
-
     async def finish_session(self, request: web.Request) -> web.Response:
         self.released.append(request.query["session_id"])
         return web.json_response({"ok": True})
-
-
-def _pack(array: np.ndarray) -> dict[str, Any]:
-    return {
-        "data": base64.b64encode(np.ascontiguousarray(array).tobytes()).decode(),
-        "shape": list(array.shape),
-        "dtype": array.dtype.name,
-    }

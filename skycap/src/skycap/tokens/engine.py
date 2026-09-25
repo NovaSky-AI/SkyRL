@@ -1,11 +1,10 @@
 """How one token-in/token-out engine is spelled on the wire.
 
-Two wires ship. ``vllm`` is vLLM's own ``/inference/v1/generate``: routed
-experts as a base64 ``.npy`` covering every token but the last, and a
-``sampling_mask`` when the server runs with ``return_sampling_mask``.
-``skyrl`` is SkyRL's ``/skyrl/v1/generate``: routed experts and the sampler's
-top-k support as packed ``{data, shape, dtype}`` arrays, and a router with
-``/finish_session`` to release a trajectory's session.
+``VLLMEngine`` is vLLM's own ``/inference/v1/generate``: routed experts as a
+base64 ``.npy`` covering every token but the last, and a ``sampling_mask`` when
+the server runs with ``return_sampling_mask``. Another engine's wire is a
+subclass: it overrides the path, how a request is built, and how the side
+channels are read.
 """
 
 from __future__ import annotations
@@ -38,6 +37,8 @@ class EngineOutput:
 class VLLMEngine:
     name = "vllm"
     generate_path = "/inference/v1/generate"
+    #: Where to POST ``?session_id=<trajectory id>`` when a trajectory ends, for a router that
+    #: holds per-session state. None for vLLM, which holds none.
     release_path: str | None = None
     #: What vLLM's ``SamplingParams`` accepts; anything else is dropped rather than sent.
     sampling_keys = frozenset(
@@ -109,34 +110,8 @@ class VLLMEngine:
             output.sampling_mask = [[int(t) for t in row] for row in mask]
 
 
-class SkyRLEngine(VLLMEngine):
-    name = "skyrl"
-    generate_path = "/skyrl/v1/generate"
-    release_path = "/finish_session"
-
-    def request(self, *, sampling_mask: bool, **kwargs: Any) -> dict[str, Any]:
-        body = super().request(sampling_mask=sampling_mask, **kwargs)
-        if sampling_mask:
-            body["return_sample_support"] = True
-        return body
-
-    def _side_channels(self, choice: Mapping[str, Any], output: EngineOutput) -> None:
-        routed = choice.get("routed_experts")
-        if routed is not None:
-            output.routed_experts = unpack(routed)
-        support = choice.get("rollout_sample_support")
-        if support is not None:
-            rows = unpack(support)
-            if rows.shape[0] != len(output.completion_ids):
-                raise EngineError(f"{rows.shape[0]} sample-support rows for {len(output.completion_ids)} tokens")
-            output.sampling_mask = [[int(t) for t in row if t >= 0] for row in rows]
-
-
-ENGINES: dict[str, type[VLLMEngine]] = {VLLMEngine.name: VLLMEngine, SkyRLEngine.name: SkyRLEngine}
-
-
 def unpack(envelope: Mapping[str, Any]) -> np.ndarray:
-    """A ``{data: base64, shape, dtype}`` array, as SkyRL packs them."""
+    """A ``{data: base64, shape, dtype}`` array envelope."""
     try:
         data = base64.b64decode(envelope["data"])
         return np.frombuffer(data, dtype=np.dtype(envelope["dtype"])).reshape(envelope["shape"]).copy()
