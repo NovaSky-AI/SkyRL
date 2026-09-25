@@ -208,6 +208,7 @@ class TokensBackend:
             sampling={k: v for k, v in sampling.items() if k != "stop_token_ids"},
             usage={"prompt_tokens": len(planned.prompt_ids), "completion_tokens": len(output.completion_ids)},
             finish_reason=reason,
+            tools=tools_key or None,
         )
         status = "ok"
         if trajectory.is_open:

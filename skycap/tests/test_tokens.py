@@ -213,6 +213,9 @@ async def test_a_tool_call_is_parsed_and_the_tool_result_bridges() -> None:
         await llm.chat.completions.create(model="policy", messages=history, tools=tools)
         first_request, second_request = stack.engine.requests
         assert second_request["token_ids"][: len(first_request["token_ids"])] == first_request["token_ids"]
+        graph = stack.server.trajectories[created["id"]].graph
+        (call,) = graph.nodes[1].calls
+        assert graph.tools[call.tools] == tools
 
 
 async def test_a_streamed_answer_is_synthesized_from_the_completion() -> None:
