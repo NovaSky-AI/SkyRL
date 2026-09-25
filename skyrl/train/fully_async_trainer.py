@@ -482,11 +482,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
 
-        # Eval before training
+        # Eval before training. The dispatcher fires the eval callbacks; the loop writes the metrics.
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with self._phase_gauge.timed_phase("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                await self._eval_dispatcher.submit(self.global_step)
+                results = await self._eval_dispatcher.drain()
+            self._log_eval_results(results)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
@@ -620,11 +621,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         or self.global_step == self.total_training_steps
                     ):
                         with self._phase_gauge.timed_phase("eval", self.all_timings):
-                            eval_metrics = await self.eval()
-                            self.all_metrics.update(eval_metrics)
+                            await self._eval_dispatcher.submit(self.global_step)
+                    # Write every settled eval at the step it evaluated, before this step's own row.
+                    self._log_eval_results(self._eval_dispatcher.get_completed())
 
                     # Log metrics for this step after evaluation
-                    self.tracker.log(self.all_metrics, step=self.global_step, commit=False)
+                    self.tracker.log(self.all_metrics, step=self.global_step)
                     self.all_metrics = {}
 
                     # 7. Checkpointing. At interval and at the last step of each epoch.
@@ -643,7 +645,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         timing_payload.update(self._ray_gpu_monitor.flush())
                     if self._vllm_metrics_scraper is not None:
                         timing_payload.update(await self._vllm_metrics_scraper.sample())
-                    self.tracker.log(timing_payload, step=self.global_step, commit=True)
+                    self.tracker.log(timing_payload, step=self.global_step)
                     self.all_timings = {}
                     self.global_step += 1
 
@@ -703,10 +705,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
                 # End of an epoch.
+
+            # Drain remaining evals.
+            self._log_eval_results(await self._eval_dispatcher.drain())
         finally:
             self._profiler_stop()
             if self._ray_gpu_monitor is not None:
                 self._ray_gpu_monitor.stop()
+            try:
+                await self._eval_dispatcher.close()
+            except Exception as e:
+                # Don't re-raise error so that any original error raised in the training
+                # loop is properly propagated.
+                logger.error(f"Closing eval dispatcher failed: {e}")
 
         pbar.close()
 
