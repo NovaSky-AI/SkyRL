@@ -1587,7 +1587,8 @@ class TrainerConfig(BaseConfig):
     fused_lm_head_logprob: bool = False
     """Megatron only. Fuse the LM-head projection into log-prob / entropy
     computation so the full ``[B, S, vocab//TP]`` logits tensor is never
-    materialized. Uses ``logprobs_chunk_size`` to bound peak memory."""
+    materialized. Metric-only entropy and ``use_entropy_loss`` share the same
+    projection. Uses ``logprobs_chunk_size`` to bound peak memory."""
     fused_lm_head_logprob_backend: str = "torch"
     """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
     The Triton backend requires CUDA + triton and falls back to ``"torch"``

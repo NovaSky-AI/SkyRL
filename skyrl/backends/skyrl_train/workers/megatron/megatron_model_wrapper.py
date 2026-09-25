@@ -26,8 +26,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     to_te_attention_mask,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-    _fused_vocab_parallel_entropy_from_hidden,
-    from_parallel_hidden_to_entropy_packed_sequences,
     from_parallel_hidden_to_logprobs,
     from_parallel_hidden_to_logprobs_packed_sequences,
     from_parallel_logits_to_logprobs,
@@ -55,6 +53,7 @@ from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    PolicyLossType,
     compute_approx_kl,
 )
 from skyrl.backends.skyrl_train.utils.replay_utils import (
@@ -120,8 +119,8 @@ def _build_packed_valid_mask(
 ) -> torch.Tensor:
     """Build a ``[1, T]`` real-token mask aligned to the packed (THD) logits layout.
 
-    1.0 for real tokens, 0.0 for the per-segment alignment padding that ``preprocess_packed_seqs``
-    inserts between sub-sequences. This is the packed counterpart of the ``[batch, seq]``
+    1.0 for real tokens, 0.0 for the layout gaps and aggregate tail padding that
+    ``preprocess_packed_seqs`` inserts. This is the packed counterpart of the ``[batch, seq]``
     ``attention_mask`` the decoupled MTP draft loss uses to mask invalid positions; mirrors the
     index math of :func:`_build_packed_targets` but scatters ones instead of token ids.
     """
@@ -693,8 +692,10 @@ class MegatronModelWrapper:
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             support_entropy = None
+            fused_entropy_BS = None
+            compute_fused_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
             if self.cfg.algorithm.enable_sample_support_replay:
-                compute_support_entropy = resolved_loss_name != "cross_entropy"
+                compute_support_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
                 support_scores = compute_sample_support_scores(
                     logits,
                     sequences,
@@ -715,7 +716,7 @@ class MegatronModelWrapper:
                 token_logprobs = support_scores.logprobs
                 support_entropy = support_scores.entropy
             elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
-                token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
+                fused_result = from_parallel_hidden_to_logprobs_packed_sequences(
                     logits,  # decoder hidden states [1, T, H]
                     lm_head_weight,
                     packed_targets,
@@ -731,9 +732,15 @@ class MegatronModelWrapper:
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    return_entropy=compute_fused_entropy,
+                    entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
                 )
+                if compute_fused_entropy:
+                    token_logprobs, fused_entropy_BS = fused_result
+                else:
+                    token_logprobs = fused_result
             elif fused_lm_head:
-                token_logprobs = from_parallel_hidden_to_logprobs(
+                fused_result = from_parallel_hidden_to_logprobs(
                     logits,  # decoder hidden states [B, S, H]
                     lm_head_weight,
                     sequences,
@@ -745,7 +752,13 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    return_entropy=compute_fused_entropy,
+                    entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
                 )
+                if compute_fused_entropy:
+                    token_logprobs, fused_entropy_BS = fused_result
+                else:
+                    token_logprobs = fused_result
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
                     logits,
@@ -848,8 +861,9 @@ class MegatronModelWrapper:
                 del data["mtp_student_logits"]
                 student_logits_list = None
 
-            # SFT path: cross_entropy loss (negative log likelihood)
-            if resolved_loss_name == "cross_entropy":
+            # SFT objectives need no RL entropy/KL pass. Anchored objectives
+            # already include their token-level KL in ``policy_loss``.
+            if resolved_loss_name == PolicyLossType.CROSS_ENTROPY:
                 # Policy loss masks are pre-scaled to achieve the correct reduction
                 # when summing across the entire minibatch (see `DefaultCollator`).
                 # Megatron divides loss by num_microbatches
@@ -869,7 +883,8 @@ class MegatronModelWrapper:
 
                 # Only build per-token outputs for callers that consume them.
                 if return_per_token_outputs:
-                    # Tinker consumes per-token NLL.
+                    # Per-token output remains the selected-token NLL; aggregate
+                    # SFT objectives may reweight it internally.
                     with torch.no_grad():
                         elementwise_loss = -action_log_probs
                         if loss_mask is not None:
@@ -913,6 +928,8 @@ class MegatronModelWrapper:
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
+                for key, value in loss_metrics.items():
+                    metrics["loss_metrics/" + key] = value
                 if draft_loss is not None:
                     metrics["mtp_loss"] = draft_loss.detach().item()
                 return loss, metrics
@@ -922,36 +939,8 @@ class MegatronModelWrapper:
                 if support_entropy is not None:
                     entropy = masked_mean(support_entropy[:, -num_actions:], loss_mask)
                     entropy_for_loss = entropy
-                elif fused_lm_head and loss_config.use_entropy_loss:
-                    raise NotImplementedError(
-                        "fused_lm_head_logprob does not support use_entropy_loss=True "
-                        "(the fused entropy is a no-grad metric)."
-                    )
-                elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
-                    entropy, entropy_for_loss = from_parallel_hidden_to_entropy_packed_sequences(
-                        logits,  # decoder hidden states [1, T, H]
-                        lm_head_weight,
-                        packed_seq_params.cu_seqlens_q_padded,
-                        sequences.shape[1],
-                        num_actions,
-                        data["attention_mask"],
-                        loss_mask,
-                        mpu.get_context_parallel_group(),
-                        tp_group=tp_grp,
-                        sub_seq_lengths=data.get("sub_seq_lengths_list"),
-                        chunk_size=self.cfg.logprobs_chunk_size,
-                        temperature=temperature,
-                    )
-                elif fused_lm_head:
-                    action_hidden = logits[:, -num_actions - 1 : -1, :]
-                    entropy_BS = _fused_vocab_parallel_entropy_from_hidden(
-                        action_hidden,
-                        lm_head_weight,
-                        tp_grp,
-                        chunk_size=self.cfg.logprobs_chunk_size,
-                        temperature=temperature,
-                    )
-                    entropy = masked_mean(entropy_BS, loss_mask)
+                elif fused_entropy_BS is not None:
+                    entropy = masked_mean(fused_entropy_BS[:, -num_actions:], loss_mask)
                     entropy_for_loss = entropy
                 elif packed_seq_params is not None and packed_targets is not None:
                     entropy, entropy_for_loss = vocab_parallel_entropy_packed_sequences(
