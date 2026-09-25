@@ -36,6 +36,40 @@ def _local_entropy(logits):
     return -(log_probs.exp() * log_probs).sum(dim=-1)
 
 
+@pytest.mark.parametrize("temperature", [0.5, 1.0])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("padding", [0, 2])
+def test_vocab_entropy_masked_logits_match_cropped_vocabulary(monkeypatch, temperature, dtype, padding):
+    monkeypatch.setattr(model_utils.mpu, "get_tensor_model_parallel_group", lambda: None, raising=False)
+    monkeypatch.setattr(model_utils.dist, "all_reduce", lambda tensor, **kwargs: None)
+    logits = torch.tensor([[0.2, -1.0, 2.0], [0.7, 0.3, -0.5]], dtype=dtype)
+    padded = torch.cat((logits, torch.full((2, padding), -torch.inf, dtype=dtype)), dim=-1).requires_grad_()
+    reference = logits.clone().requires_grad_()
+    scaled = padded / temperature
+    before = scaled.detach().clone()
+
+    actual = model_utils._VocabParallelEntropy.apply(scaled)
+    expected = _local_entropy(reference / temperature)
+    actual.sum().backward()
+    expected.sum().backward()
+
+    assert torch.isfinite(actual).all()
+    assert torch.isfinite(padded.grad).all()
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(padded.grad[:, :3], reference.grad)
+    assert torch.count_nonzero(padded.grad[:, 3:]) == 0
+    assert torch.count_nonzero(scaled.softmax(-1)[:, 3:]) == 0
+    torch.testing.assert_close(scaled, before)
+
+
+@pytest.mark.parametrize("values", [[0.0, torch.nan], [0.0, torch.inf], [-torch.inf, -torch.inf]])
+def test_vocab_entropy_preserves_invalid_distribution(monkeypatch, values):
+    monkeypatch.setattr(model_utils.mpu, "get_tensor_model_parallel_group", lambda: None, raising=False)
+    monkeypatch.setattr(model_utils.dist, "all_reduce", lambda tensor, **kwargs: None)
+    entropy = model_utils._VocabParallelEntropy.apply(torch.tensor([values]))
+    assert torch.isnan(entropy).all()
+
+
 def test_vocab_entropy_chunking_matches_unchunked_output_and_gradient(monkeypatch):
     monkeypatch.setattr(model_utils._VocabParallelEntropy, "apply", _local_entropy)
     torch.manual_seed(3)
