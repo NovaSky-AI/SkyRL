@@ -19,15 +19,24 @@ import torch.nn as nn
 # Stub out the megatron pieces hidden_capture touches so it runs on CPU:
 # unwrap_model (a passthrough) and get_mtp_layer_offset (0 — the single-stage / no-PP case;
 # hidden_capture fails loud if the real helper goes missing, so the stub must provide it).
+from skyrl.backends.skyrl_train.mtp.native_loss_patch import (  # noqa: E402
+    _skyrl_skip_native_mtp_loss,
+)
+
 _fake_mcore_utils = types.ModuleType("megatron.core.utils")
 _fake_mcore_utils.unwrap_model = lambda m: m
 _fake_mtp_mod = types.ModuleType("megatron.core.transformer.multi_token_prediction")
 _fake_mtp_mod.get_mtp_layer_offset = lambda config, vp_stage=None: 0
+# Installed by the worker whenever the model has MTP heads; native_mtp_disabled requires it.
+_fake_mtp_mod.process_mtp_loss = _skyrl_skip_native_mtp_loss
+
+_fake_transformer = types.ModuleType("megatron.core.transformer")
+_fake_transformer.multi_token_prediction = _fake_mtp_mod
 
 _MEGATRON_MODULES = {
     "megatron": types.ModuleType("megatron"),
     "megatron.core": types.ModuleType("megatron.core"),
-    "megatron.core.transformer": types.ModuleType("megatron.core.transformer"),
+    "megatron.core.transformer": _fake_transformer,
     "megatron.core.utils": _fake_mcore_utils,
     "megatron.core.transformer.multi_token_prediction": _fake_mtp_mod,
 }
@@ -35,7 +44,11 @@ _MEGATRON_MODULES = {
 from skyrl.backends.skyrl_train.mtp.adapter import (  # noqa: E402
     project_mtp_hidden_to_logits,
 )
-from skyrl.backends.skyrl_train.mtp.hidden_capture import MTPHiddenCapture  # noqa: E402
+from skyrl.backends.skyrl_train.mtp.hidden_capture import (  # noqa: E402
+    MTPHiddenCapture,
+    maybe_capture_mtp_hidden,
+    native_mtp_disabled,
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -77,6 +90,7 @@ class _FakeGPT(nn.Module):
     def __init__(self, hidden=4, mtp_num_layers=1):
         super().__init__()
         self.mtp = _FakeMTPBlock(hidden, num_layers=mtp_num_layers)
+        self.mtp_process = True
         self.config = types.SimpleNamespace(mtp_num_layers=mtp_num_layers)
 
 
@@ -306,3 +320,43 @@ def test_no_capture_when_block_absent():
     with capture.capture():
         pass
     assert capture.compute_student_hidden_states() is None
+
+
+def test_native_mtp_disabled_skips_the_block_and_restores_it():
+    model = _FakeGPT()
+    with native_mtp_disabled(model):
+        assert model.mtp_process is False
+    assert model.mtp_process is True
+
+
+def test_native_mtp_disabled_restores_on_error():
+    model = _FakeGPT()
+    with pytest.raises(RuntimeError):
+        with native_mtp_disabled(model):
+            raise RuntimeError("forward failed")
+    assert model.mtp_process is True
+
+
+def test_native_mtp_disabled_reaches_the_nested_language_model():
+    model = _FakeVL()
+    with native_mtp_disabled(model):
+        assert model.language_model.mtp_process is False
+    assert model.language_model.mtp_process is True
+
+
+def test_native_mtp_disabled_is_a_noop_without_an_mtp_block():
+    model = _FakeGPT()
+    model.mtp = None
+    del model.mtp_process
+    with native_mtp_disabled(model):
+        pass
+    assert not hasattr(model, "mtp_process")
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_mtp_block_runs_only_when_captured(enabled):
+    model = _FakeGPT()
+    with maybe_capture_mtp_hidden(model, enabled) as capture:
+        assert model.mtp_process is enabled
+        assert (capture is not None) is enabled
+    assert model.mtp_process is True
