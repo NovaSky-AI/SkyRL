@@ -24,7 +24,7 @@ skyrl/backends/skyrl_train/weight_sync/
 ├── sources.py              # FsdpWeightSource / MegatronWeightSource (vLLM's metadata()+__iter__)
 ├── weight_senders.py       # build_trainer_engine: init info + client -> trainer_init
 ├── control_plane.py        # SkyrlWeightSyncClient (blocking HTTP) + per-server init rewrites
-├── weight_receivers.py     # receive side: skyrl_nccl / skyrl_ipc (+ the drafter-reload proxy)
+├── weight_receivers.py     # receive side: skyrl_nccl / skyrl_ipc (+ the FP8-aware load proxy)
 ├── delta/                  # the checkpoint-delta backend; __init__ is import-free
 │   ├── trainer.py              # DeltaTrainerWeightTransferEngine (send side)
 │   ├── engine.py               # DeltaWeightTransferEngine (receive side, in the vLLM worker)
@@ -72,8 +72,8 @@ vLLM worker-extension class (loaded via `--worker-extension-cls`):
 | `sharded_rdt` | `ShardedRDTTrainerWeightTransferEngine` (`sharded_rdt`) | `sharded_rdt` |
 
 Both sides take new names for NCCL and IPC because SkyRL subclasses vLLM's engines --
-the receive side to reload the spec-decode drafter, the send side to declare the capability
-attributes above -- and `register_engine` raises on an already-registered name.
+the receive side to load the compact FP8 wire tensors, the send side to declare the
+capability attributes above and run the draft session -- and `register_engine` raises on an already-registered name.
 
 ## Transfer backends
 
@@ -209,10 +209,9 @@ checkpoint in place, so it is the only one that needs generation stopped.
 
 The engine owns its layerwise-reload lifecycle like every other one
 (`start_weight_update` → `initialize_layerwise_reload`, `finish_weight_update` →
-`finalize_layerwise_reload`), which is what runs `process_weights_after_loading`. Its
-drafter reload takes a **second** `iter_tensors` pass rather than the push backends'
-proxy: materializing a whole checkpoint into a list so the drafter can re-read it would
-put the entire model in memory at once.
+`finalize_layerwise_reload`), which is what runs `process_weights_after_loading`. Under
+speculative decoding the trainer re-applies the same published version in a draft session;
+the drafter's `load_weights` keeps the MTP names from the full checkpoint stream.
 
 `DeltaWeightSyncConfig.__post_init__` derives `local_checkpoint_dir` and `publish_staging_dir`
 from `sync_dir` when unset, so consuming classes never invent their own defaults.
@@ -381,24 +380,31 @@ vLLM's native routes, driven by the trainer engine through `SkyrlWeightSyncClien
 `GPUWorker` opens `set_current_vllm_config` around steps 2-4 itself, which is why the
 receive path needs no SkyRL wrapper.
 
-### Spec-decode drafter reload
+### Spec-decode drafter: the draft session
 
-vLLM's engines call `self.model.load_weights(...)` directly and there is still no
-`load_weights` callback, so `weight_receivers.SkyrlDrafterReloadMixin` swaps `self.model` for
-a `_LoadWeightsProxy` for the duration of `receive_weights` — the drafter
-(`model_runner.drafter.model`, a separate module the main load never touches) is then
-reloaded from exactly the weights the main model just received. The proxy is only
-installed when this process actually *has* a drafter, so a non-MTP deployment runs vLLM's
-path verbatim.
+vLLM's MTP drafter is a separate model that the main model's load never touches, and
+colocated sleep at level 2 discards its weights. Every supported speculative method (MTP)
+drafts from the policy checkpoint, so under `speculative_config` each sync runs **two
+sessions**: the main model, then the drafter.
 
-Delta is the exception: it re-streams `iter_tensors` a second time instead, because the
-proxy has to materialize the weight list so the drafter can re-read it, and for a whole
-checkpoint that is the entire model resident at once.
+- `/start_draft_weight_update` retargets the worker's receive engine at the drafter
+  (`set_weight_update_target`) for one session; `/finish_weight_update` restores it. The
+  engine's own layerwise reload therefore runs on the drafter, so
+  `process_weights_after_loading` runs there too.
+- `SkyrlWeightSyncClient.draft_session()` routes `start_weight_update` to the draft route.
+  vLLM's trainer engines only ever call `start_weight_update`.
+- `nccl` / `ipc`: `SkyrlDraftSessionMixin.send_weights` replays vLLM's `send_weights` with
+  `self.source` swapped for `skyrl_draft_source`, over the same transport.
+- `delta`: the published checkpoint already carries the MTP head, so the trainer re-applies
+  the same version inside the pause.
+- `sharded_rdt`: unsupported. Its pull plan targets one model, so `build_trainer_engine`
+  and config validation refuse it.
 
-An engine has no route to its worker — it is constructed inside `Worker.load_model`, and
-the worker-extension class is appended to `Worker.__bases__` *after* `Worker` — so
-`patches/vllm/patch_model_runner_registry.py` wraps `GPUModelRunner.load_model` to record
-the runner in a process-global weakref.
+The draft source is `MegatronPolicyWorkerBase._build_draft_weight_source`: a
+`MegatronWeightSource` filtered to the MTP block plus the embedding and output layer. The
+drafter aliases those two and its layerwise reload covers them. FSDP has no MTP head, so
+config validation (`_validate_draft_weight_sync_cfg`) requires Megatron. It also rejects
+serialized FP8 and adapter-only LoRA.
 
 ## KV offload during non-colocated weight sync
 
@@ -466,6 +472,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `weight_senders.py` / a trainer engine | `test_weight_senders.py` (CPU) **and** GPU `test_weight_sync.py` |
 | `register.py` (either factory) | `test_registration.py` (CPU) — it *resolves* each entry, not just membership |
 | `weight_receivers.py` (receive side) | GPU `test_weight_sync.py` only — it runs inside the vLLM worker |
+| Draft session (`draft_session`, `SkyrlDraftSessionMixin`, `_build_draft_weight_source`) | `test_draft_session.py` (CPU) **and** GPU `megatron/test_mtp_weight_sync.py` |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |
@@ -504,7 +511,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 - `set_weight_update_target` / `reset_weight_update_target` on `WeightTransferEngine` —
   the draft-session hook. SkyRL's proxy swap composes with it by restoring the exact
   object it found.
-- `GPUModelRunner.load_model` — wrapped by `patch_model_runner_registry`.
+- `/start_draft_weight_update` → `GPUWorker.start_draft_weight_update` — the draft session.
 - `CuMemAllocator` via `vllm.device_allocator.get_mem_allocator_instance` — the KV-offload
   path drives it directly because `EngineCore.sleep` hardcodes
   `clear_prefix_cache = level >= 1` and `CuMemBackend.suspend` cannot express "discard

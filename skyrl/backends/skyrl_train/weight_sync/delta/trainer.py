@@ -181,6 +181,13 @@ class DeltaTrainerWeightTransferEngine(SkyrlTrainerCapabilities, TrainerWeightTr
             self.client.start_weight_update()
             self.client.update_weights(update_info)
             self.client.finish_weight_update()
+            if self.skyrl_draft_source is not None:
+                # The published checkpoint already carries the MTP head: the
+                # drafter reloads the same version, filtering to its own names.
+                with self.client.draft_session():
+                    self.client.start_weight_update()
+                    self.client.update_weights(update_info)
+                    self.client.finish_weight_update()
         finally:
             self.client.resume_generation()
 

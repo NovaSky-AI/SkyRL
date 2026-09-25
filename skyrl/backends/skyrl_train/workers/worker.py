@@ -538,6 +538,7 @@ class Worker(DistributedTorchRayActor):
             rank=torch.distributed.get_rank(),
             inference_world_size=inference_world_size,
             source_factory=self._build_weight_source,
+            draft_source_factory=self._build_draft_weight_source,
             server_urls=list(inference_engine_client.server_urls),
             data_parallel_size=int(inference_engine_client.data_parallel_size),
             base_model_path=self.cfg.policy.model.path,
@@ -561,6 +562,13 @@ class Worker(DistributedTorchRayActor):
         source and sharded RDT's ownership-aware subclass.
         """
         raise NotImplementedError()
+
+    def _build_draft_weight_source(self, dtype: "torch.dtype") -> Any:
+        """Build the ``WeightSource`` for vLLM's MTP drafter, synced in its own session.
+
+        Only backends whose model carries the MTP head implement it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot sync the spec-decode drafter's weights.")
 
     def _weight_sync_thread(self, fn, *args, **kwargs):
         """Run ``fn`` off the event loop with **this rank's** CUDA device selected.

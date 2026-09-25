@@ -14,7 +14,8 @@ Imports vLLM at module scope, so import this lazily from anything that must work
 without the wheel.
 """
 
-from typing import Any, Iterator, List, Optional, Tuple
+import re
+from typing import Any, Callable, Iterator, List, Optional, Tuple
 
 import torch
 from vllm.distributed.weight_transfer.base import (
@@ -29,8 +30,27 @@ __all__ = [
     "ParamMeta",
     "SerializedFp8WeightSource",
     "WeightSource",
+    "is_megatron_draft_param",
+    "is_megatron_mtp_param",
     "materialize_full_tensor",
 ]
+
+_MEGATRON_MTP_RE = re.compile(r"(^|\.)mtp\.")
+_MEGATRON_SHARED_WITH_DRAFT = ("embedding.word_embeddings.weight", "output_layer.weight")
+
+
+def is_megatron_mtp_param(name: str) -> bool:
+    """Whether a global Megatron parameter name is in the MTP block."""
+    return _MEGATRON_MTP_RE.search(name) is not None
+
+
+def is_megatron_draft_param(name: str) -> bool:
+    """Whether vLLM's MTP drafter loads this global Megatron parameter.
+
+    The drafter aliases the policy's embedding and LM head, and its layerwise
+    reload covers them, so they ride along with the MTP block.
+    """
+    return is_megatron_mtp_param(name) or name.endswith(_MEGATRON_SHARED_WITH_DRAFT)
 
 
 class FsdpWeightSource(WeightSource):
@@ -93,16 +113,34 @@ class MegatronWeightSource(WeightSource):
 
     There is no shape-only export, so ``metadata()`` runs a dry export and
     caches. Engines call it every round; the cost is one-time.
+
+    ``param_filter`` keeps the conversion tasks whose global Megatron name it
+    accepts. Every rank filters the same global list, so they enter the same
+    collectives, and a filter by name keeps each ``group_key`` whole.
     """
 
-    def __init__(self, bridge: Any, module: Any, dtype: torch.dtype) -> None:
+    def __init__(
+        self,
+        bridge: Any,
+        module: Any,
+        dtype: torch.dtype,
+        param_filter: Optional[Callable[[str], bool]] = None,
+    ) -> None:
         self._bridge = bridge
         self._module = module
         self._dtype = dtype
+        self._param_filter = param_filter
         self._meta: Optional[List[ParamMeta]] = None
 
     def _export(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=None)
+        tasks = None
+        if self._param_filter is not None:
+            tasks = [
+                task
+                for task in self._bridge.get_conversion_tasks(self._module)
+                if self._param_filter(task.global_param_name)
+            ]
+        return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
 
     def metadata(self) -> List[ParamMeta]:
         if self._meta is None:

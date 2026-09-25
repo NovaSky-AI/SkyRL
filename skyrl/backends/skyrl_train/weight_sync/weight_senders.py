@@ -68,6 +68,30 @@ class SkyrlTrainerCapabilities:
     skyrl_force_disable_expandable_segments: bool = False
     skyrl_empty_cache_after_send: bool = True
 
+    #: Set by :func:`build_trainer_engine` under MTP speculative decoding. vLLM's
+    #: drafter is a separate model the main session never loads, so each send
+    #: ends with a second session, opened on the drafter, fed from this source.
+    skyrl_draft_source: Optional[WeightSource] = None
+
+
+class SkyrlDraftSessionMixin:
+    """Follow the main-model send with a draft session over ``skyrl_draft_source``.
+
+    Replays vLLM's own ``send_weights`` with the source swapped and the client's
+    start routed to the drafter, so both sessions share the transport.
+    """
+
+    def send_weights(self) -> None:
+        super().send_weights()
+        if self.skyrl_draft_source is None:
+            return
+        source, self.source = self.source, self.skyrl_draft_source
+        try:
+            with self.client.draft_session():
+                super().send_weights()
+        finally:
+            self.source = source
+
 
 _TRAINER_ENGINE_CACHE: dict[str, tuple[type, type]] = {}
 
@@ -88,7 +112,9 @@ def _build_skyrl_nccl_trainer() -> "tuple[type, type]":
     class SkyrlNCCLTrainerInitInfo(NCCLTrainerInitInfo):
         backend: ClassVar[str] = SKYRL_NCCL_TRAINER_BACKEND
 
-    class SkyrlNCCLTrainerWeightTransferEngine(SkyrlTrainerCapabilities, NCCLTrainerWeightTransferEngine):
+    class SkyrlNCCLTrainerWeightTransferEngine(
+        SkyrlDraftSessionMixin, SkyrlTrainerCapabilities, NCCLTrainerWeightTransferEngine
+    ):
         init_info_cls = SkyrlNCCLTrainerInitInfo
 
     return SkyrlNCCLTrainerInitInfo, SkyrlNCCLTrainerWeightTransferEngine
@@ -105,7 +131,9 @@ def _build_skyrl_ipc_trainer() -> "tuple[type, type]":
     class SkyrlIPCTrainerInitInfo(IPCTrainerInitInfo):
         backend: ClassVar[str] = SKYRL_IPC_TRAINER_BACKEND
 
-    class SkyrlIPCTrainerWeightTransferEngine(SkyrlTrainerCapabilities, IPCTrainerWeightTransferEngine):
+    class SkyrlIPCTrainerWeightTransferEngine(
+        SkyrlDraftSessionMixin, SkyrlTrainerCapabilities, IPCTrainerWeightTransferEngine
+    ):
         init_info_cls = SkyrlIPCTrainerInitInfo
 
     return SkyrlIPCTrainerInitInfo, SkyrlIPCTrainerWeightTransferEngine
@@ -132,6 +160,7 @@ def build_trainer_engine(
     rank: int,
     inference_world_size: int,
     source_factory: Callable[["torch.dtype", str], WeightSource],
+    draft_source_factory: Callable[["torch.dtype"], WeightSource],
     server_urls: list,
     data_parallel_size: int,
     base_model_path: Optional[str] = None,
@@ -156,6 +185,8 @@ def build_trainer_engine(
             the source reads the live model, which only the caller has, and it
             cannot be built until the backend is known -- sharded RDT needs an
             ownership-aware subclass.
+        draft_source_factory: ``dtype -> WeightSource`` over the policy's MTP
+            head, for vLLM's drafter. Called only under speculative decoding.
         server_urls: every inference server, in deployment-major order.
         data_parallel_size: DP replicas per deployment.
         base_model_path: policy model path. Required by ``delta``, which
@@ -171,6 +202,12 @@ def build_trainer_engine(
         raise ValueError("Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}.")
     dtype = str_to_torch_dtype(ie_cfg.model_dtype)
     source = source_factory(dtype, backend)
+    draft_source = None
+    # Every supported speculative method (MTP) drafts from the policy checkpoint.
+    if ie_cfg.speculative_config is not None:
+        if backend == "sharded_rdt":
+            raise ValueError("sharded_rdt cannot sync the spec-decode drafter; use the nccl or delta backend.")
+        draft_source = draft_source_factory(dtype)
 
     init_info, init_payload_fn = _build_sender_init_info(
         backend=backend,
@@ -193,6 +230,7 @@ def build_trainer_engine(
         rdt_send.log_source_choice(source)
 
     engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
+    engine.skyrl_draft_source = draft_source
 
     if backend == "sharded_rdt":
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send

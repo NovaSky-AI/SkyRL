@@ -61,10 +61,6 @@ class DeltaWeightTransferEngine(WeightTransferEngine[DeltaTransferInitInfo, Delt
     init_info_cls = DeltaTransferInitInfo
     update_info_cls = DeltaTransferUpdateInfo
 
-    # Read by vLLM's Worker._start_weight_update when updating a draft model.
-    # Delta sync reloads the full checkpoint for the target model only.
-    supports_draft_weight_update = False
-
     def __init__(self, config: Any, vllm_config: Any, device: Any, model: torch.nn.Module) -> None:
         super().__init__(config, vllm_config, device, model)
         self._store: LocalCheckpointStore | None = None
@@ -149,11 +145,10 @@ class DeltaWeightTransferEngine(WeightTransferEngine[DeltaTransferInitInfo, Delt
         load_s = 0.0
         t1 = time.perf_counter()
 
-        def tensors():
-            return self._store.iter_tensors(
-                load_format=self._checkpoint_load_format,
-                multi_thread_safetensors_max_workers=self._multi_thread_safetensors_max_workers,
-            )
+        tensors = self._store.iter_tensors(
+            load_format=self._checkpoint_load_format,
+            multi_thread_safetensors_max_workers=self._multi_thread_safetensors_max_workers,
+        )
 
         # MTP architectures raise on incomplete layer coverage.
         from vllm.model_executor.model_loader.mtp_validation import (
@@ -161,13 +156,7 @@ class DeltaWeightTransferEngine(WeightTransferEngine[DeltaTransferInitInfo, Delt
         )
 
         with torch.device(self.device), disable_mtp_completeness_check():
-            self.model.load_weights(tensors())
-            # The spec-decode drafter is a separate module the main load never
-            # touches. Unlike the push backends this does NOT go through
-            # skyrl_drafter_reload's proxy: that materializes the weight list so
-            # the drafter can re-read it, which for a whole checkpoint would be
-            # the entire model resident at once. The store re-streams instead.
-            self._reload_drafter(tensors)
+            self.model.load_weights(tensors)
 
         load_s = time.perf_counter() - t1
         total_s = time.perf_counter() - t0
@@ -183,27 +172,6 @@ class DeltaWeightTransferEngine(WeightTransferEngine[DeltaTransferInitInfo, Delt
         )
         logger.info(message)
         print(message, flush=True)
-
-    def _reload_drafter(self, tensors) -> None:
-        """Reload the spec-decode drafter from a fresh pass over the checkpoint.
-
-        No-op, and no second pass, when this process has no loadable proposer.
-        """
-        from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
-            current_model_runner,
-        )
-
-        model_runner = current_model_runner()
-        drafter = getattr(model_runner, "drafter", None) if model_runner is not None else None
-        if drafter is None or getattr(drafter, "model", None) is None:
-            return
-
-        from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
-            _reload_spec_decode_drafter,
-        )
-
-        # NOTE: This only works for MTP because we iterate over the target model's tensors
-        _reload_spec_decode_drafter(model_runner, tensors())
 
     def shutdown(self):
         self._store = None

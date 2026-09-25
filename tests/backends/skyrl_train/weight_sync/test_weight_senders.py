@@ -274,7 +274,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
         def _fake_trainer_init(init_info, *, client, source=None):
             seen["init_info"] = init_info
             seen["source"] = source
-            return object()
+            return SimpleNamespace()
 
         monkeypatch.setattr(WeightTransferTrainerFactory, "trainer_init", _fake_trainer_init)
 
@@ -288,11 +288,13 @@ class TestBuildTrainerEngineResolvesTheBackend:
                 model_dtype="bfloat16",
                 weight_transfer_threshold_cuda_ipc_GB=1.0,
                 fp8_weight_sync_mode=fp8_weight_sync_mode,
+                speculative_config=None,
             ),
             colocate_all=colocate_all,
             rank=0,
             inference_world_size=4,
             source_factory=source_factory,
+            draft_source_factory=None,
             server_urls=["http://a"],
             data_parallel_size=1,
             base_model_path=None,

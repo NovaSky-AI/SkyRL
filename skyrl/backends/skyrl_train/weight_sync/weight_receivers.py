@@ -1,10 +1,10 @@
 """SkyRL's receive-side weight-transfer engines (the inference-worker half).
 
-vLLM's NCCL and IPC engines, subclassed to add one thing: reloading the
-speculative-decoding drafter. The drafter (``model_runner.drafter.model``) is a
-separate module that the main model's ``load_weights`` never touches, and vLLM's
-engines call ``self.model.load_weights(...)`` directly with no callback, so the
-only injection point is the ``self.model`` handle they read.
+vLLM's NCCL and IPC engines, subclassed to add one thing: loading the compact
+batched-MoE FP8 wire tensors. vLLM's engines call ``self.model.load_weights(...)``
+directly with no callback, so the only injection point is the ``self.model``
+handle they read. That handle is whichever model the session targets -- the main
+model, or the spec-decode drafter under ``/start_draft_weight_update``.
 
 Registered (in ``weight_sync/register.py``) under ``skyrl_nccl`` / ``skyrl_ipc``
 rather than shadowing vLLM's
@@ -55,22 +55,12 @@ class _LoadWeightsProxy:
         return getattr(self._model, name)
 
 
-class SkyrlDrafterReloadMixin:
-    """Handle SkyRL-specific reloads around the engine's model load.
-
-    The wrapper splits the compact batched-MoE FP8 wire tensors from ordinary
-    checkpoint weights, then reloads a spec-decode drafter when one is present.
-    """
+class SkyrlCheckpointLoadMixin:
+    """Split the compact batched-MoE FP8 wire tensors from ordinary checkpoint weights."""
 
     @contextmanager
-    def skyrl_drafter_reload(self) -> Iterator[None]:
-        """Install the FP8-aware, drafter-reloading proxy over ``self.model`."""
-        from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
-            current_model_runner,
-        )
-
-        model_runner = current_model_runner()
-        drafter = getattr(model_runner, "drafter", None) if model_runner is not None else None
+    def skyrl_checkpoint_load(self) -> Iterator[None]:
+        """Install the FP8-aware loader proxy over ``self.model``."""
         from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
             _load_checkpoint_weights,
         )
@@ -78,17 +68,7 @@ class SkyrlDrafterReloadMixin:
         model = self.model
 
         def load_weights(weights: Any, **kwargs: Any) -> Any:
-            # The engines hand us a one-shot generator. The compact FP8 loader
-            # and a speculative drafter both need a complete view of the stream.
-            weight_list = list(weights)
-            loaded = _load_checkpoint_weights(model, weight_list, **kwargs)
-            if drafter is not None and getattr(drafter, "model", None) is not None:
-                from skyrl.backends.skyrl_train.inference_servers.spec_decode_utils import (
-                    _reload_spec_decode_drafter,
-                )
-
-                _reload_spec_decode_drafter(model_runner, weight_list)
-            return loaded
+            return _load_checkpoint_weights(model, weights, **kwargs)
 
         # The proxy scopes the override to the `WeightTransferEngine` context
         # instead of mutating `load_weights` on the model object itself.
@@ -109,15 +89,15 @@ class SkyrlDrafterReloadMixin:
 def _build_skyrl_nccl_engine() -> type:
     from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
 
-    class SkyrlNCCLWeightTransferEngine(SkyrlDrafterReloadMixin, NCCLWeightTransferEngine):
-        """vLLM's dense NCCL receive engine plus the drafter reload."""
+    class SkyrlNCCLWeightTransferEngine(SkyrlCheckpointLoadMixin, NCCLWeightTransferEngine):
+        """vLLM's dense NCCL receive engine plus the FP8-aware loader."""
 
         def start_weight_update(self) -> None:
             with torch.device(self.device):
                 super().start_weight_update()
 
         def receive_weights(self, update_info: Any) -> None:
-            with torch.device(self.device), self.skyrl_drafter_reload():
+            with torch.device(self.device), self.skyrl_checkpoint_load():
                 super().receive_weights(update_info)
 
         def finish_weight_update(self) -> None:
@@ -131,15 +111,15 @@ def _build_skyrl_nccl_engine() -> type:
 def _build_skyrl_ipc_engine() -> type:
     from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
 
-    class SkyrlIPCWeightTransferEngine(SkyrlDrafterReloadMixin, IPCWeightTransferEngine):
-        """vLLM's CUDA IPC receive engine plus the drafter reload."""
+    class SkyrlIPCWeightTransferEngine(SkyrlCheckpointLoadMixin, IPCWeightTransferEngine):
+        """vLLM's CUDA IPC receive engine plus the FP8-aware loader."""
 
         def start_weight_update(self) -> None:
             with torch.device(self.device):
                 super().start_weight_update()
 
         def receive_weights(self, update_info: Any) -> None:
-            with torch.device(self.device), self.skyrl_drafter_reload():
+            with torch.device(self.device), self.skyrl_checkpoint_load():
                 super().receive_weights(update_info)
 
         def finish_weight_update(self) -> None:

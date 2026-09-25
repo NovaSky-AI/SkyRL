@@ -12,7 +12,7 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
 )
 from skyrl.train.config.config import build_nested_dataclass
-from skyrl.train.utils.utils import _apply_mtp_config
+from skyrl.train.utils.utils import _apply_mtp_config, _validate_draft_weight_sync_cfg
 
 
 def test_megatron_config_mtp_defaults():
@@ -109,3 +109,59 @@ def test_apply_mtp_config_does_not_clobber_explicit_speculative_config():
     cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 5}
     _apply_mtp_config(cfg)
     assert cfg.generator.inference_engine.speculative_config["num_speculative_tokens"] == 5
+
+
+def _spec_cfg(strategy="megatron", weight_sync_backend="nccl", colocate_all=False):
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.strategy = strategy
+    cfg.trainer.mtp.enabled = True
+    cfg.trainer.placement.colocate_all = colocate_all
+    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
+    _apply_mtp_config(cfg)
+    assert cfg.generator.inference_engine.speculative_config["method"] == "mtp"
+    return cfg
+
+
+@pytest.mark.parametrize(
+    ("weight_sync_backend", "colocate_all"),
+    [("nccl", False), ("nccl", True), ("delta", False)],
+)
+def test_draft_weight_sync_cfg_accepts_megatron_full_weight_backends(weight_sync_backend, colocate_all):
+    _validate_draft_weight_sync_cfg(_spec_cfg(weight_sync_backend=weight_sync_backend, colocate_all=colocate_all))
+
+
+def test_draft_weight_sync_cfg_noop_without_spec_decode():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.strategy = "fsdp"
+    cfg.generator.inference_engine.weight_sync_backend = "sharded_rdt"
+    _validate_draft_weight_sync_cfg(cfg)
+
+
+def test_draft_weight_sync_cfg_rejects_fsdp():
+    with pytest.raises(ValueError, match="requires trainer.strategy='megatron'"):
+        _validate_draft_weight_sync_cfg(_spec_cfg(strategy="fsdp"))
+
+
+@pytest.mark.parametrize("backend", ["sharded_rdt", "rdt"])
+def test_draft_weight_sync_cfg_rejects_sharded_rdt(backend):
+    with pytest.raises(ValueError, match=f"weight_sync_backend={backend!r}"):
+        _validate_draft_weight_sync_cfg(_spec_cfg(weight_sync_backend=backend))
+
+
+def test_draft_weight_sync_cfg_rejects_fp8_weight_sync():
+    cfg = _spec_cfg()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+    with pytest.raises(ValueError, match="fp8_weight_sync_mode='blockwise'"):
+        _validate_draft_weight_sync_cfg(cfg)
+
+
+def test_draft_weight_sync_cfg_rejects_adapter_only_lora():
+    from skyrl.train.config import SkyRLLoraConfig
+
+    cfg = _spec_cfg()
+    cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    with pytest.raises(ValueError, match="full-weight sync"):
+        _validate_draft_weight_sync_cfg(cfg)
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
+    _validate_draft_weight_sync_cfg(cfg)

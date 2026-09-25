@@ -1334,6 +1334,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return SerializedFp8WeightSource(source, self._serialized_fp8_config)
         return source
 
+    def _build_draft_weight_source(self, dtype: "torch.dtype"):
+        """The MTP block plus the embedding and output layer the drafter shares with the policy."""
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            MegatronWeightSource,
+            is_megatron_draft_param,
+            is_megatron_mtp_param,
+        )
+
+        tasks = self.bridge.get_conversion_tasks(self.actor_module)
+        if not any(is_megatron_mtp_param(task.global_param_name) for task in tasks):
+            raise ValueError(
+                "Speculative decoding drafts with the policy's MTP head, but the Megatron model has none "
+                "(no `mtp.*` parameters). Enable trainer.mtp on an MTP-capable checkpoint."
+            )
+        return MegatronWeightSource(self.bridge, self.actor_module, dtype, param_filter=is_megatron_draft_param)
+
     def _is_lora_sync_writer_rank(self) -> bool:
         """True on the ranks that write the LoRA adapter files to ``lora_sync_path``.
 
