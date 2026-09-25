@@ -348,7 +348,8 @@ class TestDatasetConfigNormalization:
         _normalize_dataset_cfg(cfg)
         assert cfg.train_datasets == ["yahma/alpaca-cleaned"]
         assert cfg.train_dataset_splits == ["train[:100]"]
-        assert cfg.train_dataset_weights == [1.0]
+        # Unset weights stay None (union sampling; no defaulted mixing).
+        assert cfg.train_dataset_weights is None
         assert cfg.dataset_name is None and cfg.dataset_split is None
         assert cfg.eval_datasets is None  # eval stays disabled
 
@@ -412,10 +413,12 @@ class TestMultiDatasetValidation:
         assert list(cfg.train_datasets) == ["allenai/tulu-3-sft-mixture", "yahma/alpaca-cleaned"]
         assert list(cfg.train_dataset_splits) == ["train[:50000]", "train[:10000]"]
 
-    def test_default_weights_are_equal_mixing(self):
+    def test_unset_weights_stay_none_for_union_sampling(self):
+        # No defaulted equal mixing: unset weights select union sampling
+        # (one shuffle over the concatenation, without replacement).
         cfg = _sft_cfg_from_overrides(["train_datasets=[a,b,c,d]", "train_dataset_splits=[s,s,s,s]"])
         _normalize_dataset_cfg(cfg)
-        assert cfg.train_dataset_weights == pytest.approx([0.25] * 4)
+        assert cfg.train_dataset_weights is None
 
     def test_splits_length_mismatch_rejected(self):
         cfg = _sft_cfg_from_overrides(["train_datasets=[a,b]", "train_dataset_splits=[s1]"])
