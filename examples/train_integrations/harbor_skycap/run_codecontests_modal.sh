@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# One small Harbor x skycap training run on CodeContests, sandboxed on Modal.
+# A small Harbor training run on CodeContests, sandboxed on Modal, through skycap
+# or through the sibling `harbor` integration (the baseline), to compare the two.
 #
 #   bash examples/train_integrations/harbor_skycap/run_codecontests_modal.sh [extra overrides...]
 #
 # Does everything: reads the Modal credentials, prepares the tasks under
-# /tmp/harbor/data (skipped when they are already there), and runs one GRPO step
-# of NUM_PROMPTS prompts x GROUP_SIZE samples on this machine's GPUs, with skycap
-# capturing every rollout. Each run gets a fresh uuid name, so its trials, skycap
-# records, checkpoints and logs all land in their own /tmp/harbor/runs/<name>.
+# /tmp/harbor/data (skipped when they are already there), and trains EPOCHS
+# passes over NUM_PROMPTS tasks x GROUP_SIZE samples on this machine's GPUs.
+# Each run gets a fresh uuid name, so its trials, skycap records, checkpoints and
+# logs all land in their own /tmp/harbor/runs/<name>.
+#
+#   GENERATOR=skycap|baseline  which integration generates the rollouts (default skycap)
+#   TEMPERATURE=0              greedy, so a baseline run and a skycap run can be diffed
+#                              token for token with compare_runs.py
+#   DETERMINISTIC=1            one trial at a time and no prefix caching, so every request runs
+#                              alone and greedy decoding can't flip on batch-dependent numerics
+#   TASKS=a,b                  task names to run instead of the first NUM_PROMPTS
 #
 # Needs: 2 GPUs, and a file holding `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...`.
 set -euo pipefail
@@ -19,6 +27,12 @@ cd "$REPO"
 # Knobs
 #-----------------------
 MODAL_KEY_FILE="${MODAL_KEY_FILE:-$HOME/default/model_key.key}"
+GENERATOR="${GENERATOR:-skycap}"
+TEMPERATURE="${TEMPERATURE:-1.0}"
+EPOCHS="${EPOCHS:-1}"
+LR="${LR:-1.0e-6}"
+TASKS="${TASKS:-}"
+DETERMINISTIC="${DETERMINISTIC:-0}"
 # Non-thinking, so the chat template never strips reasoning from history and a
 # rollout stays one path.
 MODEL="${MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
@@ -34,10 +48,36 @@ DATASET="${DATASET:-open-thoughts/CodeContests}"
 
 DATA_ROOT="/tmp/harbor/data"
 TASKS_DIR="$DATA_ROOT/$(basename "$DATASET")"
-SUBSET_DIR="$DATA_ROOT/$(basename "$DATASET")-first$NUM_PROMPTS"
 
-EXPERIMENT="harbor-skycap-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+EXPERIMENT="harbor-$GENERATOR-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 RUN_DIR="/tmp/harbor/runs/$EXPERIMENT"
+SUBSET_DIR="$RUN_DIR/tasks"
+
+case "$GENERATOR" in
+  skycap)
+    ENTRYPOINT=examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap
+    EXTRAS=(--extra harbor --extra skycap)
+    # Each row is already a complete path; merging could fuse two paths.
+    ARM_ARGS=(skycap.record_dir="$RUN_DIR/skycap" generator.merge_stepwise_output=false)
+    ;;
+  baseline)
+    ENTRYPOINT=examples.train_integrations.harbor.entrypoints.main_harbor
+    EXTRAS=(--extra harbor)
+    # Its recommended setting: per-turn rows merged back into whole sequences where they align.
+    ARM_ARGS=(generator.merge_stepwise_output=true)
+    ;;
+  *)
+    echo "GENERATOR must be skycap or baseline, got $GENERATOR" >&2
+    exit 1
+    ;;
+esac
+if [[ "$DETERMINISTIC" == 1 ]]; then
+  ARM_ARGS+=(
+    generator.rate_limit.enabled=true
+    generator.rate_limit.max_concurrency=1
+    generator.inference_engine.engine_init_kwargs.enable_prefix_caching=false
+  )
+fi
 
 #-----------------------
 # Modal credentials
@@ -54,7 +94,7 @@ set +a
 : "${MODAL_TOKEN_SECRET:?$MODAL_KEY_FILE must set MODAL_TOKEN_SECRET}"
 
 #-----------------------
-# Data: download and extract once, then a subset of the first NUM_PROMPTS tasks
+# Data: download and extract once, then this run's tasks (TASKS, or the first NUM_PROMPTS)
 #-----------------------
 if [[ -d "$TASKS_DIR" ]] && [[ -n "$(ls -A "$TASKS_DIR" 2>/dev/null)" ]]; then
   echo "==> tasks already at $TASKS_DIR"
@@ -64,14 +104,19 @@ else
   uv run --isolated --extra harbor python examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset "$DATASET" --output_dir "$TASKS_DIR"
 fi
-if [[ "$(find "$SUBSET_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)" -ne "$NUM_PROMPTS" ]]; then
-  rm -rf "$SUBSET_DIR"
-  mkdir -p "$SUBSET_DIR"
+mkdir -p "$SUBSET_DIR"
+if [[ -n "$TASKS" ]]; then
+  IFS=, read -r -a tasks <<< "$TASKS"
+  tasks=("${tasks[@]/#/$TASKS_DIR/}")
+else
   mapfile -t tasks < <(find "$TASKS_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
-  for task in "${tasks[@]:0:$NUM_PROMPTS}"; do
-    ln -s "$task" "$SUBSET_DIR/$(basename "$task")"
-  done
+  tasks=("${tasks[@]:0:$NUM_PROMPTS}")
 fi
+for task in "${tasks[@]}"; do
+  [[ -d "$task" ]] || { echo "no task at $task" >&2; exit 1; }
+  ln -s "$task" "$SUBSET_DIR/$(basename "$task")"
+done
+NUM_PROMPTS="${#tasks[@]}"
 echo "==> $NUM_PROMPTS tasks in $SUBSET_DIR"
 
 #-----------------------
@@ -94,18 +139,17 @@ export RAY_task_events_report_interval_ms=0
 unset RAY_enable_core_worker_ray_event_to_aggregator
 unset RAY_DASHBOARD_AGGREGATOR_AGENT_EVENTS_EXPORT_ADDR RAY_DASHBOARD_AGGREGATOR_AGENT_PUBLISHER_MAX_RETRIES
 
-mkdir -p "$RUN_DIR"
 echo "==> experiment $EXPERIMENT in $RUN_DIR"
 
 #-----------------------
 # Run
 #-----------------------
-uv run --isolated --extra fsdp --extra harbor --extra skycap \
-  -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \
+uv run --isolated --extra fsdp "${EXTRAS[@]}" -m "$ENTRYPOINT" \
+  "${ARM_ARGS[@]}" \
   data.train_data="['$SUBSET_DIR']" \
   trainer.policy.model.path="$MODEL" \
   generator.inference_engine.served_model_name="$SERVED_MODEL_NAME" \
-  trainer.project_name=harbor-skycap \
+  trainer.project_name=harbor-compare \
   trainer.run_name="$EXPERIMENT" \
   trainer.logger=console \
   trainer.export_path="$RUN_DIR/exports" \
@@ -114,14 +158,14 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   trainer.ckpt_interval=-1 \
   trainer.hf_save_interval=-1 \
   trainer.resume_mode=none \
-  skycap.record_dir="$RUN_DIR/skycap" \
   harbor_trial_config.trials_dir="$RUN_DIR/trials" \
   harbor_trial_config.environment.type=modal \
   harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT_SEC" \
   harbor_trial_config.agent.kwargs.max_turns="$MAX_TURNS" \
+  harbor_trial_config.agent.kwargs.temperature="$TEMPERATURE" \
   harbor_trial_config.agent.kwargs.model_info.max_input_tokens="$MAX_MODEL_LEN" \
   harbor_trial_config.agent.kwargs.model_info.max_output_tokens="$MAX_GENERATE_LENGTH" \
-  trainer.epochs=1 \
+  trainer.epochs="$EPOCHS" \
   trainer.train_batch_size="$NUM_PROMPTS" \
   trainer.policy_mini_batch_size="$NUM_PROMPTS" \
   trainer.micro_forward_batch_size_per_gpu=1 \
@@ -134,7 +178,8 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   trainer.algorithm.loss_reduction=token_mean \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.max_seq_len="$MAX_MODEL_LEN" \
-  trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.algorithm.temperature=1.0 \
+  trainer.policy.optimizer_config.lr="$LR" \
   trainer.strategy=fsdp \
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_nodes=1 \
@@ -148,15 +193,16 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   generator.inference_engine.gpu_memory_utilization=0.6 \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.engine_init_kwargs.max_model_len="$MAX_MODEL_LEN" \
-  generator.sampling_params.temperature=1.0 \
+  generator.sampling_params.temperature="$TEMPERATURE" \
   generator.sampling_params.max_generate_length="$MAX_GENERATE_LENGTH" \
   generator.step_wise_trajectories=true \
-  generator.merge_stepwise_output=false \
   generator.batched=false \
   "$@" 2>&1 | tee "$RUN_DIR/run.log"
 
 echo
 echo "==> done: $EXPERIMENT"
-echo "    skycap records: $RUN_DIR/skycap ($(ls "$RUN_DIR/skycap" 2>/dev/null | grep -c '\.json\.zst$' || true) trajectories)"
+if [[ "$GENERATOR" == skycap ]]; then
+  echo "    skycap records: $RUN_DIR/skycap"
+fi
 echo "    Harbor trials:  $RUN_DIR/trials"
 echo "    log:            $RUN_DIR/run.log"
