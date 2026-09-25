@@ -174,6 +174,7 @@ class HarborSkycapGenerator(GeneratorInterface):
     ) -> TrialOutcome:
         """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces."""
         meta = {
+            "task": str(prompt),
             "instance_id": str(trajectory_id.instance_id),
             "repetition_id": trajectory_id.repetition_id,
             "step": step,
