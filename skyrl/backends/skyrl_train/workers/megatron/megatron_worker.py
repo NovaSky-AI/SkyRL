@@ -462,6 +462,7 @@ class MegatronWorker:
         ddp_config: Optional[Union[MegatronDDPConfig, Dict[str, Any]]] = None,
         lora_config: Optional[Dict[str, Any]] = None,
         lora_type: Optional[str] = "lora",
+        looped_lora_config: Optional[Dict[str, Any]] = None,
         bf16: bool = True,
     ) -> List[nn.Module]:
         """
@@ -496,6 +497,24 @@ class MegatronWorker:
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
+
+        if looped_lora_config is not None and looped_lora_config["sections"]:
+            if lora_config is None:
+                raise ValueError("Looped LoRA training requires Megatron LoRA")
+
+            def looped_lora_pre_wrap_hook(model):
+                from skyrl.backends.skyrl_train.patches.megatron.looped_lora import (
+                    install_looped_lora,
+                )
+
+                install_looped_lora(
+                    model,
+                    looped_lora_config["sections"],
+                    looped_lora_config["mode"],
+                )
+                return model
+
+            self.provider.register_pre_wrap_hook(looped_lora_pre_wrap_hook)
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
@@ -825,6 +844,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ddp_config=self.cfg.policy.megatron_config.ddp_config if wrap_with_ddp else None,
             lora_config=self.cfg.policy.model.lora if self._is_lora else None,
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
+            looped_lora_config=get_config_as_dict(self.cfg.policy.model.looped_lora),
             bf16=self.cfg.bf16,
         )
 

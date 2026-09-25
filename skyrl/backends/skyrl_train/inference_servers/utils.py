@@ -141,7 +141,12 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    try:
+        from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm.entrypoints.launchers":
+            raise
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -253,6 +258,33 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    looped_lora_config = get_config_as_dict(cfg.trainer.policy.model.looped_lora)
+    looped_lora_sections = looped_lora_config["sections"]
+    if looped_lora_sections:
+        from skyrl.train.looped_lora import parse_looped_lora_sections
+
+        parse_looped_lora_sections(looped_lora_sections)
+        if not _uses_lora_weight_sync(cfg):
+            raise ValueError("Looped LoRA requires unmerged LoRA weight sync for vLLM")
+        tensor_parallel_size = engine_kwargs.get("tensor_parallel_size", ie_cfg.tensor_parallel_size)
+        if tensor_parallel_size != 1:
+            raise ValueError("Looped LoRA currently requires vLLM tensor_parallel_size=1")
+
+        hf_overrides = dict(engine_kwargs.get("hf_overrides", {}))
+        architecture = ["SkyRLLoopedQwen3ForCausalLM"]
+        configured_architecture = hf_overrides.get("architectures")
+        if configured_architecture is not None and configured_architecture != architecture:
+            raise ValueError("Looped LoRA cannot be combined with a different hf_overrides.architectures value")
+        hf_overrides["architectures"] = architecture
+        hf_overrides["looped_lora_sections"] = looped_lora_sections
+        hf_overrides["looped_lora_mode"] = looped_lora_config["mode"]
+        engine_kwargs["hf_overrides"] = hf_overrides
+        logger.info(
+            "vLLM looped LoRA enabled: mode=%s sections=%s",
+            looped_lora_config["mode"],
+            looped_lora_sections,
+        )
+
     _apply_serialized_fp8_weight_sync_defaults(
         ie_cfg,
         engine_kwargs,

@@ -250,6 +250,9 @@ version = {attr = "skyrl.__version__"}
 [project.scripts]
 # The following is for supporting the skyrl-train dependency
 
+[project.entry-points."vllm.general_plugins"]
+skyrl_looped_qwen3 = "skyrl.backends.skyrl_train.models.looped_qwen3:register"
+
 [tool.uv]
 # Resolve only the Linux architectures covered by the CUDA wheels, plus the
 # supported macOS development target. CUDA-only extras cannot resolve on other

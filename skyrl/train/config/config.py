@@ -134,6 +134,22 @@ class SkyRLLoraConfig(BaseConfig):
 
 
 @dataclass
+class LoopedLoraConfig(BaseConfig):
+    """Fast recurrent LoRA sections for supported inference and training models."""
+
+    sections: List[Dict[str, int]] = field(default_factory=list)
+    """Physical ``[start_layer, end_layer)`` ranges and their total ``repeat_count``."""
+
+    mode: Literal["lora_only", "full_block"] = "lora_only"
+    """Extra-pass compute path. ``full_block`` is a benchmark reference mode."""
+
+    def __post_init__(self) -> None:
+        from skyrl.train.looped_lora import parse_looped_lora_sections
+
+        parse_looped_lora_sections(self.sections)
+
+
+@dataclass
 class FakeInt4QatConfig(BaseConfig):
     """Fake-INT4 quantization-aware training for MoE experts (Megatron only).
 
@@ -172,6 +188,7 @@ class ModelConfig(BaseConfig):
     path: Optional[str] = None
     """HuggingFace model path (or local directory) for this model."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
+    looped_lora: LoopedLoraConfig = field(default_factory=LoopedLoraConfig)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
     def __post_init__(self) -> None:
