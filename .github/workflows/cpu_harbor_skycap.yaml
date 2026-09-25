@@ -1,0 +1,48 @@
+name: harbor-skycap
+
+# The Harbor x skycap integration: a real skycap server, a mock SkyRL router and a fake Harbor trial.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'skyrl/**'
+      - 'skycap/**'
+      - 'examples/train_integrations/harbor/**'
+      - 'examples/train_integrations/harbor_skycap/**'
+      - 'tests/integrations/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/cpu_harbor_skycap.yaml'
+  pull_request:
+    paths:
+      - 'skyrl/**'
+      - 'skycap/**'
+      - 'examples/train_integrations/harbor/**'
+      - 'examples/train_integrations/harbor_skycap/**'
+      - 'tests/integrations/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/cpu_harbor_skycap.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # CI runs only in the upstream repo, as for the rest of the repository.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+      - name: Test
+        run: uv run --isolated --extra skyrl-train --extra harbor-skycap --extra dev pytest tests/integrations/harbor_skycap
