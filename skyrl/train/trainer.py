@@ -2,9 +2,10 @@ import math
 import os
 import shutil
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import ray
@@ -652,13 +653,24 @@ class RayPPOTrainer:
         return entries[:kept_prompts]
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker):
-        """
-        Initialize the actors for training, and handle colocation logic
+        """Spawn the training actors and load their models (``create_actor_groups`` + ``init_models``)."""
+        self.create_actor_groups(PolicyWorker, CriticWorker, RefWorker)
+        self.init_models()
+
+    def create_actor_groups(self, PolicyWorker, CriticWorker, RefWorker):
+        """Spawn the policy/ref/critic Ray actor groups without loading any model.
+
+        Actor creation is where each worker process starts, re-execs through the uv
+        runtime env, imports the backend (tens of seconds for Megatron + TransformerEngine)
+        and joins its process group; it takes no GPU memory beyond a CUDA context. The
+        groups are created concurrently, and the entrypoint runs this while the inference
+        engines are still starting. ``init_models`` then loads the models.
         """
         cfg = self.cfg
         pg = None
 
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        factories: Dict[str, Callable[[], PPORayActorGroup]] = {}
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -676,7 +688,7 @@ class RayPPOTrainer:
             ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
             pg = self.colocate_pg
 
-            policy_model = PPORayActorGroup(
+            factories["policy"] = lambda: PPORayActorGroup(
                 cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
@@ -691,7 +703,7 @@ class RayPPOTrainer:
                 assert (
                     num_policy_gpus == num_ref_gpus
                 ), "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
-                ref_model = PPORayActorGroup(
+                factories["ref"] = lambda: PPORayActorGroup(
                     cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
@@ -701,14 +713,11 @@ class RayPPOTrainer:
                     colocate_all=True,
                     sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
                 )
-            else:
-                ref_model = None
-
             if cfg.trainer.critic.model.path:
                 assert (
                     num_policy_gpus == num_critic_gpus
                 ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
-                critic_model = PPORayActorGroup(
+                factories["critic"] = lambda: PPORayActorGroup(
                     cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
@@ -718,9 +727,6 @@ class RayPPOTrainer:
                     colocate_all=True,
                     sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
                 )
-            else:
-                critic_model = None
-
         else:
             if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
                 assert (
@@ -738,8 +744,13 @@ class RayPPOTrainer:
                 raw_pg = placement_group(bundles, strategy="PACK")
                 get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
                 pg = ResolvedPlacementGroup(raw_pg)
+                # The shared policy/ref placement group `pg` is set only when colocate_policy_ref is enabled
+                logger.info(
+                    "Colocating policy and ref on the same GPUs across "
+                    f"{cfg.trainer.placement.policy_num_nodes} node(s)."
+                )
 
-            policy_model = PPORayActorGroup(
+            factories["policy"] = lambda: PPORayActorGroup(
                 cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
@@ -750,7 +761,7 @@ class RayPPOTrainer:
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             )
             if use_ref_model:
-                ref_model = PPORayActorGroup(
+                factories["ref"] = lambda: PPORayActorGroup(
                     cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
@@ -760,17 +771,8 @@ class RayPPOTrainer:
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
                 )
-                if pg is not None:
-                    # The shared policy/ref placement group `pg` is set only when colocate_policy_ref is enabled
-                    logger.info(
-                        "Colocating policy and ref on the same GPUs across "
-                        f"{cfg.trainer.placement.policy_num_nodes} node(s)."
-                    )
-            else:
-                ref_model = None
-
             if cfg.trainer.critic.model.path:
-                critic_model = PPORayActorGroup(
+                factories["critic"] = lambda: PPORayActorGroup(
                     cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
@@ -779,8 +781,25 @@ class RayPPOTrainer:
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
                 )
-            else:
-                critic_model = None
+
+        # Each group blocks on its own actors coming up (process start, imports, process
+        # group init); creating them concurrently overlaps those waits.
+        with ThreadPoolExecutor(max_workers=len(factories)) as pool:
+            futures = {name: pool.submit(factory) for name, factory in factories.items()}
+            groups = {name: future.result() for name, future in futures.items()}
+        self.policy_model: PPORayActorGroup = groups["policy"]
+        self.ref_model: Optional[PPORayActorGroup] = groups.get("ref")
+        self.critic_model: Optional[PPORayActorGroup] = groups.get("critic")
+        logger.info(f"spawned actor groups: {sorted(groups)}")
+
+    def init_models(self):
+        """Load the models on the spawned actor groups and build the worker dispatch.
+
+        Colocated groups load one at a time and offload to CPU so they fit alongside each
+        other; non-colocated groups load concurrently.
+        """
+        cfg = self.cfg
+        policy_model, ref_model, critic_model = self.policy_model, self.ref_model, self.critic_model
 
         policy_steps_per_train_batch = (
             cfg.trainer.train_batch_size // cfg.trainer.policy_mini_batch_size * cfg.trainer.update_epochs_per_batch
@@ -835,10 +854,6 @@ class RayPPOTrainer:
                     )
                 )
                 critic_model.offload_to_cpu()
-
-        self.policy_model: PPORayActorGroup = policy_model
-        self.critic_model: Optional[PPORayActorGroup] = critic_model
-        self.ref_model: Optional[PPORayActorGroup] = ref_model
 
         # Create unified dispatch that manages all actor groups
         self.dispatch = WorkerDispatch(
