@@ -53,6 +53,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_PADDING,
     SampleSupport,
 )
+from skyrl.backends.skyrl_train.weight_sync.lora_target import in_memory_lora_path
 from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
@@ -500,11 +501,18 @@ class VLLMServerActor(ServerActorProtocol):
             body = await request.json()
             lora_name = body.get("lora_name")
             lora_path = body.get("lora_path")
-            if not lora_name or not lora_path:
+            in_memory = bool(body.get("in_memory", False))
+            if not lora_name or (in_memory == bool(lora_path)):
                 raise HTTPException(
                     status_code=400,
-                    detail="Both 'lora_name' and 'lora_path' must be provided.",
+                    detail="'lora_name' plus exactly one of 'lora_path' or 'in_memory': true must be provided.",
                 )
+            if in_memory:
+                # Tensors were staged in every worker by the preceding weight
+                # update (armed with a LoRA receive target); the patched worker
+                # LoRA manager builds the adapter from them when it sees this
+                # marker path.
+                lora_path = in_memory_lora_path(lora_name)
 
             models = request.app.state.openai_serving_models
             async with models.lora_resolver_lock[lora_name]:

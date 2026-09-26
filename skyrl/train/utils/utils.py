@@ -656,6 +656,26 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 "Megatron LoRA with merge_lora=false syncs adapters only"
             )
 
+    lora_cfg = cfg.trainer.policy.model.lora
+    if lora_cfg.sync_mode not in {"disk", "memory"}:
+        raise ValueError(f"trainer.policy.model.lora.sync_mode must be 'disk' or 'memory', got {lora_cfg.sync_mode!r}")
+    if lora_cfg.sync_mode == "memory":
+        # The adapter rides the base-model transport (NCCL broadcast / CUDA IPC)
+        # into the receive engine, which stages it for vLLM's LoRA manager. The
+        # other backends have no such stream to carry it: delta publishes
+        # checkpoint diffs and sharded_rdt bakes a pull plan into model params.
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("lora.sync_mode='memory' is only implemented for trainer.strategy='megatron'")
+        if lora_cfg.rank <= 0 or cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+            raise ValueError(
+                "lora.sync_mode='memory' requires lora.rank > 0 and megatron_config.lora_config.merge_lora=false"
+            )
+        if ie_cfg.weight_sync_backend != "nccl":
+            raise ValueError(
+                "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
+                f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
+            )
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (

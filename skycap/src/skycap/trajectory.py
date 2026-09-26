@@ -10,10 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from skycap.graph import MessageGraph
+from skycap.retry import RetryCache
 
 Status = Literal["open", "finished", "failed", "abandoned"]
-
-DOCUMENT_VERSION = 1
 
 
 def new_trajectory_id() -> str:
@@ -34,6 +33,8 @@ class Failure:
 class Trajectory:
     id: str
     meta: dict[str, Any] = field(default_factory=dict)
+    #: How this server captured it: mode, and for tokens the tokenizer and logprobs mode.
+    capture: dict[str, Any] = field(default_factory=dict)
     status: Status = "open"
     annotations: dict[str, Any] = field(default_factory=dict)
     graph: MessageGraph = field(default_factory=MessageGraph)
@@ -43,6 +44,11 @@ class Trajectory:
     last_active: float = field(default_factory=time.monotonic)
     #: Handlers serving this trajectory right now; sealing cancels them.
     inflight: set[asyncio.Task[Any]] = field(default_factory=set)
+    #: Recent calls, so an SDK retry gets the original's reply. Never persisted.
+    replay: RetryCache = field(default_factory=RetryCache)
+    #: Set once the server has released and written it. Sealed is not ended:
+    #: a trajectory can fail mid-run and still be waiting for its ``finish``.
+    ended: bool = False
 
     @property
     def is_open(self) -> bool:
@@ -51,13 +57,20 @@ class Trajectory:
     def touch(self) -> None:
         self.last_active = time.monotonic()
 
-    def seal(self, status: Status, annotations: dict[str, Any] | None = None) -> None:
-        """Close the trajectory. In-flight calls are cancelled and never committed."""
+    def seal(self, status: Status, annotations: dict[str, Any] | None = None, *, cancel: bool = True) -> None:
+        """Close the trajectory. In-flight calls are cancelled and never committed.
+
+        A call that fails the trajectory from inside passes ``cancel=False``:
+        it still owes its own harness a reply, and calls queued behind it find
+        the trajectory closed.
+        """
         if not self.is_open:
             return
         self.status = status
         self.annotations.update(annotations or {})
         self.finished_at = time.time()
+        if not cancel:
+            return
         current = asyncio.current_task() if _loop_running() else None
         for task in list(self.inflight):
             if task is not current:
@@ -67,15 +80,17 @@ class Trajectory:
     def document(self) -> dict[str, Any]:
         """Everything but the token arrays, as JSON-ready data."""
         return {
-            "version": DOCUMENT_VERSION,
             "id": self.id,
             "status": self.status,
             "meta": self.meta,
+            "capture": self.capture,
+            "ended": self.ended,
             "annotations": self.annotations,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "tools": self.graph.tools,
             "failures": [dataclasses.asdict(f) for f in self.failures],
+            "retries": {"replayed": self.replay.replayed, "coalesced": self.replay.coalesced},
             "nodes": [
                 {
                     "id": n.id,

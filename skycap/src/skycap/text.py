@@ -9,11 +9,13 @@ reply always finds that reply recorded.
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import aiohttp
 import orjson
 from aiohttp import web
 
+from skycap import retry
 from skycap.graph import CallInfo
 from skycap.openai_chat import (
     ChatReply,
@@ -33,6 +35,9 @@ class TextBackend:
         self.api_key = api_key
         self._session: aiohttp.ClientSession | None = None
 
+    def describe(self) -> dict[str, Any]:
+        return {"mode": "text"}
+
     async def start(self) -> None:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=30),
@@ -45,6 +50,9 @@ class TextBackend:
 
     async def release(self, trajectory: Trajectory) -> None:
         """Nothing is held upstream per trajectory in text mode."""
+
+    async def finalize(self, trajectory: Trajectory) -> None:
+        """Text mode records no tokens, so there is nothing to add before writing."""
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -81,8 +89,7 @@ class TextBackend:
                 except ValueError as error:
                     _fail(trajectory, up.status, f"unreadable reply: {error}")
                     return response
-                commit(trajectory, chat, reply, started)
-                return response
+                return retry.committed(response) if commit(trajectory, chat, reply, started) else response
         except aiohttp.ClientError as error:
             _fail(trajectory, None, f"upstream: {error}")
             return web.Response(
@@ -133,10 +140,10 @@ class TextBackend:
         return response
 
 
-def commit(trajectory: Trajectory, chat: ChatRequest, reply: ChatReply, started: float) -> None:
-    """Record one successful call, unless the trajectory was sealed meanwhile."""
+def commit(trajectory: Trajectory, chat: ChatRequest, reply: ChatReply, started: float) -> bool:
+    """Record one successful call, unless the trajectory was sealed meanwhile. Returns whether it did."""
     if not trajectory.is_open:
-        return
+        return False
     call = CallInfo(
         t_start=started,
         t_end=time.time(),
@@ -146,6 +153,7 @@ def commit(trajectory: Trajectory, chat: ChatRequest, reply: ChatReply, started:
         finish_reason=reply.finish_reason,
     )
     trajectory.graph.commit_text(chat.messages, reply.message, tools=chat.tools, model=chat.model, call=call)
+    return True
 
 
 def _fail(trajectory: Trajectory, status: int | None, error: str) -> None:

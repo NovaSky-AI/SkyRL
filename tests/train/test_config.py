@@ -1304,6 +1304,59 @@ class TestDeltaWeightSyncConfig:
         assert "my_sync_dir" in cfg.local_checkpoint_dir
 
 
+def _memory_lora_megatron_cfg():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.sync_mode = "memory"
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    return cfg
+
+
+def test_lora_memory_sync_mode_accepts_megatron_adapter_only_nccl():
+    validate_inference_engine_cfg(_memory_lora_megatron_cfg())
+
+
+def test_lora_sync_mode_rejects_unknown_value():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.sync_mode = "tmpfs"
+    with pytest.raises(ValueError, match="sync_mode must be 'disk' or 'memory'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_megatron():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.strategy = "fsdp"
+    with pytest.raises(ValueError, match="only implemented for trainer.strategy='megatron'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_adapter_only_lora():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
+    with pytest.raises(ValueError, match="merge_lora=false"):
+        validate_inference_engine_cfg(cfg)
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.rank = 0
+    with pytest.raises(ValueError, match="lora.rank > 0"):
+        validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("backend", ["delta", "sharded_rdt"])
+def test_lora_memory_sync_mode_requires_nccl_transport(backend):
+    cfg = _memory_lora_megatron_cfg()
+    cfg.generator.inference_engine.weight_sync_backend = backend
+    with pytest.raises(ValueError, match="weight_sync_backend='nccl'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_disk_sync_mode_is_default_and_unconstrained():
+    cfg = _make_validated_test_config()
+    assert cfg.trainer.policy.model.lora.sync_mode == "disk"
+    validate_inference_engine_cfg(cfg)
+
+
 class TestMegatronRouterReplayValidation:
     @staticmethod
     def _cfg():
