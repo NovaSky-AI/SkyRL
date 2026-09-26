@@ -160,6 +160,31 @@ async def test_no_reset_when_prefix_caching_disabled(strategy, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("strategy", STRATEGIES)
+@pytest.mark.parametrize("handles_reset", [False, True])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+@pytest.mark.parametrize("clear_kv_cache", [False, True])
+async def test_async_running_request_reset(strategy, handles_reset, enable_prefix_caching, clear_kv_cache, monkeypatch):
+    _patch_collectives(monkeypatch)
+    engine = _DeltaLikeEngine(handles_prefix_cache_reset=handles_reset)
+    worker = _make_worker(get_worker_cls(strategy), engine)
+    worker.cfg.fully_async.enabled = True
+    worker.cfg.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
+    client = AsyncMock()
+
+    await worker.broadcast_to_inference_engines(client, _ie_cfg(enable_prefix_caching))
+
+    # The engine gets the same policy regardless of who owns the reset, and
+    # running requests require invalidation even without reusable prefix blocks.
+    assert engine.reset_prefix_cache_told is clear_kv_cache
+    assert engine.sends == 1
+    if clear_kv_cache and not handles_reset:
+        client.reset_prefix_cache.assert_awaited_once_with(reset_running_requests=True)
+    else:
+        client.reset_prefix_cache.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", STRATEGIES)
 async def test_expandable_segments_force_comes_from_the_engine(strategy, monkeypatch):
     """sharded_rdt asks for the toggle unconditionally; everything else leaves it
     to ``colocate_all``. Default False for an engine that declares nothing."""
