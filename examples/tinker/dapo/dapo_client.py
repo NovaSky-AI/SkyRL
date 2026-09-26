@@ -935,10 +935,7 @@ def run_training(args: argparse.Namespace) -> None:
                     "reward/mean_positive_reward": rollout_metrics["mean_positive_reward"],
                 }
                 log_payload.update({f"reward/{k}": v for k, v in overlong_metrics.items()})
-                # Server metrics that already carry a `policy/` prefix (the loss_metrics family) are kept as is.
-                log_payload.update(
-                    {(k if k.startswith("policy/") else f"policy/{k}"): v for k, v in policy_metrics.items()}
-                )
+                log_payload.update({f"policy/{k}": v for k, v in policy_metrics.items()})
 
                 logger.info("Train step %s: %s", global_step, log_payload)
                 append_metrics(args.output_dir, log_payload)
