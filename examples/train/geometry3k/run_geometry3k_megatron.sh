@@ -1,9 +1,13 @@
 set -x
 
-# Multi-turn GRPO training for Geometry-3K (VLM).
+# Multi-turn GRPO training for Geometry-3K (VLM), Megatron backend.
+#
+# Megatron variant of run_geometry3k.sh; all non-backend settings are identical.
+# Defaults to TP=2, PP=1 (DP=4 on 8 GPUs). VLMs on Megatron do not support
+# microbatch padding removal (sample packing) or context parallelism.
 #
 # uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir $HOME/data/geometry_3k
-# bash examples/train/geometry3k/run_geometry3k.sh
+# bash examples/train/geometry3k/run_geometry3k_megatron.sh
 
 : "${DATA_DIR:="$HOME/data/geometry_3k"}"
 : "${NUM_GPUS:=8}"
@@ -13,17 +17,23 @@ if [ ! -f "$DATA_DIR/train.parquet" ]; then
   uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir "$DATA_DIR"
 fi
 : "${LOGGER:=console}"
-: "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm"}"
-: "${CKPT_PATH:="$HOME/ckpts/geometry3k_vlm_ckpt"}"
+: "${MEGATRON_TP:=2}"
+: "${MEGATRON_PP:=1}"
+: "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm_megatron"}"
+: "${CKPT_PATH:="$HOME/ckpts/geometry3k_vlm_megatron_ckpt"}"
 
-uv run --isolated --extra fsdp --with pylatexenc \
+uv run --isolated --extra megatron --with pylatexenc \
   python examples/train/geometry3k/geometry3k_entrypoint.py \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/test.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp \
+  trainer.strategy=megatron \
+  trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
+  trainer.ref.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.ref.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
@@ -55,7 +65,7 @@ uv run --isolated --extra fsdp --with pylatexenc \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="geometry3k" \
-  trainer.run_name="geometry3k_vlm" \
+  trainer.run_name="geometry3k_vlm_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}" \
   trainer.resume_mode=null \
   trainer.log_path="/tmp/skyrl-logs" \
   trainer.export_path="$EXPORT_PATH" \
