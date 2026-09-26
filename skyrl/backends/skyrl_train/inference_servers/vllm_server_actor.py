@@ -48,6 +48,10 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
+from skyrl.backends.skyrl_train.inference_servers.request_cancellation import (
+    RequestDisconnectedError,
+    run_until_disconnected,
+)
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
     SAMPLE_SUPPORT_PADDING,
@@ -583,9 +587,18 @@ class VLLMServerActor(ServerActorProtocol):
                 prompt = TokensPrompt(prompt_token_ids=token_ids)
             request_id = random_uuid()
 
-            final_res = None
-            async for res in engine.generate(prompt, sampling_params, request_id=request_id, lora_request=lora_request):
-                final_res = res
+            async def generate_output():
+                final_res = None
+                async for res in engine.generate(
+                    prompt, sampling_params, request_id=request_id, lora_request=lora_request
+                ):
+                    final_res = res
+                return final_res
+
+            try:
+                final_res = await run_until_disconnected(request, generate_output)
+            except RequestDisconnectedError as exc:
+                raise HTTPException(status_code=499, detail="Client disconnected") from exc
 
             if final_res is None:
                 raise HTTPException(status_code=500, detail="vLLM returned no output")
