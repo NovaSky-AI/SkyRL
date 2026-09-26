@@ -169,6 +169,15 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     return model_or_models
 
 
+def _require_num_moe_experts(key: str, num_moe_experts: Optional[int]) -> int:
+    if num_moe_experts is None:
+        raise ValueError(
+            f"Shared-outer expert LoRA tensor {key!r} must be expanded to every expert, "
+            "but num_moe_experts was not provided"
+        )
+    return num_moe_experts
+
+
 def _convert_moe_experts_lora_to_vllm(
     adapter_state: Dict[str, "torch.Tensor"],
     num_moe_experts: Optional[int] = None,
@@ -198,8 +207,8 @@ def _convert_moe_experts_lora_to_vllm(
         is_gate_up = ".mlp.experts.gate_up_proj." in key
         is_down = ".mlp.experts.down_proj." in key
         if (is_gate_up or is_down) and tensor.ndim == 3 and not uses_indexed_expert_keys:
-            if num_moe_experts is not None and tensor.shape[0] == 1 and num_moe_experts > 1:
-                tensor = tensor.expand(num_moe_experts, -1, -1)
+            if tensor.shape[0] == 1:
+                tensor = tensor.expand(_require_num_moe_experts(key, num_moe_experts), -1, -1)
             if key.endswith(".lora_A.weight"):
                 # (E, rank, in) -> (rank*E [expert-major], in)
                 tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
@@ -218,53 +227,16 @@ def _convert_moe_experts_lora_to_vllm(
             if uses_indexed_expert_keys
             else None
         )
-        if shared_match is not None and tensor.ndim == 3 and tensor.shape[0] == 1 and num_moe_experts is not None:
+        if shared_match is not None and tensor.ndim == 3 and tensor.shape[0] == 1:
             # Per-expert-HF model: replicate the shared side into the indexed
             # per-expert keys vLLM's PEFT loader parses.
             insert_pos = key.rindex(".mlp.experts.") + len(".mlp.experts.")
-            for expert_idx in range(num_moe_experts):
+            for expert_idx in range(_require_num_moe_experts(key, num_moe_experts)):
                 converted[f"{key[:insert_pos]}{expert_idx}.{key[insert_pos:]}"] = tensor[0].clone()
             continue
 
         converted[key] = tensor
     return converted
-
-
-def patch_packed_per_expert_sharded_state_dict():
-    """Fix Megatron-Bridge's ``PackedPerExpertLinear.sharded_state_dict``.
-
-    The pinned bridge rev builds the packed per-expert LoRA weight's sharded
-    tensor without the required ``pg_collection`` kwarg, so dist-checkpoint
-    saving with ``experts_shared_outer_loras=True`` raises ``TypeError``. This
-    supplies the same MPU-backed collection the other grouped-expert adapters
-    resolve via ``_get_pg_collection``. Remove once the upstream fix
-    (NVIDIA-NeMo/Megatron-Bridge#6184) is in the pinned rev.
-    """
-    try:
-        from megatron.bridge.peft import utils as bridge_peft_utils
-        from megatron.core.process_groups_config import ProcessGroupCollection
-    except ImportError:
-        return
-
-    cls = getattr(bridge_peft_utils, "PackedPerExpertLinear", None)
-    if cls is None or getattr(cls, "_skyrl_sharded_state_dict_patched", False):
-        return
-
-    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-        key = f"{prefix}weight"
-        pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=["ep", "expt_tp", "expt_dp"])
-        return {
-            key: bridge_peft_utils._make_grouped_expert_sharded_tensor(
-                self.weight.data,
-                key,
-                tp_axis=None,
-                sharded_offsets=sharded_offsets,
-                pg_collection=pg_collection,
-            )
-        }
-
-    cls.sharded_state_dict = sharded_state_dict
-    cls._skyrl_sharded_state_dict_patched = True
 
 
 def gdn_in_proj_lora_is_safe(bridge) -> bool:

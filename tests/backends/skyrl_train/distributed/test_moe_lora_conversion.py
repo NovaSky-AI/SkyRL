@@ -152,3 +152,23 @@ class TestPerExpertHFFormatSharedOuter:
         # Expert-agnostic shared keys are consumed by the replication.
         assert self._shared("gate_proj", "A") not in converted
         assert self._shared("down_proj", "B") not in converted
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@pytest.mark.parametrize(
+    "key",
+    [GATE_UP_A, "base_model.model.model.layers.0.mlp.experts.down_proj.lora_B.weight"],
+)
+def test_shared_side_without_num_experts_raises_packed(key):
+    with pytest.raises(ValueError, match="num_moe_experts"):
+        _convert_moe_experts_lora_to_vllm({key: torch.randn(1, RANK, HIDDEN)}, num_moe_experts=None)
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+def test_shared_side_without_num_experts_raises_indexed():
+    state = {
+        "base_model.model.model.layers.0.mlp.experts.gate_proj.lora_A.weight": torch.randn(1, RANK, HIDDEN),
+        "base_model.model.model.layers.0.mlp.experts.0.gate_proj.lora_B.weight": torch.randn(INTERMEDIATE, RANK),
+    }
+    with pytest.raises(ValueError, match="num_moe_experts"):
+        _convert_moe_experts_lora_to_vllm(state, num_moe_experts=None)
