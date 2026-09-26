@@ -10,8 +10,11 @@ identically -- the concurrency limit, the empty-response case, the length and fi
 invariants -- and a backend implements one method, ``_compute_logprobs``.
 Callers only ever use ``compute_logprobs``.
 
-Backends, both over ``aiohttp`` so the package adds no dependency:
+Backends:
 
+- ``SkyRLTeacherClient``: a vLLM deployment this job launched (``trainer.teacher.backend="skyrl"``),
+  driven through its ``RemoteInferenceClient`` exactly as the student's engines are; scoring goes
+  through the client's ``sample()`` with ``include_prompt_logprobs``.
 - ``FireworksTeacherClient``: the OpenAI-compatible ``/inference/v1/completions`` endpoint with an
   integer prompt, ``echo_last`` and ``logprobs`` (the request shape verified live on 2026-09-17 and
   2026-09-18; see ``research/readings/fireworks-opd-teacher.md`` in the workspace). Derived from the
@@ -20,8 +23,9 @@ Backends, both over ``aiohttp`` so the package adds no dependency:
   entrypoint), through the OpenAI-compatible ``/v1/completions`` with vLLM's ``prompt_logprobs``
   parameter.
 
-Neither is an ``InferenceEngineInterface`` implementation, deliberately: a frozen teacher never
-sleeps, wakes, syncs weights or pauses, and a class of eleven stubs would only hide that.
+The last two are over ``aiohttp`` so the package adds no dependency. None is an
+``InferenceEngineInterface`` implementation, deliberately: a frozen teacher never sleeps, wakes,
+syncs weights or pauses, and a class of eleven stubs would only hide that.
 """
 
 from __future__ import annotations
@@ -30,10 +34,15 @@ import abc
 import asyncio
 import math
 import random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from loguru import logger
+
+if TYPE_CHECKING:
+    from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+        RemoteInferenceClient,
+    )
 
 DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai"
 _HTTP_RETRY_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -339,3 +348,57 @@ class VLLMTeacherClient(_HttpTeacherClient):
             raise RuntimeError(f"vLLM returned {len(prompt_logprobs)} prompt logprobs for {expected} tokens")
         tail = list(prompt_logprobs)[-len(response_ids) :]
         return [_vllm_prompt_logprob(entry, token_id) for entry, token_id in zip(tail, response_ids)]
+
+
+class SkyRLTeacherClient(TeacherLogprobClient):
+    """Teacher on a vLLM deployment this job launched, driven through its ``RemoteInferenceClient``.
+
+    Scores through the client's ``sample()`` (SkyRL's Tinker-shaped route, ``/inference/v1/generate``)
+    with ``include_prompt_logprobs=True``, which the client maps to vLLM's ``prompt_logprobs=0``: each
+    position carries the prompt token's own logprob and nothing else. ``max_tokens=1`` because vLLM
+    refuses 0; the generated token is discarded. The client answers with one entry per sent token,
+    looked up by the token id that was sent, so a tokenizer mismatch surfaces as a missing entry
+    (``None``) rather than a plausible-looking number. Routing through the deployment's router, the
+    per-engine concurrency cap and the retry policy are the client's, the same ones the student's
+    rollouts get; ``model`` is the client's ``model_name``, the name the servers were launched under.
+    """
+
+    def __init__(self, client: "RemoteInferenceClient", *, max_concurrency: int = 32):
+        super().__init__(max_concurrency=max_concurrency)
+        self._client = client
+
+    @property
+    def client(self) -> "RemoteInferenceClient":
+        return self._client
+
+    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[float]:
+        token_ids = prompt_ids + response_ids
+        response = await self._client.sample(
+            {
+                "json": {
+                    "prompt": {"chunks": [{"type": "encoded_text", "tokens": token_ids}]},
+                    "num_samples": 1,
+                    "sampling_params": {"max_tokens": 1, "temperature": 1.0},
+                    "include_prompt_logprobs": True,
+                }
+            }
+        )
+        prompt_logprobs = response.get("prompt_logprobs")
+        if prompt_logprobs is None:
+            raise RuntimeError("the teacher deployment returned no prompt_logprobs")
+        if len(prompt_logprobs) != len(token_ids):
+            raise RuntimeError(
+                f"the teacher deployment returned {len(prompt_logprobs)} prompt logprobs for {len(token_ids)} tokens"
+            )
+        tail = list(prompt_logprobs)[-len(response_ids) :]
+        missing = [i for i, value in enumerate(tail) if value is None]
+        if missing:
+            shown = missing[:5]
+            raise RuntimeError(
+                f"the teacher deployment returned no logprob for response position(s) {shown} "
+                f"(token ids {[response_ids[i] for i in shown]}); the teacher's vocabulary may differ from the student's"
+            )
+        return [float(value) for value in tail]
+
+    async def aclose(self) -> None:
+        await self._client.teardown()

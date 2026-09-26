@@ -22,19 +22,22 @@ export FIREWORKS_API_KEY=<your key>
 uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 bash examples/train/on_policy_distillation/run_opd_gsm8k_gptoss_fireworks.sh
 
-# The math recipe: Qwen3-4B-Base student, DAPO-17k prompts, AIME24 eval, a Qwen3-family teacher on a
-# dedicated Fireworks deployment.
+# The math recipe: Qwen3-4B-Base student, DAPO-17k prompts, AIME24 eval. By default the job launches the
+# teacher (Qwen3-32B, TP=4) on 4 GPUs next to the student's 4; TEACHER_BACKEND=fireworks uses a dedicated
+# Fireworks deployment instead.
 bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-TEACHER_MODEL=accounts/<account>/deployments/<id> \
-  bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh
+bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh
 ```
 
-The only OPD-specific flags are the teacher and, optionally, the mixing knobs:
+The only OPD-specific flags are the teacher and, optionally, the mixing knobs. By default the job launches
+the teacher's vLLM deployment on its own GPUs:
 
 ```bash
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   trainer.policy.model.path=Qwen/Qwen3-4B-Base \
-  trainer.teacher.model=accounts/<account>/deployments/<id> \
+  trainer.teacher.model=Qwen/Qwen3-32B \
+  trainer.teacher.inference_engine.num_engines=1 \
+  trainer.teacher.inference_engine.tensor_parallel_size=4 \
   trainer.algorithm.opd.kl_coef=1.0 \
   trainer.algorithm.opd.use_task_reward=false \
   ...
@@ -46,19 +49,30 @@ The student and the teacher must share a tokenizer: the teacher scores the stude
 
 ## Teacher backends
 
-- `trainer.teacher.backend=fireworks` (default): a Fireworks model id or a dedicated deployment id
+Where the teacher lives is one choice with three answers; each backend reads only its own fields, and
+setting another backend's fields is a config error.
+
+- `trainer.teacher.backend=skyrl` (default): the job launches a vLLM deployment of `trainer.teacher.model`
+  (an HF id or local path) from `trainer.teacher.inference_engine`, the same block as
+  `generator.inference_engine`, on its own GPUs, and drives it through a `RemoteInferenceClient` exactly as
+  the student's engines are. The teacher's `num_engines · tensor_parallel_size · pipeline_parallel_size ·
+  data_parallel_size` GPUs come on top of the student's; a budget the cluster cannot satisfy surfaces as the
+  teacher placement group's timeout. Defaults that differ from the student's block: prefix caching off
+  (scoring requests never read it), `gpu_memory_utilization` 0.9, Ray Prometheus stats off; `max_model_len`
+  defaults to the longest input + longest response + 1. Never weight-synced or slept.
+- `trainer.teacher.backend=vllm`: vLLM servers you started (a stock `vllm serve` or SkyRL's `serve`
+  entrypoint), given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible
+  `/v1/completions` with vLLM's `prompt_logprobs` parameter. `trainer.teacher.model` is the served model name.
+- `trainer.teacher.backend=fireworks`: a Fireworks model id or a dedicated deployment id
   (`accounts/<account>/deployments/<id>`), scored through the completions API with an integer prompt and
   `echo_last`. Serverless is fine for checking the plumbing; use a dedicated deployment for training,
   because serverless replicas disagree on logprobs by more than the OPD signal itself and the Qwen3 (2025)
   family is not served serverless.
-- `trainer.teacher.backend=vllm`: vLLM servers you started (a stock `vllm serve` or SkyRL's `serve`
-  entrypoint), given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible
-  `/v1/completions` with vLLM's `prompt_logprobs` parameter. `trainer.teacher.model` is the served model name.
 
-There are no preflight checks yet: nothing verifies the teacher's tokenizer, context length, or
-reproducibility before training (a TODO in `skyrl/train/entrypoints/main_opd.py` records what other
-frameworks check). Pick a teacher from the student's model family, serve it with enough context, and
-prefer a dedicated deployment over serverless.
+There are no preflight checks yet: nothing verifies the teacher's tokenizer, context length (a launched
+teacher gets its context by construction), or reproducibility before training (a TODO in
+`skyrl/train/entrypoints/main_opd.py` records what other frameworks check). Pick a teacher from the
+student's model family, serve it with enough context, and prefer a dedicated deployment over serverless.
 
 ## Pure and mixed distillation
 

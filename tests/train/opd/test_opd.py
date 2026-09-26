@@ -20,13 +20,21 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.opd.config import (
     OPDExpConfig,
+    TeacherEngineConfig,
+    teacher_max_model_len,
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
     FireworksTeacherClient,
+    SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
     _extract_echoed_logprobs,
+)
+from skyrl.train.opd.teacher_launch import (
+    served_teacher_name,
+    teacher_cli_args,
+    teacher_start_port,
 )
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
@@ -300,21 +308,56 @@ async def test_vllm_wrong_token_id_and_short_response_raise():
 # ---------------------------------------------------------------------------
 
 
-def test_opd_config_defaults_and_overrides(monkeypatch):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "k")
+def test_opd_config_defaults_and_overrides():
     cfg = OPDExpConfig.from_cli_overrides(
         [
-            "trainer.teacher.model=accounts/fireworks/models/gpt-oss-120b",
+            "trainer.teacher.model=Qwen/Qwen3-32B",
             "trainer.algorithm.opd.kl_coef=0.5",
             "trainer.algorithm.opd.use_task_reward=true",
         ]
     )
     assert cfg.trainer.algorithm.use_kl_loss is False
     assert cfg.trainer.algorithm.policy_loss_type == "importance_sampling"
-    assert cfg.trainer.teacher.backend == "fireworks"
+    assert cfg.trainer.teacher.backend == "skyrl"  # the job launches the teacher by default
     assert cfg.trainer.algorithm.opd.kl_coef == 0.5
     assert cfg.trainer.algorithm.opd.use_task_reward is True
     validate_opd_cfg(cfg)  # no error
+
+
+def test_teacher_engine_block_keeps_its_defaults_under_overrides():
+    # from_cli_overrides rebuilds a nested block from its field type whenever any key inside it is
+    # overridden, so the teacher's changed defaults have to live on TeacherEngineConfig itself.
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.inference_engine.num_engines=2"])
+    ie_cfg = cfg.trainer.teacher.inference_engine
+    assert isinstance(ie_cfg, TeacherEngineConfig)
+    assert ie_cfg.num_engines == 2
+    assert ie_cfg.enable_prefix_caching is False
+    assert ie_cfg.gpu_memory_utilization == 0.9
+    assert ie_cfg.enable_ray_prometheus_stats is False
+    assert ie_cfg != TeacherEngineConfig()
+    assert OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"]).trainer.teacher.inference_engine == (
+        TeacherEngineConfig()
+    )
+    validate_opd_cfg(cfg)
+
+
+def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields(monkeypatch):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "k")
+    validate_opd_cfg(
+        OPDExpConfig.from_cli_overrides(
+            [
+                "trainer.teacher.model=Qwen/Qwen3-32B",
+                "trainer.teacher.inference_engine.tensor_parallel_size=4",
+                "trainer.teacher.inference_engine.engine_init_kwargs.max_model_len=4096",
+            ]
+        )
+    )
+    validate_opd_cfg(
+        OPDExpConfig.from_cli_overrides(
+            ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_urls=['http://a:8000']"]
+        )
+    )
+    validate_opd_cfg(OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.backend=fireworks"]))
 
 
 @pytest.mark.parametrize(
@@ -323,6 +366,68 @@ def test_opd_config_defaults_and_overrides(monkeypatch):
         ([], "trainer.teacher.model must be set"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=bogus"], "backend must be one of"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=vllm"], "server_urls"),
+        # The three backends are exclusive: another backend's fields are a config error, not a no-op.
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.server_urls=['http://a:8000']"],
+            "server_urls is for backend='vllm'",
+        ),
+        (["trainer.teacher.model=m", "trainer.teacher.base_url=http://x"], "base_url is for backend='fireworks'"),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.inference_engine.run_engines_locally=false"],
+            "run_engines_locally must be true",
+        ),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.inference_engine.external_server_urls=['http://a:8000']"],
+            "external_server_urls does not apply",
+        ),
+        (["trainer.teacher.model=m", "trainer.teacher.inference_engine.enable_pd=true"], "enable_pd does not apply"),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.inference_engine.enable_return_routed_experts=true"],
+            "enable_return_routed_experts does not apply",
+        ),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.inference_engine.speculative_config={method: mtp}"],
+            "speculative_config does not apply",
+        ),
+        (["trainer.teacher.model=m", "trainer.teacher.inference_engine.num_engines=0"], "at least one GPU"),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.inference_engine.engine_init_kwargs.max_model_len=100"],
+            "max_model_len=100 is shorter",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.teacher.backend=vllm",
+                "trainer.teacher.server_urls=['http://a:8000']",
+                "trainer.teacher.inference_engine.num_engines=2",
+            ],
+            "inference_engine is for backend='skyrl'",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.teacher.backend=vllm",
+                "trainer.teacher.server_urls=['http://a:8000']",
+                "trainer.teacher.base_url=http://x",
+            ],
+            "base_url is for backend='fireworks'",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.teacher.backend=fireworks",
+                "trainer.teacher.server_urls=['http://a']",
+            ],
+            "server_urls is for backend='vllm'",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.teacher.backend=fireworks",
+                "trainer.teacher.inference_engine.gpu_memory_utilization=0.5",
+            ],
+            "inference_engine is for backend='skyrl'",
+        ),
         (["trainer.teacher.model=m", "trainer.algorithm.zero_variance_filter=true"], "zero_variance_filter"),
         (["trainer.teacher.model=m", "trainer.algorithm.advantage_batch_normalize=true"], "advantage_batch_normalize"),
         (["trainer.teacher.model=m", "trainer.algorithm.policy_loss_type=rollout_is"], "old-logprob forward"),
@@ -363,9 +468,207 @@ def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo(monke
 
 def test_validate_opd_cfg_requires_api_key(monkeypatch):
     monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
-    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"])
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.backend=fireworks"])
     with pytest.raises(ValueError, match="FIREWORKS_API_KEY"):
         validate_opd_cfg(cfg)
+
+
+def test_teacher_max_model_len_single_and_multi_turn():
+    cfg = OPDExpConfig.from_cli_overrides(
+        ["trainer.max_prompt_length=2048", "generator.sampling_params.max_generate_length=8192"]
+    )
+    assert teacher_max_model_len(cfg) == 2048 + 8192 + 1
+    cfg.generator.max_input_length = 30000  # multi-turn: the engine input per turn, which includes earlier turns
+    assert teacher_max_model_len(cfg) == 30000 + 8192 + 1
+
+
+# ---------------------------------------------------------------------------
+# Launching the teacher (backend="skyrl")
+# ---------------------------------------------------------------------------
+
+
+def test_served_teacher_name_prefers_the_served_alias():
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=Qwen/Qwen3-32B"])
+    assert served_teacher_name(cfg.trainer.teacher) == "Qwen/Qwen3-32B"
+    cfg.trainer.teacher.inference_engine.served_model_name = "teacher"
+    assert served_teacher_name(cfg.trainer.teacher) == "teacher"
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        # the student's launched servers take num_engines * dp windows of 100 ports from 8000
+        (["generator.inference_engine.num_engines=4", "generator.inference_engine.data_parallel_size=2"], 8800),
+        (["generator.inference_engine.num_engines=1"], 8100),
+        # a PD student indexes the same number of windows
+        (
+            [
+                "generator.inference_engine.num_engines=3",
+                "generator.inference_engine.enable_pd=true",
+                "generator.inference_engine.num_prefill=1",
+            ],
+            8300,
+        ),
+        # an external student launches nothing
+        (
+            [
+                "generator.inference_engine.num_engines=4",
+                "generator.inference_engine.run_engines_locally=false",
+                "generator.inference_engine.external_server_urls=['http://s:8000']",
+            ],
+            8000,
+        ),
+        (
+            ["generator.inference_engine.num_engines=4", "generator.inference_engine.external_proxy_url=http://p:9000"],
+            8000,
+        ),
+    ],
+)
+def test_teacher_start_port_is_past_the_students_windows(overrides, expected):
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"] + overrides)
+    assert teacher_start_port(cfg) == expected
+
+
+def test_teacher_cli_args_uses_the_frozen_role_and_defaults_max_model_len(monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    calls = []
+
+    def fake_frozen(model_path, ie_cfg, seed):
+        calls.append((model_path, ie_cfg, seed))
+        return "cli-args"
+
+    monkeypatch.setattr(inference_utils, "build_frozen_vllm_cli_args", fake_frozen)
+    cfg = OPDExpConfig.from_cli_overrides(
+        ["trainer.teacher.model=Qwen/Qwen3-32B", "trainer.seed=7", "trainer.teacher.inference_engine.num_engines=2"]
+    )
+    assert teacher_cli_args(cfg) == "cli-args"
+    ((model_path, ie_cfg, seed),) = calls
+    assert model_path == "Qwen/Qwen3-32B"
+    assert seed == 7
+    assert ie_cfg.num_engines == 2
+    assert ie_cfg.engine_init_kwargs["max_model_len"] == teacher_max_model_len(cfg)
+    # the config itself is not mutated
+    assert "max_model_len" not in cfg.trainer.teacher.inference_engine.engine_init_kwargs
+
+    cfg.trainer.teacher.inference_engine.engine_init_kwargs["max_model_len"] = 65536
+    teacher_cli_args(cfg)
+    assert calls[-1][1].engine_init_kwargs["max_model_len"] == 65536  # a user value is kept
+
+
+class FakeRemoteInferenceClient:
+    """The two RemoteInferenceClient methods SkyRLTeacherClient uses."""
+
+    def __init__(self, response):
+        self.response = response
+        self.payloads = []
+        self.torn_down = False
+
+    async def sample(self, request_payload):
+        self.payloads.append(request_payload)
+        return self.response
+
+    async def teardown(self):
+        self.torn_down = True
+
+
+@pytest.mark.asyncio
+async def test_skyrl_teacher_client_scores_through_sample():
+    client = FakeRemoteInferenceClient({"type": "sample", "sequences": [], "prompt_logprobs": [None, -0.5, -1.0, -2.0]})
+    teacher = SkyRLTeacherClient(client, max_concurrency=4)
+    assert teacher.client is client
+
+    assert await teacher.compute_logprobs([1, 2], [3, 4]) == [-1.0, -2.0]
+
+    (payload,) = client.payloads
+    body = payload["json"]
+    assert body["prompt"] == {"chunks": [{"type": "encoded_text", "tokens": [1, 2, 3, 4]}]}
+    assert body["num_samples"] == 1
+    assert body["include_prompt_logprobs"] is True
+    assert body["sampling_params"] == {"max_tokens": 1, "temperature": 1.0}
+    assert "model" not in body  # resolved by the client to the name the servers were launched under
+
+    await teacher.aclose()
+    assert client.torn_down
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response, message",
+    [
+        ({"prompt_logprobs": None}, "no prompt_logprobs"),
+        ({"prompt_logprobs": [None, -0.5, -1.0]}, "3 prompt logprobs for 4 tokens"),
+        ({"prompt_logprobs": [None, -0.5, None, -2.0]}, "vocabulary may differ"),
+    ],
+)
+async def test_skyrl_teacher_client_rejects_malformed_answers(response, message):
+    teacher = SkyRLTeacherClient(FakeRemoteInferenceClient(response))
+    with pytest.raises(RuntimeError, match=message):
+        await teacher.compute_logprobs([1, 2], [3, 4])
+
+
+def test_opd_exp_launches_the_teacher_for_the_skyrl_backend(monkeypatch):
+    import skyrl.train.entrypoints.main_opd as main_opd
+
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=Qwen/Qwen3-32B", "trainer.teacher.max_concurrency=8"])
+    fake_client = FakeRemoteInferenceClient({})
+    launched = []
+
+    def fake_launch(launch_cfg):
+        launched.append(launch_cfg)
+        return fake_client, "server-setup"
+
+    monkeypatch.setattr(main_opd, "launch_teacher", fake_launch)
+    exp = main_opd.OPDExp.__new__(main_opd.OPDExp)  # skip BasePPOExp.__init__ (tokenizer, datasets)
+    exp.cfg = cfg
+    exp._teacher_setup = None
+
+    teacher = exp.get_teacher_client()
+    assert isinstance(teacher, SkyRLTeacherClient)
+    assert teacher.client is fake_client
+    assert launched == [cfg]
+    assert exp._teacher_setup == "server-setup"
+
+
+def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
+    import skyrl.train.entrypoints.main_opd as main_opd
+
+    monkeypatch.setattr(main_opd, "launch_teacher", lambda cfg: pytest.fail("must not launch"))
+    exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
+    exp._teacher_setup = None
+    exp.cfg = OPDExpConfig.from_cli_overrides(
+        ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_urls=['http://a:8000']"]
+    )
+    assert isinstance(exp.get_teacher_client(), VLLMTeacherClient)
+    assert exp._teacher_setup is None
+
+
+@pytest.mark.parametrize("outcome", ["returns", "raises"])
+def test_opd_exp_run_shuts_the_teacher_down(monkeypatch, outcome):
+    import skyrl.train.entrypoints.main_opd as main_opd
+
+    shut_down = []
+    monkeypatch.setattr(main_opd, "shutdown_teacher", shut_down.append)
+
+    def base_run(self):
+        if outcome == "raises":
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(main_opd.BasePPOExp, "run", base_run)
+    exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
+    exp._teacher_setup = "server-setup"
+    if outcome == "raises":
+        with pytest.raises(RuntimeError, match="boom"):
+            exp.run()
+    else:
+        exp.run()
+    assert shut_down == ["server-setup"]
+    assert exp._teacher_setup is None
+
+    exp._teacher_setup = None  # nothing launched (a URL backend): nothing to shut down
+    if outcome == "returns":
+        exp.run()
+        assert shut_down == ["server-setup"]
 
 
 # ---------------------------------------------------------------------------
