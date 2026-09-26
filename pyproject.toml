@@ -497,6 +497,10 @@ megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev =
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
 # `git ls-tree <bridge-rev> 3rdparty/Megatron-LM`.
+#
+# Upstream PRs not yet in these pins (GLM-5.3-Flash's KDA / mHC / k-pool DSA, and a few bug
+# fixes) are carried in skyrl/backends/skyrl_train/patches/megatron/. When bumping either pin,
+# follow skyrl/backends/skyrl_train/patches/megatron/README.md to retire whatever has landed.
 megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "d476c21be396dc666d2e04fa8c199c3851a1551f", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [

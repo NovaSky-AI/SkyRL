@@ -96,7 +96,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path imp
 
 apply_compile_cache_device_path_patch()
 
+# GLM-5.3-Flash LoRA: the pinned vLLM has no packed_modules_mapping for the model's fused
+# projections, and its merged-LoRA loader ignores the replicated_shard_ids that KDA's
+# in_proj_qkvbfg_a declares. Installed here for the same reason as the patch above: this
+# module is loaded in every worker process before model init.
+from skyrl.backends.skyrl_train.patches.vllm.patch_glm5next_lora_packing import (  # noqa: E402
+    apply_glm5next_lora_packing_patch,
+)
 
+apply_glm5next_lora_packing_patch()
 # Runs in every vLLM worker process before the model is loaded, so the
 # LoRA-capability declaration is in place for the supports_lora() gate.
 from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E402

@@ -30,6 +30,9 @@ from skyrl.train.utils.tracking import Tracking
 from tests.backends.skyrl_train.gpu.utils import import_worker, ray_init_for_tests
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+# 4-layer GLM-5.3-Flash slice (2 KDA + 2 NoPE-MLA/DSA, 3 MoE layers x 288 experts, mHC
+# residuals) -- the same checkpoint the megatron parity rows use.
+GLM5_3_FLASH_MODEL_NAME = "eatang/GLM-5.3-Flash-4layer"
 NUM_GPUS = 2
 
 
@@ -49,11 +52,13 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp_cpu_offload: bool = False) -> SkyRLTrainConfig:
+def get_test_trainer_config(
+    strategy: str, fsdp_cpu_offload: bool = False, model_name: str = MODEL_NAME, lora: bool = False
+) -> SkyRLTrainConfig:
     """Create minimal trainer config for testing"""
     cfg = SkyRLTrainConfig()
-    cfg.trainer.policy.model.path = MODEL_NAME
-    cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
+    cfg.trainer.policy.model.path = model_name
+    cfg.trainer.critic.model.path = model_name  # Enable critic for testing
     cfg.trainer.strategy = strategy
     if strategy == "fsdp":
         cfg.trainer.policy.fsdp_config.cpu_offload = fsdp_cpu_offload
@@ -85,8 +90,59 @@ def get_test_trainer_config(strategy: str, fsdp_cpu_offload: bool = False) -> Sk
         # Disable critic for megatron
         cfg.trainer.critic.model.path = ""
 
-    # Use temporary directories
-    cfg.trainer.export_path = tempfile.mkdtemp(prefix="trainer_ckpt_test_")
+    if "glm-5.3-flash" in model_name.lower():
+        # glm5_next is a KDA + NoPE-MLA/DSA hybrid MoE with mHC residuals, shipped as a VL
+        # checkpoint; SkyRL bridges only the language model, so route the trainer to the
+        # text-only path. Mirrors the parity rows in megatron/test_megatron_models.py.
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
+        cfg.trainer.remove_microbatch_padding = True
+        # mHC rejects pipeline_model_parallel_size > 1, so depth has to come from EP here.
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        cfg.trainer.policy.megatron_config.moe_grouped_gemm = True
+        cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
+        cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
+        cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "none"
+
+    if lora:
+        lora_cfg = cfg.trainer.policy.model.lora
+        lora_cfg.rank = 32
+        lora_cfg.alpha = 32
+        if "glm-5.3-flash" in model_name.lower():
+            # The "all-linear" default maps to dense-attention names that match none of
+            # GLM-5.3-Flash's MLA or KDA projections, so spell them out. f_b_proj/g_b_proj
+            # are deliberately absent (see test_megatron_models.py for why).
+            lora_cfg.target_modules = [
+                "linear_q_down_proj",
+                "linear_q_up_proj",
+                "linear_kv_down_proj",
+                "linear_kv_up_proj",
+                "linear_proj",
+                "linear_fc1",
+                "linear_fc2",
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "b_proj",
+                "f_a_proj",
+                "g_a_proj",
+                "o_proj",
+            ]
+            cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+
+    # Use temporary directories.
+    #
+    # The checkpoint is written by the Megatron worker actors, which Ray may place on a
+    # different node than this test process. On a multi-node cluster a bare mkdtemp() lands in
+    # node-local /tmp, so the workers write on their node while the assertions below look on
+    # the driver's -- and the checkpoint appears to be missing. Point SKYRL_TEST_CKPT_DIR at a
+    # shared mount there; leaving it unset (single-node CI) keeps the old behaviour.
+    cfg.trainer.export_path = tempfile.mkdtemp(
+        prefix="trainer_ckpt_test_", dir=os.environ.get("SKYRL_TEST_CKPT_DIR") or None
+    )
     cfg.trainer.ckpt_path = cfg.trainer.export_path
 
     # Enable checkpointing with correct config names
@@ -99,7 +155,7 @@ def get_test_trainer_config(strategy: str, fsdp_cpu_offload: bool = False) -> Sk
 def create_minimal_trainer(cfg: SkyRLTrainConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path, trust_remote_code=True)
 
     # Create dummy dataset
     train_dataset = DummyDataset(size=4)  # Small dataset for quick testing
@@ -130,20 +186,32 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
 
 
 @pytest.mark.parametrize(
-    ("strategy", "fsdp_cpu_offload", "lora"),
+    ("strategy", "fsdp_cpu_offload", "lora", "model_name"),
     [
-        ("fsdp", False, False),
-        ("fsdp", True, False),
-        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
+        ("fsdp", False, False, MODEL_NAME),
+        ("fsdp", True, False, MODEL_NAME),
+        pytest.param("megatron", False, False, MODEL_NAME, marks=pytest.mark.megatron),
+        # GLM-5.3-Flash (glm5_next) on the 4-layer slice, with LoRA -- what the DAPO recipes
+        # actually train. Distinct from the dense rows above because this model checkpoints
+        # things they do not have: mHC residual state, KDA linear-attention projections, and
+        # 288-expert MoE layers sharded over EP=4. It also runs PP=1, since mHC rejects
+        # pipeline parallelism.
+        #
+        # The no-LoRA (full-finetune) counterpart is NOT parametrized here: it fails inside
+        # save_checkpoint with a distributed-optimizer shape mismatch
+        # (distrib_optimizer.py, sharded_param_state_*), independent of EP and of the
+        # optimizer sharding format. With LoRA only the adapter tensors are in the grad
+        # buffer, which is why this row passes.
+        pytest.param("megatron", False, True, GLM5_3_FLASH_MODEL_NAME, marks=pytest.mark.megatron),
     ],
     ids=[
         "fsdp_no_lora",
         "fsdp_cpu_offload",
         "megatron_no_lora",
-        # TODO (erictang000): add megatron lora test - currently full checkpointing fails
+        "megatron_glm5_3_flash_lora",
     ],
 )
-def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload, lora):
+def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload, lora, model_name):
     """
     Test full trainer checkpointing by:
     1. Creating trainer and setting it up
@@ -155,10 +223,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload
     7. Verifying all state matches
     8. Continuing training to ensure it works
     """
-    cfg = get_test_trainer_config(strategy, fsdp_cpu_offload)
-    if lora:
-        cfg.trainer.policy.model.lora.rank = 32
-        cfg.trainer.policy.model.lora.alpha = 32
+    cfg = get_test_trainer_config(strategy, fsdp_cpu_offload, model_name, lora)
 
     checkpoint_dir = None
     try:
@@ -227,7 +292,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload
         print("Phase 2: Resume from checkpoint")
         ray_init_for_tests()
         # Create new config with resume enabled
-        cfg_resume = get_test_trainer_config(strategy, fsdp_cpu_offload)
+        cfg_resume = get_test_trainer_config(strategy, fsdp_cpu_offload, model_name, lora)
         cfg_resume.trainer.resume_mode = "from_path"  # Enable resume
         cfg_resume.trainer.resume_path = checkpoint_dir  # Set resume path
         cfg_resume.trainer.export_path = cfg.trainer.export_path  # Use same export path

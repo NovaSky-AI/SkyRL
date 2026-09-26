@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py
+uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py
 
 LoRA rows of ``test_logprobs_matching_roundtrip`` (test_megatron_models.py): the
 same models, meshes, generation, forward and weight-sync flow, with a LoRA
@@ -59,6 +59,55 @@ from tests.backends.skyrl_train.gpu.utils import (
 # Scales the 1e-3 noise std that perturb_lora_b adds to every LoRA B tensor.
 LORA_B_MULTIPLIER = 30.0
 
+# GLM-5.3-Flash: the trainer-side target_modules must be spelled out, because the "all-linear"
+# default maps to dense-attention names (linear_qkv/...) that match none of its MLA or KDA
+# projections. These are the mcore names from patches/megatron/glm5_next (MLA:
+# linear_q_down/up_proj, linear_kv_down/up_proj, linear_proj; KDA: q/k/v/b/f_a/g_a/o_proj) plus
+# the MoE/dense MLP linears. f_b_proj / g_b_proj stay out on both sides: vLLM's KDA runs one
+# fused in_proj_qkvbfg_a GEMM and .split()s it, so f_a/g_a are non-contiguous views.
+GLM5_3_FLASH_LORA_TARGET_MODULES = [
+    "linear_q_down_proj",
+    "linear_q_up_proj",
+    "linear_kv_down_proj",
+    "linear_kv_up_proj",
+    "linear_proj",
+    "linear_fc1",
+    "linear_fc2",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "b_proj",
+    "f_a_proj",
+    "g_a_proj",
+    "o_proj",
+]
+# vLLM-side names for the same modules: vLLM fuses KDA's q/k/v/b/f_a/g_a into in_proj_qkvbfg_a
+# and MLA's q_a/kv_a into fused_qkv_a_proj (see patches/vllm/patch_glm5next_lora_packing.py).
+# "experts" is required: passing lora_target_modules at all switches vLLM's MoE LoRA wrapping
+# from unrestricted to filtered, and an unwrapped MoE layer fails the profile run with
+# "LoRA context must be set" (vLLM picks the LoRA-aware expert kernel whenever LoRA is enabled).
+GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES = [
+    "fused_qkv_a_proj",
+    "q_b_proj",
+    "kv_b_proj",
+    "o_proj",
+    "gate_up_proj",
+    "down_proj",
+    "in_proj_qkvbfg_a",
+    "experts",
+]
+# The 4-layer GLM-5.3-Flash slice has a very flat next-token distribution, so the Megatron-vs-vLLM
+# diff with a live adapter grows faster than the adapter itself (about 0.06 at a LoRA-B std of
+# 0.002, 0.18 at 0.01). Keep its perturbation small enough for phase 3 to stay within threshold.
+LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 2.0}
+
+
+def _lora_b_multiplier(model_name: str) -> float:
+    for key, multiplier in LORA_B_MULTIPLIER_OVERRIDES.items():
+        if key in model_name.lower():
+            return multiplier
+    return LORA_B_MULTIPLIER
+
 
 class LoRAPerturbPolicyWorkerBase(MegatronPolicyWorkerBase):
     def perturb_lora_b(self, multiplier: float) -> dict:
@@ -81,6 +130,8 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
         rank=8, alpha=16, dropout=0.0, target_modules="all-linear", lora_sync_path=lora_sync_path
     )
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
+    if "glm-5.3-flash" in model_name.lower():
+        cfg.trainer.policy.model.lora.target_modules = list(GLM5_3_FLASH_LORA_TARGET_MODULES)
     validate_cfg(cfg)
     return cfg
 
@@ -137,6 +188,25 @@ async def _sync_weights(policy, client, cfg, label: str):
             id="qwen3.5-35b-a3b_h100_tp4_ep4_adapter",
             marks=pytest.mark.h100,
         ),
+        # GLM-5.3-Flash 4-layer slice (2 KDA + 2 NoPE-MLA/DSA layers, 288-expert MoE, mHC), same
+        # mesh as its row in test_megatron_models.py. Adapter sync covers vLLM booting with
+        # enable_lora on glm5_next, the packed-module mapping and kv_b_proj decode patches in
+        # patch_glm5next_lora_packing, KDA's non-contiguous f_a/g_a through lora_shrink, and the
+        # per-expert adapter export and hot-load.
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            "eatang/GLM-5.3-Flash-4layer",
+            1e-1,
+            False,
+            id="glm-5.3-flash-4layer_h100_tp2_ep4_adapter",
+            marks=pytest.mark.h100,
+        ),
     ],
 )
 async def test_lora_logprobs_matching_roundtrip(
@@ -167,6 +237,8 @@ async def test_lora_logprobs_matching_roundtrip(
         tokenizer.pad_token = tokenizer.eos_token
 
         engine_overrides = _engine_overrides_for_model(model_name)
+        if lora_sync and "glm-5.3-flash" in model_name.lower():
+            engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES)
         async with InferenceEngineState.create(
             cfg=cfg,
             model=model_name,
@@ -235,7 +307,8 @@ async def test_lora_logprobs_matching_roundtrip(
             assert zero_diff < threshold, f"Logprob diff should be less than {threshold}, but is {zero_diff:.6f}"
 
             # Phase 2: perturb the trainer's adapter; the engines still serve the zero adapter.
-            stats = ray.get(policy.async_run_ray_method("pass_through", "perturb_lora_b", LORA_B_MULTIPLIER))[0]
+            multiplier = _lora_b_multiplier(model_name)
+            stats = ray.get(policy.async_run_ray_method("pass_through", "perturb_lora_b", multiplier))[0]
             print(f"perturbed {stats['changed_tensors']} LoRA B tensors ({stats['changed_elements']} elements)")
             logprobs_megatron_perturbed = _trainer_logprobs(policy, training_input)
             _mean_abs_diff(
@@ -246,7 +319,7 @@ async def test_lora_logprobs_matching_roundtrip(
             )
             assert stale_diff > threshold, (
                 f"Perturbed Megatron differs from the stale sampler by only {stale_diff:.6f}; "
-                f"raise LORA_B_MULTIPLIER so a missed sync fails the {threshold} parity check"
+                f"raise the LoRA-B multiplier (now {multiplier}) so a missed sync fails the {threshold} parity check"
             )
 
             # Phase 3: publish the perturbed adapter and score the new samples.
