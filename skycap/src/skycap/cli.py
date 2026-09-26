@@ -56,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="record each sampled token's support (start vLLM with return_sampling_mask)",
     )
     tokens.add_argument("--logprobs-mode", default="processed_logprobs", help="recorded on every trajectory")
+    tokens.add_argument(
+        "--raw-content",
+        action="store_true",
+        help="answer with the completion's text as content, reasoning inline and tool calls unparsed, "
+        "as vLLM does with no parsers",
+    )
     tokens.add_argument("--renderer-pool-size", type=int, default=8)
     serve.add_argument(
         "--record-dir",
@@ -89,6 +95,7 @@ def build_backend(args: argparse.Namespace) -> Backend:
         sampling_overrides=args.sampling_overrides,
         sampling_mask=args.sampling_mask,
         logprobs_mode=args.logprobs_mode,
+        raw_content=args.raw_content,
     )
 
 

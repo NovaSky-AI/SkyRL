@@ -194,6 +194,31 @@ async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
         assert [len(s.targets) for s in samples] == [1, 1]
 
 
+async def test_raw_content_keeps_reasoning_inline_so_a_verbatim_replay_stays_one_path() -> None:
+    thinking = [*encode("THINK:hmm|answer"), END]
+    async with token_stack(completion=lambda prompt, sampling: thinking, raw_content=True) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        raw = await stack.http.post(
+            f"{created['base_url']}/chat/completions", json={"model": "policy", "messages": [user("q")]}
+        )
+        # As vLLM with no reasoning parser answers: the field is there, and null.
+        assert (await raw.json())["choices"][0]["message"]["reasoning_content"] is None
+        reply = (await llm.chat.completions.create(model="policy", messages=[user("q")])).choices[0].message
+        assert reply.content == "THINK:hmm|answer"
+        # A harness that replays only `content` sends back exactly what it got.
+        await llm.chat.completions.create(
+            model="policy",
+            messages=[user("q"), {"role": "assistant", "content": reply.content}, user("more")],
+        )
+        graph = stack.server.trajectories[created["id"]].graph
+
+        assert graph.branch_points() == []
+        assert len(graph.paths()) == 1
+        first, second = stack.engine.requests[-2:]
+        assert second["token_ids"][: len(first["token_ids"]) + len(thinking)] == first["token_ids"] + thinking
+
+
 async def test_a_tool_call_is_parsed_and_the_tool_result_bridges() -> None:
     async with token_stack() as stack:
         created = await stack.create()
