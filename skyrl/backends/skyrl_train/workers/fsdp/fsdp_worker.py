@@ -147,12 +147,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         and insert that namespace inside it before vLLM loads the adapter.
         """
         import json
-        from dataclasses import asdict
 
         from safetensors.torch import save_file
 
         from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
             collect_lora_params,
+            serialize_peft_config,
         )
 
         lora_params = collect_lora_params(module=self.model.model)
@@ -171,10 +171,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            peft_config = asdict(peft_model.peft_config.get("default", {}))
-            peft_config["task_type"] = peft_config["task_type"].value
-            peft_config["peft_type"] = peft_config["peft_type"].value
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            peft_config = serialize_peft_config(peft_model.peft_config["default"])
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
