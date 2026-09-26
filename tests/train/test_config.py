@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    FullyAsyncConfig,
     SkyRLTrainConfig,
     TrainerConfig,
     _resolve_class_type,
@@ -29,6 +30,12 @@ from skyrl.train.utils.utils import (
     validate_megatron_cfg,
 )
 from tests.train.util import example_dummy_config
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_fully_async_rejects_invalid_generation_timeout(timeout):
+    with pytest.raises(ValueError, match="generation_timeout_seconds"):
+        FullyAsyncConfig(generation_timeout_seconds=timeout)
 
 
 def _get_nested_attr(cfg, dotted_path: str):

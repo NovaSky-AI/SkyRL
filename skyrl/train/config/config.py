@@ -8,6 +8,7 @@ can be constructed from a Hydra DictConfig via SkyRLTrainConfig.from_dict_config
 import copy
 import dataclasses
 import json
+import math
 import os
 import typing
 from abc import ABC
@@ -1027,6 +1028,11 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    generation_timeout_seconds: Optional[float] = None
+    """Maximum wall-clock seconds for one prompt group's generation, or None for no deadline.
+    Starts after acquiring a submission slot and includes inference pauses during weight sync.
+    On expiry, cancel generation and fail training without retrying or dropping the group.
+    Cancellation is cooperative; remote generators must implement their own resource cleanup."""
     sample_full_batch: bool = False
     """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
     mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).
@@ -1058,6 +1064,11 @@ class FullyAsyncConfig(BaseConfig):
     simulate_weight_sync_seconds: float = 0.0
     """Wall-clock seconds generation stays paused to stand in for the (skipped) weight broadcast.
     0.0 = pause then immediately resume."""
+
+    def __post_init__(self) -> None:
+        timeout = self.generation_timeout_seconds
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("trainer.fully_async.generation_timeout_seconds must be positive and finite, or None.")
 
 
 # ---------------------------------------------------------------------------
