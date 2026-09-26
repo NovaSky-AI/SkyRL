@@ -14,7 +14,10 @@ set -x
 #
 # Megatron-Bridge's Qwen3VLMoEModelProvider defaults to freeze_language_model=True and
 # freeze_vision_model=True (the dense Qwen3VLModelProvider defaults both to False), so without
-# the explicit freeze_* overrides below only the vision projector would be trained.
+# the explicit freeze_* overrides below only the vision projector would be trained. See
+# https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0/src/megatron/bridge/models/qwen_vl/qwen3_vl_provider.py#L272-L274
+# (the pinned rev; every other VL provider defaults to False) and the half-landed upstream fix
+# https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/2098.
 #
 # uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir $HOME/data/geometry_3k
 # bash examples/train/geometry3k/run_geometry3k_30b_a3b_megatron.sh
