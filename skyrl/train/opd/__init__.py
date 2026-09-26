@@ -5,7 +5,9 @@ response token; the negative per-token reverse KL to the teacher becomes a dense
 its own (pure distillation) or on top of a task reward. Entry point:
 ``skyrl.train.entrypoints.main_opd``; run scripts under ``examples/train/on_policy_distillation``.
 
-- ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the Fireworks and vLLM backends.
+- ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the launched (``SkyRLTeacherClient``
+  over a ``RemoteInferenceClient``), vLLM-URL and Fireworks backends.
+- ``teacher_launch``: launching the teacher's vLLM deployment inside the job (``backend="skyrl"``).
 - ``trainer``: ``OPDTrainer``. Its ``generate`` runs one ``generator.generate`` call per prompt group
   concurrently and scores each group under the teacher as it finishes (any generator works); three
   more ``RayPPOTrainer`` overrides consume the teacher logprobs.
@@ -14,17 +16,27 @@ its own (pure distillation) or on top of a task reward. Entry point:
 """
 
 from skyrl.train.opd.config import (
+    TEACHER_BACKENDS,
     OPDAlgorithmConfig,
     OPDConfig,
     OPDExpConfig,
     OPDTrainerConfig,
     TeacherConfig,
+    teacher_max_model_len,
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
     FireworksTeacherClient,
+    SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
+)
+from skyrl.train.opd.teacher_launch import (
+    launch_teacher,
+    served_teacher_name,
+    shutdown_teacher,
+    teacher_cli_args,
+    teacher_start_port,
 )
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
@@ -35,16 +47,24 @@ from skyrl.train.opd.utils import (
 )
 
 __all__ = [
+    "TEACHER_BACKENDS",
     "OPDAlgorithmConfig",
     "OPDConfig",
     "OPDExpConfig",
     "OPDTrainerConfig",
     "TeacherConfig",
+    "teacher_max_model_len",
     "validate_opd_cfg",
     "TEACHER_LOGPROBS_KEY",
     "FireworksTeacherClient",
+    "SkyRLTeacherClient",
     "TeacherLogprobClient",
     "VLLMTeacherClient",
+    "launch_teacher",
+    "served_teacher_name",
+    "shutdown_teacher",
+    "teacher_cli_args",
+    "teacher_start_port",
     "OPDTrainer",
     "apply_opd_to_advantages",
     "pad_teacher_logprobs",

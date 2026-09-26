@@ -14,6 +14,10 @@ import ray
 
 logger = logging.getLogger(__name__)
 
+# Base of the first launched server's port window; a second deployment on the same
+# nodes starts past the first one's windows (see `create_inference_servers`).
+VLLM_START_PORT = 8000
+
 # Stride between successive server actors' (or groups') start_port values.
 # Each actor's `find_and_reserve_port` increments by 1 on conflict, so this
 # stride must be larger than the max number of conflicts an actor could see
