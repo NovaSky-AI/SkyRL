@@ -134,7 +134,7 @@ On 8xH100 80GB, a full 6-epoch run (96 steps) took about 3h50m. Eval pass@1 on `
   generator.max_input_length=$MAX_INPUT_LENGTH \                                 # default 8192
 ```
 
-Defaults are `MEGATRON_TP=2`, `MEGATRON_PP=1`, `MEGATRON_EP=8`, 4 vLLM engines at TP=4, 128 prompts x 8 samples, and a 4096-token response budget. `generator.max_input_length` is set explicitly because it otherwise defaults to `trainer.max_prompt_length` and is checked against the whole conversation before each turn, which would cut off the tool-call retry turns. If the optimizer state does not fit at TP=2, use `MEGATRON_TP=4 MEGATRON_PP=2`; if vLLM runs out of memory, use `NUM_INFERENCE_ENGINES=2 INFERENCE_ENGINE_TP=8`.
+Defaults are `MEGATRON_TP=4`, `MEGATRON_PP=2` (DP=2), `MEGATRON_EP=8`, 4 vLLM engines at TP=4, 128 prompts x 8 samples, and a 4096-token response budget. TP=2/PP=1 runs out of memory at step 1 on 80GB H100s (76-81 GiB peak); TP=4/PP=2 is the validated layout. `generator.max_input_length` is set explicitly because it otherwise defaults to `trainer.max_prompt_length` and is checked against the whole conversation before each turn, which would cut off the tool-call retry turns. If vLLM runs out of memory, use `NUM_INFERENCE_ENGINES=2 INFERENCE_ENGINE_TP=8`. On 2x8 H100 the run takes about 6.4 min per step (policy training is ~57% of it, since VLM batches are not packed); step-0 eval pass@1 is 0.577 and step 5 is 0.621.
 
 ```bash
 NUM_NODES=2 DATA_DIR=/shared/geo3k/data EXPORT_PATH=/shared/geo3k/exports CKPT_PATH=/shared/geo3k/ckpts \
