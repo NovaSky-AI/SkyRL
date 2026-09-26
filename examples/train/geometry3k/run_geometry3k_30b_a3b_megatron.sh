@@ -12,6 +12,10 @@ set -x
 #   Inference: 4 vLLM engines x TP=4 (fall back to NUM_INFERENCE_ENGINES=2 INFERENCE_ENGINE_TP=8)
 # VLMs on Megatron: no microbatch padding removal (packing) and no context parallelism.
 #
+# Megatron-Bridge's Qwen3VLMoEModelProvider defaults to freeze_language_model=True and
+# freeze_vision_model=True (the dense Qwen3VLModelProvider defaults both to False), so without
+# the explicit freeze_* overrides below only the vision projector would be trained.
+#
 # uv run examples/train/geometry3k/geometry_3k_dataset.py --output_dir $HOME/data/geometry_3k
 # bash examples/train/geometry3k/run_geometry3k_30b_a3b_megatron.sh
 
@@ -69,6 +73,8 @@ uv run --isolated --extra megatron --with pylatexenc \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity=$RECOMPUTE_GRANULARITY \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=$RECOMPUTE_METHOD \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=$RECOMPUTE_NUM_LAYERS \
+  trainer.policy.megatron_config.transformer_config_kwargs.freeze_language_model=false \
+  trainer.policy.megatron_config.transformer_config_kwargs.freeze_vision_model=false \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.ref_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
