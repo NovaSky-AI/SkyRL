@@ -24,3 +24,4 @@ On a multi-node Ray cluster, put `DATA_DIR`, `EXPORT_PATH` and `CKPT_PATH` on st
 
 - `run_geometry3k_lora.sh`: LoRA on the FSDP backend.
 - `run_geometry3k_megatron.sh`: Megatron backend (defaults to `MEGATRON_TP=2`, `MEGATRON_PP=1`).
+- `run_geometry3k_30b_a3b_megatron.sh`: `Qwen3-VL-30B-A3B-Instruct` (MoE) on 2 nodes x 8 H100, Megatron with `MEGATRON_EP=8`.
