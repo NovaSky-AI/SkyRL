@@ -434,6 +434,11 @@ class MegatronLoraConfig(BaseConfig):
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
     """Merge LoRA weights into the base weights during weight sync."""
+    experts_shared_outer_loras: bool = False
+    """Shared-outer grouped-expert LoRA for MoE models: the fc1 (gate_up) lora_A and
+    fc2 (down) lora_B matrices are shared across all experts, while the inner matrices
+    (fc1 lora_B, fc2 lora_A) are trained per expert. Maps to Megatron-Bridge
+    ``LoRA(experts_shared_outer_loras=True)``; only supported with ``lora_type="lora"``."""
     normalize_moe_lora: bool = False
     """When True, grouped MoE expert linears use ``rank // moe_router_topk`` as
     their LoRA rank (non-expert layers keep the full rank), normalizing total

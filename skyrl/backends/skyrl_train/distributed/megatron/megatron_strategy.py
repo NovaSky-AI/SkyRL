@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import os
 import random
@@ -105,6 +106,27 @@ def _patched_update_fp32_params_by_new_state(self):
             continue
         fp32_param = self.param_to_fp32_param[param]
         fp32_param.data.copy_(v["master_param"])
+
+
+@contextlib.contextmanager
+def _without_stub_optimizers(optimizer):
+    """Temporarily drop stub sub-optimizers from a ChainedOptimizer for checkpoint save/load.
+
+    A stub DistributedOptimizer owns no params (e.g. the dense group when LoRA only targets
+    expert linears) and megatron-core cannot build its ``sharded_state_dict`` (``state_dict``
+    dereferences its ``None`` inner optimizer). Stubs hold no state, and the same groups are
+    stubs on every rank, so save and load see a consistent chain without them.
+    """
+    chained = getattr(optimizer, "chained_optimizers", None)
+    kept = [o for o in chained or [] if not getattr(o, "is_stub_optimizer", False)]
+    if not chained or len(kept) == len(chained):
+        yield
+        return
+    optimizer.chained_optimizers = kept
+    try:
+        yield
+    finally:
+        optimizer.chained_optimizers = chained
 
 
 _orig_load_parameter_state_from_dp_reshardable = DistributedOptimizer.load_parameter_state_from_dp_reshardable
@@ -328,11 +350,12 @@ class MegatronStrategy(DistributedStrategy):
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
             self._ensure_optimizer_state_initialized(optimizer)
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict,
-                is_loading=False,
-                metadata=self._dist_ckpt_optim_metadata,
-            )
+            with _without_stub_optimizers(optimizer):
+                sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                    model_sharded_state_dict,
+                    is_loading=False,
+                    metadata=self._dist_ckpt_optim_metadata,
+                )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -464,11 +487,12 @@ class MegatronStrategy(DistributedStrategy):
         if not self.is_lora:
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict,
-                is_loading=True,
-                metadata=self._dist_ckpt_optim_metadata,
-            )
+            with _without_stub_optimizers(optimizer):
+                sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                    model_sharded_state_dict,
+                    is_loading=True,
+                    metadata=self._dist_ckpt_optim_metadata,
+                )
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -498,7 +522,8 @@ class MegatronStrategy(DistributedStrategy):
             assert (
                 "optimizer" in state_dict
             ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
-            optimizer.load_state_dict(state_dict["optimizer"])
+            with _without_stub_optimizers(optimizer):
+                optimizer.load_state_dict(state_dict["optimizer"])
             self.print("Loaded optimizer state dict.")
 
         if scheduler and load_lr_scheduler_states:

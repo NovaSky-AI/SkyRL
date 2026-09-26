@@ -48,6 +48,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
+    apply_packed_per_expert_sharded_state_dict_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_shared_expert_lora_tp import (
     apply_shared_expert_lora_tp_patch,
 )
@@ -390,7 +393,9 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
-    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
+        if experts_shared_outer_loras:
+            apply_packed_per_expert_sharded_state_dict_patch()
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
         # TODO: We should improve test coverage for this normalization logic and add a GPU-based integration test
         # that asserts consistency between megatron and vllm.
@@ -442,10 +447,13 @@ class MegatronWorker:
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
-                normalize_moe_lora=self.cfg.policy.megatron_config.lora_config.normalize_moe_lora,
+                experts_shared_outer_loras=experts_shared_outer_loras,
+                normalize_moe_lora=normalize_moe_lora,
                 share_expert_adapters=lora_config.share_expert_adapters,
             )
         elif lora_type == "canonical_lora":
+            if experts_shared_outer_loras:
+                raise ValueError("experts_shared_outer_loras is only supported with lora_type='lora'")
             # TODO (sumanthrh): Why is share_expert_adapters not passed here?
             self.lora_cls = CanonicalLoRA(
                 target_modules=target_modules,
@@ -464,6 +472,7 @@ class MegatronWorker:
         ddp_config: Optional[Union[MegatronDDPConfig, Dict[str, Any]]] = None,
         lora_config: Optional[Dict[str, Any]] = None,
         lora_type: Optional[str] = "lora",
+        experts_shared_outer_loras: bool = False,
         bf16: bool = True,
     ) -> List[nn.Module]:
         """
@@ -489,7 +498,7 @@ class MegatronWorker:
         patch_vision_attention_backend()
 
         if lora_config is not None:
-            self.configure_lora(lora_config, lora_type)
+            self.configure_lora(lora_config, lora_type, experts_shared_outer_loras=experts_shared_outer_loras)
 
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
@@ -830,6 +839,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ddp_config=self.cfg.policy.megatron_config.ddp_config if wrap_with_ddp else None,
             lora_config=self.cfg.policy.model.lora if self._is_lora else None,
             lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
+            experts_shared_outer_loras=self.cfg.policy.megatron_config.lora_config.experts_shared_outer_loras,
             bf16=self.cfg.bf16,
         )
 
@@ -1265,7 +1275,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.optimizer is None:
             return None
         if isinstance(self.optimizer, ChainedOptimizer):
-            return self.optimizer.chained_optimizers[0].param_groups[0]["lr"]
+            # Skip stub sub-optimizers that own no params (e.g. the dense group under
+            # expert-only LoRA); their `param_groups` would dereference a None optimizer.
+            opt = next(o for o in self.optimizer.chained_optimizers if o.optimizer is not None)
+            return opt.param_groups[0]["lr"]
         return self.optimizer.param_groups[0]["lr"]
 
     def set_lr(self, learning_rate: float) -> None:
@@ -1285,6 +1298,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if isinstance(self.optimizer, ChainedOptimizer):
             # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
             for opt in self.optimizer.chained_optimizers:
+                if opt.optimizer is None:
+                    continue
                 for param_group in opt.param_groups:
                     param_group["lr"] = learning_rate
         else:
@@ -1550,14 +1565,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # only gates the bridge's trailing device-to-host copy (not its
         # collectives), so non-writers skip that copy for tensors they discard.
         keep_state = self._is_lora_sync_writer_rank()
-        adapter_state = {}
+        # Shared-outer grouped-expert LoRA emits the per-expert side of packed-HF
+        # models (e.g. Qwen3.5/3.6 MoE) as one 2D slice per expert under the same
+        # expert-agnostic name; collect repeats in emission order (expert 0..E-1)
+        # and stack them back into the (E, out, in) layout the converter expects.
+        adapter_tensor_lists: Dict[str, List[torch.Tensor]] = {}
         for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=keep_state, show_progress=False):
             if keep_state:
                 # Keep the training dtype (bf16): upcasting to float32 doubles
                 # the already-large per-expert adapter state (and the file the
                 # engines re-read every step) for no fidelity gain -- vLLM casts
                 # adapters to its lora dtype on load.
-                adapter_state[f"base_model.model.{name}"] = tensor.clone()
+                adapter_tensor_lists.setdefault(f"base_model.model.{name}", []).append(tensor.clone())
+        adapter_state = {
+            name: tensors[0] if len(tensors) == 1 else torch.stack(tensors, dim=0)
+            for name, tensors in adapter_tensor_lists.items()
+        }
 
         rank = torch.distributed.get_rank()
         if keep_state:
@@ -1587,7 +1610,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # merge_lora=False on-policy sync is accepted (otherwise
             # load_lora_adapter rejects `experts.down_proj`). See
             # _convert_moe_experts_lora_to_vllm for the layout details.
-            adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
+            adapter_state = _convert_moe_experts_lora_to_vllm(
+                adapter_state, num_moe_experts=getattr(self.provider, "num_moe_experts", None)
+            )
 
             target_modules = sorted(
                 set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}

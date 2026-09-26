@@ -22,6 +22,7 @@
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -168,8 +169,18 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     return model_or_models
 
 
+def _require_num_moe_experts(key: str, num_moe_experts: Optional[int]) -> int:
+    if num_moe_experts is None:
+        raise ValueError(
+            f"Shared-outer expert LoRA tensor {key!r} must be expanded to every expert, "
+            "but num_moe_experts was not provided"
+        )
+    return num_moe_experts
+
+
 def _convert_moe_experts_lora_to_vllm(
     adapter_state: Dict[str, "torch.Tensor"],
+    num_moe_experts: Optional[int] = None,
 ) -> Dict[str, "torch.Tensor"]:
     """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
 
@@ -180,12 +191,24 @@ def _convert_moe_experts_lora_to_vllm(
     the flat PEFT layout keyed ``...experts.base_layer`` (w13) / ``...experts``
     (w2), with ``lora_A=(rank*E, in)`` and ``lora_B=(out, rank*E)``. This is the
     exact inverse of vLLM's per-expert reshape. Non-expert tensors pass through.
+
+    Shared-outer grouped-expert LoRA (``experts_shared_outer_loras=True``) exports
+    the shared side (gate_up lora_A / down lora_B) as a ``(1, ...)`` tensor under
+    an expert-agnostic name. vLLM has no shared-expert LoRA contract, so the
+    shared side is expanded to all ``num_moe_experts`` experts (mathematically
+    identical since every expert applies the same matrix): for packed-HF models
+    it joins the flat-layout rewrite above; for per-expert-HF models (keys like
+    ``...experts.<idx>.gate_proj``) it is replicated into per-expert indexed keys.
     """
+    uses_indexed_expert_keys = any(re.search(r"\.mlp\.experts\.\d+\.", key) for key in adapter_state)
+
     converted: Dict[str, "torch.Tensor"] = {}
     for key, tensor in adapter_state.items():
         is_gate_up = ".mlp.experts.gate_up_proj." in key
         is_down = ".mlp.experts.down_proj." in key
-        if (is_gate_up or is_down) and tensor.ndim == 3:
+        if (is_gate_up or is_down) and tensor.ndim == 3 and not uses_indexed_expert_keys:
+            if tensor.shape[0] == 1:
+                tensor = tensor.expand(_require_num_moe_experts(key, num_moe_experts), -1, -1)
             if key.endswith(".lora_A.weight"):
                 # (E, rank, in) -> (rank*E [expert-major], in)
                 tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
@@ -196,6 +219,22 @@ def _convert_moe_experts_lora_to_vllm(
                 key = key.replace(".mlp.experts.gate_up_proj.", ".mlp.experts.base_layer.")
             else:
                 key = key.replace(".mlp.experts.down_proj.", ".mlp.experts.")
+            converted[key] = tensor
+            continue
+
+        shared_match = (
+            re.search(r"\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.(lora_[AB])\.weight$", key)
+            if uses_indexed_expert_keys
+            else None
+        )
+        if shared_match is not None and tensor.ndim == 3 and tensor.shape[0] == 1:
+            # Per-expert-HF model: replicate the shared side into the indexed
+            # per-expert keys vLLM's PEFT loader parses.
+            insert_pos = key.rindex(".mlp.experts.") + len(".mlp.experts.")
+            for expert_idx in range(_require_num_moe_experts(key, num_moe_experts)):
+                converted[f"{key[:insert_pos]}{expert_idx}.{key[insert_pos:]}"] = tensor[0].clone()
+            continue
+
         converted[key] = tensor
     return converted
 
@@ -495,6 +534,10 @@ def offload_megatron_optimizer(optimizers):
         return [opt]
 
     for _opt in _iter_opts(optimizers):
+        if _opt.optimizer is None:
+            # Stub sub-optimizer with no params on this rank, e.g. the dense group when
+            # LoRA only targets expert linears.
+            continue
         offload_megatron_copy_params(_opt)
         opt_state_dict_values = _opt.optimizer.state.values()
         for v in opt_state_dict_values:
@@ -512,6 +555,8 @@ def load_megatron_optimizer(optimizers):
         return [opt]
 
     for _opt in _iter_opts(optimizers):
+        if _opt.optimizer is None:
+            continue
         load_megatron_copy_params(_opt)
         # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu
         if hasattr(_opt.optimizer, "_move_new_state_to_right_device"):
