@@ -55,6 +55,8 @@ fi
 : "${LR:=1.0e-6}"
 : "${CKPT_PATH:="$HOME/ckpts/geometry3k_vlm_30b_a3b_megatron_ckpt"}"
 : "${EXPORT_PATH:="$HOME/exports/geometry3k_vlm_30b_a3b_megatron"}"
+# Worker infra logs (per-node); put on shared storage to read them from the head node.
+: "${LOG_PATH:="/tmp/skyrl-logs"}"
 
 uv run --isolated --extra megatron --with pylatexenc \
   python examples/train/geometry3k/geometry3k_entrypoint.py \
@@ -96,6 +98,7 @@ uv run --isolated --extra megatron --with pylatexenc \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
+  trainer.max_ckpts_to_keep=2 \
   trainer.remove_microbatch_padding=false \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
@@ -115,7 +118,7 @@ uv run --isolated --extra megatron --with pylatexenc \
   trainer.project_name="geometry3k" \
   trainer.run_name="geometry3k_vlm_30b_a3b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_ep${MEGATRON_EP}" \
   trainer.resume_mode=null \
-  trainer.log_path="/tmp/skyrl-logs" \
+  trainer.log_path="$LOG_PATH" \
   trainer.export_path="$EXPORT_PATH" \
   trainer.dump_eval_results=true \
   trainer.ckpt_path="$CKPT_PATH" \
