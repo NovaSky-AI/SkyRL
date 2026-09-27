@@ -255,7 +255,7 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
     import litellm
 
     router.reply = "<think>\nhmm\n</think>\n\nanswer"
-    backend = TokensBackend(router.url, FakeRenderer(), engine=SkyRLEngine(), model="policy", raw_content=True)
+    backend = TokensBackend(router.url, FakeRenderer(), engine=SkyRLEngine(), model="policy", use_raw_content=True)
     service = SkycapService(backend, record_dir=str(tmp_path), host="127.0.0.1")
     service.start()
     try:

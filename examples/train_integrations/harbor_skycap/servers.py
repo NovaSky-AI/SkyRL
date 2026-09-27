@@ -39,7 +39,7 @@ def build_tokens_backend(settings: Dict[str, Any]) -> Any:
         max_model_len=settings["max_model_len"],
         sampling_overrides=settings["sampling_overrides"],
         sampling_mask=settings["sampling_mask"],
-        raw_content=settings.get("raw_content", False),
+        use_raw_content=settings.get("use_raw_content", False),
     )
 
 
