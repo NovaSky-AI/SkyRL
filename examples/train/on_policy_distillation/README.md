@@ -89,7 +89,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
 Prefer independent replicas (`num_engines=N`) over one data-parallel group. A budget the cluster cannot
 satisfy surfaces as the teacher placement group's timeout (`SKYRL_RAY_PG_TIMEOUT_IN_S`); there is no
 upfront check yet. The teacher is launched before the student's engines and the training workers, and
-shut down when the run ends.
+goes down with the Ray job when the run ends, like the student's engines.
 
 ### A vLLM teacher you run
 

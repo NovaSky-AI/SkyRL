@@ -60,16 +60,16 @@ def launcher_doubles(monkeypatch):
     monkeypatch.setattr(inference_setup, "build_router_args", lambda ie_cfg, **kwargs: kwargs)
     monkeypatch.setattr(inference_setup.ray, "get", lambda refs: refs)
 
-    created_pgs = []
+    pg_requests = []
 
     def fake_placement_group(bundles, strategy):
-        created_pgs.append((len(bundles), strategy))
-        return f"raw-pg-{len(created_pgs)}"
+        pg_requests.append((len(bundles), strategy))
+        return f"raw-pg-{len(pg_requests)}"
 
     monkeypatch.setattr(inference_setup, "ray_placement_group", fake_placement_group)
     monkeypatch.setattr(inference_setup, "get_ray_pg_ready_with_timeout", lambda pg, timeout: None)
     monkeypatch.setattr(inference_setup, "ResolvedPlacementGroup", lambda pg: SimpleNamespace(pg=pg))
-    return created_pgs
+    return pg_requests
 
 
 def test_create_inference_servers_offsets_port_windows_from_start_port(launcher_doubles):
@@ -83,7 +83,6 @@ def test_create_inference_servers_offsets_port_windows_from_start_port(launcher_
     assert result.server_urls == ["http://server-0-0:8000", "http://server-1-0:8000"]
     assert result.proxy_url == "http://router:7000"
     assert launcher_doubles == [(4, "PACK")]  # one PG of num_engines * tp * pp * dp single-GPU bundles
-    assert [pg.pg for pg in result.placement_groups] == ["raw-pg-1"]
 
 
 def test_create_inference_servers_default_port_and_supplied_pg(launcher_doubles):
@@ -100,7 +99,7 @@ def test_create_inference_servers_default_port_and_supplied_pg(launcher_doubles)
     assert FakeServerGroup.instances[0].kwargs["start_port"] == VLLM_START_PORT
     assert FakeServerGroup.instances[0].kwargs["placement_group"] is external_pg
     assert launcher_doubles == []  # nothing created when the caller supplied the PG
-    assert result.placement_groups == []
+    assert result.server_urls == ["http://server-0-0:8000"]
 
 
 def test_launch_remote_inference_client_wraps_the_deployment(monkeypatch):

@@ -631,7 +631,7 @@ def test_opd_exp_launches_the_teacher_for_the_skyrl_backend(monkeypatch):
     assert isinstance(teacher, SkyRLTeacherClient)
     assert teacher.client is fake_client
     assert launched == [cfg]
-    assert exp._teacher_setup == "server-setup"
+    assert exp._teacher_setup == "server-setup"  # kept referenced for the run: it holds the actor handles
 
 
 def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
@@ -645,34 +645,6 @@ def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
     )
     assert isinstance(exp.get_teacher_client(), VLLMTeacherClient)
     assert exp._teacher_setup is None
-
-
-@pytest.mark.parametrize("outcome", ["returns", "raises"])
-def test_opd_exp_run_shuts_the_teacher_down(monkeypatch, outcome):
-    import skyrl.train.entrypoints.main_opd as main_opd
-
-    shut_down = []
-    monkeypatch.setattr(main_opd, "shutdown_teacher", shut_down.append)
-
-    def base_run(self):
-        if outcome == "raises":
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(main_opd.BasePPOExp, "run", base_run)
-    exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
-    exp._teacher_setup = "server-setup"
-    if outcome == "raises":
-        with pytest.raises(RuntimeError, match="boom"):
-            exp.run()
-    else:
-        exp.run()
-    assert shut_down == ["server-setup"]
-    assert exp._teacher_setup is None
-
-    exp._teacher_setup = None  # nothing launched (a URL backend): nothing to shut down
-    if outcome == "returns":
-        exp.run()
-        assert shut_down == ["server-setup"]
 
 
 # ---------------------------------------------------------------------------

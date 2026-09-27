@@ -13,8 +13,6 @@ import copy
 from argparse import Namespace
 from typing import TYPE_CHECKING, Tuple
 
-import ray
-
 from skyrl.backends.skyrl_train.inference_servers.common import (
     SERVER_PORT_STRIDE,
     VLLM_START_PORT,
@@ -63,7 +61,10 @@ def teacher_start_port(cfg) -> int:
 
 
 def launch_teacher(cfg) -> Tuple["RemoteInferenceClient", "InferenceServerSetup"]:
-    """Launch the teacher deployment and return the client that drives it plus the setup to tear down.
+    """Launch the teacher deployment; return the client that drives it and the setup that owns its actors.
+
+    Keep the setup referenced for the run: Ray terminates a non-detached actor once every handle to
+    it is gone, and the setup's server groups hold the only handles.
 
     Blocks until every server answers ``/health``. The deployment creates its own placement group;
     a GPU budget the cluster cannot satisfy surfaces as that group's timeout
@@ -85,13 +86,3 @@ def launch_teacher(cfg) -> Tuple["RemoteInferenceClient", "InferenceServerSetup"
         log_path=cfg.trainer.log_path,
         start_port=teacher_start_port(cfg),
     )
-
-
-def shutdown_teacher(server_setup: "InferenceServerSetup") -> None:
-    """Stop the router and the server actors, then release the placement group(s) the launch created."""
-    if server_setup.router is not None:
-        server_setup.router.shutdown()
-    for group in server_setup.server_groups:
-        group.shutdown()
-    for placement_group in server_setup.placement_groups:
-        ray.util.remove_placement_group(placement_group.pg)

@@ -43,8 +43,6 @@ class InferenceServerSetup:
     proxy (no internal ``VLLMRouter`` is started). The three
     server-group lists default to empty when servers are external or
     when the relevant branch (PD vs non-PD) is not active.
-    ``placement_groups`` holds the groups this module created (none
-    when colocated or external).
     """
 
     proxy_url: str
@@ -53,8 +51,6 @@ class InferenceServerSetup:
     server_groups: List[ServerGroup] = field(default_factory=list)
     prefill_server_groups: List[ServerGroup] = field(default_factory=list)
     decode_server_groups: List[ServerGroup] = field(default_factory=list)
-    placement_groups: List[ResolvedPlacementGroup] = field(default_factory=list)
-    """Placement groups ``create_inference_servers`` made itself (non-colocated only), for teardown."""
 
 
 def create_inference_servers(
@@ -110,7 +106,6 @@ def create_inference_servers(
 
         # When not colocated, create separate shared PGs for prefill and
         # decode groups so that bundle offsets index into a valid range.
-        created_pgs: List[ResolvedPlacementGroup] = []
         if placement_group is None:
             prefill_total_gpus = num_prefill * gpus_per_server * servers_per_group
             prefill_bundles = [{"GPU": 1, "CPU": 1} for _ in range(prefill_total_gpus)]
@@ -123,7 +118,6 @@ def create_inference_servers(
             raw_decode_pg = ray_placement_group(decode_bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(raw_decode_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
             decode_pg = ResolvedPlacementGroup(raw_decode_pg)
-            created_pgs = [prefill_pg, decode_pg]
         else:
             prefill_pg = placement_group
             decode_pg = placement_group
@@ -220,19 +214,16 @@ def create_inference_servers(
             server_groups=prefill_server_groups + decode_server_groups,
             prefill_server_groups=prefill_server_groups,
             decode_server_groups=decode_server_groups,
-            placement_groups=created_pgs,
         )
     else:
         # When not colocated, create a shared PG for all engine groups so
         # that bundle offsets index into a valid range.
-        created_pgs: List[ResolvedPlacementGroup] = []
         if placement_group is None:
             total_gpus = ie_cfg.num_engines * gpus_per_server * ie_cfg.data_parallel_size
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(total_gpus)]
             raw_pg = ray_placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
             placement_group = ResolvedPlacementGroup(raw_pg)
-            created_pgs = [placement_group]
 
         server_groups = [
             ServerGroup(
@@ -269,7 +260,6 @@ def create_inference_servers(
             proxy_url=proxy_url,
             server_urls=server_urls,
             server_groups=server_groups,
-            placement_groups=created_pgs,
         )
 
 
