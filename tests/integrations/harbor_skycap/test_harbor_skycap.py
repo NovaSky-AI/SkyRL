@@ -246,3 +246,31 @@ async def test_the_service_writes_open_trajectories_when_stopped(router, tmp_pat
     await asyncio.to_thread(service.stop)
 
     assert (tmp_path / f"{created['id']}.json.zst").exists()
+
+
+@pytest.mark.asyncio
+async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(router, tmp_path) -> None:
+    """Terminus-2 talks to skycap through LiteLLM's `hosted_vllm/` provider, which splits `<think>`
+    out of `content` unless the reply carries `reasoning_content: null` the way vLLM's does."""
+    import litellm
+
+    router.reply = "<think>\nhmm\n</think>\n\nanswer"
+    backend = TokensBackend(router.url, FakeRenderer(), engine=SkyRLEngine(), model="policy", raw_content=True)
+    service = SkycapService(backend, record_dir=str(tmp_path), host="127.0.0.1")
+    service.start()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{service.url}/trajectories", json={"meta": {}}) as response:
+                created = await response.json()
+        history = [{"role": "user", "content": "q"}]
+        for _ in range(2):
+            reply = await litellm.acompletion(
+                model="hosted_vllm/policy", messages=history, api_base=created["base_url"], api_key="k"
+            )
+            content = reply.choices[0].message.content
+            assert content.startswith("<think>")
+            history += [{"role": "assistant", "content": content}, {"role": "user", "content": "more"}]
+        graph = service.server.trajectories[created["id"]].graph
+        assert len(graph.paths()) == 1
+    finally:
+        await asyncio.to_thread(service.stop)

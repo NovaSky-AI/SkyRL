@@ -79,6 +79,8 @@ class FakeRenderer:
 class MockRouter:
     def __init__(self) -> None:
         self.url = ""
+        #: Set to answer every call with this text (plus the end token) instead of ``re<n>``.
+        self.reply: str | None = None
         self.requests: list[dict[str, Any]] = []
         self.sessions: list[str] = []
         self.released: list[str] = []
@@ -94,7 +96,7 @@ class MockRouter:
         self.requests.append(body)
         self.sessions.append(request.headers.get("X-Session-ID", ""))
         prompt = body["token_ids"]
-        completion = [*encode(f"re{len(prompt)}"), END]
+        completion = [*encode(self.reply if self.reply is not None else f"re{len(prompt)}"), END]
         total = len(prompt) + len(completion)
         rows = np.arange(total - 1) % 256
         routed = np.broadcast_to(rows[:, None, None], (total - 1, LAYERS, EXPERTS_PER_TOKEN)).astype(np.uint8)

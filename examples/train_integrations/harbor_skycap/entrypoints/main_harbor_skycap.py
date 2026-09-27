@@ -47,6 +47,11 @@ class SkycapConfig:
     """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
     renderer_pool_size: int = 8
     """Renderers (tokenizer copies) each server renders prompts with in parallel."""
+    raw_content: bool = True
+    """Answer with the completion's own text as ``content``, a thinking model's reasoning inline, as
+    SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
+    ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
+    replies every replayed turn would lose its reasoning, edit history and fork the graph."""
 
 
 @dataclass
@@ -74,6 +79,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
             "min_p": sampling.min_p,
         },
         "sampling_mask": ie.enable_return_sample_support_set,
+        "raw_content": cfg.skycap.raw_content,
     }
     return start_servers(
         settings,
