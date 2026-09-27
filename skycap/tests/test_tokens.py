@@ -194,9 +194,9 @@ async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
         assert [len(s.targets) for s in samples] == [1, 1]
 
 
-async def test_raw_content_keeps_reasoning_inline_so_a_verbatim_replay_stays_one_path() -> None:
+async def test_use_raw_content_keeps_reasoning_inline_so_a_verbatim_replay_stays_one_path() -> None:
     thinking = [*encode("THINK:hmm|answer"), END]
-    async with token_stack(completion=lambda prompt, sampling: thinking, raw_content=True) as stack:
+    async with token_stack(completion=lambda prompt, sampling: thinking, use_raw_content=True) as stack:
         created = await stack.create()
         llm = client(created["base_url"])
         raw = await stack.http.post(
