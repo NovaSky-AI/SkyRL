@@ -205,7 +205,7 @@ def build_trainer_engine(
     source = source_factory(dtype, backend)
     draft_source = None
     # Every supported speculative method (MTP) drafts from the policy checkpoint.
-    if ie_cfg.speculative_config is not None:
+    if getattr(ie_cfg, "speculative_config", None) is not None:
         if backend == "sharded_rdt":
             raise ValueError("sharded_rdt cannot sync the spec-decode drafter; use the nccl or delta backend.")
         draft_source = draft_source_factory(dtype)

@@ -410,6 +410,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(ray_init_fixt
     for i, resp_ids in enumerate(generator_output["response_ids"]):
         loss_mask = generator_output["loss_masks"][i]
         prompt_token_ids = generator_output["prompt_token_ids"][i]
+        stop_reason = generator_output["stop_reasons"][i]
         masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
         masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
 
@@ -435,9 +436,12 @@ async def test_generator_formatting_no_use_conversation_multi_turn(ray_init_fixt
         ), "the single generation prompt should be included in the prompt"
 
         # count number of eos tokens in masked_in_resp_ids
-        assert (
-            sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
-        )  # 1 eos for each assistant response
+        if stop_reason == "stop":
+            assert (
+                sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
+            )  # 1 eos for the final assistant response
+        else:
+            logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
         if model_name == "Qwen/Qwen3-0.6B":
             assert (
                 sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
