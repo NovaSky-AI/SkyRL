@@ -275,7 +275,24 @@ class TokensBackend:
         return retry.committed(out) if recorded else out
 
     def _raw_reply(self, completion_ids: list[int], prompt_ids: list[int]) -> dict[str, Any]:
-        """The completion as text, without its stop token: what vLLM returns with no parsers."""
+        """The completion as text, without its stop token: what vLLM returns with no parsers.
+
+        The harness replays this ``content`` as the assistant message of its next request, so it
+        has to be the text that renders back to exactly the sampled tokens. The chat template
+        closes every assistant turn with its own end-of-turn token, so the text must not carry
+        one. With Qwen3, a completion sampled as ``done<|im_end|>``, ids ``[10438, 151645]``:
+
+        * returned as ``"done"``, the replayed turn renders as ``done <|im_end|>``,
+          ``[10438, 151645]``, the sampled tokens;
+        * returned as ``"done<|im_end|>"``, the literal ``<|im_end|>`` encodes to 151645 too, and
+          the template adds its own: ``[10438, 151645, 151645]``, an end token the model never
+          sampled. Wherever skycap renders that history rather than reusing the sampled tokens, the
+          turn no longer matches what was sampled and the trajectory forks. The harness also sees
+          a stray ``<|im_end|>`` that vLLM would never have returned.
+
+        So trailing stop tokens are dropped before decoding. Only trailing ones: generation ends at
+        the first stop token, so none can sit mid-completion. The recorded tokens keep theirs.
+        """
         stops = set(self.renderer.stop_token_ids())
         end = len(completion_ids)
         while end and completion_ids[end - 1] in stops:
