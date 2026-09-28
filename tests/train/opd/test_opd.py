@@ -5,6 +5,7 @@ uv run --isolated --extra dev pytest tests/train/opd/test_opd.py
 """
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -184,16 +185,19 @@ def _vllm_response(prompt_len: int, ids: List[int], logprobs: List[float]) -> Di
     return {"choices": [{"text": "x", "logprobs": None, "prompt_logprobs": entries}]}
 
 
-def test_vllm_client_rejects_missing_model_and_urls():
+def test_vllm_client_rejects_missing_model_and_bad_url():
     with pytest.raises(ValueError, match="model name"):
-        VLLMTeacherClient("", server_urls=["http://a:8000"])
+        VLLMTeacherClient("", server_url="http://a:8000")
     with pytest.raises(ValueError, match="server url"):
-        VLLMTeacherClient("m", server_urls=[])
+        VLLMTeacherClient("m", server_url="")
+    with pytest.raises(ValueError, match="trailing /v1"):
+        VLLMTeacherClient("m", server_url="http://a:8000/v1/")
 
 
 @pytest.mark.asyncio
-async def test_vllm_request_parse_and_round_robin():
-    client = VLLMTeacherClient("teacher", server_urls=["http://a:8000/", "http://b:8000"])
+async def test_vllm_request_and_parse():
+    client = VLLMTeacherClient("teacher", server_url="http://a:8000/")
+    assert client.server_url == "http://a:8000"
     seen: Dict[str, Any] = {}
 
     async def fake_post(body):
@@ -206,16 +210,57 @@ async def test_vllm_request_parse_and_round_robin():
     assert out == [-0.5, -0.25, -0.125]
     assert seen["prompt"] == [10, 11, 30, 31, 32]
     assert seen["model"] == "teacher" and seen["max_tokens"] == 1 and seen["prompt_logprobs"] == 0
-    assert [client._next_url() for _ in range(3)] == [
-        "http://a:8000/v1/completions",
-        "http://b:8000/v1/completions",
-        "http://a:8000/v1/completions",
-    ]
+
+
+@pytest.mark.asyncio
+async def test_vllm_client_retries_on_the_same_endpoint():
+    # One endpoint per teacher: a retry backs off and goes to the same URL; balancing replicas is the
+    # endpoint's (router's) job.
+    client = VLLMTeacherClient("teacher", server_url="http://router:9000", max_retries=1)
+
+    class FakeResponse:
+        request_info = SimpleNamespace(real_url="http://router:9000/v1/completions")
+        history = ()
+
+        def __init__(self, status, payload=None):
+            self.status, self.payload = status, payload
+
+        async def text(self):
+            return "busy"
+
+        async def json(self):
+            return self.payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeSession:
+        closed = False
+
+        def __init__(self):
+            self.urls = []
+            self.responses = [FakeResponse(503), FakeResponse(200, _vllm_response(1, [30], [-0.5]))]
+
+        def post(self, url, json):
+            self.urls.append(url)
+            return self.responses.pop(0)
+
+    session = FakeSession()
+
+    async def fake_get_session():
+        return session
+
+    client._get_session = fake_get_session  # type: ignore[method-assign]
+    assert await client.compute_logprobs([10], [30]) == [-0.5]
+    assert session.urls == ["http://router:9000/v1/completions"] * 2
 
 
 @pytest.mark.asyncio
 async def test_vllm_wrong_token_id_and_short_response_raise():
-    client = VLLMTeacherClient("teacher", server_urls=["http://a:8000"])
+    client = VLLMTeacherClient("teacher", server_url="http://a:8000")
 
     async def scored_a_different_token(body):
         return _vllm_response(prompt_len=1, ids=[99], logprobs=[-1.0])  # we sent 30
@@ -282,7 +327,7 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
     )
     validate_opd_cfg(
         OPDExpConfig.from_cli_overrides(
-            ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_urls=['http://a:8000']"]
+            ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_url=http://a:8000"]
         )
     )
 
@@ -293,11 +338,15 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
         ([], "trainer.teacher.model must be set"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=bogus"], "backend must be one of"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=fireworks"], "backend must be one of"),  # removed
-        (["trainer.teacher.model=m", "trainer.teacher.backend=vllm"], "server_urls"),
+        (["trainer.teacher.model=m", "trainer.teacher.backend=vllm"], "requires trainer.teacher.server_url"),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_url=http://a:8000/v1"],
+            "trailing /v1",
+        ),
         # The two backends are exclusive: the other backend's fields are a config error, not a no-op.
         (
-            ["trainer.teacher.model=m", "trainer.teacher.server_urls=['http://a:8000']"],
-            "server_urls is for backend='vllm'",
+            ["trainer.teacher.model=m", "trainer.teacher.server_url=http://a:8000"],
+            "server_url is for backend='vllm'",
         ),
         (
             ["trainer.teacher.model=m", "trainer.teacher.inference_engine.run_engines_locally=false"],
@@ -329,7 +378,7 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
             [
                 "trainer.teacher.model=m",
                 "trainer.teacher.backend=vllm",
-                "trainer.teacher.server_urls=['http://a:8000']",
+                "trainer.teacher.server_url=http://a:8000",
                 "trainer.teacher.inference_engine.num_engines=2",
             ],
             "inference_engine is for backend='skyrl'",
@@ -533,7 +582,7 @@ def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
     monkeypatch.setattr(main_opd, "launch_teacher", lambda cfg: pytest.fail("must not launch"))
     exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
     exp.cfg = OPDExpConfig.from_cli_overrides(
-        ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_urls=['http://a:8000']"]
+        ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_url=http://a:8000"]
     )
     assert isinstance(exp.get_teacher_client(), VLLMTeacherClient)
 

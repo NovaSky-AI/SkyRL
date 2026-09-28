@@ -15,9 +15,9 @@ Backends:
 - ``SkyRLTeacherClient``: a vLLM deployment this job launched (``trainer.teacher.backend="skyrl"``),
   driven through its ``RemoteInferenceClient`` exactly as the student's engines are; scoring goes
   through the client's ``sample()`` with ``include_prompt_logprobs``.
-- ``VLLMTeacherClient``: vLLM servers you started (a stock ``vllm serve`` or SkyRL's ``serve``
-  entrypoint), through the OpenAI-compatible ``/v1/completions`` with vLLM's ``prompt_logprobs``
-  parameter.
+- ``VLLMTeacherClient``: one vLLM endpoint you run per teacher model (a stock ``vllm serve``, or a
+  router in front of several servers such as the one SkyRL's ``serve`` entrypoint starts), through the
+  OpenAI-compatible ``/v1/completions`` with vLLM's ``prompt_logprobs`` parameter.
 
 ``VLLMTeacherClient`` is over ``aiohttp`` so the package adds no dependency. Neither is an
 ``InferenceEngineInterface`` implementation, deliberately: a frozen teacher never sleeps, wakes,
@@ -97,76 +97,6 @@ class TeacherLogprobClient(abc.ABC):
         return None
 
 
-class _HttpTeacherClient(TeacherLogprobClient):
-    """Shared HTTP plumbing for teachers behind a completions endpoint.
-
-    One ``aiohttp`` session per event loop (a session is bound to the loop that created it),
-    round-robin over ``urls``, and ``_post`` with exponential backoff on timeouts, connection errors
-    and retryable statuses.
-    """
-
-    def __init__(
-        self,
-        urls: List[str],
-        *,
-        max_concurrency: int = 32,
-        request_timeout_s: float = 120.0,
-        max_retries: int = 3,
-    ):
-        super().__init__(max_concurrency=max_concurrency)
-        if not urls:
-            raise ValueError("at least one server url is required")
-        self._urls = [url.rstrip("/") for url in urls]
-        self._next = 0
-        self._headers = {"Content-Type": "application/json"}
-        self._timeout = aiohttp.ClientTimeout(total=request_timeout_s)
-        self._max_retries = max(0, max_retries)
-        self._sessions: Dict[asyncio.AbstractEventLoop, aiohttp.ClientSession] = {}
-
-    def _next_url(self) -> str:
-        url = self._urls[self._next % len(self._urls)]
-        self._next += 1
-        return url
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        loop = asyncio.get_running_loop()
-        session = self._sessions.get(loop)
-        if session is None or session.closed:
-            session = aiohttp.ClientSession(timeout=self._timeout, headers=self._headers)
-            self._sessions[loop] = session
-        return session
-
-    async def _post(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """POST ``body`` to the next server. A retry goes to the next server too."""
-        session = await self._get_session()
-        for attempt in range(self._max_retries + 1):
-            url = self._next_url()
-            try:
-                async with session.post(url, json=body) as resp:
-                    if resp.status in _HTTP_RETRY_STATUSES:
-                        raise aiohttp.ClientResponseError(
-                            resp.request_info, resp.history, status=resp.status, message=await resp.text()
-                        )
-                    if resp.status >= 400:
-                        raise RuntimeError(f"teacher HTTP {resp.status} from {url}: {(await resp.text())[:500]}")
-                    return await resp.json()
-            except (asyncio.TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientResponseError) as exc:
-                if attempt >= self._max_retries:
-                    raise RuntimeError(
-                        f"teacher request to {url} failed after {attempt + 1} attempt(s): {exc}"
-                    ) from exc
-                delay = min(8.0, 0.5 * (2**attempt)) * (1.0 + 0.25 * random.random())
-                logger.warning(f"teacher request to {url} failed ({exc}); retrying in {delay:.1f}s")
-                await asyncio.sleep(delay)
-        raise AssertionError("unreachable")
-
-    async def aclose(self) -> None:
-        sessions, self._sessions = list(self._sessions.values()), {}
-        for session in sessions:
-            if not session.closed:
-                await session.close()
-
-
 def _vllm_prompt_logprob(entry: Any, token_id: int) -> float:
     """The logprob of ``token_id`` in one vLLM ``prompt_logprobs`` entry.
 
@@ -191,8 +121,30 @@ def _vllm_prompt_logprob(entry: Any, token_id: int) -> float:
     return float(logprob)
 
 
-class VLLMTeacherClient(_HttpTeacherClient):
-    """Teacher on vLLM servers you started, scored through the OpenAI-compatible ``/v1/completions``.
+def normalize_server_url(server_url: Optional[str]) -> str:
+    """Validate a vLLM teacher's server root and drop a trailing slash.
+
+    The client appends ``/v1/completions``, so a URL that already ends in ``/v1`` (the OpenAI SDK's
+    ``base_url`` convention) would request ``/v1/v1/completions``; it is refused instead.
+    """
+    url = (server_url or "").strip().rstrip("/")
+    if not url:
+        raise ValueError("vLLM teacher needs a server url, e.g. http://host:8000")
+    if url.endswith("/v1"):
+        raise ValueError(
+            "server_url is the server root and the client appends /v1/completions; drop the trailing /v1 from "
+            f"{server_url!r}"
+        )
+    return url
+
+
+class VLLMTeacherClient(TeacherLogprobClient):
+    """Teacher behind one vLLM endpoint you run, scored through the OpenAI-compatible ``/v1/completions``.
+
+    ``server_url`` is this teacher model's one endpoint: a single ``vllm serve``, a data-parallel one, or
+    a router in front of several servers (SkyRL's ``serve`` entrypoint starts one and logs it as
+    ``proxy_url``). Spreading requests over replicas is the endpoint's job; the client neither
+    round-robins nor fails over.
 
     Request: integer prompt ``prompt_ids + response_ids``, ``max_tokens=1`` (vLLM refuses 0; the
     generated token is discarded), ``temperature=1.0`` and vLLM's ``prompt_logprobs=0``: zero top-k
@@ -200,34 +152,72 @@ class VLLMTeacherClient(_HttpTeacherClient):
     it), which is the value SkyRL's own Tinker-compatible sampling path sends for the same purpose.
     The choice's ``prompt_logprobs`` has one entry per prompt token; the last ``len(response_ids)``
     entries are looked up by the token id that was sent, so a tokenizer mismatch surfaces as a
-    missing id rather than a wrong number. Works against a stock ``vllm serve`` and against SkyRL's
-    ``serve`` entrypoint. ``model_name`` is the served model name.
+    missing id rather than a wrong number. ``model_name`` is the served model name.
+
+    Transport: one ``aiohttp`` session per event loop (a session is bound to the loop that created
+    it); timeouts, connection errors and retryable statuses are retried on the same endpoint with
+    exponential backoff.
     """
 
     def __init__(
         self,
         model_name: str,
         *,
-        server_urls: List[str],
+        server_url: str,
         max_concurrency: int = 32,
         request_timeout_s: float = 120.0,
         max_retries: int = 3,
     ):
+        super().__init__(max_concurrency=max_concurrency)
         if not model_name:
             raise ValueError("vLLM teacher needs the served model name, e.g. Qwen/Qwen3-32B")
-        if not server_urls:
-            raise ValueError("vLLM teacher needs at least one server url, e.g. http://host:8000")
-        super().__init__(
-            [f"{url.rstrip('/')}/v1/completions" for url in server_urls],
-            max_concurrency=max_concurrency,
-            request_timeout_s=request_timeout_s,
-            max_retries=max_retries,
-        )
         self._model_name = model_name
+        self._server_url = normalize_server_url(server_url)
+        self._completions_url = f"{self._server_url}/v1/completions"
+        self._headers = {"Content-Type": "application/json"}
+        self._timeout = aiohttp.ClientTimeout(total=request_timeout_s)
+        self._max_retries = max(0, max_retries)
+        self._sessions: Dict[asyncio.AbstractEventLoop, aiohttp.ClientSession] = {}
 
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    @property
+    def server_url(self) -> str:
+        return self._server_url
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        loop = asyncio.get_running_loop()
+        session = self._sessions.get(loop)
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(timeout=self._timeout, headers=self._headers)
+            self._sessions[loop] = session
+        return session
+
+    async def _post(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST ``body`` to the endpoint, retrying transient failures on it with exponential backoff."""
+        url = self._completions_url
+        session = await self._get_session()
+        for attempt in range(self._max_retries + 1):
+            try:
+                async with session.post(url, json=body) as resp:
+                    if resp.status in _HTTP_RETRY_STATUSES:
+                        raise aiohttp.ClientResponseError(
+                            resp.request_info, resp.history, status=resp.status, message=await resp.text()
+                        )
+                    if resp.status >= 400:
+                        raise RuntimeError(f"teacher HTTP {resp.status} from {url}: {(await resp.text())[:500]}")
+                    return await resp.json()
+            except (asyncio.TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientResponseError) as exc:
+                if attempt >= self._max_retries:
+                    raise RuntimeError(
+                        f"teacher request to {url} failed after {attempt + 1} attempt(s): {exc}"
+                    ) from exc
+                delay = min(8.0, 0.5 * (2**attempt)) * (1.0 + 0.25 * random.random())
+                logger.warning(f"teacher request to {url} failed ({exc}); retrying in {delay:.1f}s")
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")
 
     async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[float]:
         body = {
@@ -251,6 +241,12 @@ class VLLMTeacherClient(_HttpTeacherClient):
             raise RuntimeError(f"vLLM returned {len(prompt_logprobs)} prompt logprobs for {expected} tokens")
         tail = list(prompt_logprobs)[-len(response_ids) :]
         return [_vllm_prompt_logprob(entry, token_id) for entry, token_id in zip(tail, response_ids)]
+
+    async def aclose(self) -> None:
+        sessions, self._sessions = list(self._sessions.values()), {}
+        for session in sessions:
+            if not session.closed:
+                await session.close()
 
 
 class SkyRLTeacherClient(TeacherLogprobClient):

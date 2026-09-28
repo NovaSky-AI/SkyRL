@@ -53,9 +53,10 @@ setting the other's fields is a config error.
   teacher placement group's timeout. Defaults that differ from the student's block: prefix caching off
   (scoring requests never read it), `gpu_memory_utilization` 0.9, Ray Prometheus stats off; `max_model_len`
   defaults to the longest input + longest response + 1. Never weight-synced or slept.
-- `trainer.teacher.backend=vllm`: vLLM servers you started (a stock `vllm serve` or SkyRL's `serve`
-  entrypoint), given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible
-  `/v1/completions` with vLLM's `prompt_logprobs` parameter. `trainer.teacher.model` is the served model name.
+- `trainer.teacher.backend=vllm`: one vLLM endpoint you run per teacher model, given by
+  `trainer.teacher.server_url`: a stock `vllm serve`, or a router in front of several servers, such as the
+  `proxy_url` that SkyRL's `serve` entrypoint logs. Scored through the OpenAI-compatible `/v1/completions`
+  with vLLM's `prompt_logprobs` parameter; `trainer.teacher.model` is the served model name.
 
 There are no preflight checks yet: nothing verifies the teacher's tokenizer or context length before
 training (a launched teacher gets its context by construction; a TODO in

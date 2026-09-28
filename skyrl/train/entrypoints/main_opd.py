@@ -24,7 +24,7 @@ Usage (teacher launched by the job on its own GPUs):
         data.train_data="['$HOME/data/dapo/dapo-math-17k-cleaned.parquet']" \\
         environment.env_class=aime ...
 
-Servers you run instead: ``trainer.teacher.backend=vllm trainer.teacher.server_urls=[...]``. Run scripts:
+A server you run instead: ``trainer.teacher.backend=vllm trainer.teacher.server_url=http://host:8000``. Run scripts:
 ``examples/train/on_policy_distillation/``.
 """
 
@@ -64,7 +64,7 @@ class OPDExp(BasePPOExp):
         if teacher.backend == "vllm":
             return VLLMTeacherClient(
                 teacher.model,
-                server_urls=list(teacher.server_urls),
+                server_url=teacher.server_url,
                 max_concurrency=teacher.max_concurrency,
                 request_timeout_s=teacher.request_timeout_s,
                 max_retries=teacher.max_retries,

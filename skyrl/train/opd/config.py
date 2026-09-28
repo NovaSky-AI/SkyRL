@@ -12,7 +12,7 @@ Adds two blocks to the standard config and changes two algorithm defaults:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from loguru import logger
 
@@ -27,6 +27,7 @@ from skyrl.train.config import (
     make_config,
 )
 from skyrl.train.config.config import BaseConfig
+from skyrl.train.opd.teacher_client import normalize_server_url
 
 TEACHER_BACKENDS = ("skyrl", "vllm")
 
@@ -69,8 +70,7 @@ class TeacherConfig(BaseConfig):
     """Which service scores the teacher: ``"skyrl"`` or ``"vllm"``.
     ``"skyrl"`` (default): this job launches a vLLM deployment from ``inference_engine`` on its own GPUs and
     drives it through a ``RemoteInferenceClient``, as it does the student's engines. ``"vllm"``:
-    OpenAI-compatible vLLM servers you run (a stock ``vllm serve`` or SkyRL's ``serve`` entrypoint), named
-    by ``server_urls``. Each backend reads only its own fields; setting the other's is a config error."""
+    one OpenAI-compatible vLLM endpoint you run for the teacher model, at ``server_url``. Each backend reads only its own fields; setting the other's is a config error."""
     model: str = ""
     """The teacher model; what it names depends on the backend.
     ``skyrl``: an HF id or local path the job loads, e.g. ``Qwen/Qwen3-32B``. ``vllm``: the served model
@@ -81,9 +81,11 @@ class TeacherConfig(BaseConfig):
     to a frozen model and are rejected when set. Defaults that differ from the student's: prefix caching
     off, ``gpu_memory_utilization`` 0.9, Ray Prometheus stats off. ``engine_init_kwargs.max_model_len``
     defaults to the longest input plus the longest response plus one."""
-    server_urls: Optional[List[str]] = None
-    """Base URLs of the vLLM servers for ``backend="vllm"``, e.g. ``["http://host:8000"]``.
-    Requests round-robin across them, and a retry moves to the next one."""
+    server_url: Optional[str] = None
+    """Root URL of the one vLLM endpoint serving the teacher for ``backend="vllm"``, e.g. ``"http://host:8000"``.
+    A single server, a data-parallel one, or a router in front of several (SkyRL's ``serve`` entrypoint
+    starts one and logs it as ``proxy_url``); spreading requests over replicas is the endpoint's job. The
+    client appends ``/v1/completions``, so leave off a trailing ``/v1``."""
     max_concurrency: int = 32
     """Maximum teacher requests in flight, for every backend.
     A launched teacher is also capped by its ``RemoteInferenceClient``'s per-engine limit
@@ -148,17 +150,17 @@ _FROZEN_ENGINE_FIELDS_MUST_BE_NONE = (
 def _validate_launched_teacher(cfg, teacher: TeacherConfig) -> None:
     """``backend="skyrl"``: the job launches the teacher, so nothing may point elsewhere."""
     ie_cfg: TeacherEngineConfig = teacher.inference_engine
-    if teacher.server_urls is not None:
+    if teacher.server_url is not None:
         raise ValueError(
-            "trainer.teacher.server_urls is for backend='vllm' (servers you run); backend='skyrl' launches the "
+            "trainer.teacher.server_url is for backend='vllm' (a server you run); backend='skyrl' launches the "
             "teacher in this job from trainer.teacher.inference_engine"
         )
     if ie_cfg.backend != "vllm":
         raise ValueError(f"trainer.teacher.inference_engine.backend must be 'vllm', got {ie_cfg.backend!r}")
     if not ie_cfg.run_engines_locally:
         raise ValueError(
-            "trainer.teacher.inference_engine.run_engines_locally must be true for backend='skyrl'; for servers "
-            "you run use backend='vllm' with trainer.teacher.server_urls"
+            "trainer.teacher.inference_engine.run_engines_locally must be true for backend='skyrl'; for a server "
+            "you run use backend='vllm' with trainer.teacher.server_url"
         )
     for name in _FROZEN_ENGINE_FIELDS_MUST_BE_OFF:
         if getattr(ie_cfg, name):
@@ -202,8 +204,9 @@ def validate_opd_cfg(cfg) -> None:
     if teacher.backend == "skyrl":
         _validate_launched_teacher(cfg, teacher)
     elif teacher.backend == "vllm":
-        if not teacher.server_urls:
-            raise ValueError("trainer.teacher.backend='vllm' requires trainer.teacher.server_urls")
+        if not teacher.server_url:
+            raise ValueError("trainer.teacher.backend='vllm' requires trainer.teacher.server_url")
+        normalize_server_url(teacher.server_url)  # refuses a trailing /v1 before anything launches
         _reject_launch_settings(teacher)
     if teacher.max_concurrency <= 0:
         raise ValueError("trainer.teacher.max_concurrency must be positive")
