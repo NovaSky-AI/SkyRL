@@ -168,7 +168,9 @@ class TokensBackend:
         try:
             planned = await asyncio.to_thread(turn.plan, graph, self.renderer, chat.messages, chat.tools, matches)
             # A first call has nothing to extend; after that, not extending is worth reporting.
-            follows_a_call = any(node.author == "model" for node in graph)
+            # A call commits its messages and its reply together (``turn.commit``), so the graph
+            # has nodes exactly when an earlier call went through.
+            follows_a_call = bool(graph.nodes)
         except turn.TokenError as error:
             return _error(str(error), 400)
 
