@@ -49,6 +49,9 @@ class TrialOutcome:
     # One of: "complete", "context_length", "agent_timeout", "error".
     stop_reason: str = "complete"
     e2e_time: Optional[float] = None
+    # Model calls whose prompt skycap had to render instead of extending the previous tokens:
+    # expected for a harness that edits or compacts its history, a surprise for an append-only one.
+    unbridged_calls: int = 0
 
 
 @dataclass
@@ -180,4 +183,7 @@ def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_i
     metrics["generate/num_timeout_trajectories"] = sum(o.stop_reason == "agent_timeout" for o in outcomes)
     metrics["generate/num_error_trajectories"] = sum(o.stop_reason == "error" for o in outcomes)
     metrics["generate/num_masked_instances"] = len(masked_instances)
+    # Which trajectories to open in the viewer: each forks at its first unbridged call.
+    metrics["generate/num_unbridged_trajectories"] = sum(o.unbridged_calls > 0 for o in outcomes)
+    metrics["generate/num_unbridged_calls"] = sum(o.unbridged_calls for o in outcomes)
     return metrics

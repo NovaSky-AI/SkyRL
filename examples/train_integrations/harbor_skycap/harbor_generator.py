@@ -204,7 +204,11 @@ class HarborSkycapGenerator(GeneratorInterface):
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
             return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
         return TrialOutcome(
-            trajectory_id=trajectory_id, samples=finished.samples, reward=reward, stop_reason=stop_reason
+            trajectory_id=trajectory_id,
+            samples=finished.samples,
+            reward=reward,
+            stop_reason=stop_reason,
+            unbridged_calls=finished.unbridged_calls,
         )
 
     def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
