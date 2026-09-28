@@ -1474,6 +1474,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         if self._generate_client is not None:
             await self._generate_client.aclose()
 
+    async def close_current_async_session(self) -> None:
+        """Close the HTTP session bound to the running event loop; the client stays usable from other loops."""
+        if self._generate_client is not None:
+            await self._generate_client.aclose()
+
     async def __aenter__(self) -> "RemoteInferenceClient":
         """Async context manager entry."""
         return self

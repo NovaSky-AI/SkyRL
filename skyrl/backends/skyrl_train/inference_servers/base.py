@@ -145,6 +145,16 @@ class InferenceEngineInterface(ABC):
     async def teardown(self):
         raise NotImplementedError
 
+    async def close_current_async_session(self) -> None:
+        """Close async resources, such as HTTP sessions, bound to the running event loop.
+
+        Call it before an ``asyncio.run`` that used the client returns: a session left open on a closed
+        loop can never be closed from another one. Unlike ``teardown``, the client stays usable, and a
+        later call on another loop opens a fresh session. The default does nothing, for clients that hold
+        no per-loop resources.
+        """
+        pass
+
     @abstractmethod
     async def reset_prefix_cache(self, reset_running_requests: bool = False):
         raise NotImplementedError
