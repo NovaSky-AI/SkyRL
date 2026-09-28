@@ -204,7 +204,8 @@ class VLLMServerActor(ServerActorProtocol):
 
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
-        self._port, self._port_reservation = find_and_reserve_port(start_port)
+        self._cli_args.host = default_bind_host(self._ip)
+        self._port, self._port_reservation = find_and_reserve_port(start_port, host=self._cli_args.host)
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
         self._use_mp_backend = distributed_executor_backend == "mp"
@@ -227,8 +228,7 @@ class VLLMServerActor(ServerActorProtocol):
         # Configure the distributed executor backend
         self._cli_args.distributed_executor_backend = distributed_executor_backend
 
-        # Update args with our assigned host/port
-        self._cli_args.host = default_bind_host(self._ip)
+        # Update args with our assigned port
         self._cli_args.port = self._port
 
         # PD disaggregation: setup the KV-transfer side channel for the P2P
