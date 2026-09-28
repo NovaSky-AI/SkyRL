@@ -163,7 +163,7 @@ class SkyrlWeightSyncClient:
         for url, response in zip(self._urls, responses):
             try:
                 body = response.json()
-            except Exception as exc:
+            except ValueError as exc:
                 raise RuntimeError(f"Prefix cache reset failed on {url}: invalid JSON response") from exc
             if not isinstance(body, dict) or body.get("success") is not True:
                 raise RuntimeError(f"Prefix cache reset failed on {url}")

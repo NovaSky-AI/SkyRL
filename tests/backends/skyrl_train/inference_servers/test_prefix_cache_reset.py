@@ -141,6 +141,14 @@ def test_only_native_reset_route(backends):
 
 
 @pytest.mark.asyncio
+async def test_sync_invalid_json_names_server(backends):
+    backends[0].app.state.engine_client.reply = Response(b"not-json", media_type="application/json")
+    with pytest.raises(RuntimeError, match=f"{backends[0].url}: invalid JSON response") as error:
+        await reset(backends, "sync", reset_running_requests=True)
+    assert isinstance(error.value.__cause__, ValueError)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["async", "sync"])
 @pytest.mark.parametrize("failed_server", [0, 1])
 async def test_native_rejection_is_fatal(backends, transport, failed_server):
