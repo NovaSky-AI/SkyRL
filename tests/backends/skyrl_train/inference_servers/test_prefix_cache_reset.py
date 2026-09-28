@@ -9,6 +9,7 @@ from functools import partial
 from types import SimpleNamespace
 
 import aiohttp
+import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
@@ -16,8 +17,11 @@ from fastapi.responses import JSONResponse, Response
 
 pytest.importorskip("vllm")
 
+from vllm import platforms
 from vllm.entrypoints.serve.dev.cache.api_router import attach_router
+from vllm.platforms.interface import UnspecifiedPlatform
 
+from skyrl.backends.skyrl_train.inference_servers import vllm_server_actor
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
 )
@@ -138,6 +142,26 @@ def test_only_native_reset_route(backends):
     for backend in backends:
         routes = [route for route in backend.app.routes if getattr(route, "path", None) == "/reset_prefix_cache"]
         assert len(routes) == 1
+
+
+@pytest.mark.asyncio
+async def test_production_app_exposes_native_reset_route(monkeypatch):
+    monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
+    monkeypatch.setattr(platforms, "_current_platform", UnspecifiedPlatform())
+    cli_args = vllm_server_actor._build_standalone_cli_args([])
+    cli_args.enable_scale_out = True
+    app = vllm_server_actor.build_app(cli_args)
+    engine = CacheEngine()
+    app.state.engine_client = engine
+    VLLMServerActor._add_custom_endpoints(app, engine, cli_args)
+    routes = [route for route in app.routes if getattr(route, "path", None) == "/reset_prefix_cache"]
+    assert len(routes) == 1
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/reset_prefix_cache", params={"reset_running_requests": "true"})
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+    assert engine.calls == [(True, False)]
 
 
 @pytest.mark.asyncio
