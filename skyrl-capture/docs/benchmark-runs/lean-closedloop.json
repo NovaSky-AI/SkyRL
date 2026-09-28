@@ -1,0 +1,171 @@
+{
+  "configuration": {
+    "requests_per_arm": 3000,
+    "load_processes": 2,
+    "concurrency_per_process": 4,
+    "aggregate_concurrency": 8,
+    "streaming": false,
+    "duration_seconds": null,
+    "target_rps": null,
+    "python": "3.13.3",
+    "platform": "darwin",
+    "cpu_count": 10,
+    "uvloop": true
+  },
+  "arms": {
+    "calibration_upstream_direct": {
+      "name": "upstream direct (no proxy)",
+      "requests": 3000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 1.1048,
+      "throughput_rps": 2715.4,
+      "latency_ms": {
+        "min": 1.799,
+        "p50": 2.2767,
+        "p95": 2.8932,
+        "p99": 3.3392,
+        "max": 6.1907,
+        "mean": 2.3881,
+        "samples": 3000
+      },
+      "first_byte_ms": null,
+      "capture": {}
+    },
+    "baseline_capture_off": {
+      "name": "capture-off",
+      "requests": 3000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 1.2565,
+      "throughput_rps": 2387.6,
+      "latency_ms": {
+        "min": 1.7312,
+        "p50": 2.7266,
+        "p95": 3.4006,
+        "p99": 3.8652,
+        "max": 5.5455,
+        "mean": 2.7839,
+        "samples": 3000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "dropped": 0,
+        "ingested_exchanges": 0,
+        "note": "capture disabled"
+      }
+    },
+    "capture_on_split_ingestion": {
+      "name": "capture-on (split ingestion)",
+      "requests": 3000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 1.4735,
+      "throughput_rps": 2035.9,
+      "latency_ms": {
+        "min": 1.5823,
+        "p50": 3.3306,
+        "p95": 3.9111,
+        "p99": 4.739,
+        "max": 6.4202,
+        "mean": 3.3448,
+        "samples": 3000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 3008,
+        "dropped": 0,
+        "max_ring_depth": 5,
+        "ring_capacity": 262144,
+        "spool_records": 3008,
+        "spool_bytes": 6091200,
+        "ingested_exchanges": 3008,
+        "ingestion": "separate process"
+      }
+    },
+    "capture_on_in_process_ingestion": {
+      "name": "capture-on (in-process ingestion)",
+      "requests": 3000,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 1.483,
+      "throughput_rps": 2022.9,
+      "latency_ms": {
+        "min": 1.8376,
+        "p50": 3.2271,
+        "p95": 3.8958,
+        "p99": 4.968,
+        "max": 17.9847,
+        "mean": 3.304,
+        "samples": 3000
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 3008,
+        "dropped": 0,
+        "max_ring_depth": 19,
+        "ring_capacity": 262144,
+        "spool_records": 3008,
+        "spool_bytes": 6091200,
+        "ingested_exchanges": 3008,
+        "ingestion": "in process"
+      }
+    }
+  },
+  "deltas": {
+    "capture_on_split_ingestion": {
+      "throughput_ratio_pct": 85.27,
+      "added_latency_p50_ms": 0.604,
+      "added_latency_p95_ms": 0.5105,
+      "added_latency_p99_ms": 0.8738,
+      "added_latency_mean_ms": 0.5609,
+      "added_error_rate_pct_points": 0.0
+    },
+    "capture_on_in_process_ingestion": {
+      "throughput_ratio_pct": 84.73,
+      "added_latency_p50_ms": 0.5005,
+      "added_latency_p95_ms": 0.4952,
+      "added_latency_p99_ms": 1.1028,
+      "added_latency_mean_ms": 0.5201,
+      "added_error_rate_pct_points": 0.0
+    }
+  },
+  "methodology": {
+    "mode": "closed-loop",
+    "note": "Open-loop (--target-rps) paces arrivals below the ceiling and is the only mode in which added latency is meaningful. Closed-loop saturates the proxy and measures the throughput ceiling; its latency deltas are queueing, not per-request cost.",
+    "measured_capture_cpu_cost_us_per_request": 6.5
+  },
+  "thresholds": {
+    "throughput_at_least_99pct_of_baseline": {
+      "passed": false,
+      "observed": "85.27% of baseline",
+      "meaningful": true
+    },
+    "added_p99_latency_at_most_1ms": {
+      "passed": true,
+      "observed": "0.8738 ms",
+      "meaningful": false,
+      "note": "closed-loop run: this difference is queueing at the throughput ceiling, not per-request overhead. Re-run with --target-rps below the ceiling."
+    },
+    "added_error_rate_at_most_0.01pct_points": {
+      "passed": true,
+      "observed": "0.0 points",
+      "meaningful": true
+    },
+    "zero_dropped_capture_events": {
+      "passed": true,
+      "observed": "0 dropped",
+      "meaningful": true
+    },
+    "all_exchanges_ingested": {
+      "passed": true,
+      "observed": "3008 of 3000 successful requests",
+      "meaningful": true
+    }
+  },
+  "harness": {
+    "ceiling_rps": 2715.4,
+    "baseline_fraction_of_ceiling_pct": 87.9,
+    "note": "Ceiling is what this machine reaches with no proxy in the path. Every other number in this report is bounded by it, so it is what tells a reader whether a result is a proxy limit or a harness limit."
+  }
+}

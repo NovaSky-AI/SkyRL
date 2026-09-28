@@ -1,0 +1,34 @@
+{
+ "trajectory": "tr_01M310328E25H55F88067QYX0M",
+ "mode": "text",
+ "tokenizer": null,
+ "paths": [
+  {
+   "path_id": "tr_01M310328E25H55F88067QYX0M-p0000",
+   "node_ids": [
+    "nd_01M310328K58AMSX85XMHDHWTZ",
+    "nd_01M310328KX90BK8VGAC408PSV"
+   ],
+   "leaf_node_id": "nd_01M310328KX90BK8VGAC408PSV",
+   "abandoned": false,
+   "masked_reason": null,
+   "stop_reason": null,
+   "token_count": 0,
+   "trainable_count": 0,
+   "blocking": null,
+   "blocks": [],
+   "messages": [
+    {
+     "role": "user",
+     "author": "client",
+     "chars": 43
+    },
+    {
+     "role": "assistant",
+     "author": "model",
+     "chars": 51
+    }
+   ]
+  }
+ ]
+}

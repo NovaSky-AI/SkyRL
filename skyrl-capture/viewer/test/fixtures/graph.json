@@ -1,0 +1,168 @@
+{
+ "trajectory": "tr_01M3103279ND9DB279AB2W6M4B",
+ "nodes": [
+  {
+   "node_id": "nd_01M310327T3MCBZZY5QQX4JGB3",
+   "parent_node_id": null,
+   "exchange_id": "ex_01M310327TZJJBDY50SXYRJZGK",
+   "depth": 0,
+   "role": "user",
+   "author": "client",
+   "message_hash": "2f40feb306ac18965ade45974b6ba083ed478a22752cae4dce9691c327e4cc47",
+   "delta_hash": "7669daef787fd58e5fa57cc1788cefb34a8961ab3d5c43a494f276ffc09afc8c",
+   "content_block_count": 1,
+   "char_count": 10,
+   "token_count": 18,
+   "sampled_start": null,
+   "sampled_token_count": 0,
+   "has_logprobs": false,
+   "has_routed_experts": false,
+   "tokenizer": "builtin",
+   "inserted_at": "2026-09-21T03:27:55.642761+00:00",
+   "output_started_at": null,
+   "output_ended_at": null,
+   "derivation": {
+    "renderer": "builtin:mock-tokens-model",
+    "reused_prefix_length": 0,
+    "matched_message_count": 0,
+    "bridge_transition_id": null,
+    "derivation_version": 2
+   },
+   "has_payload": true
+  },
+  {
+   "node_id": "nd_01M310327T3R45S4C955YXHQXP",
+   "parent_node_id": "nd_01M310327T3MCBZZY5QQX4JGB3",
+   "exchange_id": "ex_01M310327TZJJBDY50SXYRJZGK",
+   "depth": 1,
+   "role": "assistant",
+   "author": "model",
+   "message_hash": "4798d4b5ad3fa59b7957a4f29e4358fae499eab7c3904109c8cc0734a9814190",
+   "delta_hash": "56bfb9b6dd267b317e3695a8821b38de04977e20fbe89e9a675e75e0e887ef28",
+   "content_block_count": 1,
+   "char_count": 0,
+   "token_count": 17,
+   "sampled_start": 11,
+   "sampled_token_count": 6,
+   "has_logprobs": true,
+   "has_routed_experts": false,
+   "tokenizer": "builtin",
+   "inserted_at": "2026-09-21T03:27:55.642761+00:00",
+   "output_started_at": null,
+   "output_ended_at": "2026-09-21T03:27:55.642639+00:00",
+   "derivation": {
+    "renderer": "builtin:mock-tokens-model",
+    "reused_prefix_length": 0,
+    "matched_message_count": 0,
+    "bridge_transition_id": null,
+    "derivation_version": 2
+   },
+   "has_payload": true
+  },
+  {
+   "node_id": "nd_01M310327X7C46BVBTJYC5Y8G6",
+   "parent_node_id": "nd_01M310327T3MCBZZY5QQX4JGB3",
+   "exchange_id": "ex_01M310327XVAQBK0AXEG1XKVZ8",
+   "depth": 1,
+   "role": "assistant",
+   "author": "client",
+   "message_hash": "1d9509b4b9acb2d43adaaaef0ba5d821f1bd7e97ced6815a759bae1647f15dfa",
+   "delta_hash": "bde6b6997b2fd71aac065d40d365ba43350fe383775d1f1116ad136f233da995",
+   "content_block_count": 1,
+   "char_count": 9,
+   "token_count": 22,
+   "sampled_start": null,
+   "sampled_token_count": 0,
+   "has_logprobs": false,
+   "has_routed_experts": false,
+   "tokenizer": "builtin",
+   "inserted_at": "2026-09-21T03:27:55.645465+00:00",
+   "output_started_at": null,
+   "output_ended_at": null,
+   "derivation": {
+    "renderer": "builtin:mock-tokens-model",
+    "reused_prefix_length": 0,
+    "matched_message_count": 1,
+    "bridge_transition_id": null,
+    "derivation_version": 2
+   },
+   "has_payload": true
+  },
+  {
+   "node_id": "nd_01M310327X0TE0RXPK7HS4BVM9",
+   "parent_node_id": "nd_01M310327X7C46BVBTJYC5Y8G6",
+   "exchange_id": "ex_01M310327XVAQBK0AXEG1XKVZ8",
+   "depth": 2,
+   "role": "user",
+   "author": "client",
+   "message_hash": "616b8fd7268766ef85cdf463784d495fbcf40e36aa9efc452ad737d546e91170",
+   "delta_hash": "92f882c5a5a3fa5a8f2ac6b27ed8334d98e73f4824c4197aadcf1f362962e44e",
+   "content_block_count": 1,
+   "char_count": 8,
+   "token_count": 16,
+   "sampled_start": null,
+   "sampled_token_count": 0,
+   "has_logprobs": false,
+   "has_routed_experts": false,
+   "tokenizer": "builtin",
+   "inserted_at": "2026-09-21T03:27:55.645465+00:00",
+   "output_started_at": null,
+   "output_ended_at": null,
+   "derivation": {
+    "renderer": "builtin:mock-tokens-model",
+    "reused_prefix_length": 0,
+    "matched_message_count": 1,
+    "bridge_transition_id": null,
+    "derivation_version": 2
+   },
+   "has_payload": true
+  },
+  {
+   "node_id": "nd_01M310327X19G08P76ESSR2EFW",
+   "parent_node_id": "nd_01M310327X0TE0RXPK7HS4BVM9",
+   "exchange_id": "ex_01M310327XVAQBK0AXEG1XKVZ8",
+   "depth": 3,
+   "role": "assistant",
+   "author": "model",
+   "message_hash": "4798d4b5ad3fa59b7957a4f29e4358fae499eab7c3904109c8cc0734a9814190",
+   "delta_hash": "f4a1fe1b73d28bc6995450797d21164d02cf0aea66066b8816062a866e5a0e1b",
+   "content_block_count": 1,
+   "char_count": 0,
+   "token_count": 17,
+   "sampled_start": 11,
+   "sampled_token_count": 6,
+   "has_logprobs": true,
+   "has_routed_experts": false,
+   "tokenizer": "builtin",
+   "inserted_at": "2026-09-21T03:27:55.645465+00:00",
+   "output_started_at": null,
+   "output_ended_at": "2026-09-21T03:27:55.645246+00:00",
+   "derivation": {
+    "renderer": "builtin:mock-tokens-model",
+    "reused_prefix_length": 0,
+    "matched_message_count": 1,
+    "bridge_transition_id": null,
+    "derivation_version": 2
+   },
+   "has_payload": true
+  }
+ ],
+ "leaf_node_ids": [
+  "nd_01M310327T3R45S4C955YXHQXP",
+  "nd_01M310327X19G08P76ESSR2EFW"
+ ],
+ "leaf_assistant_node_ids": [
+  "nd_01M310327T3R45S4C955YXHQXP",
+  "nd_01M310327X19G08P76ESSR2EFW"
+ ],
+ "branch_points": [
+  {
+   "node_id": "nd_01M310327T3MCBZZY5QQX4JGB3",
+   "child_count": 2,
+   "child_ids": [
+    "nd_01M310327T3R45S4C955YXHQXP",
+    "nd_01M310327X7C46BVBTJYC5Y8G6"
+   ]
+  }
+ ]
+}

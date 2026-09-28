@@ -650,6 +650,17 @@ def zero_variance_filter(
 
     Returns:
         List[int]
+
+    TODO (Kourosh): this counts rows, not trajectories. In step-wise mode one trajectory
+    contributes one row per turn, all carrying that trajectory's reward, so
+    ``len(vals) > 1`` can be true for a group holding a single live trajectory
+    -- the case the contract above promises to keep. ``max - min`` is unmoved
+    by the duplication, so a group with several repetitions still scores
+    correctly and this stays latent; it bites at ``n_samples_per_prompt=1``,
+    where one multi-turn trajectory is dropped as zero-variance on its own.
+    The fix is to take the variance over the ``is_last_step`` rows, which is
+    one per trajectory, which means threading that mask in from
+    ``trainer.py``'s call site.
     """
     is_live = [True] * len(rewards) if loss_masks is None else [sum(mask) > 0 for mask in loss_masks]
 

@@ -1,0 +1,154 @@
+name: SkyRL-Capture
+
+# Only what is inside the package, so a change to the trainer or another
+# example does not spend a runner on it -- and a change in here does not have
+# to wait on the rest of the repo's matrix.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'skyrl-capture/**'
+      - '.github/workflows/cpu_skyrl_capture.yaml'
+  pull_request:
+    paths:
+      - 'skyrl-capture/**'
+      - '.github/workflows/cpu_skyrl_capture.yaml'
+  workflow_dispatch:
+
+# The package is its own uv project, with its own lockfile, ruff config and
+# Python floor, so every step runs from its directory.
+defaults:
+  run:
+    working-directory: skyrl-capture
+
+jobs:
+  test:
+    # Nothing to provision. Every trajectory is a file the serving process
+    # writes, so there is no database to start and no schema to migrate; the
+    # suite runs over real sockets against in-repo provider mocks, so it needs
+    # no API key and no network egress.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Lint
+        run: uv run ruff check src tests tools scripts viewer
+
+      - name: Test
+        run: uv run pytest -q
+
+  base-install:
+    # `skyrl-capture` installs beside a trainer that pins its own transformers,
+    # so the base wheel must carry no ML dependency. Every other job runs
+    # `--all-extras`, which would never notice a renderer import escaping to
+    # module scope.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install without extras
+        run: uv venv && uv pip install .
+      - name: The runtime must import, and import nothing from the tokens extra
+        run: |
+          uv run --no-project python -c "
+          import sys
+          import skyrl_capture.runtime, skyrl_capture.cli.main
+          import skyrl_capture.persistence, skyrl_capture.reader.records
+          import skyrl_capture.control_plane.viewer, skyrl_capture.export.service
+          leaked = sorted(n for n in sys.modules
+                          if n.split('.')[0] in {'transformers', 'renderers', 'torch'})
+          assert not leaked, leaked
+          print('base install: ok')
+          "
+      - name: The command is installed under its own name
+        run: uv run --no-project skyrl-capture --version
+
+  container:
+    # The image is built from a narrower context than the repo, and the wheel
+    # force-includes `viewer`, so a missing COPY breaks the build rather than
+    # producing an image with no viewer. That went unnoticed because nothing
+    # built it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t skyrl-capture:ci .
+      - name: It starts and answers /healthz
+        run: |
+          docker run -d --name capture -p 8080:8080 \
+            -e UPSTREAM_TYPE=openai -e UPSTREAM_URL=https://api.openai.com/v1 \
+            -e CAPTURE_RECORD_DIR=/data/record \
+            skyrl-capture:ci
+          for _ in $(seq 30); do
+            curl -sf http://127.0.0.1:8080/healthz && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/healthz > /dev/null
+          docker rm -f capture
+      - name: And Compose starts it too
+        # `docker run` takes the image's CMD, so it cannot catch a bad
+        # `command:` in the Compose file -- which is how `skyrl-capture
+        # skyrl-capture serve` survived. This step is the one that would have.
+        run: |
+          docker compose up -d
+          for _ in $(seq 60); do
+            curl -sf http://127.0.0.1:8080/healthz && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/healthz > /dev/null
+          docker compose down -v
+
+  verify-against-an-engine:
+    # The second verification layer, at CI cost. It re-feeds a record's prompts
+    # to the engine and compares the completions -- the check that catches a
+    # record which is self-consistent and still not what the engine saw, which
+    # nothing inside the capture process can know. The mock engine's completion
+    # is a deterministic function of its prompt, so the claim is the same one a
+    # real model makes, greedily. See docs/verification.md for the GPU run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras
+
+      - name: Capture a run into a record, then verify it
+        run: |
+          uv run python -m tools.mock_server --port 9199 &
+          sleep 3
+          uv run python scripts/verify_e2e.py
+          uv run python -m tools.verify.cli --record ./ci-traces --run-id ci \
+            --engine-url http://127.0.0.1:9199/generate --model ci-policy
+
+  # There was a `benchmark-smoke` job here. The harness runs again -- it lost
+  # the `database_url` and the split-ingestion arm with the code they named,
+  # and is now two arms, capture off and capture on -- but it is not back in
+  # CI. A shared runner saturates on its own noise, and the harness's own
+  # report says a closed-loop throughput ratio there means nothing. Restore
+  # this job against a dedicated runner and an open-loop `--target-rps`, or
+  # not at all; until then it is development material under
+  # `tools/bench/`.
+
+  viewer:
+    # The viewer is a separate program in another language, so it gets its own
+    # job. It has no dependencies to install and nothing to build: the tests
+    # render the real views against fixtures captured from a live /v1.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: The viewer must stay dependency-free
+        run: |
+          test ! -e viewer/node_modules
+          test ! -e viewer/package-lock.json
+      - name: Render every view
+        run: node --test viewer/test/*.test.mjs

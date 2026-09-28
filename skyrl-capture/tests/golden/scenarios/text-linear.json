@@ -1,0 +1,894 @@
+{
+ "exports": {
+  "graph": [
+   {
+    "schema_version": 4,
+    "trajectory_id": "<tr#1>",
+    "project": "golden",
+    "run_id": "run-g",
+    "task_id": "t1",
+    "step": 0,
+    "mode": "text",
+    "status": "finished",
+    "command_result": null,
+    "labels": [
+     "ok"
+    ],
+    "annotations": {
+     "reward": 1.0
+    },
+    "upstream": {
+     "type": "openai",
+     "url": "http://127.0.0.1:<port>/v1",
+     "model": null,
+     "tokenizer": null
+    },
+    "integrity": {
+     "complete": true,
+     "calls_missing": 0,
+     "calls_after_close": 0
+    },
+    "bodies": "full",
+    "created_at": "<volatile>",
+    "finished_at": "<volatile>",
+    "derivation_version": 2,
+    "nodes": [
+     {
+      "node_id": "<nd#1>",
+      "parent": null,
+      "children": [
+       "<nd#2>"
+      ],
+      "role": "system",
+      "author": "client",
+      "message": {
+       "content": "be terse",
+       "role": "system"
+      },
+      "message_hash": "177f93e5cce84d28dcf6c4270dc7d1bd152fe1a7d33dec4a5b4ff8ddc9c54a3d",
+      "context_hash": "7f1318e42880dbba5e9fb3242fed8793c16e1d7434e73dd9dabbe29794ee6877"
+     },
+     {
+      "node_id": "<nd#2>",
+      "parent": "<nd#1>",
+      "children": [
+       "<nd#3>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "turn 0",
+       "role": "user"
+      },
+      "message_hash": "1bbd2bff1195a9128b136876739f2ab40fda3d51d024696aced4bd352e830eed",
+      "context_hash": "c40cb2eb86c0bed372a7805ff17925413a276e450bea13d6de108c9e5a41c17e"
+     },
+     {
+      "node_id": "<nd#3>",
+      "parent": "<nd#2>",
+      "children": [
+       "<nd#4>"
+      ],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "reply 0",
+       "role": "assistant"
+      },
+      "message_hash": "76d23a9a607eafaaa8bbae1de9c3c0e3a266f77ce5d55d1f492ff3382c58e2cb",
+      "context_hash": "40c574ba092385208695d16be2979f003bed27ce834bca41b7ef772095cef827",
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-model",
+       "status": 200,
+       "streaming": false,
+       "finish_reason": "stop",
+       "tools_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "sampling": {},
+       "usage": {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+        "cached_tokens": 0,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 3,
+         "completion_tokens": 2,
+         "total_tokens": 5,
+         "prompt_tokens_details": {
+          "cached_tokens": 0
+         }
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     },
+     {
+      "node_id": "<nd#4>",
+      "parent": "<nd#3>",
+      "children": [
+       "<nd#5>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "turn 1",
+       "role": "user"
+      },
+      "message_hash": "ed0c2c98e4740fb7011b5dd79aa039c92837b9176164e014c0554b7e944e0331",
+      "context_hash": "1c56baeffd7f51db5de30220ff1266da92bd30c58295cfbe232c6acefad0e265"
+     },
+     {
+      "node_id": "<nd#5>",
+      "parent": "<nd#4>",
+      "children": [
+       "<nd#6>"
+      ],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "reply 1",
+       "role": "assistant"
+      },
+      "message_hash": "d8319d46050f49c5274a62134d681a402947445245ef83e3ac876d4dfe88056f",
+      "context_hash": "acfed00a957b4955b6498bd5618292989db97b60e359beefde21df196c696a4c",
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-model",
+       "status": 200,
+       "streaming": false,
+       "finish_reason": "stop",
+       "tools_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "sampling": {},
+       "usage": {
+        "prompt_tokens": 5,
+        "completion_tokens": 2,
+        "total_tokens": 7,
+        "cached_tokens": 0,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 5,
+         "completion_tokens": 2,
+         "total_tokens": 7,
+         "prompt_tokens_details": {
+          "cached_tokens": 0
+         }
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     },
+     {
+      "node_id": "<nd#6>",
+      "parent": "<nd#5>",
+      "children": [
+       "<nd#7>"
+      ],
+      "role": "user",
+      "author": "client",
+      "message": {
+       "content": "turn 2",
+       "role": "user"
+      },
+      "message_hash": "a6710e1ce81ef5aa5f7e1d6df52ea6610a4d00c3afd5f81645672d6beba00f36",
+      "context_hash": "fb3755d2aeca3e22a0016d630c45a44032df2a01de7c7062f208c295db71aa75"
+     },
+     {
+      "node_id": "<nd#7>",
+      "parent": "<nd#6>",
+      "children": [],
+      "role": "assistant",
+      "author": "model",
+      "message": {
+       "content": "reply 2",
+       "role": "assistant"
+      },
+      "message_hash": "50e35a437a3b1fc0985dd0706a41b18579ed9217c027e5b893ab20a3372be0a4",
+      "context_hash": "be756fd73d7810bd0fb324c915fae4c95e5bf5e18ab0b90602ee60e2cd0d8ba5",
+      "call": {
+       "endpoint": "/v1/chat/completions",
+       "model": "mock-model",
+       "status": 200,
+       "streaming": false,
+       "finish_reason": "stop",
+       "tools_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+       "sampling": {},
+       "usage": {
+        "prompt_tokens": 7,
+        "completion_tokens": 2,
+        "total_tokens": 9,
+        "cached_tokens": 0,
+        "reasoning_tokens": null,
+        "raw": {
+         "prompt_tokens": 7,
+         "completion_tokens": 2,
+         "total_tokens": 9,
+         "prompt_tokens_details": {
+          "cached_tokens": 0
+         }
+        }
+       },
+       "timing": {
+        "started_at": "<volatile>",
+        "ended_at": "<volatile>",
+        "duration_ms": "<volatile>",
+        "ttft_ms": "<volatile>"
+       }
+      }
+     }
+    ]
+   }
+  ],
+  "replay": [
+   {
+    "schema_version": 4,
+    "session_id": "<tr#1>-s0000",
+    "trajectory_id": "<tr#1>",
+    "parent_session_id": null,
+    "delay_ms": null,
+    "arrival_ms": "<volatile>",
+    "forks": [],
+    "turns": [
+     {
+      "delay_ms": null,
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-model",
+       "messages": [
+        {
+         "content": "be terse",
+         "role": "system"
+        },
+        {
+         "content": "turn 0",
+         "role": "user"
+        }
+       ]
+      }
+     },
+     {
+      "delay_ms": "<volatile>",
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-model",
+       "messages": [
+        {
+         "content": "turn 1",
+         "role": "user"
+        }
+       ]
+      }
+     },
+     {
+      "delay_ms": "<volatile>",
+      "method": "POST",
+      "endpoint": "/v1/chat/completions",
+      "payload": {
+       "model": "mock-model",
+       "messages": [
+        {
+         "content": "turn 2",
+         "role": "user"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  ],
+  "text_samples": [
+   {
+    "schema_version": 4,
+    "path_id": "<tr#1>-p0000",
+    "trajectory_id": "<tr#1>",
+    "node_ids": [
+     "<nd#1>",
+     "<nd#2>",
+     "<nd#3>",
+     "<nd#4>",
+     "<nd#5>",
+     "<nd#6>",
+     "<nd#7>"
+    ],
+    "abandoned": false,
+    "labels": [
+     "ok"
+    ],
+    "annotations": {
+     "reward": 1.0
+    },
+    "model": "mock-model",
+    "tools": null,
+    "trainable_count": 3,
+    "messages": [
+     {
+      "node_id": "<nd#1>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "be terse",
+       "role": "system"
+      }
+     },
+     {
+      "node_id": "<nd#2>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "turn 0",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#3>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "reply 0",
+       "role": "assistant"
+      }
+     },
+     {
+      "node_id": "<nd#4>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "turn 1",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#5>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "reply 1",
+       "role": "assistant"
+      }
+     },
+     {
+      "node_id": "<nd#6>",
+      "author": "client",
+      "trainable": false,
+      "message": {
+       "content": "turn 2",
+       "role": "user"
+      }
+     },
+     {
+      "node_id": "<nd#7>",
+      "author": "model",
+      "trainable": true,
+      "message": {
+       "content": "reply 2",
+       "role": "assistant"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "api": {
+  "/": {
+   "id": "<tr#1>",
+   "project": "golden",
+   "run_id": "run-g",
+   "task_id": "t1",
+   "step": 0,
+   "upstream": {
+    "mode": "text",
+    "type": "openai",
+    "protocol": "openai",
+    "url": "http://127.0.0.1:<port>/v1",
+    "model": null
+   },
+   "mode": "text",
+   "status": "finished",
+   "labels": [
+    "ok"
+   ],
+   "annotations": {
+    "reward": 1.0
+   },
+   "bodies": "full",
+   "created_at": "<volatile>",
+   "first_event_at": "<volatile>",
+   "finished_at": "<volatile>",
+   "capture": {
+    "exchange_count": 3,
+    "node_count": 7,
+    "calls_after_close": 0,
+    "complete": true,
+    "calls_missing": 0,
+    "recovery_uncertain": false,
+    "delivery_uncertain": [],
+    "errors": []
+   },
+   "command_result": null,
+   "source_metadata": {},
+   "schema_version": 4,
+   "revision": 1,
+   "gap_distribution": {
+    "samples": 2,
+    "min_ms": "<volatile>",
+    "max_ms": "<volatile>",
+    "mean_ms": "<volatile>",
+    "p50_ms": "<volatile>",
+    "p95_ms": "<volatile>",
+    "p99_ms": "<volatile>",
+    "overlapping": 0,
+    "total_wait_ms": "<volatile>"
+   }
+  },
+  "/exchanges": {
+   "data": [
+    {
+     "id": "<ex#1>",
+     "sequence": 0,
+     "provider": "openai",
+     "model": "mock-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": false,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": null,
+     "overlapping": false,
+     "chunk_count": 1,
+     "stream_summary": {
+      "chunk_count": 1,
+      "first_chunk_ms": "<volatile>",
+      "last_chunk_ms": "<volatile>",
+      "total_bytes": 306,
+      "mean_inter_chunk_ms": null,
+      "max_inter_chunk_ms": null
+     },
+     "usage": {
+      "prompt_tokens": 3,
+      "completion_tokens": 2,
+      "total_tokens": 5,
+      "cached_tokens": 0,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 3,
+       "completion_tokens": 2,
+       "total_tokens": 5,
+       "prompt_tokens_details": {
+        "cached_tokens": 0
+       }
+      }
+     },
+     "request_byte_count": 124,
+     "response_byte_count": 306,
+     "provider_request_id": "<chatcmpl-mock>",
+     "provider_response_id": "<chatcmpl-mock>",
+     "previous_response_id": null,
+     "input_prefix_node_id": null,
+     "input_node_ids": [
+      "<nd#1>",
+      "<nd#2>"
+     ],
+     "input_leaf_node_id": "<nd#2>",
+     "output_node_id": "<nd#3>",
+     "parent_output_node_id": null,
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    },
+    {
+     "id": "<ex#2>",
+     "sequence": 1,
+     "provider": "openai",
+     "model": "mock-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": false,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": "<volatile>",
+     "overlapping": false,
+     "chunk_count": 1,
+     "stream_summary": {
+      "chunk_count": 1,
+      "first_chunk_ms": "<volatile>",
+      "last_chunk_ms": "<volatile>",
+      "total_bytes": 306,
+      "mean_inter_chunk_ms": null,
+      "max_inter_chunk_ms": null
+     },
+     "usage": {
+      "prompt_tokens": 5,
+      "completion_tokens": 2,
+      "total_tokens": 7,
+      "cached_tokens": 0,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 5,
+       "completion_tokens": 2,
+       "total_tokens": 7,
+       "prompt_tokens_details": {
+        "cached_tokens": 0
+       }
+      }
+     },
+     "request_byte_count": 200,
+     "response_byte_count": 306,
+     "provider_request_id": "<chatcmpl-mock>",
+     "provider_response_id": "<chatcmpl-mock>",
+     "previous_response_id": null,
+     "input_prefix_node_id": "<nd#3>",
+     "input_node_ids": [
+      "<nd#4>"
+     ],
+     "input_leaf_node_id": "<nd#4>",
+     "output_node_id": "<nd#5>",
+     "parent_output_node_id": "<nd#3>",
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    },
+    {
+     "id": "<ex#3>",
+     "sequence": 2,
+     "provider": "openai",
+     "model": "mock-model",
+     "endpoint_kind": "chat_completions",
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "http_status": 200,
+     "streaming": false,
+     "transport_error": null,
+     "provider_error": null,
+     "retry_attempt": 0,
+     "completion_reason": "stop",
+     "request_start_at": "<volatile>",
+     "response_end_at": "<volatile>",
+     "ttft_ms": "<volatile>",
+     "duration_ms": "<volatile>",
+     "gap_ms": "<volatile>",
+     "overlapping": false,
+     "chunk_count": 1,
+     "stream_summary": {
+      "chunk_count": 1,
+      "first_chunk_ms": "<volatile>",
+      "last_chunk_ms": "<volatile>",
+      "total_bytes": 306,
+      "mean_inter_chunk_ms": null,
+      "max_inter_chunk_ms": null
+     },
+     "usage": {
+      "prompt_tokens": 7,
+      "completion_tokens": 2,
+      "total_tokens": 9,
+      "cached_tokens": 0,
+      "reasoning_tokens": null,
+      "raw": {
+       "prompt_tokens": 7,
+       "completion_tokens": 2,
+       "total_tokens": 9,
+       "prompt_tokens_details": {
+        "cached_tokens": 0
+       }
+      }
+     },
+     "request_byte_count": 276,
+     "response_byte_count": 306,
+     "provider_request_id": "<chatcmpl-mock>",
+     "provider_response_id": "<chatcmpl-mock>",
+     "previous_response_id": null,
+     "input_prefix_node_id": "<nd#5>",
+     "input_node_ids": [
+      "<nd#6>"
+     ],
+     "input_leaf_node_id": "<nd#6>",
+     "output_node_id": "<nd#7>",
+     "parent_output_node_id": "<nd#5>",
+     "previous_exchange_id": null,
+     "is_duplicate_retry": false,
+     "late": false,
+     "has_payload": true,
+     "schema_version": 4,
+     "derivation_version": 2
+    }
+   ],
+   "next_cursor": null,
+   "has_more": false
+  },
+  "/graph": {
+   "trajectory": "<tr#1>",
+   "nodes": [
+    {
+     "node_id": "<nd#1>",
+     "parent_node_id": null,
+     "exchange_id": "<ex#1>",
+     "depth": 0,
+     "role": "system",
+     "author": "client",
+     "message_hash": "177f93e5cce84d28dcf6c4270dc7d1bd152fe1a7d33dec4a5b4ff8ddc9c54a3d",
+     "delta_hash": "e0a8a78939ab94868b0e023064575f8eafe3dec984ff594213ad8933a938ffaf",
+     "content_block_count": 1,
+     "char_count": 8,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "tail_offset": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#2>",
+     "parent_node_id": "<nd#1>",
+     "exchange_id": "<ex#1>",
+     "depth": 1,
+     "role": "user",
+     "author": "client",
+     "message_hash": "1bbd2bff1195a9128b136876739f2ab40fda3d51d024696aced4bd352e830eed",
+     "delta_hash": "1e02afc54ceeec6c05ecfb25a252a812431fba2a4b41d6a3ace7c6c66e4d63a2",
+     "content_block_count": 1,
+     "char_count": 6,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "tail_offset": 1,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#3>",
+     "parent_node_id": "<nd#2>",
+     "exchange_id": "<ex#1>",
+     "depth": 2,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "76d23a9a607eafaaa8bbae1de9c3c0e3a266f77ce5d55d1f492ff3382c58e2cb",
+     "delta_hash": "157b20d867e9750a27a0217be6bea14ae434849dc749a1afb8702ec2deff1106",
+     "content_block_count": 1,
+     "char_count": 7,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": "<volatile>",
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "matched_prefix_messages": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#4>",
+     "parent_node_id": "<nd#3>",
+     "exchange_id": "<ex#2>",
+     "depth": 3,
+     "role": "user",
+     "author": "client",
+     "message_hash": "ed0c2c98e4740fb7011b5dd79aa039c92837b9176164e014c0554b7e944e0331",
+     "delta_hash": "bcea4485660397f6838b3af0cc7e35bd346e9f43be2ddafb33fbbe01b47072ed",
+     "content_block_count": 1,
+     "char_count": 6,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 3,
+      "tail_offset": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#5>",
+     "parent_node_id": "<nd#4>",
+     "exchange_id": "<ex#2>",
+     "depth": 4,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "d8319d46050f49c5274a62134d681a402947445245ef83e3ac876d4dfe88056f",
+     "delta_hash": "f66b7ec3acadb7b8a538e4acdd5b9d1441f5e042e99f34ef14ac52e54f8ccc97",
+     "content_block_count": 1,
+     "char_count": 7,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": "<volatile>",
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "matched_prefix_messages": 3,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#6>",
+     "parent_node_id": "<nd#5>",
+     "exchange_id": "<ex#3>",
+     "depth": 5,
+     "role": "user",
+     "author": "client",
+     "message_hash": "a6710e1ce81ef5aa5f7e1d6df52ea6610a4d00c3afd5f81645672d6beba00f36",
+     "delta_hash": "1e4e926d04cf3bc0c8276bd00bf247826ea8271e3e7449ea8c8a41807dbbf7f7",
+     "content_block_count": 1,
+     "char_count": 6,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": null,
+     "output_ended_at": null,
+     "derivation": {
+      "matched_prefix_messages": 5,
+      "tail_offset": 0,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    },
+    {
+     "node_id": "<nd#7>",
+     "parent_node_id": "<nd#6>",
+     "exchange_id": "<ex#3>",
+     "depth": 6,
+     "role": "assistant",
+     "author": "model",
+     "message_hash": "50e35a437a3b1fc0985dd0706a41b18579ed9217c027e5b893ab20a3372be0a4",
+     "delta_hash": "cdd6a10aaafcd8291446b27b9474187cd3192e21be2768a3d41b8686bbdf9ea1",
+     "content_block_count": 1,
+     "char_count": 7,
+     "token_count": null,
+     "sampled_start": null,
+     "sampled_token_count": null,
+     "has_logprobs": false,
+     "has_routed_experts": false,
+     "tokenizer": null,
+     "inserted_at": "<volatile>",
+     "output_started_at": "<volatile>",
+     "output_ended_at": "<volatile>",
+     "derivation": {
+      "matched_prefix_messages": 5,
+      "derivation_version": 2
+     },
+     "has_payload": true
+    }
+   ],
+   "leaf_node_ids": [
+    "<nd#7>"
+   ],
+   "leaf_assistant_node_ids": [
+    "<nd#7>"
+   ],
+   "branch_points": []
+  },
+  "/paths": {
+   "trajectory": "<tr#1>",
+   "mode": "text",
+   "tokenizer": null,
+   "paths": [
+    {
+     "path_id": "<tr#1>-p0000",
+     "node_ids": [
+      "<nd#1>",
+      "<nd#2>",
+      "<nd#3>",
+      "<nd#4>",
+      "<nd#5>",
+      "<nd#6>",
+      "<nd#7>"
+     ],
+     "leaf_node_id": "<nd#7>",
+     "abandoned": false,
+     "masked_reason": null,
+     "stop_reason": null,
+     "token_count": 0,
+     "trainable_count": 0,
+     "blocking": null,
+     "blocks": [],
+     "messages": [
+      {
+       "role": "system",
+       "author": "client",
+       "chars": 41
+      },
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 37
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 43
+      },
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 37
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 43
+      },
+      {
+       "role": "user",
+       "author": "client",
+       "chars": 37
+      },
+      {
+       "role": "assistant",
+       "author": "model",
+       "chars": 43
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,152 @@
+{
+  "configuration": {
+    "requests_per_arm": 4000,
+    "load_processes": 3,
+    "concurrency_per_process": 6,
+    "aggregate_concurrency": 18,
+    "streaming": false,
+    "duration_seconds": null,
+    "target_rps": 1200.0,
+    "python": "3.13.3",
+    "platform": "darwin",
+    "cpu_count": 10,
+    "uvloop": true
+  },
+  "arms": {
+    "baseline_capture_off": {
+      "name": "capture-off",
+      "requests": 3999,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 4.2303,
+      "throughput_rps": 945.3,
+      "latency_ms": {
+        "min": 1.0127,
+        "p50": 2.1339,
+        "p95": 4.8596,
+        "p99": 6.8187,
+        "max": 9.5865,
+        "mean": 2.4585,
+        "samples": 3999
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "dropped": 0,
+        "ingested_exchanges": 0,
+        "note": "capture disabled"
+      }
+    },
+    "capture_on_split_ingestion": {
+      "name": "capture-on (split ingestion)",
+      "requests": 3999,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 4.183,
+      "throughput_rps": 956.0,
+      "latency_ms": {
+        "min": 1.1557,
+        "p50": 2.2018,
+        "p95": 4.226,
+        "p99": 6.4679,
+        "max": 9.8148,
+        "mean": 2.4184,
+        "samples": 3999
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 4017,
+        "dropped": 0,
+        "max_ring_depth": 11,
+        "ring_capacity": 262144,
+        "spool_records": 4017,
+        "spool_bytes": 8134425,
+        "accepted_exchanges": 4017,
+        "ingested_exchanges": 4017,
+        "ingestion": "separate process",
+        "ingestion_lag_when_load_stopped": 3606,
+        "ingestion_catch_up_seconds": 57.04
+      }
+    },
+    "capture_on_in_process_ingestion": {
+      "name": "capture-on (in-process ingestion)",
+      "requests": 3999,
+      "errors": 0,
+      "error_rate_pct": 0.0,
+      "wall_seconds": 4.1785,
+      "throughput_rps": 957.0,
+      "latency_ms": {
+        "min": 1.1995,
+        "p50": 2.1286,
+        "p95": 4.0627,
+        "p99": 6.4374,
+        "max": 10.3803,
+        "mean": 2.3472,
+        "samples": 3999
+      },
+      "first_byte_ms": null,
+      "capture": {
+        "offered": 4017,
+        "dropped": 0,
+        "max_ring_depth": 14,
+        "ring_capacity": 262144,
+        "spool_records": 4017,
+        "spool_bytes": 8134425,
+        "accepted_exchanges": 4017,
+        "ingested_exchanges": 4017,
+        "ingestion": "in process",
+        "ingestion_lag_when_load_stopped": null,
+        "ingestion_catch_up_seconds": null
+      }
+    }
+  },
+  "deltas": {
+    "capture_on_split_ingestion": {
+      "throughput_ratio_pct": 101.13,
+      "added_latency_p50_ms": 0.0679,
+      "added_latency_p95_ms": -0.6336,
+      "added_latency_p99_ms": -0.3508,
+      "added_latency_mean_ms": -0.0401,
+      "added_error_rate_pct_points": 0.0
+    },
+    "capture_on_in_process_ingestion": {
+      "throughput_ratio_pct": 101.24,
+      "added_latency_p50_ms": -0.0053,
+      "added_latency_p95_ms": -0.7969,
+      "added_latency_p99_ms": -0.3813,
+      "added_latency_mean_ms": -0.1113,
+      "added_error_rate_pct_points": 0.0
+    }
+  },
+  "methodology": {
+    "mode": "open-loop",
+    "note": "Open-loop (--target-rps) paces arrivals below the ceiling and is the only mode in which added latency is meaningful. Closed-loop saturates the proxy and measures the throughput ceiling; its latency deltas are queueing, not per-request cost.",
+    "measured_capture_cpu_cost_us_per_request": 6.5
+  },
+  "thresholds": {
+    "throughput_at_least_99pct_of_baseline": {
+      "passed": true,
+      "observed": "101.13% of baseline",
+      "meaningful": true
+    },
+    "added_p99_latency_at_most_1ms": {
+      "passed": true,
+      "observed": "-0.3508 ms",
+      "meaningful": true
+    },
+    "added_error_rate_at_most_0.01pct_points": {
+      "passed": true,
+      "observed": "0.0 points",
+      "meaningful": true
+    },
+    "zero_dropped_capture_events": {
+      "passed": true,
+      "observed": "0 dropped",
+      "meaningful": true
+    },
+    "all_exchanges_ingested": {
+      "passed": true,
+      "observed": "4017 of 4017 accepted exchanges (worker was 3606 behind when load stopped, caught up in 57.04s)",
+      "meaningful": true
+    }
+  }
+}

@@ -1,0 +1,106 @@
+{
+ "runs": {
+  "data": [
+   {
+    "id": "run-g",
+    "project": "golden",
+    "created_at": "<volatile>",
+    "trajectory_count": 2,
+    "task_count": 2,
+    "steps": [
+     0
+    ],
+    "step_counts": {
+     "0": 2
+    }
+   }
+  ]
+ },
+ "trajectories": {
+  "data": [
+   {
+    "id": "<tr#1>",
+    "project": "golden",
+    "run_id": "run-g",
+    "task_id": "t2",
+    "step": 0,
+    "upstream": {
+     "mode": "text",
+     "type": "openai",
+     "protocol": "openai",
+     "url": "http://127.0.0.1:<port>/v1",
+     "model": null
+    },
+    "mode": "text",
+    "status": "finished",
+    "labels": [],
+    "annotations": {
+     "reward": 0.5
+    },
+    "bodies": "full",
+    "created_at": "<volatile>",
+    "first_event_at": "<volatile>",
+    "finished_at": "<volatile>",
+    "capture": {
+     "exchange_count": 3,
+     "node_count": 6,
+     "calls_after_close": 0,
+     "complete": true,
+     "calls_missing": 0,
+     "recovery_uncertain": false,
+     "delivery_uncertain": [],
+     "errors": []
+    },
+    "command_result": null,
+    "source_metadata": {},
+    "schema_version": 4,
+    "revision": 1
+   },
+   {
+    "id": "<tr#2>",
+    "project": "golden",
+    "run_id": "run-g",
+    "task_id": "t1",
+    "step": 0,
+    "upstream": {
+     "mode": "text",
+     "type": "openai",
+     "protocol": "openai",
+     "url": "http://127.0.0.1:<port>/v1",
+     "model": null
+    },
+    "mode": "text",
+    "status": "finished",
+    "labels": [
+     "ok"
+    ],
+    "annotations": {
+     "reward": 1.0
+    },
+    "bodies": "full",
+    "created_at": "<volatile>",
+    "first_event_at": "<volatile>",
+    "finished_at": "<volatile>",
+    "capture": {
+     "exchange_count": 3,
+     "node_count": 7,
+     "calls_after_close": 0,
+     "complete": true,
+     "calls_missing": 0,
+     "recovery_uncertain": false,
+     "delivery_uncertain": [],
+     "errors": []
+    },
+    "command_result": null,
+    "source_metadata": {},
+    "schema_version": 4,
+    "revision": 1
+   }
+  ],
+  "next_cursor": null,
+  "has_more": false,
+  "total": 2,
+  "indexing": false,
+  "indexed_trajectories": "<volatile>"
+ }
+}

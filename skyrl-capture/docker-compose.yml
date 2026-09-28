@@ -1,0 +1,33 @@
+# Local self-hosted profile: one container running the proxy, the control plane
+# and the writer, with one mounted directory for the record -- and for what an
+# export writes beside it.
+#
+# There is nothing to bring up first. The state is a map this process owns, so
+# there is no database, no schema and no migration step -- and, for the same
+# reason, nothing outside `record` survives the container.
+services:
+  capture:
+    build: .
+    image: skyrl-capture:latest
+    environment:
+      # Results that outlive the container: one append-only event log,
+      # readable afterwards with no server: `skyrl-capture view --record`.
+      CAPTURE_RECORD_DIR: /data/record
+      # The one inference server this process captures. Fixed at startup:
+      # changing it means restarting the container.
+      UPSTREAM_TYPE: ${UPSTREAM_TYPE:-openai}
+      UPSTREAM_URL: ${UPSTREAM_URL:-https://api.openai.com/v1}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-}
+      PROXY_HOST: 0.0.0.0
+      PROXY_PORT: "8080"
+      PUBLIC_URL: ${PUBLIC_URL:-http://127.0.0.1:8080}
+    # No `command:` here. ENTRYPOINT is already `skyrl-capture` and CMD is
+    # already `serve`, so naming the binary again ran `skyrl-capture
+    # skyrl-capture serve`. Override this with a bare subcommand or not at all.
+    ports:
+      - "8080:8080"
+    volumes:
+      - trace-record:/data/record
+
+volumes:
+  trace-record:
