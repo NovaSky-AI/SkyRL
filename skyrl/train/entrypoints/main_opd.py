@@ -31,7 +31,6 @@ Servers you run instead: ``trainer.teacher.backend=vllm trainer.teacher.server_u
 
 import os
 import sys
-from typing import Optional
 
 import ray
 
@@ -53,14 +52,6 @@ class OPDExp(BasePPOExp):
     def __init__(self, cfg):
         super().__init__(cfg)
         self._teacher_client: TeacherLogprobClient = None
-        # The launched teacher deployment (backend="skyrl"). Holding it keeps the teacher alive: Ray
-        # terminates a non-detached actor once every handle to it is gone, and its server groups hold
-        # the only handles (the same reason BasePPOExp keeps _server_groups for the student).
-        # TODO (kyuds): consider gracefully shutting down a teacher started via skyrl when the run ends
-        # (router, server groups, placement group). Today it goes down with the Ray job, like the
-        # student's engines; an explicit stop would matter for a long-lived driver that runs several
-        # experiments in one job, where placement groups outlive the run.
-        self._teacher_setup: Optional[object] = None
 
     def get_teacher_client(self) -> TeacherLogprobClient:
         """Build the teacher client from ``trainer.teacher``. Override for other backends.
@@ -71,8 +62,12 @@ class OPDExp(BasePPOExp):
         """
         teacher = self.cfg.trainer.teacher
         if teacher.backend == "skyrl":
-            client, self._teacher_setup = launch_teacher(self.cfg)
-            return SkyRLTeacherClient(client, max_concurrency=teacher.max_concurrency)
+            client, server_setup = launch_teacher(self.cfg)
+            return SkyRLTeacherClient(
+                client,
+                server_setup=server_setup,
+                max_concurrency=teacher.max_concurrency
+            )
         if teacher.backend == "fireworks":
             return FireworksTeacherClient(
                 teacher.model,

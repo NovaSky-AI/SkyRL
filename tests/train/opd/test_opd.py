@@ -579,8 +579,9 @@ class FakeRemoteInferenceClient:
 @pytest.mark.asyncio
 async def test_skyrl_teacher_client_scores_through_sample():
     client = FakeRemoteInferenceClient({"type": "sample", "sequences": [], "prompt_logprobs": [None, -0.5, -1.0, -2.0]})
-    teacher = SkyRLTeacherClient(client, max_concurrency=4)
+    teacher = SkyRLTeacherClient(client, server_setup="server-setup", max_concurrency=4)
     assert teacher.client is client
+    assert teacher.server_setup == "server-setup"
 
     assert await teacher.compute_logprobs([1, 2], [3, 4]) == [-1.0, -2.0]
 
@@ -625,13 +626,12 @@ def test_opd_exp_launches_the_teacher_for_the_skyrl_backend(monkeypatch):
     monkeypatch.setattr(main_opd, "launch_teacher", fake_launch)
     exp = main_opd.OPDExp.__new__(main_opd.OPDExp)  # skip BasePPOExp.__init__ (tokenizer, datasets)
     exp.cfg = cfg
-    exp._teacher_setup = None
 
     teacher = exp.get_teacher_client()
     assert isinstance(teacher, SkyRLTeacherClient)
     assert teacher.client is fake_client
     assert launched == [cfg]
-    assert exp._teacher_setup == "server-setup"  # kept referenced for the run: it holds the actor handles
+    assert teacher.server_setup == "server-setup"  # the client holds the deployment, keeping its actors alive
 
 
 def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
@@ -639,12 +639,10 @@ def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
 
     monkeypatch.setattr(main_opd, "launch_teacher", lambda cfg: pytest.fail("must not launch"))
     exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
-    exp._teacher_setup = None
     exp.cfg = OPDExpConfig.from_cli_overrides(
         ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_urls=['http://a:8000']"]
     )
     assert isinstance(exp.get_teacher_client(), VLLMTeacherClient)
-    assert exp._teacher_setup is None
 
 
 # ---------------------------------------------------------------------------

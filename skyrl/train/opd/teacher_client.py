@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
     )
+    from skyrl.backends.skyrl_train.inference_servers.setup import InferenceServerSetup
 
 DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai"
 _HTTP_RETRY_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -361,15 +362,33 @@ class SkyRLTeacherClient(TeacherLogprobClient):
     (``None``) rather than a plausible-looking number. Routing through the deployment's router, the
     per-engine concurrency cap and the retry policy are the client's, the same ones the student's
     rollouts get; ``model`` is the client's ``model_name``, the name the servers were launched under.
+
+    The client also owns the deployment it drives: ``server_setup``, the ``InferenceServerSetup`` the
+    launch returned (``skyrl.train.opd.teacher_launch.launch_teacher``), is held for the client's
+    lifetime because Ray terminates a non-detached actor once every handle to it is gone, and the
+    setup's server groups hold the only handles to the teacher's server actors.
     """
 
-    def __init__(self, client: "RemoteInferenceClient", *, max_concurrency: int = 32):
+    def __init__(
+        self,
+        client: "RemoteInferenceClient",
+        *,
+        server_setup: Optional["InferenceServerSetup"] = None,
+        max_concurrency: int = 32,
+    ):
         super().__init__(max_concurrency=max_concurrency)
         self._client = client
+        # Keeps the teacher's server actors alive for as long as this client exists; None when the
+        # caller owns the deployment.
+        self._server_setup = server_setup
 
     @property
     def client(self) -> "RemoteInferenceClient":
         return self._client
+
+    @property
+    def server_setup(self) -> Optional["InferenceServerSetup"]:
+        return self._server_setup
 
     async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[float]:
         token_ids = prompt_ids + response_ids
@@ -401,4 +420,8 @@ class SkyRLTeacherClient(TeacherLogprobClient):
         return [float(value) for value in tail]
 
     async def aclose(self) -> None:
+        # TODO (kyuds): consider gracefully shutting down the deployment in server_setup here (router,
+        # server groups, placement group) when the run ends. Today it goes down with the Ray job, like
+        # the student's engines; an explicit stop would matter for a long-lived driver that runs several
+        # experiments in one job, where placement groups outlive the run.
         await self._client.teardown()
