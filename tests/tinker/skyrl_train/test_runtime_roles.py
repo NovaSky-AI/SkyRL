@@ -83,6 +83,23 @@ def test_inference_runtime_rejects_training_models():
         backend.create_model("critic-a", types.LoraConfig(rank=0, alpha=16, seed=0), model_role="critic")
 
 
+def test_inference_runtime_unload_preserves_other_model_aliases():
+    backend = object.__new__(SkyRLTrainBackend)
+    backend.config = MegatronBackendOverrides(runtime_role="inference")
+    backend._model_ids_to_role = {"model-a": "policy", "model-b": "policy"}
+    backend._model_metadata = {"model-a": Mock(), "model-b": Mock()}
+    inference_client = object()
+    backend._inference_engine_client = inference_client
+
+    with patch("skyrl.backends.skyrl_train_backend.ray.shutdown") as shutdown:
+        backend.delete_model("model-a")
+
+    shutdown.assert_not_called()
+    assert backend._model_ids_to_role == {"model-b": "policy"}
+    assert set(backend._model_metadata) == {"model-b"}
+    assert backend._inference_engine_client is inference_client
+
+
 @pytest.mark.parametrize("operation", ["save_checkpoint", "load_checkpoint", "save_sampler_checkpoint"])
 def test_inference_runtime_rejects_weight_operations(operation):
     backend = object.__new__(SkyRLTrainBackend)

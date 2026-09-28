@@ -652,6 +652,14 @@ class SkyRLTrainBackend(AbstractBackend):
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
 
+        # Inference-only model IDs are aliases for the same base-model runtime.
+        # Keep that runtime alive while another alias is still registered.
+        if self.config.runtime_role == "inference" and len(self._model_ids_to_role) > 1:
+            del self._model_ids_to_role[model_id]
+            self._model_metadata.pop(model_id, None)
+            logger.info(f"Removed inference-only model alias '{model_id}'; shared runtime stays up")
+            return
+
         # Multi-LoRA: if more than one model is currently registered — or the
         # last one is unloading with keep_runtime_warm_on_last_unload set —
         # drop just this adapter slot rather than tearing down the shared Ray
