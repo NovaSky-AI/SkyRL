@@ -142,6 +142,7 @@ def find_and_reserve_port(start_port: int, *, host: str = "0.0.0.0") -> Tuple[in
     sock: socket.socket | None = None
     while port < end_port:
         for family, socktype, proto, _, address in addresses:
+            sock = None
             try:
                 sock = socket.socket(family, socktype, proto)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -149,7 +150,7 @@ def find_and_reserve_port(start_port: int, *, host: str = "0.0.0.0") -> Tuple[in
                 sock.listen(1)
                 return port, sock
             except OSError:
-                if sock:
+                if sock is not None:
                     sock.close()
         port += 1
     raise RuntimeError(
