@@ -64,6 +64,12 @@ class BasePPOExp:
         self._prefill_server_groups = None
         self._decode_server_groups = None
         self._inference_router = None
+        self._server_setup = None
+        self._engines_slept = False
+        # When False, ``_get_new_inference_client`` launches the engines without
+        # waiting for them to become healthy; ``_setup_trainer`` waits after the
+        # training workers are built so the two initializations overlap.
+        self._wait_for_inference_ready = True
 
     @staticmethod
     def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
@@ -230,22 +236,33 @@ class BasePPOExp:
         )
 
         is_colocated = self.cfg.trainer.placement.colocate_all
+        # Colocated engines are slept below once healthy; with a deferred wait the
+        # entrypoint sleeps them after wait_until_ready() instead.
         client, server_setup = build_new_inference_client(
             self.cfg,
             self.tokenizer,
             placement_group=self.colocate_pg if is_colocated else None,
+            wait_for_ready=self._wait_for_inference_ready,
         )
+        self._server_setup = server_setup
         self._inference_router = server_setup.router
         self._server_groups = server_setup.server_groups
         self._prefill_server_groups = server_setup.prefill_server_groups
         self._decode_server_groups = server_setup.decode_server_groups
 
-        if is_colocated:
-            # Callers must invoke get_inference_client() from a sync context (no running event loop).
-            asyncio.run(client.sleep())
-            logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
+        if is_colocated and not server_setup.pending_start_refs:
+            self._sleep_colocated_engines(client)
 
         return client
+
+    def _sleep_colocated_engines(self, client: InferenceEngineInterface) -> None:
+        """Free the shared GPUs for the training workers' model load (once, engines healthy)."""
+        if self._engines_slept:
+            return
+        # Callers must invoke this from a sync context (no running event loop).
+        asyncio.run(client.sleep())
+        self._engines_slept = True
+        logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
     def _setup_trainer(self) -> RayPPOTrainer:
         """Setup and return the trainer.
@@ -278,6 +295,12 @@ class BasePPOExp:
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
 
+        # Engine startup (weight load, torch.compile, CUDA graph capture) overlaps the
+        # training-side work below. Non-colocated: everything, the workers have their own
+        # GPUs. Colocated: only the actor spawn (process start, imports, process groups);
+        # the engines must be healthy and slept before the training workers load models.
+        placement = self.cfg.trainer.placement
+        self._wait_for_inference_ready = placement.colocate_all and not placement.overlap_worker_spawn
         inference_engine_client = self.get_inference_client()
 
         generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
@@ -310,7 +333,21 @@ class BasePPOExp:
                 "models instantiated. Trainer steps will be simulated (sleep + pause/resume, no broadcast)."
             )
         else:
-            trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+            trainer.create_actor_groups(PolicyWorker, CriticWorker, RefWorker)
+            if not placement.colocate_all:
+                # Own GPUs: load the models while the engines are still coming up.
+                trainer.init_models()
+
+        # Residual engine startup not hidden behind the training-side work (zero when
+        # the engines were already awaited, e.g. a custom client hook).
+        if self._server_setup is not None:
+            self._server_setup.wait_until_ready()
+            if placement.colocate_all:
+                self._sleep_colocated_engines(inference_engine_client)
+
+        if not simulate_training and placement.colocate_all:
+            # Shared GPUs: the engines are asleep now, load the models.
+            trainer.init_models()
         return trainer
 
     def run(self):
