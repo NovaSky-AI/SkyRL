@@ -35,7 +35,7 @@ from skyrl.train.generators.base import (
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
-from .compose import TrialOutcome, compose
+from .compose import TrialOutcome, compose, split
 
 litellm.suppress_debug_info = True
 
@@ -81,7 +81,8 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.capture_urls = list(capture_urls)
         self.inference_engine_client = inference_engine_client
         served = generator_cfg.inference_engine.served_model_name
-        assert served is not None and "/" not in served, "served_model_name must be set, without '/'"
+        if served is None or "/" in served:
+            raise ValueError("generator.inference_engine.served_model_name must be set, without '/'")
         self._served_model_name = served
 
         self._template = deepcopy(harbor_cfg)
@@ -138,6 +139,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             outcomes,
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
             top_k=self.generator_cfg.sampling_params.top_k,
+            sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
         )
 
     async def _trial(
@@ -202,6 +204,11 @@ class HarborSkycapGenerator(GeneratorInterface):
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
+            return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
+        if not any(split(sample) is not None for sample in finished.samples):
+            # Nothing generated (e.g. the harness failed before its first call): retried, then masked,
+            # so the trial's reward doesn't enter the group without tokens behind it.
+            logger.warning(f"Trajectory {trajectory_id}: skycap captured no trainable tokens")
             return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
         return TrialOutcome(
             trajectory_id=trajectory_id,

@@ -154,6 +154,9 @@ class FakeTrial:
         async with aiohttp.ClientSession() as session:
             if script == "crash":
                 raise RuntimeError("sandbox did not start")
+            if script == "silent":
+                # Verified, but the agent never called the model.
+                return verified(1.0)
             history = [{"role": "user", "content": script}]
             history.append(await chat(session, history))
             if script == "timeout":

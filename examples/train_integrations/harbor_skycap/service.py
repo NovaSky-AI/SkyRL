@@ -56,7 +56,10 @@ class SkycapService:
         if thread is None:
             return True
         if self._loop is not None and self._stopping is not None and not self._stopping.is_set():
-            self._loop.call_soon_threadsafe(self._stopping.set)
+            try:
+                self._loop.call_soon_threadsafe(self._stopping.set)
+            except RuntimeError:
+                pass  # the loop already closed: the server stopped on its own
         thread.join(timeout)
         if thread.is_alive():
             logger.warning(f"skycap did not stop within {timeout}s")

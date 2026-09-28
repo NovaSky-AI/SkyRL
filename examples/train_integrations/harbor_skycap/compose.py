@@ -88,8 +88,14 @@ def _placeholder() -> _Row:
     return _Row(prompt=[0], response=[0], loss_mask=[0], logprobs=[0.0], placeholder=True)
 
 
-def compose(outcomes: List[TrialOutcome], *, overlong_filtering: bool, top_k: int = -1) -> GeneratorOutput:
-    """``top_k`` sets the width of sampler-support rows, as SkyRL's own capture pads them."""
+def compose(
+    outcomes: List[TrialOutcome], *, overlong_filtering: bool, top_k: int = -1, sample_support: bool = False
+) -> GeneratorOutput:
+    """``top_k`` sets the width of sampler-support rows, as SkyRL's own capture pads them.
+
+    ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
+    still carries padded support rows, as every other batch will.
+    """
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
 
     groups: List[List[_Row]] = []
@@ -106,7 +112,7 @@ def compose(outcomes: List[TrialOutcome], *, overlong_filtering: bool, top_k: in
         groups.append(rows or [_placeholder()])
 
     real = [row for rows in groups for row in rows if not row.placeholder]
-    support = _sample_support(groups, real, top_k)
+    support = _sample_support(groups, real, top_k, expected=sample_support)
 
     out: Dict[str, List[Any]] = {
         key: []
@@ -145,8 +151,10 @@ def compose(outcomes: List[TrialOutcome], *, overlong_filtering: bool, top_k: in
     )
 
 
-def _sample_support(groups: List[List[_Row]], real: List[_Row], top_k: int) -> Optional[List[np.ndarray]]:
-    if not real or all(row.support is None for row in real):
+def _sample_support(
+    groups: List[List[_Row]], real: List[_Row], top_k: int, expected: bool
+) -> Optional[List[np.ndarray]]:
+    if (not real and not expected) or (real and all(row.support is None for row in real)):
         return None
     if any(row.support is None for row in real):
         raise ValueError("some captured paths have sampler support and some don't")

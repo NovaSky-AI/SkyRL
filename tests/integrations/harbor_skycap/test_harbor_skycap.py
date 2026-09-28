@@ -195,6 +195,23 @@ async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(sky
     assert not any(t.is_open for t in skycap.server.trajectories.values())
 
 
+@pytest.mark.asyncio
+async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_rewarded(skycap, trials) -> None:
+    out = await generator(skycap).generate(batch("silent", "linear"), disable_tqdm=True)
+
+    silent = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "silent"]
+    assert [out["rewards"][i] for i in silent] == [0.0] and out["stop_reasons"][silent[0]] == "error"
+    assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL + 1
+
+
+def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
+    outcome = TrialOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
+
+    support = compose([outcome], overlong_filtering=False, top_k=TOP_K, sample_support=True)["rollout_sample_support"]
+    assert [array.shape for array in support] == [(1, TOP_K)]
+    assert compose([outcome], overlong_filtering=False, top_k=TOP_K)["rollout_sample_support"] is None
+
+
 def test_the_generator_refuses_configs_it_cannot_serve() -> None:
     with pytest.raises(ValueError, match="step_wise_trajectories"):
         HarborSkycapGenerator(generator_cfg(step_wise_trajectories=False), {}, ["http://x"])
@@ -203,6 +220,10 @@ def test_the_generator_refuses_configs_it_cannot_serve() -> None:
     r3 = SimpleNamespace(served_model_name="policy", enable_return_routed_experts=True)
     with pytest.raises(ValueError, match="R3"):
         HarborSkycapGenerator(generator_cfg(inference_engine=r3), {}, ["http://x"])
+    with pytest.raises(ValueError, match="served_model_name"):
+        HarborSkycapGenerator(
+            generator_cfg(inference_engine=SimpleNamespace(served_model_name="a/b")), {}, ["http://x"]
+        )
 
 
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
