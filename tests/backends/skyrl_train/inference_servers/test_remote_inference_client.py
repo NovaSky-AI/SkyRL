@@ -332,8 +332,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"status": "awake", "server_id": server_id, "tags": tags}
 
     @app.post("/reset_prefix_cache")
-    async def reset_prefix_cache(request: Request):
-        return {"status": "cache_reset", "server_id": server_id, "body": await request.json()}
+    async def reset_prefix_cache(reset_running_requests: bool = Query(False)):
+        return {"success": True, "reset_running_requests": reset_running_requests}
 
     @app.post("/init_weight_transfer_engine")
     async def init_weight_transfer_engine(request: Request):
@@ -901,13 +901,13 @@ class TestControlPlane:
             assert response["body"]["tags"] == ["weights"]
 
     @pytest.mark.asyncio
-    async def test_reset_prefix_cache(self, client):
-        """Test reset_prefix_cache fans out to all servers with the request body."""
-        result = await client.reset_prefix_cache(reset_running_requests=True)
+    @pytest.mark.parametrize("reset_running_requests", [False, True])
+    async def test_reset_prefix_cache(self, client, reset_running_requests):
+        """Reset uses vLLM's query parameter on every server."""
+        result = await client.reset_prefix_cache(reset_running_requests=reset_running_requests)
         assert set(result) == set(client.server_urls)
         for response in result.values():
-            assert response["body"]["status"] == "cache_reset"
-            assert response["body"]["body"] == {"reset_running_requests": True}
+            assert response["body"] == {"success": True, "reset_running_requests": reset_running_requests}
 
 
 class TestWeightSync:
