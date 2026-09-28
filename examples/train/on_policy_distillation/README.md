@@ -50,7 +50,7 @@ Where the teacher lives is one choice with two answers, and each backend reads o
 | `trainer.teacher.backend` | What it is | Notes |
 |---|---|---|
 | `skyrl` (default) | A vLLM deployment this job launches from `trainer.teacher.inference_engine` (the same block as `generator.inference_engine`) on its own GPUs, driven through a `RemoteInferenceClient` exactly as the student's engines are | `trainer.teacher.model` is an HF id or local path. Own placement group (never the colocate group), a router, a port window past the student's; never weight-synced or slept. Defaults that differ from the student's block: prefix caching off (scoring requests never read it), `gpu_memory_utilization` 0.9, Ray Prometheus stats off; `max_model_len` defaults to the longest input + longest response + 1. Weight-sync, sleep, LoRA, PD, speculative-decoding, routed-expert and external-URL fields are rejected. |
-| `vllm` | vLLM servers you started, given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible `/v1/completions` with vLLM's `prompt_logprobs` parameter | Works with a stock `vllm serve` and with SkyRL's `serve` entrypoint (`examples/train/remote_inference_server/run_vllm_server.sh`). Any model vLLM serves; `max_model_len` must cover prompt + response + 1. Requests round-robin across the URLs. The servers are never weight-synced or slept. |
+| `vllm` | One vLLM endpoint you run per teacher model, given by `trainer.teacher.server_url`, scored through the OpenAI-compatible `/v1/completions` with vLLM's `prompt_logprobs` parameter | A single `vllm serve`, a data-parallel one, or a router in front of several servers: SkyRL's `serve` entrypoint (`examples/train/remote_inference_server/run_vllm_server.sh`) starts servers behind a router and logs its `proxy_url`, which is the URL to use. Spreading requests over replicas is the endpoint's job; the client does not round-robin. Any model vLLM serves; `max_model_len` must cover prompt + response + 1. The servers are never weight-synced or slept. |
 
 There are no preflight checks yet. Nothing verifies before training that the teacher's tokenizer
 matches the student's, or that a vLLM teacher you run has a context covering the longest input plus the
@@ -82,8 +82,8 @@ goes down with the Ray job when the run ends, like the student's engines.
 ### A vLLM teacher you run
 
 Start the teacher on GPUs the training job does not use, either with vLLM directly or with SkyRL's
-standalone server (`examples/train/remote_inference_server/run_vllm_server.sh`, which logs its
-`server_urls`), then point the run at it with `backend=vllm`:
+standalone server (`examples/train/remote_inference_server/run_vllm_server.sh`, which starts servers
+behind a router and logs its `proxy_url`), then point the run at that one endpoint with `backend=vllm`:
 
 ```bash
 vllm serve Qwen/Qwen3-32B --tensor-parallel-size 4 --port 8000   # on the teacher node(s)
@@ -91,7 +91,7 @@ vllm serve Qwen/Qwen3-32B --tensor-parallel-size 4 --port 8000   # on the teache
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   trainer.teacher.backend=vllm \
   trainer.teacher.model=Qwen/Qwen3-32B \
-  trainer.teacher.server_urls="['http://teacher-host:8000']" \
+  trainer.teacher.server_url=http://teacher-host:8000 \
   ...
 ```
 
@@ -108,9 +108,9 @@ sent to vLLM servers.
 | `trainer.teacher.backend` | `skyrl` | `skyrl` (launched by the job) or `vllm` (servers you run) |
 | `trainer.teacher.model` | — | `skyrl`: HF id or local path; `vllm`: the served model name |
 | `trainer.teacher.inference_engine.*` | the student's block with prefix caching off, `gpu_memory_utilization` 0.9, Ray Prometheus stats off | `skyrl` only: engine count, parallelism, memory, batching, `engine_init_kwargs` (e.g. `max_model_len`) |
-| `trainer.teacher.server_urls` | — | `vllm` only: base URLs, e.g. `"['http://host:8000']"` |
+| `trainer.teacher.server_url` | — | `vllm` only: root URL of the teacher's one endpoint, e.g. `http://host:8000`, without `/v1` |
 | `trainer.teacher.max_concurrency` | 32 | Teacher requests in flight (a launched teacher is also capped per engine like the student's rollouts) |
-| `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | `vllm` only: request timeout and retries with backoff (a retry moves to the next URL); a launched teacher uses its `RemoteInferenceClient`'s policy |
+| `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | `vllm` only: request timeout and retries with backoff on the same endpoint; a launched teacher uses its `RemoteInferenceClient`'s policy |
 | `trainer.algorithm.opd.kl_coef` | 1.0 | `advantages -= kl_coef · (log π_student − log π_teacher)` |
 | `trainer.algorithm.opd.use_task_reward` | `false` | `false`: pure distillation (env reward is only logged). `true`: the reward's advantages plus the teacher term |
 
