@@ -63,11 +63,7 @@ class OPDExp(BasePPOExp):
         teacher = self.cfg.trainer.teacher
         if teacher.backend == "skyrl":
             client, server_setup = launch_teacher(self.cfg)
-            return SkyRLTeacherClient(
-                client,
-                server_setup=server_setup,
-                max_concurrency=teacher.max_concurrency
-            )
+            return SkyRLTeacherClient(client, server_setup=server_setup, max_concurrency=teacher.max_concurrency)
         if teacher.backend == "fireworks":
             return FireworksTeacherClient(
                 teacher.model,
