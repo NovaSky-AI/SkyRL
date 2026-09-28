@@ -127,23 +127,26 @@ def get_open_port(start_port: int | None = None) -> int:
         return s.getsockname()[1]
 
 
-def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
-    """Find an available port and hold the socket to prevent race conditions.
+def find_and_reserve_port(start_port: int, *, host: str = "0.0.0.0") -> Tuple[int, socket.socket]:
+    """Reserve a port on the server's bind address until the caller closes it.
 
-    This keeps the socket bound so no other process can claim the same port
-    between discovery and actual server startup.
+    IPv6 reservations are dual-stack, matching the native router's listener.
+    Closing the reservation before server startup still leaves a rebind race.
 
     Returns:
         (port, socket) -- caller must close the socket before rebinding.
     """
     port = start_port
     end_port = start_port + SERVER_PORT_STRIDE
+    family = socket.getaddrinfo(host, start_port, type=socket.SOCK_STREAM)[0][0]
     sock: socket.socket | None = None
     while port < end_port:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = socket.socket(family, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", port))
+            if family == socket.AF_INET6:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            sock.bind((host, port))
             sock.listen(1)
             return port, sock
         except OSError:

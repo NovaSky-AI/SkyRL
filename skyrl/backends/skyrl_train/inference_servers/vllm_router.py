@@ -80,11 +80,15 @@ class VLLMRouter:
 
         # Reserve the router port and prometheus port to prevent race conditions
         # between discovery and actual server startup.
-        reserved_port, self._port_reservation = find_and_reserve_port(self._router_args.port)
+        reserved_port, self._port_reservation = find_and_reserve_port(
+            self._router_args.port, host=self._router_args.host
+        )
         self._router_args.port = reserved_port
 
         prometheus_start = self._router_args.prometheus_port or self._DEFAULT_PROMETHEUS_PORT
-        reserved_prom_port, self._prometheus_port_reservation = find_and_reserve_port(prometheus_start)
+        reserved_prom_port, self._prometheus_port_reservation = find_and_reserve_port(
+            prometheus_start, host=self._router_args.prometheus_host or "127.0.0.1"
+        )
         self._router_args.prometheus_port = reserved_prom_port
 
         logger.info(f"VLLMRouter: port={self._router_args.port}, prometheus_port={self._router_args.prometheus_port}")

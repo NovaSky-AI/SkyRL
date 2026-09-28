@@ -33,8 +33,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-# vLLM dev-mode RLHF routes (entrypoints/serve/dev/rlhf/api_router.py), plus
-# /fetch_weights and /reset_prefix_cache, which SkyRL adds in vllm_server_actor.
+# vLLM dev-mode routes, plus /fetch_weights, which SkyRL adds in vllm_server_actor.
 INIT_ENGINE_ENDPOINT = "/init_weight_transfer_engine"
 START_UPDATE_ENDPOINT = "/start_weight_update"
 UPDATE_WEIGHTS_ENDPOINT = "/update_weights"
@@ -128,7 +127,8 @@ class SkyrlWeightSyncClient:
         self._fanout_uniform(FETCH_WEIGHTS_ENDPOINT, body)
 
     def reset_prefix_cache(self, reset_running_requests: bool = True) -> None:
-        self._fanout_uniform(RESET_PREFIX_CACHE_ENDPOINT, {"reset_running_requests": reset_running_requests})
+        endpoint = f"{RESET_PREFIX_CACHE_ENDPOINT}?reset_running_requests={str(reset_running_requests).lower()}"
+        self._fanout_uniform(endpoint, None)
 
     def pause_generation(self, clear_cache: bool = False) -> None:
         # /pause takes query params, not a body (mirrors RemoteInferenceClient.pause).
@@ -170,6 +170,10 @@ class SkyrlWeightSyncClient:
         resp = self._session.post(f"{url}{endpoint}", json=body, timeout=None)
         if resp.status_code >= 400:
             raise RuntimeError(_error_message(url, endpoint, resp))
+        if endpoint.partition("?")[0] == RESET_PREFIX_CACHE_ENDPOINT:
+            result = resp.json()
+            if not isinstance(result, dict) or result.get("success") is not True:
+                raise RuntimeError(f"Prefix-cache reset did not return success=true from: {url}")
 
 
 def _json_safe(update_info: Dict[str, Any]) -> Dict[str, Any]:
