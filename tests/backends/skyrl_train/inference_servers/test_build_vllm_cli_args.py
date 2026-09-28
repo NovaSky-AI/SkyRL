@@ -7,6 +7,7 @@ import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     _apply_serialized_fp8_weight_sync_defaults,
+    build_frozen_vllm_cli_args,
     build_vllm_cli_args,
     get_pd_cli_args,
     get_pd_p2p_connector_name,
@@ -167,6 +168,37 @@ def test_sample_support_uses_processed_top_k_logprobs():
 
     assert args.max_logprobs == 8
     assert args.logprobs_mode == "processed_logprobs"
+
+
+@pytest.mark.vllm
+def test_build_frozen_vllm_cli_args_serves_a_model_that_is_only_read():
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.served_model_name = "teacher"
+    ie_cfg.tensor_parallel_size = 4
+    ie_cfg.enable_return_routed_experts = True  # policy-only settings the frozen role must not apply
+    ie_cfg.enable_return_sample_support_set = True
+    ie_cfg.engine_init_kwargs = {"max_model_len": 4096, "enforce_eager": True}
+
+    args = build_frozen_vllm_cli_args("Qwen/Qwen3-32B", ie_cfg, seed=7)
+    policy_args = build_vllm_cli_args(cfg)
+
+    assert args.model == "Qwen/Qwen3-32B"
+    assert args.served_model_name == ["teacher"]
+    assert args.tensor_parallel_size == 4
+    assert args.seed == 7
+    assert args.enable_sleep_mode is False
+    assert args.enable_lora is False
+    assert args.weight_transfer_config is None
+    assert args.enable_return_routed_experts is False
+    assert args.logprobs_mode != "processed_logprobs"  # sample-support capture is the policy's
+    assert args.max_model_len == 4096
+    assert args.enforce_eager is True  # engine_init_kwargs applies last, over the config field
+    # the role-independent fields are the same ones the policy gets
+    for name in ("worker_extension_cls", "generation_config", "gpu_memory_utilization", "max_num_seqs", "dtype"):
+        assert getattr(args, name) == getattr(policy_args, name)
+    assert policy_args.weight_transfer_config is not None
+    assert policy_args.logprobs_mode == "processed_logprobs"
 
 
 def test_resolve_policy_model_name_uses_served_model_name():

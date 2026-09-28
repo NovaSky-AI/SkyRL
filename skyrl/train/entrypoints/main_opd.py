@@ -10,19 +10,23 @@ On top of ``main_base``: ``OPDTrainer.generate`` runs one ``generator.generate``
 group concurrently and scores each group under the teacher as soon as its rollouts are back, so
 teacher latency overlaps with the rest of the batch's generation and any generator works; the
 trainer's other overrides consume the resulting ``GeneratorOutput["teacher_logprobs"]``; and this
-experiment class builds the teacher client. Nothing verifies the teacher before training yet; see
-the TODO in ``_setup_trainer``. See ``skyrl.train.opd``.
+experiment class builds the teacher client, launching the teacher's vLLM deployment in the job
+when ``trainer.teacher.backend="skyrl"`` (the default). Nothing verifies the teacher before training
+yet; see the TODO in ``_setup_trainer``. See ``skyrl.train.opd``.
 
-Usage (Fireworks teacher):
+Usage (teacher launched by the job on its own GPUs):
 
-    export FIREWORKS_API_KEY=...
     uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \\
         trainer.policy.model.path=Qwen/Qwen3-4B-Base \\
-        trainer.teacher.model=accounts/<account>/deployments/<teacher-deployment> \\
+        trainer.teacher.model=Qwen/Qwen3-32B \\
+        trainer.teacher.inference_engine.num_engines=1 \\
+        trainer.teacher.inference_engine.tensor_parallel_size=4 \\
         data.train_data="['$HOME/data/dapo/dapo-math-17k-cleaned.parquet']" \\
         environment.env_class=aime ...
 
-Run scripts: ``examples/train/on_policy_distillation/``.
+Servers you run instead: ``trainer.teacher.backend=vllm trainer.teacher.server_urls=[...]``; Fireworks:
+``trainer.teacher.backend=fireworks`` with ``FIREWORKS_API_KEY`` exported. Run scripts:
+``examples/train/on_policy_distillation/``.
 """
 
 import os
@@ -34,9 +38,11 @@ from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.opd.config import OPDExpConfig, validate_opd_cfg
 from skyrl.train.opd.teacher_client import (
     FireworksTeacherClient,
+    SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
 )
+from skyrl.train.opd.teacher_launch import launch_teacher
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
@@ -48,8 +54,16 @@ class OPDExp(BasePPOExp):
         self._teacher_client: TeacherLogprobClient = None
 
     def get_teacher_client(self) -> TeacherLogprobClient:
-        """Build the teacher client from ``trainer.teacher``. Override for other backends."""
+        """Build the teacher client from ``trainer.teacher``. Override for other backends.
+
+        ``backend="skyrl"`` launches the teacher's vLLM deployment here, before the student's engines
+        and the training workers exist (``_setup_trainer`` calls this first): the colocate placement
+        group, if any, was created in ``__init__``, so the teacher can never take colocated GPUs.
+        """
         teacher = self.cfg.trainer.teacher
+        if teacher.backend == "skyrl":
+            client, server_setup = launch_teacher(self.cfg)
+            return SkyRLTeacherClient(client, server_setup=server_setup, max_concurrency=teacher.max_concurrency)
         if teacher.backend == "fireworks":
             return FireworksTeacherClient(
                 teacher.model,
