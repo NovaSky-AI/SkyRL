@@ -41,26 +41,6 @@ def test_render_bridge_and_parse_agree(renderer: RenderersRenderer) -> None:
     assert set(bridged.tail_indices) == {-1, 0}
 
 
-def test_a_turn_whose_thinking_never_closed_is_extended_verbatim(renderer: RenderersRenderer) -> None:
-    """The library declines such a turn; skycap extends it as sampled, so no history is re-rendered."""
-    from renderers.base import load_tokenizer
-
-    tokenizer = load_tokenizer(TOKENIZER)
-    first = renderer.render([{"role": "user", "content": "hi"}], None)
-    unclosed = tokenizer.encode("<think>\nstill thinking<|im_end|>", add_special_tokens=False)
-    closed = tokenizer.encode("<think>\nstill thinking</think><|im_end|>", add_special_tokens=False)
-    more = [{"role": "user", "content": "more"}]
-
-    bridged = renderer.bridge(first.token_ids, unclosed, more, None)
-    assert bridged is not None
-    assert bridged.token_ids[: bridged.reused] == first.token_ids + unclosed
-    # The next message renders exactly as it would after a closed turn.
-    reference = renderer.bridge(first.token_ids, closed, more, None)
-    assert reference is not None
-    assert bridged.token_ids[bridged.reused :] == reference.token_ids[reference.reused :]
-    assert bridged.tail_indices == reference.tail_indices
-
-
 async def test_a_conversation_through_the_real_renderer(renderer: RenderersRenderer) -> None:
     from renderers.base import load_tokenizer
 

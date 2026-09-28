@@ -54,17 +54,6 @@ class TokenRenderer(Protocol):
     def decode_spans(self, token_ids: Sequence[int], context: Sequence[int] = ()) -> tuple[str, list[int]]: ...
 
 
-def _token_ids(tokenizer: Any, *tokens: str) -> tuple[int, ...] | None:
-    """The ids of single-token strings, or None if the vocabulary lacks any of them."""
-    ids = []
-    for token in tokens:
-        encoded = tokenizer.encode(token, add_special_tokens=False)
-        if len(encoded) != 1:
-            return None
-        ids.append(int(encoded[0]))
-    return tuple(ids)
-
-
 def normalize_tools(tools: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]] | None:
     """OpenAI's ``{"type": "function", "function": {...}}`` wrapper, flattened."""
     if not tools:
@@ -111,7 +100,6 @@ class RenderersRenderer:
         from renderers.base import load_tokenizer
 
         self.name = tokenizer
-        self._retain_all = thinking_retention == "all"
 
         def build() -> tuple[Any, Any]:
             loaded = load_tokenizer(tokenizer)
@@ -130,9 +118,8 @@ class RenderersRenderer:
         with ThreadPoolExecutor(max_workers=min(size, 8)) as pool:
             for slot in pool.map(lambda _: build(), range(size - 1)):
                 self._slots.put(slot)
-        with self._checkout() as (renderer, loaded):
+        with self._checkout() as (renderer, _):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
-            self._think_ids = _token_ids(loaded, "<think>", "</think>")
 
     @contextmanager
     def _checkout(self) -> Iterator[tuple[Any, Any]]:
@@ -148,40 +135,6 @@ class RenderersRenderer:
         return Rendered(token_ids=list(out.token_ids), tail_indices=list(out.message_indices))
 
     def bridge(
-        self,
-        previous_prompt: Sequence[int],
-        previous_completion: Sequence[int],
-        new_messages: Sequence[Mapping[str, Any]],
-        tools: Sequence[Mapping[str, Any]] | None,
-    ) -> Rendered | None:
-        bridged = self._bridge(previous_prompt, previous_completion, new_messages, tools)
-        if bridged is not None or not self._unclosed_thinking(previous_prompt, previous_completion):
-            return bridged
-        # A completion whose thinking never closed, ended by a stop token. The library won't extend
-        # it, because the model's own template would render that turn differently; skycap would
-        # then re-render the whole history, parsing the thinking out of every earlier turn. With
-        # every turn's thinking retained, the history is exactly what was sampled, so extend it
-        # verbatim: the next messages render the same whatever the completion held, so take them
-        # from a bridge over the completion with its thinking closed, after the original tokens.
-        start, end = self._think_ids  # type: ignore[misc]
-        closed = [*previous_completion[:-1], end, previous_completion[-1]]
-        bridged = self._bridge(previous_prompt, closed, new_messages, tools)
-        if bridged is None:
-            return None
-        reused = len(previous_prompt) + len(previous_completion)
-        tail = bridged.token_ids[bridged.reused :]
-        return Rendered(
-            token_ids=[*previous_prompt, *previous_completion, *tail], tail_indices=bridged.tail_indices, reused=reused
-        )
-
-    def _unclosed_thinking(self, previous_prompt: Sequence[int], previous_completion: Sequence[int]) -> bool:
-        if not self._retain_all or self._think_ids is None or not previous_completion:
-            return False
-        start, end = self._think_ids
-        opened = start in previous_completion or start in previous_prompt[-4:]
-        return opened and end not in previous_completion and previous_completion[-1] in self._stop_ids
-
-    def _bridge(
         self,
         previous_prompt: Sequence[int],
         previous_completion: Sequence[int],
