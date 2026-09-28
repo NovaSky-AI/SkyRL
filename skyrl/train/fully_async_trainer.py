@@ -1153,23 +1153,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return self.convert_to_training_input(generator_output, uids)
 
-    def save_checkpoints(self) -> str:
+    def _save_additional_checkpoint_state(self, checkpoint_path: str) -> None:
         """
-        Extend base checkpointing by recording consumed UIDs for fully-async training.
+        Record consumed UIDs before model saves and checkpoint publication.
 
         Otherwise, when resuming, there is no way to know which data has been trained on.
-        Returns the checkpoint folder path (forwarded from the base implementation).
         """
+        super()._save_additional_checkpoint_state(checkpoint_path)
         consumed_uids_list = (
             self.async_train_dataloader.get_consumed_uids_list()
         )  # read first to prevent race condition
         filtered_uids_list = self.async_train_dataloader.get_filtered_uids_list()
-        # The base method will save the model, dataloader path, trainer_state, and latest_ckpt_global_step.txt.
-        global_step_folder = super().save_checkpoints()
         # Also save the consumed UIDs (do-not-redraw this epoch), the filtered subset (so dropped
         # prompts are skipped, not regenerated, on resume), and the epoch (not derivable from
         # global_step under sample_full_batch, where an epoch can end early).
-        fully_async_state_path = os.path.join(global_step_folder, "fully_async_state.pt")
+        fully_async_state_path = os.path.join(checkpoint_path, "fully_async_state.pt")
         fully_async_state = {
             "consumed_uids": consumed_uids_list,
             "filtered_uids": filtered_uids_list,
@@ -1178,7 +1176,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with io.open_file(fully_async_state_path, "wb") as f:
             torch.save(fully_async_state, f)
         logger.info(f"Saved fully-async state to {fully_async_state_path}")
-        return global_step_folder
 
     def load_checkpoints(self) -> Tuple[int, str, Optional[Set[str]], Optional[Set[str]], Optional[int]]:
         """

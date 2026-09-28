@@ -1694,6 +1694,7 @@ class RayPPOTrainer:
         critic_save_dir = os.path.join(global_step_folder, "critic")
 
         io.makedirs(global_step_folder, exist_ok=True)
+        self._save_additional_checkpoint_state(global_step_folder)
 
         # Save policy checkpoint (dispatch handles offload/backload)
         self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
@@ -1704,13 +1705,10 @@ class RayPPOTrainer:
 
         # Save dataloader state
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        try:
-            dataloader_state_dict = self.train_dataloader.state_dict()
-            with io.open_file(dataloader_save_path, "wb") as f:
-                torch.save(dataloader_state_dict, f)
-            logger.info(f"Saved dataloader state to {dataloader_save_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save dataloader state: {e}")
+        dataloader_state_dict = self.train_dataloader.state_dict()
+        with io.open_file(dataloader_save_path, "wb") as f:
+            torch.save(dataloader_state_dict, f)
+        logger.info(f"Saved dataloader state to {dataloader_save_path}")
 
         # Save additional trainer state
         trainer_state = {
@@ -1727,6 +1725,7 @@ class RayPPOTrainer:
         with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
 
+        self._on_checkpoint_saved(global_step_folder)
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
 
         # Clean up old checkpoints after successful save
@@ -1734,6 +1733,21 @@ class RayPPOTrainer:
             self._cleanup_old_checkpoints()
 
         return global_step_folder
+
+    def _save_additional_checkpoint_state(self, checkpoint_path: str) -> None:
+        """Save subclass state before model saves, publication, and retention.
+
+        Snapshot state that can change concurrently here, before distributed model
+        saves block the trainer. Raise on failure to leave the previous checkpoint
+        marker and retained checkpoints unchanged.
+        """
+
+    def _on_checkpoint_saved(self, checkpoint_path: str) -> None:
+        """Publish subclass metadata after native saves and before retention.
+
+        All native state and the latest marker have been written. Raise on failure
+        to keep previous checkpoints available for the caller's resume protocol.
+        """
 
     def _cleanup_old_checkpoints(self):
         if not self._node_ids:
@@ -1783,12 +1797,14 @@ class RayPPOTrainer:
             )
         else:
             # Get and validate resume path
-            checkpoint_path = Path(self.cfg.trainer.resume_path)
+            checkpoint_path = self.cfg.trainer.resume_path
             if not checkpoint_path:
                 raise ValueError("`trainer.resume_path` must be specified when resume_mode is 'from_path'")
+            # Keep remote URI schemes intact; pathlib collapses s3:// to s3:/.
+            checkpoint_path = os.fspath(checkpoint_path).rstrip("/")
 
             # Validate that it's a global_step directory
-            if GLOBAL_STEP_PREFIX not in checkpoint_path.name:
+            if not os.path.basename(checkpoint_path).startswith(GLOBAL_STEP_PREFIX):
                 raise ValueError(
                     f"`trainer.resume_path` must point to a directory whose name starting with {GLOBAL_STEP_PREFIX}, got: {checkpoint_path}"
                 )
@@ -1800,7 +1816,7 @@ class RayPPOTrainer:
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
-        global_step = extract_step_from_path(Path(checkpoint_path))
+        global_step = extract_step_from_path(checkpoint_path)
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
         logger.info(f"Resuming from global_step: {global_step}")
@@ -1825,13 +1841,10 @@ class RayPPOTrainer:
 
         # 2. Load dataloader state if available
         if io.exists(dataloader_state_path):
-            try:
-                with io.open_file(dataloader_state_path, "rb") as f:
-                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-                self.train_dataloader.load_state_dict(dataloader_state)
-                logger.info("Successfully loaded dataloader state")
-            except Exception as e:
-                logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
+            with io.open_file(dataloader_state_path, "rb") as f:
+                dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+            self.train_dataloader.load_state_dict(dataloader_state)
+            logger.info("Successfully loaded dataloader state")
         else:
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
