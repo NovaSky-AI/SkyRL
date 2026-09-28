@@ -25,11 +25,9 @@ from skyrl.train.opd.config import (
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
-    FireworksTeacherClient,
     SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
-    _extract_echoed_logprobs,
 )
 from skyrl.train.opd.teacher_launch import (
     served_teacher_name,
@@ -171,75 +169,6 @@ async def test_base_client_limits_concurrency():
 
 
 # ---------------------------------------------------------------------------
-# FireworksTeacherClient
-# ---------------------------------------------------------------------------
-
-
-def _content_response(ids: List[int], logprobs: List[float]) -> Dict[str, Any]:
-    return {
-        "choices": [
-            {
-                "token_ids": ids,
-                "logprobs": {"content": [{"token_id": t, "logprob": lp} for t, lp in zip(ids, logprobs)]},
-            }
-        ]
-    }
-
-
-def _legacy_response(ids: List[int], logprobs: List[float]) -> Dict[str, Any]:
-    return {"choices": [{"token_ids": ids, "logprobs": {"token_ids": ids, "token_logprobs": logprobs}}]}
-
-
-def test_extract_echoed_logprobs_both_shapes():
-    assert _extract_echoed_logprobs(_content_response([7, 8], [-0.1, -0.2])["choices"][0]) == ([7, 8], [-0.1, -0.2])
-    assert _extract_echoed_logprobs(_legacy_response([7, 8], [-0.1, -0.2])["choices"][0]) == ([7, 8], [-0.1, -0.2])
-    with pytest.raises(RuntimeError, match="no logprobs"):
-        _extract_echoed_logprobs({"token_ids": [1]})
-
-
-def test_fireworks_client_rejects_v1_base_url_and_missing_key():
-    with pytest.raises(ValueError, match="server root"):
-        FireworksTeacherClient("m", api_key="k", base_url="https://api.fireworks.ai/v1")
-    with pytest.raises(ValueError, match="API key"):
-        FireworksTeacherClient("m", api_key="")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("shape", ["content", "legacy"])
-async def test_fireworks_request_and_parse(shape):
-    client = FireworksTeacherClient("accounts/fireworks/models/x", api_key="k")
-    captured: Dict[str, Any] = {}
-
-    async def fake_post(body):
-        captured.update(body)
-        make = _content_response if shape == "content" else _legacy_response
-        return make([30, 31, 32], [-0.5, -0.25, -0.125])
-
-    client._post = fake_post  # type: ignore[method-assign]
-    out = await client.compute_logprobs([10, 11], [30, 31, 32])
-
-    assert out == [-0.5, -0.25, -0.125]
-    assert captured["prompt"] == [10, 11, 30, 31, 32]
-    assert captured["max_tokens"] == 0
-    assert captured["echo_last"] == 3
-    assert captured["logprobs"] is True
-    assert captured["return_token_ids"] is True
-    assert captured["temperature"] == 1.0
-
-
-@pytest.mark.asyncio
-async def test_fireworks_id_mismatch_raises():
-    client = FireworksTeacherClient("accounts/fireworks/models/x", api_key="k")
-
-    async def fake_post(body):
-        return _content_response([99, 31], [-0.5, -0.25])
-
-    client._post = fake_post  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="different token ids"):
-        await client.compute_logprobs([10], [30, 31])
-
-
-# ---------------------------------------------------------------------------
 # VLLMTeacherClient
 # ---------------------------------------------------------------------------
 
@@ -341,8 +270,7 @@ def test_teacher_engine_block_keeps_its_defaults_under_overrides():
     validate_opd_cfg(cfg)
 
 
-def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields(monkeypatch):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "k")
+def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
     validate_opd_cfg(
         OPDExpConfig.from_cli_overrides(
             [
@@ -357,7 +285,6 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields(monkeypatch):
             ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_urls=['http://a:8000']"]
         )
     )
-    validate_opd_cfg(OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.backend=fireworks"]))
 
 
 @pytest.mark.parametrize(
@@ -365,13 +292,13 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields(monkeypatch):
     [
         ([], "trainer.teacher.model must be set"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=bogus"], "backend must be one of"),
+        (["trainer.teacher.model=m", "trainer.teacher.backend=fireworks"], "backend must be one of"),  # removed
         (["trainer.teacher.model=m", "trainer.teacher.backend=vllm"], "server_urls"),
-        # The three backends are exclusive: another backend's fields are a config error, not a no-op.
+        # The two backends are exclusive: the other backend's fields are a config error, not a no-op.
         (
             ["trainer.teacher.model=m", "trainer.teacher.server_urls=['http://a:8000']"],
             "server_urls is for backend='vllm'",
         ),
-        (["trainer.teacher.model=m", "trainer.teacher.base_url=http://x"], "base_url is for backend='fireworks'"),
         (
             ["trainer.teacher.model=m", "trainer.teacher.inference_engine.run_engines_locally=false"],
             "run_engines_locally must be true",
@@ -407,31 +334,6 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields(monkeypatch):
             ],
             "inference_engine is for backend='skyrl'",
         ),
-        (
-            [
-                "trainer.teacher.model=m",
-                "trainer.teacher.backend=vllm",
-                "trainer.teacher.server_urls=['http://a:8000']",
-                "trainer.teacher.base_url=http://x",
-            ],
-            "base_url is for backend='fireworks'",
-        ),
-        (
-            [
-                "trainer.teacher.model=m",
-                "trainer.teacher.backend=fireworks",
-                "trainer.teacher.server_urls=['http://a']",
-            ],
-            "server_urls is for backend='vllm'",
-        ),
-        (
-            [
-                "trainer.teacher.model=m",
-                "trainer.teacher.backend=fireworks",
-                "trainer.teacher.inference_engine.gpu_memory_utilization=0.5",
-            ],
-            "inference_engine is for backend='skyrl'",
-        ),
         (["trainer.teacher.model=m", "trainer.algorithm.zero_variance_filter=true"], "zero_variance_filter"),
         (["trainer.teacher.model=m", "trainer.algorithm.advantage_batch_normalize=true"], "advantage_batch_normalize"),
         (["trainer.teacher.model=m", "trainer.algorithm.policy_loss_type=rollout_is"], "old-logprob forward"),
@@ -448,15 +350,13 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields(monkeypatch):
         (["trainer.teacher.model=m", "generator.step_wise_trajectories=true"], "step_wise"),
     ],
 )
-def test_validate_opd_cfg_rejects(monkeypatch, overrides, message):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "k")
+def test_validate_opd_cfg_rejects(overrides, message):
     cfg = OPDExpConfig.from_cli_overrides(overrides)
     with pytest.raises(ValueError, match=message):
         validate_opd_cfg(cfg)
 
 
-def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo(monkeypatch):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "k")
+def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo():
     validate_opd_cfg(
         OPDExpConfig.from_cli_overrides(
             [
@@ -468,13 +368,6 @@ def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo(monke
             ]
         )
     )
-
-
-def test_validate_opd_cfg_requires_api_key(monkeypatch):
-    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
-    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.backend=fireworks"])
-    with pytest.raises(ValueError, match="FIREWORKS_API_KEY"):
-        validate_opd_cfg(cfg)
 
 
 def test_teacher_max_model_len_single_and_multi_turn():

@@ -24,12 +24,10 @@ Usage (teacher launched by the job on its own GPUs):
         data.train_data="['$HOME/data/dapo/dapo-math-17k-cleaned.parquet']" \\
         environment.env_class=aime ...
 
-Servers you run instead: ``trainer.teacher.backend=vllm trainer.teacher.server_urls=[...]``; Fireworks:
-``trainer.teacher.backend=fireworks`` with ``FIREWORKS_API_KEY`` exported. Run scripts:
+Servers you run instead: ``trainer.teacher.backend=vllm trainer.teacher.server_urls=[...]``. Run scripts:
 ``examples/train/on_policy_distillation/``.
 """
 
-import os
 import sys
 
 import ray
@@ -37,7 +35,6 @@ import ray
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.opd.config import OPDExpConfig, validate_opd_cfg
 from skyrl.train.opd.teacher_client import (
-    FireworksTeacherClient,
     SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
@@ -64,15 +61,6 @@ class OPDExp(BasePPOExp):
         if teacher.backend == "skyrl":
             client, server_setup = launch_teacher(self.cfg)
             return SkyRLTeacherClient(client, server_setup=server_setup, max_concurrency=teacher.max_concurrency)
-        if teacher.backend == "fireworks":
-            return FireworksTeacherClient(
-                teacher.model,
-                api_key=os.environ[teacher.api_key_var],
-                base_url=teacher.base_url,
-                max_concurrency=teacher.max_concurrency,
-                request_timeout_s=teacher.request_timeout_s,
-                max_retries=teacher.max_retries,
-            )
         if teacher.backend == "vllm":
             return VLLMTeacherClient(
                 teacher.model,
@@ -90,8 +78,7 @@ class OPDExp(BasePPOExp):
         self._teacher_client = self.get_teacher_client()
         # TODO (kyuds): preflight checks on the teacher before any model is loaded. Nothing verifies the
         # teacher today, so a wrong setup surfaces minutes into the run, or never: a teacher with a
-        # different vocabulary accepts the student's token ids, echoes them and scores them
-        # deterministically. What other frameworks do (surveyed 2026-09-22):
+        # different vocabulary accepts the student's token ids and scores them deterministically. What other frameworks do (surveyed 2026-09-22):
         #   - NeMo-RL (nemo_rl/algorithms/distillation.py, check_vocab_equality): loads the teacher
         #     tokenizer and asserts get_vocab(), len() and config.vocab_size equal the student's;
         #     skippable with an env var. The only one of these with a tokenizer check.
@@ -103,12 +90,13 @@ class OPDExp(BasePPOExp):
         #   - Miles (utils/arguments.py, rollout/on_policy_distillation.py): argument validation only
         #     (teacher URL syntax, duplicates, a default entry, checkpoint path exists); no probe.
         #   - tinker-cookbook: nothing; both sides share the student's tokenizer by construction.
-        # Candidates here, to be decided: NeMo-RL's vocabulary equality (needs the teacher's HF
-        # tokenizer path; Fireworks model ids are not HF paths), prime-rl's /v1/models listing plus
-        # verl's context bound for vLLM teachers (max_input_length + max_generate_length + 1), and a
-        # reproducibility probe that scores one sequence n times and refuses replica-dependent teachers
-        # (serverless Fireworks replicas disagreed by ~0.25 nats mean / 2.7 nats max on identical
-        # requests, more than the 0.01-0.09 nat distillation signal).
+        # Candidates here, to be decided: NeMo-RL's vocabulary equality (a launched teacher's model is
+        # an HF id or path; an external vLLM teacher's served name need not be), prime-rl's /v1/models
+        # listing for external vLLM teachers, verl's context bound (a launched teacher gets
+        # max_model_len by construction), and a reproducibility probe that scores one sequence n times
+        # and refuses replica-dependent teachers (hosted serverless replicas disagreed by ~0.25 nats
+        # mean / 2.7 nats max on identical requests in 2026-09-17 probes, more than the 0.01-0.09 nat
+        # distillation signal).
         return super()._setup_trainer()
 
 
@@ -124,14 +112,7 @@ def main() -> None:
     validate_opd_cfg(cfg)
 
     initialize_ray(cfg)
-    # A local Ray cluster inherits the driver's environment; a `ray job submit` cluster does not.
-    # Forward the teacher API key to the task explicitly so both work.
-    teacher = cfg.trainer.teacher
-    env_vars = {}
-    if teacher.backend == "fireworks" and os.environ.get(teacher.api_key_var):
-        env_vars[teacher.api_key_var] = os.environ[teacher.api_key_var]
-    entrypoint = skyrl_entrypoint.options(runtime_env={"env_vars": env_vars}) if env_vars else skyrl_entrypoint
-    ray.get(entrypoint.remote(cfg))
+    ray.get(skyrl_entrypoint.remote(cfg))
 
 
 if __name__ == "__main__":
