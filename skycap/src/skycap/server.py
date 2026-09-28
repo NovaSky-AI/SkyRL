@@ -224,6 +224,7 @@ class CaptureServer:
                 "id": trajectory.id,
                 "status": trajectory.status,
                 "samples": [s.to_json() for s in build_samples(trajectory.graph)],
+                "unbridged_calls": trajectory.graph.unbridged_calls(),
             }
         )
 

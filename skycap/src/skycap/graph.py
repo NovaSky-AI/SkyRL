@@ -57,6 +57,10 @@ class CallInfo:
     finish_reason: str | None = None
     #: The tool set the call was made with, as a key into ``MessageGraph.tools``; None without tools.
     tools: str | None = None
+    #: Token mode: whether the prompt extended an earlier call's prompt and completion token for
+    #: token. ``False`` means it was rendered from the messages instead (a harness edit, compaction,
+    #: or a turn the renderer wouldn't extend); ``None`` for a trajectory's first call, or text mode.
+    bridged: bool | None = None
 
 
 @dataclass(slots=True)
@@ -284,6 +288,10 @@ class MessageGraph:
         n = self.nodes[node]
         chosen = self._by_match[(n.parent, n.match_hash)]
         return None if chosen == node else chosen
+
+    def unbridged_calls(self) -> int:
+        """Token-mode calls whose prompt didn't extend an earlier call's tokens (``CallInfo.bridged``)."""
+        return sum(call.bridged is False for node in self.nodes for call in node.calls)
 
     def branch_points(self) -> list[int]:
         return [parent for parent, kids in self._children.items() if parent is not None and len(kids) > 1]

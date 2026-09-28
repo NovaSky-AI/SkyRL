@@ -41,6 +41,9 @@ class FinishResult:
     id: str
     status: str
     samples: list[Sample]
+    #: Token-mode calls whose prompt had to be rendered rather than extended (``CallInfo.bridged``).
+    #: Zero for a harness that keeps its history append-only.
+    unbridged_calls: int = 0
 
 
 class Trajectory:
@@ -59,7 +62,10 @@ class Trajectory:
         self.finishing = annotations or {}
         body = await self._pool._post(f"{self.server}/trajectories/{self.id}/finish", {"annotations": self.finishing})
         self.result = FinishResult(
-            id=body["id"], status=body["status"], samples=[Sample.from_json(s) for s in body["samples"]]
+            id=body["id"],
+            status=body["status"],
+            samples=[Sample.from_json(s) for s in body["samples"]],
+            unbridged_calls=body.get("unbridged_calls", 0),
         )
         return self.result
 

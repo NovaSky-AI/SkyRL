@@ -167,6 +167,8 @@ class TokensBackend:
         matches = turn.match_hashes(chat.messages, tools_key, model)
         try:
             planned = await asyncio.to_thread(turn.plan, graph, self.renderer, chat.messages, chat.tools, matches)
+            # A first call has nothing to extend; after that, not extending is worth reporting.
+            follows_a_call = any(node.author == "model" for node in graph)
         except turn.TokenError as error:
             return _error(str(error), 400)
 
@@ -231,6 +233,7 @@ class TokensBackend:
             usage={"prompt_tokens": len(planned.prompt_ids), "completion_tokens": len(output.completion_ids)},
             finish_reason=reason,
             tools=tools_key or None,
+            bridged=planned.bridged if follows_a_call else None,
         )
         status = "ok"
         recorded = False

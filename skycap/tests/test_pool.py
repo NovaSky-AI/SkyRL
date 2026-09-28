@@ -158,6 +158,7 @@ async def test_token_samples_arrive_decoded() -> None:
             result = await trajectory.finish()
 
     (sample,) = result.samples
+    assert result.unbridged_calls == 0  # two appended turns: the second extended the first
     assert isinstance(sample.routed_experts, np.ndarray)
     assert sample.routed_experts.shape == (len(sample.input_ids), 2, 2)
     assert sample.sampling_mask is not None and len(sample.sampling_mask) == len(sample.input_ids)

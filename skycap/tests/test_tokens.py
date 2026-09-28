@@ -172,6 +172,16 @@ async def test_an_identical_retry_is_one_node_with_two_calls() -> None:
         assert len(graph.nodes[1].calls) == 2
 
 
+async def test_an_append_only_conversation_bridges_every_call_after_the_first() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        await converse(client(created["base_url"]), "a", "b", "c")
+        graph = stack.server.trajectories[created["id"]].graph
+
+        assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True, True]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
+
+
 async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
     thinking = [*encode("THINK:hmm|answer"), END]
     async with token_stack(completion=lambda prompt, sampling: thinking) as stack:
@@ -192,6 +202,11 @@ async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
             ("client", "answer"),
         ]
         assert [len(s.targets) for s in samples] == [1, 1]
+        # The second call's prompt was rendered, not extended, and finish says so.
+        assert [call.bridged for call in graph.nodes[1].calls] == [None]
+        second = next(n for n in graph if n.author == "model" and n.id != 1)
+        assert [call.bridged for call in second.calls] == [False]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
 
 
 async def test_use_raw_content_keeps_reasoning_inline_so_a_verbatim_replay_stays_one_path() -> None:

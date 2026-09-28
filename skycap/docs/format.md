@@ -56,7 +56,7 @@ Node `i` is `nodes[i]`, and `nodes[i].id == i`. A node is one message:
 | `message` | the message, exactly as the harness sent or received it |
 | `match_hash`, `delta_hash` | identity hashes (see the graph module) |
 | `created_at` | Unix seconds |
-| `calls` | model-authored nodes: every call that produced this output, `{t_start, t_end, model, sampling, usage, finish_reason, tools}`, where `tools` is the key of the call's tool set in the document's `tools`, or null |
+| `calls` | model-authored nodes: every call that produced this output, `{t_start, t_end, model, sampling, usage, finish_reason, tools, bridged}`, where `tools` is the key of the call's tool set in the document's `tools`, or null, and `bridged` (token mode) is whether the call's prompt extended an earlier call's prompt and completion token for token: `false` when it was rendered from the messages instead, null for a trajectory's first call or text mode |
 | `shadowed_by` | null, or the sibling that later history with the same message continues from |
 | `tokens` | null in text mode, else this node's slices of the sidecars (below) |
 
