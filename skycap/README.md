@@ -33,6 +33,16 @@ uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
 The engine is vLLM, over its own `/inference/v1/generate`. Another engine's wire
 is a subclass of `skycap.tokens.engine.VLLMEngine`.
 
+By default a reply is parsed: a thinking model's reasoning comes back as
+`reasoning_content`, and tool calls as `tool_calls`. Add `--use-raw-content`
+when the harness was written against a vLLM server with no reasoning or tool
+parser. Replies then match that server's: the completion's own text as
+`content`, with thinking inline and tool calls unparsed, and
+`reasoning_content: null`. A harness that replays `content` and drops
+`reasoning_content` (Terminus-2 through LiteLLM, for example) then sends each
+turn back unchanged, and a thinking model's history stays one path. With parsed
+replies, every replayed turn would lose its thinking and fork the graph.
+
 ## Capture a rollout
 
 ```python
