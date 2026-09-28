@@ -1,14 +1,11 @@
 set -x
 
 # On-policy distillation for math on the DAPO dataset, eval on AIME 2024.
-# Student: Qwen3-1.7B-Base. Teacher: a Qwen3-family model that shares the student's tokenizer,
-# launched by the job (TEACHER_BACKEND=skyrl, default) or a dedicated Fireworks deployment
-# (TEACHER_BACKEND=fireworks); see run_on_policy_distill_math_qwen3_4b.sh for the placements.
+# Student: Qwen3-1.7B-Base. Teacher: a Qwen3-family model that shares the student's tokenizer, launched
+# by the job on its own GPUs; see run_on_policy_distill_math_qwen3_4b.sh for the placement.
 #
 # bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_1.7b.sh
-# export FIREWORKS_API_KEY=<your_key_here>
-# TEACHER_BACKEND=fireworks TEACHER_MODEL=accounts/<account>/deployments/<id> bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_1.7b.sh
 
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
@@ -18,35 +15,12 @@ LOGGER=wandb
 STUDENT_MODEL="Qwen/Qwen3-1.7B-Base"
 TEACHER_MAX_CONCURRENCY=64
 
-# Teacher placement (see the header). NUM_GPUS_PER_NODE is the student's share of the node; with the
-# launched teacher the rest of the node is the teacher's (TEACHER_NUM_ENGINES * TEACHER_TP_SIZE GPUs).
-TEACHER_BACKEND="${TEACHER_BACKEND:-skyrl}"
-case "$TEACHER_BACKEND" in
-  skyrl)
-    TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-32B}"
-    TEACHER_NUM_ENGINES="${TEACHER_NUM_ENGINES:-1}"
-    TEACHER_TP_SIZE="${TEACHER_TP_SIZE:-4}"
-    NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-4}"
-    TEACHER_ARGS=(
-      trainer.teacher.backend=skyrl
-      trainer.teacher.model="$TEACHER_MODEL"
-      trainer.teacher.inference_engine.num_engines="$TEACHER_NUM_ENGINES"
-      trainer.teacher.inference_engine.tensor_parallel_size="$TEACHER_TP_SIZE"
-    )
-    ;;
-  fireworks)
-    TEACHER_MODEL="${TEACHER_MODEL:?set TEACHER_MODEL to a Fireworks model or deployment id}"
-    NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-8}"
-    TEACHER_ARGS=(
-      trainer.teacher.backend=fireworks
-      trainer.teacher.model="$TEACHER_MODEL"
-    )
-    ;;
-  *)
-    echo "TEACHER_BACKEND must be 'skyrl' (launched by the job) or 'fireworks', got '$TEACHER_BACKEND'" >&2
-    exit 1
-    ;;
-esac
+# The job launches the teacher's vLLM deployment on its own GPUs. NUM_GPUS_PER_NODE is the student's share
+# of the node; the teacher takes TEACHER_NUM_ENGINES * TEACHER_TP_SIZE GPUs on top of it.
+TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-32B}"
+TEACHER_NUM_ENGINES="${TEACHER_NUM_ENGINES:-1}"
+TEACHER_TP_SIZE="${TEACHER_TP_SIZE:-4}"
+NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-4}"
 
 # On-policy distillation args
 KL_COEF=1.0             # advantages -= KL_COEF * (log pi_student - log pi_teacher)
@@ -73,7 +47,10 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.policy.model.path=$STUDENT_MODEL \
-  "${TEACHER_ARGS[@]}" \
+  trainer.teacher.backend=skyrl \
+  trainer.teacher.model="$TEACHER_MODEL" \
+  trainer.teacher.inference_engine.num_engines=$TEACHER_NUM_ENGINES \
+  trainer.teacher.inference_engine.tensor_parallel_size=$TEACHER_TP_SIZE \
   trainer.teacher.max_concurrency=$TEACHER_MAX_CONCURRENCY \
   trainer.algorithm.opd.kl_coef=$KL_COEF \
   trainer.algorithm.opd.use_task_reward=$USE_TASK_REWARD \

@@ -15,15 +15,11 @@ Backends:
 - ``SkyRLTeacherClient``: a vLLM deployment this job launched (``trainer.teacher.backend="skyrl"``),
   driven through its ``RemoteInferenceClient`` exactly as the student's engines are; scoring goes
   through the client's ``sample()`` with ``include_prompt_logprobs``.
-- ``FireworksTeacherClient``: the OpenAI-compatible ``/inference/v1/completions`` endpoint with an
-  integer prompt, ``echo_last`` and ``logprobs`` (the request shape verified live on 2026-09-17 and
-  2026-09-18; see ``research/readings/fireworks-opd-teacher.md`` in the workspace). Derived from the
-  token-in/token-out client of https://github.com/NovaSky-AI/SkyRL/pull/1871.
 - ``VLLMTeacherClient``: vLLM servers you started (a stock ``vllm serve`` or SkyRL's ``serve``
   entrypoint), through the OpenAI-compatible ``/v1/completions`` with vLLM's ``prompt_logprobs``
   parameter.
 
-The last two are over ``aiohttp`` so the package adds no dependency. None is an
+``VLLMTeacherClient`` is over ``aiohttp`` so the package adds no dependency. Neither is an
 ``InferenceEngineInterface`` implementation, deliberately: a frozen teacher never sleeps, wakes,
 syncs weights or pauses, and a class of eleven stubs would only hide that.
 """
@@ -34,7 +30,7 @@ import abc
 import asyncio
 import math
 import random
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import aiohttp
 from loguru import logger
@@ -45,7 +41,6 @@ if TYPE_CHECKING:
     )
     from skyrl.backends.skyrl_train.inference_servers.setup import InferenceServerSetup
 
-DEFAULT_FIREWORKS_BASE_URL = "https://api.fireworks.ai"
 _HTTP_RETRY_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
@@ -102,28 +97,6 @@ class TeacherLogprobClient(abc.ABC):
         return None
 
 
-def _extract_echoed_logprobs(choice: Dict[str, Any]) -> Tuple[List[Optional[int]], List[float]]:
-    """Read ``(token_ids, logprobs)`` off a Fireworks completions choice, in either response shape.
-
-    ``logprobs: true`` yields ``logprobs.content[]`` items with ``token_id`` and ``logprob``; the
-    integer form yields the legacy ``logprobs.token_logprobs`` / ``logprobs.token_ids`` lists.
-    Entries are echoed prompt tokens first, then generated tokens (none when ``max_tokens=0``).
-    """
-    logprobs_obj = choice.get("logprobs") or {}
-    content = logprobs_obj.get("content")
-    if content is not None:
-        ids: List[Optional[int]] = [item.get("token_id") for item in content]
-        raw = [item.get("logprob") for item in content]
-    elif logprobs_obj.get("token_logprobs") is not None:
-        raw = list(logprobs_obj["token_logprobs"])
-        ids = list(logprobs_obj.get("token_ids") or choice.get("token_ids") or [None] * len(raw))
-    else:
-        raise RuntimeError(f"Fireworks response carries no logprobs: {choice!r}")
-    if any(value is None for value in raw):
-        raise RuntimeError("Fireworks returned a null logprob for an echoed token")
-    return ids, [float(value) for value in raw]
-
-
 class _HttpTeacherClient(TeacherLogprobClient):
     """Shared HTTP plumbing for teachers behind a completions endpoint.
 
@@ -136,7 +109,6 @@ class _HttpTeacherClient(TeacherLogprobClient):
         self,
         urls: List[str],
         *,
-        headers: Optional[Dict[str, str]] = None,
         max_concurrency: int = 32,
         request_timeout_s: float = 120.0,
         max_retries: int = 3,
@@ -146,7 +118,7 @@ class _HttpTeacherClient(TeacherLogprobClient):
             raise ValueError("at least one server url is required")
         self._urls = [url.rstrip("/") for url in urls]
         self._next = 0
-        self._headers = {"Content-Type": "application/json", **(headers or {})}
+        self._headers = {"Content-Type": "application/json"}
         self._timeout = aiohttp.ClientTimeout(total=request_timeout_s)
         self._max_retries = max(0, max_retries)
         self._sessions: Dict[asyncio.AbstractEventLoop, aiohttp.ClientSession] = {}
@@ -193,76 +165,6 @@ class _HttpTeacherClient(TeacherLogprobClient):
         for session in sessions:
             if not session.closed:
                 await session.close()
-
-
-class FireworksTeacherClient(_HttpTeacherClient):
-    """Teacher served by Fireworks: a serverless model id or a dedicated deployment id.
-
-    Request (verified live): integer prompt ``prompt_ids + response_ids``, ``max_tokens=0``,
-    ``echo_last=len(response_ids)``, ``logprobs=true``, ``return_token_ids=true``. The response
-    carries exactly the echoed response tokens with their raw model logprob (never
-    ``sampling_logprob``), and the echoed ids are checked against what was sent.
-    """
-
-    def __init__(
-        self,
-        model_name: str,
-        *,
-        api_key: str,
-        base_url: Optional[str] = None,
-        max_concurrency: int = 32,
-        request_timeout_s: float = 120.0,
-        max_retries: int = 3,
-    ):
-        if not model_name:
-            raise ValueError("Fireworks teacher needs a model id, e.g. accounts/fireworks/models/gpt-oss-120b")
-        if not api_key:
-            raise ValueError("Fireworks teacher needs an API key")
-        base_url = (base_url or DEFAULT_FIREWORKS_BASE_URL).rstrip("/")
-        if base_url.endswith("/v1"):
-            raise ValueError(
-                "base_url is the server root; the completions path is appended by the client. "
-                f"Drop the trailing /v1 from {base_url!r}."
-            )
-        super().__init__(
-            [f"{base_url}/inference/v1/completions"],
-            headers={"Authorization": f"Bearer {api_key}"},
-            max_concurrency=max_concurrency,
-            request_timeout_s=request_timeout_s,
-            max_retries=max_retries,
-        )
-        self._model_name = model_name
-
-    @property
-    def model_name(self) -> str:
-        return self._model_name
-
-    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[float]:
-        body = {
-            "model": self._model_name,
-            "prompt": prompt_ids + response_ids,
-            "max_tokens": 0,
-            "temperature": 1.0,
-            "logprobs": True,
-            "echo_last": len(response_ids),
-            "return_token_ids": True,
-        }
-        response = await self._post(body)
-        choices = response.get("choices") or []
-        if not choices:
-            raise RuntimeError(f"Fireworks returned no choices: {response!r}")
-        ids, logprobs = _extract_echoed_logprobs(choices[0])
-        n = len(response_ids)
-        # Echoed tokens come first; with max_tokens=0 they are the whole list.
-        echoed_ids, echoed_logprobs = ids[:n], logprobs[:n]
-        if len(echoed_logprobs) != n:
-            raise RuntimeError(f"Fireworks echoed {len(echoed_logprobs)} tokens, expected {n}")
-        if any(tid is not None for tid in echoed_ids) and echoed_ids != response_ids:
-            raise RuntimeError(
-                "Fireworks echoed different token ids than were sent; the teacher's tokenizer does not "
-                "match the student's, or the echo is misaligned"
-            )
-        return echoed_logprobs
 
 
 def _vllm_prompt_logprob(entry: Any, token_id: int) -> float:

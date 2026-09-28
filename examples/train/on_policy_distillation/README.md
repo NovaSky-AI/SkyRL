@@ -18,16 +18,8 @@ It replaces the 2025-11 example that reused the reference model as the teacher
 ## Quickstart
 
 ```bash
-export FIREWORKS_API_KEY=<your key>
-
-# Fully serverless smoke test: gpt-oss-20b student, gpt-oss-120b teacher on Fireworks serverless.
-uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-bash examples/train/on_policy_distillation/run_opd_gsm8k_gptoss_fireworks.sh
-
 # The math recipe from the writeup: Qwen3-4B-Base (or 1.7B-Base) student, DAPO-17k prompts, AIME24 eval.
-# By default the job launches the teacher (Qwen3-32B, TP=4) on 4 GPUs of the node next to the student's 4;
-# TEACHER_BACKEND=fireworks TEACHER_MODEL=accounts/<account>/deployments/<id> uses a dedicated Fireworks
-# deployment instead, with the student on all 8 GPUs.
+# The job launches the teacher (Qwen3-32B, TP=4) on 4 GPUs of an 8-GPU node, next to the student's 4.
 bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh
 ```
@@ -52,23 +44,19 @@ verbatim.
 
 ## Teacher backends
 
-Where the teacher lives is one choice with three answers, and each backend reads only its own fields
-(setting another backend's fields is a config error):
+Where the teacher lives is one choice with two answers, and each backend reads only its own fields
+(setting the other's fields is a config error):
 
 | `trainer.teacher.backend` | What it is | Notes |
 |---|---|---|
 | `skyrl` (default) | A vLLM deployment this job launches from `trainer.teacher.inference_engine` (the same block as `generator.inference_engine`) on its own GPUs, driven through a `RemoteInferenceClient` exactly as the student's engines are | `trainer.teacher.model` is an HF id or local path. Own placement group (never the colocate group), a router, a port window past the student's; never weight-synced or slept. Defaults that differ from the student's block: prefix caching off (scoring requests never read it), `gpu_memory_utilization` 0.9, Ray Prometheus stats off; `max_model_len` defaults to the longest input + longest response + 1. Weight-sync, sleep, LoRA, PD, speculative-decoding, routed-expert and external-URL fields are rejected. |
-| `fireworks` | A Fireworks model id (`accounts/fireworks/models/<id>`) or dedicated deployment (`accounts/<account>/deployments/<id>`), scored through the completions API with an integer prompt and `echo_last` | Serverless is fine for checking the plumbing; for training use a dedicated deployment. Serverless replicas disagree on logprobs by more than the OPD signal itself, some serverless models do not support echo, and the Qwen3 (2025) family is not serverless. Custom checkpoints can be uploaded with `firectl model create` and deployed. |
 | `vllm` | vLLM servers you started, given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible `/v1/completions` with vLLM's `prompt_logprobs` parameter | Works with a stock `vllm serve` and with SkyRL's `serve` entrypoint (`examples/train/remote_inference_server/run_vllm_server.sh`). Any model vLLM serves; `max_model_len` must cover prompt + response + 1. Requests round-robin across the URLs. The servers are never weight-synced or slept. |
 
 There are no preflight checks yet. Nothing verifies before training that the teacher's tokenizer
-matches the student's, that a vLLM teacher you run has a context covering the longest input plus the
-longest response (a launched teacher gets that context by construction), or that a serverless teacher
-answers identical requests identically. Those are tracked as
-a TODO in `skyrl/train/entrypoints/main_opd.py`, together with what other frameworks check. Until
-then: pick a teacher from the student's model family (same tokenizer), serve it with enough context,
-and prefer a dedicated deployment over serverless (in our probes serverless replicas disagreed by
-about 0.25 nats on identical requests, more than the distillation signal).
+matches the student's, or that a vLLM teacher you run has a context covering the longest input plus the
+longest response (a launched teacher gets that context by construction). Those are tracked as a TODO in
+`skyrl/train/entrypoints/main_opd.py`, together with what other frameworks check. Until then: pick a
+teacher from the student's model family (same tokenizer) and serve it with enough context.
 
 ### A teacher launched by the job
 
@@ -117,14 +105,12 @@ sent to vLLM servers.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `trainer.teacher.backend` | `skyrl` | `skyrl` (launched by the job), `vllm` (servers you run) or `fireworks` |
-| `trainer.teacher.model` | — | `skyrl`: HF id or local path; `vllm`: the served model name; `fireworks`: model / deployment id |
+| `trainer.teacher.backend` | `skyrl` | `skyrl` (launched by the job) or `vllm` (servers you run) |
+| `trainer.teacher.model` | — | `skyrl`: HF id or local path; `vllm`: the served model name |
 | `trainer.teacher.inference_engine.*` | the student's block with prefix caching off, `gpu_memory_utilization` 0.9, Ray Prometheus stats off | `skyrl` only: engine count, parallelism, memory, batching, `engine_init_kwargs` (e.g. `max_model_len`) |
 | `trainer.teacher.server_urls` | — | `vllm` only: base URLs, e.g. `"['http://host:8000']"` |
-| `trainer.teacher.base_url` | Fireworks data plane | `fireworks` only: server root without `/v1` |
-| `trainer.teacher.api_key_var` | `FIREWORKS_API_KEY` | `fireworks` only: environment variable holding the key |
 | `trainer.teacher.max_concurrency` | 32 | Teacher requests in flight (a launched teacher is also capped per engine like the student's rollouts) |
-| `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | `vllm` and `fireworks` only: request timeout and retries with backoff (a retry moves to the next URL); a launched teacher uses its `RemoteInferenceClient`'s policy |
+| `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | `vllm` only: request timeout and retries with backoff (a retry moves to the next URL); a launched teacher uses its `RemoteInferenceClient`'s policy |
 | `trainer.algorithm.opd.kl_coef` | 1.0 | `advantages -= kl_coef · (log π_student − log π_teacher)` |
 | `trainer.algorithm.opd.use_task_reward` | `false` | `false`: pure distillation (env reward is only logged). `true`: the reward's advantages plus the teacher term |
 

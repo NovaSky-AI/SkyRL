@@ -16,15 +16,8 @@ still generating, so teacher latency overlaps with generation. The generator is 
 ## Quickstart
 
 ```bash
-export FIREWORKS_API_KEY=<your key>
-
-# Serverless smoke test: gpt-oss-20b student, gpt-oss-120b teacher on Fireworks serverless.
-uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-bash examples/train/on_policy_distillation/run_opd_gsm8k_gptoss_fireworks.sh
-
-# The math recipe: Qwen3-4B-Base student, DAPO-17k prompts, AIME24 eval. By default the job launches the
-# teacher (Qwen3-32B, TP=4) on 4 GPUs next to the student's 4; TEACHER_BACKEND=fireworks uses a dedicated
-# Fireworks deployment instead.
+# The math recipe: Qwen3-4B-Base student, DAPO-17k prompts, AIME24 eval. The job launches the teacher
+# (Qwen3-32B, TP=4) on 4 GPUs of an 8-GPU node, next to the student's 4.
 bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh
 ```
@@ -49,8 +42,8 @@ The student and the teacher must share a tokenizer: the teacher scores the stude
 
 ## Teacher backends
 
-Where the teacher lives is one choice with three answers; each backend reads only its own fields, and
-setting another backend's fields is a config error.
+Where the teacher lives is one choice with two answers; each backend reads only its own fields, and
+setting the other's fields is a config error.
 
 - `trainer.teacher.backend=skyrl` (default): the job launches a vLLM deployment of `trainer.teacher.model`
   (an HF id or local path) from `trainer.teacher.inference_engine`, the same block as
@@ -63,16 +56,11 @@ setting another backend's fields is a config error.
 - `trainer.teacher.backend=vllm`: vLLM servers you started (a stock `vllm serve` or SkyRL's `serve`
   entrypoint), given by `trainer.teacher.server_urls`, scored through the OpenAI-compatible
   `/v1/completions` with vLLM's `prompt_logprobs` parameter. `trainer.teacher.model` is the served model name.
-- `trainer.teacher.backend=fireworks`: a Fireworks model id or a dedicated deployment id
-  (`accounts/<account>/deployments/<id>`), scored through the completions API with an integer prompt and
-  `echo_last`. Serverless is fine for checking the plumbing; use a dedicated deployment for training,
-  because serverless replicas disagree on logprobs by more than the OPD signal itself and the Qwen3 (2025)
-  family is not served serverless.
 
-There are no preflight checks yet: nothing verifies the teacher's tokenizer, context length (a launched
-teacher gets its context by construction), or reproducibility before training (a TODO in
+There are no preflight checks yet: nothing verifies the teacher's tokenizer or context length before
+training (a launched teacher gets its context by construction; a TODO in
 `skyrl/train/entrypoints/main_opd.py` records what other frameworks check). Pick a teacher from the
-student's model family, serve it with enough context, and prefer a dedicated deployment over serverless.
+student's model family and serve it with enough context.
 
 ## Pure and mixed distillation
 

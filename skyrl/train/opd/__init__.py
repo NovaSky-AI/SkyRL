@@ -6,7 +6,7 @@ its own (pure distillation) or on top of a task reward. Entry point:
 ``skyrl.train.entrypoints.main_opd``; run scripts under ``examples/train/on_policy_distillation``.
 
 - ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the launched (``SkyRLTeacherClient``
-  over a ``RemoteInferenceClient``), vLLM-URL and Fireworks backends.
+  over a ``RemoteInferenceClient``) and vLLM-URL backends.
 - ``teacher_launch``: launching the teacher's vLLM deployment inside the job (``backend="skyrl"``).
 - ``trainer``: ``OPDTrainer``. Its ``generate`` runs one ``generator.generate`` call per prompt group
   concurrently and scores each group under the teacher as it finishes (any generator works); three
@@ -26,7 +26,6 @@ from skyrl.train.opd.config import (
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
-    FireworksTeacherClient,
     SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
@@ -55,7 +54,6 @@ __all__ = [
     "teacher_max_model_len",
     "validate_opd_cfg",
     "TEACHER_LOGPROBS_KEY",
-    "FireworksTeacherClient",
     "SkyRLTeacherClient",
     "TeacherLogprobClient",
     "VLLMTeacherClient",

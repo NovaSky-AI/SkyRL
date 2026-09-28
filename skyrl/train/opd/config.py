@@ -3,16 +3,14 @@
 Adds two blocks to the standard config and changes two algorithm defaults:
 
 - ``trainer.teacher``: the frozen teacher, a sibling of ``trainer.ref`` (which stays independent:
-  a reference-KL penalty can still be turned on alongside the teacher). ``backend`` picks one of three
-  exclusive homes: launched by this job (``skyrl``, the default), vLLM servers you run (``vllm``), or
-  Fireworks (``fireworks``).
+  a reference-KL penalty can still be turned on alongside the teacher). ``backend`` picks one of two
+  exclusive homes: launched by this job (``skyrl``, the default) or vLLM servers you run (``vllm``).
 - ``trainer.algorithm.opd``: the distillation knobs.
 - ``trainer.algorithm.use_kl_loss`` defaults to ``False`` (the core default would instantiate a
   reference model for nothing) and ``policy_loss_type`` to ``"importance_sampling"`` (the
   Thinking Machines / tinker recipe). Every other core default is already right for OPD.
 """
 
-import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -30,7 +28,7 @@ from skyrl.train.config import (
 )
 from skyrl.train.config.config import BaseConfig
 
-TEACHER_BACKENDS = ("skyrl", "vllm", "fireworks")
+TEACHER_BACKENDS = ("skyrl", "vllm")
 
 
 @dataclass
@@ -68,17 +66,15 @@ class TeacherConfig(BaseConfig):
     """The frozen teacher, served by an inference engine."""
 
     backend: str = "skyrl"
-    """Which service scores the teacher: ``"skyrl"``, ``"vllm"`` or ``"fireworks"``.
+    """Which service scores the teacher: ``"skyrl"`` or ``"vllm"``.
     ``"skyrl"`` (default): this job launches a vLLM deployment from ``inference_engine`` on its own GPUs and
     drives it through a ``RemoteInferenceClient``, as it does the student's engines. ``"vllm"``:
     OpenAI-compatible vLLM servers you run (a stock ``vllm serve`` or SkyRL's ``serve`` entrypoint), named
-    by ``server_urls``. ``"fireworks"``: the Fireworks completions API at ``base_url``. Each backend reads
-    only its own fields; setting another backend's fields is a config error."""
+    by ``server_urls``. Each backend reads only its own fields; setting the other's is a config error."""
     model: str = ""
     """The teacher model; what it names depends on the backend.
     ``skyrl``: an HF id or local path the job loads, e.g. ``Qwen/Qwen3-32B``. ``vllm``: the served model
-    name of your servers. ``fireworks``: ``accounts/fireworks/models/<id>`` or a dedicated
-    ``accounts/<account>/deployments/<id>``."""
+    name of your servers."""
     inference_engine: TeacherEngineConfig = field(default_factory=TeacherEngineConfig)
     """The launched deployment for ``backend="skyrl"``, the same block as ``generator.inference_engine``.
     Weight-sync, sleep, LoRA, PD, speculative-decoding, routed-expert and external-URL fields do not apply
@@ -88,19 +84,15 @@ class TeacherConfig(BaseConfig):
     server_urls: Optional[List[str]] = None
     """Base URLs of the vLLM servers for ``backend="vllm"``, e.g. ``["http://host:8000"]``.
     Requests round-robin across them, and a retry moves to the next one."""
-    base_url: Optional[str] = None
-    """Fireworks server root without ``/v1``; defaults to the Fireworks data plane."""
-    api_key_var: str = "FIREWORKS_API_KEY"
-    """Environment variable holding the Fireworks API key (Fireworks only)."""
     max_concurrency: int = 32
     """Maximum teacher requests in flight, for every backend.
     A launched teacher is also capped by its ``RemoteInferenceClient``'s per-engine limit
     (``SKYRL_GENERATE_CONCURRENCY_PER_ENGINE`` per server), like the student's rollouts."""
     request_timeout_s: float = 120.0
-    """Per-request timeout of the ``vllm`` and ``fireworks`` clients.
+    """Per-request timeout of the ``vllm`` client.
     The ``skyrl`` backend uses its ``RemoteInferenceClient``'s policy, the one the student's rollouts get."""
     max_retries: int = 3
-    """Retries with exponential backoff for the ``vllm`` and ``fireworks`` clients.
+    """Retries with exponential backoff for the ``vllm`` client.
     The ``skyrl`` backend uses its ``RemoteInferenceClient``'s policy, the one the student's rollouts get."""
 
 
@@ -161,8 +153,6 @@ def _validate_launched_teacher(cfg, teacher: TeacherConfig) -> None:
             "trainer.teacher.server_urls is for backend='vllm' (servers you run); backend='skyrl' launches the "
             "teacher in this job from trainer.teacher.inference_engine"
         )
-    if teacher.base_url is not None:
-        raise ValueError("trainer.teacher.base_url is for backend='fireworks'")
     if ie_cfg.backend != "vllm":
         raise ValueError(f"trainer.teacher.inference_engine.backend must be 'vllm', got {ie_cfg.backend!r}")
     if not ie_cfg.run_engines_locally:
@@ -214,14 +204,6 @@ def validate_opd_cfg(cfg) -> None:
     elif teacher.backend == "vllm":
         if not teacher.server_urls:
             raise ValueError("trainer.teacher.backend='vllm' requires trainer.teacher.server_urls")
-        if teacher.base_url is not None:
-            raise ValueError("trainer.teacher.base_url is for backend='fireworks'")
-        _reject_launch_settings(teacher)
-    elif teacher.backend == "fireworks":
-        if not os.environ.get(teacher.api_key_var):
-            raise ValueError(f"trainer.teacher.api_key_var={teacher.api_key_var!r} is not set in the environment")
-        if teacher.server_urls is not None:
-            raise ValueError("trainer.teacher.server_urls is for backend='vllm'")
         _reject_launch_settings(teacher)
     if teacher.max_concurrency <= 0:
         raise ValueError("trainer.teacher.max_concurrency must be positive")
