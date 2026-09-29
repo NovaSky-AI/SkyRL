@@ -35,7 +35,7 @@ from skyrl.train.generators.base import (
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
-from .compose import TrialOutcome, compose, split
+from .compose import Attempt, TrialOutcome, compose, split
 
 litellm.suppress_debug_info = True
 
@@ -150,14 +150,19 @@ class HarborSkycapGenerator(GeneratorInterface):
         """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch."""
         started = time.monotonic()
         missing_routes = False
+        attempts: List[Attempt] = []
         for attempt in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             try:
-                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, attempt)
+                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, attempt, attempts)
             except Exception as error:  # noqa: BLE001 - retried, then masked
                 logger.warning(f"{prefix} failed: {type(error).__name__}: {error}")
+                if len(attempts) <= attempt:
+                    attempts.append(Attempt())
+                attempts[-1].exception = attempts[-1].exception or type(error).__name__
                 continue
             outcome.e2e_time = time.monotonic() - started
+            outcome.attempts = attempts
             if outcome.stop_reason != "error":
                 return outcome
             missing_routes = missing_routes or outcome.missing_routes
@@ -167,6 +172,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             stop_reason="error",
             e2e_time=time.monotonic() - started,
             missing_routes=missing_routes,
+            attempts=attempts,
         )
 
     async def _attempt(
@@ -176,8 +182,12 @@ class HarborSkycapGenerator(GeneratorInterface):
         cache_salt: Optional[str],
         step: Optional[int],
         attempt: int,
+        attempts: List[Attempt],
     ) -> TrialOutcome:
-        """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces."""
+        """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces.
+
+        Appends the attempt's Harbor phase times to ``attempts`` once Harbor returns.
+        """
         meta = {
             "task": str(prompt),
             "instance_id": str(trajectory_id.instance_id),
@@ -191,6 +201,14 @@ class HarborSkycapGenerator(GeneratorInterface):
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
             exception = results.exception_info.exception_type if results.exception_info else None
+            attempts.append(
+                Attempt(
+                    environment_setup_time=_seconds(getattr(results, "environment_setup", None)),
+                    agent_execution_time=_seconds(getattr(results, "agent_execution", None)),
+                    verifier_time=_seconds(getattr(results, "verifier", None)),
+                    exception=exception,
+                )
+            )
             if exception == "AgentTimeoutError":
                 # Masked, not retried, as the sibling does.
                 reward, stop_reason = 0.0, "agent_timeout"
@@ -247,3 +265,15 @@ class HarborSkycapGenerator(GeneratorInterface):
                 raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
             extra_body["cache_salt"] = cache_salt
         return config
+
+
+def _seconds(timing: Any) -> Optional[float]:
+    """A Harbor ``TimingInfo``'s duration, or None if it lacks either timestamp."""
+    started = getattr(timing, "started_at", None)
+    finished = getattr(timing, "finished_at", None)
+    if started is None or finished is None:
+        return None
+    try:
+        return (finished - started).total_seconds()
+    except (TypeError, AttributeError):
+        return None

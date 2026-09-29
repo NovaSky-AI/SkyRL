@@ -370,7 +370,8 @@ def concatenate_generator_outputs(
             if k not in rollout_metrics and isinstance(v, (int, float)):
                 extra_keys.setdefault(k, []).append(v)
     for k, values in extra_keys.items():
-        if "avg" in k or "mean" in k:
+        if "avg" in k or "mean" in k or "p90" in k:
+            # A percentile can't be recombined from per-group ones; their mean is an approximation, not a sum.
             rollout_metrics[k] = sum(values) / len(values)
         elif "min" in k:
             rollout_metrics[k] = min(values)

@@ -7,10 +7,13 @@
   padded to top_k with -1), and records ``/finish_session``.
 - ``FakeTrial``: what Harbor's ``Trial`` is to the generator. Its task path picks
   a script: a linear chat, a summarization (the history is rewritten), a
-  timeout or a crash.
+  timeout, a crash, or a sandbox that times out starting on the first attempt
+  (``slow_start``). Results carry Harbor's phase timings: the sandbox takes
+  ``SETUP`` seconds to start, the agent ``AGENT`` and the verifier ``VERIFY``.
 """
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,6 +29,8 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
 )
 
 START, END, NL = 1, 2, 3
+SETUP, AGENT, VERIFY, START_TIMEOUT = 5.0, 10.0, 2.0, 600.0
+EPOCH = datetime(2026, 1, 1)
 LAYERS, EXPERTS_PER_TOKEN, TOP_K = 2, 2, 3
 
 
@@ -123,10 +128,32 @@ class MockRouter:
         return web.json_response({})
 
 
-def verified(reward: float, exception: str | None = None) -> SimpleNamespace:
+def timing(start: float, seconds: float) -> SimpleNamespace:
+    """A Harbor ``TimingInfo`` from ``start`` to ``start + seconds``, in seconds after ``EPOCH``."""
+    return SimpleNamespace(
+        started_at=EPOCH + timedelta(seconds=start), finished_at=EPOCH + timedelta(seconds=start + seconds)
+    )
+
+
+def verified(reward: float, exception: str | None = None, timed: bool = True) -> SimpleNamespace:
+    """A trial's result. Timed: every phase ran, except the verifier after an exception."""
     return SimpleNamespace(
         exception_info=SimpleNamespace(exception_type=exception) if exception else None,
         verifier_result=None if exception else SimpleNamespace(rewards={"reward": reward}),
+        environment_setup=timing(0, SETUP) if timed else None,
+        agent_execution=timing(SETUP, AGENT) if timed else None,
+        verifier=timing(SETUP + AGENT, VERIFY) if timed and not exception else None,
+    )
+
+
+def start_timed_out() -> SimpleNamespace:
+    """What Harbor returns when the sandbox doesn't start in time: the setup's timing, nothing after."""
+    return SimpleNamespace(
+        exception_info=SimpleNamespace(exception_type="EnvironmentStartTimeoutError"),
+        verifier_result=None,
+        environment_setup=timing(0, START_TIMEOUT),
+        agent_execution=None,
+        verifier=None,
     )
 
 
@@ -155,12 +182,16 @@ class FakeTrial:
                 assert response.status == 200, await response.text()
                 return (await response.json())["choices"][0]["message"]
 
+        attempt = sum(str(c["task"]["path"]) == script for c in self.configs) - 1
+
         async with aiohttp.ClientSession() as session:
             if script == "crash":
                 raise RuntimeError("sandbox did not start")
             if script == "silent":
-                # Verified, but the agent never called the model.
-                return verified(1.0)
+                # Verified, but the agent never called the model; and Harbor recorded no timings.
+                return verified(1.0, timed=False)
+            if script == "slow_start" and attempt == 0:
+                return start_timed_out()
             history = [{"role": "user", "content": script}]
             history.append(await chat(session, history))
             if script == "timeout":
