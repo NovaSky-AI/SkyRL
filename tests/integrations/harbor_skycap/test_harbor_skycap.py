@@ -134,7 +134,7 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
     validate_generator_output(1, out, step_wise=True)
 
     assert out["is_last_step"] == [True] and out["rewards"] == [1.0]
-    assert out["rollout_metrics"]["generate/num_unbridged_trajectories"] == 0
+    assert out["rollout_metrics"]["generate/skycap/num_unbridged_trajectories"] == 0
     prompt, response, mask = out["prompt_token_ids"][0], out["response_ids"][0], out["loss_masks"][0]
     # The prompt is the task; both replies are trained, and the user turn between them is context.
     assert decode(prompt).endswith("userlinearassistant")
@@ -166,10 +166,10 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
     # The reward is the trial's, so every path carries it; the advantage is computed once, from the last row.
     assert out["rewards"] == [1.0, 1.0]
     assert len({t.to_string() for t in out["trajectory_ids"]}) == 1
-    assert out["rollout_metrics"]["generate/avg_num_paths"] == 2
+    assert out["rollout_metrics"]["generate/skycap/avg_num_paths"] == 2
     # The rewritten history couldn't extend the tokens before it: one call, in one trajectory.
-    assert out["rollout_metrics"]["generate/num_unbridged_trajectories"] == 1
-    assert out["rollout_metrics"]["generate/num_unbridged_calls"] == 1
+    assert out["rollout_metrics"]["generate/skycap/num_unbridged_trajectories"] == 1
+    assert out["rollout_metrics"]["generate/skycap/num_unbridged_calls"] == 1
 
 
 @pytest.mark.asyncio
@@ -190,7 +190,7 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials) -> None:
 
     timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
     assert all(out["loss_masks"][i] == [0] and out["rewards"][i] == 0.0 for i in timed_out)
-    assert out["rollout_metrics"]["generate/num_masked_instances"] == 1
+    assert out["rollout_metrics"]["generate/skycap/num_masked_instances"] == 1
     # The masked rows still carry support, so the batch collates.
     assert len(out["rollout_sample_support"]) == len(out["response_ids"])
 
