@@ -382,6 +382,29 @@ def _normalize_tool_call_payload(tc: Any) -> Optional[list]:
 _NORMALIZED_KEYS = frozenset({"role", "content", "tool_calls"})
 
 
+def _resolve_num_training_steps(sft_cfg) -> Optional[int]:
+    """Step count handed to the workers' LR scheduler at ``init_model``.
+
+    ``None`` when the run is epoch-based and uncapped. The Megatron scheduler is built before the
+    dataloader exists and cannot take ``None`` (VLM_GAPS.md #52), so that backend requires an explicit
+    count rather than a silent default; FSDP resolves it later from the dataloader.
+    """
+    num_training_steps = sft_cfg.dummy_run_max_steps if sft_cfg.dummy_run_full_ctx else sft_cfg.num_steps
+    if sft_cfg.max_training_steps is not None:
+        num_training_steps = (
+            sft_cfg.max_training_steps
+            if num_training_steps is None
+            else min(num_training_steps, sft_cfg.max_training_steps)
+        )
+    if num_training_steps is None and sft_cfg.strategy == "megatron":
+        raise ValueError(
+            "Megatron SFT needs an explicit training step count for its LR scheduler: set num_steps, or keep "
+            "num_epochs and set max_training_steps (>= num_epochs * steps_per_epoch, and > "
+            "optimizer_config.num_warmup_steps)."
+        )
+    return num_training_steps
+
+
 def _normalize_content_parts(content):
     """Map OpenAI-style multimodal parts onto the ``{"type": "image", "image": ...}`` form.
 
@@ -1033,17 +1056,7 @@ class SFTTrainer:
             sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
             record_memory=self.cfg.trainer.policy.record_memory,
         )
-        num_training_steps = (
-            self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
-        )
-        if self.sft_cfg.max_training_steps is not None:
-            num_training_steps = (
-                self.sft_cfg.max_training_steps
-                if num_training_steps is None
-                else min(num_training_steps, self.sft_cfg.max_training_steps)
-            )
-        # num_steps may be None when num_epochs is used; without an explicit cap,
-        # the worker will use its default large value for the LR scheduler.
+        num_training_steps = _resolve_num_training_steps(self.sft_cfg)
         ray.get(
             actor_group.async_init_model(
                 self.sft_cfg.model.path,

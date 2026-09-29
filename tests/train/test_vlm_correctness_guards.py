@@ -1,4 +1,4 @@
-"""CPU tests for the VLM correctness fixes (VLM_GAPS.md #4, #13, #14, #33, #34).
+"""CPU tests for the VLM correctness fixes (VLM_GAPS.md #4, #13, #14, #33, #34, #52).
 
 Run: uv run --extra dev pytest tests/train/test_vlm_correctness_guards.py
 """
@@ -10,10 +10,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     concat_nonempty_tensors,
 )
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import SFTConfig, SkyRLTrainConfig
 from skyrl.train.sft_trainer import (
     _check_modality_homogeneity,
     _normalize_chat_messages,
+    _resolve_num_training_steps,
 )
 from skyrl.utils.tok import VISION_TOWER_MODULE_REGEX, lora_exclude_modules_for_model
 
@@ -163,3 +164,29 @@ def test_modality_homogeneity_uses_modality_counts_when_available():
 
     with pytest.raises(ValueError, match="mixes 3 image rows with 2 text-only rows"):
         _check_modality_homogeneity([FakeStore()], ["store"])
+
+
+# ---------------------------------------------------------------------------
+# #52: Megatron SFT with num_epochs needs an explicit step count, not a silent default
+# ---------------------------------------------------------------------------
+
+
+def _sft_cfg(**overrides):
+    return SFTConfig.from_cli_overrides({"model.path": "test/my-model", **overrides})
+
+
+def test_megatron_epoch_based_run_requires_a_step_count():
+    with pytest.raises(ValueError, match="max_training_steps"):
+        _resolve_num_training_steps(_sft_cfg(strategy="megatron", num_epochs=2))
+
+
+def test_megatron_epoch_based_run_accepts_max_training_steps():
+    assert _resolve_num_training_steps(_sft_cfg(strategy="megatron", num_epochs=2, max_training_steps=100)) == 100
+
+
+def test_megatron_num_steps_is_capped_by_max_training_steps():
+    assert _resolve_num_training_steps(_sft_cfg(strategy="megatron", num_steps=50, max_training_steps=20)) == 20
+
+
+def test_fsdp_epoch_based_run_resolves_to_none():
+    assert _resolve_num_training_steps(_sft_cfg(strategy="fsdp", num_epochs=2)) is None
