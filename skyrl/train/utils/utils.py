@@ -352,7 +352,12 @@ def _validate_lora_base_dtype(cfg: SkyRLTrainConfig) -> None:
     for role in ("critic", "ref"):
         if getattr(cfg.trainer, role).model.lora.base_dtype is not None:
             raise ValueError(f"`trainer.{role}.model.lora.base_dtype` is not supported; it applies to the policy only")
-    if cfg.trainer.policy.model.lora.base_dtype != "bfloat16":
+    base_dtype = cfg.trainer.policy.model.lora.base_dtype
+    if base_dtype not in (None, "float32", "bfloat16"):
+        raise ValueError(
+            f"`trainer.policy.model.lora.base_dtype` must be 'float32', 'bfloat16' or unset, got {base_dtype!r}"
+        )
+    if base_dtype != "bfloat16":
         return
     if cfg.trainer.strategy != "fsdp":
         raise ValueError(

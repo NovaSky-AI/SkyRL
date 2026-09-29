@@ -1409,6 +1409,15 @@ class TestLoraBaseDtype:
 
         validate_cfg(cfg)
 
+    @pytest.mark.parametrize("base_dtype", ["bf16", "float16"])
+    def test_rejects_unknown_values(self, base_dtype):
+        cfg = _make_validated_test_config()
+        cfg.trainer.policy.model.lora.rank = 8
+        cfg.trainer.policy.model.lora.base_dtype = base_dtype
+
+        with pytest.raises(ValueError, match=r"must be 'float32', 'bfloat16' or unset"):
+            validate_cfg(cfg)
+
     def test_rejects_full_fine_tuning(self):
         cfg = _make_validated_test_config()
         cfg.trainer.strategy = "fsdp"
