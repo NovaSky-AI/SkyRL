@@ -343,12 +343,14 @@ class PretokenizedDataset(SFTDataset):
         """(rows with image tensors, total rows) over the rows this view exposes.
 
         Reads the small ``image_grid_thw`` column through the dataset (so a ``select``-ed view counts only
-        its surviving rows, not the whole underlying arrow table) and never touches ``pixel_values``.
+        its surviving rows, not the whole underlying arrow table) and never touches ``pixel_values``. The
+        normalization transform is cleared first: it needs ``input_ids`` / ``loss_mask`` and would fail on a
+        single-column read.
         """
         total = len(self._dataset)
         if "image_grid_thw" not in self._dataset.column_names:
             return 0, total
-        grids = self._dataset.select_columns(["image_grid_thw"])["image_grid_thw"]
+        grids = self._dataset.with_format(None).select_columns(["image_grid_thw"])["image_grid_thw"]
         return sum(1 for g in grids if g is not None), total
 
     @staticmethod

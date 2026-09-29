@@ -3,7 +3,6 @@
 Run: uv run --extra dev pytest tests/train/test_vlm_correctness_guards.py
 """
 
-import numpy as np
 import pytest
 import torch
 
@@ -274,22 +273,50 @@ def test_single_string_target_module_is_not_split_into_characters(is_vlm):
     assert _scope(target, is_vlm=is_vlm) == [target]
 
 
-def test_modality_counts_only_counts_selected_rows():
+def test_modality_counts_on_a_loaded_store_counts_surviving_rows(tmp_path):
+    """Production path: load_from_pretokenized drops an over-length image row (Dataset.select) and installs
+    the normalization transform; the count must see only surviving rows and must not trip the transform."""
     from datasets import Dataset
 
-    from skyrl.train.dataset.pretokenized import PretokenizedDataset
+    from skyrl.train.dataset.pretokenized import load_from_pretokenized
 
     rows = [
-        {"input_ids": [1, 2], "loss_mask": [0, 1], "pixel_values": [[0.1]], "image_grid_thw": [[1, 1, 1]]},
-        {"input_ids": [1, 2], "loss_mask": [0, 1], "pixel_values": [[0.2]], "image_grid_thw": [[1, 1, 1]]},
-        {"input_ids": [1, 2], "loss_mask": [0, 1], "pixel_values": None, "image_grid_thw": None},
+        {"input_ids": [1, 2, 3], "loss_mask": [0, 1, 1], "pixel_values": [[0.1]], "image_grid_thw": [[1, 1, 1]]},
+        {
+            "input_ids": list(range(50)),
+            "loss_mask": [0] * 49 + [1],
+            "pixel_values": [[0.2]],
+            "image_grid_thw": [[1, 1, 1]],
+        },
+        {"input_ids": [1, 2, 3], "loss_mask": [0, 1, 1], "pixel_values": None, "image_grid_thw": None},
     ]
-    survivors = Dataset.from_list(rows).select([0, 2])  # one image row dropped
-    view = PretokenizedDataset(survivors, np.array([2, 2]))
+    path = str(tmp_path / "data.parquet")
+    Dataset.from_list(rows).to_parquet(path)
 
+    view = load_from_pretokenized(path, max_length=10)
+
+    assert len(view) == 2
     assert view.modality_counts() == (1, 2)
     with pytest.raises(ValueError, match="mixes 1 image rows with 1 text-only rows"):
         _check_modality_homogeneity([view], ["store"])
+    assert "input_ids" in view[0]  # the transform still applies to normal row access
+
+
+def test_modality_counts_on_an_all_image_store(tmp_path):
+    from datasets import Dataset
+
+    from skyrl.train.dataset.pretokenized import load_from_pretokenized
+
+    rows = [
+        {"input_ids": [1, 2, 3], "loss_mask": [0, 1, 1], "pixel_values": [[0.1]], "image_grid_thw": [[1, 1, 1]]}
+    ] * 2
+    path = str(tmp_path / "data.parquet")
+    Dataset.from_list(rows).to_parquet(path)
+
+    view = load_from_pretokenized(path, max_length=10)
+
+    assert view.modality_counts() == (2, 2)
+    _check_modality_homogeneity([view], ["store"])
 
 
 def test_cache_key_changes_with_tokenization_cache_version(monkeypatch):
