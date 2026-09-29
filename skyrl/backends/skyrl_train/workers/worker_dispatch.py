@@ -25,6 +25,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.async_utils import cleanup_preserving_primary
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -789,23 +790,23 @@ class WorkerDispatch:
                     # reset the prefix cache anyway (clear_kv_cache_on_weight_sync).
                     offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
                     await self._inference_engine_client.pause_generation()
-                    try:
+                    async with cleanup_preserving_primary(
+                        self._inference_engine_client.resume_generation, "resume_generation"
+                    ):
                         await self._inference_engine_client.sleep_for_weight_sync(offload_kv=offload_kv)
                         await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
                         _broadcast_and_finish()
                         await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
-                    finally:
-                        await self._inference_engine_client.resume_generation()
                 else:
                     # Synchronous trainer: generation is complete at sync time, so there
                     # are no in-flight requests to preserve. A plain sleep (discards KV,
                     # aborts nothing) is enough -- same three-phase pattern as colocated.
                     await self._inference_engine_client.sleep()
-                    try:
+                    async with cleanup_preserving_primary(
+                        lambda: self._inference_engine_client.wake_up(tags=["kv_cache"]), "wake_up(kv_cache)"
+                    ):
                         await self._inference_engine_client.wake_up(tags=["weights"])
                         _broadcast_and_finish()
-                    finally:
-                        await self._inference_engine_client.wake_up(tags=["kv_cache"])
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
@@ -815,10 +816,10 @@ class WorkerDispatch:
                     _broadcast_and_finish()
                 else:
                     await self._inference_engine_client.pause_generation()
-                    try:
+                    async with cleanup_preserving_primary(
+                        self._inference_engine_client.resume_generation, "resume_generation"
+                    ):
                         _broadcast_and_finish()
-                    finally:
-                        await self._inference_engine_client.resume_generation()
 
         # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
         # (see `GeneratorConfig.use_cache_salt`).
