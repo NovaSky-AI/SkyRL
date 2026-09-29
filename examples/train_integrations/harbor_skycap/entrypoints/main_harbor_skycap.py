@@ -43,6 +43,10 @@ class SkycapConfig:
     record_dir: Optional[str] = None
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""
+    wandb_artifact: bool = False
+    """Upload each step's documents, without sidecars, as a version of the ``skycap-records-<run id>`` W&B
+    artifact, when a W&B run is active. The records must be readable where the trainer runs: one node, or a
+    shared ``record_dir``."""
     ttl: float = 3600.0
     """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
     renderer_pool_size: int = 8
@@ -57,6 +61,10 @@ class SkycapConfig:
 @dataclass
 class HarborSkycapConfig(HarborSkyRLConfig):
     skycap: SkycapConfig = field(default_factory=SkycapConfig)
+
+
+def record_dir(cfg: Any) -> str:
+    return cfg.skycap.record_dir or os.path.join(cfg.trainer.export_path, "skycap")
 
 
 def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
@@ -86,7 +94,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         num_servers=cfg.skycap.num_servers,
         num_cpus_per_server=cfg.skycap.num_cpus_per_server,
         placement_strategy=cfg.skycap.placement_strategy,
-        record_dir=cfg.skycap.record_dir or os.path.join(cfg.trainer.export_path, "skycap"),
+        record_dir=record_dir(cfg),
         ttl=cfg.skycap.ttl,
     )
 
@@ -102,6 +110,8 @@ class HarborSkycapExp(HarborExp):
             harbor_cfg=cfg.harbor_trial_config,
             capture_urls=self.skycap.urls,
             inference_engine_client=inference_engine_client,
+            record_dir=record_dir(cfg),
+            wandb_artifact=cfg.skycap.wandb_artifact,
         )
 
     def run(self):
