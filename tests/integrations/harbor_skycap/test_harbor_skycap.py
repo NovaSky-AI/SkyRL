@@ -27,16 +27,13 @@ from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa
 from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
-from examples.train_integrations.harbor_skycap.service import (
-    SkycapService,  # noqa: E402
-)
-from skycap import Sample, record  # noqa: E402
-from skycap.tokens.backend import TokensBackend  # noqa: E402
+from skycap import CaptureService, Sample, record  # noqa: E402
 from skycap.tokens.engine import EngineError  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
+from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     EXPERTS_PER_TOKEN,
@@ -77,18 +74,33 @@ async def router():
 
 @pytest.fixture
 def skycap(router, tmp_path):
-    backend = TokensBackend(
+    service = CaptureService(
         router.url,
-        FakeRenderer(),
+        mode="tokens",
+        renderer=FakeRenderer(),
         engine=SkyRLEngine(),
         model="policy",
         sampling_overrides={"top_k": TOP_K},
         sampling_mask=True,
+        record_dir=str(tmp_path / "record"),
+        host="127.0.0.1",
     )
-    service = SkycapService(backend, record_dir=str(tmp_path / "record"), host="127.0.0.1")
     service.start()
     yield service
     service.stop()
+
+
+def service_for(router, record_dir, **options) -> CaptureService:
+    return CaptureService(
+        router.url,
+        mode="tokens",
+        renderer=FakeRenderer(),
+        engine=SkyRLEngine(),
+        model="policy",
+        record_dir=str(record_dir),
+        host="127.0.0.1",
+        **options,
+    )
 
 
 @pytest.fixture
@@ -112,18 +124,29 @@ def batch(*scripts: str, repetitions: int = 1) -> dict:
     return {"prompts": prompts, "trajectory_ids": ids, "batch_metadata": SimpleNamespace(global_step=3)}
 
 
-def generator(skycap, **cfg) -> HarborSkycapGenerator:
-    engine_client = SimpleNamespace(weight_version=7)
-    return HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client)
+@pytest_asyncio.fixture
+async def generator(skycap):
+    """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
+    made = []
+
+    def make(**cfg) -> HarborSkycapGenerator:
+        made.append(
+            HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], SimpleNamespace(weight_version=7))
+        )
+        return made[-1]
+
+    yield make
+    for gen in made:
+        await gen.close()
 
 
 @pytest.mark.asyncio
-async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, trials) -> None:
-    out = await generator(skycap).generate(batch("linear"), disable_tqdm=True)
+async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, trials, generator) -> None:
+    out = await generator().generate(batch("linear"), disable_tqdm=True)
     validate_generator_output(1, out, step_wise=True)
 
     assert out["is_last_step"] == [True] and out["rewards"] == [1.0]
-    assert out["rollout_metrics"]["generate/num_unbridged_trajectories"] == 0
+    assert out["rollout_metrics"]["generate/skycap/num_unbridged_trajectories"] == 0
     prompt, response, mask = out["prompt_token_ids"][0], out["response_ids"][0], out["loss_masks"][0]
     # The prompt is the task; both replies are trained, and the user turn between them is context.
     assert decode(prompt).endswith("userlinearassistant")
@@ -146,8 +169,19 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
 
 
 @pytest.mark.asyncio
-async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("summarize"), disable_tqdm=True)
+async def test_the_generator_keeps_one_pool_across_batches(skycap, trials, generator) -> None:
+    """Fully async training calls `generate` once per prompt; one pool serves every call, round-robin across all."""
+    gen = generator()
+    pool = gen.pool
+    for _ in range(2):
+        out = await gen.generate(batch("linear"), disable_tqdm=True)
+        assert out["rewards"] == [1.0]
+    assert gen.pool is pool
+
+
+@pytest.mark.asyncio
+async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("summarize"), disable_tqdm=True)
     validate_generator_output(1, out, step_wise=True)
 
     assert len(out["response_ids"]) == 2
@@ -155,15 +189,33 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
     # The reward is the trial's, so every path carries it; the advantage is computed once, from the last row.
     assert out["rewards"] == [1.0, 1.0]
     assert len({t.to_string() for t in out["trajectory_ids"]}) == 1
-    assert out["rollout_metrics"]["generate/avg_num_paths"] == 2
+    assert out["rollout_metrics"]["generate/skycap/avg_num_paths"] == 2
     # The rewritten history couldn't extend the tokens before it: one call, in one trajectory.
-    assert out["rollout_metrics"]["generate/num_unbridged_trajectories"] == 1
-    assert out["rollout_metrics"]["generate/num_unbridged_calls"] == 1
+    assert out["rollout_metrics"]["generate/skycap/num_unbridged_trajectories"] == 1
+    assert out["rollout_metrics"]["generate/skycap/num_unbridged_calls"] == 1
 
 
 @pytest.mark.asyncio
-async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials) -> None:
-    await generator(skycap).generate(batch("linear"), disable_tqdm=True)
+async def test_concatenated_outputs_keep_skycap_metrics_apart_from_the_recomputed_ones(
+    skycap, trials, generator
+) -> None:
+    groups = [batch("summarize"), batch("summarize")]
+    groups[1]["trajectory_ids"] = [TrajectoryID(instance_id="summarize", repetition_id=1)]
+    outs = [await generator().generate(group, disable_tqdm=True) for group in groups]
+    metrics = concatenate_generator_outputs(outs, step_wise=True)["rollout_metrics"]
+
+    # The shared stats are recomputed over the whole batch, so none may also appear under skycap's name,
+    # where they would be averaged per group instead.
+    skycap_keys = {k for k in metrics if k.startswith("generate/skycap/")}
+    assert "generate/avg_num_tokens" in metrics
+    assert not {k.replace("generate/skycap/", "generate/") for k in skycap_keys} & set(metrics)
+    # Counts add up across the concatenated groups.
+    assert metrics["generate/skycap/num_unbridged_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials, generator) -> None:
+    await generator().generate(batch("linear"), disable_tqdm=True)
     kwargs = trials.configs[0]["agent"]["kwargs"]
 
     assert kwargs["api_base"].startswith(f"{skycap.url}/t/")
@@ -172,21 +224,21 @@ async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials) -
 
 
 @pytest.mark.asyncio
-async def test_a_timeout_masks_the_whole_instance(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
+async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
     # 4 prompts: two instances ("timeout", "linear"), two repetitions each.
     validate_generator_output(4, out, step_wise=True)
 
     timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
     assert all(out["loss_masks"][i] == [0] and out["rewards"][i] == 0.0 for i in timed_out)
-    assert out["rollout_metrics"]["generate/num_masked_instances"] == 1
+    assert out["rollout_metrics"]["generate/skycap/num_masked_instances"] == 1
     # The masked rows still carry support, so the batch collates.
     assert len(out["rollout_sample_support"]) == len(out["response_ids"])
 
 
 @pytest.mark.asyncio
-async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("crash"), disable_tqdm=True)
+async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("crash"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     urls = [config["agent"]["kwargs"]["api_base"] for config in trials.configs]
@@ -196,8 +248,8 @@ async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(sky
 
 
 @pytest.mark.asyncio
-async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_rewarded(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("silent", "linear"), disable_tqdm=True)
+async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_rewarded(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("silent", "linear"), disable_tqdm=True)
 
     silent = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "silent"]
     assert [out["rewards"][i] for i in silent] == [0.0] and out["stop_reasons"][silent[0]] == "error"
@@ -261,8 +313,7 @@ def test_overlong_filtering_masks_a_context_length_trial_but_keeps_it() -> None:
 
 @pytest.mark.asyncio
 async def test_the_service_writes_open_trajectories_when_stopped(router, tmp_path) -> None:
-    backend = TokensBackend(router.url, FakeRenderer(), engine=SkyRLEngine(), model="policy")
-    service = SkycapService(backend, record_dir=str(tmp_path), host="127.0.0.1")
+    service = service_for(router, tmp_path)
     service.start()
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{service.url}/trajectories", json={"meta": {}}) as response:
@@ -280,8 +331,7 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
     import litellm
 
     router.reply = "<think>\nhmm\n</think>\n\nanswer"
-    backend = TokensBackend(router.url, FakeRenderer(), engine=SkyRLEngine(), model="policy", use_raw_content=True)
-    service = SkycapService(backend, record_dir=str(tmp_path), host="127.0.0.1")
+    service = service_for(router, tmp_path, use_raw_content=True)
     service.start()
     try:
         async with aiohttp.ClientSession() as session:

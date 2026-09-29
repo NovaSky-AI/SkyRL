@@ -43,6 +43,27 @@ parser. Replies then match that server's: the completion's own text as
 turn back unchanged, and a thinking model's history stays one path. With parsed
 replies, every replayed turn would lose its thinking and fork the graph.
 
+## Embed a server
+
+A trainer can run a server in its own process instead, from the same options
+`skycap serve` takes. It gets a thread and event loop of its own:
+
+```python
+from skycap import CaptureService
+
+service = CaptureService(
+    "http://engine:8000", mode="tokens", tokenizer="Qwen/Qwen3-8B",
+    max_model_len=32768, record_dir="./record",
+)
+url = service.start()        # hand this to a CapturePool
+...
+service.stop()               # writes the trajectories still in memory
+```
+
+How a call reaches the model is built inside from those options. An engine
+with another wire passes `engine=` (a `skycap.tokens.engine.VLLMEngine`
+subclass), which is the one piece an embedder supplies.
+
 ## Capture a rollout
 
 ```python

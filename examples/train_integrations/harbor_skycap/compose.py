@@ -183,15 +183,16 @@ def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_i
             [o.reward for o in trained],
             trajectory_completion_times=None if any(t is None for t in times) else times,
         )
-        metrics["generate/avg_num_turns"] = sum(len(s.targets) for o in trained for s in o.samples) / len(trained)
-        metrics["generate/avg_num_paths"] = sum(len(o.samples) for o in trained) / len(trained)
-        metrics["generate/trajectories_context_length_exceeded"] = sum(
+        num_turns = sum(len(s.targets) for o in trained for s in o.samples)
+        metrics["generate/skycap/avg_num_turns"] = num_turns / len(trained)
+        metrics["generate/skycap/avg_num_paths"] = sum(len(o.samples) for o in trained) / len(trained)
+        metrics["generate/skycap/trajectories_context_length_exceeded"] = sum(
             o.stop_reason == "context_length" for o in trained
         )
-    metrics["generate/num_timeout_trajectories"] = sum(o.stop_reason == "agent_timeout" for o in outcomes)
-    metrics["generate/num_error_trajectories"] = sum(o.stop_reason == "error" for o in outcomes)
-    metrics["generate/num_masked_instances"] = len(masked_instances)
+    metrics["generate/skycap/num_timeout_trajectories"] = sum(o.stop_reason == "agent_timeout" for o in outcomes)
+    metrics["generate/skycap/num_error_trajectories"] = sum(o.stop_reason == "error" for o in outcomes)
+    metrics["generate/skycap/num_masked_instances"] = len(masked_instances)
     # Which trajectories to open in the viewer: each forks at its first unbridged call.
-    metrics["generate/num_unbridged_trajectories"] = sum(o.unbridged_calls > 0 for o in outcomes)
-    metrics["generate/num_unbridged_calls"] = sum(o.unbridged_calls for o in outcomes)
+    metrics["generate/skycap/num_unbridged_trajectories"] = sum(o.unbridged_calls > 0 for o in outcomes)
+    metrics["generate/skycap/num_unbridged_calls"] = sum(o.unbridged_calls for o in outcomes)
     return metrics

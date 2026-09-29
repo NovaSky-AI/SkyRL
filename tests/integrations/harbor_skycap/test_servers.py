@@ -14,20 +14,14 @@ from aiohttp.test_utils import TestServer  # noqa: E402
 from examples.train_integrations.harbor_skycap.servers import (
     start_servers,  # noqa: E402
 )
-from tests.integrations.harbor_skycap.fakes import MockRouter  # noqa: E402
+from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
+    FakeRenderer,
+    MockRouter,
+)
 
 pytestmark = pytest.mark.integrations
 
 REPO = Path(__file__).resolve().parents[3]
-
-
-def fake_backend(settings):
-    """Built inside each actor: token mode with the fake renderer, against the mock router."""
-    from examples.train_integrations.harbor_skycap.engine import SkyRLEngine
-    from skycap.tokens.backend import TokensBackend
-    from tests.integrations.harbor_skycap.fakes import FakeRenderer
-
-    return TokensBackend(settings["engine_url"], FakeRenderer(), engine=SkyRLEngine(), model="policy")
 
 
 @pytest.fixture(scope="module")
@@ -57,14 +51,15 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
     server = TestServer(router.app(), host="0.0.0.0")
     await server.start_server()
     servers = start_servers(
-        {"engine_url": str(server.make_url("")).rstrip("/")},
+        # The fake renderer goes to each actor with the settings, in place of a tokenizer.
+        {"upstream_url": str(server.make_url("")).rstrip("/"), "renderer": FakeRenderer(), "model": "policy"},
         num_servers=2,
         num_cpus_per_server=1,
         placement_strategy="SPREAD",
         record_dir=str(tmp_path),
         ttl=60.0,
-        backend_factory=fake_backend,
     )
+    gen = None
     try:
         # Each server picked its own port.
         assert len(set(servers.urls)) == 2
@@ -79,6 +74,8 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
         used = {c["agent"]["kwargs"]["api_base"].split("/t/")[0] for c in FakeTrial.configs}
         assert used == set(servers.urls)
     finally:
+        if gen is not None:
+            await gen.close()
         servers.stop()
         await server.close()
     assert len(list(tmp_path.glob("*.json.zst"))) == 4

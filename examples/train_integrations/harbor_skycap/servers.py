@@ -1,6 +1,6 @@
 """A pool of skycap servers, one Ray actor each.
 
-Each actor runs one server (``SkycapService``) on a port it picks itself, so
+Each actor runs one server (``skycap.CaptureService``) on a port it picks itself, so
 servers never collide, and advertises its node's address. The actors sit in one
 placement group whose strategy is configurable: ``SPREAD`` by default, so one
 node going away takes one server rather than all of them. The generator spreads
@@ -8,7 +8,7 @@ trajectories over the pool's URLs round-robin.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 from loguru import logger
@@ -20,44 +20,24 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     get_node_ip,
 )
 
-#: Builds a skycap backend from plain settings, inside the actor.
-BackendFactory = Callable[[Dict[str, Any]], Any]
-
-
-def build_tokens_backend(settings: Dict[str, Any]) -> Any:
-    """skycap in token mode, in front of SkyRL's router."""
-    from skycap.tokens.backend import TokensBackend
-    from skycap.tokens.renderer import RenderersRenderer
-
-    from .engine import SkyRLEngine
-
-    return TokensBackend(
-        settings["engine_url"],
-        RenderersRenderer(settings["tokenizer"], size=settings["renderer_pool_size"]),
-        engine=SkyRLEngine(),
-        model=settings["model"],
-        max_model_len=settings["max_model_len"],
-        sampling_overrides=settings["sampling_overrides"],
-        sampling_mask=settings["sampling_mask"],
-        use_raw_content=settings.get("use_raw_content", False),
-    )
-
 
 @ray.remote(num_cpus=0)
 class SkycapServerActor:
-    def __init__(
-        self, settings: Dict[str, Any], record_dir: Optional[str], ttl: float, backend_factory: BackendFactory
-    ) -> None:
-        from .service import SkycapService
+    def __init__(self, settings: Dict[str, Any], record_dir: Optional[str], ttl: float) -> None:
+        from skycap import CaptureService
+
+        from .engine import SkyRLEngine
 
         node_ip = get_node_ip()
-        self.service = SkycapService(
-            backend_factory(settings),
+        self.service = CaptureService(
+            mode="tokens",
+            engine=SkyRLEngine(),
             record_dir=record_dir,
             ttl=ttl,
             host=default_bind_host(node_ip),
             port=0,
             advertise_host=node_ip,
+            **settings,
         )
 
     def start(self) -> str:
@@ -99,8 +79,11 @@ def start_servers(
     placement_strategy: str,
     record_dir: Optional[str],
     ttl: float,
-    backend_factory: BackendFactory = build_tokens_backend,
 ) -> SkycapServers:
+    """``num_servers`` skycap servers in token mode, in front of SkyRL's router.
+
+    ``settings`` are ``skycap.CaptureService``'s options (``upstream_url``, ``tokenizer``, sampling, ...).
+    """
     if num_servers < 1:
         raise ValueError("skycap.num_servers must be at least 1")
     pg = placement_group([{"CPU": num_cpus_per_server}] * num_servers, strategy=placement_strategy)
@@ -109,7 +92,7 @@ def start_servers(
         SkycapServerActor.options(
             num_cpus=num_cpus_per_server,
             scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=i),
-        ).remote(settings, record_dir, ttl, backend_factory)
+        ).remote(settings, record_dir, ttl)
         for i in range(num_servers)
     ]
     urls = ray.get([actor.start.remote() for actor in actors])
