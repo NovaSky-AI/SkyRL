@@ -729,9 +729,16 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     if ie_cfg.enable_return_routed_experts:
-        assert (
-            ie_cfg.distributed_executor_backend == "mp"
-        ), "rollout router replay (r3) can hang with the ray backend - use the vLLM mp backend instead"
+        # vLLM captures routes per worker, into a buffer covering only that worker's layers, and
+        # only the last pipeline stage returns model output. With inference PP > 1 the routes of
+        # every earlier stage's MoE layers are silently dropped (left as expert 0). This holds for
+        # both executor backends. The ray backend itself is fine: vLLM copies the routed-expert
+        # arrays out of Ray's shared-memory channel before the next read (v1/executor/ray_utils.py).
+        assert ie_cfg.pipeline_parallel_size == 1, (
+            "rollout router replay (r3) requires generator.inference_engine.pipeline_parallel_size=1: "
+            "vLLM returns routed experts only from the last pipeline stage, so earlier stages' routes "
+            "would be lost. Scale the inference engine with tensor/expert parallelism instead."
+        )
         assert (
             cfg.trainer.strategy == "megatron"
         ), "rollout router replay (r3) is only supported with Megatron training backend"
