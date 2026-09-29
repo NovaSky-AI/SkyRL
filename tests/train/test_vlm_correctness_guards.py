@@ -10,6 +10,9 @@ from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     concat_nonempty_tensors,
 )
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    scope_megatron_vlm_lora_targets,
+)
 from skyrl.train.config import SFTConfig, SkyRLTrainConfig
 from skyrl.train.sft_trainer import (
     _check_modality_homogeneity,
@@ -156,3 +159,61 @@ def test_megatron_num_steps_is_capped_by_max_training_steps():
 
 def test_fsdp_epoch_based_run_resolves_to_none():
     assert _resolve_num_training_steps(_sft_cfg(strategy="fsdp", num_epochs=2)) is None
+
+
+# ---------------------------------------------------------------------------
+# Megatron LoRA targets on a VLM never match the vision tower
+# ---------------------------------------------------------------------------
+
+
+def _scope(targets, *, is_vlm=True, from_all_linear=False, exclude=None):
+    return scope_megatron_vlm_lora_targets(
+        targets, is_vlm=is_vlm, from_all_linear=from_all_linear, exclude_modules=exclude
+    )
+
+
+def test_megatron_all_linear_is_scoped_to_the_language_model():
+    assert _scope(["linear_qkv", "linear_fc1"], from_all_linear=True) == [
+        "*language_model*linear_qkv",
+        "*language_model*linear_fc1",
+    ]
+
+
+@pytest.mark.parametrize("targets", [["linear_qkv", "linear_fc1"], ["*.linear_qkv"], ["*decoder*linear_proj"]])
+def test_megatron_explicit_unscoped_targets_are_rejected_for_vlm(targets):
+    with pytest.raises(ValueError, match="vision tower"):
+        _scope(targets)
+
+
+def test_megatron_explicit_scoped_targets_are_kept():
+    targets = ["*language_model*linear_qkv", "*language_model*.layers.0.*linear_fc1"]
+    assert _scope(targets) == targets
+
+
+def test_megatron_exclude_modules_is_rejected_for_vlm():
+    with pytest.raises(ValueError, match="exclude_modules"):
+        _scope(["linear_qkv"], from_all_linear=True, exclude=["linear_fc1"])
+
+
+def test_megatron_text_model_targets_are_untouched():
+    assert _scope(["linear_qkv"], is_vlm=False) == ["linear_qkv"]
+    assert _scope(["linear_qkv"], is_vlm=False, exclude=["linear_fc1"]) == ["linear_qkv"]
+
+
+def test_megatron_scoped_patterns_skip_bridge_vision_modules():
+    import re
+
+    from skyrl.backends.skyrl_train.workers.worker_utils import (
+        MEGATRON_VLM_LANGUAGE_MODEL_PREFIX,  # noqa: F401
+    )
+
+    def wildcard_match(pattern, key):  # Megatron-Bridge peft.utils.wildcard_match
+        return re.compile("^" + pattern.replace("*", "(.*)") + "$").match(key) is not None
+
+    patterns = _scope(["linear_qkv", "linear_fc1"], from_all_linear=True)
+    lm = "module.language_model.decoder.layers.3.self_attention.linear_qkv"
+    vit = "module.vision_model.decoder.layers.3.self_attention.linear_qkv"
+    moe = "module.language_model.decoder.layers.3.mlp.experts.linear_fc1"
+    assert any(wildcard_match(p, lm) for p in patterns)
+    assert any(wildcard_match(p, moe) for p in patterns)
+    assert not any(wildcard_match(p, vit) for p in patterns)

@@ -99,6 +99,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     all_reduce_metrics,
     get_microbatch_iterator,
     reduce_metrics,
+    scope_megatron_vlm_lora_targets,
 )
 from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
@@ -452,14 +453,14 @@ class MegatronWorker:
                 ]
             if not gdn_in_proj_lora_is_safe(self.bridge):
                 target_modules.remove("in_proj")
-            if self.is_vlm and lora_config.exclude_modules is None:
-                # The bridge's vision tower reuses the same TE layer names (linear_qkv, linear_fc1, ...),
-                # so bare names would put adapters on it too; vLLM drops those tensors and the rollout
-                # policy diverges from the trainer. Megatron-Bridge's exclude_modules
-                # cannot be combined with an explicit target list, so scope the targets instead.
-                target_modules = [f"*language_model*{name}" for name in target_modules]
         else:
             target_modules = lora_config.target_modules
+        target_modules = scope_megatron_vlm_lora_targets(
+            list(target_modules),
+            is_vlm=self.is_vlm,
+            from_all_linear=lora_config.target_modules == "all-linear",
+            exclude_modules=lora_config.exclude_modules,
+        )
 
         if lora_type == "lora":
             self.lora_cls = LoRA(

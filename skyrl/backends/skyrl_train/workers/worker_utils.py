@@ -472,3 +472,40 @@ def get_microbatch_iterator(
         return TokenBasedBatchIterator(data, max_tokens_per_microbatch=max_tokens_per_microbatch)
     else:
         return SampleBasedBatchIterator(data, sample_batch_size=micro_batch_size, drop_last=False)
+
+
+# Megatron-Bridge builds every VL model with its text stack under ``language_model`` (Qwen-VL, Gemma-VL,
+# Kimi-VL, GLM-V, ERNIE-VL, Nemotron-VL, Qwen-Omni), while tower names vary per family.
+MEGATRON_VLM_LANGUAGE_MODEL_PREFIX = "language_model"
+
+
+def scope_megatron_vlm_lora_targets(
+    target_modules: List[str], *, is_vlm: bool, from_all_linear: bool, exclude_modules: Optional[List[str]]
+) -> List[str]:
+    """Return Megatron LoRA target patterns that cannot land on a VLM's vision tower.
+
+    The bridge's vision tower reuses the language model's TE layer names (``linear_qkv``, ``linear_fc1``, ...),
+    so a pattern that does not name the language model also puts adapters on the tower. vLLM applies LoRA only to
+    the language model of a multimodal model and drops those tensors, so the rollout policy would diverge from the
+    trainer. The ``all-linear`` default is scoped here; an explicit list must already be scoped, since rewriting a
+    user's patterns would change what they asked for. Megatron-Bridge rejects ``exclude_modules`` next to a target
+    list, so it cannot be used to carve out the tower.
+    """
+    if not is_vlm:
+        return target_modules
+    if exclude_modules:
+        raise ValueError(
+            "lora.exclude_modules is not supported for vision-language models on Megatron: Megatron-Bridge does not "
+            "combine it with a target list. Use target_modules=all-linear (scoped to the language model "
+            f"automatically) or explicit patterns such as '*{MEGATRON_VLM_LANGUAGE_MODEL_PREFIX}*linear_qkv'."
+        )
+    if from_all_linear:
+        return [f"*{MEGATRON_VLM_LANGUAGE_MODEL_PREFIX}*{name}" for name in target_modules]
+    unscoped = [p for p in target_modules if MEGATRON_VLM_LANGUAGE_MODEL_PREFIX not in p]
+    if unscoped:
+        raise ValueError(
+            f"LoRA target_modules {unscoped} would also match the vision tower of this vision-language model, whose "
+            "layers reuse the language model's names; vLLM does not apply those adapters. Scope each pattern to the "
+            f"language model, e.g. '*{MEGATRON_VLM_LANGUAGE_MODEL_PREFIX}*linear_qkv', or use target_modules=all-linear."
+        )
+    return target_modules
