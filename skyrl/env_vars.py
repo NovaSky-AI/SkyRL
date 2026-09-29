@@ -157,3 +157,9 @@ The timeout must cover time spent queued behind other requests as well as genera
 Equivalent to the ``--forwarding-inference-timeout-sec`` flag of the Tinker API server
 (``EngineConfig.forwarding_inference_timeout_sec``); the flag takes precedence when both are set.
 """
+
+SKYRL_MEGATRON_RANDOM_INIT = str(os.environ.get("SKYRL_MEGATRON_RANDOM_INIT", "0")).lower() in ("1", "true")
+"""Build the Megatron model from the HF config with random weights instead of loading the checkpoint.
+
+For throughput/memory benchmarking (e.g. dummy SFT with random tokens), where only the architecture
+matters: ``model.path`` then needs just ``config.json`` and tokenizer files, no safetensors."""
