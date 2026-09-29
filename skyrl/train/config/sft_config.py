@@ -556,6 +556,14 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError("One of num_steps or num_epochs must be set")
         if cfg.num_epochs <= 0:
             raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
+        if cfg.strategy == "megatron" and cfg.max_training_steps is None:
+            # The Megatron LR scheduler is built in init_model, before the dataloader exists, so an
+            # epoch-based run has no step count to give it (VLM_GAPS.md #52). Require one explicitly.
+            raise ValueError(
+                "Megatron SFT needs an explicit training step count for its LR scheduler: set num_steps, "
+                "or keep num_epochs and set max_training_steps (>= num_epochs * steps_per_epoch, and > "
+                "optimizer_config.num_warmup_steps)."
+            )
     if not cfg.model.path:
         raise ValueError("model.path must be set")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:

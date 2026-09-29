@@ -484,3 +484,23 @@ class TestMultiDatasetValidation:
         cfg = _sft_cfg_from_overrides(["eval_interval=5"])
         with pytest.raises(ValueError, match="requires eval_datasets"):
             validate_sft_cfg(cfg)
+
+
+class TestMegatronEpochBasedStepCount:
+    """Megatron builds its LR scheduler before the dataloader exists, so num_epochs alone has no
+    step count to hand it; the config must say so instead of crashing inside megatron-core."""
+
+    def test_megatron_num_epochs_without_cap_is_rejected(self):
+        cfg = SFTConfig.from_cli_overrides({"strategy": "megatron", "num_epochs": 2, "model.path": "test/my-model"})
+        with pytest.raises(ValueError, match="max_training_steps"):
+            validate_sft_cfg(cfg)
+
+    def test_megatron_num_epochs_with_cap_is_accepted(self):
+        cfg = SFTConfig.from_cli_overrides(
+            {"strategy": "megatron", "num_epochs": 2, "max_training_steps": 100, "model.path": "test/my-model"}
+        )
+        validate_sft_cfg(cfg)
+
+    def test_fsdp_num_epochs_without_cap_is_accepted(self):
+        cfg = SFTConfig.from_cli_overrides({"strategy": "fsdp", "num_epochs": 2, "model.path": "test/my-model"})
+        validate_sft_cfg(cfg)
