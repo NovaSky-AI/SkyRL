@@ -110,7 +110,8 @@ class HarborSkycapExp(HarborExp):
             harbor_cfg=cfg.harbor_trial_config,
             capture_urls=self.skycap.urls,
             inference_engine_client=inference_engine_client,
-            record_dir=record_dir(cfg) if cfg.skycap.wandb_artifact else None,
+            record_dir=record_dir(cfg),
+            wandb_artifact=cfg.skycap.wandb_artifact,
         )
 
     def run(self):

@@ -56,6 +56,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         capture_urls: List[str],
         inference_engine_client: Any = None,
         record_dir: Optional[str] = None,
+        wandb_artifact: bool = False,
     ) -> None:
         """
         Args:
@@ -63,7 +64,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             harbor_cfg: Harbor's ``TrialConfig`` template.
             capture_urls: the skycap servers to spread trajectories over.
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
-            record_dir: the skycap record directory. When set, each step's records go to W&B.
+            record_dir: where the skycap servers write the records.
+            wandb_artifact: upload each step's documents from ``record_dir`` to W&B.
         """
         if not getattr(generator_cfg, "step_wise_trajectories", False):
             raise ValueError(
@@ -84,7 +86,10 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.generator_cfg = generator_cfg
         self.capture_urls = list(capture_urls)
         self.inference_engine_client = inference_engine_client
+        if wandb_artifact and not record_dir:
+            raise ValueError("wandb_artifact needs record_dir")
         self.record_dir = Path(record_dir) if record_dir else None
+        self.wandb_artifact = wandb_artifact
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
             raise ValueError("generator.inference_engine.served_model_name must be set, without '/'")
@@ -141,7 +146,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             finally:
                 progress.close()
 
-        if self.record_dir is not None:
+        if self.wandb_artifact:
             try:
                 await asyncio.to_thread(log_step_records, self.record_dir, created, step)
             except Exception:  # noqa: BLE001 - an upload failure must not fail the step

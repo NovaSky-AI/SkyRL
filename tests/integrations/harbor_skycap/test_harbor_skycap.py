@@ -126,9 +126,11 @@ def batch(*scripts: str, repetitions: int = 1) -> dict:
     return {"prompts": prompts, "trajectory_ids": ids, "batch_metadata": SimpleNamespace(global_step=3)}
 
 
-def generator(skycap, record_dir=None, **cfg) -> HarborSkycapGenerator:
+def generator(skycap, wandb_artifact=False, **cfg) -> HarborSkycapGenerator:
     engine_client = SimpleNamespace(weight_version=7)
-    return HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client, record_dir)
+    return HarborSkycapGenerator(
+        generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client, skycap.server.record_dir, wandb_artifact
+    )
 
 
 @pytest.mark.asyncio
@@ -224,7 +226,7 @@ async def test_each_step_uploads_its_records_including_retried_attempts(skycap, 
     run = SimpleNamespace(id="run/1", log_artifact=lambda artifact, aliases: logged.append((artifact, aliases)))
     monkeypatch.setattr(artifacts.wandb, "run", run)
     record_dir = skycap.server.record_dir
-    await generator(skycap, record_dir=record_dir).generate(batch("linear", "crash"), disable_tqdm=True)
+    await generator(skycap, wandb_artifact=True).generate(batch("linear", "crash"), disable_tqdm=True)
 
     ((artifact, aliases),) = logged
     assert artifact.name == "skycap-records-run-1" and artifact.type == "skycap-records"
@@ -238,8 +240,17 @@ async def test_each_step_uploads_its_records_including_retried_attempts(skycap, 
 @pytest.mark.asyncio
 async def test_no_upload_without_a_wandb_run(skycap, trials, monkeypatch) -> None:
     monkeypatch.setattr(artifacts.wandb, "run", None)
-    out = await generator(skycap, record_dir=skycap.server.record_dir).generate(batch("linear"), disable_tqdm=True)
+    out = await generator(skycap, wandb_artifact=True).generate(batch("linear"), disable_tqdm=True)
     assert out["rewards"] == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_no_upload_when_off(skycap, trials, monkeypatch) -> None:
+    logged = []
+    run = SimpleNamespace(id="run", log_artifact=lambda artifact, aliases: logged.append(artifact))
+    monkeypatch.setattr(artifacts.wandb, "run", run)
+    await generator(skycap).generate(batch("linear"), disable_tqdm=True)
+    assert logged == [] and len(list(record.list_ids(skycap.server.record_dir))) == 1
 
 
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
