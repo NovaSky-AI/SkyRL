@@ -455,7 +455,7 @@ class MegatronWorker:
             if self.is_vlm and lora_config.exclude_modules is None:
                 # The bridge's vision tower reuses the same TE layer names (linear_qkv, linear_fc1, ...),
                 # so bare names would put adapters on it too; vLLM drops those tensors and the rollout
-                # policy diverges from the trainer (VLM_GAPS.md #14). Megatron-Bridge's exclude_modules
+                # policy diverges from the trainer. Megatron-Bridge's exclude_modules
                 # cannot be combined with an explicit target list, so scope the targets instead.
                 target_modules = [f"*language_model*{name}" for name in target_modules]
         else:

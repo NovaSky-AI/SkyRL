@@ -1,4 +1,4 @@
-"""CPU tests for the VLM correctness fixes (VLM_GAPS.md #4, #13, #14, #33, #34, #52).
+"""CPU tests for the VLM correctness fixes.
 
 Run: uv run --extra dev pytest tests/train/test_vlm_correctness_guards.py
 """

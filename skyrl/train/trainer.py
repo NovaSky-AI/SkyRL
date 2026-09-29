@@ -893,7 +893,7 @@ class RayPPOTrainer:
                 image_grid_thw
             ), "Number of pixel values should match number of image grid thw"
             # Text-only trajectories of a mixed batch have no image tensors (None). Give them empty
-            # tensors so the batch stays row-aligned; the model wrappers skip empty rows (VLM_GAPS.md #4).
+            # tensors so the batch stays row-aligned; the model wrappers skip empty rows.
             reference = next((t for t in pixel_values if t is not None), None)
             if reference is None:
                 pixel_values = None

@@ -41,7 +41,7 @@ def lora_exclude_modules_for_model(is_vlm: bool, configured: Optional[str]) -> O
 
     vLLM applies LoRA only to the language model of a multimodal model and silently drops adapter
     tensors on the vision tower, so training them makes the trainer's policy diverge from the rollout
-    policy (VLM_GAPS.md #14). Excluding the tower by default keeps the two identical.
+    policy. Excluding the tower by default keeps the two identical.
     """
     if configured is not None:
         return configured

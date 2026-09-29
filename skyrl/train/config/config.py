@@ -1879,7 +1879,7 @@ class SkyRLTrainConfig(BaseConfig):
             raise ValueError("rollout router replay (r3) does not support vision_language_generator")
 
         # The critic forward never receives pixel_values, so a VLM critic would score image
-        # placeholder tokens with no image attached (VLM_GAPS.md #13).
+        # placeholder tokens with no image attached.
         if self.generator.vision_language_generator and self.trainer.critic.model.path:
             raise ValueError(
                 "vision_language_generator does not support a critic (trainer.critic.model.path is set): "

@@ -342,7 +342,7 @@ class HFModelWrapper(nn.Module):
                 # Convert TensorList -> concatenated tensors for the HF model. Text-only rows of a
                 # mixed batch carry empty tensors and are skipped; a row that has image placeholder
                 # tokens but no pixels would make the model demand missing features, so fail loudly
-                # instead (VLM_GAPS.md #4 / #18).
+                # instead.
                 image_token_id = getattr(self.model.config, "image_token_id", None)
                 if isinstance(pixel_values, TensorList) and image_token_id is not None:
                     for row, row_pixels in enumerate(pixel_values.tensors):

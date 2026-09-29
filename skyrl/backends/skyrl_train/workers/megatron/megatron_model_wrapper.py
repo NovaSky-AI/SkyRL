@@ -460,7 +460,7 @@ class MegatronModelWrapper:
             )
 
             vlm_inputs = {}
-            # Text-only rows of a mixed batch carry empty tensors; skip them (VLM_GAPS.md #4).
+            # Text-only rows of a mixed batch carry empty tensors; skip them.
             if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
                 pixel_values = concat_nonempty_tensors(batch["pixel_values"])
                 if pixel_values is not None:
@@ -1108,7 +1108,7 @@ class MegatronModelWrapper:
             )
 
             vlm_inputs = {}
-            # Text-only rows of a mixed batch carry empty tensors; skip them (VLM_GAPS.md #4).
+            # Text-only rows of a mixed batch carry empty tensors; skip them.
             if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
                 pixel_values = concat_nonempty_tensors(batch["pixel_values"])
                 if pixel_values is not None:

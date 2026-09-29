@@ -90,7 +90,7 @@ def concat_nonempty_tensors(tensor_list: "TensorList | None") -> Optional[torch.
 
     A batch that mixes image and text-only samples carries an empty ``(0, ...)`` tensor for each
     text-only row (see ``RayPPOTrainer.convert_to_training_input``). Returns None when no row has
-    any image data, so callers can drop the vision kwargs entirely (VLM_GAPS.md #4).
+    any image data, so callers can drop the vision kwargs entirely.
     """
     if tensor_list is None:
         return None

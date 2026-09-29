@@ -386,7 +386,7 @@ def _resolve_num_training_steps(sft_cfg) -> Optional[int]:
     """Step count handed to the workers' LR scheduler at ``init_model``.
 
     ``None`` when the run is epoch-based and uncapped. The Megatron scheduler is built before the
-    dataloader exists and cannot take ``None`` (VLM_GAPS.md #52), so that backend requires an explicit
+    dataloader exists and cannot take ``None``, so that backend requires an explicit
     count rather than a silent default; FSDP resolves it later from the dataloader.
     """
     num_training_steps = sft_cfg.dummy_run_max_steps if sft_cfg.dummy_run_full_ctx else sft_cfg.num_steps
@@ -410,7 +410,7 @@ def _normalize_content_parts(content):
 
     RL datasets (and OpenAI clients) write ``{"type": "image_url", "image_url": {"url": ...}}``;
     the HF processor path only recognizes ``type == "image"``, so those parts were silently
-    tokenized as text with an image placeholder and no pixels (VLM_GAPS.md #33). Video parts are
+    tokenized as text with an image placeholder and no pixels. Video parts are
     rejected explicitly rather than dropped.
     """
     if not isinstance(content, list):
@@ -439,7 +439,7 @@ def _check_modality_homogeneity(sources, names) -> None:
     """Fail at load time if the training data mixes image and text-only rows.
 
     The collator requires every row of a batch to carry images or none of them; with a random
-    sampler a mixed dataset only fails mid-epoch (VLM_GAPS.md #34). ``sources`` are the per-dataset
+    sampler a mixed dataset only fails mid-epoch. ``sources`` are the per-dataset
     objects returned by ``load_dataset``: lists of tokenized rows or ``PretokenizedDataset``.
     """
     with_images = 0
@@ -2202,7 +2202,7 @@ class SFTTrainer:
         # Save final checkpoint (if checkpointing is enabled). Skip if the last
         # in-loop iteration already saved (either via ckpt_interval or via a
         # callback-driven force-save) so we don't double-save. ckpt_interval <= 0
-        # means checkpointing is off, final save included (VLM_GAPS.md #53).
+        # means checkpointing is off, final save included.
         if self.sft_cfg.ckpt_path and self.sft_cfg.ckpt_interval > 0 and not did_save_last_step:
             final_step = num_steps
             logger.info(f"Saving final checkpoint at step {final_step}")

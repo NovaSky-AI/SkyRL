@@ -279,7 +279,7 @@ async def test_vlm_obs_tokens_match_expected(mock_decode):
 @patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
 async def test_vlm_assistant_turn_is_rerendered_without_trailing_eos(mock_decode):
     """A response text that ends with the eos string must not be fed back into the next render,
-    or the chat template adds a second eos at every turn boundary (VLM_GAPS.md #23)."""
+    or the chat template adds a second eos at every turn boundary."""
     mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)

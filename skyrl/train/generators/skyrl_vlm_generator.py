@@ -188,7 +188,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
                 # 4. Append assistant message to conversation. Strip a trailing eos string first:
                 # the chat template re-adds it on the next render, so leaving it in produces a
-                # doubled eos at every turn boundary (VLM_GAPS.md #23).
+                # doubled eos at every turn boundary.
                 assistant_text = gen_text
                 eos_text = getattr(self.tokenizer, "eos_token", None)
                 if eos_text and assistant_text.endswith(eos_text):
