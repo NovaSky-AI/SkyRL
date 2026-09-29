@@ -79,6 +79,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             )
         self.generator_cfg = generator_cfg
         self.capture_urls = list(capture_urls)
+        self.pool = CapturePool(self.capture_urls)
         self.inference_engine_client = inference_engine_client
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
@@ -92,6 +93,10 @@ class HarborSkycapGenerator(GeneratorInterface):
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
+
+    async def close(self) -> None:
+        """Close the pool's HTTP session. The generator can't generate afterwards."""
+        await self.pool.close()
 
     def _cache_salt(self) -> Optional[str]:
         if not getattr(self.generator_cfg, "use_cache_salt", False):
@@ -121,19 +126,16 @@ class HarborSkycapGenerator(GeneratorInterface):
             mininterval=5,
         )
 
-        # A pool per batch: its HTTP session belongs to this event loop.
-        async with CapturePool(self.capture_urls) as pool:
+        async def worker(index: int, prompt: ConversationType, trajectory_id: TrajectoryID) -> None:
+            outcomes[index] = await self._trial(prompt, trajectory_id, cache_salt, step)
+            progress.update(1)
 
-            async def worker(index: int, prompt: ConversationType, trajectory_id: TrajectoryID) -> None:
-                outcomes[index] = await self._trial(pool, prompt, trajectory_id, cache_salt, step)
-                progress.update(1)
-
-            try:
-                async with asyncio.TaskGroup() as group:
-                    for index, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
-                        group.create_task(worker(index, prompt, trajectory_id))
-            finally:
-                progress.close()
+        try:
+            async with asyncio.TaskGroup() as group:
+                for index, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
+                    group.create_task(worker(index, prompt, trajectory_id))
+        finally:
+            progress.close()
 
         return compose(
             outcomes,
@@ -144,7 +146,6 @@ class HarborSkycapGenerator(GeneratorInterface):
 
     async def _trial(
         self,
-        pool: CapturePool,
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
@@ -155,7 +156,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         for attempt in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             try:
-                outcome = await self._attempt(pool, prompt, trajectory_id, cache_salt, step, attempt)
+                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, attempt)
             except Exception as error:  # noqa: BLE001 - retried, then masked
                 logger.warning(f"{prefix} failed: {type(error).__name__}: {error}")
                 continue
@@ -167,7 +168,6 @@ class HarborSkycapGenerator(GeneratorInterface):
 
     async def _attempt(
         self,
-        pool: CapturePool,
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
@@ -182,7 +182,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             "step": step,
             "attempt": attempt,
         }
-        async with pool.trajectory(meta) as trajectory:
+        async with self.pool.trajectory(meta) as trajectory:
             config = self._trial_config(prompt, trajectory.base_url, cache_salt)
             async with self._rate_limiter:
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()

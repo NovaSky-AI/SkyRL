@@ -157,6 +157,18 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
 
 
 @pytest.mark.asyncio
+async def test_the_generator_keeps_one_pool_across_batches(skycap, trials) -> None:
+    """Fully async training calls `generate` once per prompt; one pool serves every call, round-robin across all."""
+    gen = generator(skycap)
+    pool = gen.pool
+    for _ in range(2):
+        out = await gen.generate(batch("linear"), disable_tqdm=True)
+        assert out["rewards"] == [1.0]
+    assert gen.pool is pool
+    await gen.close()
+
+
+@pytest.mark.asyncio
 async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(skycap, trials) -> None:
     out = await generator(skycap).generate(batch("summarize"), disable_tqdm=True)
     validate_generator_output(1, out, step_wise=True)

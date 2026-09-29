@@ -15,6 +15,8 @@ A server that can't be reached, or answers 5xx, is skipped for that create.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import itertools
 import random
 from collections.abc import AsyncIterator, Sequence
@@ -81,7 +83,6 @@ class CapturePool:
         self,
         urls: Sequence[str],
         *,
-        session: aiohttp.ClientSession | None = None,
         timeout: float = 60.0,
     ) -> None:
         if not urls:
@@ -89,8 +90,8 @@ class CapturePool:
         self.urls = [url.rstrip("/") for url in urls]
         start = random.randrange(len(self.urls))
         self._next = itertools.cycle(self.urls[start:] + self.urls[:start])
-        self._session = session
-        self._owns_session = session is None
+        self._session: aiohttp.ClientSession | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._closed = False
 
@@ -98,14 +99,29 @@ class CapturePool:
         if self._closed:
             raise RuntimeError("the CapturePool is closed")
         if self._session is None:
-            self._session = aiohttp.ClientSession(timeout=self._timeout)
+            self._session, self._session_loop = aiohttp.ClientSession(timeout=self._timeout), asyncio.get_running_loop()
         return self._session
 
     async def close(self) -> None:
+        """Close the HTTP session, also once the loop it was used on has ended.
+
+        A session can only be awaited on its own loop. When that loop is gone, so
+        are its connections: the session is detached and its connector marked
+        closed instead, which keeps aiohttp from reporting them as leaked.
+        """
         self._closed = True
-        if self._owns_session and self._session is not None:
-            await self._session.close()
-            self._session = None
+        session, loop = self._session, self._session_loop
+        self._session = self._session_loop = None
+        if session is None:
+            return
+        if loop is asyncio.get_running_loop():
+            await session.close()
+            return
+        connector = session.connector
+        session.detach()
+        if connector is not None:
+            with contextlib.suppress(Exception):
+                connector._close()  # the synchronous close aiohttp itself uses on a dead loop
 
     async def __aenter__(self) -> CapturePool:
         return self
