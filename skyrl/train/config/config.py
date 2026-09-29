@@ -1878,6 +1878,14 @@ class SkyRLTrainConfig(BaseConfig):
         if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:
             raise ValueError("rollout router replay (r3) does not support vision_language_generator")
 
+        # The critic forward never receives pixel_values, so a VLM critic would score image
+        # placeholder tokens with no image attached (VLM_GAPS.md #13).
+        if self.generator.vision_language_generator and self.trainer.critic.model.path:
+            raise ValueError(
+                "vision_language_generator does not support a critic (trainer.critic.model.path is set): "
+                "the critic forward does not receive image inputs. Use a critic-free estimator such as grpo."
+            )
+
         if self.data.dataloader.num_workers is None:
             self.data.dataloader.num_workers = 8
         if self.data.dataloader.persistent_workers and self.data.dataloader.num_workers == 0:

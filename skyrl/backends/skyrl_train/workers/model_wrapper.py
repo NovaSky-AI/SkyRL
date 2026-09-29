@@ -30,7 +30,10 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
 )
-from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
+    concat_nonempty_tensors,
+)
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
@@ -336,11 +339,20 @@ class HFModelWrapper(nn.Module):
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
             if has_image_inputs:
-                # Convert TensorList -> concatenated tensors for the HF model
+                # Convert TensorList -> concatenated tensors for the HF model. Text-only rows of a
+                # mixed batch carry empty tensors and are skipped; a row that has image placeholder
+                # tokens but no pixels would make the model demand missing features, so fail loudly
+                # instead (VLM_GAPS.md #4 / #18).
+                image_token_id = getattr(self.model.config, "image_token_id", None)
+                if isinstance(pixel_values, TensorList) and image_token_id is not None:
+                    for row, row_pixels in enumerate(pixel_values.tensors):
+                        if row_pixels.shape[0] == 0 and bool((sequences[row] == image_token_id).any()):
+                            raise ValueError(f"Batch row {row} contains image placeholder tokens but no image tensors")
                 if isinstance(pixel_values, TensorList):
-                    pixel_values = torch.cat(pixel_values.tensors, dim=0)
+                    pixel_values = concat_nonempty_tensors(pixel_values)
                 if isinstance(image_grid_thw, TensorList):
-                    image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
+                    image_grid_thw = concat_nonempty_tensors(image_grid_thw)
+                has_image_inputs = pixel_values is not None or image_grid_thw is not None
 
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)

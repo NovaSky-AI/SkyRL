@@ -52,6 +52,7 @@ uv run --isolated --extra fsdp --with pylatexenc \
   trainer.remove_microbatch_padding=false \
   trainer.max_prompt_length=1024 \
   generator.sampling_params.max_generate_length=2048 \
+  generator.max_input_length=8192 \
   generator.max_turns=3 \
   trainer.policy.optimizer_config.lr=3.0e-5 \
   trainer.algorithm.use_kl_loss=false \

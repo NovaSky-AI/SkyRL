@@ -339,6 +339,14 @@ class PretokenizedDataset(SFTDataset):
     def __len__(self) -> int:
         return len(self._dataset)
 
+    def modality_counts(self) -> tuple[int, int]:
+        """(rows with image tensors, total rows), read from the arrow column without materializing rows."""
+        total = len(self._dataset)
+        if "pixel_values" not in self._dataset.column_names:
+            return 0, total
+        column = self._dataset.data.column("pixel_values")
+        return total - int(column.null_count), total
+
     @staticmethod
     def _strip_none(row: dict) -> dict:
         return {k: v for k, v in row.items() if v is not None}

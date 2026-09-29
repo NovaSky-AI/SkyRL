@@ -186,8 +186,14 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 step_reward: float = env_step_output["reward"]
                 done = env_step_output["done"]
 
-                # 4. Append assistant message to conversation
-                conversation.append({"role": "assistant", "content": gen_text})
+                # 4. Append assistant message to conversation. Strip a trailing eos string first:
+                # the chat template re-adds it on the next render, so leaving it in produces a
+                # doubled eos at every turn boundary (VLM_GAPS.md #23).
+                assistant_text = gen_text
+                eos_text = getattr(self.tokenizer, "eos_token", None)
+                if eos_text and assistant_text.endswith(eos_text):
+                    assistant_text = assistant_text[: -len(eos_text)]
+                conversation.append({"role": "assistant", "content": assistant_text})
 
                 # 5. Track generated tokens (loss_mask=1, except appended eos which is masked out)
                 response_ids.extend(gen_ids)

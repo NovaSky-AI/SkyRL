@@ -85,6 +85,21 @@ def _deserialize_tensor(value: dict) -> torch.Tensor:
         return torch.from_numpy(arr.copy())
 
 
+def concat_nonempty_tensors(tensor_list: "TensorList | None") -> Optional[torch.Tensor]:
+    """Concatenate a TensorList along dim 0, skipping zero-row entries.
+
+    A batch that mixes image and text-only samples carries an empty ``(0, ...)`` tensor for each
+    text-only row (see ``RayPPOTrainer.convert_to_training_input``). Returns None when no row has
+    any image data, so callers can drop the vision kwargs entirely (VLM_GAPS.md #4).
+    """
+    if tensor_list is None:
+        return None
+    tensors = [t for t in tensor_list.tensors if t.shape[0] > 0]
+    if not tensors:
+        return None
+    return torch.cat(tensors, dim=0)
+
+
 class TensorList:
     """A list of tensors with variable shapes, indexed by batch position.
 

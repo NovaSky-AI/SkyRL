@@ -892,8 +892,21 @@ class RayPPOTrainer:
             assert len(pixel_values) == len(
                 image_grid_thw
             ), "Number of pixel values should match number of image grid thw"
-            pixel_values = TensorList(pixel_values)
-            image_grid_thw = TensorList(image_grid_thw)
+            # Text-only trajectories of a mixed batch have no image tensors (None). Give them empty
+            # tensors so the batch stays row-aligned; the model wrappers skip empty rows (VLM_GAPS.md #4).
+            reference = next((t for t in pixel_values if t is not None), None)
+            if reference is None:
+                pixel_values = None
+                image_grid_thw = None
+            else:
+                pixel_values = [
+                    t if t is not None else reference.new_zeros((0, *reference.shape[1:])) for t in pixel_values
+                ]
+                image_grid_thw = [
+                    t if t is not None else reference.new_zeros((0, 3), dtype=torch.long) for t in image_grid_thw
+                ]
+                pixel_values = TensorList(pixel_values)
+                image_grid_thw = TensorList(image_grid_thw)
 
         # 2. Convert to tensors.
         (

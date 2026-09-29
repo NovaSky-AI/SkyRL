@@ -30,6 +30,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import get_inference_weight_prefix
+from skyrl.utils.tok import lora_exclude_modules_for_model
 
 if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
@@ -76,7 +77,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_dropout=self.cfg.policy.model.lora.dropout,
             lora_init_method=self.cfg.policy.model.lora.init_method,
             target_modules=self.cfg.policy.model.lora.target_modules,
-            exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+            exclude_modules=lora_exclude_modules_for_model(is_multimodal, self.cfg.policy.model.lora.exclude_modules),
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
