@@ -18,7 +18,10 @@ from aiohttp.test_utils import TestServer  # noqa: E402
 from examples.train_integrations.harbor.entrypoints.main_harbor import (
     HARBOR_DEFAULT_CONFIG,  # noqa: E402
 )
-from examples.train_integrations.harbor_skycap import harbor_generator  # noqa: E402
+from examples.train_integrations.harbor_skycap import (  # noqa: E402
+    artifacts,
+    harbor_generator,
+)
 from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
     TrialOutcome,
     compose,
@@ -123,9 +126,9 @@ def batch(*scripts: str, repetitions: int = 1) -> dict:
     return {"prompts": prompts, "trajectory_ids": ids, "batch_metadata": SimpleNamespace(global_step=3)}
 
 
-def generator(skycap, **cfg) -> HarborSkycapGenerator:
+def generator(skycap, record_dir=None, **cfg) -> HarborSkycapGenerator:
     engine_client = SimpleNamespace(weight_version=7)
-    return HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client)
+    return HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client, record_dir)
 
 
 @pytest.mark.asyncio
@@ -213,6 +216,30 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
     silent = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "silent"]
     assert [out["rewards"][i] for i in silent] == [0.0] and out["stop_reasons"][silent[0]] == "error"
     assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL + 1
+
+
+@pytest.mark.asyncio
+async def test_each_step_uploads_its_records_including_retried_attempts(skycap, trials, monkeypatch) -> None:
+    logged = []
+    run = SimpleNamespace(id="run/1", log_artifact=lambda artifact, aliases: logged.append((artifact, aliases)))
+    monkeypatch.setattr(artifacts.wandb, "run", run)
+    record_dir = skycap.server.record_dir
+    await generator(skycap, record_dir=record_dir).generate(batch("linear", "crash"), disable_tqdm=True)
+
+    ((artifact, aliases),) = logged
+    assert artifact.name == "skycap-records-run-1" and artifact.type == "skycap-records"
+    assert aliases == ["step-3", "latest"] and artifact.metadata["global_step"] == 3
+    ids = list(record.list_ids(record_dir))
+    assert artifact.metadata["num_trajectories"] == len(ids) == 3
+    assert set(artifact.manifest.entries) == {f"{trajectory_id}.json.zst" for trajectory_id in ids}
+    assert artifact.metadata["contents"] == "documents"
+
+
+@pytest.mark.asyncio
+async def test_no_upload_without_a_wandb_run(skycap, trials, monkeypatch) -> None:
+    monkeypatch.setattr(artifacts.wandb, "run", None)
+    out = await generator(skycap, record_dir=skycap.server.record_dir).generate(batch("linear"), disable_tqdm=True)
+    assert out["rewards"] == [1.0]
 
 
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
