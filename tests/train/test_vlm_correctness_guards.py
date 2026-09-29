@@ -16,7 +16,6 @@ from skyrl.train.sft_trainer import (
     _normalize_chat_messages,
     _resolve_num_training_steps,
 )
-from skyrl.utils.tok import VISION_TOWER_MODULE_REGEX, lora_exclude_modules_for_model
 
 # ---------------------------------------------------------------------------
 # #13: a VLM critic is rejected at config time
@@ -36,39 +35,6 @@ def test_vlm_generator_rejects_critic():
 def test_vlm_generator_without_critic_is_accepted():
     cfg = SkyRLTrainConfig.from_cli_overrides(["generator.vision_language_generator=true"])
     assert cfg.generator.vision_language_generator
-
-
-# ---------------------------------------------------------------------------
-# #14: LoRA excludes the vision tower by default for VLMs
-# ---------------------------------------------------------------------------
-
-
-def test_lora_exclude_defaults_to_vision_tower_for_vlm():
-    assert lora_exclude_modules_for_model(is_vlm=True, configured=None) == VISION_TOWER_MODULE_REGEX
-    assert lora_exclude_modules_for_model(is_vlm=False, configured=None) is None
-    assert lora_exclude_modules_for_model(is_vlm=True, configured="custom") == "custom"
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "model.visual.blocks.3.attn.qkv",
-        "model.visual.merger.linear_fc1",
-        "model.vision_tower.encoder.layers.0.mlp.fc1",
-        "model.multi_modal_projector.linear_1",
-    ],
-)
-def test_vision_tower_regex_matches_vision_modules(name):
-    import re
-
-    assert re.fullmatch(VISION_TOWER_MODULE_REGEX, name)
-
-
-@pytest.mark.parametrize("name", ["model.language_model.layers.0.self_attn.q_proj", "lm_head"])
-def test_vision_tower_regex_leaves_language_model_alone(name):
-    import re
-
-    assert re.fullmatch(VISION_TOWER_MODULE_REGEX, name) is None
 
 
 # ---------------------------------------------------------------------------

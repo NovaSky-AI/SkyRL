@@ -32,6 +32,7 @@ uv run --isolated --extra fsdp --with pylatexenc \
   trainer.policy.model.path="Qwen/Qwen3-VL-8B-Instruct" \
   trainer.policy.model.lora.rank=32 \
   trainer.policy.model.lora.alpha=32 \
+  trainer.policy.model.lora.exclude_modules='.*visual.*' \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \

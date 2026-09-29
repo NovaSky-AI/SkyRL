@@ -30,7 +30,6 @@ from skyrl.backends.skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import get_inference_weight_prefix
-from skyrl.utils.tok import lora_exclude_modules_for_model
 
 if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
@@ -64,6 +63,16 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
         self._is_multimodal_lm_only = self.cfg.policy.language_model_only and is_multimodal
+        if self._is_lora and is_multimodal and not self._is_multimodal_lm_only:
+            if self.cfg.policy.model.lora.exclude_modules is None:
+                # vLLM applies LoRA only to the language model of a multimodal model and silently drops
+                # adapter tensors on the vision tower, so training them makes the trainer's policy diverge
+                # from the rollout policy. Tower module names differ per model family, so require them.
+                raise ValueError(
+                    "LoRA on a vision-language model requires trainer.policy.model.lora.exclude_modules to "
+                    "exclude the vision tower and projector (PEFT regex, full match), e.g. '.*visual.*' for "
+                    "Qwen2.5-VL / Qwen3-VL."
+                )
         use_meta = should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
@@ -77,7 +86,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_dropout=self.cfg.policy.model.lora.dropout,
             lora_init_method=self.cfg.policy.model.lora.init_method,
             target_modules=self.cfg.policy.model.lora.target_modules,
-            exclude_modules=lora_exclude_modules_for_model(is_multimodal, self.cfg.policy.model.lora.exclude_modules),
+            exclude_modules=self.cfg.policy.model.lora.exclude_modules,
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
