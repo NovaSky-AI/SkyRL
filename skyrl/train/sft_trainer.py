@@ -442,6 +442,8 @@ def _check_modality_homogeneity(sources, names) -> None:
     sampler a mixed dataset only fails mid-epoch. ``sources`` are the per-dataset
     objects returned by ``load_dataset``: lists of tokenized rows or ``PretokenizedDataset``.
     """
+    # TODO(xgui): support mixed text+image SFT batches (empty image tensors for text rows, as the RL path
+    # does) as a follow-up, then drop this check and the one in collate_sft_batch.
     with_images = 0
     total = 0
     for source in sources:
