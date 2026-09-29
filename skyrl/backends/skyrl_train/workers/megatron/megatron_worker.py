@@ -61,6 +61,7 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
     TrainingInputBatch,
     TrainingOutputBatch,
     append_packed_field_padding,
@@ -672,7 +673,8 @@ class MegatronWorker:
         (forward micro-batches carry neither key, so this is inert there). This is needed
         because Megatron's forward_backward_func requires uniform micro_batch_size across all
         microbatches (especially with PP > 1). Scalar keys (``num_actions``,
-        ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged.
+        ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged;
+        per-sample ``TensorList`` fields grow via ``_tensor_list_dummy_rows``.
 
         Defined on the base worker so the shared ``_forward_logprobs`` path works for
         policy, ref, and critic workers alike.
@@ -721,10 +723,28 @@ class MegatronWorker:
                 else:
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                 padded[key] = torch.cat([value, pad_tensor], dim=0)
+            elif isinstance(value, TensorList):
+                padded[key] = TensorList(value.tensors + self._tensor_list_dummy_rows(key, value, pad_count))
             else:
                 padded[key] = value
 
         return padded
+
+    @staticmethod
+    def _tensor_list_dummy_rows(key: str, value: TensorList, pad_count: int) -> list[torch.Tensor]:
+        """Rows appended to a per-sample ``TensorList`` so it grows with the micro-batch.
+
+        ``sub_seq_lengths`` gets ``[1]``: one sub-sequence covering the dummy row's single
+        attended token. Multimodal fields get a zero-row tensor of the same trailing shape,
+        the placeholder the batch builder uses for text-only samples.
+        """
+        reference = value.tensors[0]
+        if key == "sub_seq_lengths":
+            return [torch.ones(1, dtype=reference.dtype, device=reference.device) for _ in range(pad_count)]
+        return [
+            torch.empty(0, *reference.shape[1:], dtype=reference.dtype, device=reference.device)
+            for _ in range(pad_count)
+        ]
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
