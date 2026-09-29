@@ -2,8 +2,7 @@
 
 ``CaptureService`` is for embedding: a trainer starts one next to its engine,
 from the same options ``skycap serve`` takes, and hands its URL to a
-``CapturePool``. How a call reaches the model (text or tokens mode) is built
-inside from those options; the caller never constructs it.
+``CapturePool``.
 
 The server gets a thread of its own because the embedding process may run each
 batch on a new event loop. ``stop`` shuts it down gracefully, which writes every
@@ -78,7 +77,7 @@ def build_backend(
 
 
 class CaptureService:
-    """``upstream_url`` and ``options`` are ``build_backend``'s; the rest place and persist the server.
+    """The model options are ``build_backend``'s; the rest place and persist the server.
 
     ``port=0`` lets the OS pick a free port. ``advertise_host`` is the address clients use to reach
     this server, which ``url`` carries once started.
@@ -88,14 +87,40 @@ class CaptureService:
         self,
         upstream_url: str,
         *,
+        mode: str = "text",
+        api_key: str | None = None,
+        tokenizer: str | None = None,
+        renderer: TokenRenderer | None = None,
+        renderer_pool_size: int = 8,
+        engine: VLLMEngine | None = None,
+        model: str | None = None,
+        max_model_len: int | None = None,
+        sampling_overrides: Mapping[str, Any] | None = None,
+        sampling_mask: bool = False,
+        logprobs_mode: str = "processed_logprobs",
+        use_raw_content: bool = False,
         record_dir: str | None = None,
         ttl: float = 3600.0,
         host: str = "0.0.0.0",
         port: int = 0,
         advertise_host: str = "127.0.0.1",
-        **options: Any,
     ) -> None:
-        self.server = CaptureServer(build_backend(upstream_url, **options), record_dir=record_dir, ttl=ttl)
+        backend = build_backend(
+            upstream_url,
+            mode=mode,
+            api_key=api_key,
+            tokenizer=tokenizer,
+            renderer=renderer,
+            renderer_pool_size=renderer_pool_size,
+            engine=engine,
+            model=model,
+            max_model_len=max_model_len,
+            sampling_overrides=sampling_overrides,
+            sampling_mask=sampling_mask,
+            logprobs_mode=logprobs_mode,
+            use_raw_content=use_raw_content,
+        )
+        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl)
         self._host, self._port = host, port
         self._advertise_host = advertise_host
         self._thread: threading.Thread | None = None
