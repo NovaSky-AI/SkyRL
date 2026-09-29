@@ -230,11 +230,24 @@ async def test_each_step_uploads_its_records_including_retried_attempts(skycap, 
 
     ((artifact, aliases),) = logged
     assert artifact.name == "skycap-records-run-1" and artifact.type == "skycap-records"
-    assert aliases == ["step-3", "latest"] and artifact.metadata["global_step"] == 3
+    assert aliases == ["train-step-3", "latest"] and artifact.metadata["global_step"] == 3
+    assert artifact.metadata["training_phase"] == "train"
     ids = list(record.list_ids(record_dir))
     assert artifact.metadata["num_trajectories"] == len(ids) == 3
     assert set(artifact.manifest.entries) == {f"{trajectory_id}.json.zst" for trajectory_id in ids}
     assert artifact.metadata["contents"] == "documents"
+
+
+@pytest.mark.asyncio
+async def test_eval_records_upload_under_their_own_alias(skycap, trials, monkeypatch) -> None:
+    logged = []
+    run = SimpleNamespace(id="run/1", log_artifact=lambda artifact, aliases: logged.append((artifact, aliases)))
+    monkeypatch.setattr(artifacts.wandb, "run", run)
+    eval_batch = {**batch("linear"), "batch_metadata": SimpleNamespace(global_step=3, training_phase="eval")}
+    await generator(skycap, wandb_artifact=True).generate(eval_batch, disable_tqdm=True)
+
+    ((artifact, aliases),) = logged
+    assert aliases == ["eval-step-3", "latest"] and artifact.metadata["training_phase"] == "eval"
 
 
 @pytest.mark.asyncio

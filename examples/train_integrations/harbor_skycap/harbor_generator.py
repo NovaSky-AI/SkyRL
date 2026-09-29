@@ -120,6 +120,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             raise ValueError(f"Prompt count ({len(prompts)}) doesn't match trajectory_ids ({len(trajectory_ids)})")
         metadata = input_batch.get("batch_metadata")
         step = getattr(metadata, "global_step", None)
+        phase = getattr(metadata, "training_phase", "train")
         cache_salt = self._cache_salt()
 
         outcomes: List[Optional[TrialOutcome]] = [None] * len(prompts)
@@ -148,9 +149,9 @@ class HarborSkycapGenerator(GeneratorInterface):
 
         if self.wandb_artifact:
             try:
-                await asyncio.to_thread(log_step_records, self.record_dir, created, step)
+                await asyncio.to_thread(log_step_records, self.record_dir, created, step, phase)
             except Exception:  # noqa: BLE001 - an upload failure must not fail the step
-                logger.exception(f"uploading the skycap records of step {step} failed")
+                logger.exception(f"uploading the skycap {phase} records of step {step} failed")
 
         return compose(
             outcomes,

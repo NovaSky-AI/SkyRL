@@ -29,7 +29,7 @@ Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/defaul
 `skycap.*` sets the record directory (default `{trainer.export_path}/skycap`),
 the idle TTL, the port and the renderer pool size. `skycap.wandb_artifact=true` uploads each
 step's documents, without sidecars, as a version of the `skycap-records-<run id>` W&B artifact,
-aliased `step-N` and `latest`.
+aliased `train-step-N` (or `eval-step-N`) and `latest`.
 
 ## How it fits
 
