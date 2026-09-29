@@ -33,6 +33,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
+from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     EXPERTS_PER_TOKEN,
@@ -170,6 +171,22 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
     # The rewritten history couldn't extend the tokens before it: one call, in one trajectory.
     assert out["rollout_metrics"]["generate/skycap/num_unbridged_trajectories"] == 1
     assert out["rollout_metrics"]["generate/skycap/num_unbridged_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_concatenated_outputs_keep_skycap_metrics_apart_from_the_recomputed_ones(skycap, trials) -> None:
+    groups = [batch("summarize"), batch("summarize")]
+    groups[1]["trajectory_ids"] = [TrajectoryID(instance_id="summarize", repetition_id=1)]
+    outs = [await generator(skycap).generate(group, disable_tqdm=True) for group in groups]
+    metrics = concatenate_generator_outputs(outs, step_wise=True)["rollout_metrics"]
+
+    # The shared stats are recomputed over the whole batch, so none may also appear under skycap's name,
+    # where they would be averaged per group instead.
+    skycap_keys = {k for k in metrics if k.startswith("generate/skycap/")}
+    assert "generate/avg_num_tokens" in metrics
+    assert not {k.replace("generate/skycap/", "generate/") for k in skycap_keys} & set(metrics)
+    # Counts add up across the concatenated groups.
+    assert metrics["generate/skycap/num_unbridged_calls"] == 2
 
 
 @pytest.mark.asyncio
