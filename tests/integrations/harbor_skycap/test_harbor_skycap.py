@@ -196,10 +196,12 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
 
 
 @pytest.mark.asyncio
-async def test_concatenated_outputs_keep_skycap_metrics_apart_from_the_recomputed_ones(skycap, trials) -> None:
+async def test_concatenated_outputs_keep_skycap_metrics_apart_from_the_recomputed_ones(
+    skycap, trials, generator
+) -> None:
     groups = [batch("summarize"), batch("summarize")]
     groups[1]["trajectory_ids"] = [TrajectoryID(instance_id="summarize", repetition_id=1)]
-    outs = [await generator(skycap).generate(group, disable_tqdm=True) for group in groups]
+    outs = [await generator().generate(group, disable_tqdm=True) for group in groups]
     metrics = concatenate_generator_outputs(outs, step_wise=True)["rollout_metrics"]
 
     # The shared stats are recomputed over the whole batch, so none may also appear under skycap's name,
