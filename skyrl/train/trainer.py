@@ -164,6 +164,10 @@ class RayPPOTrainer:
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
         self._current_epoch: int = 0
+        # The loader can still belong to an exhausted epoch until its iterator
+        # observes StopIteration. Optimizer steps cannot identify this cursor,
+        # especially when dynamic sampling consumes several batches per update.
+        self._dataloader_epoch: int = 0
 
         configure_ray_worker_logging()
 
@@ -281,7 +285,7 @@ class RayPPOTrainer:
 
         # Compute start_epoch up-front so callback metadata is ready before
         # any event fires (including the baseline eval below).
-        start_epoch = self.global_step // len(self.train_dataloader)
+        start_epoch = self._dataloader_epoch
         self._current_epoch = start_epoch
         self._training_control.reset()
 
@@ -304,7 +308,10 @@ class RayPPOTrainer:
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
-        stop_training = False
+        stop_training = (
+            self.cfg.trainer.max_training_steps is not None
+            and self.global_step > self.cfg.trainer.max_training_steps
+        )
 
         # booleans tracking whether we save ckpts
         # as well as hf model at step end
@@ -313,6 +320,8 @@ class RayPPOTrainer:
         self._profiler_start()
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
+                if stop_training:
+                    break
                 self._current_epoch = epoch
                 self._fire("on_epoch_start")
                 # ``step_started`` tracks the on_step_start/on_step_end pairing taking
@@ -551,6 +560,10 @@ class RayPPOTrainer:
                         break
 
                     del training_input, generator_output
+                else:
+                    # A checkpoint inside the final batch retains this epoch;
+                    # one after iterator exhaustion must resume the next epoch.
+                    self._dataloader_epoch = epoch + 1
 
                 # If dynamic sampling was still accumulating when the dataloader ran out, the step
                 # is left in flight with its `vllm/train` window open. Close it and drop the partial
@@ -1713,6 +1726,8 @@ class RayPPOTrainer:
         # Save additional trainer state
         trainer_state = {
             "global_step": self.global_step,
+            "dataloader_epoch": self._dataloader_epoch,
+            "dataloader_generator_state": self.train_dataloader.generator.get_state(),
             "config": asdict(self.cfg),
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
@@ -1835,6 +1850,10 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
+        dataloader_epoch = trainer_state.get("dataloader_epoch")
+        if type(dataloader_epoch) is not int or dataloader_epoch < 0:
+            raise ValueError("checkpoint dataloader_epoch must be a non-negative integer")
+        self._dataloader_epoch = dataloader_epoch
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
@@ -1844,6 +1863,11 @@ class RayPPOTrainer:
             with io.open_file(dataloader_state_path, "rb") as f:
                 dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state)
+            # StatefulDataLoader defers restoration until an iterator is built.
+            # Materialize it before restoring the generator shared by sampler
+            # and worker seeding, so the next epoch keeps its original shuffle.
+            self.train_dataloader.state_dict()
+            self.train_dataloader.generator.set_state(trainer_state["dataloader_generator_state"])
             logger.info("Successfully loaded dataloader state")
         else:
             logger.warning(

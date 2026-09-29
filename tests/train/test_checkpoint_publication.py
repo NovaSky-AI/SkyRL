@@ -23,10 +23,13 @@ def _trainer(tmp_path, trainer_type=RayPPOTrainer):
     trainer.cfg.trainer.critic.model.path = None
     trainer.resume_mode = ResumeMode.FROM_PATH
     trainer.global_step = 1
+    trainer._dataloader_epoch = 0
     trainer.epoch = 2
     trainer.tokenizer = None
     trainer.all_timings = {}
-    trainer.train_dataloader = StatefulDataLoader(list(range(6)), batch_size=2)
+    trainer.train_dataloader = StatefulDataLoader(
+        list(range(6)), batch_size=2, generator=torch.Generator().manual_seed(42)
+    )
     trainer.async_train_dataloader = MagicMock()
     trainer.async_train_dataloader.get_consumed_uids_list.return_value = ["trained", "filtered"]
     trainer.async_train_dataloader.get_filtered_uids_list.return_value = ["filtered"]
@@ -157,5 +160,31 @@ def test_dataloader_restore_failure_stops_before_loading_policy(tmp_path, monkey
     trainer.cfg.trainer.resume_path = trainer.save_checkpoints()
     monkeypatch.setattr(trainer.train_dataloader, "load_state_dict", MagicMock(side_effect=ValueError("bad state")))
     with pytest.raises(ValueError, match="bad state"):
+        trainer.load_checkpoints()
+    trainer.dispatch.load_checkpoint.assert_not_called()
+
+
+def test_async_resume_keeps_its_epoch_and_consumed_uid_state(tmp_path):
+    trainer = _trainer(tmp_path, FullyAsyncRayPPOTrainer)
+    checkpoint = trainer.save_checkpoints()
+    resumed = _trainer(tmp_path, FullyAsyncRayPPOTrainer)
+    resumed.cfg.trainer.resume_path = checkpoint
+    assert resumed.load_checkpoints() == (1, checkpoint, {"trained", "filtered"}, {"filtered"}, 2)
+    assert resumed._dataloader_epoch == 0
+
+
+@pytest.mark.parametrize("epoch", [None, -1, True, 0.5])
+def test_resume_rejects_missing_or_invalid_dataloader_epoch(tmp_path, epoch):
+    trainer = _trainer(tmp_path)
+    checkpoint = Path(trainer.save_checkpoints())
+    trainer.cfg.trainer.resume_path = str(checkpoint)
+    path = checkpoint / "trainer_state.pt"
+    state = torch.load(path, weights_only=False)
+    if epoch is None:
+        del state["dataloader_epoch"]
+    else:
+        state["dataloader_epoch"] = epoch
+    torch.save(state, path)
+    with pytest.raises(ValueError, match="dataloader_epoch"):
         trainer.load_checkpoints()
     trainer.dispatch.load_checkpoint.assert_not_called()
