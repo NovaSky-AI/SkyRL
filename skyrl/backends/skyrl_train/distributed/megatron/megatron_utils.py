@@ -212,6 +212,8 @@ def _require_num_moe_experts(key: str, num_moe_experts: Optional[int]) -> int:
             "but num_moe_experts was not provided"
         )
     return num_moe_experts
+
+
 def freeze_dsa_indexer(model_or_models: Union[nn.Module, List[nn.Module]]):
     """Freeze the dynamic-sparse-attention indexer on every attention layer that has one.
 
