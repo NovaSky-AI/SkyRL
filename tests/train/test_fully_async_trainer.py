@@ -16,6 +16,7 @@ from skyrl.train.fully_async_trainer import (
     _AsyncDataloader,
     _AsyncStalenessManager,
 )
+from skyrl.train.utils.async_utils import BackgroundFailure
 
 
 def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
@@ -151,12 +152,12 @@ async def test_drain_next_group_returns_buffered_items_then_exhaustion():
     drain = FullyAsyncRayPPOTrainer._drain_next_group
     dummy = object()
 
-    assert await drain(dummy, buffer, done) == "a"
-    assert await drain(dummy, buffer, done) == "b"
+    assert await drain(dummy, buffer, done, BackgroundFailure()) == "a"
+    assert await drain(dummy, buffer, done, BackgroundFailure()) == "b"
 
     # Buffer empty and generators done -> exhausted.
     done.set()
-    assert await drain(dummy, buffer, done) is None
+    assert await drain(dummy, buffer, done, BackgroundFailure()) is None
 
 
 @pytest.mark.asyncio
@@ -169,8 +170,8 @@ async def test_drain_next_group_drains_remaining_before_exhaustion():
 
     drain = FullyAsyncRayPPOTrainer._drain_next_group
     dummy = object()
-    assert await drain(dummy, buffer, done) == "a"
-    assert await drain(dummy, buffer, done) is None
+    assert await drain(dummy, buffer, done, BackgroundFailure()) == "a"
+    assert await drain(dummy, buffer, done, BackgroundFailure()) is None
 
 
 @pytest.mark.asyncio
@@ -185,8 +186,71 @@ async def test_drain_next_group_blocks_until_item_arrives():
         buffer.put_nowait("x")
 
     producer = asyncio.create_task(delayed_put())
-    assert await drain(dummy, buffer, done) == "x"
+    assert await drain(dummy, buffer, done, BackgroundFailure()) == "x"
     await producer
+
+
+@pytest.mark.asyncio
+async def test_drain_next_group_raises_when_worker_fails_mid_drain():
+    """A worker failure while other workers are still alive must raise, not block or read as exhaustion."""
+    buffer: asyncio.Queue = asyncio.Queue()
+    done = asyncio.Event()
+    failure = BackgroundFailure()
+    drain = FullyAsyncRayPPOTrainer._drain_next_group
+    err = RuntimeError("generator crashed")
+
+    async def failing_worker():
+        await asyncio.sleep(0.02)
+        failure.record(err, "generation worker")
+        raise err
+
+    async def live_worker():
+        await asyncio.sleep(3600)
+
+    tasks = [asyncio.create_task(failing_worker()), asyncio.create_task(live_worker())]
+    watcher = asyncio.create_task(FullyAsyncRayPPOTrainer._watch_generators_done(tasks, done, failure))
+    with pytest.raises(RuntimeError) as exc_info:
+        await asyncio.wait_for(drain(object(), buffer, done, failure), timeout=5)
+    assert exc_info.value is err
+    assert not done.is_set()
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.wait_for(watcher, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_drain_next_group_raises_before_draining_buffered_items_after_a_failure():
+    buffer: asyncio.Queue = asyncio.Queue()
+    buffer.put_nowait("a")
+    failure = BackgroundFailure()
+    failure.record(RuntimeError("generator crashed"), "generation worker")
+    with pytest.raises(RuntimeError, match="generator crashed"):
+        await FullyAsyncRayPPOTrainer._drain_next_group(object(), buffer, asyncio.Event(), failure)
+    assert buffer.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_watch_generators_done_leaves_event_unset_on_failure():
+    done = asyncio.Event()
+    failure = BackgroundFailure()
+    err = RuntimeError("boom")
+
+    async def failing_worker():
+        failure.record(err, "generation worker")
+        raise err
+
+    async def ok_worker():
+        return None
+
+    tasks = [asyncio.create_task(failing_worker()), asyncio.create_task(ok_worker())]
+    await FullyAsyncRayPPOTrainer._watch_generators_done(tasks, done, failure)
+    assert not done.is_set()
+
+    # Without a failure, finishing all workers signals exhaustion.
+    tasks = [asyncio.create_task(ok_worker())]
+    await FullyAsyncRayPPOTrainer._watch_generators_done(tasks, done, BackgroundFailure())
+    assert done.is_set()
 
 
 # --------------------------------------------------------------------------------------
