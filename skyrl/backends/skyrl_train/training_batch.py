@@ -100,6 +100,21 @@ def concat_nonempty_tensors(tensor_list: "TensorList | None") -> Optional[torch.
     return torch.cat(tensors, dim=0)
 
 
+def check_image_rows_have_pixels(
+    sequences: torch.Tensor, pixel_values: "TensorList", image_token_id: Optional[int]
+) -> None:
+    """Raise if a row has image placeholder tokens but an empty image tensor.
+
+    Such a row would make the model look for image features that were never provided. Text-only rows of a
+    mixed batch have empty tensors and no placeholders, so they pass.
+    """
+    if image_token_id is None:
+        return
+    for row, row_pixels in enumerate(pixel_values.tensors):
+        if row_pixels.shape[0] == 0 and bool((sequences[row] == image_token_id).any()):
+            raise ValueError(f"Batch row {row} contains image placeholder tokens but no image tensors")
+
+
 class TensorList:
     """A list of tensors with variable shapes, indexed by batch position.
 

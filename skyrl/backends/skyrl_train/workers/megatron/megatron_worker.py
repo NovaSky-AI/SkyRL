@@ -456,7 +456,7 @@ class MegatronWorker:
         else:
             target_modules = lora_config.target_modules
         target_modules = scope_megatron_vlm_lora_targets(
-            list(target_modules),
+            target_modules,
             is_vlm=self.is_vlm,
             from_all_linear=lora_config.target_modules == "all-linear",
             exclude_modules=lora_config.exclude_modules,

@@ -340,12 +340,16 @@ class PretokenizedDataset(SFTDataset):
         return len(self._dataset)
 
     def modality_counts(self) -> tuple[int, int]:
-        """(rows with image tensors, total rows), read from the arrow column without materializing rows."""
+        """(rows with image tensors, total rows) over the rows this view exposes.
+
+        Reads the small ``image_grid_thw`` column through the dataset (so a ``select``-ed view counts only
+        its surviving rows, not the whole underlying arrow table) and never touches ``pixel_values``.
+        """
         total = len(self._dataset)
-        if "pixel_values" not in self._dataset.column_names:
+        if "image_grid_thw" not in self._dataset.column_names:
             return 0, total
-        column = self._dataset.data.column("pixel_values")
-        return total - int(column.null_count), total
+        grids = self._dataset.select_columns(["image_grid_thw"])["image_grid_thw"]
+        return sum(1 for g in grids if g is not None), total
 
     @staticmethod
     def _strip_none(row: dict) -> dict:

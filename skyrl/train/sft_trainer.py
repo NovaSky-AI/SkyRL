@@ -172,6 +172,11 @@ def _tokenize_alpaca_slice_worker(args):
     return results
 
 
+# Bump when tokenization output changes for the same inputs, so stale cache entries are not reused.
+# 2: OpenAI ``image_url`` parts are tokenized with their image tensors (previously text-only).
+_SFT_TOKENIZATION_CACHE_VERSION = 2
+
+
 def _compute_cache_key(
     dataset_name: str,
     dataset_split: str,
@@ -205,6 +210,7 @@ def _compute_cache_key(
     # Build a deterministic string from all relevant parameters
     cache_params = json.dumps(
         {
+            "cache_version": _SFT_TOKENIZATION_CACHE_VERSION,
             "dataset_name": dataset_name,
             "dataset_split": dataset_split,
             "model_path": model_path,

@@ -3,11 +3,13 @@
 Run: uv run --extra dev pytest tests/train/test_vlm_correctness_guards.py
 """
 
+import numpy as np
 import pytest
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
+    check_image_rows_have_pixels,
     concat_nonempty_tensors,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -217,3 +219,92 @@ def test_megatron_scoped_patterns_skip_bridge_vision_modules():
     assert any(wildcard_match(p, lm) for p in patterns)
     assert any(wildcard_match(p, moe) for p in patterns)
     assert not any(wildcard_match(p, vit) for p in patterns)
+
+
+# ---------------------------------------------------------------------------
+# Row alignment survives slicing a mixed-batch TensorList
+# ---------------------------------------------------------------------------
+
+
+def test_sliced_mixed_tensor_list_keeps_row_alignment():
+    t0, t2 = torch.randn(4, 6), torch.randn(8, 6)
+    pixels = TensorList([t0, t0.new_zeros((0, 6)), t2])
+
+    sliced = pixels[1:3]
+
+    assert len(sliced) == 2
+    assert sliced[0].shape == (0, 6)
+    assert torch.equal(sliced[1], t2)
+    assert torch.equal(concat_nonempty_tensors(sliced), t2)
+
+
+# ---------------------------------------------------------------------------
+# A row with image placeholders but no pixels fails loudly
+# ---------------------------------------------------------------------------
+
+IMAGE_TOKEN = 151655
+
+
+def test_row_with_placeholders_but_no_pixels_raises():
+    sequences = torch.tensor([[1, IMAGE_TOKEN, IMAGE_TOKEN, 2], [1, IMAGE_TOKEN, 3, 2]])
+    pixels = TensorList([torch.randn(4, 6), torch.zeros(0, 6)])
+    with pytest.raises(ValueError, match="row 1 contains image placeholder tokens but no image tensors"):
+        check_image_rows_have_pixels(sequences, pixels, IMAGE_TOKEN)
+
+
+def test_text_row_without_placeholders_and_empty_pixels_passes():
+    sequences = torch.tensor([[1, IMAGE_TOKEN, IMAGE_TOKEN, 2], [1, 5, 3, 2]])
+    pixels = TensorList([torch.randn(4, 6), torch.zeros(0, 6)])
+    check_image_rows_have_pixels(sequences, pixels, IMAGE_TOKEN)
+
+
+def test_placeholder_check_is_skipped_without_image_token_id():
+    sequences = torch.tensor([[1, IMAGE_TOKEN, 2]])
+    check_image_rows_have_pixels(sequences, TensorList([torch.zeros(0, 6)]), None)
+
+
+# ---------------------------------------------------------------------------
+# Review regressions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("is_vlm", [False, True])
+def test_single_string_target_module_is_not_split_into_characters(is_vlm):
+    target = "*language_model*linear_qkv" if is_vlm else "linear_qkv"
+    assert _scope(target, is_vlm=is_vlm) == [target]
+
+
+def test_modality_counts_only_counts_selected_rows():
+    from datasets import Dataset
+
+    from skyrl.train.dataset.pretokenized import PretokenizedDataset
+
+    rows = [
+        {"input_ids": [1, 2], "loss_mask": [0, 1], "pixel_values": [[0.1]], "image_grid_thw": [[1, 1, 1]]},
+        {"input_ids": [1, 2], "loss_mask": [0, 1], "pixel_values": [[0.2]], "image_grid_thw": [[1, 1, 1]]},
+        {"input_ids": [1, 2], "loss_mask": [0, 1], "pixel_values": None, "image_grid_thw": None},
+    ]
+    survivors = Dataset.from_list(rows).select([0, 2])  # one image row dropped
+    view = PretokenizedDataset(survivors, np.array([2, 2]))
+
+    assert view.modality_counts() == (1, 2)
+    with pytest.raises(ValueError, match="mixes 1 image rows with 1 text-only rows"):
+        _check_modality_homogeneity([view], ["store"])
+
+
+def test_cache_key_changes_with_tokenization_cache_version(monkeypatch):
+    import skyrl.train.sft_trainer as sft_trainer
+
+    args = dict(
+        dataset_name="d",
+        dataset_split="train",
+        model_path="m",
+        max_length=128,
+        messages_key="messages",
+        train_on_what="last_assistant_message",
+        tools_key=None,
+        system_key=None,
+    )
+    current = sft_trainer._compute_cache_key(**args)
+    monkeypatch.setattr(sft_trainer, "_SFT_TOKENIZATION_CACHE_VERSION", 1)
+    assert sft_trainer._compute_cache_key(**args) != current

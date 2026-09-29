@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -480,7 +480,11 @@ MEGATRON_VLM_LANGUAGE_MODEL_PREFIX = "language_model"
 
 
 def scope_megatron_vlm_lora_targets(
-    target_modules: List[str], *, is_vlm: bool, from_all_linear: bool, exclude_modules: Optional[List[str]]
+    target_modules: Union[str, List[str]],
+    *,
+    is_vlm: bool,
+    from_all_linear: bool,
+    exclude_modules: Optional[List[str]],
 ) -> List[str]:
     """Return Megatron LoRA target patterns that cannot land on a VLM's vision tower.
 
@@ -490,7 +494,11 @@ def scope_megatron_vlm_lora_targets(
     trainer. The ``all-linear`` default is scoped here; an explicit list must already be scoped, since rewriting a
     user's patterns would change what they asked for. Megatron-Bridge rejects ``exclude_modules`` next to a target
     list, so it cannot be used to carve out the tower.
+
+    ``lora.target_modules`` is typed ``str``: a single custom module name arrives as a string and is wrapped in a
+    list here (iterating it would yield one-character patterns).
     """
+    target_modules = [target_modules] if isinstance(target_modules, str) else list(target_modules)
     if not is_vlm:
         return target_modules
     if exclude_modules:

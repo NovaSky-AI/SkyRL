@@ -32,6 +32,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
+    check_image_rows_have_pixels,
     concat_nonempty_tensors,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
@@ -343,12 +344,10 @@ class HFModelWrapper(nn.Module):
                 # mixed batch carry empty tensors and are skipped; a row that has image placeholder
                 # tokens but no pixels would make the model demand missing features, so fail loudly
                 # instead.
-                image_token_id = getattr(self.model.config, "image_token_id", None)
-                if isinstance(pixel_values, TensorList) and image_token_id is not None:
-                    for row, row_pixels in enumerate(pixel_values.tensors):
-                        if row_pixels.shape[0] == 0 and bool((sequences[row] == image_token_id).any()):
-                            raise ValueError(f"Batch row {row} contains image placeholder tokens but no image tensors")
                 if isinstance(pixel_values, TensorList):
+                    check_image_rows_have_pixels(
+                        sequences, pixel_values, getattr(self.model.config, "image_token_id", None)
+                    )
                     pixel_values = concat_nonempty_tensors(pixel_values)
                 if isinstance(image_grid_thw, TensorList):
                     image_grid_thw = concat_nonempty_tensors(image_grid_thw)
