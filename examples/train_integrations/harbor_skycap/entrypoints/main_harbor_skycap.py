@@ -111,12 +111,11 @@ class HarborSkycapExp(HarborExp):
         try:
             super().run()
         finally:
-            if self.generator is not None:
-                # Training's event loop has ended; the pool drops the HTTP session it left behind.
-                asyncio.run(self.generator.close())
             if self.skycap is not None:
                 logger.info("stopping skycap, writing the trajectories still in memory")
                 self.skycap.stop()
+            if self.generator is not None:
+                asyncio.run(self.generator.close())
 
 
 @ray.remote(num_cpus=1)

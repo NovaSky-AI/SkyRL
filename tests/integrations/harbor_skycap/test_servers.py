@@ -59,6 +59,7 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
         record_dir=str(tmp_path),
         ttl=60.0,
     )
+    gen = None
     try:
         # Each server picked its own port.
         assert len(set(servers.urls)) == 2
@@ -73,6 +74,8 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
         used = {c["agent"]["kwargs"]["api_base"].split("/t/")[0] for c in FakeTrial.configs}
         assert used == set(servers.urls)
     finally:
+        if gen is not None:
+            await gen.close()
         servers.stop()
         await server.close()
     assert len(list(tmp_path.glob("*.json.zst"))) == 4

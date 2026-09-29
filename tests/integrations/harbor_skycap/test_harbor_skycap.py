@@ -123,14 +123,25 @@ def batch(*scripts: str, repetitions: int = 1) -> dict:
     return {"prompts": prompts, "trajectory_ids": ids, "batch_metadata": SimpleNamespace(global_step=3)}
 
 
-def generator(skycap, **cfg) -> HarborSkycapGenerator:
-    engine_client = SimpleNamespace(weight_version=7)
-    return HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client)
+@pytest_asyncio.fixture
+async def generator(skycap):
+    """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
+    made = []
+
+    def make(**cfg) -> HarborSkycapGenerator:
+        made.append(
+            HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], SimpleNamespace(weight_version=7))
+        )
+        return made[-1]
+
+    yield make
+    for gen in made:
+        await gen.close()
 
 
 @pytest.mark.asyncio
-async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, trials) -> None:
-    out = await generator(skycap).generate(batch("linear"), disable_tqdm=True)
+async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, trials, generator) -> None:
+    out = await generator().generate(batch("linear"), disable_tqdm=True)
     validate_generator_output(1, out, step_wise=True)
 
     assert out["is_last_step"] == [True] and out["rewards"] == [1.0]
@@ -157,20 +168,19 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
 
 
 @pytest.mark.asyncio
-async def test_the_generator_keeps_one_pool_across_batches(skycap, trials) -> None:
+async def test_the_generator_keeps_one_pool_across_batches(skycap, trials, generator) -> None:
     """Fully async training calls `generate` once per prompt; one pool serves every call, round-robin across all."""
-    gen = generator(skycap)
+    gen = generator()
     pool = gen.pool
     for _ in range(2):
         out = await gen.generate(batch("linear"), disable_tqdm=True)
         assert out["rewards"] == [1.0]
     assert gen.pool is pool
-    await gen.close()
 
 
 @pytest.mark.asyncio
-async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("summarize"), disable_tqdm=True)
+async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("summarize"), disable_tqdm=True)
     validate_generator_output(1, out, step_wise=True)
 
     assert len(out["response_ids"]) == 2
@@ -185,8 +195,8 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
 
 
 @pytest.mark.asyncio
-async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials) -> None:
-    await generator(skycap).generate(batch("linear"), disable_tqdm=True)
+async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials, generator) -> None:
+    await generator().generate(batch("linear"), disable_tqdm=True)
     kwargs = trials.configs[0]["agent"]["kwargs"]
 
     assert kwargs["api_base"].startswith(f"{skycap.url}/t/")
@@ -195,8 +205,8 @@ async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials) -
 
 
 @pytest.mark.asyncio
-async def test_a_timeout_masks_the_whole_instance(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
+async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
     # 4 prompts: two instances ("timeout", "linear"), two repetitions each.
     validate_generator_output(4, out, step_wise=True)
 
@@ -208,8 +218,8 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("crash"), disable_tqdm=True)
+async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("crash"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     urls = [config["agent"]["kwargs"]["api_base"] for config in trials.configs]
@@ -219,8 +229,8 @@ async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(sky
 
 
 @pytest.mark.asyncio
-async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_rewarded(skycap, trials) -> None:
-    out = await generator(skycap).generate(batch("silent", "linear"), disable_tqdm=True)
+async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_rewarded(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("silent", "linear"), disable_tqdm=True)
 
     silent = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "silent"]
     assert [out["rewards"][i] for i in silent] == [0.0] and out["stop_reasons"][silent[0]] == "error"
