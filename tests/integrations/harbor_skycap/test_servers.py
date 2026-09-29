@@ -63,7 +63,7 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
         placement_strategy="SPREAD",
         record_dir=str(tmp_path),
         ttl=60.0,
-        backend_factory=fake_backend,
+        _build_backend=fake_backend,
     )
     try:
         # Each server picked its own port.

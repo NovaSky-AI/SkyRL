@@ -21,10 +21,10 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
 )
 
 #: Builds a skycap backend from plain settings, inside the actor.
-BackendFactory = Callable[[Dict[str, Any]], Any]
+_BackendBuilder = Callable[[Dict[str, Any]], Any]
 
 
-def build_tokens_backend(settings: Dict[str, Any]) -> Any:
+def _tokens_backend(settings: Dict[str, Any]) -> Any:
     """skycap in token mode, in front of SkyRL's router."""
     from skycap.tokens.backend import TokensBackend
     from skycap.tokens.renderer import RenderersRenderer
@@ -46,13 +46,13 @@ def build_tokens_backend(settings: Dict[str, Any]) -> Any:
 @ray.remote(num_cpus=0)
 class SkycapServerActor:
     def __init__(
-        self, settings: Dict[str, Any], record_dir: Optional[str], ttl: float, backend_factory: BackendFactory
+        self, settings: Dict[str, Any], record_dir: Optional[str], ttl: float, build_backend: _BackendBuilder
     ) -> None:
         from .service import SkycapService
 
         node_ip = get_node_ip()
         self.service = SkycapService(
-            backend_factory(settings),
+            build_backend(settings),
             record_dir=record_dir,
             ttl=ttl,
             host=default_bind_host(node_ip),
@@ -99,8 +99,13 @@ def start_servers(
     placement_strategy: str,
     record_dir: Optional[str],
     ttl: float,
-    backend_factory: BackendFactory = build_tokens_backend,
+    _build_backend: _BackendBuilder = _tokens_backend,
 ) -> SkycapServers:
+    """``num_servers`` skycap servers in token mode, in front of the router at ``settings["engine_url"]``.
+
+    ``_build_backend`` is for tests: it runs inside each actor's process, where a monkeypatch in the
+    driver wouldn't reach.
+    """
     if num_servers < 1:
         raise ValueError("skycap.num_servers must be at least 1")
     pg = placement_group([{"CPU": num_cpus_per_server}] * num_servers, strategy=placement_strategy)
@@ -109,7 +114,7 @@ def start_servers(
         SkycapServerActor.options(
             num_cpus=num_cpus_per_server,
             scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=i),
-        ).remote(settings, record_dir, ttl, backend_factory)
+        ).remote(settings, record_dir, ttl, _build_backend)
         for i in range(num_servers)
     ]
     urls = ray.get([actor.start.remote() for actor in actors])
