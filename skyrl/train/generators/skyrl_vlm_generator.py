@@ -188,7 +188,10 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
                 # 4. Append assistant message to conversation. Strip a trailing eos string first:
                 # the chat template re-adds it on the next render, so leaving it in produces a
-                # doubled eos at every turn boundary.
+                # doubled eos at every turn boundary. detokenize already skips special tokens, so
+                # this is a guard for callers that return raw text.
+                # TODO(xgui): remove once this loop is folded into SkyRLGymGenerator's token-in/
+                # token-out loop, which extends token ids instead of re-rendering assistant text.
                 assistant_text = gen_text
                 eos_text = getattr(self.tokenizer, "eos_token", None)
                 if eos_text and assistant_text.endswith(eos_text):
