@@ -47,10 +47,12 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     ppo_critic_loss,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
+    TokenBasedBatchIterator,
     all_reduce_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
@@ -537,6 +539,7 @@ class Worker(DistributedTorchRayActor):
             rank=torch.distributed.get_rank(),
             inference_world_size=inference_world_size,
             source_factory=self._build_weight_source,
+            draft_source_factory=self._build_draft_weight_source,
             server_urls=list(inference_engine_client.server_urls),
             data_parallel_size=int(inference_engine_client.data_parallel_size),
             base_model_path=self.cfg.policy.model.path,
@@ -560,6 +563,13 @@ class Worker(DistributedTorchRayActor):
         source and sharded RDT's ownership-aware subclass.
         """
         raise NotImplementedError()
+
+    def _build_draft_weight_source(self, dtype: "torch.dtype") -> Any:
+        """Build the ``WeightSource`` for vLLM's MTP drafter, synced in its own session.
+
+        Only backends whose model carries the MTP head implement it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot sync the spec-decode drafter's weights.")
 
     def _weight_sync_thread(self, fn, *args, **kwargs):
         """Run ``fn`` off the event loop with **this rank's** CUDA device selected.
@@ -1004,7 +1014,7 @@ class PolicyWorkerBase(Worker):
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
         )
         all_metrics = defaultdict(list)
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        loss_fn_output_batches = []  # per-microbatch; restored to input order below
 
         for microbatch in microbatch_iterator:
             experience = BaseBatchIterator.batch_to_experience(microbatch)
@@ -1018,11 +1028,20 @@ class PolicyWorkerBase(Worker):
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
 
             for k, v in metrics.items():
                 all_metrics[k].append(v)
+
+        # Token-based batching packs samples into microbatches out of input order and
+        # appends padding microbatches, so per-sample outputs must be mapped back to
+        # their input positions (and padding entries dropped) before returning.
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         # Reduce across microbatches and all-reduce metrics across DP ranks.
         # Loss metrics are pre-scaled sums, so keep the same sum-reduction
@@ -1081,6 +1100,7 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         response_mask = experience.response_mask
         rollout_action_logprobs = experience.rollout_logprobs
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
         # Determine which loss function to use
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
@@ -1115,6 +1135,9 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
+                sample_support=experience.rollout_sample_support if sample_support_replay else None,
+                loss_mask=loss_mask if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
             # loss function
             # TODO: recompute advantages
@@ -1368,6 +1391,7 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         response_mask = experience.response_mask
         rollout_action_logprobs = experience.rollout_logprobs
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
         current_loss_fn = PolicyLossRegistry.get(loss_fn)
 
@@ -1390,6 +1414,9 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=False,
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
+                sample_support=experience.rollout_sample_support if sample_support_replay else None,
+                loss_mask=loss_mask if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
             policy_loss, _ = current_loss_fn(
                 action_log_probs,
@@ -1451,6 +1478,7 @@ class PolicyWorkerBase(Worker):
         attention_mask = micro_batch["attention_mask"]
         pixel_values = micro_batch.get("pixel_values", None)
         image_grid_thw = micro_batch.get("image_grid_thw", None)
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
@@ -1461,6 +1489,10 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.algorithm.temperature,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                # Replay the rollout support when recomputing the policy ratio.
+                sample_support=micro_batch.get(SAMPLE_SUPPORT_FIELD) if sample_support_replay else None,
+                loss_mask=micro_batch.get("loss_mask") if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1754,14 +1786,20 @@ class RefWorkerBase(Worker):
         attention_mask = micro_batch["attention_mask"]
         pixel_values = micro_batch.get("pixel_values", None)
         image_grid_thw = micro_batch.get("image_grid_thw", None)
+        sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             log_probs = self.model(
                 sequences,
                 response_length,
                 attention_mask,
                 return_output=False,
+                # Match policy temperature for support-conditioned KL.
+                temperature=self.cfg.algorithm.temperature if sample_support_replay else 1.0,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                sample_support=micro_batch.get(SAMPLE_SUPPORT_FIELD) if sample_support_replay else None,
+                loss_mask=micro_batch.get("loss_mask") if sample_support_replay else None,
+                enable_sample_support_replay=sample_support_replay,
             )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(

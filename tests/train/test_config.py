@@ -472,6 +472,113 @@ def test_serialized_fp8_fp32_scales_reject_vllm_e8m0(monkeypatch):
         prepare_runtime_environment(cfg)
 
 
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("generator.sampling_params.temperature=0", "temperature > 0"),
+        ("generator.sampling_params.top_k=1", "top_k > 1"),
+        ("generator.sampling_params.repetition_penalty=1.1", "repetition_penalty=1.0"),
+        ("generator.sampling_params.additional_kwargs.foo=bar", "additional_kwargs"),
+        ("generator.vision_language_generator=true", "vision_language_generator"),
+    ],
+)
+def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                override,
+            ]
+        )
+
+
+def test_routed_expert_capture_rejects_the_vision_language_generator():
+    with pytest.raises(ValueError, match="vision_language_generator"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_routed_experts=true",
+                "generator.vision_language_generator=true",
+            ]
+        )
+
+
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_requires_capture(strategy):
+    with pytest.raises(ValueError, match="enable_return_sample_support_set"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                f"trainer.strategy={strategy}",
+            ]
+        )
+
+
+def test_sample_support_replay_rejects_a_backend_without_a_scorer():
+    with pytest.raises(ValueError, match="requires trainer.strategy=megatron or fsdp"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "trainer.strategy=jax",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+            ]
+        )
+
+
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_accepts_capture_on_either_backend(strategy):
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            f"trainer.strategy={strategy}",
+            "generator.use_conversation_multi_turn=true",
+        ]
+    )
+
+    assert cfg.trainer.algorithm.enable_sample_support_replay
+
+
+def test_sample_support_replay_rejects_single_assistant_message_generation():
+    with pytest.raises(ValueError, match="generator.use_conversation_multi_turn=True"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                "trainer.strategy=megatron",
+                "generator.use_conversation_multi_turn=false",
+            ]
+        )
+
+
+def test_sample_support_capture_accepts_top_k_top_p_and_min_p():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "generator.sampling_params.top_p=0.9",
+            "generator.sampling_params.min_p=0.05",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.enable_return_sample_support_set
+
+
+def test_sample_support_capture_leaves_greedy_eval_sampling_params_alone():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+        ]
+    )
+
+    assert cfg.generator.eval_sampling_params.temperature == 0.0
+    assert cfg.generator.eval_sampling_params.top_k == -1
+
+
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
         SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])
@@ -1253,6 +1360,59 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+def _memory_lora_megatron_cfg():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.sync_mode = "memory"
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    return cfg
+
+
+def test_lora_memory_sync_mode_accepts_megatron_adapter_only_nccl():
+    validate_inference_engine_cfg(_memory_lora_megatron_cfg())
+
+
+def test_lora_sync_mode_rejects_unknown_value():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.sync_mode = "tmpfs"
+    with pytest.raises(ValueError, match="sync_mode must be 'disk' or 'memory'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_megatron():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.strategy = "fsdp"
+    with pytest.raises(ValueError, match="only implemented for trainer.strategy='megatron'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_adapter_only_lora():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
+    with pytest.raises(ValueError, match="merge_lora=false"):
+        validate_inference_engine_cfg(cfg)
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.rank = 0
+    with pytest.raises(ValueError, match="lora.rank > 0"):
+        validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("backend", ["delta", "sharded_rdt"])
+def test_lora_memory_sync_mode_requires_nccl_transport(backend):
+    cfg = _memory_lora_megatron_cfg()
+    cfg.generator.inference_engine.weight_sync_backend = backend
+    with pytest.raises(ValueError, match="weight_sync_backend='nccl'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_disk_sync_mode_is_default_and_unconstrained():
+    cfg = _make_validated_test_config()
+    assert cfg.trainer.policy.model.lora.sync_mode == "disk"
+    validate_inference_engine_cfg(cfg)
 
 
 class TestMegatronRouterReplayValidation:

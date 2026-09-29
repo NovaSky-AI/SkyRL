@@ -106,7 +106,15 @@ class SkyRLLoraConfig(BaseConfig):
     """Dropout probability applied to LoRA layers, to help prevent overfitting."""
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
-    Must be accessible to all workers in distributed setups."""
+    Must be accessible to all workers in distributed setups. Unused when ``sync_mode="memory"``."""
+    sync_mode: str = "disk"
+    """How adapter-only weight sync (Megatron ``merge_lora=false``) reaches the inference engines.
+    ``"disk"`` writes PEFT files to ``lora_sync_path`` and vLLM reads them back.
+    ``"memory"`` ships the adapter tensors through the configured
+    ``generator.inference_engine.weight_sync_backend`` transport (``nccl``: NCCL broadcast when
+    non-colocated, CUDA IPC when colocated) and vLLM builds the adapter from the received GPU
+    tensors; nothing is written. Shared expert adapters are sent once and aliased on the receiver.
+    Megatron only."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
@@ -426,6 +434,11 @@ class MegatronLoraConfig(BaseConfig):
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
     """Merge LoRA weights into the base weights during weight sync."""
+    experts_shared_outer_loras: bool = False
+    """Shared-outer grouped-expert LoRA for MoE models: the fc1 (gate_up) lora_A and
+    fc2 (down) lora_B matrices are shared across all experts, while the inner matrices
+    (fc1 lora_B, fc2 lora_A) are trained per expert. Maps to Megatron-Bridge
+    ``LoRA(experts_shared_outer_loras=True)``; only supported with ``lora_type="lora"``."""
     normalize_moe_lora: bool = False
     """When True, grouped MoE expert linears use ``rank // moe_router_topk`` as
     their LoRA rank (non-expert layers keep the full rank), normalizing total
@@ -592,9 +605,6 @@ class MegatronConfig(BaseConfig):
     The on-disk format is identical to a synchronous save. Only the sharded
     model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
     Falls back to synchronous for cloud paths."""
-    async_dist_ckpt_strategy: str = "mcore"
-    """Backend for the async write. ``mcore`` needs no extra deps; megatron-core's own
-    default ``nvrx`` requires nvidia-resiliency-ext. Only used when async saves are on."""
     async_save_prestage_to_cpu: bool = False
     """Copy shards to host memory on the training rank before handing them to the async
     checkpoint writer, instead of letting the writer pull them over CUDA IPC.
@@ -981,6 +991,9 @@ class AlgorithmConfig(BaseConfig):
     Enabled Truncated Importance Sampling (TIS) as proposed in https://fengyao.notion.site/off-policy-rl."""
     off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     """See https://docs.skyrl.ai/docs/algorithms/off_policy_correction for a full guide."""
+    enable_sample_support_replay: bool = False
+    """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
+    ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1235,6 +1248,8 @@ class InferenceEngineConfig(BaseConfig):
     enable_return_routed_experts: bool = False
     """Return per-layer expert routing indices, for rollout router replay (R3) when training an MoE model.
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
+    enable_return_sample_support_set: bool = False
+    """Return the bounded sampler support used to renormalize rollout logprobs."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -1837,6 +1852,40 @@ class SkyRLTrainConfig(BaseConfig):
         # so workers can access it without needing the generator config
         if self.trainer.algorithm.temperature is None:
             self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        if self.trainer.algorithm.enable_sample_support_replay:
+            if not self.generator.inference_engine.enable_return_sample_support_set:
+                raise ValueError(
+                    "trainer.algorithm.enable_sample_support_replay requires "
+                    "generator.inference_engine.enable_return_sample_support_set"
+                )
+            if self.trainer.strategy not in ("megatron", "fsdp"):
+                raise ValueError(
+                    "sample-support replay requires trainer.strategy=megatron or fsdp, got " f"{self.trainer.strategy}"
+                )
+            if not self.generator.use_conversation_multi_turn:
+                raise ValueError(
+                    "sample-support replay requires generator.use_conversation_multi_turn=True because "
+                    "use_conversation_multi_turn=False appends a synthetic loss-active EOS without captured support"
+                )
+
+        # Eval requests opt out of capture and do not use these constraints.
+        if self.generator.inference_engine.enable_return_sample_support_set:
+            sampling_params = self.generator.sampling_params
+            if sampling_params.temperature <= 0:
+                raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")
+            if sampling_params.top_k <= 1:
+                raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            if sampling_params.repetition_penalty != 1.0:
+                raise ValueError("sample-support capture requires repetition_penalty=1.0")
+            if sampling_params.additional_kwargs:
+                raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
+            if self.generator.vision_language_generator:
+                raise ValueError("sample-support capture does not support vision_language_generator")
+
+        # The VLM generator does not populate routed-expert indices.
+        if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:
+            raise ValueError("rollout router replay (r3) does not support vision_language_generator")
 
         if self.data.dataloader.num_workers is None:
             self.data.dataloader.num_workers = 8

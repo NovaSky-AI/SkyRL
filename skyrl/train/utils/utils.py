@@ -339,6 +339,36 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
         }
 
 
+def _validate_draft_weight_sync_cfg(cfg: SkyRLTrainConfig):
+    """Speculative decoding drafts with the policy's MTP head, so every weight sync must reach it."""
+    ie_cfg = cfg.generator.inference_engine
+    spec = ie_cfg.speculative_config
+    if spec is None:
+        return
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError(
+            f"speculative_config={spec} syncs the drafter from the policy's MTP head, which requires "
+            f"trainer.strategy='megatron' (got {cfg.trainer.strategy!r}): the FSDP model carries no MTP head"
+        )
+    from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+
+    if get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "sharded_rdt":
+        raise ValueError(
+            f"speculative_config={spec} is not supported with weight_sync_backend={ie_cfg.weight_sync_backend!r}: "
+            "its pull plan targets one model. Use 'nccl' or 'delta'."
+        )
+    if ie_cfg.fp8_weight_sync_mode is not None:
+        raise ValueError(
+            f"speculative_config={spec} is not supported with fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}: "
+            "the drafter has no loader for the serialized FP8 wire format"
+        )
+    if cfg.trainer.policy.model.lora.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+        raise ValueError(
+            f"speculative_config={spec} needs full-weight sync to keep the drafter aligned; "
+            "Megatron LoRA with merge_lora=false syncs adapters only"
+        )
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -361,6 +391,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
     # side (vLLM MTP speculative decoding) so both stay consistent.
     _apply_mtp_config(cfg)
+    _validate_draft_weight_sync_cfg(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
@@ -438,6 +469,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "`token_mean_legacy` loss reduction is not supported with step-wise training. Use `token_mean` instead."
         )
 
+    if cfg.generator.step_wise_trajectories and cfg.generator.inference_engine.enable_return_routed_experts:
+        raise ValueError(
+            "`generator.inference_engine.enable_return_routed_experts=True` is not supported with "
+            "`generator.step_wise_trajectories=True`. Each step-wise row's prompt is the whole history so "
+            "far, while routes are recorded for that step's generated tokens only. The trainer aligns "
+            "routes from the start of the sequence, so a step's routes would replay onto the first N prompt "
+            "tokens of its row with no length mismatch to assert on, silently training against routing that "
+            "does not match the rollout."
+        )
+
     if cfg.generator.merge_stepwise_output and not cfg.generator.step_wise_trajectories:
         raise ValueError(
             "`generator.merge_stepwise_output=True` requires `generator.step_wise_trajectories=True`. "
@@ -512,6 +553,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
         assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
+        megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
+        if megatron_lora_cfg.experts_shared_outer_loras and megatron_lora_cfg.lora_type != "lora":
+            raise ValueError(
+                "`megatron_config.lora_config.experts_shared_outer_loras` is only supported with "
+                f'`lora_type="lora"`, got lora_type="{megatron_lora_cfg.lora_type}"'
+            )
 
         # delta weight sync is not yet supported
         # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
@@ -645,6 +692,26 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             raise ValueError(
                 "FP8 weight sync requires full-weight updates; "
                 "Megatron LoRA with merge_lora=false syncs adapters only"
+            )
+
+    lora_cfg = cfg.trainer.policy.model.lora
+    if lora_cfg.sync_mode not in {"disk", "memory"}:
+        raise ValueError(f"trainer.policy.model.lora.sync_mode must be 'disk' or 'memory', got {lora_cfg.sync_mode!r}")
+    if lora_cfg.sync_mode == "memory":
+        # The adapter rides the base-model transport (NCCL broadcast / CUDA IPC)
+        # into the receive engine, which stages it for vLLM's LoRA manager. The
+        # other backends have no such stream to carry it: delta publishes
+        # checkpoint diffs and sharded_rdt bakes a pull plan into model params.
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("lora.sync_mode='memory' is only implemented for trainer.strategy='megatron'")
+        if lora_cfg.rank <= 0 or cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+            raise ValueError(
+                "lora.sync_mode='memory' requires lora.rank > 0 and megatron_config.lora_config.merge_lora=false"
+            )
+        if ie_cfg.weight_sync_backend != "nccl":
+            raise ValueError(
+                "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
+                f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
 
     if ie_cfg.enable_pd:
@@ -833,6 +900,16 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
+
+    # TileLang JITs kernels by shelling out to nvcc, and picks its toolkit from CUDA_HOME,
+    # defaulting to the pip wheel tree (site-packages/nvidia/cu13). That tree can be internally
+    # inconsistent -- e.g. nvidia-cuda-nvcc==13.3 next to nvidia-cuda-runtime==13.0 -- and
+    # nvidia-cuda-cccl then rejects the pair at compile time with "CUDA compiler and CUDA toolkit
+    # headers are incompatible". Pointing CUDA_HOME at a self-consistent system toolkit
+    # (e.g. /usr/local/cuda-13.3) fixes it. Workers are re-exec'd through the runtime env, so a
+    # plain driver export does not reach them; forward it here for both trainer and engine actors.
+    if os.environ.get("CUDA_HOME"):
+        env_vars["CUDA_HOME"] = os.environ["CUDA_HOME"]
 
     # NOTE (erictang000): This should no longer be required since this has been removed in vllm
     # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for

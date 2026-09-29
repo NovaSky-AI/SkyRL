@@ -10,7 +10,13 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     build_token_metadata_layout,
 )
 from skyrl.backends.skyrl_train.utils import replay_utils
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+
+
+def _pack_routes(routes: torch.Tensor, attention_mask: torch.Tensor) -> PackedTensor:
+    """Pack a ``[batch, seq_len, layers, topk]`` fixture to its real tokens."""
+    return PackedTensor.from_segments([routes[row][attention_mask[row].bool()] for row in range(routes.shape[0])])
 
 
 @pytest.fixture
@@ -80,15 +86,14 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
         "scatter_router_padding_mask_for_model",
         lambda mask, model, model_config: mask,
     )
-    apply_layout = replay_utils.align_token_metadata
+    apply_layout = replay_utils.align_packed_token_metadata
     routed_layer_counts = []
 
     def record_routed_layer_count(metadata, layout, padding_value):
-        if metadata.ndim == 4:
-            routed_layer_counts.append(metadata.shape[2])
+        routed_layer_counts.append(metadata.row_shape[0])
         return apply_layout(metadata, layout, padding_value)
 
-    monkeypatch.setattr(replay_utils, "align_token_metadata", record_routed_layer_count)
+    monkeypatch.setattr(replay_utils, "align_packed_token_metadata", record_routed_layer_count)
 
     routes = torch.tensor(
         [
@@ -111,7 +116,7 @@ def test_setup_replay_installs_indices_and_returns_model_mask(monkeypatch, paral
     )
 
     model_kwargs = replay_utils.setup_per_microbatch_replay_forward(
-        routes,
+        _pack_routes(routes, attention_mask),
         router_padding_mask,
         attention_mask,
         model=object(),
@@ -174,7 +179,7 @@ def test_replay_indices_are_dtype_independent(monkeypatch, parallel_state, packe
             fp8_enabled=False,
         )
         replay_utils.setup_per_microbatch_replay_forward(
-            routes,
+            _pack_routes(routes, attention_mask),
             router_padding_mask,
             attention_mask,
             model=object(),

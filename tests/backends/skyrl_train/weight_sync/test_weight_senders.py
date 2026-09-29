@@ -246,7 +246,7 @@ def test_unknown_backend_is_rejected():
 
 
 def test_skyrl_trainer_engines_are_registered():
-    """``delta`` and ``sharded_rdt`` are ours; vLLM registers the rest."""
+    """SkyRL extends the native trainers with its additional backends."""
     from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
     _init_info("ipc")  # any call performs the registration
@@ -274,7 +274,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
         def _fake_trainer_init(init_info, *, client, source=None):
             seen["init_info"] = init_info
             seen["source"] = source
-            return object()
+            return SimpleNamespace()
 
         monkeypatch.setattr(WeightTransferTrainerFactory, "trainer_init", _fake_trainer_init)
 
@@ -288,11 +288,13 @@ class TestBuildTrainerEngineResolvesTheBackend:
                 model_dtype="bfloat16",
                 weight_transfer_threshold_cuda_ipc_GB=1.0,
                 fp8_weight_sync_mode=fp8_weight_sync_mode,
+                speculative_config=None,
             ),
             colocate_all=colocate_all,
             rank=0,
             inference_world_size=4,
             source_factory=source_factory,
+            draft_source_factory=None,
             server_urls=["http://a"],
             data_parallel_size=1,
             base_model_path=None,
@@ -374,14 +376,14 @@ class TestCapabilityDeclarations:
         assert DeltaTrainerWeightTransferEngine.skyrl_handles_prefix_cache_reset is True
         assert DeltaTrainerWeightTransferEngine.skyrl_empty_cache_after_send is True
 
-    def test_rdt_declares_its_two_memory_flags(self):
+    def test_skyrl_rdt_trainer_declares_its_memory_flags(self):
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
-            ShardedRDTTrainerWeightTransferEngine as E,
+            SkyRLShardedRDTTrainerWeightTransferEngine,
         )
 
-        assert E.skyrl_handles_prefix_cache_reset is False
-        assert E.skyrl_force_disable_expandable_segments is True
-        assert E.skyrl_empty_cache_after_send is False
+        assert SkyRLShardedRDTTrainerWeightTransferEngine.skyrl_handles_prefix_cache_reset is False
+        assert SkyRLShardedRDTTrainerWeightTransferEngine.skyrl_force_disable_expandable_segments is True
+        assert SkyRLShardedRDTTrainerWeightTransferEngine.skyrl_empty_cache_after_send is False
 
     def test_set_reset_prefix_cache_is_optional(self):
         maybe_set_reset_prefix_cache(_Bare(), True)

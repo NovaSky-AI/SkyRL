@@ -19,6 +19,7 @@ these via server-side client_config flags and fall back to JSON):
 """
 
 import base64
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 from tinker.proto import tinker_public_pb2 as pb
@@ -124,24 +125,44 @@ def serialize_result(request_type: types.RequestType, result_data: dict) -> byte
 
 def _serialize_sample_output(result_data: dict) -> bytes:
     output = types.SampleOutput.model_validate(result_data)
+    return serialize_sample_output(
+        [(seq.stop_reason, seq.tokens, seq.logprobs) for seq in output.sequences],
+        output.prompt_logprobs,
+        output.topk_prompt_logprobs,
+    )
+
+
+def serialize_sample_output(
+    sequences: Iterable[tuple[str, Sequence[int], Sequence[float]]],
+    prompt_logprobs: Sequence[float | None] | None,
+    topk_prompt_logprobs: Sequence[Sequence[tuple[int, float]] | None] | None,
+) -> bytes:
+    """Build ``SampleResponse`` wire bytes from plain Python data.
+
+    ``sequences`` holds ``(stop_reason, tokens, logprobs)`` per sequence. This is
+    the hot path for forwarded samples: the vLLM body is decoded once and
+    encoded straight to proto, with no pydantic model and no JSON text in
+    between (each of which costs about as much as this whole function for a
+    32k-token result).
+    """
     proto = pb.SampleResponse()
 
-    for seq in output.sequences:
+    for stop_reason, tokens, logprobs in sequences:
         proto.sequences.append(
             pb.SampledSequence(
-                stop_reason=_STOP_REASON_TO_PROTO[seq.stop_reason],
-                tokens=np.asarray(seq.tokens, dtype=np.int32).tobytes(),
-                logprobs=np.asarray(seq.logprobs, dtype=np.float32).tobytes(),
+                stop_reason=_STOP_REASON_TO_PROTO[stop_reason],
+                tokens=np.asarray(tokens, dtype=np.int32).tobytes(),
+                logprobs=np.asarray(logprobs, dtype=np.float32).tobytes(),
             )
         )
 
-    if output.prompt_logprobs is not None:
+    if prompt_logprobs is not None:
         proto.prompt_logprobs = np.array(
-            [np.nan if lp is None else lp for lp in output.prompt_logprobs], dtype=np.float32
+            [np.nan if lp is None else lp for lp in prompt_logprobs], dtype=np.float32
         ).tobytes()
 
-    if output.topk_prompt_logprobs is not None:
-        rows = output.topk_prompt_logprobs
+    if topk_prompt_logprobs is not None:
+        rows = topk_prompt_logprobs
         # k is not recorded in the result, so recover it from the widest row.
         # With every row undefined, use k=1 so prompt_length stays encoded
         # (the client maps fully-masked rows back to None).

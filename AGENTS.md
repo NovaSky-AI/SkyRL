@@ -11,18 +11,34 @@ SkyRL is a full-stack reinforcement learning library for training LLMs, designed
 
 ## Test Commands
 
+These mirror `.github/workflows/cpu_skyrl.yaml` and `cpu_jax.yaml`; keep them in sync.
+
 ```bash
-# CPU tests
-uv run --extra dev --extra jax pytest tests/tx/ tests/tinker/ tests/utils/
-uv run --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu/
+# CPU tests -- skyrl_train. Needs a backend extra for `ray`: without one, collection fails
+# in tests/backends/skyrl_train/conftest.py with "No module named 'ray'". CI splits on the
+# `vllm` marker because the two halves need different extras.
+uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
+uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm"
+
+# CPU tests -- tx / tinker / utils
+uv run --isolated --extra tinker --extra jax --extra dev pytest --forked -s tests/tx tests/backends/test_jax_backend.py --ignore=tests/tx/gpu
+uv run --isolated --extra tinker --extra jax --extra dev pytest --forked -s tests/tinker tests/utils --ignore=tests/tinker/skyrl_train
+uv run --isolated --extra fsdp --extra tinker --extra dev pytest tests/tinker/skyrl_train/
 
 # GPU tests (requires Ray cluster with GPUs)
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
 
-# Lint / format
-bash format.sh
+# The opt-in h100 GPU marker is auto-skipped unless requested by name:
+uv run --isolated --extra dev --extra megatron pytest -m h100 tests/backends/skyrl_train/gpu/gpu_ci/megatron/
+
+# Lint / format (needs pre-commit; `bash format.sh` fails if it is not on PATH)
+uv run --isolated --extra dev pre-commit run --all-files
 ```
+
+Tests that connect to Ray call bare `ray.init()`, which attaches to any cluster already
+running on the box -- including a live training cluster, whose workers then die. Run them
+with `RAY_ADDRESS=local` on a machine that has one up.
 
 ## Training Quick Start
 
@@ -49,6 +65,7 @@ When working on these areas, read the corresponding doc first:
 | FSDP backend | `.agents/docs/backends/fsdp.md` |
 | JAX/TPU backend | `.agents/docs/backends/jax.md` |
 | Weight sync | `.agents/docs/weight_sync.md` |
+| Bumping megatron-core / megatron-bridge, or Megatron patches / vendored code | `skyrl/backends/skyrl_train/patches/megatron/README.md` |
 
 
 ## Troubleshooting

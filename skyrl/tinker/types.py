@@ -151,6 +151,7 @@ class LossFnInputs(BaseModel):
     logprobs: TensorData
     values: TensorData = Field(default_factory=lambda: TensorData(data=[]))
     returns: TensorData = Field(default_factory=lambda: TensorData(data=[]))
+    rollout_logprobs: TensorData = Field(default_factory=lambda: TensorData(data=[]))
 
 
 class Datum(BaseModel):
@@ -304,6 +305,9 @@ class PreparedModelPassBatch(BaseModel):
     all_advantages: list[list[float]]
     all_values: list[list[float]]
     all_returns: list[list[float]]
+    all_rollout_logprobs: list[list[float]] = Field(default_factory=list)
+    """Per-example rollout-engine logprobs (see ``LossFnInputs.rollout_logprobs``). Empty
+    inner lists mean "not provided" for that example."""
 
     # Per-example scalars
     all_model_ids: list[str]

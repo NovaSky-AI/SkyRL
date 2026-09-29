@@ -69,6 +69,11 @@ def start_api_server(
                 "host": "0.0.0.0",
                 "port": str(TEST_SERVER_PORT),
                 "base-model": BASE_MODEL,
+                # Pinned rather than inherited from EngineConfig's default: these
+                # run on a CPU runner, and jax is the only backend that works
+                # without a GPU. `_build_uv_run_cmd_engine` turns this into
+                # `--extra <backend>` for the engine child process.
+                "backend": "jax",
                 "backend-config": '{"max_lora_adapters": 4}',
                 "database-url": f"sqlite:///{resolved_db_path}",
             }

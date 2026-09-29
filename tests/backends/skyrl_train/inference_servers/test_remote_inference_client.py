@@ -1,6 +1,7 @@
 """Tests for RemoteInferenceClient."""
 
 import asyncio
+import json
 import pickle
 import threading
 import time
@@ -9,25 +10,57 @@ from typing import Dict, List, Optional
 import aiohttp
 import httpx
 import numpy as np
+import orjson
 import pytest
 import pytest_asyncio
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from skyrl.backends.skyrl_train.inference_servers import (
+    remote_inference_client as remote_client_module,
+)
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    PackedArrayKey,
+    PackedField,
+    decode_packed_routed_experts,
+    pack_ndarray,
     pack_routed_experts,
+    pack_sample_support,
+    unpack_ndarray,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
     PauseMode,
+    RemoteGenerateClient,
     RemoteInferenceClient,
 )
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,
 )
 from skyrl.train.config import SkyRLTrainConfig
+
+_SUPPORT_DTYPES = frozenset({np.dtype(np.float32)})
+_ROUTES = np.arange(12).reshape(3, 2, 2)
+
+
+async def _fake_detokenize(token_id_lists: List[List[int]]) -> List[str]:
+    return ["text"] * len(token_id_lists)
+
+
+_SUPPORT = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+
+def _packed_generate_body(*, two_blobs: bool) -> dict:
+    choice: dict = {
+        "token_ids": [1, 2, 3],
+        "finish_reason": "stop",
+        PackedField.ROUTED_EXPERTS.value: pack_routed_experts(_ROUTES),
+    }
+    if two_blobs:
+        choice[PackedField.ROLLOUT_SAMPLE_SUPPORT.value] = pack_ndarray(_SUPPORT, allowed_dtypes=_SUPPORT_DTYPES)
+    return {"choices": [choice]}
 
 
 def create_mock_vllm_server(server_id: int) -> FastAPI:
@@ -46,10 +79,44 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app.state.finished_sessions = []
     # Number of /get_world_size hits, used to assert client-side caching.
     app.state.world_size_calls = 0
+    app.state.drifted_body_calls = 0
+    app.state.flaky_body_calls = 0
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.post("/test/packed_body")
+    async def packed_body(two_blobs: bool = False):
+        return Response(content=orjson.dumps(_packed_generate_body(two_blobs=two_blobs)), media_type="application/json")
+
+    @app.post("/test/drifted_packed_body")
+    async def drifted_packed_body():
+        app.state.drifted_body_calls += 1
+        # stdlib json spaces its separators, so the splice prefix no longer matches.
+        content = json.dumps(_packed_generate_body(two_blobs=False)).encode()
+        return Response(content=content, media_type="application/json")
+
+    @app.post("/test/flaky_packed_body")
+    async def flaky_packed_body():
+        app.state.flaky_body_calls += 1
+        if app.state.flaky_body_calls == 1:
+            return Response(content=b"<html>gateway hiccup</html>", media_type="application/json", status_code=502)
+        return Response(content=orjson.dumps(_packed_generate_body(two_blobs=True)), media_type="application/json")
+
+    @app.post("/test/reset_packed_body_calls")
+    async def reset_packed_body_calls():
+        app.state.drifted_body_calls = 0
+        app.state.flaky_body_calls = 0
+        return {"status": "ok"}
+
+    @app.get("/test/packed_body_calls")
+    async def packed_body_calls():
+        return {"drifted": app.state.drifted_body_calls, "flaky": app.state.flaky_body_calls}
+
+    @app.post("/test/bad_request_text")
+    async def bad_request_text():
+        return PlainTextResponse("prompt too long", status_code=400)
 
     @app.post("/finish_session")
     async def finish_session(session_id: str = Query(...)):
@@ -506,6 +573,96 @@ class TestDataPlane:
         assert captured["routed_experts_prompt_start"] == 1
 
     @pytest.mark.asyncio
+    async def test_external_generator_requests_sample_support(self, monkeypatch):
+        generate_client = RemoteGenerateClient(proxy_url="http://unused")
+        captured = {}
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            captured.update(url=url, json=json, headers=headers, packed_side_channels=packed_side_channels)
+            return {
+                "choices": [
+                    {
+                        "token_ids": [7],
+                        "finish_reason": "stop",
+                        "logprobs": {"content": [{"logprob": -0.1}]},
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
+                            np.array([[7, 8]], dtype=np.int32)
+                        ),
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(generate_client, "_post", fake_post)
+        result = await generate_client.generate(
+            prompt_token_ids=[1, 2],
+            sampling_params={},
+            session_id=None,
+            model="default",
+            return_sample_support=True,
+        )
+
+        assert captured["url"].endswith("/skyrl/v1/generate")
+        assert captured["json"]["return_sample_support"] is True
+        assert captured["packed_side_channels"] is True
+        assert np.array_equal(result.sample_support, np.array([[7, 8]], dtype=np.int32))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("input_batch_opts", [{}, {"return_sample_support": False}])
+    async def test_sample_support_capture_is_opt_in_per_request(self, monkeypatch, input_batch_opts):
+        client = RemoteInferenceClient(
+            proxy_url="http://unused",
+            server_urls=["http://unused"],
+            data_parallel_size=1,
+            enable_return_sample_support_set=True,
+        )
+        captured = {}
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            captured.update(url=url, json=json)
+            return {"choices": [{"token_ids": [1], "finish_reason": "stop"}]}
+
+        monkeypatch.setattr(client._get_generate_client(), "_post", fake_post)
+        monkeypatch.setattr(client, "detokenize", _fake_detokenize)
+
+        result = await client.generate({"prompt_token_ids": [[1, 2]], **input_batch_opts})
+
+        assert "return_sample_support" not in captured["json"]
+        assert captured["url"].endswith("/inference/v1/generate")
+        assert result["rollout_sample_support"] is None
+
+    @pytest.mark.asyncio
+    async def test_sample_support_capture_honours_an_explicit_opt_in(self, monkeypatch):
+        client = RemoteInferenceClient(
+            proxy_url="http://unused",
+            server_urls=["http://unused"],
+            data_parallel_size=1,
+            enable_return_sample_support_set=True,
+        )
+        captured = {}
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            captured.update(url=url, json=json)
+            return {
+                "choices": [
+                    {
+                        "token_ids": [7],
+                        "finish_reason": "stop",
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
+                            np.array([[7, 8]], dtype=np.int32)
+                        ),
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(client._get_generate_client(), "_post", fake_post)
+        monkeypatch.setattr(client, "detokenize", _fake_detokenize)
+
+        result = await client.generate({"prompt_token_ids": [[1, 2]], "return_sample_support": True})
+
+        assert captured["json"]["return_sample_support"] is True
+        assert np.array_equal(result["rollout_sample_support"][0], np.array([[7, 8]], dtype=np.int32))
+
+    @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):
         client = RemoteInferenceClient(
             proxy_url="http://unused",
@@ -565,6 +722,90 @@ class TestDataPlane:
         result = await client.detokenize([[1, 2, 3], [4, 5, 6]])
         assert len(result) == 2
         assert result[0] == "hello world"  # Mock response
+
+
+class TestPackedSideChannelBodies:
+    """Tests for response parsing with packed side channels."""
+
+    async def _post_packed(self, client, mock_servers, path: str, **kwargs):
+        return await client._get_generate_client()._post(
+            f"{mock_servers['proxy_url']}{path}", json={}, packed_side_channels=True, **kwargs
+        )
+
+    @pytest.mark.asyncio
+    async def test_splices_both_registered_fields(self, client, mock_servers):
+        body = await self._post_packed(client, mock_servers, "/test/packed_body?two_blobs=true")
+        choice = body["choices"][0]
+
+        assert isinstance(choice[PackedField.ROUTED_EXPERTS][PackedArrayKey.DATA], memoryview)
+        assert isinstance(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT][PackedArrayKey.DATA], memoryview)
+        assert np.array_equal(decode_packed_routed_experts(choice[PackedField.ROUTED_EXPERTS]), _ROUTES)
+        support, _ = unpack_ndarray(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT], allowed_dtypes=_SUPPORT_DTYPES, ndim=2)
+        assert np.array_equal(support, _SUPPORT)
+
+    @pytest.mark.asyncio
+    async def test_drifted_layout_raises_without_retrying(self, client, mock_servers):
+        await client._post(f"{mock_servers['proxy_url']}/test/reset_packed_body_calls", json={})
+
+        with pytest.raises(ValueError, match="layout drifted"):
+            await self._post_packed(client, mock_servers, "/test/drifted_packed_body")
+
+        async with httpx.AsyncClient() as http:
+            counts = (await http.get(f"{mock_servers['proxy_url']}/test/packed_body_calls")).json()
+        assert counts["drifted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_undecodable_body_is_retried_then_spliced(self, client, mock_servers):
+        await client._post(f"{mock_servers['proxy_url']}/test/reset_packed_body_calls", json={})
+
+        body = await self._post_packed(client, mock_servers, "/test/flaky_packed_body")
+
+        async with httpx.AsyncClient() as http:
+            counts = (await http.get(f"{mock_servers['proxy_url']}/test/packed_body_calls")).json()
+        assert counts["flaky"] == 2
+        assert np.array_equal(
+            decode_packed_routed_experts(body["choices"][0][PackedField.ROUTED_EXPERTS]),
+            _ROUTES,
+        )
+
+    @pytest.mark.asyncio
+    async def test_client_error_with_non_json_body_surfaces_the_text(self, client, mock_servers):
+        with pytest.raises(aiohttp.ClientResponseError, match="prompt too long"):
+            await client._post(f"{mock_servers['proxy_url']}/test/bad_request_text", json={})
+
+    @pytest.mark.asyncio
+    async def test_non_routed_expert_generate_never_scans_the_body(self, client, monkeypatch):
+        def fail(*args, **kwargs):
+            raise AssertionError("the non-R3 path must not scan the response body")
+
+        monkeypatch.setattr(remote_client_module, "load_packed_body", fail)
+
+        result = await client.generate({"prompt_token_ids": [[1, 2, 3]]})
+        assert len(result["responses"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_routed_expert_generate_goes_through_the_splice(self, mock_servers, monkeypatch):
+        calls: List[int] = []
+        original = remote_client_module.load_packed_body
+
+        def counted(raw, **kwargs):
+            calls.append(len(raw))
+            return original(raw, **kwargs)
+
+        monkeypatch.setattr(remote_client_module, "load_packed_body", counted)
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
+            enable_return_routed_experts=True,
+        )
+        try:
+            result = await client.generate({"prompt_token_ids": [[1, 2, 3]]})
+        finally:
+            await client.teardown()
+
+        assert len(calls) == 1
+        assert np.array_equal(result["rollout_expert_indices"][0], _ROUTES)
 
 
 class TestControlPlane:

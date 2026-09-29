@@ -73,9 +73,13 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     MultiModalFeatures,
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    PackedField,
     decode_packed_routed_experts,
+    decode_packed_sample_support,
+    load_packed_body,
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
+from skyrl.backends.skyrl_train.utils.sample_support import SampleSupport
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
@@ -170,6 +174,7 @@ class RemoteGenerateResult:
     response_logprobs: Optional[List[float]]
     stop_reason: str
     routed_experts: Optional[RoutedExpertIndices]
+    sample_support: Optional[SampleSupport]
 
 
 @dataclass
@@ -214,15 +219,23 @@ class RemoteGenerateClient:
             self._sessions[current_loop] = session
         return session
 
-    async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
-        """POST JSON with retry on transient connection and response-decoding failures."""
+    async def _post(
+        self,
+        url: str,
+        json: Dict[str, Any],
+        headers: Optional[Dict[str, str]] = None,
+        *,
+        packed_side_channels: bool = False,
+    ) -> Any:
+        """POST JSON with retries, optionally splicing packed arrays before parsing."""
         session = await self._get_session()
         last_exc: Optional[Exception] = None
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
                     try:
-                        body = orjson.loads(await resp.read())
+                        raw = await resp.read()
+                        body = load_packed_body(raw) if packed_side_channels else orjson.loads(raw)
                     except orjson.JSONDecodeError as exc:
                         if 400 <= resp.status < 500:
                             text = await resp.text()
@@ -234,7 +247,20 @@ class RemoteGenerateClient:
                                 headers=resp.headers,
                             ) from exc
                         last_exc = exc
-                        logger.debug(f"retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {exc}")
+                        # The bare JSONDecodeError says only "line 1 column 1 (char 0)", which
+                        # gives no hint whether the body was empty, an HTML error page, or a
+                        # plain-text 5xx. Capture the status and a snippet so a failure here is
+                        # diagnosable from the log alone (e.g. a 502 from the router when the
+                        # engine behind it has died).
+                        try:
+                            text = await resp.text()
+                        except Exception:  # noqa: BLE001 - body may be unreadable
+                            text = "<unreadable>"
+                        logger.warning(
+                            f"non-JSON response from {url} on attempt "
+                            f"{attempt + 1}/{_DATA_PLANE_RETRIES}: status={resp.status} "
+                            f"len={len(text)} body={text[:500]!r}"
+                        )
                         await asyncio.sleep(1)
                         continue
                     raise_for_status(resp, body)
@@ -256,10 +282,11 @@ class RemoteGenerateClient:
         model: str,
         return_routed_experts: bool = False,
         routed_experts_prompt_start: Optional[int] = None,
+        return_sample_support: bool = False,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
     ) -> RemoteGenerateResult:
-        """Generate one raw-token completion, optionally returning R3 routes."""
+        """Generate one raw-token completion with optional per-token replay metadata."""
         if routed_experts_prompt_start is not None:
             if not return_routed_experts:
                 raise ValueError("routed_experts_prompt_start requires return_routed_experts=True")
@@ -270,7 +297,8 @@ class RemoteGenerateClient:
             ):
                 raise ValueError("routed_experts_prompt_start must be an integer within the prompt")
 
-        path = "/skyrl/v1/generate" if return_routed_experts else "/inference/v1/generate"
+        packed_side_channels = return_routed_experts or return_sample_support
+        path = "/skyrl/v1/generate" if packed_side_channels else "/inference/v1/generate"
         request_sampling_params = dict(sampling_params)
         if routed_experts_prompt_start is not None:
             request_sampling_params["routed_experts_prompt_start"] = routed_experts_prompt_start
@@ -279,6 +307,8 @@ class RemoteGenerateClient:
             "model": model,
             "token_ids": prompt_token_ids,
         }
+        if return_sample_support:
+            payload["return_sample_support"] = True
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
@@ -290,7 +320,12 @@ class RemoteGenerateClient:
         if session_id:
             headers["X-Session-ID"] = str(session_id)
 
-        response = await self._post(f"{self.proxy_url}{path}", json=payload, headers=headers)
+        response = await self._post(
+            f"{self.proxy_url}{path}",
+            json=payload,
+            headers=headers,
+            packed_side_channels=packed_side_channels,
+        )
         choice = response["choices"][0]
         token_ids = choice["token_ids"]
         logprobs = choice.get("logprobs")
@@ -302,10 +337,17 @@ class RemoteGenerateClient:
 
         routed_experts = None
         if return_routed_experts:
-            packed_routed_experts = choice.get("routed_experts")
+            packed_routed_experts = choice.get(PackedField.ROUTED_EXPERTS)
             if not isinstance(packed_routed_experts, dict):
                 raise ValueError("/skyrl/v1/generate must return packed routed_experts")
             routed_experts = decode_packed_routed_experts(packed_routed_experts)
+
+        sample_support = None
+        if return_sample_support:
+            packed_sample_support = choice.get(PackedField.ROLLOUT_SAMPLE_SUPPORT)
+            if not isinstance(packed_sample_support, dict):
+                raise ValueError("/skyrl/v1/generate must return packed rollout_sample_support")
+            sample_support = decode_packed_sample_support(packed_sample_support)
 
         return RemoteGenerateResult(
             raw_response=response,
@@ -313,6 +355,7 @@ class RemoteGenerateClient:
             response_logprobs=response_logprobs,
             stop_reason=choice["finish_reason"],
             routed_experts=routed_experts,
+            sample_support=sample_support,
         )
 
     async def aclose(self) -> None:
@@ -386,6 +429,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     enable_return_routed_experts: bool = False
     """Whether to return routed expert indices (R3 / rollout router replay)."""
+
+    enable_return_sample_support_set: bool = False
+    """Whether the engine may return the sampler's bounded top-k support per generated token.
+    Capture is per-request: callers opt a batch in with ``InferenceEngineInput.return_sample_support``."""
 
     uses_lora_weight_sync: bool = False
     """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
@@ -534,6 +581,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 raise ValueError("routed_experts_prompt_starts requires enable_return_routed_experts=True")
             if len(routed_experts_prompt_starts) != len(prompt_token_ids):
                 raise ValueError("routed_experts_prompt_starts must have one entry per prompt")
+        return_sample_support = self.enable_return_sample_support_set and input_batch.get(
+            "return_sample_support", False
+        )
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -560,6 +610,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     routed_experts_prompt_start=(
                         routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
                     ),
+                    return_sample_support=return_sample_support,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -572,6 +623,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     routed_experts_prompt_start=(
                         routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
                     ),
+                    return_sample_support=return_sample_support,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -588,6 +640,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         rollout_expert_indices = (
             [result["routed_experts"] for result in raw_results] if self.enable_return_routed_experts else None
         )
+        rollout_sample_support = (
+            [result[PackedField.ROLLOUT_SAMPLE_SUPPORT] for result in raw_results] if return_sample_support else None
+        )
 
         return InferenceEngineOutput(
             responses=responses,
@@ -595,6 +650,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             response_ids=[r["response_ids"] for r in raw_results],
             response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
             rollout_expert_indices=rollout_expert_indices,
+            rollout_sample_support=rollout_sample_support,
         )
 
     async def _generate_single(
@@ -606,6 +662,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
         routed_experts_prompt_start: Optional[int] = None,
+        return_sample_support: bool = False,
     ) -> Dict[str, Any]:
         result = await self._get_generate_client().generate(
             prompt_token_ids=prompt_token_ids,
@@ -614,6 +671,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             model=model,
             return_routed_experts=self.enable_return_routed_experts,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            return_sample_support=return_sample_support,
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
@@ -622,6 +680,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "response_ids": result.response_ids,
             "response_logprobs": result.response_logprobs,
             "routed_experts": result.routed_experts,
+            PackedField.ROLLOUT_SAMPLE_SUPPORT.value: result.sample_support,
         }
 
     async def _render_for_sample(
@@ -1239,10 +1298,26 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # What is left here is what the driver drives: pause/resume, prefix-cache
     # reset, /fetch_weights, LoRA, and /get_world_size at init.
 
+    async def set_lora_receive_target(self, receive_target: Dict[str, Any]) -> Dict[str, Any]:
+        """Arm every inference worker's receive engine for one LoRA adapter round.
+
+        ``lora.sync_mode=memory`` ships a PEFT adapter down the ordinary weight
+        transport, whose per-round payload carries only names, dtypes and shapes.
+        The adapter's name, config and alias map travel here instead, over
+        ``/collective_rpc``, and must land before the trainer calls
+        ``send_weights()`` (see ``weight_sync/lora_target.py``).
+        """
+        return await self._call_all_servers(
+            "/collective_rpc",
+            {"method": "skyrl_set_lora_receive_target", "kwargs": {"receive_target": receive_target}},
+        )
+
     async def load_lora_adapter(
         self,
         lora_name: str,
-        lora_path: str,
+        lora_path: Optional[str] = None,
+        *,
+        in_memory: bool = False,
     ) -> Dict[str, Any]:
         """
         Load (or reload) a LoRA adapter on all backend servers via the SkyRL
@@ -1266,15 +1341,25 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Args:
             lora_name: Name to register the adapter under on each server.
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
+            in_memory: Build the adapter from tensors already staged in every
+                worker by a weight update armed with a LoRA receive target
+                (``lora.sync_mode=memory``); no path is read. Mutually exclusive
+                with ``lora_path``.
 
         Returns:
             Dict mapping server_url to response.
         """
+        if in_memory == (lora_path is not None):
+            raise ValueError("load_lora_adapter takes exactly one of lora_path or in_memory=True")
         session = await self._get_session()
 
         async def _load_on_server(server_url: str):
             url = f"{server_url}/skyrl/v1/load_lora_adapter"
-            payload = {"lora_name": lora_name, "lora_path": lora_path}
+            payload = (
+                {"lora_name": lora_name, "in_memory": True}
+                if in_memory
+                else {"lora_name": lora_name, "lora_path": lora_path}
+            )
             async with session.post(url, json=payload) as resp:
                 if resp.status >= 400:
                     body = await resp.json()
@@ -1283,7 +1368,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
 
-        logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
+        logger.info(f"Loaded LoRA adapter '{lora_name}' from {'staged GPU tensors' if in_memory else lora_path}")
 
         return {url: resp for url, resp in results}
 
@@ -1316,6 +1401,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
         results = await asyncio.gather(*[_unload_on_server(url) for url in self.server_urls])
+
+        # An adapter published with lora.sync_mode=memory also holds staged GPU
+        # tensors in every worker (kept after the load so vLLM can rebuild it
+        # after an LRU eviction). Best-effort, like the unload itself.
+        try:
+            await self._call_all_servers(
+                "/collective_rpc",
+                {"method": "skyrl_discard_in_memory_lora", "kwargs": {"lora_name": lora_name}},
+            )
+        except Exception as e:
+            logger.debug(f"Could not discard staged in-memory LoRA tensors for '{lora_name}': {e}")
 
         logger.info(f"Unloaded LoRA adapter '{lora_name}'")
 

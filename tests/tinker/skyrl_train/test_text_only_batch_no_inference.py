@@ -76,6 +76,66 @@ def test_text_only_batch_skips_inference_engines():
     assert fake_self._renderer is None
 
 
+def _rl_prepared_batch_with_rollout_logprobs(
+    rollout_logprobs: list[list[float]] | None,
+) -> types.PreparedModelPassBatch:
+    data = []
+    for i in range(2):
+        kwargs = {}
+        if rollout_logprobs is not None:
+            kwargs["rollout_logprobs"] = types.TensorData(data=rollout_logprobs[i])
+        data.append(
+            types.Datum(
+                model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+                loss_fn_inputs=types.LossFnInputs(
+                    target_tokens=types.TensorData(data=[2, 3, 4]),
+                    weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+                    advantages=types.TensorData(data=[0.5, 0.5, 0.5]),
+                    logprobs=types.TensorData(data=[-1.0, -2.0, -3.0]),
+                    **kwargs,
+                ),
+            )
+        )
+    requests = {"req1": ("model1", types.ForwardBackwardInput(data=data, loss_fn="ppo"))}
+    return prepare_model_pass_batch(requests)
+
+
+def test_rollout_logprobs_mirror_sampling_logprobs_by_default():
+    """Without `rollout_logprobs`, the datum's `logprobs` fill both roles (ratio == 1)."""
+    batch = skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+        _fake_backend(), _rl_prepared_batch_with_rollout_logprobs(None), role="policy"
+    )
+    assert batch["action_log_probs"].tolist() == [[-1.0, -2.0, -3.0]] * 2
+    assert batch["rollout_logprobs"].tolist() == batch["action_log_probs"].tolist()
+
+
+def test_rollout_logprobs_are_used_when_provided():
+    """`rollout_logprobs` feeds off-policy correction; `logprobs` stays the PPO ratio denominator."""
+    batch = skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+        _fake_backend(),
+        _rl_prepared_batch_with_rollout_logprobs([[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]),
+        role="policy",
+    )
+    assert batch["action_log_probs"].tolist() == [[-1.0, -2.0, -3.0]] * 2
+    assert batch["rollout_logprobs"].tolist() == [[-1.5, -2.5, -3.5], [-1.0, -2.0, -3.0]]
+
+
+def test_rollout_logprobs_length_mismatch_rejected():
+    with pytest.raises(ValueError, match="rollout_logprobs"):
+        skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+            _fake_backend(), _rl_prepared_batch_with_rollout_logprobs([[-1.5, -2.5], [-1.0, -2.0, -3.0]]), role="policy"
+        )
+
+
+def test_mixed_batch_rejected():
+    """`rollout_logprobs` is all-or-nothing per batch: a datum that omits it while a batch-mate
+    provides it is a client inconsistency and fails loudly instead of silently losing correction."""
+    with pytest.raises(ValueError, match="every datum"):
+        skyrl_train_backend.SkyRLTrainBackend._to_training_batch(
+            _fake_backend(), _rl_prepared_batch_with_rollout_logprobs([[-1.5, -2.5, -3.5], []]), role="policy"
+        )
+
+
 def test_image_batch_uses_render_server_not_engines():
     """Batches with image chunks go to the CPU render server, never the engines."""
     fake_self = _fake_backend()
@@ -131,3 +191,39 @@ def test_engine_init_invalidates_cpu_render_state():
     assert fake_self._renderer is None
     assert render_server.shutdown_called
     assert fake_self._render_server is None
+
+
+def test_extract_metrics_forwards_loss_metrics_family():
+    """Off-policy-correction metrics reach the client instead of being dropped.
+
+    Without this, a configured correction that never fires is indistinguishable
+    from one that works: `geo_sequence_mask_masked_ratio` is the only signal that
+    the geometric mask is actually rejecting sequences.
+    """
+    data = {
+        "final_loss": 1.0,
+        "loss_metrics/geo_sequence_mask_masked_ratio": 0.25,
+        "loss_metrics/geo_sequence_mask_over_high_ratio": 0.1,
+        "loss_metrics/is_ratio_max": 1.5,
+        "loss_metrics/is_ratio_min": 0.5,
+        "loss_metrics/clip_ratio": 0.03,
+    }
+
+    metrics = skyrl_train_backend.SkyRLTrainBackend._extract_metrics(_fake_backend(), data)
+
+    assert metrics["geo_sequence_mask_masked_ratio:mean"] == 0.25
+    assert metrics["geo_sequence_mask_over_high_ratio:mean"] == 0.1
+    assert metrics["clip_ratio:mean"] == 0.03
+    # `_max` / `_min` names pick the matching Tinker cross-chunk reduction.
+    assert metrics["is_ratio_max:max"] == 1.5
+    assert metrics["is_ratio_min:min"] == 0.5
+    # Non-loss_metrics keys keep their existing handling.
+    assert metrics["total_loss:sum"] == 1.0
+
+
+def test_extract_metrics_without_loss_metrics_is_unchanged():
+    """Batches with no loss-function metrics gain no extra keys."""
+    metrics = skyrl_train_backend.SkyRLTrainBackend._extract_metrics(
+        _fake_backend(), {"final_loss": 2.0, "policy_loss": 1.0}
+    )
+    assert metrics == {"total_loss:sum": 2.0, "pg_loss:sum": 1.0}
