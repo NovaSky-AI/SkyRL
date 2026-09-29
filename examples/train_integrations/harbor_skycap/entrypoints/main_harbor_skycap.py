@@ -65,7 +65,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
     settings = {
-        "engine_url": engine_url,
+        "upstream_url": engine_url,
         "tokenizer": cfg.trainer.policy.model.path,
         "renderer_pool_size": cfg.skycap.renderer_pool_size,
         "model": ie.served_model_name,

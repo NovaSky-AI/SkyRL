@@ -27,11 +27,7 @@ from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa
 from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
-from examples.train_integrations.harbor_skycap.service import (
-    SkycapService,  # noqa: E402
-)
-from skycap import Sample, record  # noqa: E402
-from skycap.tokens.backend import TokensBackend  # noqa: E402
+from skycap import CaptureService, Sample, record  # noqa: E402
 from skycap.tokens.engine import EngineError  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
@@ -77,18 +73,33 @@ async def router():
 
 @pytest.fixture
 def skycap(router, tmp_path):
-    backend = TokensBackend(
+    service = CaptureService(
         router.url,
-        FakeRenderer(),
+        mode="tokens",
+        renderer=FakeRenderer(),
         engine=SkyRLEngine(),
         model="policy",
         sampling_overrides={"top_k": TOP_K},
         sampling_mask=True,
+        record_dir=str(tmp_path / "record"),
+        host="127.0.0.1",
     )
-    service = SkycapService(backend, record_dir=str(tmp_path / "record"), host="127.0.0.1")
     service.start()
     yield service
     service.stop()
+
+
+def service_for(router, record_dir, **options) -> CaptureService:
+    return CaptureService(
+        router.url,
+        mode="tokens",
+        renderer=FakeRenderer(),
+        engine=SkyRLEngine(),
+        model="policy",
+        record_dir=str(record_dir),
+        host="127.0.0.1",
+        **options,
+    )
 
 
 @pytest.fixture
@@ -261,8 +272,7 @@ def test_overlong_filtering_masks_a_context_length_trial_but_keeps_it() -> None:
 
 @pytest.mark.asyncio
 async def test_the_service_writes_open_trajectories_when_stopped(router, tmp_path) -> None:
-    backend = TokensBackend(router.url, FakeRenderer(), engine=SkyRLEngine(), model="policy")
-    service = SkycapService(backend, record_dir=str(tmp_path), host="127.0.0.1")
+    service = service_for(router, tmp_path)
     service.start()
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{service.url}/trajectories", json={"meta": {}}) as response:
@@ -280,8 +290,7 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
     import litellm
 
     router.reply = "<think>\nhmm\n</think>\n\nanswer"
-    backend = TokensBackend(router.url, FakeRenderer(), engine=SkyRLEngine(), model="policy", use_raw_content=True)
-    service = SkycapService(backend, record_dir=str(tmp_path), host="127.0.0.1")
+    service = service_for(router, tmp_path, use_raw_content=True)
     service.start()
     try:
         async with aiohttp.ClientSession() as session:
