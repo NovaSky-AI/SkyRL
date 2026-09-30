@@ -9,10 +9,18 @@ set -x
 # HF config.json + tokenizer files, present at the same path on every node. Weight values don't
 # affect memory or throughput on random tokens.
 #
+# MODEL_PATH: a directory with zai-org/GLM-5.3-Flash's config.json (drop its "quantization_config")
+# and tokenizer files (tokenizer.json, tokenizer_config.json, chat_template.jinja).
+#
 # Usage:
-#   MAX_LENGTH=8192 bash examples/train/sft/run_sft_dummy_glm5p3_flash_megatron.sh [extra overrides...]
+#   MODEL_PATH=/path/to/glm5p3_flash_cfg MAX_LENGTH=8192 \
+#       bash examples/train/sft/run_sft_dummy_glm5p3_flash_megatron.sh [extra overrides...]
+#
+# Defaults fit up to 16k tokens per sequence. 32k needs TP8 and more selective recompute
+# (measured: ~127 GB allocated per GPU, ~2.9k tokens/s on 64 B200s):
+#   MEGATRON_TP=8 RECOMPUTE_MODULES='[core_attn,moe,moe_act,mla_up_proj,shared_experts]' MAX_LENGTH=32768 ...
 
-MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/glm53_flash_cfg}"
+MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to a GLM-5.3-Flash config + tokenizer directory}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"
 NUM_NODES="${NUM_NODES:-8}"
 NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-8}"
@@ -30,6 +38,10 @@ RECOMPUTE_GRANULARITY="${RECOMPUTE_GRANULARITY:-selective}"
 RECOMPUTE_MODULES="${RECOMPUTE_MODULES:-[core_attn,moe]}"
 RECOMPUTE_METHOD="${RECOMPUTE_METHOD:-null}"
 RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-null}"
+# Fused TileLang SparseMLA for the DSA layers. glm5_next/dsa.py pads GLM-5.3's NoPE-MLA layout
+# into the kernel's; without a backend megatron-core falls back to dense [heads, sq, sq] FP32
+# scores (128 GiB/GPU at 32k with 32 local heads).
+DSA_KERNEL_BACKEND="${DSA_KERNEL_BACKEND:-tilelang}"
 
 export SKYRL_MEGATRON_RANDOM_INIT=1
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
@@ -73,6 +85,7 @@ uv run --isolated --extra megatron \
     megatron_config.transformer_config_kwargs.mlp_chunks_for_training=64 \
     megatron_config.transformer_config_kwargs.gradient_accumulation_fusion=false \
     megatron_config.transformer_config_kwargs.disable_parameter_transpose_cache=true \
+    megatron_config.transformer_config_kwargs.dsa_kernel_backend=$DSA_KERNEL_BACKEND \
     megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true \
     megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0 \
     megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \

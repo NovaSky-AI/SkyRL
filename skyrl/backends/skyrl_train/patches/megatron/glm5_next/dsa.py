@@ -12,6 +12,8 @@ itself, so ``Glm5NextDSAttention`` swaps that selection for the vendored k-pool 
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
+from loguru import logger
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer.experimental_attention_variant import dsa_layout
@@ -25,6 +27,46 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
 from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.dsa_kpool import (
     fused_qk_topk_kpool,
 )
+
+# The fused absorbed sparse-attention kernels (TileLang SparseMLA) are specialized for the
+# DeepSeek-V3.2 / GLM-5 absorbed layout: q/k width 576 (512 latent + 64 RoPE) and a top-k width
+# divisible by 64. GLM-5.3-Flash is NoPE MLA (width 512) and its k-pool selection appends the
+# query's incomplete tail pool (2048 + pool_size - 1 = 2051 slots), so the kernels decline and
+# megatron-core falls back to a dense [b, heads, sq, sk] masked softmax -- O(L^2) memory.
+_FUSED_SPARSE_MLA_QK_DIM = 576
+_FUSED_SPARSE_MLA_TOPK_MULTIPLE = 64
+_fused_sparse_attention_logged = {"used": False, "declined": False}
+
+
+def _pad_for_fused_absorbed_sparse_attention(fused_fn):
+    """Wrap ``dsa_kernels.run_fused_absorbed_sparse_attention`` to fit GLM-5.3 into its layout.
+
+    Exact: q/k are zero-padded from 512 to 576 channels in the RoPE slot (zero channels add nothing
+    to q.k; ``softmax_scale`` is passed explicitly; the value is still ``key[..., :512]``), and the
+    top-k indices are padded to a multiple of 64 with -1, which the kernels mask out. If the fused
+    backend still declines, the caller's dense fallback uses its own unpadded tensors.
+    """
+
+    def padded(config, query, key, topk_indices, softmax_scale, v_channels, topk_length=None):
+        qk_pad = _FUSED_SPARSE_MLA_QK_DIM - query.size(-1)
+        if qk_pad > 0 and key.size(-1) == query.size(-1):
+            query = F.pad(query, (0, qk_pad))
+            key = F.pad(key, (0, qk_pad))
+        topk_pad = -topk_indices.size(-1) % _FUSED_SPARSE_MLA_TOPK_MULTIPLE
+        if topk_pad:
+            topk_indices = F.pad(topk_indices, (0, topk_pad), value=-1)
+        out = fused_fn(config, query, key, topk_indices, softmax_scale, v_channels, topk_length=topk_length)
+        key_ = "used" if out is not None else "declined"
+        if not _fused_sparse_attention_logged[key_]:
+            _fused_sparse_attention_logged[key_] = True
+            logger.info(
+                f"GLM-5.3-Flash DSA: fused absorbed sparse attention {key_} "
+                f"(backend={getattr(config, 'dsa_kernel_backend', None)}, padded qk_dim={query.size(-1)}, "
+                f"topk={topk_indices.size(-1)})"
+            )
+        return out
+
+    return padded
 
 
 class Glm5NextDSAttention(DSAttention):
@@ -124,14 +166,25 @@ class Glm5NextDSAttention(DSAttention):
         def decline(*_args, **_kwargs):
             return None
 
-        saved = (mcore_dsa.fused_qk_topk_naive, dsa_kernels.run_fused_dsa_attention, dsa_kernels.run_fused_qk_topk)
+        saved = (
+            mcore_dsa.fused_qk_topk_naive,
+            dsa_kernels.run_fused_dsa_attention,
+            dsa_kernels.run_fused_qk_topk,
+            dsa_kernels.run_fused_absorbed_sparse_attention,
+        )
         mcore_dsa.fused_qk_topk_naive = kpool_topk
         dsa_kernels.run_fused_dsa_attention = decline
         dsa_kernels.run_fused_qk_topk = decline
+        dsa_kernels.run_fused_absorbed_sparse_attention = _pad_for_fused_absorbed_sparse_attention(saved[3])
         try:
             output = super().forward(*args, packed_seq_params=packed_seq_params, **kwargs)
         finally:
-            mcore_dsa.fused_qk_topk_naive, dsa_kernels.run_fused_dsa_attention, dsa_kernels.run_fused_qk_topk = saved
+            (
+                mcore_dsa.fused_qk_topk_naive,
+                dsa_kernels.run_fused_dsa_attention,
+                dsa_kernels.run_fused_qk_topk,
+                dsa_kernels.run_fused_absorbed_sparse_attention,
+            ) = saved
         # A pinned-megatron-core change that routes top-k elsewhere must fail here rather than
         # silently fall back to token-level selection.
         if not self.skip_topk and kpool_calls != 1:
