@@ -49,3 +49,21 @@ def test_request_tpot_and_ttft_are_separate():
     assert metrics["vllm/request_tpot_seconds_avg"] == 0.5
     assert metrics["vllm/request_tpot_seconds_p50"] == 1
     assert metrics["vllm/ttft_seconds_p90"] == pytest.approx(1.8)
+
+
+def test_lazy_histogram_buckets_use_confirmed_empty_baseline():
+    base = "ray_vllm_time_to_first_token_seconds"
+    previous = {base + "_count": 0, base + "_sum": 0}
+    current = {
+        base + "_count": 2,
+        base + "_sum": 0.15,
+        base + "_bucket::0.1": 1,
+        base + "_bucket::0.2": 2,
+        base + "_bucket::+Inf": 2,
+    }
+    metrics = WindowStatistics.between(previous, current, 1).latency_metrics("vllm/")
+    assert metrics["vllm/ttft_seconds_avg"] == pytest.approx(0.075)
+    assert metrics["vllm/ttft_seconds_p50"] == pytest.approx(0.1)
+    assert metrics["vllm/ttft_seconds_p90"] == pytest.approx(0.18)
+    # Absence without an explicit empty count is unknown.
+    assert not WindowStatistics.between({}, current, 1).latency_metrics("vllm/")

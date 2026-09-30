@@ -46,9 +46,14 @@ class WindowStatistics:
         for name, value in current.items():
             if not name.endswith(("_total", "_sum", "_count")) and "::" not in name:
                 continue
-            if name not in previous:
+            baseline = previous.get(name)
+            if baseline is None and "_bucket::" in name:
+                count = name.split("_bucket::", 1)[0] + "_count"
+                if previous.get(count) == 0:
+                    baseline = 0.0
+            if baseline is None:
                 continue
-            delta = value - previous[name]
+            delta = value - baseline
             if not math.isfinite(delta) or delta < 0:
                 result.valid = False
                 continue
