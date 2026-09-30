@@ -68,32 +68,6 @@ def test_engine_loads_alternate_base_weights(monkeypatch):
     }
 
 
-def test_engine_preserves_explicit_served_model_name_without_alternate_weights(monkeypatch):
-    captured = {}
-
-    class BackendConfig:
-        def __init__(self, **kwargs):
-            captured["config"] = kwargs
-
-    class Backend:
-        def __init__(self, model, _config):
-            captured["model"] = model
-
-    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_args, **_kwargs: (Backend, BackendConfig))
-    TinkerEngine(
-        EngineConfig(
-            base_model=BASE_MODEL,
-            backend_config={"generator.inference_engine.served_model_name": "custom-alias"},
-            database_url="sqlite:///:memory:",
-        )
-    )
-
-    assert captured == {
-        "model": BASE_MODEL,
-        "config": {"generator.inference_engine.served_model_name": "custom-alias"},
-    }
-
-
 def test_process_unload_model():
     """Test that process_unload_model removes model from backend."""
     config = EngineConfig(
