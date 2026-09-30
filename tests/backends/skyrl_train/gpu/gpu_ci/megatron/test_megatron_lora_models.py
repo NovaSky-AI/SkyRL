@@ -129,11 +129,7 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.model.lora = SkyRLLoraConfig(
-        rank=8,
-        alpha=16,
-        dropout=0.0,
-        target_modules="all-linear",
-        lora_sync_path=lora_sync_path,
+        rank=8, alpha=16, dropout=0.0, target_modules="all-linear", lora_sync_path=lora_sync_path
     )
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     if "glm-5.3-flash" in model_name.lower():
@@ -191,10 +187,7 @@ async def _sync_weights(policy, client, cfg, label: str):
     with Timer(label):
         ray.get(
             policy.async_run_ray_method(
-                "pass_through",
-                "broadcast_to_inference_engines",
-                client,
-                cfg.generator.inference_engine,
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
     if cfg.trainer.placement.colocate_all:
@@ -220,36 +213,11 @@ async def _sync_weights(policy, client, cfg, label: str):
             False,
             id="glm-5.3-bf16_b300_tp8_ep8_adapter",
             marks=pytest.mark.skipif(
-                not os.environ.get("GLM53_MODEL_PATH"),
-                reason="Set GLM53_MODEL_PATH on an 8xB300 node",
+                not os.environ.get("GLM53_MODEL_PATH"), reason="Set GLM53_MODEL_PATH on an 8xB300 node"
             ),
         ),
-        pytest.param(
-            2,
-            1,
-            1,
-            1,
-            None,
-            2,
-            2,
-            "Qwen/Qwen3.5-0.8B",
-            5e-2,
-            False,
-            id="qwen3.5-0.8b-dense_tp2_adapter",
-        ),
-        pytest.param(
-            2,
-            1,
-            1,
-            1,
-            None,
-            2,
-            2,
-            "Qwen/Qwen3.5-0.8B",
-            5e-2,
-            True,
-            id="qwen3.5-0.8b-dense_tp2_merged",
-        ),
+        pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, False, id="qwen3.5-0.8b-dense_tp2_adapter"),
+        pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, True, id="qwen3.5-0.8b-dense_tp2_merged"),
         # Large MoE row on 4xH100-80G, same mesh and engine overrides as the
         # bf16 row in test_megatron_models.py.
         pytest.param(
@@ -288,17 +256,7 @@ async def _sync_weights(policy, client, cfg, label: str):
     ],
 )
 async def test_lora_logprobs_matching_roundtrip(
-    tp,
-    pp,
-    cp,
-    ep,
-    etp,
-    inference_tp,
-    num_gpus,
-    model_name,
-    threshold,
-    merge_lora,
-    tmp_path,
+    tp, pp, cp, ep, etp, inference_tp, num_gpus, model_name, threshold, merge_lora, tmp_path
 ):
     """
     Check that logprob diff matches across vllm and megatron with a zero LoRA adapter and
@@ -306,9 +264,7 @@ async def test_lora_logprobs_matching_roundtrip(
     """
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
         cfg = get_test_lora_actor_config(
-            model_name=model_name,
-            merge_lora=merge_lora,
-            lora_sync_path=str(tmp_path / "adapter"),
+            model_name=model_name, merge_lora=merge_lora, lora_sync_path=str(tmp_path / "adapter")
         )
         # With merge_lora=False the policy is served under the adapter name, which
         # only exists after a sync -- so sync first.
@@ -389,10 +345,7 @@ async def test_lora_logprobs_matching_roundtrip(
             )
             ray.get(
                 policy.async_run_ray_method(
-                    "pass_through",
-                    "init_weight_sync_state",
-                    client,
-                    cfg.generator.inference_engine,
+                    "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
                 )
             )
             with Timer("roundtrip_after_initialization"):
@@ -403,22 +356,16 @@ async def test_lora_logprobs_matching_roundtrip(
                     await client.wake_up()
 
                 # Phase 1: zero adapter.
-                (
-                    (response_mask, logprobs_t, _),
-                    training_input,
-                ) = await generate_with_vllm(generator, client, model_name, tokenizer, return_training_input=True)
+                (response_mask, logprobs_t, _), training_input = await generate_with_vllm(
+                    generator, client, model_name, tokenizer, return_training_input=True
+                )
                 if cfg.trainer.placement.colocate_all:
                     await client.sleep()
                     policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
                 mask = response_mask.bool()
                 logprobs_megatron = _trainer_logprobs(policy, training_input)
-                zero_diff = _mean_abs_diff(
-                    logprobs_t,
-                    logprobs_megatron,
-                    mask,
-                    "zero adapter: vLLM vs Megatron",
-                )
+                zero_diff = _mean_abs_diff(logprobs_t, logprobs_megatron, mask, "zero adapter: vLLM vs Megatron")
                 assert zero_diff < threshold, f"Logprob diff should be less than {threshold}, but is {zero_diff:.6f}"
 
                 # Phase 2: perturb the trainer's adapter; the engines still serve the zero adapter.
@@ -427,16 +374,10 @@ async def test_lora_logprobs_matching_roundtrip(
                 print(f"perturbed {stats['changed_tensors']} LoRA B tensors ({stats['changed_elements']} elements)")
                 logprobs_megatron_perturbed = _trainer_logprobs(policy, training_input)
                 _mean_abs_diff(
-                    logprobs_megatron,
-                    logprobs_megatron_perturbed,
-                    mask,
-                    "perturbation: Megatron before vs after",
+                    logprobs_megatron, logprobs_megatron_perturbed, mask, "perturbation: Megatron before vs after"
                 )
                 stale_diff = _mean_abs_diff(
-                    logprobs_t,
-                    logprobs_megatron_perturbed,
-                    mask,
-                    "stale sampler: vLLM vs perturbed Megatron",
+                    logprobs_t, logprobs_megatron_perturbed, mask, "stale sampler: vLLM vs perturbed Megatron"
                 )
                 assert stale_diff > threshold, (
                     f"Perturbed Megatron differs from the stale sampler by only {stale_diff:.6f}; "
@@ -445,20 +386,16 @@ async def test_lora_logprobs_matching_roundtrip(
 
                 # Phase 3: publish the perturbed adapter and score the new samples.
                 await _sync_weights(policy, client, cfg, "sync_weights")
-                (
-                    (response_mask_2, logprobs_t_2, _),
-                    training_input_2,
-                ) = await generate_with_vllm(generator, client, model_name, tokenizer, return_training_input=True)
+                (response_mask_2, logprobs_t_2, _), training_input_2 = await generate_with_vllm(
+                    generator, client, model_name, tokenizer, return_training_input=True
+                )
                 if cfg.trainer.placement.colocate_all:
                     await client.sleep()
                     policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
                 logprobs_megatron_2 = _trainer_logprobs(policy, training_input_2)
                 updated_diff = _mean_abs_diff(
-                    logprobs_t_2,
-                    logprobs_megatron_2,
-                    response_mask_2.bool(),
-                    "updated adapter: vLLM vs Megatron",
+                    logprobs_t_2, logprobs_megatron_2, response_mask_2.bool(), "updated adapter: vLLM vs Megatron"
                 )
                 assert updated_diff < threshold, (
                     f"Logprob diff should be less than {threshold}, but is {updated_diff:.6f}"
