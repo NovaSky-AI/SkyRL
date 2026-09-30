@@ -4,6 +4,10 @@ import asyncio
 import contextlib
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
+from loguru import logger
+
+from skyrl.train.utils import deadline
+
 T = TypeVar("T")
 TASK_SHUTDOWN_GRACE_S = 10.0
 FAILURE_CLEANUP_GRACE_S = 10.0
@@ -76,22 +80,30 @@ async def cleanup_preserving_primary(
     *,
     failure_grace_s: float = FAILURE_CLEANUP_GRACE_S,
 ):
-    """Always await ``cleanup()`` on exit, without letting a cleanup error replace the body's exception.
+    """Run cleanup on exit without letting its error replace the body's exception.
 
     If the body raised (including cancellation), a cleanup failure is attached to that primary exception as a
-    note and the primary propagates. Failure cleanup is bounded so an unresponsive cleanup cannot hide the primary
-    indefinitely. On success, a cleanup failure propagates normally.
+    note and the primary propagates. Failure cleanup is bounded by the smaller of its grace period and the active
+    step deadline, and is skipped if that deadline has expired. On success, a cleanup failure propagates normally.
     """
     try:
         yield
     except BaseException as primary:
-        cleanup_timeout = asyncio.timeout(failure_grace_s)
+        remaining_s = deadline.remaining()
+        if remaining_s == 0:
+            logger.warning(f"Skipping {description} during cleanup: the step deadline has expired")
+            raise
+        cleanup_grace_s = failure_grace_s if remaining_s is None else min(failure_grace_s, remaining_s)
+        cleanup_timeout = asyncio.timeout(cleanup_grace_s)
         try:
             async with cleanup_timeout:
                 await cleanup()
         except BaseException as cleanup_exc:
             if cleanup_timeout.expired():
-                primary.add_note(f"{description} did not finish during cleanup within {failure_grace_s:g}s")
+                if deadline.remaining() == 0:
+                    primary.add_note(f"{description} did not finish during cleanup before the step deadline expired")
+                else:
+                    primary.add_note(f"{description} did not finish during cleanup within {failure_grace_s:g}s")
             else:
                 primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
         raise

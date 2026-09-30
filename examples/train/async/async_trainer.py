@@ -10,7 +10,7 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import prepare_generator_input
 from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.utils import Timer
+from skyrl.train.utils import Timer, deadline
 from skyrl.train.utils.async_utils import BackgroundFailure, cancel_background_tasks
 from skyrl.train.utils.trainer_utils import ResumeMode
 
@@ -36,7 +36,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             self.init_weight_sync_state()
 
         # sync weights to inference engines
-        with Timer("sync_weights_to_inference_engines"):
+        async with self._weight_sync_deadline(), Timer("sync_weights_to_inference_engines"):
             await self.dispatch.save_weights_for_sampler()
 
         # Eval before training
@@ -66,15 +66,16 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 generator_task = asyncio.create_task(self._run_generate_loop(generation_buffer, generation_failure))
 
                 for idx in range(len(self.train_dataloader)):
-                    with Timer("step", self.all_timings):
+                    async with self._step_deadline(), Timer("step", self.all_timings):
                         status = await self._run_training(generation_buffer, generation_failure)
 
                         # request the generation loop that we should sync sometime soon.
                         if idx != len(self.train_dataloader) - 1:
-                            await generation_failure.guard(self.generation_ack.wait())
+                            with deadline.operation("generation_ack"):
+                                await generation_failure.guard(self.generation_ack.wait())
 
                         # sync weights
-                        async with Timer("sync_weights", self.all_timings):
+                        async with self._weight_sync_deadline(), Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
 
                         self.sync_finished.set()
@@ -128,11 +129,11 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         pbar.close()
         if self.cfg.trainer.ckpt_interval > 0:
-            with Timer("save_checkpoints", self.all_timings):
+            async with self._step_deadline(), Timer("save_checkpoints", self.all_timings):
                 self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
         if self.cfg.trainer.hf_save_interval > 0:
-            with Timer("save_hf_model", self.all_timings):
+            async with self._step_deadline(), Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
         self.tracker.finish()
@@ -140,7 +141,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _run_training(self, generation_buffer, failure: BackgroundFailure):
         # Get a generation future and await on the object
-        generator_output, uids = await failure.guard(generation_buffer.get())  # GeneratorOutput, List[str]
+        with deadline.operation("wait_for_generation_buffer"):
+            generator_output, uids = await failure.guard(generation_buffer.get())  # GeneratorOutput, List[str]
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])

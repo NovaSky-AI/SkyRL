@@ -474,7 +474,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.init_weight_sync_state()
 
         # sync weights to inference engines
-        with Timer("sync_weights_to_inference_engines"):
+        async with self._weight_sync_deadline(), Timer("sync_weights_to_inference_engines"):
             await self.dispatch.save_weights_for_sampler()
 
         # Per-step GPU utilization to the tracker. The base loop starts, flushes, and stops the
@@ -532,7 +532,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # already reflects this epoch's trained steps. The range below is just an upper bound.
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                    with Timer("step", self.all_timings):
+                    async with self._step_deadline(), Timer("step", self.all_timings):
                         self._loop_gauges.set(
                             "skyrl_gen_buffer_qsize",
                             generation_output_group_buffer.qsize(),
@@ -600,8 +600,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             )
 
                         # 4. After training: pause generation, sync weights, resume.
-                        with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
-                            await self.dispatch.save_weights_for_sampler()
+                        async with self._weight_sync_deadline():
+                            with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
+                                await self.dispatch.save_weights_for_sampler()
                         # `sync_weights` above is the full bracket: it also pauses and
                         # resumes generation, which under vLLM DP costs seconds of
                         # coordinator quiesce that is not weight-sync work. The
@@ -637,12 +638,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
                     if self.cfg.trainer.ckpt_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                            with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                                await asyncio.to_thread(self.save_checkpoints)
+                            async with self._step_deadline():
+                                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                                    await asyncio.to_thread(self.save_checkpoints)
                     if self.cfg.trainer.hf_save_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                            with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                                await asyncio.to_thread(self.save_models)
+                            async with self._step_deadline():
+                                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                                    await asyncio.to_thread(self.save_models)
 
                     timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
                     if self._ray_gpu_monitor is not None:
@@ -728,13 +731,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
-            with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint.")
+            async with self._step_deadline():
+                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                    await asyncio.to_thread(self.save_checkpoints)
+                    logger.info("Saved final checkpoint.")
         if self.cfg.trainer.hf_save_interval > 0:
-            with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                await asyncio.to_thread(self.save_models)
-                logger.info("Saved final model.")
+            async with self._step_deadline():
+                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                    await asyncio.to_thread(self.save_models)
+                    logger.info("Saved final model.")
 
         # Drain any in-flight async checkpoint write before teardown. Unconditional:
         # a save may have happened outside the periodic path. No-op when nothing is pending.

@@ -47,12 +47,14 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     Any,
+    AsyncIterator,
     Dict,
     Iterable,
     List,
@@ -88,7 +90,9 @@ from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
     SKYRL_HTTP_CONNECTION_LIMIT,
+    SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S,
 )
+from skyrl.train.utils import deadline
 
 _DATA_PLANE_RETRIES = 30
 
@@ -141,6 +145,40 @@ class InferenceServerHTTPError(aiohttp.ClientResponseError):
         )
         notes = getattr(self, "__notes__", None)
         return type(self), args, {"__notes__": notes} if notes else None
+
+
+class InferenceServerTimeoutError(RuntimeError):
+    """A control-plane request exceeded ``SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S``.
+
+    Not a ``TimeoutError``, so ``except TimeoutError`` retry handlers don't swallow it.
+    """
+
+    def __init__(self, method: str, url: str, timeout_s: float) -> None:
+        # All fields go to args so the default BaseException pickling round-trips them.
+        super().__init__(method, url, timeout_s)
+        self.method = method
+        self.url = url
+        self.timeout_s = timeout_s
+
+    def __str__(self) -> str:
+        return (
+            f"{self.method} {self.url} did not complete within {self.timeout_s:g}s "
+            "(SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S)"
+        )
+
+
+@contextlib.asynccontextmanager
+async def _control_plane_request(
+    session: aiohttp.ClientSession, method: str, url: str, **kwargs: Any
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """``session.request`` bounded by ``SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S``."""
+    timeout_s = SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S
+    timeout = aiohttp.ClientTimeout(total=timeout_s if timeout_s > 0 else None)
+    try:
+        async with session.request(method, url, timeout=timeout, **kwargs) as resp:
+            yield resp
+    except asyncio.TimeoutError:
+        raise InferenceServerTimeoutError(method, url, timeout_s) from None
 
 
 async def _read_json_body(resp: aiohttp.ClientResponse) -> Any:
@@ -1148,7 +1186,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
-        async with session.request(method, url, json=json, params=params) as resp:
+        async with _control_plane_request(session, method, url, json=json, params=params) as resp:
             body = await _read_json_body(resp) if resp.content_length else None
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
@@ -1172,9 +1210,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Returns:
             Dict mapping server_url to response.
         """
-        results = await asyncio.gather(
-            *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
-        )
+        with deadline.operation(endpoint):
+            results = await asyncio.gather(
+                *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
+            )
         return {url: resp for url, resp in results}
 
     async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP, clear_cache: bool = False) -> Dict[str, Any]:
@@ -1403,7 +1442,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 if in_memory
                 else {"lora_name": lora_name, "lora_path": lora_path}
             )
-            async with session.post(url, json=payload) as resp:
+            async with _control_plane_request(session, "POST", url, json=payload) as resp:
                 if resp.status >= 400:
                     body = await _read_json_body(resp)
                     raise_for_status(resp, body)
@@ -1437,7 +1476,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         async def _unload_on_server(server_url: str):
             url = f"{server_url}/v1/unload_lora_adapter"
-            async with session.post(url, json=payload) as resp:
+            async with _control_plane_request(session, "POST", url, json=payload) as resp:
                 if resp.status >= 400:
                     body = await _read_json_body(resp)
                     raise_for_status(resp, body)
