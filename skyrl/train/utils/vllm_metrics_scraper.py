@@ -11,7 +11,9 @@ latencies are derived from deltas vs. the previous sample.
 """
 
 import asyncio
+import math
 import re
+import statistics
 import time
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
@@ -214,6 +216,9 @@ class VLLMMetricsScraper:
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
         self._snapshot_complete = True
+        self._engine_snapshot = {}
+        self._previous_engines = {}
+        self._window_engines = {}
         # Explicit-window state (start/pause/resume/stop). ``_label is None``
         # means no window is open.
         self._label: Optional[str] = None
@@ -286,7 +291,21 @@ class VLLMMetricsScraper:
         if self._worker_ids is not None:
             parsed = {key: value for key, value in parsed.items() if dict(key[1]).get("WorkerId") in self._worker_ids}
         if not parsed:
+            self._engine_snapshot = {}
             return None
+        engine_counters = {}
+        for (name, labels), value in parsed.items():
+            label_dict = dict(labels)
+            worker = label_dict.get("WorkerId", label_dict.get("ReplicaId"))
+            if worker is None:
+                continue
+            engine = (worker, label_dict.get("engine", "0"))
+            if name == _GAUGE_NUM_RUNNING:
+                engine_counters.setdefault(engine, {})
+            elif name in (_COUNTER_PROMPT_TOKENS, _COUNTER_GENERATION_TOKENS):
+                counters = engine_counters.setdefault(engine, {})
+                counters[name] = counters.get(name, 0.0) + value
+        self._engine_snapshot = engine_counters
         buckets = {}
         schemas = {}
         for (name, labels), value in parsed.items():
@@ -328,6 +347,7 @@ class VLLMMetricsScraper:
         if snapshot is None:
             self._prev_aggregated = None
             self._prev_timestamp = None
+            self._previous_engines = {}
             return {}
 
         now = time.monotonic()
@@ -338,6 +358,9 @@ class VLLMMetricsScraper:
         else:
             out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
 
+        if self._prev_aggregated is not None:
+            out.update(engine_imbalance(self._previous_engines, self._engine_snapshot, "vllm/"))
+        self._previous_engines = self._engine_snapshot
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
         return out
@@ -353,6 +376,7 @@ class VLLMMetricsScraper:
         if self._label is not None:
             raise ValueError(f"`start({label!r})` called while window {self._label!r} is still open")
         self._window_prev = await self._read_snapshot()
+        self._window_engines = self._engine_snapshot
         self._label = label
         self._window_time_s = 0.0
         self._active_since = time.monotonic()
@@ -396,7 +420,9 @@ class VLLMMetricsScraper:
         self._paused = False
         if new_snapshot is None:
             return {}
-        return self._window_metrics(prev, new_snapshot, window, f"{label}/")
+        result = self._window_metrics(prev, new_snapshot, window, f"{label}/")
+        result.update(engine_imbalance(self._window_engines, self._engine_snapshot, f"{label}/"))
+        return result
 
     @classmethod
     def _window_metrics(
@@ -492,3 +518,25 @@ class VLLMMetricsScraper:
                 out[f"{prefix}draft_acceptance_rate_pos_{pos + 1}"] = pos_d / drafts_d
 
         return out
+
+
+def engine_imbalance(previous, current, prefix):
+    """Return cross-engine CV of token deltas over one common interval."""
+    result = {}
+    for counter, public in (
+        (_COUNTER_PROMPT_TOKENS, "prompt_throughput_cv"),
+        (_COUNTER_GENERATION_TOKENS, "generation_throughput_cv"),
+    ):
+        deltas = []
+        for engine, counters in current.items():
+            if engine not in previous:
+                continue
+            # A present engine with no positive-only token counter is idle.
+            delta = counters.get(counter, 0.0) - previous[engine].get(counter, 0.0)
+            if math.isfinite(delta) and delta >= 0:
+                deltas.append(delta)
+        if deltas:
+            result[prefix + public + "_num_engines"] = len(deltas)
+        if len(deltas) >= 2 and statistics.mean(deltas) > 0:
+            result[prefix + public] = statistics.pstdev(deltas) / statistics.mean(deltas)
+    return result
