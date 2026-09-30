@@ -200,12 +200,16 @@ softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
 
 Wraps `transformer_block.checkpointed_forward` in `torch.autograd.graph.save_on_cpu` when
 `SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1`, so full-recompute checkpoint inputs (one hidden state per
-layer) wait in pinned host memory. Applied in `make_megatron_module` after
-`patch_dsa_index_share()`, which rebinds the same function.
+layer) wait in host memory. Applied in `make_megatron_module` after `patch_dsa_index_share()`,
+which rebinds the same function. Pageable by default (exact-size host allocations); pinned with
+`SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED=1` (~4x faster copies, asynchronous), in which case
+`release_pinned_offload_cache()` returns PyTorch's cached pinned blocks at the end of every
+`forward_backward` -- otherwise they stay reserved next to the CPU optimizer's buffers and the
+node runs out of host RAM.
 - **Landed?** Not a fix to retire; delete it if megatron-core grows its own offload of
   checkpointed layer inputs, or if nobody needs contexts past ~288k tokens per sequence.
-- **Remove:** the module, its call in `make_megatron_module`, and
-  `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`.
+- **Remove:** the module, its call in `make_megatron_module`, the `release_pinned_offload_cache()`
+  call in `forward_backward`, and `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

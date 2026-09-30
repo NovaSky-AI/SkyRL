@@ -1275,6 +1275,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status["peak_mem_allocated_gb_max"] = torch.cuda.max_memory_allocated() / 1024**3
         status["peak_mem_reserved_gb_max"] = torch.cuda.max_memory_reserved() / 1024**3
 
+        if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
+            from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
+                release_pinned_offload_cache,
+            )
+
+            release_pinned_offload_cache()
+
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
 
