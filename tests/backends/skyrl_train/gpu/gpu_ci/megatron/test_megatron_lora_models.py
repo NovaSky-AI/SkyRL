@@ -157,6 +157,8 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
         cfg.generator.inference_engine.expert_parallel_size = 8
         cfg.generator.inference_engine.distributed_executor_backend = "mp"
         cfg.generator.inference_engine.enable_return_routed_experts = True
+        # Full GLM needs separate trainer and inference GPUs during publication.
+        cfg.trainer.placement.colocate_all = False
     validate_cfg(cfg)
     return cfg
 
@@ -179,16 +181,18 @@ def _mean_abs_diff(reference: torch.Tensor, actual: torch.Tensor, mask: torch.Te
 
 async def _sync_weights(policy, client, cfg, label: str):
     """Offload the optimizer, publish the policy to the engines, then offload the model."""
-    policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
-    await client.wake_up(tags=["weights"])
+    if cfg.trainer.placement.colocate_all:
+        policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
+        await client.wake_up(tags=["weights"])
     with Timer(label):
         ray.get(
             policy.async_run_ray_method(
                 "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
-    policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
-    await client.wake_up(tags=["kv_cache"])
+    if cfg.trainer.placement.colocate_all:
+        policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
+        await client.wake_up(tags=["kv_cache"])
 
 
 @pytest.mark.asyncio
@@ -298,7 +302,7 @@ async def test_lora_logprobs_matching_roundtrip(
             cfg=cfg,
             model=model_name,
             use_local=True,
-            colocate_all=True,
+            colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             sleep_level=2,  # full sleep — this test explicitly syncs weights
             gpu_memory_utilization=engine_overrides["gpu_memory_utilization"],
@@ -329,11 +333,12 @@ async def test_lora_logprobs_matching_roundtrip(
             # adapter before the first rollout, as the trainer does; merged rows sample
             # on the checkpoint weights they loaded, which a level-1 sleep keeps in CPU
             # memory (level 2 would discard them).
-            await client.sleep(level=1)
+            if cfg.trainer.placement.colocate_all:
+                await client.sleep(level=1)
             policy = init_worker_with_type(
                 "policy",
                 shared_pg=pg,
-                colocate_all=True,
+                colocate_all=cfg.trainer.placement.colocate_all,
                 num_gpus_per_node=num_gpus,
                 cfg=cfg,
                 worker_cls=LoRAPerturbPolicyWorker,
@@ -343,50 +348,54 @@ async def test_lora_logprobs_matching_roundtrip(
                     "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
                 )
             )
-            if lora_sync:
-                await _sync_weights(policy, client, cfg, "initial_sync_weights")
-            else:
-                policy.offload_to_cpu(offload_optimizer=True, offload_model=True)
-                await client.wake_up()
+            with Timer("roundtrip_after_initialization"):
+                if lora_sync:
+                    await _sync_weights(policy, client, cfg, "initial_sync_weights")
+                else:
+                    policy.offload_to_cpu(offload_optimizer=True, offload_model=True)
+                    await client.wake_up()
 
-            # Phase 1: zero adapter.
-            (response_mask, logprobs_t, _), training_input = await generate_with_vllm(
-                generator, client, model_name, tokenizer, return_training_input=True
-            )
-            await client.sleep()
-            policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
+                # Phase 1: zero adapter.
+                (response_mask, logprobs_t, _), training_input = await generate_with_vllm(
+                    generator, client, model_name, tokenizer, return_training_input=True
+                )
+                if cfg.trainer.placement.colocate_all:
+                    await client.sleep()
+                    policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
-            mask = response_mask.bool()
-            logprobs_megatron = _trainer_logprobs(policy, training_input)
-            zero_diff = _mean_abs_diff(logprobs_t, logprobs_megatron, mask, "zero adapter: vLLM vs Megatron")
-            assert zero_diff < threshold, f"Logprob diff should be less than {threshold}, but is {zero_diff:.6f}"
+                mask = response_mask.bool()
+                logprobs_megatron = _trainer_logprobs(policy, training_input)
+                zero_diff = _mean_abs_diff(logprobs_t, logprobs_megatron, mask, "zero adapter: vLLM vs Megatron")
+                assert zero_diff < threshold, f"Logprob diff should be less than {threshold}, but is {zero_diff:.6f}"
 
-            # Phase 2: perturb the trainer's adapter; the engines still serve the zero adapter.
-            multiplier = _lora_b_multiplier(model_name)
-            stats = ray.get(policy.async_run_ray_method("pass_through", "perturb_lora_b", multiplier))[0]
-            print(f"perturbed {stats['changed_tensors']} LoRA B tensors ({stats['changed_elements']} elements)")
-            logprobs_megatron_perturbed = _trainer_logprobs(policy, training_input)
-            _mean_abs_diff(
-                logprobs_megatron, logprobs_megatron_perturbed, mask, "perturbation: Megatron before vs after"
-            )
-            stale_diff = _mean_abs_diff(
-                logprobs_t, logprobs_megatron_perturbed, mask, "stale sampler: vLLM vs perturbed Megatron"
-            )
-            assert stale_diff > threshold, (
-                f"Perturbed Megatron differs from the stale sampler by only {stale_diff:.6f}; "
-                f"raise the LoRA-B multiplier (now {multiplier}) so a missed sync fails the {threshold} parity check"
-            )
+                # Phase 2: perturb the trainer's adapter; the engines still serve the zero adapter.
+                multiplier = _lora_b_multiplier(model_name)
+                stats = ray.get(policy.async_run_ray_method("pass_through", "perturb_lora_b", multiplier))[0]
+                print(f"perturbed {stats['changed_tensors']} LoRA B tensors ({stats['changed_elements']} elements)")
+                logprobs_megatron_perturbed = _trainer_logprobs(policy, training_input)
+                _mean_abs_diff(
+                    logprobs_megatron, logprobs_megatron_perturbed, mask, "perturbation: Megatron before vs after"
+                )
+                stale_diff = _mean_abs_diff(
+                    logprobs_t, logprobs_megatron_perturbed, mask, "stale sampler: vLLM vs perturbed Megatron"
+                )
+                assert stale_diff > threshold, (
+                    f"Perturbed Megatron differs from the stale sampler by only {stale_diff:.6f}; "
+                    f"raise the LoRA-B multiplier (now {multiplier}) so a missed sync fails the {threshold} parity check"
+                )
 
-            # Phase 3: publish the perturbed adapter and score the new samples.
-            await _sync_weights(policy, client, cfg, "sync_weights")
-            (response_mask_2, logprobs_t_2, _), training_input_2 = await generate_with_vllm(
-                generator, client, model_name, tokenizer, return_training_input=True
-            )
-            await client.sleep()
-            policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
+                # Phase 3: publish the perturbed adapter and score the new samples.
+                await _sync_weights(policy, client, cfg, "sync_weights")
+                (response_mask_2, logprobs_t_2, _), training_input_2 = await generate_with_vllm(
+                    generator, client, model_name, tokenizer, return_training_input=True
+                )
+                if cfg.trainer.placement.colocate_all:
+                    await client.sleep()
+                    policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
-            logprobs_megatron_2 = _trainer_logprobs(policy, training_input_2)
-            updated_diff = _mean_abs_diff(
-                logprobs_t_2, logprobs_megatron_2, response_mask_2.bool(), "updated adapter: vLLM vs Megatron"
-            )
-            assert updated_diff < threshold, f"Logprob diff should be less than {threshold}, but is {updated_diff:.6f}"
+                logprobs_megatron_2 = _trainer_logprobs(policy, training_input_2)
+                updated_diff = _mean_abs_diff(
+                    logprobs_t_2, logprobs_megatron_2, response_mask_2.bool(), "updated adapter: vLLM vs Megatron"
+                )
+                assert updated_diff < threshold, f"Logprob diff should be less than {threshold}, but is {updated_diff:.6f}"
+            print("ROUNDTRIP_PASS", flush=True)
