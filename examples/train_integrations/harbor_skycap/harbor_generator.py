@@ -36,6 +36,7 @@ from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from .compose import TrialOutcome, compose, split
+from .record_index import RecordLog
 
 litellm.suppress_debug_info = True
 
@@ -53,6 +54,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         harbor_cfg: Dict[str, Any],
         capture_urls: List[str],
         inference_engine_client: Any = None,
+        records: Optional[RecordLog] = None,
     ) -> None:
         """
         Args:
@@ -60,6 +62,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             harbor_cfg: Harbor's ``TrialConfig`` template.
             capture_urls: the skycap servers to spread trajectories over.
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
+            records: where every trajectory opened is logged, per phase, for the W&B record index.
         """
         if not getattr(generator_cfg, "step_wise_trajectories", False):
             raise ValueError(
@@ -76,6 +79,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.capture_urls = list(capture_urls)
         self.pool = CapturePool(self.capture_urls)
         self.inference_engine_client = inference_engine_client
+        self.records = records
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
             raise ValueError("generator.inference_engine.served_model_name must be set, without '/'")
@@ -110,6 +114,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             raise ValueError(f"Prompt count ({len(prompts)}) doesn't match trajectory_ids ({len(trajectory_ids)})")
         metadata = input_batch.get("batch_metadata")
         step = getattr(metadata, "global_step", None)
+        phase = getattr(metadata, "training_phase", "train")
         cache_salt = self._cache_salt()
 
         outcomes: List[Optional[TrialOutcome]] = [None] * len(prompts)
@@ -122,7 +127,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         )
 
         async def worker(index: int, prompt: ConversationType, trajectory_id: TrajectoryID) -> None:
-            outcomes[index] = await self._trial(prompt, trajectory_id, cache_salt, step)
+            outcomes[index] = await self._trial(prompt, trajectory_id, cache_salt, step, phase)
             progress.update(1)
 
         try:
@@ -146,6 +151,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
         step: Optional[int],
+        phase: str,
     ) -> TrialOutcome:
         """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch."""
         started = time.monotonic()
@@ -153,7 +159,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         for attempt in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             try:
-                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, attempt)
+                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, phase, attempt)
             except Exception as error:  # noqa: BLE001 - retried, then masked
                 logger.warning(f"{prefix} failed: {type(error).__name__}: {error}")
                 continue
@@ -175,6 +181,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
         step: Optional[int],
+        phase: str,
         attempt: int,
     ) -> TrialOutcome:
         """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces."""
@@ -185,24 +192,30 @@ class HarborSkycapGenerator(GeneratorInterface):
             "step": step,
             "attempt": attempt,
         }
-        async with self.pool.trajectory(meta) as trajectory:
-            config = self._trial_config(prompt, trajectory.base_url, cache_salt)
-            async with self._rate_limiter:
-                results = await (await Trial.create(TrialConfig.model_validate(config))).run()
+        trajectory = None
+        try:
+            async with self.pool.trajectory(meta) as trajectory:
+                config = self._trial_config(prompt, trajectory.base_url, cache_salt)
+                async with self._rate_limiter:
+                    results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
-            exception = results.exception_info.exception_type if results.exception_info else None
-            if exception == "AgentTimeoutError":
-                # Masked, not retried, as the sibling does.
-                reward, stop_reason = 0.0, "agent_timeout"
-            elif exception == "ContextLengthExceededError":
-                # Trains with reward 0, as the sibling does.
-                reward, stop_reason = 0.0, "context_length"
-            elif not results.verifier_result:
-                reward, stop_reason = 0.0, "error"
-                logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
-            else:
-                reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
-            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
+                exception = results.exception_info.exception_type if results.exception_info else None
+                if exception == "AgentTimeoutError":
+                    # Masked, not retried, as the sibling does.
+                    reward, stop_reason = 0.0, "agent_timeout"
+                elif exception == "ContextLengthExceededError":
+                    # Trains with reward 0, as the sibling does.
+                    reward, stop_reason = 0.0, "context_length"
+                elif not results.verifier_result:
+                    reward, stop_reason = 0.0, "error"
+                    logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
+                else:
+                    reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
+                finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
+        finally:
+            # Every attempt that got a trajectory, including one that raised: the pool finished it.
+            if self.records is not None and trajectory is not None:
+                self.records.add(phase, trajectory_id, attempt, trajectory)
 
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
