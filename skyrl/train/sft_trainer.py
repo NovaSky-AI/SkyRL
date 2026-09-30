@@ -927,7 +927,11 @@ class SFTTrainer:
             "padding_side": "left",
         }
 
-        self.is_vlm = check_is_vlm(self.cfg.trainer.policy.model.path)
+        # ``language_model_only`` trains only the text stack of a VL checkpoint (e.g. GLM-5.3-Flash),
+        # which the Megatron worker already treats as a plain LM; don't disable packing for it.
+        self.is_vlm = (
+            check_is_vlm(self.cfg.trainer.policy.model.path) and not self.cfg.trainer.policy.language_model_only
+        )
         if self.is_vlm:
             self.processor = get_processor(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
             # Sequence packing / microbatch padding removal are unsupported for
