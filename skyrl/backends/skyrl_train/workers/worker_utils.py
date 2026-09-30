@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -7,6 +7,7 @@ import torch.distributed as dist
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import (
     PACKED_FIELD_PADDING,
+    REAL_SAMPLE_MASK,
     TensorBatch,
     TrainingInputBatch,
     make_packed_field_padding,
@@ -20,11 +21,12 @@ from skyrl.train.dataset.replay_buffer import Experience
 # Metrics that end in `_loss` but are plain per-token MEANS, not pre-scaled minibatch sums.
 # The `sum_loss_metrics` convention sums every `_loss` key because the *policy* losses are
 # pre-scaled (by num_microbatches * dp_size) so that summing recovers the correct minibatch
-# loss. The decoupled MTP/draft loss is NOT pre-scaled -- it is a masked per-token mean, like
-# KL/entropy (which dodge the sum only because they are named `policy_kl`/`policy_entropy`).
+# loss. The decoupled MTP/draft loss is NOT pre-scaled -- it is a masked per-token mean.
 # Summing it would multiply the reported value by the microbatch (and DP) count -- e.g. a true
 # ~0.5 nats reads as ~44. Keep these averaged regardless of `sum_loss_metrics`.
 MEAN_LOSS_METRICS = frozenset({"mtp_loss", "draft_loss"})
+# KL/entropy are reported as contributions normalized over the whole minibatch, so they sum.
+MINIBATCH_SUM_METRICS = frozenset({"policy_kl", "policy_entropy"})
 # Per-micro-batch abs diff between train-step and rollout logprobs. The moments (`_mean`,
 # `_sq_mean`) and `_max`/`_min` reduce correctly across micro-batches, DP ranks, and
 # mini-batches; the std is reconstructed from the moments downstream.
@@ -74,6 +76,11 @@ def compute_minibatch_rollout_logprob_diff_metrics(
     }
 
 
+def _is_summed_metric(key: str) -> bool:
+    """Minibatch-normalized contributions that ``sum_loss_metrics`` sums instead of averaging."""
+    return (key == "loss" or key.endswith("_loss") or key in MINIBATCH_SUM_METRICS) and key not in MEAN_LOSS_METRICS
+
+
 def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:
     """Reduce scalar metrics from a list of entries per key with the appropriate reduction.
 
@@ -100,7 +107,7 @@ def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = Fal
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
-        elif sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS:
+        elif sum_loss_metrics and _is_summed_metric(k):
             reduced_metrics[k] = sum(v)
         else:
             reduced_metrics[k] = sum(v) / len(v)
@@ -116,23 +123,18 @@ def all_reduce_metrics(
     """All reduce metrics across all processes.
 
     Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
-    If sum_loss_metrics is True, metrics named ``loss`` or ending in ``_loss`` are summed
-    instead of averaged.
+    If sum_loss_metrics is True, loss metrics and RL regularizer contributions are
+    summed instead of averaged (except the auxiliary means in MEAN_LOSS_METRICS).
 
     Args:
         metrics: Dictionary of metric name to scalar value.
         strategy: Distributed strategy for all-reduce.
         group: Process group for all-reduce.
-        sum_loss_metrics: If True, metrics named ``loss`` or ending in ``_loss`` are summed
-            (for pre-scaled policy losses).
+        sum_loss_metrics: Sum contributions normalized over the whole minibatch.
     """
     min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
     max_metrics = {k: v for k, v in metrics.items() if k.endswith("_max")}
-    sum_metrics = {
-        k: v
-        for k, v in metrics.items()
-        if sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS
-    }
+    sum_metrics = {k: v for k, v in metrics.items() if sum_loss_metrics and _is_summed_metric(k)}
     mean_metrics = {
         k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics
     }
@@ -158,9 +160,20 @@ class BaseBatchIterator:
     def __iter__(self) -> Iterator[TrainingInputBatch]:
         raise NotImplementedError
 
+    @property
+    def num_padding_microbatches(self) -> int:
+        return 0
+
     def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
         """Reorder and combine output batches to form a single output."""
         raise NotImplementedError
+
+    def reorder_and_combine_items(self, outputs: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """Flatten per-sample outputs, one per input row (callers trim their own padding)."""
+        flat = [item for batch in outputs for item in batch]
+        if flat and len(flat) != self.data.batch_size:
+            raise ValueError("Per-sample output count does not match the input batch")
+        return flat
 
     @staticmethod
     def batch_to_experience(batch: TrainingInputBatch):
@@ -192,6 +205,7 @@ class BaseBatchIterator:
             # Per-row sub-sequence lengths for sequence packing (None otherwise);
             # chunked per micro-batch by ``TensorBatch.chunk`` like any other field.
             sub_seq_lengths=batch.get("sub_seq_lengths"),
+            real_sample_mask=batch.real_sample_mask,
         )
         return exp
 
@@ -336,6 +350,7 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                 # Loss mask is all zeros so padding samples don't contribute to the loss.
                 "loss_mask": torch.zeros((batch_size, num_actions), dtype=int, device=device),
                 "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
+                REAL_SAMPLE_MASK: torch.zeros(batch_size, dtype=torch.bool, device=device),
             }
         )
         # Add optional fields to the padding batch.
@@ -443,7 +458,11 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         return reordered_batch
 
     def reorder_and_combine_items(self, batches: List[List[dict]]) -> List[dict]:
-        """Restore per-sample microbatch outputs to input order."""
+        """Restore per-sample microbatch outputs to input order, one per input row."""
+        if not any(batches):
+            return []
+        if len(batches) != len(self):
+            raise ValueError("Output microbatch count does not match the iterator")
         ordered = [None] * self.data.batch_size
         for original_indices, items in zip(self._microbatches, batches):
             if len(items) < len(original_indices):

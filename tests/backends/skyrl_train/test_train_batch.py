@@ -9,6 +9,7 @@ import torch
 
 from skyrl.backends.skyrl_train.training_batch import (
     PACKED_FIELD_PADDING,
+    REAL_SAMPLE_MASK,
     BatchField,
     TensorBatch,
     TensorFormat,
@@ -573,6 +574,7 @@ def test_tensor_batch_none_tensor_list():
 # `test_pad_batch_typeddict_matches_expected_fields` fail, forcing the author to decide how the
 # new field should be padded.
 EXPECTED_TRAINING_INPUT_FIELDS = {
+    REAL_SAMPLE_MASK,
     "sequences",
     "attention_mask",
     "loss_mask",
@@ -600,6 +602,7 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
     """
     torch.manual_seed(0)
     data = {
+        REAL_SAMPLE_MASK: torch.ones(batch_size, dtype=torch.bool),
         "sequences": torch.arange(batch_size * seq_len).reshape(batch_size, seq_len).long(),
         "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
         "loss_mask": torch.ones(batch_size, seq_len, dtype=torch.float),
@@ -680,6 +683,7 @@ def test_pad_batch_all_fields():
     # loss_mask: original rows untouched, padding rows all-zero.
     assert torch.equal(padded["loss_mask"][:batch_size], batch["loss_mask"])
     assert torch.all(padded["loss_mask"][batch_size:] == 0)
+    assert padded.real_sample_mask.tolist() == [True] * batch_size + [False] * pad_size
 
     # Regular tensor fields (not loss_mask, not TensorList): original rows untouched,
     # padding rows are copies of row 0.
@@ -698,6 +702,7 @@ def test_pad_batch_all_fields():
     assert torch.all(padded_support.values == SAMPLE_SUPPORT_PADDING)
 
     regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {
+        REAL_SAMPLE_MASK,
         "loss_mask",
         "rollout_expert_indices",
         "router_padding_mask",

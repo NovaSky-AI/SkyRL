@@ -11,6 +11,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MinibatchLossNormalization,
+)
 from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
 from skyrl.train.config import SkyRLTrainConfig
@@ -52,6 +55,9 @@ def _make_cpu_policy_worker() -> PolicyWorkerBase:
     return worker
 
 
+_LOSS_NORMALIZATION = MinibatchLossNormalization(num_sequences=BATCH_SIZE, num_loss_tokens=BATCH_SIZE * NUM_ACTIONS)
+
+
 def _patch_model(worker: PolicyWorkerBase, action_log_probs: torch.Tensor) -> None:
     """Make ``worker.model(...)`` return canned logprobs."""
     model = MagicMock()
@@ -87,7 +93,7 @@ def _run_forward_backward_micro(return_per_token_outputs=True, loss_fn_config=No
     with patch("torch.cuda.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
         return worker._forward_backward_micro(
             experience,
-            microbatch_weight=1.0,
+            loss_normalization=_LOSS_NORMALIZATION,
             loss_fn="cross_entropy",
             loss_fn_config=loss_fn_config,
             return_per_token_outputs=return_per_token_outputs,
@@ -129,7 +135,7 @@ def _run_forward_backward_micro_rl(return_per_token_outputs=True):
     with patch("torch.cuda.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
         return worker._forward_backward_micro(
             experience,
-            microbatch_weight=1.0,
+            loss_normalization=_LOSS_NORMALIZATION,
             loss_fn="regular",
             return_per_token_outputs=return_per_token_outputs,
         )
