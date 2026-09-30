@@ -1072,7 +1072,8 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "NCCL_DEBUG",
     ):
         if value := os.environ.get(var_name):
-            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            logged_value = "[REDACTED]" if var_name == "HF_TOKEN" else value
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {logged_value}")
             env_vars[var_name] = value
 
     # Forward any SKYRL_* overrides set in the launching shell (e.g.
