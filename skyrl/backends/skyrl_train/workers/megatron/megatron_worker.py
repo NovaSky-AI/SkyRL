@@ -1106,6 +1106,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ``metrics`` (all-reduced across DP).
         """
         self.model.train()
+        torch.cuda.reset_peak_memory_stats()
 
         all_metrics = defaultdict(list)
 
@@ -1256,6 +1257,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if use_token_batching:
             status["num_microbatches"] = float(len(micro_buffer))
             status["num_padding_microbatches"] = float(num_padding_microbatches)
+
+        # Peak CUDA memory over this forward_backward call, max-reduced across ranks.
+        status["peak_mem_allocated_gb_max"] = torch.cuda.max_memory_allocated() / 1024**3
+        status["peak_mem_reserved_gb_max"] = torch.cuda.max_memory_reserved() / 1024**3
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)

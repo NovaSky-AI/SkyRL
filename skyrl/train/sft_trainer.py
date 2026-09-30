@@ -1713,6 +1713,7 @@ class SFTTrainer:
             "loss": loss_val,
             "grad_norm": grad_norm,
             "timings": timings,
+            "peak_mem": {k: v for k, v in metrics.items() if k.startswith("peak_mem_")},
         }
 
     def _validate_batch_parallelism(self):
@@ -1817,14 +1818,17 @@ class SFTTrainer:
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+                log_dict.update({f"memory/{k}": v for k, v in step_result["peak_mem"].items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())
 
                 self.tracker.log(log_dict, step=step, commit=True)
+                peak_mem_str = ", ".join(f"{k}={v:.1f}" for k, v in step_result["peak_mem"].items())
                 logger.info(
                     f"Step {step}: loss={step_result['loss']:.4f}, "
                     f"grad_norm={step_result['grad_norm']}, "
-                    f"tokens_per_second={tokens_per_second:.0f}"
+                    f"tokens_per_second={tokens_per_second:.0f}, "
+                    f"step_time={all_timings['step']:.2f}s, {peak_mem_str}"
                 )
         finally:
             if self._torch_profiler_enabled:
