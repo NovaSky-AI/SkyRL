@@ -49,6 +49,22 @@ class Plan:
     bridged: bool
 
 
+def routes_from(graph: MessageGraph, planned: Plan) -> int:
+    """The first position whose routes this turn needs from the engine.
+
+    The prefix's nodes already hold routes from the calls that ran them, except the last token's,
+    which is a placeholder until a call forwards it. So routes are needed from that token on,
+    provided every node before it has its routes; otherwise from the start, as without the option.
+    """
+    if planned.parent is None or planned.prefix_len == 0:
+        return 0
+    for node_id in graph.path_to(planned.parent):
+        tokens = graph.nodes[node_id].tokens
+        if tokens is None or tokens.routed_experts is None or len(tokens.routed_experts) != len(tokens.token_ids):
+            return 0
+    return planned.prefix_len - 1
+
+
 def match_hashes(messages: Sequence[Mapping[str, Any]], tools: str, model: str | None) -> list[str]:
     return [hashing.match_hash(m, tools=tools, model=model) for m in messages]
 

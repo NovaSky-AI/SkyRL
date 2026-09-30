@@ -31,6 +31,8 @@ class SkyRLEngine(VLLMEngine):
     name = "skyrl"
     generate_path = "/skyrl/v1/generate"
     release_path = "/finish_session"
+    # vLLM's ``SamplingParams.routed_experts_prompt_start``, which SkyRL's server passes through.
+    routes_from_supported = True
 
     def request(self, *, sampling_mask: bool, **kwargs: Any) -> dict[str, Any]:
         body = super().request(sampling_mask=sampling_mask, **kwargs)

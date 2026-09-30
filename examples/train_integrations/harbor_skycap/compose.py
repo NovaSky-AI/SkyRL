@@ -19,8 +19,10 @@ The masking policy is the sibling's: an instance with any rollout that timed
 out or failed is masked whole, and a trial that hit the context limit trains
 with its reward unless overlong filtering is on.
 
-Routed experts are in skycap's record but not in the output: SkyRL's trainer
-doesn't take R3 with step-wise output yet (``_validate_per_token_side_channels``).
+With R3, each row carries its own routes: one per token of the path, prompt and
+history included, each from the forward pass that ran it. The path's last token
+was never forwarded, so its row is left out; the trainer pads it, as it does for
+SkyRL's own trace.
 """
 
 from dataclasses import dataclass, field
@@ -29,6 +31,10 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from skycap import Sample
 
+from skyrl.backends.skyrl_train.utils.routed_experts import (
+    RoutedExpertIndices,
+    compact_routed_expert_indices,
+)
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
     SAMPLE_SUPPORT_PADDING,
@@ -52,6 +58,8 @@ class TrialOutcome:
     # Model calls whose prompt skycap had to render instead of extending the previous tokens:
     # expected for a harness that edits or compacts its history, a surprise for an append-only one.
     unbridged_calls: int = 0
+    # R3: the trial finished, but a trained path lacked routed experts.
+    missing_routes: bool = False
 
 
 @dataclass
@@ -61,6 +69,7 @@ class _Row:
     loss_mask: List[int]
     logprobs: List[float]
     support: Optional[List[List[int]]] = None
+    routes: Optional[RoutedExpertIndices] = None
     placeholder: bool = False
 
 
@@ -80,7 +89,16 @@ def split(sample: Sample) -> Optional[_Row]:
             list(sample.logprobs[first:]) if sample.logprobs is not None else [0.0] * (len(sample.input_ids) - first)
         ),
         support=sample.sampling_mask[first:] if sample.sampling_mask is not None else None,
+        routes=_routes(sample),
     )
+
+
+def _routes(sample: Sample) -> Optional[RoutedExpertIndices]:
+    """The path's routes, less the last token's, which the engine never forwarded."""
+    routed = sample.routed_experts
+    if routed is None or len(routed) != len(sample.input_ids) or len(routed) < 2:
+        return None
+    return compact_routed_expert_indices(np.asarray(routed[:-1]))
 
 
 def _placeholder() -> _Row:
@@ -89,12 +107,18 @@ def _placeholder() -> _Row:
 
 
 def compose(
-    outcomes: List[TrialOutcome], *, overlong_filtering: bool, top_k: int = -1, sample_support: bool = False
+    outcomes: List[TrialOutcome],
+    *,
+    overlong_filtering: bool,
+    top_k: int = -1,
+    sample_support: bool = False,
+    routed_experts: bool = False,
 ) -> GeneratorOutput:
     """``top_k`` sets the width of sampler-support rows, as SkyRL's own capture pads them.
 
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
-    still carries padded support rows, as every other batch will.
+    still carries padded support rows, as every other batch will. ``routed_experts`` says the same
+    of routes (R3); every trained row must then have them.
     """
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
 
@@ -113,6 +137,7 @@ def compose(
 
     real = [row for rows in groups for row in rows if not row.placeholder]
     support = _sample_support(groups, real, top_k, expected=sample_support)
+    routes = _rollout_routes(groups, real) if routed_experts else None
 
     out: Dict[str, List[Any]] = {
         key: []
@@ -145,7 +170,7 @@ def compose(
     return GeneratorOutput(
         **out,
         trajectory_generation_times=None if any(t is None for t in times) else times,
-        rollout_expert_indices=None,
+        rollout_expert_indices=routes,
         rollout_sample_support=support,
         rollout_metrics=_metrics(outcomes, trained, masked_instances),
     )
@@ -172,6 +197,21 @@ def _sample_support(
     return arrays
 
 
+def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List[RoutedExpertIndices]]:
+    if not real:
+        # Nothing to train, and no shape to pad placeholders with: this step replays nothing.
+        return None
+    missing = sum(row.routes is None for row in real)
+    if missing:
+        # The generator turns a trial without routes into an error, so this is a bug, not a rollout.
+        raise ValueError(f"{missing} of {len(real)} trained paths have no routed experts")
+    # A placeholder's one route names distinct experts, as the trainer's own padding does
+    # (``replay_padding_row``): Megatron's dispatcher needs ``tokens * topk`` distinct slots.
+    layers, topk = real[0].routes.shape[1:]
+    dummy = np.broadcast_to(np.arange(topk, dtype=real[0].routes.dtype), (1, layers, topk)).copy()
+    return [dummy if row.placeholder else row.routes for rows in groups for row in rows]
+
+
 def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_instances: set) -> Dict[str, Any]:
     metrics: Dict[str, Any] = {}
     if trained:
@@ -195,4 +235,5 @@ def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_i
     # Which trajectories to open in the viewer: each forks at its first unbridged call.
     metrics["generate/skycap/num_unbridged_trajectories"] = sum(o.unbridged_calls > 0 for o in outcomes)
     metrics["generate/skycap/num_unbridged_calls"] = sum(o.unbridged_calls for o in outcomes)
+    metrics["generate/skycap/num_missing_route_trajectories"] = sum(o.missing_routes for o in outcomes)
     return metrics

@@ -1183,6 +1183,28 @@ class TestMaxSeqLenValidation:
         validate_cfg(cfg)
 
 
+class TestStepWiseRoutedExpertsValidation:
+    @staticmethod
+    def _cfg():
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = "megatron"
+        cfg.generator.inference_engine.distributed_executor_backend = "mp"
+        cfg.generator.step_wise_trajectories = True
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        return cfg
+
+    def test_step_wise_rows_may_carry_routes(self):
+        validate_cfg(self._cfg())
+
+    def test_merged_step_wise_output_refuses_routes(self):
+        cfg = self._cfg()
+        cfg.generator.merge_stepwise_output = True
+
+        with pytest.raises(ValueError, match="prefix-aware merging does not merge routed experts"):
+            validate_cfg(cfg)
+
+
 class TestTorchProfilerConfigValidation:
     """TorchProfilerConfig validation coverage."""
 

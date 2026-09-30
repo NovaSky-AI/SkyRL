@@ -762,13 +762,6 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
     prompt_token_ids = generator_output["prompt_token_ids"]
     response_ids = generator_output["response_ids"]
 
-    # Trajectory-aligned routes cannot be replayed against per-turn samples.
-    assert not (step_wise and rollout_expert_indices is not None), (
-        "rollout router replay (r3) is not supported with step-wise training: a route trace is "
-        "accumulated over one contiguous prompt+response token sequence, so replaying it against "
-        "per-turn samples would silently route trained tokens by another token's rollout routes"
-    )
-
     if rollout_expert_indices is not None:
         loss_masks = generator_output["loss_masks"]
         for i, sample_indices in enumerate(rollout_expert_indices):
@@ -779,6 +772,14 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
             assert 0 < captured_rows <= sequence_length, (
                 f"rollout_expert_indices[{i}] has {captured_rows} route rows for a "
                 f"{sequence_length}-token trajectory, expected a non-empty prefix of it"
+            )
+            # A step-wise row's prompt is the history so far, so its routes must be the row's own:
+            # one per token, less at most the last, which the engine never forwards. Routes for the
+            # step's generated tokens alone, or for the whole trajectory on an earlier step, would
+            # replay onto the wrong tokens.
+            assert not step_wise or captured_rows >= sequence_length - 1, (
+                f"rollout_expert_indices[{i}] has {captured_rows} route rows for a {sequence_length}-token "
+                "step-wise row: step-wise routes must cover the row's whole prompt and response"
             )
             # Row t covers target t + 1, so every trained target needs a captured row.
             trained_positions = np.flatnonzero(np.asarray(loss_masks[i]))

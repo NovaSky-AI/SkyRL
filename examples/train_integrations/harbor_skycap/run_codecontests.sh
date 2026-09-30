@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Harbor training on CodeContests, sandboxed on Modal, through skycap or through the
-# sibling `harbor` integration (the baseline), to compare the two.
+# Harbor training on CodeContests, sandboxed on Daytona or Modal, through skycap or through
+# the sibling `harbor` integration (the baseline), to compare the two.
 #
-#   bash examples/train_integrations/harbor_skycap/run_codecontests_modal.sh [extra overrides...]
+#   bash examples/train_integrations/harbor_skycap/run_codecontests.sh [extra overrides...]
 #
 # The defaults are the sibling recipe, examples/train_integrations/harbor/run_codecontest.sh:
 # Qwen3-8B, 32k context, 32 prompts x 8 samples per step, GRPO with token-mean loss and TIS,
 # overlong filtering, 8 GPUs colocated with 4 vLLM engines at TP 2. The knobs below scale it down.
 #
-# Does everything: reads the Modal credentials, prepares the tasks under /tmp/harbor/data
+# Does everything: reads the sandbox credentials, prepares the tasks under /tmp/harbor/data
 # (skipped when they are already there), and trains EPOCHS passes over the tasks. Each run
 # gets a fresh uuid name, so its trials, skycap records, checkpoints and logs all land in
 # their own /tmp/harbor/runs/<name>.
@@ -23,8 +23,16 @@
 #                              alone and greedy decoding can't flip on batch-dependent numerics
 #   LOGGER=console|wandb       W&B (project harbor-compare, run named after the experiment) by
 #                              default when a key is found, else the console
+#   SANDBOX=daytona|modal      where Harbor runs each trial's sandbox (default daytona)
+#   STRATEGY=fsdp|megatron     the training backend (default fsdp); megatron takes MEGATRON_TP,
+#                              MEGATRON_PP, MEGATRON_EP and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1
+#                              (the default) keeps the optimizer state on the CPU, which an MoE on
+#                              one node needs: expert parameters aren't sharded across data parallel
+#   R3=1                       rollout routing replay for an MoE model: vLLM returns each token's
+#                              routed experts and Megatron replays them (needs STRATEGY=megatron)
 #
-# Needs: the GPUs, and a file holding `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...`. For W&B,
+# Needs: the GPUs, and the sandbox's credentials in a file: `DAYTONA_API_KEY=...`
+# (DAYTONA_KEY_FILE) or `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...` (MODAL_KEY_FILE). For W&B,
 # WANDB_API_KEY, or a file holding `WANDB_API_KEY=...` (WANDB_KEY_FILE).
 set -euo pipefail
 
@@ -34,6 +42,8 @@ cd "$REPO"
 #-----------------------
 # Knobs
 #-----------------------
+SANDBOX="${SANDBOX:-daytona}"
+DAYTONA_KEY_FILE="${DAYTONA_KEY_FILE:-$HOME/default/daytona.key}"
 MODAL_KEY_FILE="${MODAL_KEY_FILE:-$HOME/default/model_key.key}"
 WANDB_KEY_FILE="${WANDB_KEY_FILE:-$HOME/default/wandb_key.key}"
 GENERATOR="${GENERATOR:-skycap}"
@@ -53,7 +63,17 @@ NUM_GPUS="${NUM_GPUS:-8}"
 NUM_ENGINES="${NUM_ENGINES:-4}"
 TP_SIZE="${TP_SIZE:-2}"
 SKYCAP_SERVERS="${SKYCAP_SERVERS:-2}"
+# vLLM's share of each GPU. It wakes up next to the trainer's weights after each step, so a
+# large model colocated with Megatron needs less than the recipe's 0.8 (0.6 for Qwen3-30B-A3B).
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 DATASET="${DATASET:-open-thoughts/CodeContests}"
+STRATEGY="${STRATEGY:-fsdp}"
+MEGATRON_TP="${MEGATRON_TP:-1}"
+MEGATRON_PP="${MEGATRON_PP:-1}"
+MEGATRON_EP="${MEGATRON_EP:-8}"
+MEGATRON_ETP="${MEGATRON_ETP:-1}"
+R3="${R3:-0}"
+OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
 
 DATA_ROOT="/tmp/harbor/data"
 TASKS_DIR="$DATA_ROOT/$(basename "$DATASET")"
@@ -86,6 +106,41 @@ case "$GENERATOR" in
     exit 1
     ;;
 esac
+case "$STRATEGY" in
+  fsdp) STRATEGY_ARGS=() ;;
+  megatron)
+    STRATEGY_ARGS=(
+      trainer.policy.megatron_config.tensor_model_parallel_size="$MEGATRON_TP"
+      trainer.policy.megatron_config.pipeline_model_parallel_size="$MEGATRON_PP"
+      trainer.policy.megatron_config.expert_model_parallel_size="$MEGATRON_EP"
+      trainer.policy.megatron_config.expert_tensor_parallel_size="$MEGATRON_ETP"
+      trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity=full
+      trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=uniform
+      trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1
+    )
+    if [[ "$OPTIMIZER_OFFLOAD" == 1 ]]; then
+      STRATEGY_ARGS+=(
+        trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true
+        trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0
+        trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=true
+        trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=true
+      )
+    fi
+    ;;
+  *)
+    echo "STRATEGY must be fsdp or megatron, got $STRATEGY" >&2
+    exit 1
+    ;;
+esac
+if [[ "$R3" == 1 ]]; then
+  [[ "$STRATEGY" == megatron ]] || { echo "R3=1 needs STRATEGY=megatron" >&2; exit 1; }
+  # vLLM's mp backend, as SkyRL requires for R3 (the ray backend can hang).
+  STRATEGY_ARGS+=(
+    trainer.policy.megatron_config.moe_enable_routing_replay=true
+    generator.inference_engine.enable_return_routed_experts=true
+    generator.inference_engine.distributed_executor_backend=mp
+  )
+fi
 if [[ "$DETERMINISTIC" == 1 ]]; then
   ARM_ARGS+=(
     generator.rate_limit.max_concurrency=1
@@ -96,16 +151,28 @@ fi
 #-----------------------
 # Credentials
 #-----------------------
-if [[ ! -f "$MODAL_KEY_FILE" ]]; then
-  echo "no Modal credentials at $MODAL_KEY_FILE (set MODAL_KEY_FILE)" >&2
+case "$SANDBOX" in
+  daytona) KEY_FILE="$DAYTONA_KEY_FILE" ;;
+  modal) KEY_FILE="$MODAL_KEY_FILE" ;;
+  *)
+    echo "SANDBOX must be daytona or modal, got $SANDBOX" >&2
+    exit 1
+    ;;
+esac
+if [[ ! -f "$KEY_FILE" ]]; then
+  echo "no $SANDBOX credentials at $KEY_FILE" >&2
   exit 1
 fi
 set -a
 # shellcheck disable=SC1090
-source "$MODAL_KEY_FILE"
+source "$KEY_FILE"
 set +a
-: "${MODAL_TOKEN_ID:?$MODAL_KEY_FILE must set MODAL_TOKEN_ID}"
-: "${MODAL_TOKEN_SECRET:?$MODAL_KEY_FILE must set MODAL_TOKEN_SECRET}"
+if [[ "$SANDBOX" == daytona ]]; then
+  : "${DAYTONA_API_KEY:?$KEY_FILE must set DAYTONA_API_KEY}"
+else
+  : "${MODAL_TOKEN_ID:?$KEY_FILE must set MODAL_TOKEN_ID}"
+  : "${MODAL_TOKEN_SECRET:?$KEY_FILE must set MODAL_TOKEN_SECRET}"
+fi
 
 # SkyRL reads the W&B key from the environment only.
 if [[ -z "${WANDB_API_KEY:-}" && -f "$WANDB_KEY_FILE" ]]; then
@@ -172,7 +239,7 @@ echo "==> experiment $EXPERIMENT in $RUN_DIR"
 # Run: the sibling recipe's settings, apart from the knobs above. The arm's own settings come
 # last so they win (DETERMINISTIC's concurrency of 1 over the recipe's 512).
 #-----------------------
-uv run --isolated --extra fsdp "${EXTRAS[@]}" -m "$ENTRYPOINT" \
+uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   data.train_data="['$SUBSET_DIR']" \
   trainer.policy.model.path="$MODEL" \
   generator.inference_engine.served_model_name="$SERVED_MODEL_NAME" \
@@ -186,7 +253,7 @@ uv run --isolated --extra fsdp "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   trainer.hf_save_interval=-1 \
   trainer.resume_mode=none \
   harbor_trial_config.trials_dir="$RUN_DIR/trials" \
-  harbor_trial_config.environment.type=modal \
+  harbor_trial_config.environment.type="$SANDBOX" \
   harbor_trial_config.agent.kwargs.temperature="$TEMPERATURE" \
   harbor_trial_config.agent.kwargs.model_info.max_input_tokens="$MAX_MODEL_LEN" \
   harbor_trial_config.agent.kwargs.model_info.max_output_tokens="$MAX_MODEL_LEN" \
@@ -208,7 +275,7 @@ uv run --isolated --extra fsdp "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   trainer.algorithm.max_seq_len="$MAX_MODEL_LEN" \
   trainer.algorithm.temperature=1.0 \
   trainer.policy.optimizer_config.lr="$LR" \
-  trainer.strategy=fsdp \
+  trainer.strategy="$STRATEGY" \
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_nodes=1 \
   trainer.placement.ref_num_nodes=1 \
@@ -218,7 +285,7 @@ uv run --isolated --extra fsdp "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.num_engines="$NUM_ENGINES" \
   generator.inference_engine.tensor_parallel_size="$TP_SIZE" \
-  generator.inference_engine.gpu_memory_utilization=0.8 \
+  generator.inference_engine.gpu_memory_utilization="$GPU_MEMORY_UTILIZATION" \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.enforce_eager=false \
   generator.inference_engine.engine_init_kwargs.chat_template="$CHAT_TEMPLATE" \
@@ -231,6 +298,7 @@ uv run --isolated --extra fsdp "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   generator.rate_limit.enabled=true \
   generator.rate_limit.trajectories_per_second=5 \
   generator.rate_limit.max_concurrency=512 \
+  "${STRATEGY_ARGS[@]}" \
   "${ARM_ARGS[@]}" \
   "$@" 2>&1 | tee "$RUN_DIR/run.log"
 

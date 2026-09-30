@@ -40,6 +40,9 @@ class VLLMEngine:
     #: Where to POST ``?session_id=<trajectory id>`` when a trajectory ends, for a router that
     #: holds per-session state. None for vLLM, which holds none.
     release_path: str | None = None
+    #: Whether the wire takes ``routed_experts_prompt_start``: routes from that position on only,
+    #: so a turn doesn't fetch again the routes of the history before it.
+    routes_from_supported = False
     #: What vLLM's ``SamplingParams`` accepts; anything else is dropped rather than sent.
     sampling_keys = frozenset(
         {
@@ -67,9 +70,14 @@ class VLLMEngine:
         model: str | None,
         cache_salt: str | None,
         sampling_mask: bool,
+        routes_from: int = 0,
     ) -> dict[str, Any]:
+        """``routes_from`` is the first position whose routes the turn needs; it's sent only when
+        ``routes_from_supported``."""
         params = {key: value for key, value in sampling.items() if key in self.sampling_keys}
         params["logprobs"] = 0  # the sampled token's logprob only, which capture requires
+        if routes_from and self.routes_from_supported:
+            params["routed_experts_prompt_start"] = routes_from
         body: dict[str, Any] = {"token_ids": list(prompt_ids), "sampling_params": params}
         if model:
             body["model"] = model
@@ -77,7 +85,8 @@ class VLLMEngine:
             body["cache_salt"] = cache_salt
         return body
 
-    def parse(self, body: Any) -> EngineOutput:
+    def parse(self, body: Any, *, routes_from: int = 0) -> EngineOutput:
+        """``routes_from`` is what the request asked for: routes then start there, unless the reply says."""
         choice = _single_choice(body)
         completion = choice.get("token_ids")
         if not isinstance(completion, list) or not completion:
@@ -92,6 +101,7 @@ class VLLMEngine:
             completion_ids=[int(t) for t in completion],
             logprobs=[float(v) for v in logprobs],
             finish_reason=str(choice.get("finish_reason") or "stop"),
+            routed_start=routes_from if self.routes_from_supported else 0,
         )
         self._side_channels(choice, output)
         return output
@@ -102,7 +112,7 @@ class VLLMEngine:
             output.routed_experts = np.load(io.BytesIO(base64.b64decode(routed)), allow_pickle=False)
         elif isinstance(routed, Mapping):
             output.routed_experts = unpack(routed)
-            output.routed_start = int(routed.get("start") or 0)
+            output.routed_start = int(routed.get("start") or output.routed_start)
         mask = choice.get("sampling_mask")
         if mask is not None:
             if len(mask) != len(output.completion_ids):

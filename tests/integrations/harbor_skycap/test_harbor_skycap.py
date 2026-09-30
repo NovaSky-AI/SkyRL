@@ -152,7 +152,7 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
     assert decode(prompt).endswith("userlinearassistant")
     assert mask[0] == 1 and 0 in mask and mask[-1] == 1
     assert len(response) == len(mask) == len(out["rollout_logprobs"][0])
-    # Routes aren't handed to the trainer yet (it refuses R3 with step-wise output), but skycap records them.
+    # Without R3 the trainer gets no routes, though skycap records them.
     assert out["rollout_expert_indices"] is None
     (trajectory_id,) = record.list_ids(skycap.server.record_dir)
     for node in record.load(skycap.server.record_dir, trajectory_id).graph:
@@ -264,14 +264,57 @@ def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
     assert compose([outcome], overlong_filtering=False, top_k=TOP_K)["rollout_sample_support"] is None
 
 
+R3 = SimpleNamespace(served_model_name="policy", enable_return_routed_experts=True)
+
+
+def assert_routes_are_the_rows_own(out) -> None:
+    """The mock router's route row ``p`` names position ``p`` of its call, and every call starts at 0."""
+    for prompt, response, routes in zip(out["prompt_token_ids"], out["response_ids"], out["rollout_expert_indices"]):
+        length = len(prompt) + len(response)
+        assert routes.shape == (length - 1, LAYERS, EXPERTS_PER_TOKEN)
+        assert (routes[:, 0, 0] == np.arange(length - 1) % 256).all()
+
+
+@pytest.mark.asyncio
+async def test_with_r3_each_row_carries_routes_for_its_whole_prompt_and_response(generator, router, trials) -> None:
+    out = await generator(inference_engine=R3).generate(batch("linear", "summarize"), disable_tqdm=True)
+
+    validate_generator_output(2, out, step_wise=True)
+    # One row for the linear trial, two for the summarizing one, whose second path restarts the history.
+    assert len(out["rollout_expert_indices"]) == 3
+    assert_routes_are_the_rows_own(out)
+    assert out["rollout_metrics"]["generate/skycap/num_missing_route_trajectories"] == 0
+    # A turn that extends the previous one asks only for the routes skycap doesn't hold yet.
+    starts = [r["sampling_params"].get("routed_experts_prompt_start", 0) for r in router.requests]
+    assert any(start > 0 for start in starts)
+
+
+@pytest.mark.asyncio
+async def test_with_r3_a_masked_instance_gets_distinct_dummy_routes(generator, trials) -> None:
+    out = await generator(inference_engine=R3).generate(batch("timeout", "linear"), disable_tqdm=True)
+
+    validate_generator_output(2, out, step_wise=True)
+    timed_out = out["trajectory_ids"].index(TrajectoryID("timeout", 0))
+    assert out["rollout_expert_indices"][timed_out].tolist() == [[list(range(EXPERTS_PER_TOKEN))] * LAYERS]
+
+
+@pytest.mark.asyncio
+async def test_with_r3_a_trial_without_routes_is_retried_then_masked(generator, router, trials) -> None:
+    router.routes = False
+    out = await generator(inference_engine=R3).generate(batch("linear"), disable_tqdm=True)
+
+    assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
+    assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
+    assert out["rollout_metrics"]["generate/skycap/num_missing_route_trajectories"] == 1
+    # Nothing trained, so nothing to replay.
+    assert out["rollout_expert_indices"] is None
+
+
 def test_the_generator_refuses_configs_it_cannot_serve() -> None:
     with pytest.raises(ValueError, match="step_wise_trajectories"):
         HarborSkycapGenerator(generator_cfg(step_wise_trajectories=False), {}, ["http://x"])
     with pytest.raises(ValueError, match="merge_stepwise_output"):
         HarborSkycapGenerator(generator_cfg(merge_stepwise_output=True), {}, ["http://x"])
-    r3 = SimpleNamespace(served_model_name="policy", enable_return_routed_experts=True)
-    with pytest.raises(ValueError, match="R3"):
-        HarborSkycapGenerator(generator_cfg(inference_engine=r3), {}, ["http://x"])
     with pytest.raises(ValueError, match="served_model_name"):
         HarborSkycapGenerator(
             generator_cfg(inference_engine=SimpleNamespace(served_model_name="a/b")), {}, ["http://x"]

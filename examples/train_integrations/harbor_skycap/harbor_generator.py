@@ -71,13 +71,8 @@ class HarborSkycapGenerator(GeneratorInterface):
                 "Set generator.merge_stepwise_output=false: each row is already a complete multi-turn path, and "
                 "prefix merging could fuse two paths that merely share a prefix."
             )
-        if getattr(generator_cfg.inference_engine, "enable_return_routed_experts", False):
-            raise ValueError(
-                "HarborSkycapGenerator doesn't support R3 yet: SkyRL's trainer refuses routed experts with "
-                "step-wise output. skycap still records them. Set "
-                "generator.inference_engine.enable_return_routed_experts=false."
-            )
         self.generator_cfg = generator_cfg
+        self._routed_experts = bool(getattr(generator_cfg.inference_engine, "enable_return_routed_experts", False))
         self.capture_urls = list(capture_urls)
         self.pool = CapturePool(self.capture_urls)
         self.inference_engine_client = inference_engine_client
@@ -142,6 +137,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
+            routed_experts=self._routed_experts,
         )
 
     async def _trial(
@@ -153,6 +149,7 @@ class HarborSkycapGenerator(GeneratorInterface):
     ) -> TrialOutcome:
         """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch."""
         started = time.monotonic()
+        missing_routes = False
         for attempt in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             try:
@@ -163,8 +160,14 @@ class HarborSkycapGenerator(GeneratorInterface):
             outcome.e2e_time = time.monotonic() - started
             if outcome.stop_reason != "error":
                 return outcome
+            missing_routes = missing_routes or outcome.missing_routes
             logger.warning(f"{prefix} produced nothing to train on")
-        return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error", e2e_time=time.monotonic() - started)
+        return TrialOutcome(
+            trajectory_id=trajectory_id,
+            stop_reason="error",
+            e2e_time=time.monotonic() - started,
+            missing_routes=missing_routes,
+        )
 
     async def _attempt(
         self,
@@ -210,6 +213,13 @@ class HarborSkycapGenerator(GeneratorInterface):
             # so the trial's reward doesn't enter the group without tokens behind it.
             logger.warning(f"Trajectory {trajectory_id}: skycap captured no trainable tokens")
             return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
+        if self._routed_experts and any(
+            (row := split(sample)) is not None and row.routes is None for sample in finished.samples
+        ):
+            # skycap drops a path's routes when any node on it lacks them; replaying the rest would
+            # train those tokens on routes the rollout never took. Retried, then masked.
+            logger.warning(f"Trajectory {trajectory_id}: a trained path has no routed experts")
+            return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error", missing_routes=True)
         return TrialOutcome(
             trajectory_id=trajectory_id,
             samples=finished.samples,

@@ -192,12 +192,14 @@ class TokensBackend:
             sampling["max_tokens"] = max_tokens
         sampling.setdefault("stop_token_ids", self.renderer.stop_token_ids())
 
+        routes_from = turn.routes_from(graph, planned)
         body = self.engine.request(
             prompt_ids=planned.prompt_ids,
             sampling=sampling,
             model=model,
             cache_salt=chat.body.get("cache_salt"),
             sampling_mask=self.sampling_mask,
+            routes_from=routes_from,
         )
         try:
             async with self.session.post(
@@ -217,7 +219,7 @@ class TokensBackend:
                         502 if up.status < 500 else up.status,
                         kind="api_error",
                     )
-                output = self.engine.parse(orjson.loads(raw))
+                output = self.engine.parse(orjson.loads(raw), routes_from=routes_from)
         except (aiohttp.ClientError, EngineError, orjson.JSONDecodeError) as error:
             self._fail(trajectory, None, f"engine: {error}")
             return _error(f"engine: {error}", 502, kind="api_error")

@@ -49,15 +49,18 @@ Masking is the sibling's:
 - **Context-length stop:** trains with reward 0, unless overlong filtering is on.
 - **Failed inside skycap** (e.g. an unattributable prompt): the trial isn't trained on.
 
+R3 (rollout routing replay) needs
+`generator.inference_engine.enable_return_routed_experts=true` and
+`trainer.policy.megatron_config.moe_enable_routing_replay=true`, with Megatron
+and vLLM's `mp` backend, as for SkyRL's own generator. Each row carries routes
+for its whole prompt and response, each from the forward pass that ran that
+token. A trial whose trained path lacks routes is retried, then masked, and
+counted in `generate/skycap/num_missing_route_trajectories`.
+
 ## Limits
 
-- **No R3 yet.** skycap records routed experts, but SkyRL's trainer refuses them
-  with step-wise output. So the generator refuses
-  `enable_return_routed_experts=true`, and the trainer change is a follow-up.
 - **Sampler support** (`enable_return_sample_support_set`) is passed through,
   padded to `top_k`.
-- **One skycap server per run.** The generator takes a list of URLs and spreads
-  trajectories over them, for when servers are launched separately.
 
 ## Tests
 

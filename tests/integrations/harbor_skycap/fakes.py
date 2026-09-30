@@ -81,6 +81,8 @@ class MockRouter:
         self.url = ""
         #: Set to answer every call with this text (plus the end token) instead of ``re<n>``.
         self.reply: str | None = None
+        #: Routed experts on every reply; row ``p`` names position ``p`` of its call, so a test can check alignment.
+        self.routes = True
         self.requests: list[dict[str, Any]] = []
         self.sessions: list[str] = []
         self.released: list[str] = []
@@ -98,13 +100,15 @@ class MockRouter:
         prompt = body["token_ids"]
         completion = [*encode(self.reply if self.reply is not None else f"re{len(prompt)}"), END]
         total = len(prompt) + len(completion)
-        rows = np.arange(total - 1) % 256
-        routed = np.broadcast_to(rows[:, None, None], (total - 1, LAYERS, EXPERTS_PER_TOKEN)).astype(np.uint8)
+        # As vLLM does: rows from `routed_experts_prompt_start` on, for every position but the last.
+        start = body["sampling_params"].get("routed_experts_prompt_start", 0)
+        rows = np.arange(start, total - 1) % 256
+        routed = np.broadcast_to(rows[:, None, None], (len(rows), LAYERS, EXPERTS_PER_TOKEN)).astype(np.uint8)
         choice: dict[str, Any] = {
             "token_ids": completion,
             "finish_reason": "stop",
             "logprobs": {"content": [{"logprob": -0.5} for _ in completion]},
-            "routed_experts": pack_routed_experts(routed),
+            "routed_experts": pack_routed_experts(routed) if self.routes else None,
             "rollout_sample_support": None,
         }
         if body.get("return_sample_support"):
