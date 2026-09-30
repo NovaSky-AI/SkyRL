@@ -228,16 +228,21 @@ class FakeWandb:
 
     Artifact = wandb.Artifact
 
-    def __init__(self) -> None:
+    def __init__(self, failures=0) -> None:
         self.run = SimpleNamespace(id="run/1")
         self.logged = []
+        self.failures = failures
 
-    def log_artifact(self, artifact, aliases) -> None:
+    def log_artifact(self, artifact, aliases):
+        if self.failures:
+            self.failures -= 1
+            raise ConnectionError("W&B unreachable")
         self.logged.append((artifact, aliases))
+        return SimpleNamespace(wait=lambda timeout: artifact)
 
 
-def uploads(records, phases=("train",), backend="wandb"):
-    fake = FakeWandb()
+def uploads(records, phases=("train",), backend="wandb", failures=0):
+    fake = FakeWandb(failures)
     trainer = SimpleNamespace(tracker=SimpleNamespace(backend=backend, logger=fake))
     return artifacts.SkycapUploads(records, list(phases)), trainer, fake
 
@@ -337,6 +342,18 @@ async def test_no_upload_without_wandb_logging(skycap, trials) -> None:
     callback.on_step_end(trainer, event(), None)
     callback.on_train_end(trainer, event(), None)
     assert fake.logged == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_upload_is_retried_three_times(skycap, trials, monkeypatch) -> None:
+    monkeypatch.setattr(artifacts, "RETRY_DELAY", 0.0)
+    for failures, logged in ((2, 1), (3, 0)):
+        records = artifacts.RecordLog()
+        await generator(skycap, records=records).generate(batch("linear"), disable_tqdm=True)
+        callback, trainer, fake = uploads(records, failures=failures)
+        callback.on_step_end(trainer, event(), None)
+        callback.on_train_end(trainer, event(), None)
+        assert len(fake.logged) == logged and fake.failures == 0
 
 
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:

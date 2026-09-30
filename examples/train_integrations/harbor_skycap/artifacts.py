@@ -3,6 +3,7 @@
 import json
 import re
 import tempfile
+import time
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -17,6 +18,9 @@ from skyrl.train.utils.callbacks import CallbackInput, TrainingCallback, Trainin
 
 ARTIFACT_TYPE = "skycap-records"
 FETCH_TIMEOUT = 60.0
+UPLOAD_ATTEMPTS = 3
+UPLOAD_TIMEOUT = 600.0
+RETRY_DELAY = 10.0
 
 
 @dataclass
@@ -104,9 +108,23 @@ def upload(
                 "num_trained": sum(row["trained"] for row in index),
             }
         )
-        wandb.log_artifact(artifact, aliases=[f"step-{step}", "latest"])
+        wandb.log_artifact(artifact, aliases=[f"step-{step}", "latest"]).wait(timeout=UPLOAD_TIMEOUT)
     logger.info(f"skycap artifact {artifact.name}:step-{step}: {uploaded} documents")
     return artifact.name
+
+
+def upload_with_retries(*args: Any) -> Optional[str]:
+    """``upload``, retried from the fetch on any exception, up to ``UPLOAD_ATTEMPTS`` times."""
+    for attempt in range(1, UPLOAD_ATTEMPTS + 1):
+        try:
+            return upload(*args)
+        except Exception as error:  # noqa: BLE001 - retried, then raised
+            if attempt == UPLOAD_ATTEMPTS:
+                raise
+            logger.warning(
+                f"skycap artifact: attempt {attempt}/{UPLOAD_ATTEMPTS} failed: {type(error).__name__}: {error}"
+            )
+            time.sleep(RETRY_DELAY * attempt)
 
 
 class SkycapUploads(TrainingCallback):
@@ -123,7 +141,7 @@ class SkycapUploads(TrainingCallback):
         if phase not in self.phases or not created or tracker is None or tracker.backend != "wandb":
             return
         wandb = tracker.logger
-        future = self._executor.submit(upload, wandb, wandb.run.id, phase, step, created, trained)
+        future = self._executor.submit(upload_with_retries, wandb, wandb.run.id, phase, step, created, trained)
         future.add_done_callback(_log_failure)
 
     def on_step_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
