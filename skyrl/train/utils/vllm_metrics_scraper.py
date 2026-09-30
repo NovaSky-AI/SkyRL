@@ -20,6 +20,7 @@ import ray
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
+from skyrl.train.utils.generation_activity import GenerationActivity
 from skyrl.train.utils.vllm_window_statistics import WindowStatistics
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
@@ -206,10 +207,13 @@ class VLLMMetricsScraper:
         self._timeout = request_timeout_s
         self._worker_ids = None if worker_ids is None else frozenset(worker_ids)
         self.last_window = WindowStatistics(valid=False)
+        self.activity = GenerationActivity()
+        self._activity_sampled_seconds = 0.0
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
+        self._snapshot_complete = True
         # Explicit-window state (start/pause/resume/stop). ``_label is None``
         # means no window is open.
         self._label: Optional[str] = None
@@ -249,6 +253,7 @@ class VLLMMetricsScraper:
     async def _fetch_all(self) -> ParsedSamples:
         client = await self._get_client()
         texts = await asyncio.gather(*(self._fetch_one(client, u) for u in self._urls))
+        self._snapshot_complete = all(bool(text) for text in texts)
         merged: ParsedSamples = {}
         for text in texts:
             if not text:
@@ -268,6 +273,8 @@ class VLLMMetricsScraper:
             return None
 
         parsed = await self._fetch_all()
+        if not self._snapshot_complete:
+            return None
         if not parsed and not self._warned_empty:
             logger.warning(
                 "VLLMMetricsScraper: scraped Ray metrics agents but found no "
@@ -318,7 +325,28 @@ class VLLMMetricsScraper:
             sums.setdefault("ray_vllm_kv_offload_load_bytes_total", 0.0)
         return {**sums, **means, **per_pos, **buckets}
 
-    async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
+    def publish_activity(self, run_name: str) -> None:
+        """Expose the outstanding-call count alongside existing training phases."""
+        from ray.util.metrics import Gauge
+
+        gauge = Gauge(
+            "skyrl_generation_active_calls", description="Outstanding generation calls.", tag_keys=("run_name",)
+        )
+        gauge.set(0, tags={"run_name": run_name})
+        self.activity = GenerationActivity(publish=lambda value: gauge.set(value, tags={"run_name": run_name}))
+        self._activity_sampled_seconds = 0.0
+
+    async def sample_active(self) -> Dict[str, float]:
+        """Sample overlapping train/eval generation using union active time."""
+        seconds = self.activity.seconds
+        delta = seconds - self._activity_sampled_seconds
+        result = await self.sample(generation_time_s=delta, allow_zero_duration=True)
+        self._activity_sampled_seconds = seconds
+        return result
+
+    async def sample(
+        self, generation_time_s: Optional[float] = None, *, allow_zero_duration: bool = False
+    ) -> Dict[str, float]:
         """Return ``vllm/...`` scalars for the current step (empty if unavailable).
 
         ``generation_time_s`` is the throughput denominator (engine generation
@@ -327,12 +355,22 @@ class VLLMMetricsScraper:
         """
         snapshot = await self._read_snapshot()
         if snapshot is None:
+            self.last_window = WindowStatistics(valid=False)
+            self._prev_aggregated = None
+            self._prev_timestamp = None
             return {}
 
         now = time.monotonic()
         if self._prev_aggregated is not None and self._prev_timestamp is not None:
             dt = max(now - self._prev_timestamp, 1e-9)
-            window = generation_time_s if (generation_time_s is not None and generation_time_s > 0) else dt
+            window = (
+                generation_time_s
+                if (
+                    generation_time_s is not None
+                    and (generation_time_s > 0 or (allow_zero_duration and generation_time_s == 0))
+                )
+                else dt
+            )
             out = self._window_metrics(self._prev_aggregated, snapshot, window, "vllm/")
         else:
             out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
