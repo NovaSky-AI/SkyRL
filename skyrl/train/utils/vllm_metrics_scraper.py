@@ -253,8 +253,6 @@ class VLLMMetricsScraper:
             _COUNTER_PREFIX_HITS,
             _HIST_TTFT_SUM,
             _HIST_TTFT_COUNT,
-            _HIST_ITL_SUM,
-            _HIST_ITL_COUNT,
             "ray_vllm_request_time_per_output_token_seconds_sum",
             "ray_vllm_request_time_per_output_token_seconds_count",
             "ray_vllm_num_preemptions_total",
@@ -376,8 +374,6 @@ class VLLMMetricsScraper:
                 _COUNTER_PREFIX_HITS,
                 _HIST_TTFT_SUM,
                 _HIST_TTFT_COUNT,
-                _HIST_ITL_SUM,
-                _HIST_ITL_COUNT,
                 "ray_vllm_request_time_per_output_token_seconds_sum",
                 "ray_vllm_request_time_per_output_token_seconds_count",
             ):
