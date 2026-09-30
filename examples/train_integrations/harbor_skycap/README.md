@@ -89,6 +89,23 @@ Terminus-2 keeps the server's own URL. A quick tunnel takes at most 200 calls in
 flight, and a call whose reply hasn't started after about 125 s fails, so use
 `external_host` for many agents or long replies.
 
+## Records and W&B
+
+Each skycap server writes its trajectories to `skycap.record_dir` on its own
+node. `skycap.record_mirror=s3://bucket/prefix` (any fsspec URL; install `s3fs`
+or `gcsfs`) has every server also copy them there, in the background.
+
+With `trainer.logger=wandb`, each step is indexed as a version of the artifact
+`skycap-records-train-<run id>`, aliased `train-step-N` and `latest`. It holds
+a `step.json` with a row per trajectory opened in the step (every attempt,
+with `trained`, `superseded` and the record's `path` and `mirror`), and, for
+mirrored records, a W&B reference to each document (no bytes are copied). A
+local-only record is in the index only. `skycap.wandb.phases=[train,eval]`
+indexes eval into `skycap-records-eval-<run id>`; `skycap.wandb.enabled=false`
+turns the index off. Logging runs on a background thread and never fails a
+step: W&B errors and timeouts are logged and counted, and at the end of
+training it waits up to two minutes for what is queued.
+
 ## How it fits
 
 | Piece | What it does |
@@ -97,6 +114,7 @@ flight, and a call whose reply hasn't started after about 125 s fails, so use
 | `servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
 | `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
 | `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
+| `record_index.py` | `SkycapRecordIndex`, a trainer callback: the per-step W&B index of the trajectories the generator logged in a `RecordLog`. Nothing in it is Harbor's. |
 | `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
 
 What's imposed on every call:
@@ -121,6 +139,7 @@ counted in `generate/skycap/num_missing_route_trajectories`.
 
 - **Sampler support** (`enable_return_sample_support_set`) is passed through,
   padded to `top_k`.
+- **No W&B record index under the fully-async trainer.** It fires no callbacks.
 
 ## Tests
 
