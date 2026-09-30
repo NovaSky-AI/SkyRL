@@ -6,6 +6,7 @@ so the wire conventions (byte layouts, NaN/sentinel fills) are checked
 against the exact code the client runs.
 """
 
+import json
 import math
 
 import numpy as np
@@ -122,6 +123,19 @@ def test_forward_backward_empty_outputs():
     output = roundtrip_forward_backward(result_data)
     assert output.loss_fn_outputs == []
     assert output.metrics == {"loss:sum": 0.0}
+
+
+def test_forward_backward_omits_nonfinite_metric_from_stored_future():
+    stored = types.ForwardBackwardOutput(
+        loss_fn_output_type="scalar",
+        loss_fn_outputs=[],
+        metrics={"total_loss:sum": 1.0, "importance_ratio:mean": math.nan},
+    ).model_dump_json()
+    result_data = json.loads(stored)
+    assert result_data["metrics"]["importance_ratio:mean"] is None
+
+    output = roundtrip_forward_backward(result_data)
+    assert output.metrics == {"total_loss:sum": 1.0}
 
 
 def test_forward_backward_field_missing_in_one_datum():

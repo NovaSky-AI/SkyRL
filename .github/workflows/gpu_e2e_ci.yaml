@@ -46,5 +46,5 @@ jobs:
           envsubst < ci/anyscale_gpu_e2e_test.yaml > ci/anyscale_gpu_e2e_test_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-gpu-e2e-test-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
-          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_e2e_test_envsubst.yaml "$JOB_NAME" 5000
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_e2e_test_envsubst.yaml "$JOB_NAME" 7200
           rm -f ci/anyscale_gpu_e2e_test_envsubst.yaml

@@ -190,7 +190,9 @@ def _serialize_forward_backward_output(result_data: dict) -> bytes:
     proto = pb.ForwardBackwardOutput()
     proto.loss_fn_output_type = output.loss_fn_output_type
     for name, value in output.metrics.items():
-        proto.metrics[name] = float(value)
+        # Pydantic writes non-finite diagnostic metrics as JSON null in stored futures.
+        if value is not None:
+            proto.metrics[name] = float(value)
 
     if not output.loss_fn_outputs:
         return proto.SerializeToString()

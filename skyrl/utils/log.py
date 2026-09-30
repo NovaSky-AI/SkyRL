@@ -38,7 +38,7 @@ def _setup_root_logger() -> None:
 
 
 def get_uvicorn_log_config() -> dict:
-    """Get uvicorn logging config that uses the same RichHandler."""
+    """Get uvicorn logging config with plain access and error handlers."""
     return {
         "version": 1,
         "disable_existing_loggers": False,
@@ -62,12 +62,20 @@ def get_uvicorn_log_config() -> dict:
                 "formatter": "default",
                 "stream": "ext://sys.stderr",
             },
+            # Uvicorn logs ASGI exceptions from the server event loop. Keep this
+            # path plain: Rich traceback rendering can become the bottleneck for
+            # very large failed responses and stall the API server.
+            "error": {
+                "class": "logging.StreamHandler",
+                "formatter": "default",
+                "stream": "ext://sys.stderr",
+            },
         },
         "loggers": {
             # Main uvicorn logger (general server messages)
             "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
             # Uvicorn error logger (startup, shutdown, exceptions)
-            "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"handlers": ["error"], "level": "INFO", "propagate": False},
             # HTTP access logs (request/response logging)
             "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
         },

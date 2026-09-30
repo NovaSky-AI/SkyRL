@@ -60,6 +60,19 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+# Must run inside EVERY vLLM worker process: post-sync hooks in the receive
+# engines need the process-local model runner, but vLLM only gives engines the
+# model object.
+try:
+    from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
+        apply_model_runner_registry_patch,
+    )
+
+    apply_model_runner_registry_patch()
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm":
+        raise
+
 # Must run inside EVERY vLLM worker process: Worker.load_model builds the
 # weight-transfer engine through the factory. vLLM loads this module before model
 # init, which is what guarantees it. Guarded because this module is also imported
