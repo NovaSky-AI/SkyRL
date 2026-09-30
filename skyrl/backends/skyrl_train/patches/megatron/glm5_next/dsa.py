@@ -9,6 +9,7 @@ itself, so ``Glm5NextDSAttention`` swaps that selection for the vendored k-pool 
 (``mcore_ext/dsa_kpool.py``, NVIDIA/Megatron-LM#7522) whenever ``dsa_indexer_kpool > 1``.
 """
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -36,6 +37,10 @@ from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.dsa_kpool import (
 _FUSED_SPARSE_MLA_QK_DIM = 576
 _FUSED_SPARSE_MLA_TOPK_MULTIPLE = 64
 _fused_sparse_attention_logged = {"used": False, "declined": False}
+# Opt-in: run the fused sparse attention in query chunks of this many tokens, each checkpointed.
+_DSA_QUERY_CHUNK = int(os.environ.get("SKYRL_DSA_QUERY_CHUNK", "0"))
+# Opt-in: split the k-pool indexer's query rows across the tensor-parallel group (exact).
+_DSA_INDEXER_TP_SHARD = os.environ.get("SKYRL_DSA_INDEXER_TP_SHARD", "0").lower() in ("1", "true")
 
 
 def _pad_for_fused_absorbed_sparse_attention(fused_fn):
@@ -49,19 +54,44 @@ def _pad_for_fused_absorbed_sparse_attention(fused_fn):
 
     def padded(config, query, key, topk_indices, softmax_scale, v_channels, topk_length=None):
         qk_pad = _FUSED_SPARSE_MLA_QK_DIM - query.size(-1)
-        if qk_pad > 0 and key.size(-1) == query.size(-1):
-            query = F.pad(query, (0, qk_pad))
+        pad_qk = qk_pad > 0 and key.size(-1) == query.size(-1)
+        if pad_qk:
             key = F.pad(key, (0, qk_pad))
         topk_pad = -topk_indices.size(-1) % _FUSED_SPARSE_MLA_TOPK_MULTIPLE
         if topk_pad:
             topk_indices = F.pad(topk_indices, (0, topk_pad), value=-1)
-        out = fused_fn(config, query, key, topk_indices, softmax_scale, v_channels, topk_length=topk_length)
+
+        def run(q, idx, lengths):
+            if pad_qk:
+                q = F.pad(q, (0, qk_pad))
+            return fused_fn(config, q, key, idx, softmax_scale, v_channels, topk_length=lengths)
+
+        # Each query attends only its own top-k keys, so query chunks are independent (key grads
+        # just sum). Checkpointing each chunk keeps only one chunk's padded q / kernel output
+        # alive instead of the whole sequence's -- at TP8 the kernel pads 8 local heads to 16, so
+        # that is ~13 GiB/GPU at 512k tokens -- for one extra kernel forward in backward.
+        sq = query.size(0)
+        if _DSA_QUERY_CHUNK and sq > _DSA_QUERY_CHUNK and topk_length is None:
+            outs = []
+            for q0 in range(0, sq, _DSA_QUERY_CHUNK):
+                q1 = min(sq, q0 + _DSA_QUERY_CHUNK)
+                args = (query[q0:q1], topk_indices[:, q0:q1], None)
+                if torch.is_grad_enabled():
+                    o = torch.utils.checkpoint.checkpoint(run, *args, use_reentrant=False)
+                else:
+                    o = run(*args)
+                if o is None:
+                    return None
+                outs.append(o)
+            out = torch.cat(outs, dim=0)
+        else:
+            out = run(query, topk_indices, topk_length)
         key_ = "used" if out is not None else "declined"
         if not _fused_sparse_attention_logged[key_]:
             _fused_sparse_attention_logged[key_] = True
             logger.info(
                 f"GLM-5.3-Flash DSA: fused absorbed sparse attention {key_} "
-                f"(backend={getattr(config, 'dsa_kernel_backend', None)}, padded qk_dim={query.size(-1)}, "
+                f"(backend={getattr(config, 'dsa_kernel_backend', None)}, padded qk_dim={key.size(-1)}, "
                 f"topk={topk_indices.size(-1)})"
             )
         return out
@@ -130,6 +160,15 @@ class Glm5NextDSAttention(DSAttention):
         if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
             _, cu_seqlens_kv = dsa_layout.get_packed_qk_cu_seqlens(packed_seq_params)
         kpool_calls = 0
+        # Every TP rank runs the indexer on the same gathered sequence with the same (replicated,
+        # never-trained) indexer weights, so its query rows can be split across the group.
+        indexer_shard_group = None
+        if _DSA_INDEXER_TP_SHARD:
+            from megatron.core import parallel_state as mpu
+
+            tp_group = mpu.get_tensor_model_parallel_group()
+            if tp_group.size() > 1:
+                indexer_shard_group = tp_group
 
         def kpool_topk(
             q,
@@ -161,6 +200,7 @@ class Glm5NextDSAttention(DSAttention):
                 cu_seqlens_kv=cu_seqlens_kv,
                 use_relu=use_relu,
                 always_select_tail=indexer.index_kpool_always_select_tail,
+                query_shard_group=indexer_shard_group,
             )
 
         def decline(*_args, **_kwargs):
