@@ -38,15 +38,17 @@ attribution; Ray export lag can move counters across step or phase boundaries.
 | `prefix_cache_hit_rate`, `external_prefix_cache_hit_rate` | Hit-token delta / queried-token delta |
 | `num_preemptions` | Scheduler preemption-event delta |
 | `preemptions_per_million_tokens` | Preemptions × 1e6 / output-token delta |
-| `kv_offload_store_throughput_bytes_s`, `kv_offload_load_throughput_bytes_s` | Transferred byte delta / active generation seconds |
-| `ttft_seconds_avg`, `request_tpot_seconds_avg` | Merged histogram sum delta / count delta |
-| `ttft_seconds_p50`, `ttft_seconds_p90`, `request_tpot_seconds_p50`, `request_tpot_seconds_p90` | Quantiles interpolated from merged cumulative bucket deltas |
-| `itl_seconds_avg` | Inter-token latency sum delta / count delta |
-| `tpot_seconds_avg` | Compatibility alias for ITL mean |
+| `kv_offload_load_throughput_bytes_s` | Transferred byte delta / active generation seconds |
+| `ttft_seconds_avg`, `tpot_seconds_avg` | Merged histogram sum delta / count delta |
+| `ttft_seconds_p90`, `tpot_seconds_p90` | Quantiles interpolated from merged cumulative bucket deltas |
 | `generation_throughput_cv`, `prompt_throughput_cv` | Population standard deviation / mean of per-engine token deltas |
 
 Request TPOT uses `request_time_per_output_token_seconds`; TTFT uses
-`time_to_first_token_seconds`. ITL is a separate observation population. Ray's
+`time_to_first_token_seconds`. TPOT is averaged over request observations,
+matching the Serve LLM dashboard. Before this change, `tpot_seconds_avg`
+represented ITL; historical W&B runs using that definition are not comparable.
+ITL, P50 latency scalars, and offload store throughput are omitted from tracker
+payloads; the corresponding raw metrics remain available for Grafana. Ray's
 OpenTelemetry export reconstructs histogram observations from bucket midpoints,
 so exported means and percentiles can be estimates. Incompatible engine bucket
 schemas are not merged.
