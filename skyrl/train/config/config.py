@@ -1449,7 +1449,31 @@ class MTPConfig(BaseConfig):
 
 
 @dataclass
+class GrafanaAnnotationsConfig(BaseConfig):
+    """Configure optional organization-scoped Grafana run annotations."""
+
+    enabled: bool = False
+    """Publish a run-name start marker and close it as a region when training ends."""
+    url: str = ""
+    """Grafana base URL, including any deployment subpath."""
+    token_env_var: str = "GRAFANA_API_TOKEN"
+    """Environment variable containing the annotation API token; never stored in run config."""
+    organization_id: Optional[int] = None
+    """Organization ID sent in the Grafana request header when configured."""
+    tags: List[str] = field(default_factory=list)
+    """Additional annotation tags, such as a cluster name."""
+    timeout_seconds: float = 5.0
+    """HTTP timeout for each annotation create or update request."""
+    dashboard_url: str = ""
+    """Optional dashboard URL printed with the run's start and end times."""
+    record_directory: str = "~/skyrl_runs/annotations"
+    """Local directory for annotation IDs and run lifecycle records."""
+
+
+@dataclass
 class TrainerConfig(BaseConfig):
+    grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
+    """Optional Grafana run annotation publishing, disabled by default."""
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     use_expandable_segments: bool = True
     """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training workers.
