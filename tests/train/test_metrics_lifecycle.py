@@ -58,3 +58,26 @@ async def test_trainer_finalization_is_idempotent(tmp_path):
     scraper.finalize.assert_awaited_once()
     assert trainer.tracker.run_status == "failed"
     assert "failed" in (tmp_path / "vllm_run_summary.json").read_text()
+
+
+@pytest.mark.parametrize("enable_pd", [False, True])
+def test_pd_does_not_publish_double_counted_engine_summaries(enable_pd):
+    from unittest.mock import patch
+
+    from skyrl.train.config import SkyRLTrainConfig
+
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.enable_ray_prometheus_stats = True
+    cfg.generator.inference_engine.enable_pd = enable_pd
+    cfg.trainer.enable_ray_gpu_monitor = False
+    with patch("skyrl.train.trainer.VLLMMetricsScraper") as scraper:
+        trainer = RayPPOTrainer(
+            cfg,
+            Tracking("test", "test", backend="console"),
+            tokenizer=Mock(),
+            train_dataset=None,
+            inference_engine_client=Mock(),
+            generator=Mock(),
+        )
+    assert (trainer._vllm_metrics_scraper is None) == enable_pd
+    assert scraper.call_count == (0 if enable_pd else 1)

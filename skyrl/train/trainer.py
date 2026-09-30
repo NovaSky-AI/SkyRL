@@ -142,8 +142,12 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.global_step = 0
 
+        engine_cfg = cfg.generator.inference_engine
+        collect_engine_metrics = engine_cfg.enable_ray_prometheus_stats and not engine_cfg.enable_pd
+        if engine_cfg.enable_ray_prometheus_stats and engine_cfg.enable_pd:
+            logger.info("Skipping aggregate engine collection for PD; prefill/decode require role-specific accounting.")
         self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
-            VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
+            VLLMMetricsScraper() if collect_engine_metrics else None
         )
 
         if self._vllm_metrics_scraper is not None:

@@ -12,6 +12,7 @@ class RunStatistics:
         self.windows = {}
         self.active_seconds = {}
         self.incomplete_windows = {}
+        self.resumed_history = False
 
     def add(self, scope: str, window: WindowStatistics):
         """Add an interval once; missing snapshots do not become zero events."""
@@ -28,8 +29,9 @@ class RunStatistics:
         """Return weighted scalar summaries suitable for tracker backends."""
         from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
-        result = {}
-        for scope, total in self.windows.items():
+        result = {"vllm_run/covers_resumed_history": self.resumed_history}
+        for scope in self.active_seconds:
+            total = self.windows.get(scope, WindowStatistics())
             prefix = f"vllm_run/{scope}/"
             metrics = VLLMMetricsScraper._derive(
                 total.deltas, dict.fromkeys(total.deltas, 0), total.duration_seconds, prefix
@@ -39,6 +41,9 @@ class RunStatistics:
             )
             result[prefix + "active_generation_seconds"] = self.active_seconds.get(scope, 0.0)
             result[prefix + "observed_active_seconds"] = total.duration_seconds
+            result[prefix + "unobserved_active_seconds"] = max(
+                self.active_seconds.get(scope, 0.0) - total.duration_seconds, 0.0
+            )
             result[prefix + "incomplete_windows"] = self.incomplete_windows.get(scope, 0)
             for counter, public in (
                 ("generation_tokens", "output_tokens_total"),
@@ -65,3 +70,4 @@ class RunStatistics:
         self.windows = {scope: WindowStatistics(**window) for scope, window in state.get("windows", {}).items()}
         self.active_seconds = dict(state.get("active_seconds", {}))
         self.incomplete_windows = dict(state.get("incomplete_windows", {}))
+        self.resumed_history = bool(self.active_seconds)

@@ -19,6 +19,7 @@ def test_weighted_rates_and_cache_hits_survive_resume():
     assert summary["vllm_run/train/generation_throughput_tok_s"] == 30
     assert summary["vllm_run/train/external_prefix_cache_hit_rate"] == pytest.approx(0.14)
     assert summary["vllm_run/train/output_tokens_total"] == 300
+    assert summary["vllm_run/covers_resumed_history"] is True
 
 
 def test_missing_interval_is_not_zero_work():
@@ -30,3 +31,13 @@ def test_missing_interval_is_not_zero_work():
     assert summary["vllm_run/combined/active_generation_seconds"] == 5
     assert summary["vllm_run/combined/observed_active_seconds"] == 2
     assert summary["vllm_run/combined/incomplete_windows"] == 1
+
+
+def test_entirely_unobserved_run_reports_coverage_without_rates():
+    stats = RunStatistics()
+    stats.add("train", WindowStatistics(duration_seconds=3, valid=False))
+    summary = stats.summary()
+    assert summary["vllm_run/train/active_generation_seconds"] == 3
+    assert summary["vllm_run/train/observed_active_seconds"] == 0
+    assert summary["vllm_run/train/incomplete_windows"] == 1
+    assert "vllm_run/train/generation_throughput_tok_s" not in summary

@@ -213,6 +213,10 @@ class VLLMMetricsScraper:
         self.run_statistics = RunStatistics()
         self._last_scope = "combined"
         self._offload_enabled = False
+        self._fresh_snapshot = None
+        self._pending_seconds = 0.0
+        self._fresh_engines = False
+        self._window_fresh_engines = False
         self.activity = GenerationActivity()
         self._activity_sampled_seconds = 0.0
         self._prev_aggregated: Optional[Dict[str, float]] = None
@@ -240,6 +244,27 @@ class VLLMMetricsScraper:
         """Restrict snapshots to the fixed set of servers launched for this run."""
         self._worker_ids = frozenset(worker_ids)
         self._offload_enabled = offload_enabled
+        # These actors have just been launched and have served no requests.
+        # Ray's positive-only exports may not exist until their first request.
+        names = [
+            _COUNTER_PROMPT_TOKENS,
+            _COUNTER_GENERATION_TOKENS,
+            _COUNTER_PREFIX_QUERIES,
+            _COUNTER_PREFIX_HITS,
+            _HIST_TTFT_SUM,
+            _HIST_TTFT_COUNT,
+            _HIST_ITL_SUM,
+            _HIST_ITL_COUNT,
+            "ray_vllm_request_time_per_output_token_seconds_sum",
+            "ray_vllm_request_time_per_output_token_seconds_count",
+            "ray_vllm_num_preemptions_total",
+        ]
+        if offload_enabled:
+            names.extend(_ADDITIONAL_COUNTERS[1:5])
+        self._fresh_snapshot = dict.fromkeys(names, 0.0)
+        self._prev_aggregated = self._fresh_snapshot.copy()
+        self._prev_timestamp = time.monotonic()
+        self._fresh_engines = True
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -349,6 +374,12 @@ class VLLMMetricsScraper:
                 _COUNTER_GENERATION_TOKENS,
                 _COUNTER_PREFIX_QUERIES,
                 _COUNTER_PREFIX_HITS,
+                _HIST_TTFT_SUM,
+                _HIST_TTFT_COUNT,
+                _HIST_ITL_SUM,
+                _HIST_ITL_COUNT,
+                "ray_vllm_request_time_per_output_token_seconds_sum",
+                "ray_vllm_request_time_per_output_token_seconds_count",
             ):
                 sums.setdefault(name, 0.0)
             if self._offload_enabled:
@@ -417,9 +448,9 @@ class VLLMMetricsScraper:
         if snapshot is None:
             self.last_window = WindowStatistics(duration_seconds=generation_time_s or 0.0, valid=False)
             self.run_statistics.add(self._last_scope, self.last_window)
-            self._prev_aggregated = None
-            self._prev_timestamp = None
-            self._previous_engines = {}
+            # Retain the last counter baseline across an unavailable export.
+            # A later complete snapshot can recover the whole interval.
+            self._pending_seconds += generation_time_s or 0.0
             return {}
 
         now = time.monotonic()
@@ -433,6 +464,8 @@ class VLLMMetricsScraper:
                 )
                 else dt
             )
+            if generation_time_s is not None:
+                window += self._pending_seconds
             out = self._window_metrics(self._prev_aggregated, snapshot, window, "vllm/")
         else:
             out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
@@ -442,7 +475,13 @@ class VLLMMetricsScraper:
         )
         if self._prev_aggregated is not None:
             self.run_statistics.add(self._last_scope, self.last_window)
+            self.run_statistics.active_seconds[self._last_scope] -= self._pending_seconds
+            if self._fresh_engines:
+                self._previous_engines = {engine: {} for engine in self._engine_snapshot}
             out.update(engine_imbalance(self._previous_engines, self._engine_snapshot, "vllm/"))
+        self._pending_seconds = 0.0
+        self._fresh_snapshot = None
+        self._fresh_engines = False
         self._previous_engines = self._engine_snapshot
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
@@ -458,7 +497,21 @@ class VLLMMetricsScraper:
         """
         if self._label is not None:
             raise ValueError(f"`start({label!r})` called while window {self._label!r} is still open")
-        self._window_prev = await self._read_snapshot()
+        if self._fresh_snapshot is not None or self._prev_aggregated is None:
+            self._last_scope = label.removeprefix("vllm/")
+        self._window_fresh_engines = self._fresh_engines
+        # Harvest late exports from the previous scope before opening the next
+        # window. Reuse that snapshot so counters between windows are not lost.
+        snapshot = await self._read_snapshot()
+        if snapshot is not None:
+            if self._prev_aggregated is not None:
+                gap = WindowStatistics.between(self._prev_aggregated, snapshot, self._pending_seconds)
+                self.run_statistics.add(self._last_scope, gap)
+                self.run_statistics.active_seconds[self._last_scope] -= self._pending_seconds
+            self._pending_seconds = 0.0
+            self._fresh_snapshot = None
+            self._fresh_engines = False
+        self._window_prev = snapshot if snapshot is not None else self._prev_aggregated
         self._window_engines = self._engine_snapshot
         self._label = label
         self._window_time_s = 0.0
@@ -504,13 +557,16 @@ class VLLMMetricsScraper:
         self.last_window = WindowStatistics.between(prev, new_snapshot, window)
         self._last_scope = label.removeprefix("vllm/")
         self.run_statistics.add(self._last_scope, self.last_window)
-        self._prev_aggregated = new_snapshot
+        self._prev_aggregated = new_snapshot if new_snapshot is not None else prev
         self._prev_timestamp = time.monotonic()
         self._previous_engines = self._engine_snapshot
         self._activity_sampled_seconds = self.activity.seconds
         if new_snapshot is None:
+            self._pending_seconds += window
             return {}
         result = self._window_metrics(prev, new_snapshot, window, f"{label}/")
+        if self._window_fresh_engines:
+            self._window_engines = {engine: {} for engine in self._engine_snapshot}
         result.update(engine_imbalance(self._window_engines, self._engine_snapshot, f"{label}/"))
         return result
 

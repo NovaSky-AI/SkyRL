@@ -37,3 +37,62 @@ async def test_zero_active_time_does_not_fall_back_to_wall_time():
     metrics = await scraper.sample_active()
     assert "vllm/generation_throughput_tok_s" not in metrics
     assert scraper.last_window.duration_seconds == 0
+
+
+@pytest.mark.asyncio
+async def test_fresh_owned_engine_recovers_delayed_first_export():
+    from unittest.mock import AsyncMock
+
+    from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
+
+    scraper = VLLMMetricsScraper(urls=["test"])
+    scraper.set_worker_ids(["owned"])
+    scraper._read_snapshot = AsyncMock(side_effect=[None, None, {"ray_vllm_generation_tokens_total": 100}])
+    await scraper.sample(generation_time_s=0, allow_zero_duration=True)
+    await scraper.sample(generation_time_s=2, allow_zero_duration=True)
+    metrics = await scraper.sample(generation_time_s=0, allow_zero_duration=True)
+    assert metrics["vllm/generation_throughput_tok_s"] == 50
+    summary = scraper.run_statistics.summary()
+    assert summary["vllm_run/combined/output_tokens_total"] == 100
+    assert summary["vllm_run/combined/active_generation_seconds"] == 2
+    assert summary["vllm_run/combined/observed_active_seconds"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_terminal_export_recovers_missing_stop_snapshot():
+    from unittest.mock import AsyncMock
+
+    from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
+
+    scraper = VLLMMetricsScraper(urls=["test"])
+    scraper.set_worker_ids(["owned"])
+    scraper._read_snapshot = AsyncMock(side_effect=[None, None, {"ray_vllm_generation_tokens_total": 100}])
+    await scraper.start("vllm/train")
+    scraper.pause()
+    scraper._window_time_s = 2
+    assert await scraper.stop() == {}
+    await scraper.sample(generation_time_s=0, allow_zero_duration=True)
+    summary = scraper.run_statistics.summary()
+    assert summary["vllm_run/train/output_tokens_total"] == 100
+    assert summary["vllm_run/train/generation_throughput_tok_s"] == 50
+    assert summary["vllm_run/train/active_generation_seconds"] == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_late_exports_between_windows_are_counted_once():
+    from unittest.mock import AsyncMock
+
+    from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
+
+    counter = "ray_vllm_generation_tokens_total"
+    scraper = VLLMMetricsScraper(urls=["test"])
+    scraper._read_snapshot = AsyncMock(side_effect=[{counter: 0}, {counter: 100}, {counter: 150}, {counter: 200}])
+    for _ in range(2):
+        await scraper.start("vllm/train")
+        scraper.pause()
+        scraper._window_time_s = 1
+        await scraper.stop()
+    summary = scraper.run_statistics.summary()
+    assert summary["vllm_run/train/output_tokens_total"] == 200
+    assert summary["vllm_run/train/generation_throughput_tok_s"] == 100
+    assert summary["vllm_run/train/active_generation_seconds"] == 2
