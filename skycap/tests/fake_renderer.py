@@ -83,18 +83,21 @@ class FakeRenderer:
     def parse(self, completion_ids: Sequence[int], tools: Any) -> dict[str, Any]:
         text = decode([t for t in completion_ids if t != END])
         message: dict[str, Any] = {"role": "assistant", "content": text}
+        reasoning_content = None
         if text.startswith("THINK:") and "|" in text:
-            reasoning, _, text = text[6:].partition("|")
-            message = {"role": "assistant", "content": text, "reasoning_content": reasoning}
+            reasoning_content, _, text = text[6:].partition("|")
+            message = {"role": "assistant", "content": text, "reasoning_content": reasoning_content}
         if text.startswith("CALL:"):
             name, _, arguments = text[5:].partition(":")
             message = {
                 "role": "assistant",
-                "content": None,
+                "content": "" if reasoning_content is not None else None,
                 "tool_calls": [
                     {"id": "call_0", "type": "function", "function": {"name": name, "arguments": arguments}}
                 ],
             }
+            if reasoning_content is not None:
+                message["reasoning_content"] = reasoning_content
         return message
 
     def stop_token_ids(self) -> list[int]:

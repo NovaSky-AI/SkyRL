@@ -48,6 +48,19 @@ def test_provider_specific_fields_do_not_change_rendered_tokens(renderer: Render
     assert renderer.render(messages, None).token_ids == renderer.render(with_metadata, None).token_ids
 
 
+def test_empty_tool_call_content_renders_like_absent_content(renderer: RenderersRenderer) -> None:
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+    tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+    reply = {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [tool_call]}
+    replay = {key: value for key, value in reply.items() if key != "content"}
+    replay["provider_specific_fields"] = {"refusal": None}
+
+    assert (
+        renderer.render([{"role": "user", "content": "hi"}, reply], tools).token_ids
+        == renderer.render([{"role": "user", "content": "hi"}, replay], tools).token_ids
+    )
+
+
 async def test_a_conversation_through_the_real_renderer(renderer: RenderersRenderer) -> None:
     from renderers.base import load_tokenizer
 

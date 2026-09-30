@@ -93,6 +93,19 @@ def test_token_match_ignores_provider_specific_fields(fields: dict) -> None:
     assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
 
 
+def test_token_match_equates_empty_tool_content_with_absent_content() -> None:
+    tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+    reply = {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [tool_call]}
+    replay = {key: value for key, value in reply.items() if key != "content"}
+    replay["provider_specific_fields"] = {"refusal": None}
+
+    assert token_match_hash(reply, tools="", model="policy") == token_match_hash(replay, tools="", model="policy")
+    assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
+    assert token_match_hash(reply, tools="", model="policy") != token_match_hash(
+        {**replay, "content": "Summary so far"}, tools="", model="policy"
+    )
+
+
 def test_scaffold_belongs_to_the_following_message_and_the_tail_to_the_reply() -> None:
     chunks, scaffold = attribute([9, 1, 1, 8, 2, 2, 7, 7], [-1, 0, 0, -1, 1, 1, -1, -1], 2)
     assert chunks == [[9, 1, 1], [8, 2, 2]]
@@ -208,6 +221,44 @@ async def test_client_metadata_does_not_prevent_bridging() -> None:
         graph = stack.server.trajectories[created["id"]].graph
         assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True]
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
+
+
+async def test_empty_tool_call_content_replay_bridges_but_rewrite_forks() -> None:
+    completion = [*encode("THINK:hmm|CALL:search:{}"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+        first = await llm.chat.completions.create(model="policy", messages=[user("q")], tools=tools)
+        reply = first.choices[0].message.model_dump(exclude_none=True)
+        assert reply["content"] == "" and reply["reasoning_content"] == "hmm" and reply["tool_calls"]
+
+        replay = {key: value for key, value in reply.items() if key != "content"}
+        replay["provider_specific_fields"] = {"refusal": None}
+        tool_result = {"role": "tool", "tool_call_id": reply["tool_calls"][0]["id"], "content": "found"}
+        async with stack.http.post(
+            f"{created['base_url']}/chat/completions",
+            json={"model": "policy", "messages": [user("q"), replay, tool_result], "tools": tools},
+        ) as response:
+            assert response.status == 200
+
+        async with stack.http.post(
+            f"{created['base_url']}/chat/completions",
+            json={
+                "model": "policy",
+                "messages": [user("q"), {"role": "assistant", "content": "Summary so far"}, user("next")],
+                "tools": tools,
+            },
+        ) as response:
+            assert response.status == 200
+
+        graph = stack.server.trajectories[created["id"]].graph
+        model_nodes = [node for node in graph if node.author == "model"]
+        assert len(model_nodes) == 3
+        assert model_nodes[0].id in graph.path_to(model_nodes[1].id)
+        assert model_nodes[0].id not in graph.path_to(model_nodes[2].id)
+        assert [call.bridged for node in model_nodes for call in node.calls] == [None, True, False]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
 
 
 async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:

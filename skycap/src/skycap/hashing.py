@@ -61,11 +61,19 @@ def token_match_hash(message: Mapping[str, Any], *, tools: str, model: str | Non
 
     ``provider_specific_fields`` is client metadata, not rendered tokens. Text
     mode keeps it in the regular match hash because its upstream may use it.
+    For assistant tool calls, an empty ``content`` renders like absent content.
     """
-    if "provider_specific_fields" not in message:
+    empty_tool_content = (
+        message.get("role") == "assistant" and message.get("content") == "" and bool(message.get("tool_calls"))
+    )
+    if "provider_specific_fields" not in message and not empty_tool_content:
         return match_hash(message, tools=tools, model=model)
-    rendered_message = {key: value for key, value in message.items() if key != "provider_specific_fields"}
-    return match_hash(rendered_message, tools=tools, model=model)
+    matched_message = {
+        key: value
+        for key, value in message.items()
+        if key != "provider_specific_fields" and not (empty_tool_content and key == "content")
+    }
+    return match_hash(matched_message, tools=tools, model=model)
 
 
 def sampling_key(sampling: Mapping[str, Any] | None) -> dict[str, Any]:
