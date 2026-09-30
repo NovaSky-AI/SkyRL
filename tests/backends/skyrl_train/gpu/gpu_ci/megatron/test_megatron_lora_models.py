@@ -22,6 +22,8 @@ Each row runs three phases:
    ``threshold``.
 """
 
+import os
+
 import pytest
 import ray
 import torch
@@ -132,12 +134,34 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     if "glm-5.3-flash" in model_name.lower():
         cfg.trainer.policy.model.lora.target_modules = list(GLM5_3_FLASH_LORA_TARGET_MODULES)
+    if "glm-5.3-bf16" in model_name.lower():
+        cfg.trainer.policy.inference_only_init = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.trainer.remove_microbatch_padding = False
+        cfg.trainer.policy.model.lora.target_modules = GLM5_3_FLASH_LORA_TARGET_MODULES[:7]
+        cfg.trainer.policy.model.lora.sync_mode = "memory"
+        cfg.trainer.policy.model.lora.max_loras = 1
+        cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
+        cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "none"
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(
+            dsa_kernel_backend="tilelang",
+            moe_router_bias_update_rate=0.0,
+            gradient_accumulation_fusion=False,
+            sequence_parallel=True,
+        )
+        cfg.generator.inference_engine.language_model_only = True
+        cfg.generator.inference_engine.expert_parallel_size = 8
+        cfg.generator.inference_engine.distributed_executor_backend = "mp"
+        cfg.generator.inference_engine.enable_return_routed_experts = True
     validate_cfg(cfg)
     return cfg
 
 
 def _trainer_logprobs(policy, training_input) -> torch.Tensor:
-    results = ray.get(policy.async_run_ray_method("mesh", "forward", data=training_input))
+    with Timer("trainer_forward"):
+        results = ray.get(policy.async_run_ray_method("mesh", "forward", data=training_input))
     output = WorkerOutput.cat(policy.actor_infos, results)
     return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
@@ -170,6 +194,22 @@ async def _sync_weights(policy, client, cfg, label: str):
 @pytest.mark.parametrize(
     "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,threshold,merge_lora",
     [
+        pytest.param(
+            8,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            os.environ.get("GLM53_MODEL_PATH", "zai-org/GLM-5.3-BF16"),
+            5e-2,
+            False,
+            id="glm-5.3-bf16_b300_tp8_ep8_adapter",
+            marks=pytest.mark.skipif(
+                not os.environ.get("GLM53_MODEL_PATH"), reason="Set GLM53_MODEL_PATH on an 8xB300 node"
+            ),
+        ),
         pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, False, id="qwen3.5-0.8b-dense_tp2_adapter"),
         pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, True, id="qwen3.5-0.8b-dense_tp2_merged"),
         # Large MoE row on 4xH100-80G, same mesh and engine overrides as the
@@ -237,6 +277,19 @@ async def test_lora_logprobs_matching_roundtrip(
         tokenizer.pad_token = tokenizer.eos_token
 
         engine_overrides = _engine_overrides_for_model(model_name)
+        if "glm-5.3-bf16" in model_name.lower():
+            engine_overrides = {
+                "gpu_memory_utilization": 0.8,
+                "max_num_seqs": 32,
+                "engine_init_kwargs": {
+                    "max_model_len": 32768,
+                    "kv_cache_dtype": "bfloat16",
+                    "moe_backend": "triton",
+                    "linear_backend": "triton",
+                    "disable_custom_all_reduce": True,
+                    "attention_config": {"mla_prefill_backend": "FLASH_ATTN"},
+                },
+            }
         if lora_sync and "glm-5.3-flash" in model_name.lower():
             engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES)
         async with InferenceEngineState.create(
