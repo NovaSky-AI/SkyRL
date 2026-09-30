@@ -1,5 +1,8 @@
 # Inference
 
+For two-engine Harbor evaluations with native CPU KV cache offloading, see
+`examples/train_integrations/harbor/kv_offload/README.md`.
+
 For training-to-inference weight transfer (`NewInferenceWorkerWrap`, broadcast vs. CUDA IPC, lifecycle), see [`weight_sync.md`](weight_sync.md).
 
 ## Architecture

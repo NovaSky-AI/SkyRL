@@ -2,6 +2,9 @@
 
 RL training with [Harbor](https://github.com/laude-institute/harbor) as the environment and reward source. See the [full documentation](https://docs.skyrl.ai/docs/harbor) for details.
 
+For generation-only evaluations with native CPU KV cache
+offloading, see [the offloading examples](kv_offload/README.md).
+
 ### Structure
 
 ```
