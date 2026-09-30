@@ -245,8 +245,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         if generator_cfg.vision_language_rerender_check and not generator_cfg.vision_language_generator:
             raise ValueError("`vision_language_rerender_check=True` requires `vision_language_generator=True`.")
         if generator_cfg.vision_language_generator:
-            if generator_cfg.batched:
-                raise ValueError("`vision_language_generator=True` does not support `batched=True`.")
             if generator_cfg.step_wise_trajectories:
                 raise ValueError("`vision_language_generator=True` does not support `step_wise_trajectories=True`.")
             if not generator_cfg.use_conversation_multi_turn:
@@ -910,14 +908,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         Returns:
             GeneratorOutput
         """
-        # TODO(xgui): support vision-language batched generation: render each prompt with
-        # `self.renderer.render_prompt`, pass the features as `mm_features`, and return the decoded
-        # `pixel_values` / `image_grid_thw`.
-        if self.generator_cfg.vision_language_generator:
-            raise NotImplementedError(
-                "`generate_batched` does not support `vision_language_generator=True`: it tokenizes prompts "
-                "with the local tokenizer and sends no image features. Set `batched=False`."
-            )
         envs = []
         init_prompts = []
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
@@ -929,12 +919,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             envs.append(env)
 
         # for consistency, use token-in-token-out
-        prompt_token_ids = self.tokenizer.apply_chat_template(
-            init_prompts,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=False,
-        )
+        rendered_prompts = await asyncio.gather(*(self.renderer.render_prompt(p) for p in init_prompts))
+        prompt_token_ids = [rendered.token_ids for rendered in rendered_prompts]
+        prompt_mm_features = [rendered.features for rendered in rendered_prompts]
+        has_vision_features = any(features is not None for features in prompt_mm_features)
         # Eval batches do not capture per-token side channels.
         capture_sample_support = (
             self.generator_cfg.inference_engine.enable_return_sample_support_set
@@ -948,6 +936,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             sampling_params=sampling_params,
             return_sample_support=capture_sample_support,
             cache_salt=cache_salt,
+            mm_features=prompt_mm_features if has_vision_features else None,
         )
         engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
         outputs = engine_output["responses"]
@@ -1009,6 +998,14 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_expert_indices": truncated_indices,
             "rollout_sample_support": truncated_sample_support,
         }
+        if has_vision_features:
+            # Responses hold no images, so every image lies in the prompt.
+            vision_features = [
+                self._decode_vision_features(features, len(prompt_ids))
+                for features, prompt_ids in zip(prompt_mm_features, prompt_token_ids)
+            ]
+            generator_output["pixel_values"] = [pixel_values for pixel_values, _ in vision_features]
+            generator_output["image_grid_thw"] = [image_grid_thw for _, image_grid_thw in vision_features]
 
         return generator_output
 

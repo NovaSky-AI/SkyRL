@@ -242,7 +242,6 @@ def _fake_decode(kwargs_data):
 @pytest.mark.parametrize(
     "overrides, match",
     [
-        ({"batched": True}, "batched"),
         ({"step_wise_trajectories": True}, "step_wise_trajectories"),
         ({"use_conversation_multi_turn": False}, "use_conversation_multi_turn"),
         ({"chat_template": ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")}, "custom chat"),
@@ -252,18 +251,6 @@ def _fake_decode(kwargs_data):
 def test_vlm_validate_cfg_refusals(tokenizer, overrides, match):
     with pytest.raises(ValueError, match=match):
         _build_generator(tokenizer, MockRenderServer(tokenizer), MockLLM(tokenizer), **overrides)
-
-
-@pytest.mark.asyncio
-async def test_vlm_generate_batched_raises(tokenizer):
-    generator = _build_generator(tokenizer, MockRenderServer(tokenizer), MockLLM(tokenizer))
-    with pytest.raises(NotImplementedError, match="vision_language_generator"):
-        await generator.generate_batched(
-            prompts=[[{"role": "user", "content": "a"}]],
-            env_classes=["cpu_vlm_test_env"],
-            env_extras=[{}],
-            max_tokens=10,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +427,35 @@ async def test_vlm_rerender_check_logs_a_mismatch(_mock_decode, tokenizer):
     finally:
         logger.remove(handler_id)
     assert any("differs from the token-in-token-out sequence" in m for m in messages)
+
+
+@pytest.mark.asyncio
+@patch(DECODE_MM_KWARGS, side_effect=_fake_decode)
+async def test_vlm_generate_batched(_mock_decode, tokenizer):
+    """Batched generation renders each prompt through /render and sends and returns its images."""
+    render, llm = MockRenderServer(tokenizer), MockLLM(tokenizer)
+    generator = _build_generator(tokenizer, render, llm, batched=True, max_turns=1)
+    prompts = [
+        [_image_message("img://a", "first")],
+        [{"role": "user", "content": "text only"}],
+        [_image_message("img://b", "second"), _image_message("img://c", "third")],
+    ]
+    output: GeneratorOutput = await generator.generate(
+        {"prompts": prompts, "env_extras": [{}] * 3, "env_classes": ["cpu_vlm_test_env"] * 3}
+    )
+
+    assert len(llm.requests) == 1
+    request = llm.requests[0]
+    assert request["prompt_token_ids"] == output["prompt_token_ids"]
+    expected_urls = [["img://a"], [], ["img://b", "img://c"]]
+    for prompt_ids, features, urls in zip(request["prompt_token_ids"], request["mm_features"], expected_urls):
+        if not urls:
+            assert features is None
+            continue
+        assert features["mm_placeholders"]["image"] == _placeholder_runs(prompt_ids, render.image_pad_id)
+        assert features["mm_hashes"]["image"] == urls
+    assert output["pixel_values"] == [["kwargs:img://a"], None, ["kwargs:img://b", "kwargs:img://c"]]
+    assert output["response_ids"] == [llm.response_ids] * 3
 
 
 # ---------------------------------------------------------------------------
