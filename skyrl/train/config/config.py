@@ -261,11 +261,6 @@ class FSDPConfig(BaseConfig):
 @dataclass
 class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
-    reduce_scatter_with_fp32_accumulation: bool = False
-    """With ``grad_reduce_in_fp32=False`` (bf16 ``main_grad`` buffers, half the memory), still
-    accumulate the data-parallel reduce-scatter in FP32 locally while sending bf16 over the
-    wire. Only takes effect with the distributed optimizer's reduce-scatter, and requires
-    ``average_in_collective=False`` (megatron-core's implementation only supports SUM)."""
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
     fp8_param_gather: bool = False
