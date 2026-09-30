@@ -1282,6 +1282,18 @@ def test_validate_generator_output_rejects_step_wise_routes_for_generated_tokens
         validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
 
 
+def test_validate_generator_output_accepts_a_short_dummy_route_on_a_step_wise_row_that_trains_nothing():
+    """A masked or overlong-filtered row carries one dummy route; the trainer pads the rest."""
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
+    output["loss_masks"] = [[0, 0, 0], [1, 1, 1]]
+    output["rollout_expert_indices"] = [
+        _routes(1),
+        _routes(len(output["prompt_token_ids"][1]) + len(output["response_ids"][1])),
+    ]
+
+    validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
 def test_validate_generator_output_rejects_trajectory_routes_on_an_earlier_step():
     """A whole trajectory's routes on an earlier, shorter step row."""
     output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))

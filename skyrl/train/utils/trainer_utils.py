@@ -785,16 +785,17 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
                 f"rollout_expert_indices[{i}] has {captured_rows} route rows for a "
                 f"{sequence_length}-token trajectory, expected a non-empty prefix of it"
             )
+            # Row t covers target t + 1, so every trained target needs a captured row.
+            trained_positions = np.flatnonzero(np.asarray(loss_masks[i]))
             # A step-wise row's prompt is the history so far, so its routes must be the row's own:
             # one per token, less at most the last, which the engine never forwards. Routes for the
             # step's generated tokens alone, or for the whole trajectory on an earlier step, would
-            # replay onto the wrong tokens.
-            assert not step_wise or captured_rows >= sequence_length - 1, (
+            # replay onto the wrong tokens. A row that trains nothing (masked, or overlong-filtered)
+            # may carry a short dummy route: the trainer pads the rest, and no loss depends on it.
+            assert not (step_wise and trained_positions.size) or captured_rows >= sequence_length - 1, (
                 f"rollout_expert_indices[{i}] has {captured_rows} route rows for a {sequence_length}-token "
                 "step-wise row: step-wise routes must cover the row's whole prompt and response"
             )
-            # Row t covers target t + 1, so every trained target needs a captured row.
-            trained_positions = np.flatnonzero(np.asarray(loss_masks[i]))
             if trained_positions.size:
                 last_trained_token = prompt_length + int(trained_positions[-1])
                 assert captured_rows >= last_trained_token, (

@@ -354,6 +354,7 @@ def test_with_r3_an_overlong_filtered_trial_needs_no_routes() -> None:
     ]
 
     out = compose(outcomes, overlong_filtering=True, routed_experts=True)
+    validate_generator_output(2, out, step_wise=True, routes_expected=True)
     assert out["loss_masks"][1] == [0, 0]
     assert out["rollout_expert_indices"][1].tolist() == [[list(range(EXPERTS_PER_TOKEN))] * LAYERS]
     with pytest.raises(ValueError, match="1 of 2 trained paths have no routed experts"):
