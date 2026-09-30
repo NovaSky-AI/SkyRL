@@ -20,6 +20,7 @@ import ray
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
+from skyrl.train.utils.vllm_window_statistics import WindowStatistics
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
 # AND the `ray_` prefix that Ray's metrics agent adds to every custom metric.
@@ -60,6 +61,16 @@ _SUM_METRICS = (
     _COUNTER_SPEC_DRAFT_TOKENS,
     _COUNTER_SPEC_ACCEPTED_TOKENS,
 )
+_ADDITIONAL_COUNTERS = (
+    "ray_vllm_num_preemptions_total",
+    "ray_vllm_external_prefix_cache_queries_total",
+    "ray_vllm_external_prefix_cache_hits_total",
+    "ray_vllm_kv_offload_store_bytes_total",
+    "ray_vllm_kv_offload_load_bytes_total",
+    "ray_vllm_request_time_per_output_token_seconds_sum",
+    "ray_vllm_request_time_per_output_token_seconds_count",
+)
+_SUM_METRICS += _ADDITIONAL_COUNTERS
 _MEAN_METRICS = (_GAUGE_KV_CACHE_USAGE,)
 
 ParsedSamples = Dict[Tuple[str, FrozenSet[Tuple[str, str]]], float]
@@ -193,9 +204,12 @@ class VLLMMetricsScraper:
         self,
         urls: Optional[List[str]] = None,
         request_timeout_s: float = 2.0,
+        worker_ids: Optional[Iterable[str]] = None,
     ):
         self._urls = urls if urls is not None else discover_ray_metrics_urls()
         self._timeout = request_timeout_s
+        self._worker_ids = None if worker_ids is None else frozenset(worker_ids)
+        self.last_window = WindowStatistics(valid=False)
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
         self._client: Optional[httpx.AsyncClient] = None
@@ -212,6 +226,10 @@ class VLLMMetricsScraper:
                 "VLLMMetricsScraper: ray.nodes() returned no metrics endpoints; "
                 "engine metrics will not appear in wandb."
             )
+
+    def set_worker_ids(self, worker_ids: Iterable[str]) -> None:
+        """Restrict snapshots to the fixed set of servers launched for this run."""
+        self._worker_ids = frozenset(worker_ids)
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -262,10 +280,47 @@ class VLLMMetricsScraper:
             )
             self._warned_empty = True
 
+        if self._worker_ids is not None:
+            parsed = {key: value for key, value in parsed.items() if dict(key[1]).get("WorkerId") in self._worker_ids}
+        if not parsed:
+            return None
+        buckets = {}
+        schemas = {}
+        for (name, labels), value in parsed.items():
+            if name not in {
+                "ray_vllm_time_to_first_token_seconds_bucket",
+                "ray_vllm_request_time_per_output_token_seconds_bucket",
+            }:
+                continue
+            label_dict = dict(labels)
+            bound = label_dict.get("le")
+            if bound is None:
+                continue
+            owner = frozenset((k, v) for k, v in labels if k != "le")
+            schemas.setdefault(name, {}).setdefault(owner, set()).add(bound)
+            key = f"{name}::{bound}"
+            buckets[key] = buckets.get(key, 0.0) + value
+        for name, owners in schemas.items():
+            if len({frozenset(bounds) for bounds in owners.values()}) != 1:
+                buckets = {key: value for key, value in buckets.items() if not key.startswith(name + "::")}
+        # Ray counters skip zero increments. A live engine gauge confirms the
+        # exporter exists; connector queries/store counters establish support.
+        if any(name == _GAUGE_NUM_RUNNING for name, _ in parsed):
+            buckets.setdefault("ray_vllm_num_preemptions_total", 0.0)
         sums = aggregate(parsed, _SUM_METRICS, how="sum")
         means = aggregate(parsed, _MEAN_METRICS, how="mean")
         per_pos = sum_by_position(parsed, _COUNTER_SPEC_ACCEPTED_PER_POS)
-        return {**sums, **means, **per_pos}
+        if "ray_vllm_num_preemptions_total" in sums:
+            buckets.pop("ray_vllm_num_preemptions_total", None)
+        for hits, queries in (
+            ("ray_vllm_prefix_cache_hits_total", _COUNTER_PREFIX_QUERIES),
+            ("ray_vllm_external_prefix_cache_hits_total", "ray_vllm_external_prefix_cache_queries_total"),
+        ):
+            if queries in sums:
+                sums.setdefault(hits, 0.0)
+        if "ray_vllm_kv_offload_store_bytes_total" in sums:
+            sums.setdefault("ray_vllm_kv_offload_load_bytes_total", 0.0)
+        return {**sums, **means, **per_pos, **buckets}
 
     async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
         """Return ``vllm/...`` scalars for the current step (empty if unavailable).
@@ -286,6 +341,9 @@ class VLLMMetricsScraper:
         else:
             out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
 
+        self.last_window = WindowStatistics.between(
+            self._prev_aggregated, snapshot, window if self._prev_timestamp is not None else None
+        )
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
         return out
@@ -342,6 +400,7 @@ class VLLMMetricsScraper:
         self._window_prev = None
         self._active_since = None
         self._paused = False
+        self.last_window = WindowStatistics.between(prev, new_snapshot, window)
         if new_snapshot is None:
             return {}
         return self._window_metrics(prev, new_snapshot, window, f"{label}/")
@@ -406,6 +465,23 @@ class VLLMMetricsScraper:
         itl_count_d = delta(_HIST_ITL_COUNT)
         if itl_sum_d is not None and itl_count_d is not None and itl_count_d > 0:
             out[f"{prefix}tpot_seconds_avg"] = itl_sum_d / itl_count_d
+            out[f"{prefix}itl_seconds_avg"] = itl_sum_d / itl_count_d
+
+        stats = WindowStatistics.between(prev, cur, throughput_window_s)
+        out.update(stats.latency_metrics(prefix))
+        preemptions = delta("ray_vllm_num_preemptions_total")
+        if preemptions is not None:
+            out[prefix + "num_preemptions"] = preemptions
+            if gen_d is not None and gen_d > 0:
+                out[prefix + "preemptions_per_million_tokens"] = preemptions * 1e6 / gen_d
+        external_q = delta("ray_vllm_external_prefix_cache_queries_total")
+        external_h = delta("ray_vllm_external_prefix_cache_hits_total")
+        if external_q is not None and external_q > 0 and external_h is not None:
+            out[prefix + "external_prefix_cache_hit_rate"] = external_h / external_q
+        for direction in ("store", "load"):
+            byte_delta = delta(f"ray_vllm_kv_offload_{direction}_bytes_total")
+            if byte_delta is not None and has_window:
+                out[f"{prefix}kv_offload_{direction}_throughput_bytes_s"] = byte_delta / throughput_window_s
 
         # Speculative-decoding (MTP draft) acceptance. Counters, so pure deltas over the window --
         # no throughput denominator needed. Keys mirror the legacy metrics: raw draft/accept counts,
