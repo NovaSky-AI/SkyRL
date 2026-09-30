@@ -182,6 +182,7 @@ def test_convert_to_training_input_fills_empty_image_rows_for_mixed_batch(
     dummy_config, dummy_tokenizer, dummy_generator
 ):
     """A text-only trajectory in a VLM batch gets an empty (0, D) pixel row and a (0, 3) long grid."""
+    dummy_config.trainer.strategy = "megatron"
     trainer = _vlm_trainer(dummy_config, dummy_tokenizer, dummy_generator, batch_size=3)
     t0, t2 = torch.randn(4, 6), torch.randn(8, 6)
     g0, g2 = torch.tensor([[1, 2, 2]]), torch.tensor([[1, 2, 4]])
@@ -194,6 +195,17 @@ def test_convert_to_training_input_fills_empty_image_rows_for_mixed_batch(
     assert pixels[1].shape == (0, 6) and pixels[1].dtype == t0.dtype
     assert grids[1].shape == (0, 3) and grids[1].dtype == torch.long
     assert torch.equal(grids[0], g0) and torch.equal(grids[2], g2)
+
+
+def test_convert_to_training_input_rejects_mixed_batch_on_fsdp(dummy_config, dummy_tokenizer, dummy_generator):
+    """On FSDP a text-only micro-batch skips the sharded vision tower and deadlocks the other ranks."""
+    dummy_config.trainer.strategy = "fsdp"
+    trainer = _vlm_trainer(dummy_config, dummy_tokenizer, dummy_generator, batch_size=3)
+    t0, t2 = torch.randn(4, 6), torch.randn(8, 6)
+    g0, g2 = torch.tensor([[1, 2, 2]]), torch.tensor([[1, 2, 4]])
+
+    with pytest.raises(ValueError, match="1 of 3 trajectories have no images"):
+        trainer.convert_to_training_input(_vlm_generator_output([t0, None, t2], [g0, None, g2]), ["a", "b", "c"])
 
 
 def test_convert_to_training_input_drops_image_fields_when_no_row_has_images(

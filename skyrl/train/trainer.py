@@ -895,6 +895,17 @@ class RayPPOTrainer:
             # Text-only trajectories of a mixed batch have no image tensors (None). Give them empty
             # tensors so the batch stays row-aligned; the model wrappers skip empty rows.
             reference = next((t for t in pixel_values if t is not None), None)
+            num_text_only = sum(t is None for t in pixel_values)
+            if reference is not None and num_text_only > 0 and self.cfg.trainer.strategy == "fsdp":
+                # On FSDP, a rank whose micro-batch has no images skips the vision tower, whose sharded
+                # weights are all-gathered collectively on every forward, so the ranks deadlock.
+                # TODO(xgui): run a dummy vision forward (tiny fake image, output scaled by 0) on
+                # text-only micro-batches so every rank joins the same collectives, then drop this check.
+                raise ValueError(
+                    f"Mixed image and text-only batches are not supported on the FSDP backend: {num_text_only} of "
+                    f"{len(pixel_values)} trajectories have no images. Use an all-image dataset or "
+                    "trainer.strategy=megatron."
+                )
             if reference is None:
                 pixel_values = None
                 image_grid_thw = None
