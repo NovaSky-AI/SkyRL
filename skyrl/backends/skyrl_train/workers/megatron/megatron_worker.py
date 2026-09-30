@@ -104,7 +104,11 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     get_microbatch_iterator,
     reduce_metrics,
 )
-from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import (
+    SKYRL_MEGATRON_RANDOM_INIT,
+    SKYRL_OFFLOAD_CHECKPOINT_INPUTS,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+)
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -519,6 +523,13 @@ class MegatronWorker:
         # Delete along with the patch module once the megatron-core pin includes
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
+        if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
+            # After patch_dsa_index_share, which rebinds the same function.
+            from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
+                patch_offload_checkpoint_inputs,
+            )
+
+            patch_offload_checkpoint_inputs()
 
         # Give the Qwen3-VL ViT the language model's attention backend; megatron-core
         # now asserts NVTE_* attention env vars agree across all models in a process.

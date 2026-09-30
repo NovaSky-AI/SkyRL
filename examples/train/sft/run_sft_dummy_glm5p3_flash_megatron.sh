@@ -16,9 +16,14 @@ set -x
 #   MODEL_PATH=/path/to/glm5p3_flash_cfg MAX_LENGTH=8192 \
 #       bash examples/train/sft/run_sft_dummy_glm5p3_flash_megatron.sh [extra overrides...]
 #
-# Defaults fit up to 16k tokens per sequence. 32k needs TP8 and more selective recompute
-# (measured: ~127 GB allocated per GPU, ~2.9k tokens/s on 64 B200s):
-#   MEGATRON_TP=8 RECOMPUTE_MODULES='[core_attn,moe,moe_act,mla_up_proj,shared_experts]' MAX_LENGTH=32768 ...
+# Defaults fit up to 16k tokens per sequence. Longer contexts (measured on 64 B200s):
+#   up to 256k: TP8 + full recompute + bf16 grad buffers with FP32 reduce-scatter accumulation
+#     MEGATRON_TP=8 RECOMPUTE_GRANULARITY=full RECOMPUTE_METHOD=uniform RECOMPUTE_NUM_LAYERS=1 \
+#     MAX_LENGTH=262144 bash ... megatron_config.ddp_config.grad_reduce_in_fp32=false \
+#       megatron_config.ddp_config.reduce_scatter_with_fp32_accumulation=true \
+#       megatron_config.ddp_config.average_in_collective=false
+#   (256k: ~141 GiB/GPU, ~3.4k tokens/s)
+#   beyond: also SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1 (384k: ~127 GiB/GPU, ~3.0k tokens/s)
 
 MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to a GLM-5.3-Flash config + tokenizer directory}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"
