@@ -73,7 +73,7 @@ placeholder generated token; summing them does not yield logical run totals.
 
 ## Run summaries
 
-W&B receives `vllm_run/train/`, `vllm_run/eval/`, or `vllm_run/combined/` summary
+W&B receives `vllm_correct_aggregate/train/`, `vllm_correct_aggregate/eval/`, or `vllm_correct_aggregate/combined/` summary
 fields. Other configured loggers continue receiving step scalars. A local
 `vllm_run_summary.json` is saved under `trainer.ckpt_path` on finalization.
 
@@ -87,7 +87,7 @@ counters and duration. Use unobserved seconds to identify unrecovered coverage.
 
 `run_status` becomes `success` or `failed` on handled exit. Partial summaries
 update during logging. Accumulators persist in training checkpoints;
-`vllm_run/covers_resumed_history` reports whether restored history is included.
+`vllm_correct_aggregate/covers_resumed_history` reports whether restored history is included.
 Fresh engines establish new baselines after resumption. Final collection allows
 a bounded terminal export drain without adding idle time to generation duration.
 A hard kill cannot finalize status or annotations.
@@ -95,6 +95,14 @@ A hard kill cannot finalize status or annotations.
 In W&B, add run-table columns for status, output tokens, throughput, preemptions
 per million tokens, cache hit rates, offload bytes/s, and TTFT/request TPOT.
 Compare weighted summary fields rather than averaging step rates.
+
+Step history keeps its `vllm/*` keys. Tracking defines each of these metrics with
+W&B `summary="none"` and removes their SDK summary entries at finalization.
+The pinned SDK produces an uploaded summary without those entries, but live
+validation found that the W&B backend still exposes inferred last values in its
+public summary. If these appear, use `vllm_correct_aggregate/*` for run comparisons;
+`vllm/*` values are step snapshots. Historical runs retain their old namespaces.
+A hard kill can leave a partial aggregate; check status and coverage before comparing.
 
 ## Optional Grafana annotations
 
