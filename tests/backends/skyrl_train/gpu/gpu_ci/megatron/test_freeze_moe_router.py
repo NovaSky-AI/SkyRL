@@ -1,6 +1,7 @@
 """Smoke tests for the ``freeze_moe_router`` helper.
 
-The helper walks ``model.decoder.layers`` and flips ``requires_grad`` on
+The helper walks ``model.decoder.layers`` (or ``model.language_model.decoder.layers``
+for multimodal models) and flips ``requires_grad`` on
 router weights/biases. These tests build minimal mock modules that mimic Megatron-Core's attribute layout
 without importing Megatron.
 
@@ -11,6 +12,7 @@ uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl
 import pytest
 import torch
 import torch.nn as nn
+from loguru import logger
 
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     freeze_moe_router,
@@ -193,3 +195,38 @@ def test_freeze_moe_router_skips_chunk_without_decoder():
     assert chunk.embedding.weight.requires_grad is True
     for layer in moe_chunk.decoder.layers:
         assert layer.mlp.router.weight.requires_grad is False
+
+
+@pytest.mark.megatron
+def test_freeze_moe_router_warns_when_nothing_frozen():
+    """A rank holding no MoE router (dense-only layers, or no decoder at all) warns
+    that nothing was frozen and still returns its input unchanged."""
+
+    class _DenseLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = nn.Linear(8, 8)
+
+    class _DenseModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.decoder = nn.Module()
+            self.decoder.layers = nn.ModuleList([_DenseLayer(), _DenseLayer()])
+
+    class _EmbeddingOnlyChunk(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = nn.Embedding(16, 8)
+
+    models = [_EmbeddingOnlyChunk(), _DenseModel()]
+    messages = []
+    handler_id = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        ret = freeze_moe_router(models)
+    finally:
+        logger.remove(handler_id)
+
+    assert ret is models
+    assert all(p.requires_grad for m in models for p in m.parameters())
+    assert any("no transformer decoder found on _EmbeddingOnlyChunk" in msg for msg in messages)
+    assert any("froze no router parameters" in msg for msg in messages)
