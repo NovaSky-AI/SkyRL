@@ -125,9 +125,7 @@ class LoRAPerturbPolicyWorkerBase(MegatronPolicyWorkerBase):
 LoRAPerturbPolicyWorker = ray.remote(num_gpus=1)(LoRAPerturbPolicyWorkerBase)
 
 
-def get_test_lora_actor_config(
-    model_name: str, merge_lora: bool, lora_sync_path: str
-) -> SkyRLTrainConfig:
+def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path: str) -> SkyRLTrainConfig:
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.model.lora = SkyRLLoraConfig(
@@ -139,18 +137,14 @@ def get_test_lora_actor_config(
     )
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     if "glm-5.3-flash" in model_name.lower():
-        cfg.trainer.policy.model.lora.target_modules = list(
-            GLM5_3_FLASH_LORA_TARGET_MODULES
-        )
+        cfg.trainer.policy.model.lora.target_modules = list(GLM5_3_FLASH_LORA_TARGET_MODULES)
     if "glm-5.3-bf16" in model_name.lower():
         cfg.trainer.placement.policy_num_gpus_per_node = 8
         cfg.trainer.policy.inference_only_init = True
         cfg.trainer.policy.language_model_only = True
         cfg.trainer.ref.language_model_only = True
         cfg.trainer.remove_microbatch_padding = False
-        cfg.trainer.policy.model.lora.target_modules = GLM5_3_FLASH_LORA_TARGET_MODULES[
-            :7
-        ]
+        cfg.trainer.policy.model.lora.target_modules = GLM5_3_FLASH_LORA_TARGET_MODULES[:7]
         cfg.trainer.policy.model.lora.sync_mode = "memory"
         cfg.trainer.policy.model.lora.max_loras = 1
         cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
@@ -175,16 +169,12 @@ def get_test_lora_actor_config(
 
 def _trainer_logprobs(policy, training_input) -> torch.Tensor:
     with Timer("trainer_forward"):
-        results = ray.get(
-            policy.async_run_ray_method("mesh", "forward", data=training_input)
-        )
+        results = ray.get(policy.async_run_ray_method("mesh", "forward", data=training_input))
     output = WorkerOutput.cat(policy.actor_infos, results)
     return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
 
-def _mean_abs_diff(
-    reference: torch.Tensor, actual: torch.Tensor, mask: torch.Tensor, label: str
-) -> float:
+def _mean_abs_diff(reference: torch.Tensor, actual: torch.Tensor, mask: torch.Tensor, label: str) -> float:
     diff = (reference[mask] - actual[mask]).abs()
     print(
         f"{label}: mean abs diff {diff.mean().item():.6f}, max {diff.max().item():.6f}, "
@@ -351,9 +341,7 @@ async def test_lora_logprobs_matching_roundtrip(
                 },
             }
         if lora_sync and "glm-5.3-flash" in model_name.lower():
-            engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(
-                GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES
-            )
+            engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES)
         async with InferenceEngineState.create(
             cfg=cfg,
             model=model_name,
@@ -418,14 +406,10 @@ async def test_lora_logprobs_matching_roundtrip(
                 (
                     (response_mask, logprobs_t, _),
                     training_input,
-                ) = await generate_with_vllm(
-                    generator, client, model_name, tokenizer, return_training_input=True
-                )
+                ) = await generate_with_vllm(generator, client, model_name, tokenizer, return_training_input=True)
                 if cfg.trainer.placement.colocate_all:
                     await client.sleep()
-                    policy.backload_to_gpu(
-                        backload_optimizer=False, backload_model=True
-                    )
+                    policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
                 mask = response_mask.bool()
                 logprobs_megatron = _trainer_logprobs(policy, training_input)
@@ -435,20 +419,12 @@ async def test_lora_logprobs_matching_roundtrip(
                     mask,
                     "zero adapter: vLLM vs Megatron",
                 )
-                assert zero_diff < threshold, (
-                    f"Logprob diff should be less than {threshold}, but is {zero_diff:.6f}"
-                )
+                assert zero_diff < threshold, f"Logprob diff should be less than {threshold}, but is {zero_diff:.6f}"
 
                 # Phase 2: perturb the trainer's adapter; the engines still serve the zero adapter.
                 multiplier = _lora_b_multiplier(model_name)
-                stats = ray.get(
-                    policy.async_run_ray_method(
-                        "pass_through", "perturb_lora_b", multiplier
-                    )
-                )[0]
-                print(
-                    f"perturbed {stats['changed_tensors']} LoRA B tensors ({stats['changed_elements']} elements)"
-                )
+                stats = ray.get(policy.async_run_ray_method("pass_through", "perturb_lora_b", multiplier))[0]
+                print(f"perturbed {stats['changed_tensors']} LoRA B tensors ({stats['changed_elements']} elements)")
                 logprobs_megatron_perturbed = _trainer_logprobs(policy, training_input)
                 _mean_abs_diff(
                     logprobs_megatron,
@@ -472,14 +448,10 @@ async def test_lora_logprobs_matching_roundtrip(
                 (
                     (response_mask_2, logprobs_t_2, _),
                     training_input_2,
-                ) = await generate_with_vllm(
-                    generator, client, model_name, tokenizer, return_training_input=True
-                )
+                ) = await generate_with_vllm(generator, client, model_name, tokenizer, return_training_input=True)
                 if cfg.trainer.placement.colocate_all:
                     await client.sleep()
-                    policy.backload_to_gpu(
-                        backload_optimizer=False, backload_model=True
-                    )
+                    policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
                 logprobs_megatron_2 = _trainer_logprobs(policy, training_input_2)
                 updated_diff = _mean_abs_diff(
