@@ -1,7 +1,7 @@
 """The capture server: a control plane plus one OpenAI-compatible route per trajectory.
 
     POST /trajectories                    {meta}         -> {id, base_url}
-    POST /trajectories/{id}/finish        {annotations}  -> {status, samples}
+    POST /trajectories/{id}/finish        {annotations}  -> {status, samples, record}
     GET  /trajectories/{id}                               -> the trajectory document
     POST /t/{id}/v1/chat/completions                      (the harness)
     GET  /t/{id}/v1/models                                (passed through)
@@ -15,6 +15,12 @@ With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
 and then dropped from memory; reads of it are served from disk. Without one,
 ended trajectories stay in memory, which is only for tests and development.
+
+With a ``record_mirror`` as well, each written record is then copied to that
+URL in the background (``skycap.mirror``). The copy fails open: a slow or
+failing store never fails a trajectory, and its losses are counted on
+``/healthz``. ``finish`` answers with where the record is: its path on this
+server's disk, and its mirror URI.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import orjson
 from aiohttp import web
 
 from skycap import record
+from skycap.mirror import RecordMirror
 from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
 from skycap.samples import build_samples
 from skycap.trajectory import Status, Trajectory, new_trajectory_id
@@ -65,11 +72,16 @@ class CaptureServer:
         backend: Backend,
         *,
         record_dir: str | Path | None = None,
+        record_mirror: str | RecordMirror | None = None,
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
     ) -> None:
         self.backend = backend
-        self.record_dir = Path(record_dir) if record_dir is not None else None
+        self.record_dir = Path(record_dir).absolute() if record_dir is not None else None
+        if record_mirror is not None and self.record_dir is None:
+            raise ValueError("record_mirror copies what is written to record_dir, so it needs a record_dir")
+        #: The remote copy of the record directory, if any.
+        self.mirror = RecordMirror(record_mirror) if isinstance(record_mirror, str) else record_mirror
         #: Seconds an open trajectory may go without a request before it is abandoned.
         self.ttl = ttl
         self.sweep_interval = sweep_interval
@@ -109,6 +121,9 @@ class CaptureServer:
                 except Exception:
                     logger.exception("releasing %s failed", trajectory.id)
         await self.backend.close()
+        if self.mirror is not None:
+            # Bounded by the mirror's shutdown deadline; what is left is dropped with a warning.
+            await asyncio.to_thread(self.mirror.close)
 
     # -- ending a trajectory -----------------------------------------------------
     async def end(self, trajectory: Trajectory, status: Status, annotations: dict[str, Any] | None = None) -> None:
@@ -147,7 +162,19 @@ class CaptureServer:
         except Exception:
             logger.exception("writing %s failed", trajectory.id)
             return False
+        if self.mirror is not None:
+            self.mirror.submit(self.record_dir, trajectory.id)
         return True
+
+    def location(self, trajectory: Trajectory) -> dict[str, str | None] | None:
+        """Where a trajectory's record is: ``{"path", "mirror"}``, or None when it isn't written."""
+        if self.record_dir is None or self.trajectories.get(trajectory.id) is trajectory:
+            return None
+        name = record.document_path(self.record_dir, trajectory.id).name
+        return {
+            "path": str(self.record_dir / name),
+            "mirror": None if self.mirror is None else self.mirror.uri(name),
+        }
 
     async def sweep(self) -> list[str]:
         """End trajectories nobody finished within the TTL; open ones as abandoned. Returns their ids."""
@@ -193,7 +220,10 @@ class CaptureServer:
     # -- control plane --------------------------------------------------------
     async def healthz(self, request: web.Request) -> web.Response:
         open_count = sum(1 for t in self.trajectories.values() if t.is_open)
-        return _json({"ok": True, "open_trajectories": open_count, "capture": self.backend.describe()})
+        health = {"ok": True, "open_trajectories": open_count, "capture": self.backend.describe()}
+        if self.mirror is not None:
+            health["record_mirror"] = {"url": self.mirror.url, **self.mirror.stats()}
+        return _json(health)
 
     async def create(self, request: web.Request) -> web.Response:
         body = await _read_json(request, default={})
@@ -225,6 +255,7 @@ class CaptureServer:
                 "status": trajectory.status,
                 "samples": [s.to_json() for s in build_samples(trajectory.graph)],
                 "unbridged_calls": trajectory.graph.unbridged_calls(),
+                "record": self.location(trajectory),
             }
         )
 

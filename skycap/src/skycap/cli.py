@@ -69,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="where ended trajectories are written; without it they stay in memory (development only)",
     )
     serve.add_argument(
+        "--record-mirror",
+        default=None,
+        metavar="URL",
+        help="also copy each written record to this fsspec URL (s3://, gs://, ...) in the background; "
+        "needs --record-dir and skycap[remote], plus the store's fsspec implementation (s3fs, gcsfs)",
+    )
+    serve.add_argument(
         "--ttl",
         type=float,
         default=3600.0,
@@ -80,6 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
 def build_server(args: argparse.Namespace) -> CaptureServer:
     if args.mode == "tokens" and not args.tokenizer:
         raise SystemExit("--mode tokens needs --tokenizer")
+    if args.record_mirror and not args.record_dir:
+        raise SystemExit("--record-mirror needs --record-dir")
     backend = build_backend(
         args.upstream_url,
         mode=args.mode,
@@ -93,7 +102,7 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         logprobs_mode=args.logprobs_mode,
         use_raw_content=args.use_raw_content,
     )
-    return CaptureServer(backend, record_dir=args.record_dir, ttl=args.ttl)
+    return CaptureServer(backend, record_dir=args.record_dir, record_mirror=args.record_mirror, ttl=args.ttl)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -20,6 +20,32 @@ Sidecars are written before the document, and every file is written to a
 temporary name and renamed, so a document that exists always has its sidecars.
 A reader lists trajectories by listing `*.json.zst`.
 
+### A mirror
+
+A server started with a record mirror (`--record-mirror URL`, an fsspec URL
+such as `s3://bucket/run-7`) also copies each trajectory's files, under the
+same names, to `{URL}/{name}`, after writing them to the record directory.
+The copy is made in the background, sidecars before the document, so a
+mirrored document also has its sidecars beside it. The copy fails open: a
+record the store never got is missing from the mirror (the server's
+`/healthz` counts them under `record_mirror`), and the record directory is
+always complete. A reader reads a mirror exactly as it reads a record
+directory.
+
+### Where a trajectory's record is
+
+`finish` answers with the document's location as `record`, or `null` when the
+server has no record directory or couldn't write the record:
+
+```json
+{"record": {"path": "/data/record/tr_ab12.json.zst",
+            "mirror": "s3://bucket/run-7/tr_ab12.json.zst"}}
+```
+
+`path` is on the server's own disk. `mirror` is null without a mirror, and
+otherwise where the copy is going: it may not be there yet, or at all. The
+sidecars are beside the document in both places.
+
 ## The document
 
 The decompressed document is a UTF-8 JSON object:

@@ -23,6 +23,7 @@ from skycap.server import Backend, CaptureServer
 from skycap.text import TextBackend
 
 if TYPE_CHECKING:
+    from skycap.mirror import RecordMirror
     from skycap.tokens.engine import VLLMEngine
     from skycap.tokens.renderer import TokenRenderer
 
@@ -79,6 +80,9 @@ def build_backend(
 class CaptureService:
     """The model options are ``build_backend``'s; the rest place and persist the server.
 
+    ``record_mirror`` (an fsspec URL, or a ``RecordMirror``) copies each record written to ``record_dir``
+    to a remote store in the background; see ``skycap.mirror``.
+
     ``port=0`` lets the OS pick a free port. ``advertise_host`` is the address clients use to reach
     this server, which ``url`` carries once started.
     """
@@ -100,6 +104,7 @@ class CaptureService:
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
         record_dir: str | None = None,
+        record_mirror: str | RecordMirror | None = None,
         ttl: float = 3600.0,
         host: str = "0.0.0.0",
         port: int = 0,
@@ -120,7 +125,7 @@ class CaptureService:
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
         )
-        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl)
+        self.server = CaptureServer(backend, record_dir=record_dir, record_mirror=record_mirror, ttl=ttl)
         self._host, self._port = host, port
         self._advertise_host = advertise_host
         self._thread: threading.Thread | None = None
@@ -143,7 +148,11 @@ class CaptureService:
         return self.url
 
     def stop(self, timeout: float = 120.0) -> bool:
-        """Stop serving, writing what is still in memory. Returns whether that finished in time."""
+        """Stop serving, writing what is still in memory. Returns whether that finished in time.
+
+        With a record mirror, stopping also waits up to the mirror's ``shutdown_timeout`` for its queue,
+        so ``timeout`` should exceed that.
+        """
         thread = self._thread
         if thread is None:
             return True
