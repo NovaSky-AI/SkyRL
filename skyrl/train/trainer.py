@@ -309,8 +309,7 @@ class RayPPOTrainer:
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
         stop_training = (
-            self.cfg.trainer.max_training_steps is not None
-            and self.global_step > self.cfg.trainer.max_training_steps
+            self.cfg.trainer.max_training_steps is not None and self.global_step > self.cfg.trainer.max_training_steps
         )
 
         # booleans tracking whether we save ckpts
