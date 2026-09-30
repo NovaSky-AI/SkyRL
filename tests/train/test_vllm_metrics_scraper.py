@@ -677,3 +677,37 @@ def test_discover_ray_metrics_urls_filters_dead_and_missing(monkeypatch):
         "http://10.0.0.1:51001/metrics",
         "http://10.0.0.4:51004/metrics",
     ]
+
+
+@pytest.mark.asyncio
+async def test_worker_filter_and_merged_latency_buckets():
+    from unittest.mock import AsyncMock
+
+    scraper = VLLMMetricsScraper(urls=["http://test/metrics"], worker_ids=["ours"])
+    text = """ray_vllm_generation_tokens_total{WorkerId="ours"} 10
+ray_vllm_generation_tokens_total{WorkerId="other"} 900
+ray_vllm_time_to_first_token_seconds_bucket{WorkerId="ours",le="1"} 2
+ray_vllm_time_to_first_token_seconds_bucket{WorkerId="ours",le="+Inf"} 3
+ray_vllm_time_to_first_token_seconds_bucket{WorkerId="other",le="1"} 900
+"""
+    scraper._fetch_all = AsyncMock(return_value=parse_metrics_text(text))
+    snapshot = await scraper._read_snapshot()
+    assert snapshot["ray_vllm_generation_tokens_total"] == 10
+    assert snapshot["ray_vllm_time_to_first_token_seconds_bucket::1"] == 2
+
+
+def test_offload_and_preemption_scalar_reductions():
+    current = {
+        "ray_vllm_num_preemptions_total": 2,
+        "ray_vllm_generation_tokens_total": 100,
+        "ray_vllm_external_prefix_cache_queries_total": 30,
+        "ray_vllm_external_prefix_cache_hits_total": 12,
+        "ray_vllm_kv_offload_store_bytes_total": 1000,
+        "ray_vllm_kv_offload_load_bytes_total": 500,
+    }
+    metrics = VLLMMetricsScraper._derive(current, dict.fromkeys(current, 0), 5, "vllm/")
+    assert metrics["vllm/num_preemptions"] == 2
+    assert metrics["vllm/preemptions_per_million_tokens"] == 20000
+    assert metrics["vllm/external_prefix_cache_hit_rate"] == 0.4
+    assert metrics["vllm/kv_offload_store_throughput_bytes_s"] == 200
+    assert metrics["vllm/kv_offload_load_throughput_bytes_s"] == 100
