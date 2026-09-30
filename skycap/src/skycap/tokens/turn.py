@@ -2,7 +2,9 @@
 
 Planning, in order:
 
-1. Match the request's messages against the graph in message space.
+1. Match the request's messages against the graph in message space. Where
+   the hashes stop, a message the graph holds in another spelling is
+   matched if the renderer renders both alike (``_match``).
 2. If the matched prefix contains a model node, bridge from the deepest one:
    the renderer extends that call's exact prompt and completion with the new
    messages instead of re-rendering what the model sampled.
@@ -29,7 +31,7 @@ import numpy as np
 from skycap import hashing
 from skycap.graph import CallInfo, MessageGraph, NodeTokens
 from skycap.tokens.engine import EngineOutput
-from skycap.tokens.renderer import TokenRenderer
+from skycap.tokens.renderer import Rendered, TokenRenderer
 
 
 class TokenError(Exception):
@@ -75,14 +77,18 @@ def plan(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
     matches: Sequence[str],
+    *,
+    tools_key: str,
+    model: str | None,
 ) -> Plan:
     if not messages:
         raise TokenError("a request needs at least one message")
-    matched = graph.match(matches)
+    matched, rendered = _match(graph, renderer, messages, tools, matches, tools_key, model)
     bridged = _bridge(graph, renderer, messages, tools, matched)
     if bridged is not None:
         return bridged
-    rendered = renderer.render(messages, tools)
+    if rendered is None:
+        rendered = renderer.render(messages, tools)
     prompt = rendered.token_ids
     offset, parent, start = 0, None, 0
     for depth, node_id in enumerate(matched):
@@ -94,6 +100,71 @@ def plan(
     indices = [i - start if i >= 0 else -1 for i in rendered.tail_indices[offset:]]
     chunks, scaffold = attribute(prompt[offset:], indices, len(messages) - start)
     return Plan(prompt, parent, offset, start, chunks, scaffold, bridged=False)
+
+
+def _match(
+    graph: MessageGraph,
+    renderer: TokenRenderer,
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    matches: Sequence[str],
+    tools_key: str,
+    model: str | None,
+) -> tuple[list[int], Rendered | None]:
+    """The longest prefix of ``messages`` in the graph, and the full render if one was needed.
+
+    Where the match hashes stop, the next message may still be a node's message
+    spelled differently, e.g. ``content: ""`` against no ``content``. Whether two
+    spellings are the same message depends on the chat template, so the renderer
+    decides: a sibling whose rendered fields agree once empty strings are dropped
+    is swapped into the request, and if the request renders to the same tokens
+    either way, the message is that node. Its hash is recorded as an alias, so
+    later requests replaying this spelling match without rendering.
+    """
+    rendered: Rendered | None = None
+    matched = graph.match(matches)
+    while len(matched) < len(messages):
+        depth = len(matched)
+        parent = matched[-1] if matched else None
+        candidates = _candidates(graph, parent, messages[depth], tools_key, model)
+        if not candidates:
+            break
+        if rendered is None:
+            rendered = renderer.render(messages, tools)
+        for node_id in candidates:
+            swapped = [*messages[:depth], graph.nodes[node_id].message, *messages[depth + 1 :]]
+            if renderer.render(swapped, tools).token_ids == rendered.token_ids:
+                graph.alias(parent, matches[depth], node_id)
+                break
+        else:
+            break
+        matched = graph.match(matches)
+    return matched, rendered
+
+
+def _candidates(
+    graph: MessageGraph, parent: int | None, message: Mapping[str, Any], tools_key: str, model: str | None
+) -> list[int]:
+    """Children of ``parent`` that may be ``message`` spelled differently, model-authored and latest first.
+
+    A child qualifies if it was matched under this call's tools and model, and
+    its rendered fields equal the message's once empty strings are dropped too.
+    """
+    loose = _loose(message)
+    found = [
+        node_id
+        for node_id in graph.children(parent)
+        if hashing.token_match_hash(graph.nodes[node_id].message, tools=tools_key, model=model)
+        == graph.nodes[node_id].match_hash
+        and _loose(graph.nodes[node_id].message) == loose
+    ]
+    return sorted(found, key=lambda node_id: (graph.nodes[node_id].author == "model", node_id), reverse=True)
+
+
+def _loose(message: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value for key, value in hashing.canonical_message(hashing.rendered_fields(message)).items() if value != ""
+    }
 
 
 def _bridge(

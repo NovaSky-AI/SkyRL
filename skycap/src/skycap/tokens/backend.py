@@ -166,7 +166,9 @@ class TokensBackend:
             graph.tools.setdefault(tools_key, [dict(tool) for tool in chat.tools])
         matches = turn.match_hashes(chat.messages, tools_key, model)
         try:
-            planned = await asyncio.to_thread(turn.plan, graph, self.renderer, chat.messages, chat.tools, matches)
+            planned = await asyncio.to_thread(
+                turn.plan, graph, self.renderer, chat.messages, chat.tools, matches, tools_key=tools_key, model=model
+            )
             # A first call has nothing to extend; after that, not extending is worth reporting.
             # A call commits its messages and its reply together (``turn.commit``), so the graph
             # has nodes exactly when an earlier call went through.

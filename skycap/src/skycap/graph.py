@@ -192,6 +192,17 @@ class MessageGraph:
     def child(self, parent: int | None, match_hash: str) -> int | None:
         return self._by_match.get((parent, match_hash))
 
+    def alias(self, parent: int | None, match_hash: str, node: int) -> None:
+        """Match ``match_hash`` under ``parent`` to ``node``, a child whose message renders the same.
+
+        Token mode records one when a request spells a message differently from
+        the node (``tokens.turn``), so later requests match it without rendering.
+        An existing match is kept.
+        """
+        if self.nodes[node].parent != parent:
+            raise ValueError(f"node {node} is not a child of {parent}")
+        self._by_match.setdefault((parent, match_hash), node)
+
     def match(self, match_hashes: Sequence[str]) -> list[int]:
         """The longest prefix of ``match_hashes`` already in the graph, as node ids."""
         matched: list[int] = []

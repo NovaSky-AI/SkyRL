@@ -93,17 +93,49 @@ def test_token_match_ignores_provider_specific_fields(fields: dict) -> None:
     assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
 
 
-def test_token_match_equates_empty_tool_content_with_absent_content() -> None:
+def test_token_match_leaves_empty_tool_content_to_the_renderer() -> None:
+    """``content: ""`` against no ``content`` is template-dependent, so the hash keeps them apart.
+
+    Whether they are the same message is decided by rendering, when a request
+    is planned: see ``test_empty_tool_call_content_replay_bridges_but_rewrite_forks``
+    and ``test_a_replay_the_template_renders_differently_forks``.
+    """
     tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
     reply = {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [tool_call]}
     replay = {key: value for key, value in reply.items() if key != "content"}
-    replay["provider_specific_fields"] = {"refusal": None}
+    with_metadata = {**replay, "provider_specific_fields": {"refusal": None}}
 
-    assert token_match_hash(reply, tools="", model="policy") == token_match_hash(replay, tools="", model="policy")
-    assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
+    assert token_match_hash(with_metadata, tools="", model="policy") == token_match_hash(
+        replay, tools="", model="policy"
+    )
+    assert token_match_hash(reply, tools="", model="policy") != token_match_hash(replay, tools="", model="policy")
+    assert match_hash(reply, tools="", model="policy") != match_hash(with_metadata, tools="", model="policy")
     assert token_match_hash(reply, tools="", model="policy") != token_match_hash(
         {**replay, "content": "Summary so far"}, tools="", model="policy"
     )
+
+
+def test_token_match_ignores_unrendered_fields_inside_tool_calls() -> None:
+    tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+    reply = {"role": "assistant", "content": "x", "tool_calls": [tool_call]}
+    replay = {
+        **reply,
+        "refusal": None,
+        "annotations": [],
+        "audio": {"id": "audio_0"},
+        "provider_specific_fields": {"refusal": None},
+        "tool_calls": [
+            {
+                **tool_call,
+                "provider_specific_fields": {"thought_signature": "sig"},
+                "function": {**tool_call["function"], "provider_specific_fields": {"index": 0}},
+            }
+        ],
+    }
+    edited = {**reply, "tool_calls": [{**tool_call, "function": {"name": "search", "arguments": '{"q":1}'}}]}
+
+    assert token_match_hash(reply, tools="", model="policy") == token_match_hash(replay, tools="", model="policy")
+    assert token_match_hash(reply, tools="", model="policy") != token_match_hash(edited, tools="", model="policy")
 
 
 def test_scaffold_belongs_to_the_following_message_and_the_tail_to_the_reply() -> None:
@@ -287,6 +319,67 @@ async def test_empty_tool_call_content_replay_bridges_but_rewrite_forks() -> Non
         assert model_nodes[0].id not in graph.path_to(model_nodes[2].id)
         assert [call.bridged for node in model_nodes for call in node.calls] == [None, True, False]
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
+
+
+TOOLS = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+
+
+async def _tool_call_then_replay_without_content(stack: TokenStack, created: dict) -> dict:
+    """Answer ``q`` with a tool call, then send it back without its empty ``content``, plus the tool result."""
+    first = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")], tools=TOOLS)
+    reply = first.choices[0].message.model_dump(exclude_none=True)
+    assert reply["content"] == "" and reply["tool_calls"]
+    replay = {key: value for key, value in reply.items() if key != "content"}
+    tool_result = {"role": "tool", "tool_call_id": reply["tool_calls"][0]["id"], "content": "found"}
+    body = {"model": "policy", "messages": [user("q"), replay, tool_result], "tools": TOOLS}
+    async with stack.http.post(f"{created['base_url']}/chat/completions", json=body) as response:
+        assert response.status == 200
+    return body
+
+
+async def test_a_replay_the_template_renders_differently_forks() -> None:
+    """With a template that renders ``content: ""``, dropping it is an edit, not a respelling."""
+    completion = [*encode("THINK:hmm|CALL:search:{}"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.renderer.empty_content = "<empty>"
+        created = await stack.create()
+        await _tool_call_then_replay_without_content(stack, created)
+
+        graph = stack.server.trajectories[created["id"]].graph
+        model_nodes = [node for node in graph if node.author == "model"]
+        assert model_nodes[0].id not in graph.path_to(model_nodes[1].id)
+        assert [call.bridged for node in model_nodes for call in node.calls] == [None, False]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
+
+
+async def test_a_respelled_message_is_rendered_once_then_matched_by_alias() -> None:
+    completion = [*encode("THINK:hmm|CALL:search:{}"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        created = await stack.create()
+        body = await _tool_call_then_replay_without_content(stack, created)
+        # The first call renders once; the replay renders the request with each spelling.
+        assert stack.renderer.renders == 3
+
+        async with stack.http.post(f"{created['base_url']}/chat/completions", json=body) as response:
+            assert response.status == 200
+
+        assert stack.renderer.renders == 3
+        graph = stack.server.trajectories[created["id"]].graph
+        assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True, True]
+
+
+async def test_a_rewrite_is_not_rendered_twice() -> None:
+    """A message that differs from every sibling in more than empty strings is new without a render check."""
+    async with token_stack() as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        await llm.chat.completions.create(model="policy", messages=[user("q")])
+        renders = stack.renderer.renders
+        await llm.chat.completions.create(
+            model="policy", messages=[user("q"), {"role": "assistant", "content": "Summary so far"}, user("next")]
+        )
+
+        assert stack.renderer.renders == renders + 1
 
 
 async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
