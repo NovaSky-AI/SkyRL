@@ -14,7 +14,9 @@ import torch
 import torch.nn as nn
 from loguru import logger
 
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+pytest.importorskip("megatron.core", reason="requires the megatron extra")
+
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (  # noqa: E402
     freeze_moe_router,
 )
 
