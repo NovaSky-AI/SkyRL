@@ -152,6 +152,7 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
             sequence_parallel=True,
         )
         cfg.generator.inference_engine.language_model_only = True
+        cfg.generator.inference_engine.tensor_parallel_size = 8
         cfg.generator.inference_engine.expert_parallel_size = 8
         cfg.generator.inference_engine.distributed_executor_backend = "mp"
         cfg.generator.inference_engine.enable_return_routed_experts = True
