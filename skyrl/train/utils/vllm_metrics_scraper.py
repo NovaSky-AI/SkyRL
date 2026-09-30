@@ -36,8 +36,6 @@ _COUNTER_PROMPT_TOKENS = "ray_vllm_prompt_tokens_total"
 _COUNTER_GENERATION_TOKENS = "ray_vllm_generation_tokens_total"
 _HIST_TTFT_SUM = "ray_vllm_time_to_first_token_seconds_sum"
 _HIST_TTFT_COUNT = "ray_vllm_time_to_first_token_seconds_count"
-_HIST_ITL_SUM = "ray_vllm_inter_token_latency_seconds_sum"
-_HIST_ITL_COUNT = "ray_vllm_inter_token_latency_seconds_count"
 # Speculative-decoding (MTP draft) counters. The per-position counter additionally carries a
 # `position` label ("0".."k-1"); it is summed per-position in `sum_by_position` rather than through
 # `_SUM_METRICS` (which would collapse the label and lose the per-depth breakdown).
@@ -55,8 +53,6 @@ _SUM_METRICS = (
     _COUNTER_GENERATION_TOKENS,
     _HIST_TTFT_SUM,
     _HIST_TTFT_COUNT,
-    _HIST_ITL_SUM,
-    _HIST_ITL_COUNT,
     _COUNTER_SPEC_DRAFTS,
     _COUNTER_SPEC_DRAFT_TOKENS,
     _COUNTER_SPEC_ACCEPTED_TOKENS,
@@ -461,14 +457,15 @@ class VLLMMetricsScraper:
         if ttft_sum_d is not None and ttft_count_d is not None and ttft_count_d > 0:
             out[f"{prefix}ttft_seconds_avg"] = ttft_sum_d / ttft_count_d
 
-        itl_sum_d = delta(_HIST_ITL_SUM)
-        itl_count_d = delta(_HIST_ITL_COUNT)
-        if itl_sum_d is not None and itl_count_d is not None and itl_count_d > 0:
-            out[f"{prefix}tpot_seconds_avg"] = itl_sum_d / itl_count_d
-            out[f"{prefix}itl_seconds_avg"] = itl_sum_d / itl_count_d
-
         stats = WindowStatistics.between(prev, cur, throughput_window_s)
-        out.update(stats.latency_metrics(prefix))
+        latencies = stats.latency_metrics(prefix)
+        for suffix in ("avg", "p90"):
+            request_key = f"{prefix}request_tpot_seconds_{suffix}"
+            if request_key in latencies:
+                out[f"{prefix}tpot_seconds_{suffix}"] = latencies[request_key]
+            ttft_key = f"{prefix}ttft_seconds_{suffix}"
+            if ttft_key in latencies:
+                out[ttft_key] = latencies[ttft_key]
         preemptions = delta("ray_vllm_num_preemptions_total")
         if preemptions is not None:
             out[prefix + "num_preemptions"] = preemptions
@@ -478,10 +475,9 @@ class VLLMMetricsScraper:
         external_h = delta("ray_vllm_external_prefix_cache_hits_total")
         if external_q is not None and external_q > 0 and external_h is not None:
             out[prefix + "external_prefix_cache_hit_rate"] = external_h / external_q
-        for direction in ("store", "load"):
-            byte_delta = delta(f"ray_vllm_kv_offload_{direction}_bytes_total")
-            if byte_delta is not None and has_window:
-                out[f"{prefix}kv_offload_{direction}_throughput_bytes_s"] = byte_delta / throughput_window_s
+        load_bytes = delta("ray_vllm_kv_offload_load_bytes_total")
+        if load_bytes is not None and has_window:
+            out[f"{prefix}kv_offload_load_throughput_bytes_s"] = load_bytes / throughput_window_s
 
         # Speculative-decoding (MTP draft) acceptance. Counters, so pure deltas over the window --
         # no throughput denominator needed. Keys mirror the legacy metrics: raw draft/accept counts,
