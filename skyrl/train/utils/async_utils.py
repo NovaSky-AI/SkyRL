@@ -1,9 +1,10 @@
 """asyncio helpers for surfacing background-task failures as real exceptions."""
 
 import asyncio
-from typing import Awaitable, Optional, TypeVar
+from typing import Any, Awaitable, Iterable, Optional, TypeVar
 
 T = TypeVar("T")
+TASK_SHUTDOWN_GRACE_S = 10.0
 
 
 class BackgroundFailure:
@@ -52,3 +53,17 @@ class BackgroundFailure:
         finally:
             task.cancel()
             failure_wait.cancel()
+
+
+async def cancel_background_tasks(
+    tasks: Iterable[asyncio.Task[Any]], grace_s: float = TASK_SHUTDOWN_GRACE_S
+) -> None:
+    """Cancel background tasks without waiting indefinitely for cleanup."""
+    tasks = set(tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        done, _ = await asyncio.wait(tasks, timeout=grace_s)
+        for task in done:
+            if not task.cancelled():
+                task.exception()

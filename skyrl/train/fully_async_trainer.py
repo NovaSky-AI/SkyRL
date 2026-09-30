@@ -41,7 +41,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
-from skyrl.train.utils.async_utils import BackgroundFailure
+from skyrl.train.utils.async_utils import BackgroundFailure, cancel_background_tasks
 from skyrl.train.utils.metrics import ScalarGauges, TrainingPhaseGauge
 from skyrl.train.utils.trainer_utils import (
     ResumeMode,
@@ -706,14 +706,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # End of an epoch.
         except BaseException:
-            for task in generator_tasks:
-                task.cancel()
+            tasks_to_stop = [*generator_tasks]
             if generators_done_watcher is not None:
-                generators_done_watcher.cancel()
-            if generator_tasks:
-                await asyncio.gather(*generator_tasks, return_exceptions=True)
-            if generators_done_watcher is not None:
-                await asyncio.gather(generators_done_watcher, return_exceptions=True)
+                tasks_to_stop.append(generators_done_watcher)
+            await cancel_background_tasks(tasks_to_stop)
             raise
         finally:
             self._profiler_stop()

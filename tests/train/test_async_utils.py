@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from skyrl.train.utils.async_utils import BackgroundFailure
+from skyrl.train.utils.async_utils import BackgroundFailure, cancel_background_tasks
 
 # --------------------------------------------------------------------------------------
 # BackgroundFailure
@@ -63,3 +63,23 @@ async def test_guard_prefers_result_over_simultaneous_failure():
     asyncio.get_running_loop().call_soon(put_and_fail)
     assert await failure.guard(queue.get()) == "item"
     assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_tasks_bounds_an_unresponsive_task():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def ignore_cancel_once():
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    task = asyncio.create_task(ignore_cancel_once())
+    await started.wait()
+    await cancel_background_tasks([task], grace_s=0.01)
+    assert not task.done()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)

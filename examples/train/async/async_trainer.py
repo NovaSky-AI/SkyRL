@@ -11,7 +11,7 @@ from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import prepare_generator_input
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
-from skyrl.train.utils.async_utils import BackgroundFailure
+from skyrl.train.utils.async_utils import BackgroundFailure, cancel_background_tasks
 from skyrl.train.utils.trainer_utils import ResumeMode
 
 
@@ -121,8 +121,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 generation_failure.raise_if_failed()
         except BaseException:
             if generator_task is not None:
-                generator_task.cancel()
-                await asyncio.gather(generator_task, return_exceptions=True)
+                await cancel_background_tasks([generator_task])
             raise
         finally:
             self._profiler_stop()
