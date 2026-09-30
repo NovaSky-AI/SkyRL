@@ -1034,7 +1034,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 staleness_violation_count += 1
 
         generator_output = concatenate_generator_outputs(
-            generator_outputs, step_wise=self.cfg.generator.step_wise_trajectories
+            generator_outputs,
+            step_wise=self.cfg.generator.step_wise_trajectories,
+            routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
         )
         kept_rollout_metrics = generator_output["rollout_metrics"]
         assert kept_rollout_metrics is not None, "Rollout metrics should be non-null."

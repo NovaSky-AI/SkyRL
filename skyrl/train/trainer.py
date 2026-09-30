@@ -1031,6 +1031,7 @@ class RayPPOTrainer:
             len(input_batch["prompts"]),
             generator_output,
             step_wise=self.cfg.generator.step_wise_trajectories,
+            routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
         )
 
         return generator_output

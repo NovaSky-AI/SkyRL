@@ -856,11 +856,13 @@ class TestMergeStepwiseOutput:
 
     @patch("skyrl.train.utils.utils.validate_batch_sizes", new=lambda cfg: None)
     @patch("skyrl.train.utils.utils.validate_generator_cfg", new=lambda cfg: None)
-    def test_validate_cfg_refuses_step_wise_with_routed_expert_capture(self):
+    def test_validate_cfg_refuses_merged_step_wise_with_routed_expert_capture(self):
+        # Step-wise rows may carry their own routes; merging them doesn't merge routes.
         cfg = example_dummy_config()
         cfg.generator.step_wise_trajectories = True
+        cfg.generator.merge_stepwise_output = True
         cfg.generator.inference_engine.enable_return_routed_experts = True
-        with pytest.raises(ValueError, match="first N prompt tokens"):
+        with pytest.raises(ValueError, match="prefix-aware merging does not merge routed experts"):
             validate_cfg(cfg)
 
 

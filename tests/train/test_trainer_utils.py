@@ -1292,6 +1292,28 @@ def test_validate_generator_output_rejects_trajectory_routes_on_an_earlier_step(
         validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
 
 
+def test_validate_generator_output_refuses_a_trainable_batch_without_routes_when_r3_is_on():
+    """A generator that returns no routes would otherwise train with replay silently skipped."""
+    output = _make_side_channel_output()
+
+    with pytest.raises(AssertionError, match="returned no rollout_expert_indices"):
+        validate_generator_output(num_prompts=2, generator_output=output, routes_expected=True)
+    validate_generator_output(num_prompts=2, generator_output=output, routes_expected=False)
+
+
+def test_validate_generator_output_accepts_an_untrainable_batch_without_routes_when_r3_is_on():
+    """Every rollout failed and was masked: nothing to train, so nothing to replay."""
+    output = _make_side_channel_output(loss_masks=[[0, 0], [0, 0]])
+
+    validate_generator_output(num_prompts=2, generator_output=output, routes_expected=True)
+
+
+def test_validate_generator_output_accepts_routes_when_r3_is_on():
+    output = _make_side_channel_output(rollout_expert_indices=[_routes(5), _routes(4)])
+
+    validate_generator_output(num_prompts=2, generator_output=output, routes_expected=True)
+
+
 def test_validate_generator_output_allows_sample_support_under_step_wise():
     output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
     output["rollout_sample_support"] = [_support(len(response)) for response in output["response_ids"]]

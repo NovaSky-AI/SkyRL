@@ -670,7 +670,9 @@ def zero_variance_filter(
     return [i for i, uid in enumerate(uids) if uid in kept_uids_set]
 
 
-def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput, step_wise: bool = False):
+def validate_generator_output(
+    num_prompts: int, generator_output: GeneratorOutput, step_wise: bool = False, routes_expected: bool = False
+):
     """Validate the generator output.
 
     Args:
@@ -679,6 +681,8 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         step_wise: If True, validate step-wise specific fields (is_last_step, trajectory_ids,
             contiguous ordering). In step-wise mode, num_responses may exceed num_prompts
             because each trajectory is expanded into multiple per-turn samples.
+        routes_expected: R3 is on for this batch, so a batch that trains anything must carry
+            routed experts. Without them the trainer would silently skip replay.
     """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
@@ -750,6 +754,14 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
     _validate_per_token_side_channels(generator_output, step_wise)
+
+    if routes_expected and generator_output.get("rollout_expert_indices") is None:
+        # A batch with nothing to train (every rollout failed) has nothing to replay either.
+        assert not any(any(mask) for mask in generator_output["loss_masks"]), (
+            "generator.inference_engine.enable_return_routed_experts=True, but the generator returned no "
+            "rollout_expert_indices for a batch with trainable tokens, so routing replay would silently be "
+            "skipped. Use a generator that returns routed experts, or disable R3."
+        )
 
     if step_wise:
         _validate_step_wise_fields(generator_output, num_responses)

@@ -301,7 +301,9 @@ def _last_step_only(
     return [v for v, last in zip(values, is_last_step) if last]
 
 
-def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step_wise: bool = False) -> GeneratorOutput:
+def concatenate_generator_outputs(
+    generator_outputs: List[GeneratorOutput], step_wise: bool = False, routes_expected: bool = False
+) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
 
@@ -312,6 +314,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         generator_outputs: Per-batch generator outputs to concatenate.
         step_wise: If True, validate step-wise specific fields on the concatenated result
             (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
+        routes_expected: If True, a result with trainable tokens must carry routed experts (R3).
     """
     assert len(generator_outputs) > 0
     # Per-token side channels must be populated consistently across batches.
@@ -382,7 +385,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
     from skyrl.train.utils.trainer_utils import validate_generator_output
 
     num_prompts = len(result["prompt_token_ids"])
-    validate_generator_output(num_prompts, result, step_wise=step_wise)
+    validate_generator_output(num_prompts, result, step_wise=step_wise, routes_expected=routes_expected)
 
     return result
 
