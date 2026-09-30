@@ -6,7 +6,7 @@ minimal mock modules that mimic Megatron-Core's attribute layout without importi
 Megatron.
 
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_freeze_dsa_indexer.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/workers/megatron/test_freeze_dsa_indexer.py
 """
 
 import pytest

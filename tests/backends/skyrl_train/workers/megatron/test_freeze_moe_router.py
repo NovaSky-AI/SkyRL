@@ -6,7 +6,7 @@ router weights/biases. These tests build minimal mock modules that mimic Megatro
 without importing Megatron.
 
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_freeze_moe_router.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/workers/megatron/test_freeze_moe_router.py
 """
 
 import pytest
