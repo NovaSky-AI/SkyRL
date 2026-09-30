@@ -24,7 +24,8 @@
 #   LOGGER=console|wandb       W&B (project harbor-compare, run named after the experiment) by
 #                              default when a key is found, else the console
 #
-# Needs: the GPUs, and MODAL_TOKEN_ID and MODAL_TOKEN_SECRET, or a file holding them. For W&B,
+# Needs: the GPUs, and MODAL_TOKEN_ID and MODAL_TOKEN_SECRET, a file holding them, or
+# ~/.modal.toml (single node only). For W&B,
 # WANDB_API_KEY, or a file holding `WANDB_API_KEY=...` (WANDB_KEY_FILE).
 set -euo pipefail
 
@@ -96,19 +97,20 @@ fi
 #-----------------------
 # Credentials
 #-----------------------
-if [[ -z "${MODAL_TOKEN_ID:-}" ]]; then
-  if [[ ! -f "$MODAL_KEY_FILE" ]]; then
-    echo "no Modal credentials in the environment or at $MODAL_KEY_FILE (set MODAL_KEY_FILE)" >&2
-    exit 1
-  fi
+# The Modal SDK reads ~/.modal.toml itself, but only on this node.
+if [[ -z "${MODAL_TOKEN_ID:-}" && -f "$MODAL_KEY_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$MODAL_KEY_FILE"
   set +a
 fi
-: "${MODAL_TOKEN_ID:?set MODAL_TOKEN_ID, or MODAL_KEY_FILE}"
-: "${MODAL_TOKEN_SECRET:?set MODAL_TOKEN_SECRET, or MODAL_KEY_FILE}"
-export MODAL_TOKEN_ID MODAL_TOKEN_SECRET
+if [[ -n "${MODAL_TOKEN_ID:-}" ]]; then
+  : "${MODAL_TOKEN_SECRET:?set MODAL_TOKEN_SECRET with MODAL_TOKEN_ID}"
+  export MODAL_TOKEN_ID MODAL_TOKEN_SECRET
+elif [[ ! -f "$HOME/.modal.toml" ]]; then
+  echo "no Modal credentials in the environment, at $MODAL_KEY_FILE or in ~/.modal.toml" >&2
+  exit 1
+fi
 
 # SkyRL reads the W&B key from the environment only.
 if [[ -z "${WANDB_API_KEY:-}" && -f "$WANDB_KEY_FILE" ]]; then
