@@ -16,7 +16,6 @@ turns those into the step-wise ``GeneratorOutput``.
 import asyncio
 import time
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import litellm
@@ -36,7 +35,7 @@ from skyrl.train.generators.base import (
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
-from .artifacts import log_step_records
+from .artifacts import Created, RecordLog
 from .compose import TrialOutcome, compose, split
 
 litellm.suppress_debug_info = True
@@ -55,8 +54,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         harbor_cfg: Dict[str, Any],
         capture_urls: List[str],
         inference_engine_client: Any = None,
-        record_dir: Optional[str] = None,
-        wandb_artifact: bool = False,
+        records: Optional[RecordLog] = None,
     ) -> None:
         """
         Args:
@@ -64,8 +62,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             harbor_cfg: Harbor's ``TrialConfig`` template.
             capture_urls: the skycap servers to spread trajectories over.
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
-            record_dir: where the skycap servers write the records.
-            wandb_artifact: upload each step's documents from ``record_dir`` to W&B.
+            records: the log each created trajectory goes into, for the W&B uploads.
         """
         if not getattr(generator_cfg, "step_wise_trajectories", False):
             raise ValueError(
@@ -86,10 +83,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.generator_cfg = generator_cfg
         self.capture_urls = list(capture_urls)
         self.inference_engine_client = inference_engine_client
-        if wandb_artifact and not record_dir:
-            raise ValueError("wandb_artifact needs record_dir")
-        self.record_dir = Path(record_dir) if record_dir else None
-        self.wandb_artifact = wandb_artifact
+        self.records = records
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
             raise ValueError("generator.inference_engine.served_model_name must be set, without '/'")
@@ -124,7 +118,6 @@ class HarborSkycapGenerator(GeneratorInterface):
         cache_salt = self._cache_salt()
 
         outcomes: List[Optional[TrialOutcome]] = [None] * len(prompts)
-        created: List[str] = []
         progress = tqdm(
             disable=disable_tqdm,
             total=len(prompts),
@@ -137,7 +130,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         async with CapturePool(self.capture_urls) as pool:
 
             async def worker(index: int, prompt: ConversationType, trajectory_id: TrajectoryID) -> None:
-                outcomes[index] = await self._trial(pool, prompt, trajectory_id, cache_salt, step, created)
+                outcomes[index] = await self._trial(pool, prompt, trajectory_id, cache_salt, step, phase)
                 progress.update(1)
 
             try:
@@ -146,12 +139,6 @@ class HarborSkycapGenerator(GeneratorInterface):
                         group.create_task(worker(index, prompt, trajectory_id))
             finally:
                 progress.close()
-
-        if self.wandb_artifact:
-            try:
-                await asyncio.to_thread(log_step_records, self.record_dir, created, step, phase)
-            except Exception:  # noqa: BLE001 - an upload failure must not fail the step
-                logger.exception(f"uploading the skycap {phase} records of step {step} failed")
 
         return compose(
             outcomes,
@@ -167,14 +154,14 @@ class HarborSkycapGenerator(GeneratorInterface):
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
         step: Optional[int],
-        created: List[str],
+        phase: str,
     ) -> TrialOutcome:
         """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch."""
         started = time.monotonic()
         for attempt in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             try:
-                outcome = await self._attempt(pool, prompt, trajectory_id, cache_salt, step, attempt, created)
+                outcome = await self._attempt(pool, prompt, trajectory_id, cache_salt, step, phase, attempt)
             except Exception as error:  # noqa: BLE001 - retried, then masked
                 logger.warning(f"{prefix} failed: {type(error).__name__}: {error}")
                 continue
@@ -191,8 +178,8 @@ class HarborSkycapGenerator(GeneratorInterface):
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
         step: Optional[int],
+        phase: str,
         attempt: int,
-        created: List[str],
     ) -> TrialOutcome:
         """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces."""
         meta = {
@@ -203,7 +190,11 @@ class HarborSkycapGenerator(GeneratorInterface):
             "attempt": attempt,
         }
         async with pool.trajectory(meta) as trajectory:
-            created.append(trajectory.id)
+            if self.records is not None:
+                self.records.add(
+                    phase,
+                    Created(trajectory.server, trajectory.id, meta["instance_id"], meta["repetition_id"], attempt),
+                )
             config = self._trial_config(prompt, trajectory.base_url, cache_salt)
             async with self._rate_limiter:
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()

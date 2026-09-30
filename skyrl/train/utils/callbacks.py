@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+    from skyrl.train.generators.base import TrajectoryID
 
 
 @dataclass
@@ -48,6 +49,9 @@ class CallbackInput:
 
     # Step events
     batch: Optional["TrainingInputBatch"] = None
+
+    # on_step_end only - the trajectories behind ``batch``, one per row
+    trajectory_ids: Optional[List["TrajectoryID"]] = None
 
     # Step end / eval end
     metrics: Optional[Dict[str, Any]] = None

@@ -2,6 +2,7 @@
 server in token mode, which calls a mock SkyRL router."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,7 +13,10 @@ pytest.importorskip("skycap")
 pytest.importorskip("harbor")
 
 import aiohttp  # noqa: E402
+import orjson  # noqa: E402
 import pytest_asyncio  # noqa: E402
+import wandb  # noqa: E402
+import zstandard  # noqa: E402
 from aiohttp.test_utils import TestServer  # noqa: E402
 
 from examples.train_integrations.harbor.entrypoints.main_harbor import (
@@ -36,6 +40,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
+from skyrl.train.utils.callbacks import CallbackInput  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     EXPERTS_PER_TOKEN,
@@ -126,11 +131,9 @@ def batch(*scripts: str, repetitions: int = 1) -> dict:
     return {"prompts": prompts, "trajectory_ids": ids, "batch_metadata": SimpleNamespace(global_step=3)}
 
 
-def generator(skycap, wandb_artifact=False, **cfg) -> HarborSkycapGenerator:
+def generator(skycap, records=None, **cfg) -> HarborSkycapGenerator:
     engine_client = SimpleNamespace(weight_version=7)
-    return HarborSkycapGenerator(
-        generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client, skycap.server.record_dir, wandb_artifact
-    )
+    return HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], engine_client, records)
 
 
 @pytest.mark.asyncio
@@ -220,50 +223,117 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
     assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL + 1
 
 
+class FakeWandb:
+    """The ``wandb`` module as the tracker holds it: a run, ``Artifact`` and ``log_artifact``."""
+
+    Artifact = wandb.Artifact
+
+    def __init__(self) -> None:
+        self.run = SimpleNamespace(id="run/1")
+        self.logged = []
+
+    def log_artifact(self, artifact, aliases) -> None:
+        self.logged.append((artifact, aliases))
+
+
+def uploads(records, phases=("train",), backend="wandb"):
+    fake = FakeWandb()
+    trainer = SimpleNamespace(tracker=SimpleNamespace(backend=backend, logger=fake))
+    return artifacts.SkycapUploads(records, list(phases)), trainer, fake
+
+
+def event(step=3, trajectory_ids=None) -> CallbackInput:
+    return CallbackInput(global_step=step, epoch=0, total_steps=9, steps_per_epoch=9, trajectory_ids=trajectory_ids)
+
+
+def step_index(artifact) -> list:
+    return json.loads(open(artifact.manifest.entries["step.json"].local_path).read())
+
+
 @pytest.mark.asyncio
-async def test_each_step_uploads_its_records_including_retried_attempts(skycap, trials, monkeypatch) -> None:
-    logged = []
-    run = SimpleNamespace(id="run/1", log_artifact=lambda artifact, aliases: logged.append((artifact, aliases)))
-    monkeypatch.setattr(artifacts.wandb, "run", run)
-    record_dir = skycap.server.record_dir
-    await generator(skycap, wandb_artifact=True).generate(batch("linear", "crash"), disable_tqdm=True)
+async def test_each_step_uploads_every_attempt_and_marks_the_trained_ones(skycap, trials) -> None:
+    records = artifacts.RecordLog()
+    out = await generator(skycap, records=records).generate(batch("linear", "crash"), disable_tqdm=True)
+    callback, trainer, fake = uploads(records)
+    callback.on_step_end(trainer, event(trajectory_ids=out["trajectory_ids"]), None)
+    callback.on_train_end(trainer, event(), None)
 
-    ((artifact, aliases),) = logged
-    assert artifact.name == "skycap-records-run-1" and artifact.type == "skycap-records"
-    assert aliases == ["train-step-3", "latest"] and artifact.metadata["global_step"] == 3
-    assert artifact.metadata["training_phase"] == "train"
-    ids = list(record.list_ids(record_dir))
-    assert artifact.metadata["num_trajectories"] == len(ids) == 3
-    assert set(artifact.manifest.entries) == {f"{trajectory_id}.json.zst" for trajectory_id in ids}
-    assert artifact.metadata["contents"] == "documents"
+    ((artifact, aliases),) = fake.logged
+    assert artifact.name == "skycap-records-train-run-1" and artifact.type == "skycap-records"
+    assert aliases == ["step-3", "latest"]
+    ids = list(record.list_ids(skycap.server.record_dir))
+    assert set(artifact.manifest.entries) == {f"{i}.json.zst" for i in ids} | {"step.json"}
+    rows = {(r["instance_id"], r["attempt"]): r for r in step_index(artifact)}
+    # The first crash attempt was retried, so only its second attempt is in the batch.
+    assert {key: r["trained"] for key, r in rows.items()} == {
+        ("linear", 0): True,
+        ("crash", 0): False,
+        ("crash", 1): True,
+    }
+    assert artifact.metadata == {
+        "global_step": 3,
+        "training_phase": "train",
+        "run_id": "run/1",
+        "contents": "documents",
+        "num_uploaded": 3,
+        "num_missing": 0,
+        "num_trained": 2,
+    }
+    # The upload is the document the server wrote, recompressed.
+    (linear,) = [r["id"] for r in step_index(artifact) if r["instance_id"] == "linear"]
+    uploaded = artifact.manifest.entries[f"{linear}.json.zst"].local_path
+    stored = record.read_document(skycap.server.record_dir, linear)
+    assert orjson.loads(zstandard.ZstdDecompressor().decompress(open(uploaded, "rb").read())) == stored
 
 
 @pytest.mark.asyncio
-async def test_eval_records_upload_under_their_own_alias(skycap, trials, monkeypatch) -> None:
-    logged = []
-    run = SimpleNamespace(id="run/1", log_artifact=lambda artifact, aliases: logged.append((artifact, aliases)))
-    monkeypatch.setattr(artifacts.wandb, "run", run)
+async def test_a_trajectory_dropped_by_dynamic_sampling_is_uploaded_untrained(skycap, trials) -> None:
+    records = artifacts.RecordLog()
+    out = await generator(skycap, records=records).generate(batch("linear", "summarize"), disable_tqdm=True)
+    kept = [t for t in out["trajectory_ids"] if t.instance_id == "linear"]
+    callback, trainer, fake = uploads(records)
+    callback.on_step_end(trainer, event(trajectory_ids=kept), None)
+    callback.on_train_end(trainer, event(), None)
+
+    ((artifact, _),) = fake.logged
+    assert {r["instance_id"]: r["trained"] for r in step_index(artifact)} == {"linear": True, "summarize": False}
+
+
+@pytest.mark.asyncio
+async def test_eval_uploads_to_its_own_artifact_only_when_asked(skycap, trials) -> None:
     eval_batch = {**batch("linear"), "batch_metadata": SimpleNamespace(global_step=3, training_phase="eval")}
-    await generator(skycap, wandb_artifact=True).generate(eval_batch, disable_tqdm=True)
-
-    ((artifact, aliases),) = logged
-    assert aliases == ["eval-step-3", "latest"] and artifact.metadata["training_phase"] == "eval"
-
-
-@pytest.mark.asyncio
-async def test_no_upload_without_a_wandb_run(skycap, trials, monkeypatch) -> None:
-    monkeypatch.setattr(artifacts.wandb, "run", None)
-    out = await generator(skycap, wandb_artifact=True).generate(batch("linear"), disable_tqdm=True)
-    assert out["rewards"] == [1.0]
+    for phases, expected in ((["train"], []), (["train", "eval"], ["skycap-records-eval-run-1"])):
+        records = artifacts.RecordLog()
+        await generator(skycap, records=records).generate(eval_batch, disable_tqdm=True)
+        callback, trainer, fake = uploads(records, phases)
+        callback.on_eval_end(trainer, event(), None)
+        callback.on_train_end(trainer, event(), None)
+        assert [artifact.name for artifact, _ in fake.logged] == expected
+        assert records.take("eval") == []
 
 
 @pytest.mark.asyncio
-async def test_no_upload_when_off(skycap, trials, monkeypatch) -> None:
-    logged = []
-    run = SimpleNamespace(id="run", log_artifact=lambda artifact, aliases: logged.append(artifact))
-    monkeypatch.setattr(artifacts.wandb, "run", run)
-    await generator(skycap).generate(batch("linear"), disable_tqdm=True)
-    assert logged == [] and len(list(record.list_ids(skycap.server.record_dir))) == 1
+async def test_a_document_the_server_does_not_have_is_counted_missing(skycap, trials) -> None:
+    records = artifacts.RecordLog()
+    await generator(skycap, records=records).generate(batch("linear"), disable_tqdm=True)
+    records.add("train", artifacts.Created(skycap.url, "tr_nope", "gone", 0, 0))
+    callback, trainer, fake = uploads(records)
+    callback.on_step_end(trainer, event(), None)
+    callback.on_train_end(trainer, event(), None)
+
+    ((artifact, _),) = fake.logged
+    assert artifact.metadata["num_uploaded"] == 1 and artifact.metadata["num_missing"] == 1
+    assert {r["instance_id"]: r["uploaded"] for r in step_index(artifact)} == {"linear": True, "gone": False}
+
+
+@pytest.mark.asyncio
+async def test_no_upload_without_wandb_logging(skycap, trials) -> None:
+    records = artifacts.RecordLog()
+    await generator(skycap, records=records).generate(batch("linear"), disable_tqdm=True)
+    callback, trainer, fake = uploads(records, backend="tensorboard")
+    callback.on_step_end(trainer, event(), None)
+    callback.on_train_end(trainer, event(), None)
+    assert fake.logged == []
 
 
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:

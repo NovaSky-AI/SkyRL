@@ -27,9 +27,9 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
 The rest of the configuration is the sibling's: `harbor_trial_config` holds
 Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/default.yaml`.
 `skycap.*` sets the record directory (default `{trainer.export_path}/skycap`),
-the idle TTL, the port and the renderer pool size. `skycap.wandb_artifact=true` uploads each
-step's documents, without sidecars, as a version of the `skycap-records-<run id>` W&B artifact,
-aliased `train-step-N` (or `eval-step-N`) and `latest`.
+the idle TTL, the port and the renderer pool size. With `trainer.logger=wandb`, each step's
+documents go to W&B, without sidecars, as a version of `skycap-records-train-<run id>`, aliased
+`step-N` and `latest`. `skycap.wandb.phases` adds `eval`; `skycap.wandb.enabled=false` turns it off.
 
 ## How it fits
 
@@ -39,7 +39,7 @@ aliased `train-step-N` (or `eval-step-N`) and `latest`.
 | `servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
 | `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
 | `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
-| `artifacts.py` | With `skycap.wandb_artifact`, uploads the step's `{id}.json.zst` documents, retried attempts included, after the step's trials end. An upload failure is logged and does not fail the step. |
+| `artifacts.py` | `SkycapUploads`, a trainer callback: after each step it fetches every attempt's document from its server and uploads them on a background thread, with a `step.json` that marks each one trained or dropped. An upload failure is logged and does not fail the step. |
 | `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
 
 What's imposed on every call:
@@ -59,6 +59,7 @@ Masking is the sibling's:
   `enable_return_routed_experts=true`, and the trainer change is a follow-up.
 - **Sampler support** (`enable_return_sample_support_set`) is passed through,
   padded to `top_k`.
+- **No W&B uploads under the fully-async trainer.** It fires no callbacks.
 - **One skycap server per run.** The generator takes a list of URLs and spreads
   trajectories over them, for when servers are launched separately.
 

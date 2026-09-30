@@ -13,7 +13,7 @@ generator points each trial at its own trajectory on one of them.
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import ray
 import yaml
@@ -28,8 +28,18 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
+from ..artifacts import RecordLog, SkycapUploads
 from ..harbor_generator import HarborSkycapGenerator
 from ..servers import SkycapServers, start_servers
+
+
+@dataclass
+class SkycapWandbConfig:
+    enabled: bool = True
+    """Upload each step's documents, without sidecars, as a version of ``skycap-records-<phase>-<run id>``,
+    when ``trainer.logger`` is wandb. The trainer fetches them from the skycap servers."""
+    phases: List[str] = field(default_factory=lambda: ["train"])
+    """The training phases to upload: ``train``, ``eval``."""
 
 
 @dataclass
@@ -43,10 +53,7 @@ class SkycapConfig:
     record_dir: Optional[str] = None
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""
-    wandb_artifact: bool = False
-    """Upload each step's documents, without sidecars, as a version of the ``skycap-records-<run id>`` W&B
-    artifact, when a W&B run is active. The records must be readable where the trainer runs: one node, or a
-    shared ``record_dir``."""
+    wandb: SkycapWandbConfig = field(default_factory=SkycapWandbConfig)
     ttl: float = 3600.0
     """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
     renderer_pool_size: int = 8
@@ -101,18 +108,26 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
 
 class HarborSkycapExp(HarborExp):
     skycap: Optional[SkycapServers] = None
+    records: Optional[RecordLog] = None
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         if self.skycap is None:
             self.skycap = start_skycap(cfg, inference_engine_client.get_endpoint_url())
+        if self.records is None and cfg.skycap.wandb.enabled:
+            self.records = RecordLog()
         return HarborSkycapGenerator(
             generator_cfg=cfg.generator,
             harbor_cfg=cfg.harbor_trial_config,
             capture_urls=self.skycap.urls,
             inference_engine_client=inference_engine_client,
-            record_dir=record_dir(cfg),
-            wandb_artifact=cfg.skycap.wandb_artifact,
+            records=self.records,
         )
+
+    def get_trainer(self, *args, **kwargs):
+        trainer = super().get_trainer(*args, **kwargs)
+        if self.records is not None:
+            trainer.add_callback(SkycapUploads(self.records, self.cfg.skycap.wandb.phases))
+        return trainer
 
     def run(self):
         try:
