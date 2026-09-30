@@ -48,6 +48,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_full_recompute import (
+    finalize_provider,
+    uses_skyrl_mhc_layer,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -316,14 +320,18 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
-        # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
-        # the residual it would re-materialize is the n-stream tensor consumed by the mHC
-        # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
-        # needs the mHC recompute managers, which SkyRL's mHC layer does not implement, so
-        # downgrade to selective recompute of the remaining modules instead of failing.
-        # Tied to the vendored mHC layer: see patches/megatron/README.md (Megatron-LM#7521) for
-        # when to change or delete this.
-        if getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
+        # megatron-core rejects mHC (hyper-connection) models under full activation recompute.
+        # SkyRL's own mHC layer (GLM-5.3-Flash) supports it -- finalize_provider() below bypasses
+        # that one check (see patches/megatron/patch_mhc_full_recompute.py). Any other mHC layer
+        # keeps megatron-core's guard; its suggestion -- selective recompute with "mhc" in
+        # recompute_modules -- needs mHC recompute managers, so downgrade to selective recompute
+        # of the remaining modules instead of failing. Tied to the vendored mHC layer: see
+        # patches/megatron/README.md (Megatron-LM#7521) for when to change or delete this.
+        if (
+            getattr(provider, "enable_mhc_connections", False)
+            and provider.recompute_granularity == "full"
+            and not uses_skyrl_mhc_layer(provider)
+        ):
             provider.recompute_granularity = "selective"
             provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
             provider.recompute_method = None
@@ -395,7 +403,7 @@ class MegatronWorker:
                 "(native process_mtp_loss disabled)"
             )
 
-        provider.finalize()
+        finalize_provider(provider)
 
         self.provider = provider
         self.bridge = bridge
