@@ -310,6 +310,9 @@ async def test_eval_uploads_to_its_own_artifact_only_when_asked(skycap, trials) 
         callback.on_train_end(trainer, event(), None)
         assert [artifact.name for artifact, _ in fake.logged] == expected
         assert records.take("eval") == []
+    ((artifact, _),) = fake.logged
+    assert artifact.metadata["num_trained"] == 0
+    assert not any(row["trained"] for row in step_index(artifact))
 
 
 @pytest.mark.asyncio

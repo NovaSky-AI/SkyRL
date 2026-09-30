@@ -132,7 +132,7 @@ class SkycapUploads(TrainingCallback):
         self._submit(trainer, "train", callback_input.global_step, trained)
 
     def on_eval_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
-        self._submit(trainer, "eval", callback_input.global_step, None)
+        self._submit(trainer, "eval", callback_input.global_step, set())
 
     def on_train_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
         # The tracker finishes the W&B run right after this event.
