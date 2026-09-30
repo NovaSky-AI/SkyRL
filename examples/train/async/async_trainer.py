@@ -51,6 +51,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         # Start from step 1
         self.global_step += 1
         self._profiler_start()
+        generator_task = None
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
                 # while this is just off by one, you can image a more general queue based approach
@@ -118,6 +119,11 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 generator_task.cancel()
                 await asyncio.gather(generator_task, return_exceptions=True)
                 generation_failure.raise_if_failed()
+        except BaseException:
+            if generator_task is not None:
+                generator_task.cancel()
+                await asyncio.gather(generator_task, return_exceptions=True)
+            raise
         finally:
             self._profiler_stop()
 

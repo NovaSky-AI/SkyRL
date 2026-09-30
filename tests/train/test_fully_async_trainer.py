@@ -6,6 +6,7 @@ UID tracking, and the consumer's exhaustion-aware buffer drain.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -151,13 +152,14 @@ async def test_drain_next_group_returns_buffered_items_then_exhaustion():
     # _drain_next_group uses no instance state, so a bare object stands in for `self`.
     drain = FullyAsyncRayPPOTrainer._drain_next_group
     dummy = object()
+    failure = BackgroundFailure()
 
-    assert await drain(dummy, buffer, done, BackgroundFailure()) == "a"
-    assert await drain(dummy, buffer, done, BackgroundFailure()) == "b"
+    assert await drain(dummy, buffer, done, failure) == "a"
+    assert await drain(dummy, buffer, done, failure) == "b"
 
     # Buffer empty and generators done -> exhausted.
-    done.set()
-    assert await drain(dummy, buffer, done, BackgroundFailure()) is None
+    await FullyAsyncRayPPOTrainer._watch_generators_done([asyncio.create_task(asyncio.sleep(0))], done, failure)
+    assert await drain(dummy, buffer, done, failure) is None
 
 
 @pytest.mark.asyncio
@@ -198,59 +200,31 @@ async def test_drain_next_group_raises_when_worker_fails_mid_drain():
     failure = BackgroundFailure()
     drain = FullyAsyncRayPPOTrainer._drain_next_group
     err = RuntimeError("generator crashed")
-
-    async def failing_worker():
-        await asyncio.sleep(0.02)
-        failure.record(err, "generation worker")
-        raise err
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.async_train_dataloader = SimpleNamespace(get_next_non_consumed_data=AsyncMock(side_effect=err))
 
     async def live_worker():
         await asyncio.sleep(3600)
 
-    tasks = [asyncio.create_task(failing_worker()), asyncio.create_task(live_worker())]
+    tasks = [
+        asyncio.create_task(trainer._run_generate_for_a_group_loop(buffer, failure)),
+        asyncio.create_task(live_worker()),
+    ]
     watcher = asyncio.create_task(FullyAsyncRayPPOTrainer._watch_generators_done(tasks, done, failure))
     with pytest.raises(RuntimeError) as exc_info:
-        await asyncio.wait_for(drain(object(), buffer, done, failure), timeout=5)
+        await asyncio.wait_for(drain(trainer, buffer, done, failure), timeout=5)
     assert exc_info.value is err
+    assert err.__notes__ == ["raised in background generation worker"]
     assert not done.is_set()
+    buffer.put_nowait("a")
+    with pytest.raises(RuntimeError) as buffered_exc:
+        await drain(trainer, buffer, done, failure)
+    assert buffered_exc.value is err
+    assert buffer.get_nowait() == "a"
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     await asyncio.wait_for(watcher, timeout=5)
-
-
-@pytest.mark.asyncio
-async def test_drain_next_group_raises_before_draining_buffered_items_after_a_failure():
-    buffer: asyncio.Queue = asyncio.Queue()
-    buffer.put_nowait("a")
-    failure = BackgroundFailure()
-    failure.record(RuntimeError("generator crashed"), "generation worker")
-    with pytest.raises(RuntimeError, match="generator crashed"):
-        await FullyAsyncRayPPOTrainer._drain_next_group(object(), buffer, asyncio.Event(), failure)
-    assert buffer.qsize() == 1
-
-
-@pytest.mark.asyncio
-async def test_watch_generators_done_leaves_event_unset_on_failure():
-    done = asyncio.Event()
-    failure = BackgroundFailure()
-    err = RuntimeError("boom")
-
-    async def failing_worker():
-        failure.record(err, "generation worker")
-        raise err
-
-    async def ok_worker():
-        return None
-
-    tasks = [asyncio.create_task(failing_worker()), asyncio.create_task(ok_worker())]
-    await FullyAsyncRayPPOTrainer._watch_generators_done(tasks, done, failure)
-    assert not done.is_set()
-
-    # Without a failure, finishing all workers signals exhaustion.
-    tasks = [asyncio.create_task(ok_worker())]
-    await FullyAsyncRayPPOTrainer._watch_generators_done(tasks, done, BackgroundFailure())
-    assert done.is_set()
 
 
 # --------------------------------------------------------------------------------------

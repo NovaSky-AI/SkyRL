@@ -494,6 +494,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step += 1  # start training at global_step 1
         stop_training = False
         self._profiler_start()
+        generator_tasks: List[asyncio.Task] = []
+        generators_done_watcher: Optional[asyncio.Task] = None
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
                 self.epoch = epoch
@@ -703,6 +705,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
                 # End of an epoch.
+        except BaseException:
+            for task in generator_tasks:
+                task.cancel()
+            if generators_done_watcher is not None:
+                generators_done_watcher.cancel()
+            if generator_tasks:
+                await asyncio.gather(*generator_tasks, return_exceptions=True)
+            if generators_done_watcher is not None:
+                await asyncio.gather(generators_done_watcher, return_exceptions=True)
+            raise
         finally:
             self._profiler_stop()
             if self._ray_gpu_monitor is not None:
