@@ -135,6 +135,7 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
     if "glm-5.3-flash" in model_name.lower():
         cfg.trainer.policy.model.lora.target_modules = list(GLM5_3_FLASH_LORA_TARGET_MODULES)
     if "glm-5.3-bf16" in model_name.lower():
+        cfg.trainer.placement.policy_num_gpus_per_node = 8
         cfg.trainer.policy.inference_only_init = True
         cfg.trainer.policy.language_model_only = True
         cfg.trainer.ref.language_model_only = True
