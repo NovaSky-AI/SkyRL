@@ -68,11 +68,10 @@ def token_match_hash(message: Mapping[str, Any], *, tools: str, model: str | Non
     )
     if "provider_specific_fields" not in message and not empty_tool_content:
         return match_hash(message, tools=tools, model=model)
-    matched_message = {
-        key: value
-        for key, value in message.items()
-        if key != "provider_specific_fields" and not (empty_tool_content and key == "content")
-    }
+    matched_message = dict(message)
+    matched_message.pop("provider_specific_fields", None)
+    if empty_tool_content:
+        matched_message.pop("content", None)
     return match_hash(matched_message, tools=tools, model=model)
 
 

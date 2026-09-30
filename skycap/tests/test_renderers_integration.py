@@ -12,7 +12,7 @@ pytest.importorskip("renderers")
 
 from skycap.samples import build_samples  # noqa: E402
 from skycap.tokens.renderer import RenderersRenderer  # noqa: E402
-from tests.test_tokens import client, token_stack  # noqa: E402
+from tests.test_tokens import client, token_stack, user  # noqa: E402
 
 TOKENIZER = "Qwen/Qwen3-0.6B"
 
@@ -59,6 +59,44 @@ def test_empty_tool_call_content_renders_like_absent_content(renderer: Renderers
         renderer.render([{"role": "user", "content": "hi"}, reply], tools).token_ids
         == renderer.render([{"role": "user", "content": "hi"}, replay], tools).token_ids
     )
+
+
+async def test_real_renderer_bridges_empty_content_tool_call_replay(renderer: RenderersRenderer) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(TOKENIZER)
+    completion = tokenizer.encode(
+        '<think>\nhmm\n</think>\n\n<tool_call>\n{"name": "search", "arguments": {}}\n</tool_call><|im_end|>',
+        add_special_tokens=False,
+    )
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.server.backend.renderer = renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        llm = client(created["base_url"])
+        first = await llm.chat.completions.create(model="policy", messages=[user("q")], tools=tools)
+        reply = first.choices[0].message.model_dump(exclude_none=True)
+        assert reply["content"] == "" and reply["reasoning_content"] == "hmm" and reply["tool_calls"]
+
+        replay = {key: value for key, value in reply.items() if key != "content"}
+        replay["provider_specific_fields"] = {"refusal": None}
+        tool_result = {"role": "tool", "tool_call_id": reply["tool_calls"][0]["id"], "content": "found"}
+        async with stack.http.post(
+            f"{created['base_url']}/chat/completions",
+            json={"model": "policy", "messages": [user("q"), replay, tool_result], "tools": tools},
+        ) as response:
+            assert response.status == 200
+
+        first_request, second_request = stack.engine.requests
+        exact_prefix = first_request["token_ids"] + completion
+        assert second_request["token_ids"][: len(exact_prefix)] == exact_prefix
+        graph = stack.server.trajectories[created["id"]].graph
+        model_nodes = [node for node in graph if node.author == "model"]
+        assert len(model_nodes) == 2
+        assert model_nodes[0].id in graph.path_to(model_nodes[1].id)
+        assert [call.bridged for node in model_nodes for call in node.calls] == [None, True]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
 
 
 async def test_a_conversation_through_the_real_renderer(renderer: RenderersRenderer) -> None:
