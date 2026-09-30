@@ -8,7 +8,8 @@
 - ``FakeTrial``: what Harbor's ``Trial`` is to the generator. Its task path picks
   a script: a linear chat, a summarization (the history is rewritten), a
   timeout, a crash, or a sandbox that times out starting on the first attempt
-  (``slow_start``). Results carry Harbor's phase timings: the sandbox takes
+  (``slow_start``; "first" counts every trial of that task path since
+  ``FakeTrial.configs`` was reset, so a test runs one such trial). Results carry Harbor's phase timings: the sandbox takes
   ``SETUP`` seconds to start, the agent ``AGENT`` and the verifier ``VERIFY``.
 """
 

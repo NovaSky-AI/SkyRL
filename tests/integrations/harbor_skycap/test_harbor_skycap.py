@@ -159,6 +159,7 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
             assert metrics[f"generate/skycap/{phase}_time_{stat}"] == pytest.approx(seconds)
     assert metrics["generate/skycap/num_attempts"] == 1
     assert metrics["generate/skycap/num_retried_attempts"] == 0
+    assert metrics["generate/skycap/num_failed_attempts"] == 0
     assert not any(k.startswith("generate/skycap/num_failed_attempts/") for k in metrics)
     prompt, response, mask = out["prompt_token_ids"][0], out["response_ids"][0], out["loss_masks"][0]
     # The prompt is the task; both replies are trained, and the user turn between them is context.
@@ -251,6 +252,7 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
     # A timed-out agent isn't retried; its attempts count as failed, and its verifier never ran.
     assert metrics["generate/skycap/num_attempts"] == 4
     assert metrics["generate/skycap/num_retried_attempts"] == 0
+    assert metrics["generate/skycap/num_failed_attempts"] == 2
     assert metrics["generate/skycap/num_failed_attempts/AgentTimeoutError"] == 2
     assert metrics["generate/skycap/agent_execution_time_max"] == pytest.approx(AGENT)
     assert metrics["generate/skycap/verifier_time_mean"] == pytest.approx(VERIFY)

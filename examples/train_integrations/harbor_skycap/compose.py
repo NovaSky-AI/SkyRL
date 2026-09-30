@@ -270,6 +270,8 @@ def _attempt_metrics(attempts: List[Attempt]) -> Dict[str, Any]:
             metrics[f"generate/skycap/{phase}_time_mean"] = float(np.mean(arr))
             metrics[f"generate/skycap/{phase}_time_p90"] = float(np.percentile(arr, 90))
             metrics[f"generate/skycap/{phase}_time_max"] = float(np.max(arr))
+    # Always present, so a healthy step charts as zero rather than a gap.
+    metrics["generate/skycap/num_failed_attempts"] = sum(a.exception is not None for a in attempts)
     for attempt in attempts:
         if attempt.exception is not None:
             key = f"generate/skycap/num_failed_attempts/{attempt.exception}"
