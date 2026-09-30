@@ -910,6 +910,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         Returns:
             GeneratorOutput
         """
+        # TODO(xgui): support vision-language batched generation: render each prompt with
+        # `self.renderer.render_prompt`, pass the features as `mm_features`, and return the decoded
+        # `pixel_values` / `image_grid_thw`.
+        if self.generator_cfg.vision_language_generator:
+            raise NotImplementedError(
+                "`generate_batched` does not support `vision_language_generator=True`: it tokenizes prompts "
+                "with the local tokenizer and sends no image features. Set `batched=False`."
+            )
         envs = []
         init_prompts = []
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):

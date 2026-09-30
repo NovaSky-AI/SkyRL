@@ -254,6 +254,18 @@ def test_vlm_validate_cfg_refusals(tokenizer, overrides, match):
         _build_generator(tokenizer, MockRenderServer(tokenizer), MockLLM(tokenizer), **overrides)
 
 
+@pytest.mark.asyncio
+async def test_vlm_generate_batched_raises(tokenizer):
+    generator = _build_generator(tokenizer, MockRenderServer(tokenizer), MockLLM(tokenizer))
+    with pytest.raises(NotImplementedError, match="vision_language_generator"):
+        await generator.generate_batched(
+            prompts=[[{"role": "user", "content": "a"}]],
+            env_classes=["cpu_vlm_test_env"],
+            env_extras=[{}],
+            max_tokens=10,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Text observations
 # ---------------------------------------------------------------------------
