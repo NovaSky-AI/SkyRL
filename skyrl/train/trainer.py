@@ -75,6 +75,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.utils import (
     Timer,
+    deadline,
     get_ray_pg_ready_with_timeout,
     trainer_utils,
 )
@@ -276,7 +277,7 @@ class RayPPOTrainer:
                 self.global_step, _ = self.load_checkpoints()
 
         # Prepare weights for sampling
-        with Timer("sync_weights"):
+        async with self._weight_sync_deadline(), Timer("sync_weights"):
             await self.dispatch.save_weights_for_sampler()
 
         # Compute start_epoch up-front so callback metadata is ready before
@@ -330,7 +331,7 @@ class RayPPOTrainer:
                         if self._vllm_metrics_scraper is not None:
                             await self._vllm_metrics_scraper.start("vllm/train")
                             self._vllm_metrics_scraper.pause()
-                    with Timer("step", self.all_timings):
+                    async with self._step_deadline(), Timer("step", self.all_timings):
                         # for colocate_all=true, inference engine is always on GPU when starting the training step
 
                         # 0. truncate data to have even shards
@@ -349,7 +350,7 @@ class RayPPOTrainer:
                         # 1.1. generation phase
                         if self._vllm_metrics_scraper is not None:
                             self._vllm_metrics_scraper.resume()
-                        with Timer("generate", self.all_timings):
+                        with Timer("generate", self.all_timings), deadline.operation("generate"):
                             generator_output: GeneratorOutput = await self.generate(generator_input)
                         if self._vllm_metrics_scraper is not None:
                             self._vllm_metrics_scraper.pause()
@@ -481,7 +482,7 @@ class RayPPOTrainer:
                                 self.update_ref_with_policy()
 
                         # 10. Prepare weights for sampling
-                        with Timer("sync_weights", self.all_timings):
+                        async with self._weight_sync_deadline(), Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
                         # `sync_weights` above is the full bracket: it also pauses and
                         # resumes generation, which under vLLM DP costs seconds of
@@ -583,12 +584,12 @@ class RayPPOTrainer:
         # Safety net: always save final checkpoint at end of training.
         # Skip if we already saved at the last step
         if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
-            with Timer("save_checkpoints", self.all_timings):
+            async with self._step_deadline(), Timer("save_checkpoints", self.all_timings):
                 ckpt_path = self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
             self._fire("on_save", ckpt_path=ckpt_path)
         if self.cfg.trainer.hf_save_interval > 0 and not hf_model_save:
-            with Timer("save_hf_model", self.all_timings):
+            async with self._step_deadline(), Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
 
@@ -626,6 +627,16 @@ class RayPPOTrainer:
             logger.warning(f"Failed to flush pending metrics at step {self.global_step}: {e}")
         self.all_metrics = {}
         self.all_timings = {}
+
+    def _step_deadline(self):
+        """Budget for one training step, or one save made outside a step (``trainer.step_timeout_s``)."""
+        return deadline.step_deadline(self.global_step, self.cfg.trainer.step_timeout_s)
+
+    def _weight_sync_deadline(self):
+        """Budget for one weight sync (``trainer.weight_sync_timeout_s``), nested within the step's."""
+        return deadline.step_deadline(
+            self.global_step, self.cfg.trainer.weight_sync_timeout_s, deadline.WeightSyncTimeoutError
+        )
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
         """Remove tail data to have even shards in terms of *effective* samples.

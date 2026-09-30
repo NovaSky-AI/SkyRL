@@ -34,6 +34,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
     InferenceServerHTTPError,
+    InferenceServerTimeoutError,
     PauseMode,
     RemoteGenerateClient,
     RemoteInferenceClient,
@@ -119,6 +120,11 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/test/bad_request_text")
     async def bad_request_text():
         return PlainTextResponse("prompt too long", status_code=400)
+
+    @app.post("/test/control_hang")
+    async def control_hang():
+        await asyncio.sleep(30)
+        return {"status": "ok"}
 
     @app.post("/test/control_plain_error")
     async def control_plain_error():
@@ -542,6 +548,24 @@ class TestInferenceServerHTTPError:
         with pytest.raises(InferenceServerHTTPError) as exc_info:
             await client._call_server(mock_servers["server_urls"][0], endpoint)
         _assert_picklable_http_error(exc_info.value, status=502, message=message)
+
+
+class TestControlPlaneTimeout:
+    @pytest.mark.asyncio
+    async def test_hung_control_plane_call_raises_picklable_timeout(self, client, mock_servers, monkeypatch):
+        monkeypatch.setattr(remote_client_module, "SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S", 0.2)
+        url = mock_servers["server_urls"][0]
+        with pytest.raises(InferenceServerTimeoutError) as exc_info:
+            await asyncio.wait_for(client._call_server(url, "/test/control_hang"), timeout=10)
+        err = exc_info.value
+        assert (err.method, err.url, err.timeout_s) == ("POST", f"{url}/test/control_hang", 0.2)
+        restored = pickle.loads(pickle.dumps(err))
+        assert (restored.method, restored.url, restored.timeout_s, str(restored)) == (
+            err.method,
+            err.url,
+            err.timeout_s,
+            str(err),
+        )
 
 
 class TestRemoteInferenceClientInit:

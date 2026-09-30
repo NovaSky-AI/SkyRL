@@ -9,6 +9,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import ray
 import torch
@@ -35,35 +36,45 @@ from skyrl.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
 from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
     SkyRLTrainConfig,
     get_config_as_dict,
 )
+from skyrl.train.utils import deadline
 
 
 class Timer:
+    """Times a block and names it as the current step-deadline stage (see ``deadline.stage``)."""
+
     def __init__(self, message, update_dict=None):
         self.message = message
         self.update_dict = update_dict
 
     def __enter__(self):
         self.start_time = time.time()
+        self._stage = deadline.stage(self.message)
+        self._stage.__enter__()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stage.__exit__(exc_type, exc_val, exc_tb)
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
     async def __aenter__(self):
         self.start_time = time.time()
+        self._stage = deadline.stage(self.message)
+        self._stage.__enter__()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._stage.__exit__(exc_type, exc_val, exc_tb)
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
@@ -347,6 +358,24 @@ def _validate_draft_weight_sync_cfg(cfg: SkyRLTrainConfig):
         )
 
 
+def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_s: Optional[float]) -> None:
+    for name, value in (("step_timeout_s", step_timeout_s), ("weight_sync_timeout_s", weight_sync_timeout_s)):
+        if value is None:
+            continue
+        if value <= 0:
+            raise ValueError(f"trainer.{name} must be > 0, got {value}")
+        if value < SKYRL_WORKER_NCCL_TIMEOUT_IN_S:
+            logger.warning(
+                f"trainer.{name}={value} is below SKYRL_WORKER_NCCL_TIMEOUT_IN_S={SKYRL_WORKER_NCCL_TIMEOUT_IN_S}: "
+                "the driver will give up on a stuck collective before the NCCL watchdog reports it."
+            )
+    if step_timeout_s is not None and weight_sync_timeout_s is not None and weight_sync_timeout_s > step_timeout_s:
+        raise ValueError(
+            f"trainer.weight_sync_timeout_s ({weight_sync_timeout_s}) must be <= trainer.step_timeout_s "
+            f"({step_timeout_s})"
+        )
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -361,6 +390,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.max_training_steps is not None:
         if cfg.trainer.max_training_steps <= 0:
             raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
+
+    validate_step_timeouts(cfg.trainer.step_timeout_s, cfg.trainer.weight_sync_timeout_s)
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
