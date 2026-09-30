@@ -414,6 +414,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
             # This is no longer needed now given that step wise training is supported
             # TODO (sumanthrh): This path can be deprecated
+            # Not supported with `vision_language_generator` (a custom chat template is refused in
+            # `_validate_cfg`); use step-wise training instead.
             retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
 
             # Create a new environment instance
