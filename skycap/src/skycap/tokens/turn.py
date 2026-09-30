@@ -50,7 +50,7 @@ class Plan:
 
 
 def match_hashes(messages: Sequence[Mapping[str, Any]], tools: str, model: str | None) -> list[str]:
-    return [hashing.match_hash(m, tools=tools, model=model) for m in messages]
+    return [hashing.token_match_hash(m, tools=tools, model=model) for m in messages]
 
 
 def plan(

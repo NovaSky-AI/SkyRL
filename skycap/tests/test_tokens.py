@@ -15,6 +15,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from skycap import record
+from skycap.hashing import match_hash, token_match_hash
 from skycap.samples import build_samples
 from skycap.server import CaptureServer
 from skycap.tokens.backend import STATUS_HEADER, TokensBackend
@@ -83,6 +84,15 @@ async def converse(llm: openai.AsyncOpenAI, *texts: str, **kwargs: Any) -> list[
 
 
 # -- attribution ---------------------------------------------------------------
+@pytest.mark.parametrize("fields", [{"refusal": None}, {"response_id": "resp_1", "refusal": None}])
+def test_token_match_ignores_provider_specific_fields(fields: dict) -> None:
+    reply = {"role": "assistant", "content": "answer"}
+    replay = {**reply, "provider_specific_fields": fields}
+
+    assert token_match_hash(reply, tools="", model="policy") == token_match_hash(replay, tools="", model="policy")
+    assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
+
+
 def test_scaffold_belongs_to_the_following_message_and_the_tail_to_the_reply() -> None:
     chunks, scaffold = attribute([9, 1, 1, 8, 2, 2, 7, 7], [-1, 0, 0, -1, 1, 1, -1, -1], 2)
     assert chunks == [[9, 1, 1], [8, 2, 2]]
@@ -179,6 +189,24 @@ async def test_an_append_only_conversation_bridges_every_call_after_the_first() 
         graph = stack.server.trajectories[created["id"]].graph
 
         assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True, True]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
+
+
+async def test_client_metadata_does_not_prevent_bridging() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        first = await llm.chat.completions.create(model="policy", messages=[user("q")])
+        reply = first.choices[0].message.model_dump(exclude_none=True)
+        reply["provider_specific_fields"] = {"refusal": None, "response_id": "resp_1"}
+        async with stack.http.post(
+            f"{created['base_url']}/chat/completions",
+            json={"model": "policy", "messages": [user("q"), reply, user("next")]},
+        ) as response:
+            assert response.status == 200
+
+        graph = stack.server.trajectories[created["id"]].graph
+        assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True]
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
 
 

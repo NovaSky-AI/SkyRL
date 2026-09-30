@@ -41,6 +41,13 @@ def test_render_bridge_and_parse_agree(renderer: RenderersRenderer) -> None:
     assert set(bridged.tail_indices) == {-1, 0}
 
 
+def test_provider_specific_fields_do_not_change_rendered_tokens(renderer: RenderersRenderer) -> None:
+    messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    with_metadata = [*messages[:-1], {**messages[-1], "provider_specific_fields": {"response_id": "resp_1"}}]
+
+    assert renderer.render(messages, None).token_ids == renderer.render(with_metadata, None).token_ids
+
+
 async def test_a_conversation_through_the_real_renderer(renderer: RenderersRenderer) -> None:
     from renderers.base import load_tokenizer
 

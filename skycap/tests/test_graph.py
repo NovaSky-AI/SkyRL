@@ -255,6 +255,18 @@ def test_absent_null_and_empty_are_the_same_message() -> None:
     assert turn.matched == 2
 
 
+def test_text_mode_keeps_provider_specific_fields_in_message_identity() -> None:
+    h = Harness()
+    h.call([user("q")], assistant("a"))
+    turn = h.call(
+        [user("q"), assistant("a", provider_specific_fields={"response_id": "resp_1"}), user("next")],
+        assistant("b"),
+    )
+
+    assert turn.matched == 1
+    assert h.graph.branch_points() == [0]
+
+
 def test_empty_content_is_not_absent_content() -> None:
     h = Harness()
     h.call([user("q")], assistant(""))

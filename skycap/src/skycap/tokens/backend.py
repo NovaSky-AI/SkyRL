@@ -247,7 +247,7 @@ class TokensBackend:
                     messages=chat.messages,
                     matches=matches,
                     reply=reply,
-                    reply_match=hashing.match_hash(reply, tools=tools_key, model=model),
+                    reply_match=hashing.token_match_hash(reply, tools=tools_key, model=model),
                     output=output,
                     call=call,
                 )

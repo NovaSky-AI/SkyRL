@@ -56,6 +56,18 @@ def match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> 
     return digest([message_hash(message), tools, model or ""])
 
 
+def token_match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> str:
+    """Match token-mode messages by fields the renderer can use.
+
+    ``provider_specific_fields`` is client metadata, not rendered tokens. Text
+    mode keeps it in the regular match hash because its upstream may use it.
+    """
+    if "provider_specific_fields" not in message:
+        return match_hash(message, tools=tools, model=model)
+    rendered_message = {key: value for key, value in message.items() if key != "provider_specific_fields"}
+    return match_hash(rendered_message, tools=tools, model=model)
+
+
 def sampling_key(sampling: Mapping[str, Any] | None) -> dict[str, Any]:
     if not sampling:
         return {}
