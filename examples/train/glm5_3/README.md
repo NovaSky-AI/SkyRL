@@ -6,7 +6,8 @@ with shared expert adapters, and in-memory adapter synchronization.
 
 Use SkyRL's Megatron installation and start a Ray cluster across the nodes.
 The same checkout, model and data must be available on every node. `RUN_ROOT`
-must be on shared storage; a node-local directory is not sufficient.
+must be on shared storage and fresh for each run; the script refuses to reuse an
+existing checkpoint directory.
 
 ```bash
 bash examples/train/algorithms/dapo/prepare_dapo_data.sh

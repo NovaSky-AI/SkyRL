@@ -8,6 +8,14 @@ DATA_DIR=${DATA_DIR:-$HOME/data/dapo}
 : "${RUN_ROOT:?Set RUN_ROOT to a shared directory for checkpoints and logs}"
 NUM_NODES=${NUM_NODES:-4}
 
+# A fresh run must not mix its checkpoints with a previous run's retention queue.
+if [[ -e "$RUN_ROOT/checkpoints" ]]; then
+  echo "Use a fresh RUN_ROOT; $RUN_ROOT/checkpoints already exists." >&2
+  exit 1
+fi
+
+export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=${SKYRL_WORKER_NCCL_TIMEOUT_IN_S:-21600}
+
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$DATA_DIR/dapo-math-17k-cleaned.parquet']" \
   data.val_data="['$DATA_DIR/aime-2024-cleaned.parquet']" \
@@ -58,6 +66,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.max_num_seqs=32 \
   generator.inference_engine.max_num_batched_tokens=32768 \
   generator.inference_engine.router_init_kwargs.request_timeout_secs=21600 \
+  generator.inference_engine.router_init_kwargs.queue_size=4096 \
+  generator.inference_engine.router_init_kwargs.queue_timeout_secs=21600 \
   generator.inference_engine.engine_init_kwargs='{"disable_custom_all_reduce":true,"linear_backend":"triton","moe_backend":"triton","max_model_len":32768,"kv_cache_dtype":"bfloat16","enable_flashinfer_autotune":false,"attention_config":{"mla_prefill_backend":"FLASH_ATTN"},"kernel_config":{"ir_op_priority":{"rms_norm":["vllm_c"],"fused_add_rms_norm":["vllm_c"]}},"compilation_config":{"pass_config":{"fuse_allreduce_rms":false}}}' \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.algorithm.policy_loss_type=dual_clip \
