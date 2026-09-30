@@ -96,7 +96,7 @@ def split(sample: Sample) -> Optional[_Row]:
 def _routes(sample: Sample) -> Optional[RoutedExpertIndices]:
     """The path's routes, less the last token's, which the engine never forwarded."""
     routed = sample.routed_experts
-    if routed is None or len(routed) != len(sample.input_ids) or len(routed) < 2:
+    if routed is None or len(routed) != len(sample.input_ids):
         return None
     return compact_routed_expert_indices(np.asarray(routed[:-1]))
 
@@ -198,18 +198,21 @@ def _sample_support(
 
 
 def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List[RoutedExpertIndices]]:
-    if not real:
-        # Nothing to train, and no shape to pad placeholders with: this step replays nothing.
-        return None
-    missing = sum(row.routes is None for row in real)
+    # Only a row that still trains needs its own routes; one whose loss mask overlong filtering
+    # cleared trains nothing, so it may go without.
+    missing = sum(row.routes is None and any(row.loss_mask) for row in real)
     if missing:
         # The generator turns a trial without routes into an error, so this is a bug, not a rollout.
         raise ValueError(f"{missing} of {len(real)} trained paths have no routed experts")
-    # A placeholder's one route names distinct experts, as the trainer's own padding does
+    shaped = next((row.routes for row in real if row.routes is not None), None)
+    if shaped is None:
+        # Nothing trains, and no shape to pad the rest with: this step replays nothing.
+        return None
+    # A row without routes gets one route of distinct experts, as the trainer's own padding does
     # (``replay_padding_row``): Megatron's dispatcher needs ``tokens * topk`` distinct slots.
-    layers, topk = real[0].routes.shape[1:]
-    dummy = np.broadcast_to(np.arange(topk, dtype=real[0].routes.dtype), (1, layers, topk)).copy()
-    return [dummy if row.placeholder else row.routes for rows in groups for row in rows]
+    layers, topk = shaped.shape[1:]
+    dummy = np.broadcast_to(np.arange(topk, dtype=shaped.dtype), (1, layers, topk)).copy()
+    return [dummy if row.routes is None else row.routes for rows in groups for row in rows]
 
 
 def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_instances: set) -> Dict[str, Any]:

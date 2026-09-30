@@ -147,12 +147,22 @@ async def test_routed_experts_align_and_the_placeholder_is_replaced() -> None:
         assert routed[-1, 0, 0] == routed[-2, 0, 0]
 
 
-class _RoutesFromEngine(VLLMEngine):
-    routes_from_supported = True
+class _FullRoutesEngine(VLLMEngine):
+    routes_from_supported = False
+
+
+async def test_a_wire_without_routes_from_gets_every_calls_full_routes() -> None:
+    async with token_stack(engine=_FullRoutesEngine()) as stack:
+        created = await stack.create()
+        await converse(client(created["base_url"]), "hi", "more")
+        (sample,) = build_samples(stack.server.trajectories[created["id"]].graph)
+
+        assert not any("routed_experts_prompt_start" in r["sampling_params"] for r in stack.engine.requests)
+        np.testing.assert_array_equal(sample.routed_experts[:-1, 0, 0], np.arange(len(sample.input_ids) - 1) % 256)
 
 
 async def test_a_turn_fetches_only_the_routes_it_lacks_and_they_still_align() -> None:
-    async with token_stack(engine=_RoutesFromEngine()) as stack:
+    async with token_stack() as stack:
         created = await stack.create()
         await converse(client(created["base_url"]), "hi", "more", "again")
         (sample,) = build_samples(stack.server.trajectories[created["id"]].graph)

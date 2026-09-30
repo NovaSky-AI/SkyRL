@@ -72,9 +72,9 @@ class MockEngine:
         completion, logprobs = generated
         buffer = io.BytesIO()
         # As vLLM does with `routed_experts_prompt_start`: rows from that position on.
-        rows = routed_rows(len(body["token_ids"]) + len(completion))[
-            body["sampling_params"].get("routed_experts_prompt_start", 0) :
-        ]
+        start = body["sampling_params"].get("routed_experts_prompt_start", 0)
+        total = len(body["token_ids"]) + len(completion)
+        rows = routed_rows(total)[start:]
         np.save(buffer, rows[:3] if self.bad_routing else rows)
         choice = {
             "index": 0,

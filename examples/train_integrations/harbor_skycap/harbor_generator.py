@@ -213,8 +213,12 @@ class HarborSkycapGenerator(GeneratorInterface):
             # so the trial's reward doesn't enter the group without tokens behind it.
             logger.warning(f"Trajectory {trajectory_id}: skycap captured no trainable tokens")
             return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
-        if self._routed_experts and any(
-            (row := split(sample)) is not None and row.routes is None for sample in finished.samples
+        # Overlong filtering clears a context-length trial's loss mask, so it trains nothing and needs no routes.
+        filtered = stop_reason == "context_length" and self.generator_cfg.apply_overlong_filtering
+        if (
+            self._routed_experts
+            and not filtered
+            and any((row := split(sample)) is not None and row.routes is None for sample in finished.samples)
         ):
             # skycap drops a path's routes when any node on it lacks them; replaying the rest would
             # train those tokens on routes the rollout never took. Retried, then masked.

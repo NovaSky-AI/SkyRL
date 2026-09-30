@@ -343,6 +343,23 @@ def test_the_engine_asks_for_support_only_with_a_sampling_mask() -> None:
     assert "return_sample_support" not in SkyRLEngine().request(sampling_mask=False, **kwargs)
 
 
+def test_with_r3_an_overlong_filtered_trial_needs_no_routes() -> None:
+    """Its loss mask is cleared, so it trains nothing; without filtering, a missing route is a bug."""
+    routed = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
+    routed.routed_experts = np.zeros((3, LAYERS, EXPERTS_PER_TOKEN), dtype=np.uint8)
+    unrouted = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[4, 5, 6], loss_mask=[0, 1, 1])
+    outcomes = [
+        TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[routed], reward=1.0),
+        TrialOutcome(trajectory_id=TrajectoryID("a", 1), samples=[unrouted], stop_reason="context_length"),
+    ]
+
+    out = compose(outcomes, overlong_filtering=True, routed_experts=True)
+    assert out["loss_masks"][1] == [0, 0]
+    assert out["rollout_expert_indices"][1].tolist() == [[list(range(EXPERTS_PER_TOKEN))] * LAYERS]
+    with pytest.raises(ValueError, match="1 of 2 trained paths have no routed experts"):
+        compose(outcomes, overlong_filtering=False, routed_experts=True)
+
+
 def test_overlong_filtering_masks_a_context_length_trial_but_keeps_it() -> None:
     sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
     sample.logprobs = [0.0, -1.0, -1.0]
