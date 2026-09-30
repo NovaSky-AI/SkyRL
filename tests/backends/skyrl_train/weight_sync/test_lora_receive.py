@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.patches.vllm import patch_lora_in_memory as patch
+from skyrl.backends.skyrl_train.weight_sync import weight_receivers
 from skyrl.backends.skyrl_train.weight_sync.lora_target import build_lora_receive_target
 from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
     SkyrlReceiveLifecycleMixin,
@@ -197,3 +198,22 @@ class TestStagingRegistry:
         patch.stage_in_memory_adapter("a", {"k": torch.zeros(1)}, {"r": 2})
         assert patch._STAGED["a"].peft_config == {"r": 2}
         assert torch.equal(patch._STAGED["a"].tensors["k"], torch.zeros(1))
+
+
+@pytest.mark.parametrize("lora_armed", [False, True])
+def test_fp8_hooks_bracket_only_full_weight_updates(monkeypatch, lora_armed):
+    engine = _Engine([("w", torch.ones(2))])
+    monkeypatch.setattr(weight_receivers, "skyrl_before_weight_update", lambda: engine.calls.append("before"))
+    monkeypatch.setattr(weight_receivers, "skyrl_after_weight_update", lambda: engine.calls.append("after"))
+    monkeypatch.setattr(weight_receivers, "empty_cuda_cache_rocm", lambda: engine.calls.append("empty_cache"))
+    if lora_armed:
+        engine.skyrl_set_lora_receive_target(build_lora_receive_target("tenant", {}, {}))
+
+    _run_round(engine)
+
+    if lora_armed:
+        assert engine.calls == ["receive"]
+        assert engine.loaded == []
+    else:
+        assert engine.calls == ["before", "start", "receive", "finish", "after", "empty_cache"]
+        assert len(engine.loaded) == 1

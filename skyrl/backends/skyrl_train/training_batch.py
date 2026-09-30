@@ -605,6 +605,26 @@ def packed_dummy_row_segments(key: str, count: int) -> List[int]:
     return [_packed_field_padding_rule(key).dummy_row_length] * count
 
 
+def append_tensor_list_padding(key: str, field: TensorList, count: int) -> TensorList:
+    """Extend a ragged ``TensorList`` field with ``count`` synthetic batch rows.
+
+    ``TensorList`` fields are indexed by batch position, so they must grow with the
+    rest of the batch: consumers either check their length against
+    ``sequences.shape[0]`` or derive the batch size from them.
+
+    ``sub_seq_lengths`` gets ``[1]``: one sub-sequence of one valid token, matching a
+    synthetic row's single attended token. Other fields (e.g. ``pixel_values``,
+    ``image_grid_thw``) get a zero-row tensor of the same trailing shape and dtype,
+    which contributes nothing when concatenated for the vision tower.
+    """
+    reference = field.tensors[0]
+    if key == "sub_seq_lengths":
+        row = torch.ones(1, dtype=reference.dtype, device=reference.device)
+    else:
+        row = torch.empty(0, *reference.shape[1:], dtype=reference.dtype, device=reference.device)
+    return TensorList.cat([field, TensorList([row.clone() for _ in range(count)])])
+
+
 def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) -> TrainingInputBatch:
     """Pad `pad_size` entries to `unpadded_batch`, return a newly allocated TrainingInputBatch. If pad_size is 0, return the original batch."""
     # TODO(Charlie): This incurs 2x CPU memory usage when pad_size > 0. Optimize when needed.

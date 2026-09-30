@@ -11,8 +11,8 @@ import sys
 from aiohttp import web
 
 from skycap import __version__
-from skycap.server import Backend, CaptureServer
-from skycap.text import TextBackend
+from skycap.server import CaptureServer
+from skycap.service import build_backend
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,19 +77,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_backend(args: argparse.Namespace) -> Backend:
-    api_key = os.environ.get(args.upstream_api_key_env)
-    if args.mode == "text":
-        return TextBackend(args.upstream_url, api_key=api_key)
-    if not args.tokenizer:
+def build_server(args: argparse.Namespace) -> CaptureServer:
+    if args.mode == "tokens" and not args.tokenizer:
         raise SystemExit("--mode tokens needs --tokenizer")
-    from skycap.tokens.backend import TokensBackend
-    from skycap.tokens.renderer import RenderersRenderer
-
-    return TokensBackend(
+    backend = build_backend(
         args.upstream_url,
-        RenderersRenderer(args.tokenizer, size=args.renderer_pool_size),
-        api_key=api_key,
+        mode=args.mode,
+        api_key=os.environ.get(args.upstream_api_key_env),
+        tokenizer=args.tokenizer,
+        renderer_pool_size=args.renderer_pool_size,
         model=args.model,
         max_model_len=args.max_model_len,
         sampling_overrides=args.sampling_overrides,
@@ -97,10 +93,6 @@ def build_backend(args: argparse.Namespace) -> Backend:
         logprobs_mode=args.logprobs_mode,
         use_raw_content=args.use_raw_content,
     )
-
-
-def build_server(args: argparse.Namespace) -> CaptureServer:
-    backend = build_backend(args)
     return CaptureServer(backend, record_dir=args.record_dir, ttl=args.ttl)
 
 

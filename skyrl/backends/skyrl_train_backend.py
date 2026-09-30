@@ -6,7 +6,7 @@ import math
 import os
 import tarfile
 import tempfile
-from typing import Callable
+from typing import Callable, Literal
 
 import ray
 import torch
@@ -68,6 +68,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
+    runtime_role: Literal["trainer", "inference", "combined"] = "combined"
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -93,6 +94,8 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    if overrides.runtime_role != "combined":
+        user_overrides["trainer.placement.colocate_all"] = False
     # The Tinker path drives profiling through /start_profiling, which builds the
     # profiler at request time. A static config here would fight it over the single
     # `worker.profiler` slot, so reject it rather than letting both sources win
@@ -482,8 +485,16 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
+        if self.config.runtime_role == "trainer":
+            raise RuntimeError("Sampling is unavailable in a trainer-only runtime")
         if self._inference_engines_initialized:
             return
+        if self.config.runtime_role == "inference" and getattr(self, "_cfg", None) is None:
+            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config=None)
+            if not ray.is_initialized():
+                initialize_ray(self._cfg)
+        elif hasattr(self, "_cfg") and self._cfg is None:
+            raise RuntimeError("Create a model before sampling from a combined runtime")
 
         # A preceding training op (another tenant's forward/forward_backward)
         # may have left the trainer GPU-resident; under colocate_all the
@@ -495,8 +506,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
         self._create_new_inference_client()
 
-        self._dispatch.set_inference_engine_client(self._inference_engine_client)
-        self.init_weight_sync_state()
+        if self._dispatch is not None:
+            self._dispatch.set_inference_engine_client(self._inference_engine_client)
+            self.init_weight_sync_state()
         self._inference_engines_initialized = True
 
         # The engines' API servers also expose the render endpoint, fanning
@@ -521,6 +533,8 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{model_id}' already exists")
 
         is_lora = lora_config is not None and lora_config.rank > 0
+        if self.config.runtime_role == "inference" and (is_lora or model_role == "critic"):
+            raise ValueError("Training models are unavailable in an inference-only runtime")
 
         # Multi-LoRA path: register additional policy adapters against the
         # already-built shared runtime. Gate on the runtime being alive rather
@@ -564,7 +578,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
             self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self._cfg.trainer.strategy == "fsdp":
+            if self.config.runtime_role == "inference":
+                PolicyWorker = None
+            elif self._cfg.trainer.strategy == "fsdp":
                 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                     PolicyWorker,
                 )
@@ -574,9 +590,9 @@ class SkyRLTrainBackend(AbstractBackend):
                 )
             else:
                 raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-
-            logger.info("Building models.")
-            self._build_policy(PolicyWorker, model_id=model_id)
+            if PolicyWorker is not None:
+                logger.info("Building models.")
+                self._build_policy(PolicyWorker, model_id=model_id)
             if is_lora:
                 self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
@@ -598,6 +614,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         self._model_ids_to_role[model_id] = model_role
         self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
+        if self.config.runtime_role == "inference":
+            self._ensure_inference_engines()
         logger.info(f"Created {model_role} model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
@@ -633,6 +651,14 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
+
+        # Inference-only model IDs are aliases for the same base-model runtime.
+        # Keep that runtime alive while another alias is still registered.
+        if self.config.runtime_role == "inference" and len(self._model_ids_to_role) > 1:
+            del self._model_ids_to_role[model_id]
+            self._model_metadata.pop(model_id, None)
+            logger.info(f"Removed inference-only model alias '{model_id}'; shared runtime stays up")
+            return
 
         # Multi-LoRA: if more than one model is currently registered — or the
         # last one is unloading with keep_runtime_warm_on_last_unload set —
@@ -1024,6 +1050,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training is unavailable in an inference-only runtime")
         if not prepared_batch.all_model_inputs:
             return {}
 
@@ -1116,6 +1144,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training is unavailable in an inference-only runtime")
         if not prepared_batch.all_model_inputs:
             return {}
 
@@ -1202,6 +1232,8 @@ class SkyRLTrainBackend(AbstractBackend):
         return next((e for e in errors if e), None)
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training is unavailable in an inference-only runtime")
         role = self._get_role(model_id)
 
         # Apply learning rate from AdamParams before optimizer step
@@ -1476,6 +1508,8 @@ class SkyRLTrainBackend(AbstractBackend):
     def _validate_model_state(self, model_id: str) -> None:
         """Validate that model exists and is initialized."""
         self._get_role(model_id)
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training and weight synchronization are unavailable in an inference-only runtime")
         if self._dispatch is None:
             raise RuntimeError("Model not initialized")
 

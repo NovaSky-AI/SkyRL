@@ -228,6 +228,14 @@ async def _close_external_inference(app: FastAPI) -> None:
             await aclose()
 
 
+def _should_forward_sample_requests(config: EngineConfig) -> bool:
+    """Return whether samples can bypass the engine for managed inference."""
+    if config.backend not in ("megatron", "fsdp") or config.runtime_role != "combined":
+        return False
+    backend_config = config.backend_config or {}
+    return not bool(backend_config.get("trainer.placement.colocate_all", True))
+
+
 async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
     try:
         await _close_external_inference(app)
@@ -336,20 +344,16 @@ async def lifespan(app: FastAPI):
     # Three cases:
     #   1. external_inference_url set: forward sample requests to a fully
     #      external vLLM (existing behavior).
-    #   2. backend in (megatron, fsdp) and colocate_all=False: install
+    #   2. combined SkyRL-Train runtime with colocate_all=False: install
     #      SkyRLTrainInferenceForwardingClient so sample requests go directly
-    #      to the SkyRL-Train-managed vLLM, bypassing the engine's serial loop.
-    #   3. otherwise (JAX, colocated SkyRL-Train, etc.): route everything
-    #      through the engine subprocess.
+    #      to the managed vLLM, bypassing the engine's serial loop.
+    #   3. otherwise (JAX, dedicated roles, colocated SkyRL-Train, etc.):
+    #      route everything through the engine subprocess.
     #
-    # The colocated path stays on the engine because vLLM is asleep during
-    # training and only the engine's synchronous sample path knows how to
-    # wake it (save_weights_for_sampler → broadcast → sample).
+    # Colocated sampling stays on the engine because only that path can wake
+    # vLLM. Dedicated roles stay there for trainer-only rejection and
+    # inference-only lazy startup.
     backend_name = app.state.engine_config.backend
-    backend_cfg = app.state.engine_config.backend_config or {}
-    # SkyRL-Train default is colocate_all=True; only opt into forwarding
-    # when the operator explicitly sets it to False.
-    is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
     store_ttls = dict(
         retrieved_ttl_sec=app.state.engine_config.external_future_retrieved_ttl_sec,
         completed_ttl_sec=app.state.engine_config.external_future_completed_ttl_sec,
@@ -361,7 +365,7 @@ async def lifespan(app: FastAPI):
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
         )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
-    elif backend_name in ("megatron", "fsdp") and not is_colocated:
+    elif _should_forward_sample_requests(app.state.engine_config):
         app.state.external_future_store = ExternalFutureStore(**store_ttls)
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(

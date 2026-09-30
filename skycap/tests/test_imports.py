@@ -7,7 +7,7 @@ import sys
 
 _CHECK = """
 import sys
-import skycap.cli, skycap.server, skycap.record, skycap.samples, skycap.tokens.backend
+import skycap, skycap.cli, skycap.server, skycap.service, skycap.record, skycap.samples, skycap.tokens.backend
 leaked = sorted(n for n in sys.modules if n.split('.')[0] in {'renderers', 'transformers', 'torch'})
 assert not leaked, leaked
 """

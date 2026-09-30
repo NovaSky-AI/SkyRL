@@ -43,6 +43,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    resolve_auto_fp8_recipe,
+    validate_concrete_fp8_recipe,
+    validate_mxfp8_gdn_tp_alignment,
+)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -62,9 +67,11 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
     TrainingInputBatch,
     TrainingOutputBatch,
     append_packed_field_padding,
+    append_tensor_list_padding,
     packed_dummy_row_segments,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
@@ -75,10 +82,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     get_transfer_strategy,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
-    BLOCKWISE_FP8,
-    SerializedFp8Config,
-    registered_fp8_spec_names,
-    resolve_fp8_spec,
+    resolve_serialized_fp8_config,
 )
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     AdapterStore,
@@ -223,6 +227,18 @@ class MegatronWorker:
             transformer_config_kwargs
             if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        )
+        # validate_megatron_cfg resolves fp8_recipe="auto" on the driver when it
+        # can see a GPU; a GPU-less driver ships "auto" through unresolved. The
+        # worker always has the target device visible, so resolve here and
+        # re-run the device/recipe validation the blind driver had to skip.
+        resolve_auto_fp8_recipe(transformer_config_kwargs)
+        validate_concrete_fp8_recipe(transformer_config_kwargs)
+        # Megatron's own fp8 guard checks only the GLOBAL GDN in_proj dim; TE
+        # quantizes the TP shard. Refuse misaligned shards here with the
+        # arithmetic instead of TE's C++ assert deep inside model build.
+        validate_mxfp8_gdn_tp_alignment(
+            transformer_config_kwargs, hf_config, megatron_config.tensor_model_parallel_size
         )
 
         if not self.cfg.gradient_checkpointing:
@@ -674,6 +690,8 @@ class MegatronWorker:
         because Megatron's forward_backward_func requires uniform micro_batch_size across all
         microbatches (especially with PP > 1). Scalar keys (``num_actions``,
         ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged.
+        Ragged per-sample fields carried as a ``TensorList`` (``sub_seq_lengths``,
+        ``pixel_values``, ``image_grid_thw``) grow by ``append_tensor_list_padding``.
 
         Defined on the base worker so the shared ``_forward_logprobs`` path works for
         policy, ref, and critic workers alike.
@@ -722,6 +740,8 @@ class MegatronWorker:
                 else:
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                 padded[key] = torch.cat([value, pad_tensor], dim=0)
+            elif isinstance(value, TensorList):
+                padded[key] = append_tensor_list_padding(key, value, pad_count)
             else:
                 padded[key] = value
 
@@ -1338,8 +1358,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._serialized_fp8_config = None
         mode = inference_engine_cfg.fp8_weight_sync_mode
         if mode is not None:
-            if mode != BLOCKWISE_FP8:
-                raise ValueError(f"Unsupported fp8_weight_sync_mode={mode!r}. Supported value: {BLOCKWISE_FP8!r}.")
             resolved_backend = get_transfer_strategy(
                 inference_engine_cfg.weight_sync_backend,
                 self.cfg.placement.colocate_all,
@@ -1349,13 +1367,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
                     f"got {resolved_backend!r}."
                 )
-            spec = resolve_fp8_spec(self.strategy.hf_config)
-            if spec is None:
-                raise ValueError(
-                    "FP8 weight sync requires a registered model spec for the configured checkpoint "
-                    f"(registered specs: {', '.join(registered_fp8_spec_names())})."
-                )
-            self._serialized_fp8_config = SerializedFp8Config(spec=spec)
+            self._serialized_fp8_config = resolve_serialized_fp8_config(mode, self.strategy.hf_config)
 
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
