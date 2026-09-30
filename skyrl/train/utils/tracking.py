@@ -78,6 +78,7 @@ class Tracking:
         self._finished = False
         self._summary_provider = None
         self.run_status = "running"
+        self._vllm_history_metrics = set()
 
     def set_summary_provider(self, provider) -> None:
         """Install a callback producing current weighted run summaries."""
@@ -103,6 +104,10 @@ class Tracking:
     def log(self, data, step, commit=False):
         self._flush_summary()
         if self.backend == "wandb":
+            for name in data:
+                if name.startswith("vllm/") and name not in self._vllm_history_metrics:
+                    self.logger.define_metric(name, summary="none")
+                    self._vllm_history_metrics.add(name)
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
@@ -112,6 +117,15 @@ class Tracking:
             return
         if self.run_status == "running":
             self.run_status = "success" if exit_code == 0 else "failed"
+        if self.backend == "wandb" and self.logger.run is not None:
+            # Explicit removals also clear summaries already inferred from history.
+            for name in self._vllm_history_metrics:
+                try:
+                    del self.logger.run.summary[name]
+                except KeyError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Could not remove automatic metric summary {name}: {e}")
         self._flush_summary()
         self._finished = True
         if self.backend == "console":

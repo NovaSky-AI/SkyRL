@@ -29,10 +29,10 @@ class RunStatistics:
         """Return weighted scalar summaries suitable for tracker backends."""
         from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
-        result = {"vllm_run/covers_resumed_history": self.resumed_history}
+        result = {"vllm_correct_aggregate/covers_resumed_history": self.resumed_history}
         for scope in self.active_seconds:
             total = self.windows.get(scope, WindowStatistics())
-            prefix = f"vllm_run/{scope}/"
+            prefix = f"vllm_correct_aggregate/{scope}/"
             metrics = VLLMMetricsScraper._derive(
                 total.deltas, dict.fromkeys(total.deltas, 0), total.duration_seconds, prefix
             )

@@ -16,10 +16,10 @@ def test_failure_status_and_summary_precede_finish():
     logger.run = SimpleNamespace(summary=summary)
     logger.finish.side_effect = lambda **kwargs: events.append(("finish", kwargs))
     tracker.logger = logger
-    tracker.set_summary_provider(lambda: {"vllm_run/train/output_tokens_total": 10})
+    tracker.set_summary_provider(lambda: {"vllm_correct_aggregate/train/output_tokens_total": 10})
     tracker.finish(exit_code=1)
     tracker.finish(exit_code=1)
     assert events == [
-        ("summary", {"vllm_run/train/output_tokens_total": 10, "run_status": "failed"}),
+        ("summary", {"vllm_correct_aggregate/train/output_tokens_total": 10, "run_status": "failed"}),
         ("finish", {"exit_code": 1}),
     ]

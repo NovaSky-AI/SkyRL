@@ -53,9 +53,9 @@ async def test_fresh_owned_engine_recovers_delayed_first_export():
     metrics = await scraper.sample(generation_time_s=0, allow_zero_duration=True)
     assert metrics["vllm/generation_throughput_tok_s"] == 50
     summary = scraper.run_statistics.summary()
-    assert summary["vllm_run/combined/output_tokens_total"] == 100
-    assert summary["vllm_run/combined/active_generation_seconds"] == 2
-    assert summary["vllm_run/combined/observed_active_seconds"] == 2
+    assert summary["vllm_correct_aggregate/combined/output_tokens_total"] == 100
+    assert summary["vllm_correct_aggregate/combined/active_generation_seconds"] == 2
+    assert summary["vllm_correct_aggregate/combined/observed_active_seconds"] == 2
 
 
 @pytest.mark.asyncio
@@ -73,9 +73,9 @@ async def test_sync_terminal_export_recovers_missing_stop_snapshot():
     assert await scraper.stop() == {}
     await scraper.sample(generation_time_s=0, allow_zero_duration=True)
     summary = scraper.run_statistics.summary()
-    assert summary["vllm_run/train/output_tokens_total"] == 100
-    assert summary["vllm_run/train/generation_throughput_tok_s"] == 50
-    assert summary["vllm_run/train/active_generation_seconds"] == 2
+    assert summary["vllm_correct_aggregate/train/output_tokens_total"] == 100
+    assert summary["vllm_correct_aggregate/train/generation_throughput_tok_s"] == 50
+    assert summary["vllm_correct_aggregate/train/active_generation_seconds"] == 2
 
 
 @pytest.mark.asyncio
@@ -93,6 +93,6 @@ async def test_sync_late_exports_between_windows_are_counted_once():
         scraper._window_time_s = 1
         await scraper.stop()
     summary = scraper.run_statistics.summary()
-    assert summary["vllm_run/train/output_tokens_total"] == 200
-    assert summary["vllm_run/train/generation_throughput_tok_s"] == 100
-    assert summary["vllm_run/train/active_generation_seconds"] == 2
+    assert summary["vllm_correct_aggregate/train/output_tokens_total"] == 200
+    assert summary["vllm_correct_aggregate/train/generation_throughput_tok_s"] == 100
+    assert summary["vllm_correct_aggregate/train/active_generation_seconds"] == 2

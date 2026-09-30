@@ -16,10 +16,11 @@ def test_weighted_rates_and_cache_hits_survive_resume():
     restored.load_state_dict(stats.state_dict())
     restored.add("train", WindowStatistics(8, {counter: 200, queries: 90, hits: 9}))
     summary = restored.summary()
-    assert summary["vllm_run/train/generation_throughput_tok_s"] == 30
-    assert summary["vllm_run/train/external_prefix_cache_hit_rate"] == pytest.approx(0.14)
-    assert summary["vllm_run/train/output_tokens_total"] == 300
-    assert summary["vllm_run/covers_resumed_history"] is True
+    assert not any(key.startswith("vllm_run/") for key in summary)
+    assert summary["vllm_correct_aggregate/train/generation_throughput_tok_s"] == 30
+    assert summary["vllm_correct_aggregate/train/external_prefix_cache_hit_rate"] == pytest.approx(0.14)
+    assert summary["vllm_correct_aggregate/train/output_tokens_total"] == 300
+    assert summary["vllm_correct_aggregate/covers_resumed_history"] is True
 
 
 def test_missing_interval_is_not_zero_work():
@@ -27,20 +28,20 @@ def test_missing_interval_is_not_zero_work():
     stats.add("combined", WindowStatistics(2, {"ray_vllm_generation_tokens_total": 100}))
     stats.add("combined", WindowStatistics(3, valid=False))
     summary = stats.summary()
-    assert summary["vllm_run/combined/generation_throughput_tok_s"] == 50
-    assert summary["vllm_run/combined/active_generation_seconds"] == 5
-    assert summary["vllm_run/combined/observed_active_seconds"] == 2
-    assert summary["vllm_run/combined/incomplete_windows"] == 1
+    assert summary["vllm_correct_aggregate/combined/generation_throughput_tok_s"] == 50
+    assert summary["vllm_correct_aggregate/combined/active_generation_seconds"] == 5
+    assert summary["vllm_correct_aggregate/combined/observed_active_seconds"] == 2
+    assert summary["vllm_correct_aggregate/combined/incomplete_windows"] == 1
 
 
 def test_entirely_unobserved_run_reports_coverage_without_rates():
     stats = RunStatistics()
     stats.add("train", WindowStatistics(duration_seconds=3, valid=False))
     summary = stats.summary()
-    assert summary["vllm_run/train/active_generation_seconds"] == 3
-    assert summary["vllm_run/train/observed_active_seconds"] == 0
-    assert summary["vllm_run/train/incomplete_windows"] == 1
-    assert "vllm_run/train/generation_throughput_tok_s" not in summary
+    assert summary["vllm_correct_aggregate/train/active_generation_seconds"] == 3
+    assert summary["vllm_correct_aggregate/train/observed_active_seconds"] == 0
+    assert summary["vllm_correct_aggregate/train/incomplete_windows"] == 1
+    assert "vllm_correct_aggregate/train/generation_throughput_tok_s" not in summary
 
 
 def test_run_tpot_is_request_weighted_and_tracker_metrics_are_pruned():
@@ -65,10 +66,10 @@ def test_run_tpot_is_request_weighted_and_tracker_metrics_are_pruned():
         }
         stats.add("train", WindowStatistics(2, deltas))
     summary = stats.summary()
-    assert summary["vllm_run/train/tpot_seconds_avg"] == pytest.approx(1.4 / 4)
-    assert summary["vllm_run/train/tpot_seconds_p90"] == pytest.approx(1.8)
-    assert summary["vllm_run/train/ttft_seconds_p90"] == pytest.approx(1.8)
-    assert summary["vllm_run/train/kv_offload_store_bytes_total"] == 2000
+    assert summary["vllm_correct_aggregate/train/tpot_seconds_avg"] == pytest.approx(1.4 / 4)
+    assert summary["vllm_correct_aggregate/train/tpot_seconds_p90"] == pytest.approx(1.8)
+    assert summary["vllm_correct_aggregate/train/ttft_seconds_p90"] == pytest.approx(1.8)
+    assert summary["vllm_correct_aggregate/train/kv_offload_store_bytes_total"] == 2000
     assert not any(
         "itl" in key or "request_tpot" in key or "p50" in key or "store_throughput" in key for key in summary
     )
