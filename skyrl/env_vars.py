@@ -113,6 +113,24 @@ See https://github.com/ray-project/ray/issues/56697 for details on why this is n
 # Attention
 # ─────────────────────────────────────────────────────────────────────────────
 
+SKYRL_DSA_BACKWARD_CHECK = str(os.environ.get("SKYRL_DSA_BACKWARD_CHECK", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+Validate the indices Megatron hands to cuDNN's DSA sparse-attention backward before the
+kernel runs: indices within ``[0, skv * b)``, ``topk_length`` within ``[0, width]``, int32,
+and contiguous. The kernel relies on all four and checks none of them, so a violation
+surfaces as an asynchronous ``cudaErrorIllegalAddress`` attributed to whatever collective
+synchronizes next.
+
+Costs one device-to-host sync per DSA backward call, so it is off by default. Turn it on
+when debugging an illegal memory access on a DSA model.
+
+Default: False.
+"""
+
 SKYRL_DISABLE_FA4 = str(os.environ.get("SKYRL_DISABLE_FA4", "False")).lower() in (
     "true",
     "1",

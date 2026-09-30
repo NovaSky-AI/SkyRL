@@ -50,6 +50,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_backward_topk_align import (
+    patch_dsa_backward_topk_align,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
@@ -530,6 +533,11 @@ class MegatronWorker:
         # now asserts NVTE_* attention env vars agree across all models in a process.
         # Delete along with the patch module once Bridge's get_vision_model_config copies it.
         patch_vision_attention_backend()
+        # Align the cuDNN DSA backward's top-k axis to its 64-element block tile. The
+        # forward already aligns its own axis; the backward does not, and a ragged width
+        # (the kpool indexer's `index_topk + pool_size - 1`) makes it read out of bounds.
+        # Delete along with the patch module once megatron-core aligns it upstream.
+        patch_dsa_backward_topk_align()
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type, experts_shared_outer_loras=experts_shared_outer_loras)

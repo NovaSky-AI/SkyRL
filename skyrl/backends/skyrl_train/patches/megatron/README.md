@@ -23,6 +23,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `patches/megatron/test_dsa_backward_topk_align.py` (CPU) | `patch_dsa_backward_topk_align.py` padding + contract check |
+| `gpu_ci/patches/megatron/test_dsa_backward_topk_align_cuda.py` | `patch_dsa_backward_topk_align.py` vs dense autograd (SM90+, needs FlashMLA) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -190,6 +192,22 @@ Qwen3-VL ViT attention-backend propagation.
 - **Landed?** Megatron-Bridge's `get_vision_model_config` copies `attention_backend` from the
   language config.
 - **Remove:** the `patch_vision_attention_backend()` call in `make_megatron_module`, and the module.
+
+### `patch_dsa_backward_topk_align.py`: megatron-core cuDNN DSA backward top-k alignment
+
+Pads `global_idxs` to a multiple of cudnn-frontend's 64-wide block tile before
+`_run_sparse_attention_backward`. The forward already aligns its top-k axis; the backward does
+not, and the k-pool indexer's ragged width (`index_topk + pool_size - 1`, e.g. 2051) makes the
+sm100 kernel read out of bounds. `SKYRL_DSA_BACKWARD_CHECK=1` adds an opt-in bounds check.
+- **Landed?** `_run_sparse_attention_backward` in megatron-core's
+  `experimental_attention_variant/dsa_cudnn_kernels.py` aligns or pads `global_idxs` along the
+  top-k axis itself (today `_get_topk_alignment` is referenced only by its definition and the
+  forward).
+- **Remove:** the `patch_dsa_backward_topk_align()` call and import in
+  `MegatronWorker.make_megatron_module`, the module, `SKYRL_DSA_BACKWARD_CHECK` in
+  `skyrl/env_vars.py`, and both tests.
+- **Verify:** the CUDA test on SM90+ with FlashMLA installed (it skips otherwise), then the
+  GLM-5.3-Flash rows in [Verification](#verification) with `dsa_kernel_backend=tilelang`.
 
 ### `patch_mla_thd_v_pad.py`: currently not applied
 
