@@ -23,13 +23,13 @@ from skyrl.train.config import (
     SkyRLGymConfig,
 )
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl.train.generators.vlm_renderer import (
+from skyrl.train.generators.chat_renderer import (
     VLLMChatRenderer,
     append_mm_features,
     shift_mm_features,
     truncate_mm_features,
 )
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_gym.envs import deregister, register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.registration import registry

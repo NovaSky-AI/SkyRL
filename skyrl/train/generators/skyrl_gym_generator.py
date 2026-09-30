@@ -45,18 +45,19 @@ from skyrl.train.generators.base import (
     TrainingPhase,
     TrajectoryID,
 )
-from skyrl.train.generators.utils import (
-    apply_overlong_filtering,
-    build_vllm_cache_salt,
-    get_custom_chat_template,
-    get_generation_prompt_ids,
-    get_rollout_metrics,
-)
-from skyrl.train.generators.vlm_renderer import (
+from skyrl.train.generators.chat_renderer import (
+    ChatRenderer,
+    HFTokenizerRenderer,
     VLLMChatRenderer,
     append_mm_features,
     shift_mm_features,
     truncate_mm_features,
+)
+from skyrl.train.generators.utils import (
+    apply_overlong_filtering,
+    build_vllm_cache_salt,
+    get_custom_chat_template,
+    get_rollout_metrics,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
@@ -206,8 +207,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
-        # get generation prompt ids for the tokenizer if needed
-        self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
         if self.skyrl_gym_cfg.max_env_workers > 0:
             self.env_executor = ThreadPoolExecutor(
                 max_workers=self.skyrl_gym_cfg.max_env_workers, thread_name_prefix="skyrl-gym-env-"
@@ -217,40 +216,29 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         self._validate_cfg(generator_cfg)
 
-        # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
-        # correctly format and tokenize observations into `observation_ids`.
-        # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+        # Observations are rendered after this fixed conversation and only the suffix is kept.
+        # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None`.
         self.base_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "I am a user."},
         ]
-        self.base_conversation_token_ids = tokenizer.apply_chat_template(
-            self.base_conversation,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=False,
-            **self.generator_cfg.chat_template_kwargs,
-        )
-        # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
-        # For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator#multi-turn-tokenization-and-ti-to
-        if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
-            last_eos_token_index = (
-                len(self.base_conversation_token_ids)
-                - 1
-                - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
-            )
-            self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
-
-        # Vision-language rollouts render the prompt and observations through the inference server,
-        # since image placeholder token counts come from the model's image processor.
-        self.chat_renderer: Optional[VLLMChatRenderer] = None
+        # Vision-language rollouts render through the inference server, since image placeholder
+        # token counts come from the model's image processor.
+        self.renderer: ChatRenderer
         if generator_cfg.vision_language_generator:
-            self.chat_renderer = VLLMChatRenderer(
+            self.renderer = VLLMChatRenderer(
                 client=inference_engine_client,
                 base_conversation=self.base_conversation,
                 eos_token_id=self.tokenizer.eos_token_id,
                 chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
                 model_name=getattr(inference_engine_client, "model_name", None),
+            )
+        else:
+            self.renderer = HFTokenizerRenderer(
+                tokenizer=tokenizer,
+                base_conversation=self.base_conversation,
+                use_conversation_multi_turn=self.use_conversation_multi_turn,
+                chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
             )
 
     def _validate_cfg(self, generator_cfg: GeneratorConfig):
@@ -444,22 +432,14 @@ class SkyRLGymGenerator(GeneratorInterface):
             # init() returns the first prompt to be given to the model, and optional metadata dict
             chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
             initial_chat_history_length = len(chat_history)
-            initial_mm_features = None
-            if self.chat_renderer is not None:
-                rendered_prompt = await self.chat_renderer.render_prompt(chat_history)
-                initial_input_ids = rendered_prompt.token_ids
-                initial_mm_features = rendered_prompt.features
-            else:
-                initial_input_ids = self.tokenizer.apply_chat_template(
-                    chat_history,
-                    # If retokenize_chat_history==True, avoid including the generation prompt in both the
-                    # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
-                    add_generation_prompt=not retokenize_chat_history,
-                    chat_template=self.custom_chat_template if retokenize_chat_history else None,
-                    tokenize=True,
-                    return_dict=False,
-                    **self.generator_cfg.chat_template_kwargs,
-                )
+            rendered_prompt = await self.renderer.render_prompt(
+                chat_history,
+                # If retokenize_chat_history==True, avoid including the generation prompt in both the
+                # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
+                add_generation_prompt=not retokenize_chat_history,
+                chat_template=self.custom_chat_template if retokenize_chat_history else None,
+            )
+            initial_input_ids = rendered_prompt.token_ids
 
             initial_prompt_length = len(initial_input_ids)
             loss_mask = []  # this excludes the prompt
@@ -500,7 +480,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 done=False,
                 routed_expert_trace=RoutedExpertTrace() if capture_routed_experts else None,
                 sample_support_trace=SampleSupportTrace() if capture_sample_support and not is_step_wise else None,
-                mm_features=initial_mm_features,
+                mm_features=rendered_prompt.features,
             )
 
             while not agent_loop_state.done:
@@ -512,14 +492,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # 1. Generate output
                 if is_step_wise or retokenize_chat_history:
                     # re-apply whole chat template so length check is correct
-                    agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
+                    rendered_history = await self.renderer.render_prompt(
                         chat_history,
-                        chat_template=self.custom_chat_template if retokenize_chat_history else None,
                         add_generation_prompt=True,
-                        tokenize=True,
-                        return_dict=False,
-                        **self.generator_cfg.chat_template_kwargs,
+                        chat_template=self.custom_chat_template if retokenize_chat_history else None,
                     )
+                    agent_loop_state.input_ids = rendered_history.token_ids
+                    agent_loop_state.mm_features = rendered_history.features
                     agent_loop_state.loss_mask = []
                     agent_loop_state.rollout_logprobs = None
 
@@ -615,13 +594,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                     if sample_support_rows is not None:
                         raise ValueError("Sample-support bookkeeping is incompatible with postprocessed_action")
 
-                obs_mm_features = None
-                if self.chat_renderer is not None:
-                    rendered_obs = await self.chat_renderer.render_observation(new_obs, agent_loop_state.done)
-                    obs_ids = rendered_obs.token_ids
-                    obs_mm_features = rendered_obs.features
-                else:
-                    obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
+                rendered_obs = await self.renderer.render_observation(new_obs, agent_loop_state.done)
+                obs_ids = rendered_obs.token_ids
 
                 # final turn output containing generated response and environment observations
                 turn_output = TurnOutput(
@@ -633,7 +607,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     obs_ids=obs_ids,
                     rollout_sample_support=sample_support_rows,
                     added_eos=added_eos,
-                    obs_mm_features=obs_mm_features,
+                    obs_mm_features=rendered_obs.features,
                 )
 
                 if is_step_wise:
@@ -692,7 +666,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
                 per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
-            if self.chat_renderer is not None and self.generator_cfg.vision_language_rerender_check:
+            if self.generator_cfg.vision_language_rerender_check:
                 await self._log_rerender_mismatch(agent_loop_state)
 
             # Get environment-specific metrics after the episode is done
@@ -777,11 +751,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             else:
                 reward_out = self._build_per_token_rewards(per_step_rewards, response_ids, appended_eos_token)
 
-                pixel_values, image_grid_thw = None, None
-                if self.chat_renderer is not None:
-                    pixel_values, image_grid_thw = self._decode_vision_features(
-                        agent_loop_state.mm_features, len(prompt_ids) + len(response_ids)
-                    )
+                pixel_values, image_grid_thw = self._decode_vision_features(
+                    agent_loop_state.mm_features, len(prompt_ids) + len(response_ids)
+                )
 
                 agent_loop_output = TrajectoryOutput(
                     response_ids=response_ids,
@@ -811,7 +783,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
     async def _log_rerender_mismatch(self, agent_loop_state: AgentLoopState) -> None:
         """Log a warning if re-rendering the conversation gives tokens other than ``input_ids``."""
-        rendered = await self.chat_renderer.render_conversation(
+        rendered = await self.renderer.render_prompt(
             agent_loop_state.chat_history, add_generation_prompt=not agent_loop_state.done
         )
         tito_ids = agent_loop_state.input_ids
@@ -837,11 +809,13 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         Images in the dropped final observation are left out, so the tensors match the placeholder
         tokens in ``prompt_ids + response_ids``. They are decoded from the same serialized items that
-        were sent to the inference engine.
+        were sent to the inference engine. Returns ``(None, None)`` without images.
         """
+        kept = truncate_mm_features(mm_features, num_tokens)
+        if kept is None:
+            return None, None
         from skyrl.backends.renderer import decode_mm_kwargs
 
-        kept = truncate_mm_features(mm_features, num_tokens)
         mm_kwargs = decode_mm_kwargs((kept or {}).get("kwargs_data"))
         return mm_kwargs["pixel_values"], mm_kwargs["image_grid_thw"]
 
@@ -882,43 +856,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                     token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
         return reward_out
-
-    def get_obs_ids_from_obs(self, new_obs: ConversationType, is_done: bool) -> List[int]:
-        """
-        Returns observation token ids from observation messages for a turn.
-
-        Args:
-            new_obs: Observation messages from the environment step
-            is_done: Whether the agent loop has terminated
-
-        Returns:
-            List[int]: Observation token IDs. For multi-turn mode, includes chat template formatting.
-                For single-turn mode, returns directly encoded observation tokens.
-        """
-        if self.use_conversation_multi_turn:
-            # 2. apply chat template for observations, also generate generation prompt for next turn
-            obs_ids_to_add = []
-            if len(new_obs) > 0:
-                # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
-                # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-                obs_ids_to_add = self.tokenizer.apply_chat_template(
-                    [*self.base_conversation, *new_obs],
-                    add_generation_prompt=not is_done,
-                    tokenize=True,
-                    return_dict=False,
-                    **self.generator_cfg.chat_template_kwargs,
-                )[len(self.base_conversation_token_ids) :]
-            elif not is_done:
-                obs_ids_to_add = self.generation_prompt_ids
-        else:
-            # Build observation token ids (encoded directly, not using chat template)
-            # no generation prompt is added in this case
-            obs_ids_to_add = []
-            if len(new_obs) > 0:
-                for obs in new_obs:
-                    obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
-                    obs_ids_to_add.extend(obs_tokens)
-        return obs_ids_to_add
 
     def _update_chat_history(
         self,
