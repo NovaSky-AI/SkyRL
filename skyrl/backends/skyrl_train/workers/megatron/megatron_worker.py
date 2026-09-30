@@ -523,6 +523,12 @@ class MegatronWorker:
         # Delete along with the patch module once the megatron-core pin includes
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
+        # Exact for a 2-rank expert-TP group; saves an FP32 copy of the MoE combine's rows.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_combine_bf16_reduce import (
+            patch_moe_combine_bf16_reduce,
+        )
+
+        patch_moe_combine_bf16_reduce()
         if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
             # After patch_dsa_index_share, which rebinds the same function.
             from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
