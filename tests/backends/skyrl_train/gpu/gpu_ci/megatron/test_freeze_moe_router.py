@@ -1,7 +1,7 @@
 """Smoke tests for the ``freeze_moe_router`` helper.
 
-The helper walks ``model.decoder.layers`` (or ``model.language_model.decoder.layers``
-for multimodal models) and flips ``requires_grad`` on
+The helper walks the subtrees of ``model.decoder.layers`` and ``model.mtp.layers``
+(under ``model.language_model`` for multimodal models) and flips ``requires_grad`` on
 router weights/biases. These tests build minimal mock modules that mimic Megatron-Core's attribute layout
 without importing Megatron.
 
@@ -253,3 +253,28 @@ def test_freeze_moe_router_warns_when_nothing_frozen():
     assert all(p.requires_grad for m in models for p in m.parameters())
     assert any("no transformer decoder found on _EmbeddingOnlyChunk" in msg for msg in messages)
     assert any("froze no router parameters" in msg for msg in messages)
+
+
+@pytest.mark.megatron
+def test_freeze_moe_router_mtp_layers():
+    """MTP depths sit at ``model.mtp.layers[i].mtp_model_layer``, beside the decoder."""
+
+    class _MTPLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.eh_proj = nn.Linear(16, 8)
+            self.mtp_model_layer = _Layer()
+
+    m = _Model()
+    m.mtp = nn.Module()
+    m.mtp.layers = nn.ModuleList([_MTPLayer()])
+
+    freeze_moe_router(m)
+
+    mtp_layer = m.mtp.layers[0]
+    assert mtp_layer.mtp_model_layer.mlp.router.weight.requires_grad is False
+    assert mtp_layer.mtp_model_layer.mlp.router.bias.requires_grad is False
+    assert mtp_layer.mtp_model_layer.mlp.linear_fc1.weight.requires_grad is True
+    assert mtp_layer.eh_proj.weight.requires_grad is True
+    for layer in m.decoder.layers:
+        assert layer.mlp.router.weight.requires_grad is False

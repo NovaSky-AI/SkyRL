@@ -1,7 +1,7 @@
 """Smoke tests for the ``freeze_dsa_indexer`` helper.
 
-The helper walks ``model.decoder.layers`` and clears ``requires_grad`` on every
-parameter under ``layer.self_attention.core_attention.indexer``. These tests build
+The helper walks the subtrees of ``model.decoder.layers`` and ``model.mtp.layers`` and
+clears ``requires_grad`` on every parameter under ``self_attention.core_attention.indexer``. These tests build
 minimal mock modules that mimic Megatron-Core's attribute layout without importing
 Megatron.
 
@@ -219,3 +219,45 @@ def test_freeze_dsa_indexer_is_idempotent():
 
     assert not any(p.requires_grad for p in _indexer_params(m))
     assert m.decoder.layers[0].self_attention.linear_qkv.weight.requires_grad is True
+
+
+class _MTPLayer(nn.Module):
+    def __init__(self, sparse: bool = True):
+        super().__init__()
+        self.eh_proj = nn.Linear(16, 8)
+        self.mtp_model_layer = _Layer(sparse=sparse)
+
+
+@pytest.mark.megatron
+def test_freeze_dsa_indexer_mtp_layers():
+    """MTP depths sit at ``model.mtp.layers[i].mtp_model_layer``, beside the decoder."""
+    m = _Model()
+    m.mtp = nn.Module()
+    m.mtp.layers = nn.ModuleList([_MTPLayer(sparse=True), _MTPLayer(sparse=False)])
+
+    freeze_dsa_indexer(m)
+
+    sparse_mtp, dense_mtp = m.mtp.layers
+    assert not any(
+        p.requires_grad for p in sparse_mtp.mtp_model_layer.self_attention.core_attention.indexer.parameters()
+    )
+    assert sparse_mtp.mtp_model_layer.self_attention.linear_qkv.weight.requires_grad is True
+    assert sparse_mtp.eh_proj.weight.requires_grad is True
+    assert all(p.requires_grad for p in dense_mtp.parameters())
+    assert not any(p.requires_grad for p in _indexer_params(m))
+
+
+@pytest.mark.megatron
+def test_freeze_dsa_indexer_multimodal_mtp_layers():
+    """Multimodal models hold the MTP block on the language tower, as ``language_model.mtp``."""
+    language_model = _Model()
+    language_model.mtp = nn.Module()
+    language_model.mtp.layers = nn.ModuleList([_MTPLayer()])
+    multimodal = nn.Module()
+    multimodal.language_model = language_model
+
+    freeze_dsa_indexer(multimodal)
+
+    mtp_indexer = language_model.mtp.layers[0].mtp_model_layer.self_attention.core_attention.indexer
+    assert not any(p.requires_grad for p in mtp_indexer.parameters())
+    assert not any(p.requires_grad for p in _indexer_params(language_model))

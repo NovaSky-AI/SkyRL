@@ -23,7 +23,7 @@
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -171,6 +171,21 @@ def _resolve_transformer_decoder(model: nn.Module) -> Optional[nn.Module]:
     return None
 
 
+def _iter_transformer_layer_modules(model: nn.Module, decoder: nn.Module) -> Iterator[nn.Module]:
+    """Yield every module under the decoder layers and, when present, the MTP layers.
+
+    Walking whole subtrees reaches transformer layers that ``HybridStack`` wraps in
+    ``HyperConnectionHybridLayer.layer`` and the layer each MTP depth holds as
+    ``MultiTokenPredictionLayer.mtp_model_layer``. The MTP block sits beside the
+    decoder, as ``mtp`` on the same text-only model or language tower.
+    """
+    yield from decoder.layers.modules()
+    language_model = model if getattr(model, "decoder", None) is decoder else getattr(model, "language_model", None)
+    mtp = getattr(language_model, "mtp", None)
+    if mtp is not None:
+        yield from mtp.layers.modules()
+
+
 def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     models = model_or_models
     if not isinstance(model_or_models, list):
@@ -185,9 +200,7 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
                 "skipping this model chunk. Router params on it stay trainable."
             )
             continue
-        # HybridStack wraps transformer layers in HyperConnectionHybridLayer.layer.
-        # Walk the layer subtrees so router lookup reaches the wrapped layer too.
-        for layer in decoder.layers.modules():
+        for layer in _iter_transformer_layer_modules(model, decoder):
             if hasattr(layer, "mlp") and hasattr(layer.mlp, "router"):
                 if getattr(layer.mlp.router, "weight", None) is not None:
                     layer.mlp.router.weight.requires_grad = False
@@ -241,8 +254,7 @@ def freeze_dsa_indexer(model_or_models: Union[nn.Module, List[nn.Module]]):
                 "skipping this model chunk. Indexer params on it stay trainable."
             )
             continue
-        # Include transformer layers nested under HyperConnectionHybridLayer.layer.
-        for layer in decoder.layers.modules():
+        for layer in _iter_transformer_layer_modules(model, decoder):
             core_attention = getattr(getattr(layer, "self_attention", None), "core_attention", None)
             indexer = getattr(core_attention, "indexer", None)
             if indexer is None:
