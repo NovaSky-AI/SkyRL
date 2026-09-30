@@ -1,3 +1,5 @@
+import asyncio
+import json
 import math
 import os
 import shutil
@@ -146,6 +148,8 @@ class RayPPOTrainer:
 
         if self._vllm_metrics_scraper is not None:
             self._vllm_metrics_scraper.publish_activity(cfg.trainer.run_name)
+            self.tracker.set_summary_provider(self._vllm_metrics_scraper.run_statistics.summary)
+        self._metrics_finalized = False
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
@@ -236,6 +240,26 @@ class RayPPOTrainer:
                 self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
 
     @torch.no_grad()
+    async def finalize_vllm_metrics(self, status: str) -> None:
+        """Finalize observations before the tracker closes, including failed runs."""
+        if self._metrics_finalized:
+            return
+        self._metrics_finalized = True
+        self.tracker.run_status = status
+        try:
+            if self._vllm_metrics_scraper is not None:
+                await asyncio.wait_for(self._vllm_metrics_scraper.finalize(), timeout=40)
+                self.tracker.update_summary(
+                    {**self._vllm_metrics_scraper.run_statistics.summary(), "run_status": status}
+                )
+                path = os.path.join(self.cfg.trainer.ckpt_path, "vllm_run_summary.json")
+                with io.open_file(path, "w") as f:
+                    json.dump({**self._vllm_metrics_scraper.run_statistics.summary(), "run_status": status}, f)
+        except Exception as e:
+            logger.warning(f"Could not finalize vLLM metrics: {e}")
+        finally:
+            self.tracker.update_summary({"run_status": status})
+
     def _generation_activity(self):
         """Return an activity context when vLLM metrics are enabled."""
         from contextlib import nullcontext
@@ -611,8 +635,7 @@ class RayPPOTrainer:
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        if self._vllm_metrics_scraper is not None:
-            await self._vllm_metrics_scraper.aclose()
+        await self.finalize_vllm_metrics("success")
 
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.stop()
@@ -1729,6 +1752,11 @@ class RayPPOTrainer:
         trainer_state = {
             "global_step": self.global_step,
             "config": asdict(self.cfg),
+            "vllm_run_statistics": (
+                self._vllm_metrics_scraper.run_statistics.state_dict()
+                if self._vllm_metrics_scraper is not None
+                else None
+            ),
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:
@@ -1831,6 +1859,8 @@ class RayPPOTrainer:
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+        if self._vllm_metrics_scraper is not None and trainer_state.get("vllm_run_statistics") is not None:
+            self._vllm_metrics_scraper.run_statistics.load_state_dict(trainer_state["vllm_run_statistics"])
         saved_global_step = trainer_state.get("global_step", global_step)
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:

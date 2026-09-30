@@ -277,6 +277,7 @@ class BasePPOExp:
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
+        self.tracker = tracker
 
         inference_engine_client = self.get_inference_client()
 
@@ -297,7 +298,10 @@ class BasePPOExp:
             actors = [actor for group in (groups or []) for actor in group.get_actors()]
             if actors and self.cfg.generator.inference_engine.backend == "vllm":
                 worker_ids = ray.get([actor.get_metrics_worker_id.remote() for actor in actors])
-                trainer._vllm_metrics_scraper.set_worker_ids(worker_ids)
+                kv_config = self.cfg.generator.inference_engine.engine_init_kwargs.get("kv_transfer_config", {})
+                trainer._vllm_metrics_scraper.set_worker_ids(
+                    worker_ids, offload_enabled="OffloadingConnector" in str(kv_config)
+                )
         # Install the trajectory logger after construction
         trainer.trajectory_logger = self.get_trajectory_logger()
         # Expose the trainer on self so callers can log exceptions raised
@@ -321,10 +325,25 @@ class BasePPOExp:
 
     def run(self):
         self.trainer = None
+        self.tracker = None
+        status = "failed"
         try:
             trainer = self._setup_trainer()
+
             # Start the training loop
-            asyncio.run(trainer.train())
+            async def train_and_finalize():
+                run_status = "failed"
+                try:
+                    await trainer.train()
+                    run_status = "success"
+                finally:
+                    try:
+                        await trainer.finalize_vllm_metrics(run_status)
+                    except Exception as finalization_error:
+                        logger.warning(f"Could not finalize run metrics: {finalization_error}")
+
+            asyncio.run(train_and_finalize())
+            status = "success"
         except Exception as e:
             # OOMs raised inside actor init (e.g. FSDPPolicyWorkerBase.init_model)
             # surface here as RayTaskError. Without this they only land in Ray
@@ -339,6 +358,14 @@ class BasePPOExp:
             else:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")
             raise
+        finally:
+            if self.tracker is not None:
+                try:
+                    self.tracker.run_status = status
+                    self.tracker.update_summary({"run_status": status})
+                    self.tracker.finish(exit_code=0 if status == "success" else 1)
+                except Exception as finalization_error:
+                    logger.warning(f"Could not finish run tracking: {finalization_error}")
 
 
 @ray.remote(num_cpus=1)

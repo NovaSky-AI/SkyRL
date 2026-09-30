@@ -494,7 +494,7 @@ async def test_window_separates_train_and_eval_rollouts():
     # monotonic() is read at: train start, train stop, eval start, eval pause,
     # eval resume, eval pause. Active train time = 102-100 = 2s; active eval
     # time = (215-210) = 5s (the 200->200 prep span is paused out).
-    times = iter([100.0, 102.0, 200.0, 200.0, 210.0, 215.0])
+    times = iter([100.0, 102.0, 102.0, 200.0, 200.0, 210.0, 215.0, 215.0])
 
     with (
         patch.object(scraper, "_fetch_all", fake_fetch_all),
@@ -540,7 +540,7 @@ async def test_window_accumulates_active_time_across_multiple_generations():
     # monotonic() reads: start(0), pause(0), resume(10), pause(12) -> gen1 = 2s,
     # resume(112), pause(114) -> gen2 = 2s. The 100s paused gap (12 -> 112) is
     # excluded, so active time is 4s, not 114s.
-    times = iter([0.0, 0.0, 10.0, 12.0, 112.0, 114.0])
+    times = iter([0.0, 0.0, 10.0, 12.0, 112.0, 114.0, 114.0])
 
     with (
         patch.object(scraper, "_fetch_all", fake_fetch_all),

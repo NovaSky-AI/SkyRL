@@ -23,6 +23,7 @@ from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
 from skyrl.train.utils.generation_activity import GenerationActivity
+from skyrl.train.utils.vllm_run_statistics import RunStatistics
 from skyrl.train.utils.vllm_window_statistics import WindowStatistics
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
@@ -209,6 +210,9 @@ class VLLMMetricsScraper:
         self._timeout = request_timeout_s
         self._worker_ids = None if worker_ids is None else frozenset(worker_ids)
         self.last_window = WindowStatistics(valid=False)
+        self.run_statistics = RunStatistics()
+        self._last_scope = "combined"
+        self._offload_enabled = False
         self.activity = GenerationActivity()
         self._activity_sampled_seconds = 0.0
         self._prev_aggregated: Optional[Dict[str, float]] = None
@@ -232,9 +236,10 @@ class VLLMMetricsScraper:
                 "engine metrics will not appear in wandb."
             )
 
-    def set_worker_ids(self, worker_ids: Iterable[str]) -> None:
+    def set_worker_ids(self, worker_ids: Iterable[str], *, offload_enabled: bool = False) -> None:
         """Restrict snapshots to the fixed set of servers launched for this run."""
         self._worker_ids = frozenset(worker_ids)
+        self._offload_enabled = offload_enabled
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -306,6 +311,10 @@ class VLLMMetricsScraper:
                 counters = engine_counters.setdefault(engine, {})
                 counters[name] = counters.get(name, 0.0) + value
         self._engine_snapshot = engine_counters
+        if self._worker_ids is not None:
+            observed = {engine[0] for engine in engine_counters}
+            if observed != self._worker_ids:
+                return None
         buckets = {}
         schemas = {}
         for (name, labels), value in parsed.items():
@@ -332,6 +341,24 @@ class VLLMMetricsScraper:
         sums = aggregate(parsed, _SUM_METRICS, how="sum")
         means = aggregate(parsed, _MEAN_METRICS, how="mean")
         per_pos = sum_by_position(parsed, _COUNTER_SPEC_ACCEPTED_PER_POS)
+        if self._worker_ids is not None:
+            # The owned engines are fresh and membership is fixed. Supported
+            # positive-only counters can be absent until the first increment.
+            for name in (
+                _COUNTER_PROMPT_TOKENS,
+                _COUNTER_GENERATION_TOKENS,
+                _COUNTER_PREFIX_QUERIES,
+                _COUNTER_PREFIX_HITS,
+            ):
+                sums.setdefault(name, 0.0)
+            if self._offload_enabled:
+                for name in (
+                    "ray_vllm_external_prefix_cache_queries_total",
+                    "ray_vllm_external_prefix_cache_hits_total",
+                    "ray_vllm_kv_offload_store_bytes_total",
+                    "ray_vllm_kv_offload_load_bytes_total",
+                ):
+                    sums.setdefault(name, 0.0)
         if "ray_vllm_num_preemptions_total" in sums:
             buckets.pop("ray_vllm_num_preemptions_total", None)
         for hits, queries in (
@@ -343,6 +370,20 @@ class VLLMMetricsScraper:
         if "ray_vllm_kv_offload_store_bytes_total" in sums:
             sums.setdefault("ray_vllm_kv_offload_load_bytes_total", 0.0)
         return {**sums, **means, **per_pos, **buckets}
+
+    async def finalize(self) -> None:
+        """Collect an open interval and allow idle terminal counter exports to flush."""
+        if self._label is not None:
+            await self.stop()
+        else:
+            await self.sample_active()
+        # Ray agents export periodically; two default export periods provide
+        # a bounded terminal drain without adding idle time to the denominator.
+        await asyncio.sleep(15)
+        await self.sample_active()
+        await asyncio.sleep(15)
+        await self.sample_active()
+        await self.aclose()
 
     def publish_activity(self, run_name: str) -> None:
         """Expose the outstanding-call count alongside existing training phases."""
@@ -374,7 +415,8 @@ class VLLMMetricsScraper:
         """
         snapshot = await self._read_snapshot()
         if snapshot is None:
-            self.last_window = WindowStatistics(valid=False)
+            self.last_window = WindowStatistics(duration_seconds=generation_time_s or 0.0, valid=False)
+            self.run_statistics.add(self._last_scope, self.last_window)
             self._prev_aggregated = None
             self._prev_timestamp = None
             self._previous_engines = {}
@@ -399,6 +441,7 @@ class VLLMMetricsScraper:
             self._prev_aggregated, snapshot, window if self._prev_timestamp is not None else None
         )
         if self._prev_aggregated is not None:
+            self.run_statistics.add(self._last_scope, self.last_window)
             out.update(engine_imbalance(self._previous_engines, self._engine_snapshot, "vllm/"))
         self._previous_engines = self._engine_snapshot
         self._prev_aggregated = snapshot
@@ -459,6 +502,12 @@ class VLLMMetricsScraper:
         self._active_since = None
         self._paused = False
         self.last_window = WindowStatistics.between(prev, new_snapshot, window)
+        self._last_scope = label.removeprefix("vllm/")
+        self.run_statistics.add(self._last_scope, self.last_window)
+        self._prev_aggregated = new_snapshot
+        self._prev_timestamp = time.monotonic()
+        self._previous_engines = self._engine_snapshot
+        self._activity_sampled_seconds = self.activity.seconds
         if new_snapshot is None:
             return {}
         result = self._window_metrics(prev, new_snapshot, window, f"{label}/")
