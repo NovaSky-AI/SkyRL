@@ -25,6 +25,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
 | `gpu_ci/patches/megatron/test_mhc_full_recompute.py` | `patch_mhc_full_recompute.py` (loss/grads vs no recompute on a GLM-5.3-Flash slice) |
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/test_moe_combine_bf16_reduce.py` | `patch_moe_combine_bf16_reduce.py` (two ranks + wrapper) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -118,7 +120,11 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
     materializes FP32 `[sq, b, heads, sq / kpool]` per-head scores (32 GiB/GPU at 32k), so
     GLM-5.3-Flash can't train past ~16k. Top-k is per query row, so chunking is exact
     (`test_kpool_query_chunking_is_exact`). When removing, check that upstream bounds this
-    memory too, or carry the chunking over.
+    memory too, or carry the chunking over. Second deviation, opt-in with
+    `SKYRL_DSA_INDEXER_TP_SHARD=1` (wired in `glm5_next/dsa.py`): `query_shard_group` splits the
+    query rows across the tensor-parallel group, whose ranks all score the same gathered sequence,
+    and all-gathers the pool selections. The scoring is O(sq^2) and was ~1/3 of a 512k-token
+    GLM-5.3-Flash step at TP8; bitwise-identical selections (`test_dsa_kpool_tp_shard.py`).
   - `glm5_next/dsa.py`:
     - `Glm5NextDSAIndexer`: k-pool gate/ape parameters and the gate score, hand-merged onto the
       pinned `DSAIndexer`;
@@ -132,7 +138,9 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
       kernels decline and megatron-core falls back to a dense `[heads, sq, sq]` FP32 softmax,
       which OOMs at 32k. Needs `dsa_kernel_backend="tilelang"`. Tested by
       `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py`; delete with it once
-      upstream's kernels (or a GLM-specific path) take NoPE MLA directly.
+      upstream's kernels (or a GLM-specific path) take NoPE MLA directly. Opt-in
+      `SKYRL_DSA_QUERY_CHUNK=<tokens>` runs it in checkpointed query chunks (less memory, one
+      extra kernel forward in backward; key grads summed across chunks in a different order).
   - `glm5_next/layer_specs.py`: the `core_attention.module` / `submodules.indexer.module` swaps.
   - `glm5_next/provider.py`: `dsa_indexer_kpool`, `dsa_indexer_kpool_always_select_tail`.
 - **Landed?** megatron-core's `experimental_attention_variant/dsa.py` defines
@@ -215,12 +223,28 @@ selective `core_attn`.
 
 Wraps `transformer_block.checkpointed_forward` in `torch.autograd.graph.save_on_cpu` when
 `SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1`, so full-recompute checkpoint inputs (one hidden state per
-layer) wait in pinned host memory. Applied in `make_megatron_module` after
-`patch_dsa_index_share()`, which rebinds the same function.
+layer) wait in host memory. Applied in `make_megatron_module` after `patch_dsa_index_share()`,
+which rebinds the same function. Pageable by default (exact-size host allocations); pinned with
+`SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED=1` (~4x faster copies, asynchronous), in which case
+`release_pinned_offload_cache()` returns PyTorch's cached pinned blocks at the end of every
+`forward_backward` -- otherwise they stay reserved next to the CPU optimizer's buffers and the
+node runs out of host RAM.
 - **Landed?** Not a fix to retire; delete it if megatron-core grows its own offload of
   checkpointed layer inputs, or if nobody needs contexts past ~288k tokens per sequence.
-- **Remove:** the module, its call in `make_megatron_module`, and
-  `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`.
+- **Remove:** the module, its call in `make_megatron_module`, the `release_pinned_offload_cache()`
+  call in `forward_backward`, and `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`.
+
+### `patch_moe_combine_bf16_reduce.py`: FP32 upcast in the MoE combine's expert-TP reduce-scatter
+
+`MoEAlltoAllTokenDispatcher.combine_preprocess` reduce-scatters expert outputs across the
+expert-TP group as `reduce_scatter(hidden.to(probs.dtype)).to(hidden.dtype)`; with an FP32 router
+(GLM-5.3-Flash) that is an FP32 copy of every token-expert row (~19 GiB/GPU at 576k tokens, TP8 /
+EP32 x ETP2). For exactly two ranks a bf16 reduce-scatter (FP32 accumulate, one rounding) is
+bit-identical, so the wrapper reduces in the activation dtype there; other group sizes are
+untouched. Applied unconditionally in `make_megatron_module`.
+- **Landed?** megatron-core's `combine_preprocess` no longer upcasts before the reduce-scatter, or
+  does so only when needed.
+- **Remove:** the module, its call in `make_megatron_module`, and `test_moe_combine_bf16_reduce.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

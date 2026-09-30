@@ -16,14 +16,14 @@ set -x
 #   MODEL_PATH=/path/to/glm5p3_flash_cfg MAX_LENGTH=8192 \
 #       bash examples/train/sft/run_sft_dummy_glm5p3_flash_megatron.sh [extra overrides...]
 #
-# Defaults fit up to 16k tokens per sequence. Longer contexts (measured on 64 B200s):
-#   up to 256k: TP8 + full recompute + bf16 grad buffers with FP32 reduce-scatter accumulation
-#     MEGATRON_TP=8 RECOMPUTE_GRANULARITY=full RECOMPUTE_METHOD=uniform RECOMPUTE_NUM_LAYERS=1 \
-#     MAX_LENGTH=262144 bash ... megatron_config.ddp_config.grad_reduce_in_fp32=false \
-#       megatron_config.ddp_config.reduce_scatter_with_fp32_accumulation=true \
-#       megatron_config.ddp_config.average_in_collective=false
-#   (256k: ~141 GiB/GPU, ~3.4k tokens/s)
-#   beyond: also SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1 (384k: ~127 GiB/GPU, ~3.0k tokens/s)
+# Defaults fit up to 16k tokens per sequence. Long context (measured on 64 B200, FP32 grads, no
+# precision changes), e.g. 512k tokens per sequence:
+#   MEGATRON_TP=8 RECOMPUTE_GRANULARITY=full RECOMPUTE_METHOD=uniform RECOMPUTE_NUM_LAYERS=1 \
+#   RECOMPUTE_MODULES='[core_attn]' MAX_LENGTH=524288 \
+#   SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1 SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED=1 \
+#   SKYRL_DSA_INDEXER_TP_SHARD=1 bash ...
+#   -> ~163 GiB/GPU peak, ~4.1k tokens/s (fwd+bwd ~65 tokens/s/GPU). Add SKYRL_DSA_QUERY_CHUNK=65536
+#   to trade ~5 GiB for one extra DSA attention forward.
 
 MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to a GLM-5.3-Flash config + tokenizer directory}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"
