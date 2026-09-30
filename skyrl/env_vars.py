@@ -163,3 +163,7 @@ SKYRL_MEGATRON_RANDOM_INIT = str(os.environ.get("SKYRL_MEGATRON_RANDOM_INIT", "0
 
 For throughput/memory benchmarking (e.g. dummy SFT with random tokens), where only the architecture
 matters: ``model.path`` then needs just ``config.json`` and tokenizer files, no safetensors."""
+
+SKYRL_OFFLOAD_CHECKPOINT_INPUTS = str(os.environ.get("SKYRL_OFFLOAD_CHECKPOINT_INPUTS", "0")).lower() in ("1", "true")
+"""Keep full-recompute checkpoint inputs (one hidden state per layer) in pinned host memory until
+backward needs them. See ``patches/megatron/patch_offload_checkpoint_inputs.py``."""

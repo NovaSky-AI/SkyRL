@@ -76,7 +76,8 @@ model, `glm5_next/` is deleted too.
 Two pieces, which may land separately.
 
 **a) Standard-RMSNorm input norm**
-- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`).
+- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`, and
+  `_ProjectionAndRMSNorm`, which redoes the FP32 upcast in backward instead of saving it).
 - **Landed?** `TransformerConfig` has `mhc_norm_eps` / `mhc_norm_eps_inside_sqrt`, and
   `HyperConnectionModule` reads them.
 - **Remove:**
@@ -87,7 +88,11 @@ Two pieces, which may land separately.
   - Delete `mcore_ext/hyper_connection.py`.
 
 **b) MoE sub-layers in the mHC layer**
-- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
+- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`),
+  including `_release_token_dispatcher_probs`: megatron-core's token dispatchers keep `probs`
+  (with its `grad_fn`) after the MoE forward, which under full recompute pins every MoE layer's
+  recomputed graph for the rest of backward. Keep that release in whatever replaces this layer
+  unless upstream's dispatcher stops holding `probs`.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
   no `NotImplementedError` for MoE.
 - **Remove:**
@@ -190,6 +195,17 @@ softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
 - **Remove:** the `patch_sparse_mla_nope()` call in `MegatronWorker.make_megatron_module`, the
   module, and its CPU and GPU tests (`test_sparse_mla_nope.py`, and its line in
   `ci/gpu_ci_run_h100.sh`).
+
+### `patch_offload_checkpoint_inputs.py`: opt-in, not an upstream bug
+
+Wraps `transformer_block.checkpointed_forward` in `torch.autograd.graph.save_on_cpu` when
+`SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1`, so full-recompute checkpoint inputs (one hidden state per
+layer) wait in pinned host memory. Applied in `make_megatron_module` after
+`patch_dsa_index_share()`, which rebinds the same function.
+- **Landed?** Not a fix to retire; delete it if megatron-core grows its own offload of
+  checkpointed layer inputs, or if nobody needs contexts past ~288k tokens per sequence.
+- **Remove:** the module, its call in `make_megatron_module`, and
+  `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 
