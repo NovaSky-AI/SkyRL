@@ -241,7 +241,8 @@ async def test_scraper_second_call_derives_rates_and_averages():
     assert out["vllm/prompt_throughput_tok_s"] == pytest.approx(100.0)
     assert out["vllm/prefix_cache_hit_rate"] == pytest.approx(40.0 / 50.0)
     assert out["vllm/ttft_seconds_avg"] == pytest.approx(1.0 / 5.0)
-    assert out["vllm/tpot_seconds_avg"] == pytest.approx(0.5 / 100.0)
+    assert "vllm/tpot_seconds_avg" not in out
+    assert "vllm/itl_seconds_avg" not in out
     # Gauges still flow through.
     assert out["vllm/num_requests_running"] == pytest.approx(5)
     assert out["vllm/kv_cache_usage_perc"] == pytest.approx(0.35)
@@ -362,7 +363,8 @@ async def test_scraper_throughput_uses_generation_time_not_wall_clock():
     # Time-independent derived metrics are unchanged by the window choice.
     assert out["vllm/prefix_cache_hit_rate"] == pytest.approx(40.0 / 50.0)
     assert out["vllm/ttft_seconds_avg"] == pytest.approx(1.0 / 5.0)
-    assert out["vllm/tpot_seconds_avg"] == pytest.approx(0.5 / 100.0)
+    assert "vllm/tpot_seconds_avg" not in out
+    assert "vllm/itl_seconds_avg" not in out
 
 
 @pytest.mark.asyncio
@@ -709,5 +711,30 @@ def test_offload_and_preemption_scalar_reductions():
     assert metrics["vllm/num_preemptions"] == 2
     assert metrics["vllm/preemptions_per_million_tokens"] == 20000
     assert metrics["vllm/external_prefix_cache_hit_rate"] == 0.4
-    assert metrics["vllm/kv_offload_store_throughput_bytes_s"] == 200
+    assert "vllm/kv_offload_store_throughput_bytes_s" not in metrics
     assert metrics["vllm/kv_offload_load_throughput_bytes_s"] == 100
+
+
+def test_logged_tpot_uses_request_histogram_and_only_mean_p90():
+    current = {}
+    for name, count, total in [
+        ("time_to_first_token_seconds", 10, 12),
+        ("request_time_per_output_token_seconds", 4, 2),
+        ("inter_token_latency_seconds", 100, 0.1),
+    ]:
+        base = "ray_vllm_" + name
+        current.update(
+            {
+                base + "_count": count,
+                base + "_sum": total,
+                base + "_bucket::1": count / 2,
+                base + "_bucket::2": count,
+                base + "_bucket::+Inf": count,
+            }
+        )
+    metrics = VLLMMetricsScraper._derive(current, dict.fromkeys(current, 0), 5, "vllm/")
+    assert metrics["vllm/tpot_seconds_avg"] == pytest.approx(0.5)
+    assert metrics["vllm/tpot_seconds_p90"] == pytest.approx(1.8)
+    assert metrics["vllm/ttft_seconds_avg"] == pytest.approx(1.2)
+    assert metrics["vllm/ttft_seconds_p90"] == pytest.approx(1.8)
+    assert not any("itl" in key or "request_tpot" in key or "p50" in key for key in metrics)
