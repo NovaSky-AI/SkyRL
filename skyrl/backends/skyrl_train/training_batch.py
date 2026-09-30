@@ -617,6 +617,8 @@ def append_tensor_list_padding(key: str, field: TensorList, count: int) -> Tenso
     ``image_grid_thw``) get a zero-row tensor of the same trailing shape and dtype,
     which contributes nothing when concatenated for the vision tower.
     """
+    if count <= 0:
+        return field
     reference = field.tensors[0]
     if key == "sub_seq_lengths":
         row = torch.ones(1, dtype=reference.dtype, device=reference.device)

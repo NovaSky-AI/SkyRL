@@ -4,17 +4,30 @@ Token-based microbatching produces micro-batches with different row counts, and
 Megatron's ``forward_backward_func`` requires a uniform micro-batch size, so every
 per-sample field has to grow to the largest row count. These tests call the method
 directly on an uninitialized instance -- it only reads the dict it is given -- so no
-Ray actor, distributed group, or GPU is needed.
+Ray actor, distributed group, or GPU is needed. (The shared session fixture in
+``tests/backends/skyrl_train/conftest.py`` still calls ``ray.init()``, hence
+``RAY_ADDRESS=local`` below.)
 
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_pad_microbatch.py
+RAY_ADDRESS=local uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/workers/megatron/test_pad_microbatch.py
 """
 
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.training_batch import TensorList
-from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import MegatronWorker
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
+    append_tensor_list_padding,
+)
+
+try:
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+        MegatronWorker,
+    )
+except ModuleNotFoundError as e:
+    if not e.name or (e.name != "megatron" and not e.name.startswith("megatron.")):
+        raise
+    pytest.skip(f"megatron unavailable: {e}", allow_module_level=True)
 
 
 @pytest.fixture
@@ -123,3 +136,10 @@ def test_absent_tensor_list_fields_stay_absent(pad):
     assert padded["sub_seq_lengths"] is None
     assert padded["pixel_values"] is None
     assert padded["num_actions"] == 4
+
+
+@pytest.mark.megatron
+def test_append_tensor_list_padding_zero_count_is_a_no_op():
+    field = TensorList([torch.tensor([5], dtype=torch.long)])
+
+    assert append_tensor_list_padding("sub_seq_lengths", field, 0) is field
