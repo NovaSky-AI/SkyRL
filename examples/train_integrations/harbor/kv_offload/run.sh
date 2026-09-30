@@ -10,7 +10,7 @@ cd "$SCRIPT_DIR/../../../.."
 DATA_DIR=${DATA_DIR:-$HOME/data/harbor/CodeContests}
 ENV_FILE=${ENV_FILE:-$HOME/hackskyrl/.env.srh}
 RUN_DIR=${RUN_DIR:-/tmp/skyrl-kv-offload/$BACKEND-$(date -u +%Y%m%d-%H%M%S)}
-if [[ -e "$RUN_DIR/driver.log" || -e "$RUN_DIR/metrics.jsonl" ]]; then
+if [[ -e "$RUN_DIR/driver.log" ]]; then
   echo "Run directory already contains an evaluation: $RUN_DIR" >&2
   exit 2
 fi
@@ -33,14 +33,13 @@ esac
 # uv reuses both env files when Ray starts worker processes.
 cat > "$RUN_DIR/backend.env" <<EOF
 SKYRL_HARBOR_NUM_SAMPLES=$NUM_SAMPLES
-SKYRL_HARBOR_ARTIFACT_DIR=$RUN_DIR
 SKYRL_VLLM_START_PORT=${START_PORT:-8000}
 PYTHONHASHSEED=0
 EOF
 
 uv run --isolated --frozen "${EXTRAS[@]}" \
   --env-file "$ENV_FILE" --env-file "$RUN_DIR/backend.env" \
-  -m examples.train_integrations.harbor.kv_offload.main_generate \
+  -m examples.train_integrations.harbor.entrypoints.main_harbor_generate \
   "data.train_data=['$DATA_DIR']" "data.val_data=['$DATA_DIR']" \
   "harbor_trial_config.trials_dir=$RUN_DIR/trials" \
   "trainer.log_path=$RUN_DIR/infra" \

@@ -2,8 +2,30 @@
 
 RL training with [Harbor](https://github.com/laude-institute/harbor) as the environment and reward source. See the [full documentation](https://docs.skyrl.ai/docs/harbor) for details.
 
-For generation-only evaluations with native CPU KV cache
-offloading, see [the offloading examples](kv_offload/README.md).
+For generation-only evaluations with native CPU KV cache offloading, use
+[kv_offload/run.sh](kv_offload/run.sh):
+
+```bash
+export DATA_DIR="$HOME/data/harbor/CodeContests"
+export ENV_FILE="$HOME/hackskyrl/.env.srh"
+export RAY_ADDRESS=<cluster-address>
+uv run --isolated --no-project bash examples/train_integrations/harbor/kv_offload/run.sh baseline > /tmp/kv-baseline.log 2>&1
+uv run --isolated --no-project bash examples/train_integrations/harbor/kv_offload/run.sh cpu > /tmp/kv-cpu.log 2>&1
+```
+
+The script uses two Qwen3-8B engines and 500 seed-42 tasks, with `GPU_BLOCKS=50000`
+(800,000 FP8 KV tokens per engine) and `MAX_CONCURRENCY=200`. CPU mode adds a
+128 GB cache per engine. Set `NUM_SAMPLES=4 MAX_CONCURRENCY=4` for a smoke run.
+Credentials and settings are passed through `uv --env-file` for Ray workers;
+the Ray version override is 2.58.0. Use fresh `RUN_DIR` values and run comparisons
+sequentially. Logs and trial results are saved there. Extra CLI overrides can
+be appended to the script.
+
+On one eight-B200 node, the 500-task baseline recorded 5 preemptions in 751.40 s;
+CPU offloading recorded 1 in 681.47 s, with 56.61 GB of cache reads. Neither run
+had masked tasks or timeouts. Timing excludes engine startup; overlapping
+cluster activity and single-run variability limit attribution of the 9.3%
+improvement. Raw experiment artifacts remain in `/tmp/skyrl-kv-offload/`.
 
 ### Structure
 

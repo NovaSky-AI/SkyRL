@@ -3,6 +3,8 @@ Main entrypoint for generating rollouts on Harbor tasks. For debugging purposes.
 """
 
 import sys
+import os
+import random
 
 import ray
 import asyncio
@@ -22,8 +24,8 @@ from .main_harbor import (
 )
 
 
-# For debugging purposes, we only generate a few samples.
-NUM_SAMPLES_TO_TEST = 10
+# Default to a small debugging run; larger evaluations set this in their env file.
+NUM_SAMPLES_TO_TEST = int(os.environ.get("SKYRL_HARBOR_NUM_SAMPLES", "10"))
 
 
 class HarborGenerateExp(BasePPOExp):
@@ -79,14 +81,18 @@ class HarborGenerateExp(BasePPOExp):
 
         prompts = []
         trajectory_ids = []
-        for item in self.train_dataset:
+        tasks = sorted(self.train_dataset, key=lambda item: item["prompt"])
+        if not 1 <= NUM_SAMPLES_TO_TEST <= len(tasks):
+            raise ValueError(f"Sample count must be between 1 and {len(tasks)}, got {NUM_SAMPLES_TO_TEST}.")
+        tasks = random.Random(42).sample(tasks, NUM_SAMPLES_TO_TEST)
+        for item in tasks:
             prompts.append(item["prompt"])
             trajectory_ids.append(TrajectoryID(instance_id=item["uid"], repetition_id=0))
 
         # Build input from the training dataset
         input_batch = GeneratorInput(
-            prompts=prompts[:NUM_SAMPLES_TO_TEST],
-            trajectory_ids=trajectory_ids[:NUM_SAMPLES_TO_TEST],
+            prompts=prompts,
+            trajectory_ids=trajectory_ids,
             env_classes=None,
             env_extras=None,
             sampling_params=None,
