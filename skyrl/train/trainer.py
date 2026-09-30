@@ -144,6 +144,9 @@ class RayPPOTrainer:
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
         )
 
+        if self._vllm_metrics_scraper is not None:
+            self._vllm_metrics_scraper.publish_activity(cfg.trainer.run_name)
+
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
         # trajectory logger is installed after construction if needed
@@ -232,6 +235,12 @@ class RayPPOTrainer:
             if self.cfg.trainer.max_training_steps is not None:
                 self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
 
+    def _generation_activity(self):
+        """Return an activity context when vLLM metrics are enabled."""
+        from contextlib import nullcontext
+
+        return self._vllm_metrics_scraper.activity.active() if self._vllm_metrics_scraper is not None else nullcontext()
+
     @torch.no_grad()
     async def eval(self, vllm_metrics_scraper: Optional[VLLMMetricsScraper] = None) -> Dict[str, float]:
         """
@@ -257,6 +266,7 @@ class RayPPOTrainer:
             trajectory_logger=self.trajectory_logger,
             tracker=self.tracker,
             vllm_metrics_scraper=vllm_metrics_scraper,
+            generation_activity=self._generation_activity,
         )
 
     async def train(self):
@@ -349,10 +359,13 @@ class RayPPOTrainer:
                         # 1.1. generation phase
                         if self._vllm_metrics_scraper is not None:
                             self._vllm_metrics_scraper.resume()
-                        with Timer("generate", self.all_timings):
-                            generator_output: GeneratorOutput = await self.generate(generator_input)
-                        if self._vllm_metrics_scraper is not None:
-                            self._vllm_metrics_scraper.pause()
+                        try:
+                            with Timer("generate", self.all_timings):
+                                with self._generation_activity():
+                                    generator_output: GeneratorOutput = await self.generate(generator_input)
+                        finally:
+                            if self._vllm_metrics_scraper is not None:
+                                self._vllm_metrics_scraper.pause()
 
                         if self.cfg.generator.step_wise_trajectories:
                             # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`

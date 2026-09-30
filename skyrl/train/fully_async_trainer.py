@@ -482,6 +482,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
 
+        if self._vllm_metrics_scraper is not None:
+            await self._vllm_metrics_scraper.sample_active()
+
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with self._phase_gauge.timed_phase("eval", self.all_timings):
@@ -642,7 +645,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if self._ray_gpu_monitor is not None:
                         timing_payload.update(self._ray_gpu_monitor.flush())
                     if self._vllm_metrics_scraper is not None:
-                        timing_payload.update(await self._vllm_metrics_scraper.sample())
+                        timing_payload.update(await self._vllm_metrics_scraper.sample_active())
                     self.tracker.log(timing_payload, step=self.global_step, commit=True)
                     self.all_timings = {}
                     self.global_step += 1
@@ -732,6 +735,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.dispatch.finalize_pending_saves("critic")
 
         if self._vllm_metrics_scraper is not None:
+            final_metrics = await self._vllm_metrics_scraper.sample_active()
+            self.tracker.log(final_metrics, step=self.global_step, commit=False)
             await self._vllm_metrics_scraper.aclose()
         self.tracker.finish()
         logger.info("Training done!")
@@ -920,14 +925,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 global_step_at_start = self.global_step  # for staleness control
 
                 group_start_time = time.monotonic()
-                if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
-                    # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
-                    # blast the console with each worker's progress bar.
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(
-                        generator_input, disable_tqdm=True
-                    )
-                else:
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                with self._generation_activity():
+                    if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
+                        # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
+                        # blast the console with each worker's progress bar.
+                        cur_generator_output: GeneratorOutput = await self.generator.generate(
+                            generator_input, disable_tqdm=True
+                        )
+                    else:
+                        cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
                 group_completion_time_s = time.monotonic() - group_start_time
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.

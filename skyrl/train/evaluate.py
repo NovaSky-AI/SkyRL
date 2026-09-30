@@ -158,6 +158,7 @@ async def evaluate(
     trajectory_logger: Optional[TrajectoryLogger] = None,
     tracker: Optional["Tracking"] = None,
     vllm_metrics_scraper: Optional["VLLMMetricsScraper"] = None,
+    generation_activity=None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
 
@@ -200,9 +201,14 @@ async def evaluate(
         gen_start = time.monotonic()
         if vllm_metrics_scraper is not None:
             vllm_metrics_scraper.resume()
-        generator_output: GeneratorOutput = await generator.generate(generator_input)
-        if vllm_metrics_scraper is not None:
-            vllm_metrics_scraper.pause()
+        from contextlib import nullcontext
+
+        try:
+            with generation_activity() if generation_activity is not None else nullcontext():
+                generator_output: GeneratorOutput = await generator.generate(generator_input)
+        finally:
+            if vllm_metrics_scraper is not None:
+                vllm_metrics_scraper.pause()
         eval_generate_time += time.monotonic() - gen_start
         validate_generator_output(len(generator_input["prompts"]), generator_output, step_wise=step_wise)
         generator_outputs.append(generator_output)

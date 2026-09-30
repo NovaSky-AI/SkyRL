@@ -20,6 +20,7 @@ import ray
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
+from skyrl.train.utils.generation_activity import GenerationActivity
 from skyrl.train.utils.vllm_window_statistics import latency_metrics
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
@@ -201,6 +202,8 @@ class VLLMMetricsScraper:
         self._urls = urls if urls is not None else discover_ray_metrics_urls()
         self._timeout = request_timeout_s
         self._worker_ids = None if worker_ids is None else frozenset(worker_ids)
+        self.activity = GenerationActivity()
+        self._activity_sampled_seconds = 0.0
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
         self._client: Optional[httpx.AsyncClient] = None
@@ -312,7 +315,28 @@ class VLLMMetricsScraper:
                 sums.setdefault(hits, 0.0)
         return {**sums, **means, **per_pos, **buckets}
 
-    async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
+    def publish_activity(self, run_name: str) -> None:
+        """Expose the outstanding-call count alongside existing training phases."""
+        from ray.util.metrics import Gauge
+
+        gauge = Gauge(
+            "skyrl_generation_active_calls", description="Outstanding generation calls.", tag_keys=("run_name",)
+        )
+        gauge.set(0, tags={"run_name": run_name})
+        self.activity = GenerationActivity(publish=lambda value: gauge.set(value, tags={"run_name": run_name}))
+        self._activity_sampled_seconds = 0.0
+
+    async def sample_active(self) -> Dict[str, float]:
+        """Sample overlapping train/eval generation using union active time."""
+        seconds = self.activity.seconds
+        delta = seconds - self._activity_sampled_seconds
+        result = await self.sample(generation_time_s=delta, allow_zero_duration=True)
+        self._activity_sampled_seconds = seconds
+        return result
+
+    async def sample(
+        self, generation_time_s: Optional[float] = None, *, allow_zero_duration: bool = False
+    ) -> Dict[str, float]:
         """Return ``vllm/...`` scalars for the current step (empty if unavailable).
 
         ``generation_time_s`` is the throughput denominator (engine generation
@@ -328,7 +352,14 @@ class VLLMMetricsScraper:
         now = time.monotonic()
         if self._prev_aggregated is not None and self._prev_timestamp is not None:
             dt = max(now - self._prev_timestamp, 1e-9)
-            window = generation_time_s if (generation_time_s is not None and generation_time_s > 0) else dt
+            window = (
+                generation_time_s
+                if (
+                    generation_time_s is not None
+                    and (generation_time_s > 0 or (allow_zero_duration and generation_time_s == 0))
+                )
+                else dt
+            )
             out = self._window_metrics(self._prev_aggregated, snapshot, window, "vllm/")
         else:
             out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
