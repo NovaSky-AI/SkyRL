@@ -41,8 +41,8 @@ from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packing_align_size_sequence,
-    get_packing_align_size_total,
     get_unpacked_seq_align_size,
+    packed_segment_layout,
 )
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
@@ -560,9 +560,6 @@ def preprocess_packed_seqs(
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
     packing_align_size_sequence = get_packing_align_size_sequence(tp_size, cp_size)
-    packing_align_size_total = get_packing_align_size_total(
-        tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe
-    )
 
     batch_size = input_ids.shape[0]
 
@@ -597,33 +594,27 @@ def preprocess_packed_seqs(
                 ) % packing_align_size_sequence
                 running += length_int + pad
 
-        seqlens_in_batch = torch.tensor(flat_seqlens, dtype=torch.int32, device=input_ids.device)
+        seqlens_in_batch_cpu: list[int] = flat_seqlens
         num_subseqs = len(flat_seqlens)
     else:
-        seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+        # One D2H sync here; the loop below needs these as Python ints anyway.
+        seqlens_in_batch_cpu = attention_mask.sum(dim=-1, dtype=torch.int32).tolist()
         num_subseqs = batch_size
 
-    pad_size = (
-        packing_align_size_sequence - seqlens_in_batch % packing_align_size_sequence
-    ) % packing_align_size_sequence
-    seqlens_in_batch_padded = seqlens_in_batch + pad_size
-    # TP and FP8 operate on the aggregate local token slab. Attach their tail
-    # padding once to the final sequence rather than to every sequence.
-    aggregate_pad_size = (-seqlens_in_batch_padded.sum()) % packing_align_size_total
-    seqlens_in_batch_padded[-1] += aggregate_pad_size
+    layout = packed_segment_layout(
+        seqlens_in_batch_cpu,
+        tp_size=tp_size,
+        cp_size=cp_size,
+        fp8_enabled=fp8_enabled,
+        fp8_recipe=fp8_recipe,
+    )
+    seqlens_in_batch_padded_cpu: list[int] = list(layout.padded_lengths)
+    cu_seqlens_padded_cpu: list[int] = list(layout.cu_seqlens_padded)
 
+    seqlens_in_batch = torch.tensor(seqlens_in_batch_cpu, dtype=torch.int32, device=input_ids.device)
     cu_seqlens = torch.zeros(num_subseqs + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
-    cu_seqlens_padded = torch.zeros(num_subseqs + 1, dtype=torch.int32, device=input_ids.device)
-    cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
-
-    # ----------------------------------------------------------------------------
-    # Move the index information needed in the subsequent loop to the CPU at once,
-    # to avoid frequent .item() calls in the loop that cause D2H synchronization
-    # ----------------------------------------------------------------------------
-    seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()
-    seqlens_in_batch_padded_cpu: list[int] = seqlens_in_batch_padded.tolist()
-    cu_seqlens_padded_cpu: list[int] = cu_seqlens_padded.tolist()
+    cu_seqlens_padded = torch.tensor(cu_seqlens_padded_cpu, dtype=torch.int32, device=input_ids.device)
 
     # Pure Python int calculation to avoid further synchronization
     max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
