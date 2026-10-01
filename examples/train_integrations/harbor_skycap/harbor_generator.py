@@ -9,8 +9,8 @@ context graph, so a rewritten history is a branch rather than a hole and
 summarization is allowed.
 
 Per trial: create a trajectory, point the agent at ``trajectory.base_url``, run
-it, and ``finish`` with the reward to get one sample per path. ``compose``
-turns those into the step-wise ``GeneratorOutput``.
+it, and ``finish`` with the reward to get a sample per path the ``train_paths``
+rule picks. ``compose`` turns those into the step-wise ``GeneratorOutput``.
 """
 
 import asyncio
@@ -23,6 +23,7 @@ from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
 from skycap import CapturePool
+from skycap.paths import load_rule
 from tqdm import tqdm
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
@@ -53,6 +54,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         harbor_cfg: Dict[str, Any],
         capture_urls: List[str],
         inference_engine_client: Any = None,
+        train_paths: str = "all",
     ) -> None:
         """
         Args:
@@ -60,7 +62,12 @@ class HarborSkycapGenerator(GeneratorInterface):
             harbor_cfg: Harbor's ``TrialConfig`` template.
             capture_urls: the skycap servers to spread trajectories over.
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
+            train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
+                rule's ``"pkg.module:function"``, which the servers must have been started with.
         """
+        # Imported here too, so a bad import path fails at startup rather than at the first finish.
+        load_rule(train_paths)
+        self.train_paths = train_paths
         if not getattr(generator_cfg, "step_wise_trajectories", False):
             raise ValueError(
                 "HarborSkycapGenerator emits one row per captured path, grouped per rollout the step-wise way. "
@@ -202,7 +209,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
             else:
                 reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
-            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
+            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason}, paths=self.train_paths)
 
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.

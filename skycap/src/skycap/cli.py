@@ -74,6 +74,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=3600.0,
         help="seconds an open trajectory may be idle before it is written as abandoned (default: %(default)s)",
     )
+    serve.add_argument(
+        "--path-rule",
+        action="append",
+        default=[],
+        metavar="[NAME=]MODULE:FUNCTION",
+        help="a custom path rule finish may name besides `all` and `final`, by NAME or else by its import path; "
+        "repeatable",
+    )
     return parser
 
 
@@ -93,7 +101,11 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         logprobs_mode=args.logprobs_mode,
         use_raw_content=args.use_raw_content,
     )
-    return CaptureServer(backend, record_dir=args.record_dir, ttl=args.ttl)
+    rules: dict[str, str] = {}
+    for spec in args.path_rule:
+        name, _, rule = spec.rpartition("=")
+        rules[name or rule] = rule
+    return CaptureServer(backend, record_dir=args.record_dir, ttl=args.ttl, path_rules=rules)
 
 
 def main(argv: list[str] | None = None) -> int:
