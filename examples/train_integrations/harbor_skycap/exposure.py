@@ -159,9 +159,8 @@ class Exposure:
 class ExternalHost(Exposure):
     """Sandboxes reach this node at ``host``, server ``i`` on ``port + i``; the gateways bind all interfaces.
 
-    ``host`` is an address the sandboxes route to: the node's public or peered address (like Miles'
-    ``--session-server-external-host``), or a relay's that forwards each port here, such as an frp
-    server on a public VM with one TCP forward per server.
+    ``host`` is an address the sandboxes route to: the node's public or peered address, or a relay's
+    that forwards each port here, such as an frp server on a public VM with one TCP forward per server.
     """
 
     def __init__(self, host: str, port: int = 11500) -> None:
