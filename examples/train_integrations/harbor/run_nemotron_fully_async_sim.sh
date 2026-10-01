@@ -15,6 +15,10 @@ set -euo pipefail
 : "${MAX_NUM_BATCHED_TOKENS:=8192}"
 : "${MAX_MODEL_LEN:=32768}"
 : "${MAX_GENERATE_LENGTH:=12288}"
+# Long multi-turn trajectories can exceed two hours, especially during output-limit recovery.
+: "${AGENT_TIMEOUT_SECONDS:=21600}"
+: "${LLM_TIMEOUT_SECONDS:=7200}"
+: "${DAYTONA_AUTO_STOP_MINS:=360}"
 : "${OFFLOAD:=0}"
 : "${CPU_OFFLOAD_BYTES:=549755813888}"
 : "${GRAFANA_URL:=http://localhost:9481}"
@@ -63,9 +67,10 @@ args=(
   "harbor_trial_config.agent.kwargs.model_info.max_input_tokens=$MAX_MODEL_LEN"
   "harbor_trial_config.agent.kwargs.model_info.max_output_tokens=$MAX_GENERATE_LENGTH"
   "harbor_trial_config.agent.kwargs.llm_kwargs.max_tokens=$MAX_GENERATE_LENGTH"
-  harbor_trial_config.agent.override_timeout_sec=7200 harbor_trial_config.agent.kwargs.llm_kwargs.timeout=3600
+  "harbor_trial_config.agent.override_timeout_sec=$AGENT_TIMEOUT_SECONDS"
+  "harbor_trial_config.agent.kwargs.llm_kwargs.timeout=$LLM_TIMEOUT_SECONDS"
   harbor_trial_config.agent.kwargs.llm_kwargs.max_retries=0
-  harbor_trial_config.environment.kwargs.auto_stop_interval_mins=180
+  "harbor_trial_config.environment.kwargs.auto_stop_interval_mins=$DAYTONA_AUTO_STOP_MINS"
   harbor_trial_config.environment.kwargs.connection_pool_maxsize=null
   trainer.logger=wandb trainer.project_name=nemotron-bench "trainer.run_name=$RUN_NAME"
   trainer.grafana_annotations.enabled=true "trainer.grafana_annotations.url=$GRAFANA_URL"
