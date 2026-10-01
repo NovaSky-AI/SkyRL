@@ -78,7 +78,7 @@ def test_publication_waits_for_current_model_writes(tmp_path, has_critic):
             state = torch.load(Path(path, model, "model.pt"), weights_only=False)
             assert state == {"model": model}
         assert trainer.dispatch.pending == {}
-        assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "2"
+        assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "1"
         assert previous.is_dir()
 
     trainer._on_checkpoint_saved = publish
@@ -86,6 +86,7 @@ def test_publication_waits_for_current_model_writes(tmp_path, has_critic):
     trainer.save_checkpoints()
 
     assert trainer.dispatch.completed == models
+    assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "2"
     assert not previous.exists()
 
 
@@ -170,7 +171,6 @@ def test_publication_failure_keeps_previous_checkpoint_until_next_publication(tm
     def fail_publication(path):
         assert Path(path, "data.pt").is_file()
         assert Path(path, "trainer_state.pt").is_file()
-        assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "2"
         assert previous.is_dir()
         events.append("publish")
         raise OSError("receipt failed")
@@ -181,6 +181,10 @@ def test_publication_failure_keeps_previous_checkpoint_until_next_publication(tm
         trainer.save_checkpoints()
     assert previous.is_dir()
     assert events == ["policy", "publish"]
+    assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "1"
+    resumed = _trainer(tmp_path)
+    resumed.resume_mode = ResumeMode.LATEST
+    assert resumed.load_checkpoints() == (1, str(previous))
 
     trainer._on_checkpoint_saved = MagicMock()
     path = trainer.save_checkpoints()
@@ -256,3 +260,18 @@ def test_resume_rejects_missing_or_invalid_dataloader_epoch(tmp_path, epoch):
     with pytest.raises(ValueError, match="dataloader_epoch"):
         trainer.load_checkpoints()
     trainer.dispatch.load_checkpoint.assert_not_called()
+
+
+@pytest.mark.parametrize("trainer_type", [RayPPOTrainer, FullyAsyncRayPPOTrainer])
+def test_resume_requires_dataloader_state_before_loading_policy(tmp_path, trainer_type):
+    trainer = _trainer(tmp_path, trainer_type)
+    next(iter(trainer.train_dataloader))
+    checkpoint = Path(trainer.save_checkpoints())
+    (checkpoint / "data.pt").unlink()
+    resumed = _trainer(tmp_path, trainer_type)
+    resumed.cfg.trainer.resume_path = str(checkpoint)
+
+    with pytest.raises(FileNotFoundError, match="data.pt"):
+        resumed.load_checkpoints()
+
+    resumed.dispatch.load_checkpoint.assert_not_called()

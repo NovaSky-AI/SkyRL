@@ -469,6 +469,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         loaded_epoch if loaded_epoch is not None else self.global_step // self.num_steps_per_epoch
                     )
 
+        if self.cfg.trainer.max_training_steps is not None and self.global_step >= self.cfg.trainer.max_training_steps:
+            self.epoch = resumed_start_epoch if resumed_start_epoch is not None else 0
+            logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}; no training steps remain.")
+            self.tracker.finish()
+            return
+
         # Initialize weight sync state
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
@@ -1181,7 +1187,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def load_checkpoints(self) -> Tuple[int, str, Optional[Set[str]], Optional[Set[str]], Optional[int]]:
         """
-        Load the base checkpoint without loading the dataloader state, and load the fully-async state.
+        Load the native checkpoint and the fully-async consumed-UID state.
 
         Returns the global step to resume from, the checkpoint path, the consumed data UIDs, the
         filtered (dropped, not trained on) data UIDs, and the epoch to resume in (None if the

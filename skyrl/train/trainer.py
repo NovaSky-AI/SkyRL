@@ -1741,12 +1741,13 @@ class RayPPOTrainer:
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        # Atomic tracking - write this last after all saves succeed
+        self._on_checkpoint_saved(global_step_folder)
+
+        # Advance the latest marker only after subclass publication succeeds.
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
         with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
 
-        self._on_checkpoint_saved(global_step_folder)
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
 
         # Clean up old checkpoints after successful save
@@ -1764,10 +1765,10 @@ class RayPPOTrainer:
         """
 
     def _on_checkpoint_saved(self, checkpoint_path: str) -> None:
-        """Publish subclass metadata after native saves and before retention.
+        """Publish subclass metadata before advancing the latest marker.
 
-        All native state and the latest marker have been written. Raise on failure
-        to keep previous checkpoints available for the caller's resume protocol.
+        All native state has been written. Raise on failure to keep the previous
+        latest marker and retained checkpoints unchanged.
         """
 
     def _cleanup_old_checkpoints(self):
@@ -1851,6 +1852,8 @@ class RayPPOTrainer:
         # Validate that required checkpoint files exist
         if not io.exists(trainer_state_path):
             raise FileNotFoundError(f"Trainer state file not found: {trainer_state_path}")
+        if not io.exists(dataloader_state_path):
+            raise FileNotFoundError(f"Dataloader state file not found: {dataloader_state_path}")
 
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
@@ -1864,21 +1867,16 @@ class RayPPOTrainer:
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
-        # 2. Load dataloader state if available
-        if io.exists(dataloader_state_path):
-            with io.open_file(dataloader_state_path, "rb") as f:
-                dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-            self.train_dataloader.load_state_dict(dataloader_state)
-            # StatefulDataLoader defers restoration until an iterator is built.
-            # Materialize it before restoring the generator shared by sampler
-            # and worker seeding, so the next epoch keeps its original shuffle.
-            self.train_dataloader.state_dict()
-            self.train_dataloader.generator.set_state(trainer_state["dataloader_generator_state"])
-            logger.info("Successfully loaded dataloader state")
-        else:
-            logger.warning(
-                f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
-            )
+        # 2. Load the required dataloader cursor and generator state.
+        with io.open_file(dataloader_state_path, "rb") as f:
+            dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+        self.train_dataloader.load_state_dict(dataloader_state)
+        # StatefulDataLoader defers restoration until an iterator is built.
+        # Materialize it before restoring the generator shared by sampler
+        # and worker seeding, so the next epoch keeps its original shuffle.
+        self.train_dataloader.state_dict()
+        self.train_dataloader.generator.set_state(trainer_state["dataloader_generator_state"])
+        logger.info("Successfully loaded dataloader state")
 
         # 3. Load policy checkpoint (dispatch handles offload/backload)
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
