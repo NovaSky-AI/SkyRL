@@ -12,12 +12,12 @@ from skyrl.train.utils.grafana_annotations import GrafanaRunAnnotation
 from skyrl.utils import grafana
 
 
-def test_create_update_and_idempotent_finish(tmp_path):
-    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "run-one", str(tmp_path))
+def test_create_update_and_idempotent_finish():
+    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "run-one")
     annotation._request = Mock(return_value={"id": 12})
     annotation.start()
-    annotation.finish("failed")
-    annotation.finish("failed")
+    annotation.finish()
+    annotation.finish()
     calls = annotation._request.call_args_list
     assert len(calls) == 2
     assert calls[0].args[:2] == ("POST", "/api/annotations")
@@ -25,22 +25,20 @@ def test_create_update_and_idempotent_finish(tmp_path):
     assert calls[1].args[2]["text"] == "run-one"
     assert calls[1].args[2]["timeEnd"] >= calls[1].args[2]["time"]
     assert "dashboardUID" not in calls[0].args[2]
-    record = json.loads(annotation.path.read_text())
-    assert record["run_status"] == "failed"
-    assert record["annotation_id"] == 12
+    assert annotation.annotation_id == 12
 
 
-def test_disabled_and_failed_api_calls_do_not_raise(tmp_path):
-    disabled = GrafanaRunAnnotation(GrafanaAnnotationsConfig(), "disabled", str(tmp_path))
+def test_disabled_and_failed_api_calls_do_not_raise():
+    disabled = GrafanaRunAnnotation(GrafanaAnnotationsConfig(), "disabled")
     disabled._request = Mock()
     disabled.start()
-    disabled.finish("success")
+    disabled.finish()
     disabled._request.assert_not_called()
-    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "failed", str(tmp_path))
+    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "failed")
     annotation._request = Mock(side_effect=RuntimeError("HTTP failure"))
     annotation.start()
-    annotation.finish("failed")
-    assert json.loads(annotation.path.read_text())["run_status"] == "failed"
+    annotation.finish()
+    assert annotation.annotation_id is None
 
 
 @pytest.fixture
@@ -67,10 +65,10 @@ def head_dispatch(monkeypatch):
     return task, decorator
 
 
-def test_requests_run_on_live_head_with_hard_affinity(tmp_path, head_dispatch):
+def test_requests_run_on_live_head_with_hard_affinity(head_dispatch):
     task, decorator = head_dispatch
     config = GrafanaAnnotationsConfig(enabled=True, timeout_seconds=2)
-    annotation = GrafanaRunAnnotation(config, "worker-trainer", str(tmp_path))
+    annotation = GrafanaRunAnnotation(config, "worker-trainer")
     payload = annotation._payload()
 
     assert annotation._request("POST", "/api/annotations", payload) == {"id": 42}
@@ -85,39 +83,37 @@ def test_requests_run_on_live_head_with_hard_affinity(tmp_path, head_dispatch):
 
 
 @pytest.mark.parametrize("heads", [[], ["head-one", "head-two"]])
-def test_missing_or_ambiguous_head_leaves_local_record(tmp_path, head_dispatch, heads):
+def test_missing_or_ambiguous_head_does_not_dispatch(head_dispatch, heads):
     ray.nodes.return_value = [
         {"Alive": True, "NodeID": head, "Resources": {"node:__internal_head__": 1}} for head in heads
     ]
-    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "no-head", str(tmp_path))
+    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "no-head")
     annotation.start()
-    annotation.finish("success")
+    annotation.finish()
 
     ray.remote.assert_not_called()
-    record = json.loads(annotation.path.read_text())
-    assert record["annotation_id"] is None
-    assert record["run_status"] == "success"
+    assert annotation.annotation_id is None
 
 
-def test_uninitialized_ray_does_not_dispatch(tmp_path, head_dispatch):
+def test_uninitialized_ray_does_not_dispatch(head_dispatch):
     ray.is_initialized.return_value = False
-    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "uninitialized", str(tmp_path))
+    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "uninitialized")
     annotation.start()
-    annotation.finish("success")
+    annotation.finish()
 
     ray.nodes.assert_not_called()
     ray.remote.assert_not_called()
-    assert json.loads(annotation.path.read_text())["run_status"] == "success"
+    assert annotation.annotation_id is None
 
 
-def test_head_task_timeout_is_cancelled_without_failing_run(tmp_path, head_dispatch):
+def test_head_task_timeout_is_cancelled_without_failing_run(head_dispatch):
     ray.get.side_effect = ray.exceptions.GetTimeoutError("timed out")
-    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "timeout", str(tmp_path))
+    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "timeout")
     annotation.start()
-    annotation.finish("success")
+    annotation.finish()
 
     ray.cancel.assert_called_once_with("task-ref", force=True)
-    assert json.loads(annotation.path.read_text())["run_status"] == "success"
+    assert annotation.annotation_id is None
 
 
 @pytest.mark.parametrize(

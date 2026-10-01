@@ -1464,8 +1464,6 @@ class GrafanaAnnotationsConfig(BaseConfig):
     """HTTP timeout per request; the head-task wait allows 10 additional seconds for startup."""
     dashboard_url: str = ""
     """Optional dashboard URL printed with the run's start and end times."""
-    record_directory: str = "~/skyrl_runs/annotations"
-    """Local directory for annotation IDs and run lifecycle records."""
 
 
 @dataclass
