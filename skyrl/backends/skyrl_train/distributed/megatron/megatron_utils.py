@@ -754,15 +754,19 @@ def preprocess_packed_seqs(
 def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
     """Whether the model packs sequences inside its own ``forward``.
 
-    True for ``Qwen3VLModel`` (e.g. Qwen3.5 via the VL bridge), which would
-    double-pack and corrupt the GDN ``cu_seqlens`` under SkyRL sample packing, so
-    :class:`MegatronModelWrapper` refuses packing for it. Returns ``False`` when
-    mbridge / Qwen3VL is not importable, so other models are unaffected.
+    True for a ``Qwen3VLModel`` with GatedDeltaNet layers (Qwen3.5 via the VL
+    bridge), which would double-pack and corrupt the GDN ``cu_seqlens`` under
+    SkyRL sample packing, so :class:`MegatronModelWrapper` refuses packing for it.
+    Attention-only ``Qwen3VLModel`` (Qwen3-VL) takes SkyRL's [1, T] THD stream
+    as-is and rebuilds mRoPE per packed sub-sequence, so it is allowed. Returns
+    ``False`` when mbridge / Qwen3VL is not importable, so other models are
+    unaffected.
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
             Qwen3VLModel,
         )
+        from megatron.core.ssm.gated_delta_net.gdn import GatedDeltaNet
     except ImportError:
         return False
 
@@ -770,7 +774,10 @@ def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -
     for chunk in chunks:
         unwrapped = unwrap_model(chunk)
         unwrapped_list = unwrapped if isinstance(unwrapped, (list, tuple)) else [unwrapped]
-        if any(isinstance(m, Qwen3VLModel) for m in unwrapped_list):
+        if any(
+            isinstance(m, Qwen3VLModel) and any(isinstance(sub, GatedDeltaNet) for sub in m.modules())
+            for m in unwrapped_list
+        ):
             return True
     return False
 
