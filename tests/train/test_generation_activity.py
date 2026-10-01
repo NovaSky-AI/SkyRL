@@ -23,6 +23,24 @@ def test_overlap_counts_union_and_closes_on_error():
     assert published == [1, 2, 1, 0, 1, 0]
 
 
+@pytest.mark.parametrize("failed_count", [0, 1])
+def test_failed_gauge_preserves_activity_timing(failed_count):
+    now = [0.0]
+
+    def publish(count):
+        if count == failed_count:
+            raise RuntimeError("gauge unavailable")
+
+    activity = GenerationActivity(clock=lambda: now[0], publish=publish)
+    with activity.active():
+        now[0] = 3
+    now[0] = 5
+    assert activity.seconds == 3
+    with activity.active():
+        now[0] = 7
+    assert activity.seconds == 5
+
+
 @pytest.mark.asyncio
 async def test_zero_active_time_does_not_fall_back_to_wall_time():
     from unittest.mock import AsyncMock

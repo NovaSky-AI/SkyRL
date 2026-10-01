@@ -4,6 +4,8 @@ import time
 from contextlib import contextmanager
 from typing import Callable, Optional
 
+from loguru import logger
+
 
 class GenerationActivity:
     """Track active wall time without summing concurrent call durations."""
@@ -38,4 +40,8 @@ class GenerationActivity:
 
     def _emit(self):
         if self._publish is not None:
-            self._publish(self._count)
+            try:
+                self._publish(self._count)
+            except Exception as error:
+                self._publish = None
+                logger.warning(f"Generation activity gauge disabled ({type(error).__name__})")
