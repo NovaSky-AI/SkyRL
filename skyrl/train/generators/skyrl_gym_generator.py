@@ -960,9 +960,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                     await self._run_in_executor_if_available(env.close)
         finally:
             if parallel_env_steps:
-                for task in step_tasks:
-                    if not task.done():
-                        task.cancel()
                 if step_tasks:
                     await asyncio.gather(*step_tasks, return_exceptions=True)
                 await asyncio.gather(

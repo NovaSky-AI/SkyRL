@@ -2,6 +2,7 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator.py
 """
 
+import threading
 import time
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -983,7 +984,10 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
 ):
     """Parallel mode settles in-flight steps before closing envs when a step fails."""
     envs_created = []
-    call_order = []
+    sibling_in_step = threading.Event()
+    failing_env_ready = threading.Event()
+    steps_in_flight = 0
+    steps_lock = threading.Lock()
 
     def make_env():
         env = MagicMock()
@@ -991,17 +995,30 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
         env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
         def step_fn(x):
-            call_order.append(f"step_start_{env_idx}")
-            if env_idx == 0:
-                raise RuntimeError("step boom")
-            time.sleep(0.05)
-            call_order.append(f"step_end_{env_idx}")
-            return BaseTextEnvStepOutput(
-                observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
-            )
+            nonlocal steps_in_flight
+            with steps_lock:
+                steps_in_flight += 1
+            try:
+                if env_idx == 0:
+                    sibling_in_step.set()
+                    failing_env_ready.wait(timeout=2.0)
+                    raise RuntimeError("step boom")
+                sibling_in_step.wait(timeout=2.0)
+                failing_env_ready.set()
+                time.sleep(0.1)
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
+                )
+            finally:
+                with steps_lock:
+                    steps_in_flight -= 1
+
+        def close_fn():
+            with steps_lock:
+                assert steps_in_flight == 0, "close called while env.step still in flight"
 
         env.step.side_effect = step_fn
-        env.close.side_effect = lambda idx=env_idx: call_order.append(f"close_{idx}")
+        env.close.side_effect = close_fn
         env.get_metrics.return_value = {}
         envs_created.append(env)
         return env
@@ -1032,10 +1049,6 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
 
     assert len(envs_created) == 2
     assert all(env.close.called for env in envs_created)
-    close_indices = [i for i, event in enumerate(call_order) if event.startswith("close_")]
-    step_end_indices = [i for i, event in enumerate(call_order) if event.startswith("step_end_")]
-    assert step_end_indices, "slow sibling step should finish before close begins"
-    assert min(close_indices) > max(step_end_indices)
 
 
 @pytest.mark.asyncio
