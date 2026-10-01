@@ -1,14 +1,15 @@
 """Optional run lifecycle annotations in Grafana's built-in event store."""
 
 import json
-import os
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
 
-import httpx
+import ray
 from loguru import logger
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+from skyrl.utils.grafana import request_from_head
 
 
 class GrafanaRunAnnotation:
@@ -24,19 +25,32 @@ class GrafanaRunAnnotation:
         self.path = Path(directory) / f"grafana-run-{self.run_id}.json"
 
     def _request(self, method, path, payload):
-        parsed = urlparse(self.config.url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("Grafana URL must be an HTTP(S) URL without embedded credentials")
-        headers = {}
-        token = os.environ.get(self.config.token_env_var)
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        if self.config.organization_id is not None:
-            headers["X-Grafana-Org-Id"] = str(self.config.organization_id)
-        with httpx.Client(timeout=self.config.timeout_seconds) as client:
-            response = client.request(method, self.config.url.rstrip("/") + path, json=payload, headers=headers)
-            response.raise_for_status()
-            return response.json()
+        if not ray.is_initialized():
+            raise RuntimeError("Ray must be initialized before publishing run annotations")
+        heads = [
+            node
+            for node in ray.nodes()
+            if node.get("Alive") and node.get("Resources", {}).get("node:__internal_head__", 0) > 0
+        ]
+        if len(heads) != 1:
+            raise RuntimeError("Could not identify a unique live Ray head node")
+        task = (
+            ray.remote(num_cpus=0, max_retries=0)(request_from_head)
+            .options(scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=heads[0]["NodeID"], soft=False))
+            .remote(
+                method,
+                path,
+                payload,
+                self.config.token_env_var,
+                self.config.organization_id,
+                self.config.timeout_seconds,
+            )
+        )
+        try:
+            return ray.get(task, timeout=self.config.timeout_seconds + 10)
+        except ray.exceptions.GetTimeoutError:
+            ray.cancel(task, force=True)
+            raise
 
     def _payload(self, end_ms=None):
         payload = {

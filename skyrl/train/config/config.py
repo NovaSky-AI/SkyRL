@@ -1454,16 +1454,14 @@ class GrafanaAnnotationsConfig(BaseConfig):
 
     enabled: bool = False
     """Publish a run-name start marker and close it as a region when training ends."""
-    url: str = ""
-    """Grafana base URL, including any deployment subpath."""
     token_env_var: str = "GRAFANA_API_TOKEN"
     """Environment variable containing the annotation API token; never stored in run config."""
     organization_id: Optional[int] = None
-    """Organization ID sent in the Grafana request header when configured."""
+    """Organization override; otherwise use the head's RAY_GRAFANA_ORG_ID (default 1)."""
     tags: List[str] = field(default_factory=list)
     """Additional annotation tags, such as a cluster name."""
     timeout_seconds: float = 5.0
-    """HTTP timeout for each annotation create or update request."""
+    """HTTP timeout per request; the head-task wait allows 10 additional seconds for startup."""
     dashboard_url: str = ""
     """Optional dashboard URL printed with the run's start and end times."""
     record_directory: str = "~/skyrl_runs/annotations"
