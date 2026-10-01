@@ -95,6 +95,15 @@ def remove(path: str) -> None:
             call_with_s3_retry(fs, fs.rm, path, recursive=True)
         else:
             call_with_s3_retry(fs, fs.rm, path)
+        # s3fs's bulk delete drops per-key errors such as AccessDenied, so confirm the
+        # removal instead of reporting one that did not happen.
+        fs.invalidate_cache(path)
+        remaining = call_with_s3_retry(fs, fs.find, path)
+        if remaining:
+            raise OSError(
+                f"{len(remaining)} object(s) remain under {path} after removal; "
+                "check that this S3 identity may s3:DeleteObject there"
+            )
         return
     if fs.isdir(path):
         fs.rm(path, recursive=True)
