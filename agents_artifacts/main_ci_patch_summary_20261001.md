@@ -1,6 +1,6 @@
 # Main CI patch audit (2026-10-01)
 
-Branch: `fix/outstanding-main-ci-20260930` | PR: [#2363](https://github.com/NovaSky-AI/SkyRL/pull/2363) | E2E training validation SHA: `2fc91fbb` | Base: `c6cce532`.
+Branch: `fix/outstanding-main-ci-20260930` | PR: [#2363](https://github.com/NovaSky-AI/SkyRL/pull/2363) | Validated code SHA: `73c74be7` | Base: `c6cce532`.
 
 This separates observed failures from inferred causes and operational mitigations. A green test on an earlier branch SHA is not claimed as exact-SHA validation of the final patch.
 
@@ -20,7 +20,7 @@ This separates observed failures from inferred causes and operational mitigation
 - **Observed:** The sync Tinker E2E rerun at `7719663f` repeatedly returned HTTP 500 from `retrieve_future`. The API traceback ended at `float(None)` in `_serialize_forward_backward_output`. Read-only inspection of five completed `FORWARD_BACKWARD` futures (request IDs 3371-3375) found `importance_ratio:mean: null`; their total and policy losses were finite.
 - **Cause:** The worker emitted a non-finite scalar diagnostic. `ForwardBackwardOutput.model_dump_json()` serialized that value as JSON `null` in the future database. The protobuf encoder then assumed every stored metric was float-convertible. The exact reason the upstream importance-ratio diagnostic became non-finite is not proven. One possible code path is division by zero when a microbatch has zero total `loss_mask`; this needs separate evidence before changing the loss calculation.
 - **Patch:** Omit only `None` metrics when encoding a stored future. Finite metrics, loss outputs, gradients, and optimizer steps are unchanged. This repairs the JSON-to-protobuf boundary; it does **not** claim to cure the non-finite diagnostic at its source.
-- **Validation:** New round-trip test passes through `model_dump_json()`, JSON parsing, protobuf encoding, and SDK decoding. The full proto test file passed (`18 passed`); the latest PR Tinker CPU check is green. Exact-SHA sync GPU E2E [run 36874991711](https://github.com/NovaSky-AI/SkyRL/actions/runs/36874991711) is still in progress at the time of this note. Confidence: high for the 500, pending for end-to-end convergence.
+- **Validation:** New round-trip test passes through `model_dump_json()`, JSON parsing, protobuf encoding, and SDK decoding. The full proto test file passed (`18 passed`); the PR Tinker CPU check passed. [Sync GPU E2E run 36886291943](https://github.com/NovaSky-AI/SkyRL/actions/runs/36886291943) completed all 14 batches and the final assertions on `73c74be7`, with no `retrieve_future` HTTP 500. Confidence: high for the observed API failure.
 
 ## Configuration and observability
 
@@ -45,13 +45,13 @@ This separates observed failures from inferred causes and operational mitigation
 - **Observed:** Sync Tinker job `prodjob_zdpufh6sxhkl2zasssqbtznvld` on `2fc91fbb` completed all 14 training batches (`progress/done_frac=1.0`) with final reward `0.547510` and KL `0.000685`, both within the test thresholds. Only afterward, the `get_summary.py` invocation failed because `uv run --isolated --extra fsdp` tried to fetch the unrelated `transformer-engine-torch` wheel from GitHub and received HTTP 500. Its automatic retry was stopped before another GPU entrypoint ran.
 - **Cause:** `get_summary.py` imports only `wandb`, but its invocation resolved the entire FSDP project environment. A transient external wheel failure could therefore mark an otherwise successful training run red. This is a post-training dependency-resolution issue, distinct from the earlier API 500.
 - **Patch:** Run the summary script in an isolated no-project environment with `wandb==0.30.0` (the version in `uv.lock`) in both Tinker E2E scripts. No training or assertion threshold changes.
-- **Validation:** The minimal command imported `wandb 0.30.0` locally without pulling backend extras; running `get_summary.py --help` in that environment, shell syntax, and diff checks passed. The next exact-SHA workflow rerun is pending. Confidence: high in the cause; final workflow result pending.
+- **Validation:** The minimal command imported `wandb 0.30.0` locally without pulling backend extras; running `get_summary.py --help` in that environment, shell syntax, and diff checks passed. [Exact-code-SHA workflow run 36886291943](https://github.com/NovaSky-AI/SkyRL/actions/runs/36886291943) and Anyscale job `prodjob_fdbfu1zye777lj4xeq9aysgvrx` both succeeded. The final summary printed `env/all/reward/total = 0.5462890625 >= 0.50`, `optim/kl_sample_train_v2 = 0.0006762227 <= 0.00074`, and `All assertions passed!`. Confidence: high.
 
 ### Tinker server log survival
 
 - **File:** `tests/train/gpu_e2e_test/gsm8k_tinker.sh`.
 - **Observed:** The sync Tinker client could not retrieve futures, but `server.log` was missing from its run directory. The cookbook's `behavior_if_log_dir_exists=delete` removes that directory after the server has opened the log file. Reading the still-open server stdout descriptor exposed the HTTP 500 traceback.
-- **Patch:** Keep the server log next to, rather than inside, the cookbook run directory and tail that same path on failure. This is observability only; it does not make training pass. Exact-SHA E2E validation is pending.
+- **Patch:** Keep the server log next to, rather than inside, the cookbook run directory and tail that same path on failure. This is observability only; it does not make training pass. The `2fc91fbb` run's post-training failure successfully tailed the preserved server log.
 
 ### Uvicorn error logger
 
@@ -67,9 +67,9 @@ This separates observed failures from inferred causes and operational mitigation
 - **Patch:** Give nested Alembic commands `--isolated --extra tinker --extra dev`. Local `test_db.py` passed (2 tests); a full Linux Tinker CPU Anyscale job and the latest PR Tinker CPU check passed.
 - **Scope caveat:** This is reproducibility/test-harness cleanup, not a demonstrated fix for the reported nightly failure. Consider moving it to a separate PR if keeping this repair narrowly scoped.
 
-## Excluded changes and remaining gates
+## Excluded changes and remaining uncertainty
 
 - No Megatron-specific change is in this branch. [Megatron run 36755420482](https://github.com/NovaSky-AI/SkyRL/actions/runs/36755420482) on `5e580e8` passed after the earlier `max_generate_length` fix on main.
 - A speculative continuous-sampler timeout and `test_unload_model` teardown hardening were removed because their proposed causes were not established by the before/after runs. Neither is in the current diff.
-- The `2fc91fbb` sync Tinker run completed training and met reward/KL thresholds but failed during the external wheel fetch in its final metrics-check command. The summary-command patch above still needs exact-SHA workflow validation. CPU, Tinker CPU, JAX CPU/GPU, gym, skycap, and code-quality checks passed on `2fc91fbb`. The branch should remain draft until the final summary command is validated.
+- The `2fc91fbb` sync Tinker run completed training and met reward/KL thresholds but failed during the external wheel fetch in its final metrics-check command. The `73c74be7` rerun succeeded end to end, and every latest-code-SHA PR check passed (CPU, Tinker CPU, JAX CPU/GPU, gym, skycap, code quality, and Vercel). The PR remains a draft for human review, not because of a failing validation gate.
 - The non-finite `importance_ratio` producer deserves a separate targeted investigation. Do not infer numerical health solely from a green API retrieval: inspect loss and reward metrics in the E2E run.
