@@ -61,36 +61,36 @@ calls for timeline correlation; it does not gate counter rates.
 
 CV includes observed idle engines and has a companion `_num_engines` suffix.
 It is omitted for fewer than two engines or zero mean. Compare equivalent
-engines. Unsupported metrics and zero-denominator ratios are omitted. Fresh
-owned engines have known zero counter baselines; other missing values remain
-unknown. Unavailable exports retain a baseline for a later complete snapshot,
-and decreasing counters invalidate the affected interval.
+engines. Unsupported metrics and zero-denominator ratios are omitted. Unknown
+counter baselines remain unavailable; reused external servers require observed
+baseline subtraction. Unavailable exports reset step baselines, and decreasing
+counters invalidate the affected interval.
 
-Prefill/decode deployments still export their raw Ray metrics, but generic
-training collection is disabled until role-specific accounting is available.
+Prefill/decode deployments retain raw Ray metrics and existing step collection,
+but generic run aggregates are omitted until role-specific accounting is available.
 Both roles can report the same prompts and requests, and prefill can report a
 placeholder generated token; summing them does not yield logical run totals.
 
 ## Run summaries
 
 W&B receives `vllm_correct_aggregate/train/`, `vllm_correct_aggregate/eval/`, or `vllm_correct_aggregate/combined/` summary
-fields. Other configured loggers continue receiving step scalars. A local
-`vllm_run_summary.json` is saved under `trainer.ckpt_path` on finalization.
+fields. Other configured loggers continue receiving step scalars.
 
 Run throughput uses summed tokens / summed active duration. Cache rates use
 summed hits / summed queries; means and percentiles use merged histogram
-statistics. Run summaries also include token/preemption/offload-byte totals,
-`active_generation_seconds`, `observed_active_seconds`,
-`unobserved_active_seconds`, and `incomplete_windows`. The last field counts
-unavailable or invalid collection attempts; a later snapshot can recover their
-counters and duration. Use unobserved seconds to identify unrecovered coverage.
+statistics. Run summaries also include token/preemption/offload-byte totals and
+`active_generation_seconds`. A missing or reset window omits its scope's summary.
+Counters unavailable during part of a scope are omitted rather than divided by
+the entire scope's duration. Fresh engines without usable initial counter
+exports can therefore lack some aggregates; warmed external servers provide
+observed baselines for reused counters.
 
-`run_status` becomes `success` or `failed` on handled exit. Partial summaries
-update during logging. Accumulators persist in training checkpoints;
-`vllm_correct_aggregate/covers_resumed_history` reports whether restored history is included.
-Fresh engines establish new baselines after resumption. Final collection allows
-a bounded terminal export drain without adding idle time to generation duration.
-A hard kill cannot finalize status or annotations.
+`run_status` becomes `success` or `failed` on handled exit. Finalization attempts
+one bounded collection and publishes aggregates for fresh runs only. Loading a
+checkpoint omits aggregates; step metrics still work. `LATEST` without a found
+checkpoint is a fresh run. Metric history is not checkpointed, and no local
+summary JSON is written. Collection is best-effort and does not wait for delayed
+Ray exports. A hard kill cannot publish final aggregates, status or annotations.
 
 In W&B, add run-table columns for status, output tokens, throughput, preemptions
 per million tokens, cache hit rates, offload bytes/s, and TTFT/request TPOT.
@@ -102,7 +102,7 @@ The pinned SDK produces an uploaded summary without those entries, but live
 validation found that the W&B backend still exposes inferred last values in its
 public summary. If these appear, use `vllm_correct_aggregate/*` for run comparisons;
 `vllm/*` values are step snapshots. Historical runs retain their old namespaces.
-A hard kill can leave a partial aggregate; check status and coverage before comparing.
+Check run status and aggregate availability before comparing.
 
 ## Optional Grafana annotations
 
@@ -112,7 +112,6 @@ trainer:
     enabled: true
     token_env_var: GRAFANA_API_TOKEN
     tags: [training]
-    record_directory: ~/skyrl_runs/annotations
 ```
 
 SkyRL reads `RAY_GRAFANA_HOST` inside a task pinned to the Ray head node and
@@ -127,7 +126,8 @@ authenticated annotation writes. SkyRL forwards it to its runtime without
 logging the value. Annotation text is exactly the run name;
 a unique invocation ID is stored in tags. A start event becomes a start/end
 region on handled finalization. Requests are bounded and failures do not stop
-training. Local records preserve annotation ID, timestamps, and status.
+training. Grafana persists events in its own annotation database; SkyRL writes
+no local annotation records.
 
 In Grafana, enable an organization annotation query with the `skyrl-run` tag.
 Regions cover startup through finalization; use the activity gauge to correlate
