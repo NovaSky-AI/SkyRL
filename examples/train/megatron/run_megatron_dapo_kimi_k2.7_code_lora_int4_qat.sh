@@ -19,12 +19,6 @@ set -x
 # One-time setup (identical paths on every node: checkout, .venv, HF cache,
 # BF16 masters):
 #
-# 0) Install the megatron stack into the project venv. The root uv.lock is
-#    CUDA-13 native (torch 2.13 cu130, vLLM 0.28, TE 2.16; every CUDA library
-#    including cuDNN comes from pip), which is what Blackwell-Ultra (B300 /
-#    sm103) needs -- NVIDIA driver >= R580:
-#    uv sync --extra megatron
-#
 # 1) Dequantize the INT4 release to BF16 masters ON EVERY NODE (or a shared
 #    filesystem). ~595 GB in, ~2.1 TB out; verifies bit-exactness:
 #    uv run --isolated examples/train/megatron/dequantize_compressed_tensors_int4.py \
@@ -34,24 +28,7 @@ set -x
 # 2) Download data (head node only; the driver reads it):
 #    bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 #
-# 3) Start the Ray cluster from the checkout, then run this script on the head
-#    node only. Export the runtime-env block below (LD_LIBRARY_PATH, CUDNN_PATH,
-#    SKYRL_LD_LIBRARY_PATH_EXPORT, UV_PROJECT_ENVIRONMENT) plus any site NCCL
-#    settings (NCCL_SOCKET_IFNAME / NCCL_IB_HCA / GLOO_SOCKET_IFNAME for the
-#    cross-node rail) in the shell that runs `ray start` on EVERY node: Ray
-#    workers inherit the raylet's environment, and only LD_LIBRARY_PATH and
-#    SKYRL_*/UV_*/HF_* are re-exported through the Ray runtime env.
-#    export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
-#    head:   uv run --no-sync --extra megatron ray start --head --port=6379 --num-gpus=8
-#    worker: uv run --no-sync --extra megatron ray start --address=<head-ip>:6379 --num-gpus=8
-#    The 595 GB INT4 load + FULL_DECODE_ONLY graph capture can exceed the 600 s
-#    engine health deadline on a cold page cache (see the export below).
-#    If the vLLM TP group dies in ncclCommInitRank with "Failed to bind NVLink
-#    SHARP (NVLS) Multicast memory ... CUDA error 401" (NVSwitch fabric state
-#    out of sync with Fabric Manager -- dmesg shows NV_ERR_FABRIC_STATE_OUT_OF_SYNC
-#    and FM asks for a GPU reset), export NCCL_NVLS_ENABLE=0 before `ray start`
-#    on every node until the GPUs have been reset; only the intra-node TP8
-#    engine all-reduce is NVLS-eligible in this layout.
+# 3) Run the below script. 
 #
 # The task here is math (DAPO-17k / AIME) to reuse the standard data prep; swap
 # data.train_data / environment.env_class for long-horizon code tasks to make
@@ -160,29 +137,7 @@ export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S="${SKYRL_WAIT_UNTIL_I
 # offload in pinned host memory.
 export SKYRL_FROZEN_OFFLOAD_DIR="${SKYRL_FROZEN_OFFLOAD_DIR:-/data/skyrl/frozen-offload}"
 
-# Runtime env: every CUDA library comes from pip (cu130 lock), so resolve them
-# from the project venv ahead of any system CUDA, and pin TE's cuDNN search
-# (CUDNN_PATH) to the pip cuDNN -- a system libcudnn core mixed with the pip
-# sublibraries fails with CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED. A system
-# cuDNN 9 of another 9.x version breaks TE fused attention even so
-# (CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH: cuDNN probes optional
-# sublibraries the pip wheel may not ship and the loader falls through to the
-# system copy) -- remove it or match the pip nvidia-cudnn-cu13 to it. Run from
-# the checkout root (no --isolated: the env below points into .venv and must
-# be stable across nodes). Export these (plus SKYRL_LD_LIBRARY_PATH_EXPORT=1)
-# before `ray start` on every node.
-SP="$(pwd)/.venv/lib/python3.12/site-packages"
-export LD_LIBRARY_PATH="$SP/nvidia/cu13/lib:$SP/nvidia/cudnn/lib:$SP/nvidia/cusparselt/lib:$SP/nvidia/nccl/lib:$SP/nvidia/nvshmem/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export CUDNN_PATH="$SP/nvidia/cudnn"
-export SKYRL_LD_LIBRARY_PATH_EXPORT=1
-# Ray workers execute `uv run` from Ray's *copied* working dir (no .venv
-# there); pin the project env by absolute path so --no-sync finds it.
-export UV_PROJECT_ENVIRONMENT="$(pwd)/.venv"
-
-# --no-sync: the venv is prepared once per node before `ray start`; Ray's uv
-# hook re-runs this exact command per worker, and concurrent implicit syncs
-# from many workers can race on the shared venv.
-uv run --no-sync --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
