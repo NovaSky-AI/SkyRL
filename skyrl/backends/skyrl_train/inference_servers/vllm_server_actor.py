@@ -685,6 +685,15 @@ def _seed_dp_master_port(http_port: int) -> None:
     os.environ.setdefault("VLLM_DP_MASTER_PORT", str(compute_dp_master_port(http_port)))
 
 
+def _normalize_profiler_config(cli_args: Namespace) -> None:
+    """Normalize profiler overrides before vLLM attaches its API routes."""
+    from vllm.config import ProfilerConfig
+
+    profiler_config = getattr(cli_args, "profiler_config", None)
+    if isinstance(profiler_config, dict):
+        cli_args.profiler_config = ProfilerConfig(**profiler_config)
+
+
 async def _build_and_serve_vllm_server(
     cli_args: Namespace,
     *,
@@ -696,6 +705,7 @@ async def _build_and_serve_vllm_server(
     Shared by ``VLLMServerActor._run_server`` (Ray-actor deployment) and the
     standalone ``python -m`` entrypoint below.
     """
+    _normalize_profiler_config(cli_args)
     _seed_dp_master_port(cli_args.port)
 
     sock_addr = (cli_args.host, cli_args.port)
