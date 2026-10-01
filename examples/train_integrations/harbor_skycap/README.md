@@ -65,6 +65,44 @@ def final_and_short_discards(graph: MessageGraph) -> list[Row]:
 Every row of a trial carries its reward. See [skycap's README](../../../skycap/README.md#which-paths-train)
 for what a rule may return.
 
+## mini-swe-agent and other installed agents
+
+Terminus-2 calls the model from the trainer's process. An *installed* agent such as
+mini-swe-agent runs inside its sandbox and calls the model from there, so the sandbox has to reach
+skycap's harness routes over the network, through the exposure skycap is configured with
+(`skycap.exposure`, [below](#agents-inside-sandboxes-exposure)); the generator refuses to start such an
+agent without one. `agents.py` says, per Harbor agent, how it is pointed at its
+trajectory's URL: Terminus-2 through its kwargs, mini-swe-agent through `OPENAI_BASE_URL` and the
+other variables its LiteLLM client reads. An agent missing from the table is taken to be an
+installed one speaking OpenAI's API.
+
+```bash
+export DAYTONA_API_KEY=...   # and WANDB_API_KEY, optionally
+TASKS=code_contests-0000,code_contests-0002 \
+  bash examples/train_integrations/harbor_skycap/run_codecontests_mini_swe_agent.sh
+```
+
+The recipe defaults to Qwen3.5-2B on one GPU with `mini_swe_agent.yaml`, mini-swe-agent's
+tool-calling config with the Harbor task as its instance template. Things that differ from
+Terminus-2:
+
+- **Parsed replies.** mini-swe-agent acts through tool calls, so skycap answers with parsed
+  `reasoning_content` and `tool_calls` (`skycap.use_raw_content` defaults per agent: on for
+  Terminus-2, off otherwise). LiteLLM's `openai/` provider sends both back verbatim, so each turn
+  extends the last one token for token.
+- **Discarded replies.** A reply with no tool call is dropped from mini-swe-agent's history, and it asks
+  again. In skycap's graph that reply is a dead-end branch: `skycap.train_paths=all` trains it with the
+  rollout's advantage, and `final` doesn't.
+- **Context overflow.** When a prompt leaves no room in the model's context, skycap refuses it with
+  OpenAI's wording, so LiteLLM raises `ContextWindowExceededError` and the agent exits instead of
+  retrying. skycap records the refusal and `finish` reports it (`context_length_exceeded`); the
+  generator then treats the trial like Terminus-2's `ContextLengthExceededError`: reward 0,
+  `context_length`, and overlong filtering applies.
+- **Thinking.** `skycap.chat_template_kwargs.enable_thinking=true` samples a model whose template
+  leaves thinking off (Qwen3.5-2B) with thinking on. `skycap.thinking_retention` (default `all`) keeps
+  earlier turns' thinking in the prompt, so turns keep extending; `tool_cycle` strips it as Qwen's
+  template does, re-rendering the prompt.
+
 ## How it fits
 
 | Piece | What it does |
@@ -74,6 +112,7 @@ for what a rule may return.
 | `exposure.py`, `tunnel.py` | How agents inside sandboxes reach each server's harness routes: the harness-only gateway, the `Exposure` interface and its built-ins. `tunnel.py` runs a Cloudflare quick tunnel. |
 | `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
 | `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
+| `agents.py` | Per Harbor agent: how it is pointed at its trajectory's URL, the model name it is given, and whether it runs inside its sandbox. |
 | `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
 
 What's imposed on every call:

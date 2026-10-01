@@ -39,15 +39,13 @@ from skyrl.train.generators.base import (
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
+from .agents import binding
 from .compose import TrialOutcome, compose, split
 
 litellm.suppress_debug_info = True
 
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
 MAX_NUM_RETRIES_PER_TRIAL = 2
-
-#: skycap authenticates nothing, but LiteLLM won't build a client without a key.
-PLACEHOLDER_API_KEY = "skycap"
 
 
 class HarborSkycapGenerator(GeneratorInterface):
@@ -103,7 +101,15 @@ class HarborSkycapGenerator(GeneratorInterface):
 
         self._template = deepcopy(harbor_cfg)
         agent = self._template.setdefault("agent", {})
-        agent["model_name"] = f"hosted_vllm/{served}"
+        #: How this run's agent is pointed at a trajectory's URL (``agents.py``).
+        self._binding = binding(agent.get("name"))
+        if self._binding.in_sandbox and not self._harness_urls:
+            raise ValueError(
+                f"Agent {agent.get('name')!r} calls the model from inside its sandbox, so skycap's harness routes "
+                "must be exposed to it: set skycap.exposure.type (external_host, cloudflare, or your own)."
+            )
+        self._binding.prepare()
+        agent["model_name"] = self._binding.model_name(served)
         kwargs = agent.setdefault("kwargs", {})
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
@@ -224,6 +230,11 @@ class HarborSkycapGenerator(GeneratorInterface):
                 reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
             finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason}, paths=self.train_paths)
 
+        if exception == "NonZeroAgentExitCodeError" and finished.context_length_exceeded:
+            # An installed agent (mini-swe-agent, ...) has no ContextLengthExceededError of its own: skycap
+            # refused its prompt as too long, its client raised, and the agent exited non-zero. Treated as
+            # Terminus-2's context-length stop, so overlong filtering applies to it too.
+            reward, stop_reason = 0.0, "context_length"
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
@@ -262,15 +273,5 @@ class HarborSkycapGenerator(GeneratorInterface):
     def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
-        kwargs = config["agent"]["kwargs"]
-        kwargs["api_base"] = base_url
-        llm_kwargs = kwargs.setdefault("llm_kwargs", {})
-        # Terminus-2 takes `api_base` itself but passes a key only through `llm_kwargs`.
-        llm_kwargs["api_key"] = PLACEHOLDER_API_KEY
-        if cache_salt is not None:
-            # LiteLLM merges `extra_body` into the request body, where skycap reads `cache_salt` and forwards it.
-            extra_body = llm_kwargs.setdefault("extra_body", {})
-            if not isinstance(extra_body, dict):
-                raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
-            extra_body["cache_salt"] = cache_salt
+        self._binding.configure(config["agent"], base_url, cache_salt)
         return config

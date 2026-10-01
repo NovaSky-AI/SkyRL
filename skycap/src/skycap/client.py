@@ -46,6 +46,9 @@ class FinishResult:
     #: Token-mode calls whose prompt had to be rendered rather than extended (``CallInfo.bridged``).
     #: Zero for a harness that keeps its history append-only.
     unbridged_calls: int = 0
+    #: Whether skycap refused a prompt of this trajectory as too long for the model's context. An agent
+    #: that calls the model itself (an installed one) reports that only as its own failure.
+    context_length_exceeded: bool = False
 
 
 class Trajectory:
@@ -76,6 +79,7 @@ class Trajectory:
             status=body["status"],
             samples=[Sample.from_json(s) for s in body["samples"]],
             unbridged_calls=body.get("unbridged_calls", 0),
+            context_length_exceeded=body.get("context_length_exceeded", False),
         )
         return self.result
 

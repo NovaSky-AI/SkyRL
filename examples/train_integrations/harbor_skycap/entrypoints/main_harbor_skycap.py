@@ -30,6 +30,7 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
+from ..agents import binding
 from ..exposure import Exposure, exposure_factory
 from ..harbor_generator import HarborSkycapGenerator
 from ..servers import SkycapServers, start_servers
@@ -68,11 +69,21 @@ class SkycapConfig:
     """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
     renderer_pool_size: int = 8
     """Renderers (tokenizer copies) each server renders prompts with in parallel."""
-    use_raw_content: bool = True
+    use_raw_content: Optional[bool] = None
     """Answer with the completion's own text as ``content``, a thinking model's reasoning inline, as
     SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
     ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
-    replies every replayed turn would lose its reasoning, edit history and fork the graph."""
+    replies every replayed turn would lose its reasoning, edit history and fork the graph.
+    None (default) picks per agent (``agents.py``): on for Terminus-2, off for agents that act through
+    tool calls (mini-swe-agent), which need them parsed."""
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+    """Options for skycap's renderer, as the chat template's kwargs: ``{enable_thinking: true}`` samples
+    Qwen3.5-2B with thinking, which its template leaves off by default."""
+    thinking_retention: Optional[str] = "all"
+    """What skycap's renderer does with earlier turns' thinking. ``all`` (default) keeps it: each turn extends
+    the previous prompt and completion token for token. ``tool_cycle`` drops it once a new user query arrives,
+    as Qwen's template does, re-rendering the prompt. None follows the chat template's own knobs. (A harness
+    that drops ``reasoning_content`` when replaying a reply forks the graph either way.)"""
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the
@@ -91,6 +102,7 @@ class HarborSkycapConfig(HarborSkyRLConfig):
 
 def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     """skycap servers in token mode, in front of SkyRL's router."""
+    agent = binding(cfg.harbor_trial_config.get("agent", {}).get("name"))
     ie = cfg.generator.inference_engine
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
@@ -110,7 +122,11 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
             "min_p": sampling.min_p,
         },
         "sampling_mask": ie.enable_return_sample_support_set,
-        "use_raw_content": cfg.skycap.use_raw_content,
+        "chat_template_kwargs": (
+            dict(cfg.skycap.chat_template_kwargs) if cfg.skycap.chat_template_kwargs is not None else None
+        ),
+        "thinking_retention": cfg.skycap.thinking_retention,
+        "use_raw_content": agent.raw_content if cfg.skycap.use_raw_content is None else cfg.skycap.use_raw_content,
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
     }

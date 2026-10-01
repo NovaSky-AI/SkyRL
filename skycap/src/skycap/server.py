@@ -278,6 +278,7 @@ class CaptureServer:
                 "status": trajectory.status,
                 "samples": [s.to_json() for s in samples],
                 "unbridged_calls": trajectory.graph.unbridged_calls(),
+                "context_length_exceeded": trajectory.context_length_exceeded,
             }
         )
 
