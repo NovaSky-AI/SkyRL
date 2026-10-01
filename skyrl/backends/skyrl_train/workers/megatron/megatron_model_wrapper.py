@@ -299,12 +299,15 @@ class MegatronModelWrapper:
         return self.forward(*args, **kwargs)
 
     def _assert_vlm_supported(self):
-        """Guard the VLM parallelism constraints carried over from the FSDP path.
+        """Guard the VLM parallelism constraints.
 
-        3D RoPE and multimodal token positions make sample/microbatch packing,
-        context parallelism, and sequence parallelism unsafe for VLMs today.
+        With ``remove_microbatch_padding`` the model receives a [1, T] THD stream and
+        Megatron-Bridge's Qwen3-VL model rebuilds 3D mRoPE positions per packed
+        sub-sequence from ``packed_seq_params`` (``rope.get_rope_index``).
+        TODO(xgui): context parallelism. preprocess_packed_seqs pre-shards the stream
+        per CP rank, which the bridge model only accepts with explicit rank-local
+        3D position ids.
         """
-        assert not self.remove_microbatch_padding, "VLM + microbatch padding removal unsupported"
         assert mpu.get_context_parallel_world_size() == 1, "VLM + context parallelism unsupported"
         assert (
             mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
