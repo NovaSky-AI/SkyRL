@@ -27,7 +27,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_mhc_full_recompute.py` | `patch_mhc_full_recompute.py` (loss/grads vs no recompute on a GLM-5.3-Flash slice) |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
 | `gpu_ci/patches/megatron/test_moe_combine_bf16_reduce.py` | `patch_moe_combine_bf16_reduce.py` (two ranks + wrapper) |
-| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1 (two ranks) |
+| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1, both exchanges (two ranks) |
+| `gpu_ci/patches/megatron/test_moe_node_dedup_dispatch.py` | `patch_moe_node_dedup_dispatch.py` vs the stock dispatcher (four ranks, two pseudo-nodes) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -65,6 +66,10 @@ model, `glm5_next/` is deleted too.
   - SkyRL addition: head-wise (Ulysses) context parallelism, reusing megatron-core's
     `GatedDeltaNet` all-to-all helpers (`ssm/gated_delta_net/common.py`). #7054 has its own
     head-/chunk-wise CP (`cp_partition_mode`); compare against it before switching.
+    `SKYRL_KDA_CP_EXCHANGE=allgather` swaps GatedDeltaNet's all-to-all of the projected tensors for
+    an all-gather of the sequence-parallel hidden states (over CP, then TP) and projections of only
+    this rank's head slice: ~5x fewer bytes across the CP group, 1.18x faster fwd+bwd at 1M tokens
+    on TP8 CP2 where CP crosses nodes.
 - **Landed?** megatron-core defines a KDA module or `experimental_attention_variant="kda"`, and
   `TransformerConfig` has `kda_gate_lower_bound`
   (`grep -rn "KimiDeltaAttention\|kda_gate_lower_bound" .venv/.../megatron/core`).
@@ -252,6 +257,20 @@ untouched. Applied unconditionally in `make_megatron_module`.
 - **Landed?** megatron-core's `combine_preprocess` no longer upcasts before the reduce-scatter, or
   does so only when needed.
 - **Remove:** the module, its call in `make_megatron_module`, and `test_moe_combine_bf16_reduce.py`.
+
+### `patch_moe_node_dedup_dispatch.py`: one inter-node copy per (token, node) in the MoE all-to-all
+
+Opt-in (`SKYRL_MOE_NODE_DEDUP=1`). megatron-core's all-to-all dispatcher sends a token once per
+selected expert; with top-8 over 288 experts on 8 nodes most tokens pick several experts on the
+same remote node. The patch sends each token once per destination node (to the same-local-index GPU
+there, with that node's routing bits and probabilities), fans copies out over NVLink, and sums each
+node's expert outputs there before one partial sum crosses back. Expert ranks see exactly the stock
+rows/order (checked against `output_splits` every call), so ETP, sorting and experts are untouched;
+the combine's bf16 sum is only re-associated. 1.41x faster fwd+bwd at 64k on 64 B200 whose
+inter-node NCCL runs over TCP. Applied in `make_megatron_module` (no-op unless enabled).
+- **Landed?** megatron-core's alltoall dispatcher deduplicates per node (or SkyRL switches to a
+  hierarchical dispatcher such as DeepEP/HybridEP where the network allows).
+- **Remove:** the module, its call in `make_megatron_module`, and `test_moe_node_dedup_dispatch.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

@@ -25,8 +25,12 @@ set -x
 #   -> ~163 GiB/GPU peak, ~4.1k tokens/s (fwd+bwd ~65 tokens/s/GPU). Add SKYRL_DSA_QUERY_CHUNK=65536
 #   to trade ~5 GiB for one extra DSA attention forward.
 # 1M tokens per sequence: the same plus MEGATRON_CP=2 MAX_LENGTH=1048576 (dp = 4, batch 4)
-#   -> ~163 GiB/GPU peak, fwd+bwd ~44 tokens/s/GPU. With TP8 the CP pair spans two nodes; keeping
-#   TP * CP within a node (e.g. TP4 CP2) avoids the cross-node all-to-alls.
+#   -> ~163 GiB/GPU peak, fwd+bwd ~44 tokens/s/GPU.
+# When inter-node traffic is slow (here: NCCL over TCP, ~1 GB/s per GPU; check NCCL_DEBUG=INFO for
+# "NET/Socket"), the MoE and CP all-to-alls dominate the step. Two opt-ins cut the cross-node bytes:
+#   SKYRL_KDA_CP_EXCHANGE=allgather  KDA CP exchanges hidden states, not projections (1M: 52 tok/s/GPU)
+#   SKYRL_MOE_NODE_DEDUP=1           MoE tokens cross once per node, not once per expert
+#   -> 1M with both: fwd+bwd 977 s = ~67 tokens/s/GPU, ~4.2k tokens/s, nvidia-smi peak ~174 GiB.
 
 MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to a GLM-5.3-Flash config + tokenizer directory}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"

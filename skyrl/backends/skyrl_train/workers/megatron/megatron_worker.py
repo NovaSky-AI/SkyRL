@@ -556,6 +556,12 @@ class MegatronWorker:
         )
 
         patch_moe_combine_bf16_reduce()
+        # Opt-in (SKYRL_MOE_NODE_DEDUP=1): one inter-node copy per (token, node) in the MoE all-to-all.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_node_dedup_dispatch import (
+            patch_moe_node_dedup_dispatch,
+        )
+
+        patch_moe_node_dedup_dispatch()
         if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
             # After patch_dsa_index_share, which rebinds the same function.
             from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
