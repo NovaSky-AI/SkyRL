@@ -41,17 +41,8 @@ LoRA, and bit-exact fake-INT4 quantization-aware training.
 
 ## One-time setup
 
-Every node needs the repo checkout, the project venv, the HF cache and the
+Every node needs the repo checkout, the HF cache and the
 BF16 masters at identical paths.
-
-**0) Install the `megatron` stack** into the project venv. The root `uv.lock`
-is CUDA-13 native (torch 2.13 cu130, vLLM 0.28, Transformer Engine 2.16; every
-CUDA library, cuDNN included, comes from pip), which is what Blackwell-Ultra
-(B300 / sm103) requires — NVIDIA driver R580 or newer:
-
-```bash
-uv sync --extra megatron
-```
 
 **1) Dequantize the INT4 release to BF16 masters** on every node (or a shared
 filesystem). This also verifies, tensor by tensor, that re-quantizing the
@@ -74,23 +65,7 @@ the reference script reuses the standard DAPO prep):
 bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 ```
 
-**3) Start Ray on both nodes** from the checkout, then run the training script
-on the head node only. The environment block at the bottom of the run script
-(`LD_LIBRARY_PATH` / `CUDNN_PATH` pointing into the venv's pip CUDA libraries,
-`SKYRL_LD_LIBRARY_PATH_EXPORT=1`, `UV_PROJECT_ENVIRONMENT`) plus any
-site-specific cross-node NCCL settings (`NCCL_SOCKET_IFNAME`, `NCCL_IB_HCA`,
-`GLOO_SOCKET_IFNAME`) must be exported in the shell that runs `ray start` on
-**every** node: Ray workers inherit the raylet's environment, and only
-`LD_LIBRARY_PATH` and the `SKYRL_*` / `UV_*` / `HF_*` variables are re-exported
-through the Ray runtime env.
-
-```bash
-export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
-# head
-uv run --no-sync --extra megatron ray start --head --port=6379 --num-gpus=8
-# worker
-uv run --no-sync --extra megatron ray start --address=<head-ip>:6379 --num-gpus=8
-```
+**3) Run the training script** (assumes Ray cluster is setup):
 
 ## Running
 
@@ -152,18 +127,6 @@ train/infer mismatch (same toggle as the Qwen3.6 INT4 study).
   `/data/skyrl/frozen-offload`; clean, evictable page cache), so point it at a
   fast local disk on every node — or set it to `0` to keep the offload in
   pinned host RAM.
-- **Blackwell-Ultra (B300 / sm103)** runs on the default CUDA-13 lock — no
-  separate dependency set is needed anymore. On hosts that also carry a
-  system CUDA/cuDNN, the venv's pip libraries must come first on
-  `LD_LIBRARY_PATH` and `CUDNN_PATH` must point at the pip cuDNN (the run
-  script exports both), or Transformer Engine mixes the system `libcudnn`
-  core with the pip sublibraries (`CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED`).
-  A system cuDNN 9 of a *different* 9.x than the pip one is still a problem
-  even then: cuDNN's graph library probes optional sublibraries
-  (`libcudnn_engines_tensor_ir`) that the pip wheel pinned by torch may not
-  ship, the dynamic loader falls through to the system copy, and TE's fused
-  attention fails with `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`. Remove the
-  system cuDNN or install a pip `nvidia-cudnn-cu13` of the same version.
 - **Engine bring-up time**: the 595 GB INT4 load plus `FULL_DECODE_ONLY`
   CUDA-graph capture can exceed SkyRL's default 600 s engine health deadline
   on a cold page cache; the script raises
