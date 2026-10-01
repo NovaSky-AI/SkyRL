@@ -148,6 +148,29 @@ class TestTokenBasedBatchIterator:
             if microbatch["loss_mask"].sum() > 0:  # not a padding batch
                 assert token_count <= 15
 
+    def test_iterator_pays_aggregate_alignment_once(self):
+        batch = self._make_batch([9, 7])
+        iterator = TokenBasedBatchIterator(
+            batch,
+            max_tokens_per_microbatch=16,
+            packed_length_multiple=16,
+        )
+
+        assert iterator._microbatches == [[0, 1]]
+
+    def test_controller_packed_rows_pay_each_segment_alignment(self):
+        batch = self._make_batch([8, 8])
+        batch["sub_seq_lengths"] = TensorList([torch.tensor([3, 5]), torch.tensor([3, 5])])
+        iterator = TokenBasedBatchIterator(
+            batch,
+            max_tokens_per_microbatch=16,
+            sequence_length_multiple=4,
+            packed_length_multiple=4,
+        )
+
+        assert iterator._token_counts == [12, 12]
+        assert iterator._microbatches == [[0], [1]]
+
     def test_len_matches_iteration(self):
         batch = self._make_batch([10, 10, 5, 5])
         iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=15)

@@ -141,7 +141,7 @@ class TestPreprocessPackedSeqsShortSequencesCP:
 
                 assert result_ids.shape[0] == 1  # unsqueezed
                 assert result_ids.shape[1] % 16 == 0
-                assert packed_params.max_seqlen_q % (16 * cp_size) == 0
+                assert packed_params.total_tokens % (16 * cp_size) == 0
                 assert packed_params.qkv_format == "thd"
 
     def test_remove_left_padding_tp1_aligns_only_for_fp8(self):
