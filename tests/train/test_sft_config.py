@@ -340,6 +340,44 @@ class TestMaxTokensPerMicrobatch:
         assert skyrl_cfg.trainer.micro_train_batch_size_per_gpu == 1
 
 
+class TestPackingBinDPAlignmentConfig:
+    def _cfg(self, **overrides) -> SFTConfig:
+        cfg = SFTConfig(
+            strategy="megatron",
+            batch_size=64,
+            max_length=128,
+            use_sequence_packing=True,
+            align_packing_bins_to_dp=True,
+        )
+        cfg.model.path = "test/my-model"
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+        return cfg
+
+    def test_valid_packed_config(self):
+        validate_sft_cfg(self._cfg())
+
+    def test_requires_sequence_packing(self):
+        with pytest.raises(ValueError, match="requires use_sequence_packing"):
+            validate_sft_cfg(self._cfg(use_sequence_packing=False))
+
+    def test_rejects_custom_sampler(self):
+        with pytest.raises(ValueError, match="does not yet support sampler='custom'"):
+            validate_sft_cfg(self._cfg(sampler="custom", sampler_class_path="pkg.Sampler"))
+
+    @pytest.mark.parametrize("variation", [-0.01, 0.0, 1.0, 2.0])
+    def test_rejects_invalid_variation(self, variation):
+        with pytest.raises(ValueError, match=r"must be in \(0, 1\)"):
+            validate_sft_cfg(self._cfg(packing_batch_size_allowed_variation=variation))
+
+    def test_minimum_batch_size_error_is_actionable(self):
+        cfg = self._cfg(batch_size=4, packing_batch_size_allowed_variation=0.5)
+        cfg.megatron_config.tensor_model_parallel_size = 1
+        cfg.megatron_config.pipeline_model_parallel_size = 1
+        with pytest.raises(ValueError, match="Reduce packing_batch_size_allowed_variation or disable"):
+            validate_sft_cfg(cfg)
+
+
 class TestDatasetConfigNormalization:
     """Deprecated single-dataset fields translate to the list-based fields (RFC #1875)."""
 

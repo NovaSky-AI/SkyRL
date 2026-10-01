@@ -18,14 +18,28 @@ it as ``ClassName(tokenized, **sampler_kwargs)``. See
 from __future__ import annotations
 
 import importlib
-from typing import Iterator, List, Optional, Sequence
+import math
+from typing import TYPE_CHECKING, Any, Iterator, List, Optional, Sequence
 
 import torch
 from loguru import logger
+from torchdata.stateful_dataloader.sampler import RandomSampler
+from torchdata.stateful_dataloader.stateful import Stateful
+
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    is_fp8_enabled,
+)
+from skyrl.train.dataset.collators import make_sft_sequence_packer
+
+if TYPE_CHECKING:
+    from skyrl.train.config.sft_config import SFTConfig
+    from skyrl.train.dataset.sft_dataset import SFTDataset
 
 __all__ = [
     "DataMixingSampler",
+    "DPAlignedPackingBatchSampler",
     "StatefulSequentialSampler",
+    "build_dp_aligned_packing_batch_sampler",
     "import_sampler_class",
 ]
 
@@ -54,6 +68,260 @@ def import_sampler_class(class_path: str) -> type:
         )
     module = importlib.import_module(module_path)
     return getattr(module, class_name)
+
+
+class DPAlignedPackingBatchSampler(torch.utils.data.Sampler[List[int]]):
+    """Move contiguous batch boundaries to avoid DP-padding packed bins.
+
+    The underlying sampler defines the sample order. Each emitted batch is a
+    prefix of that order, and read-ahead indices remain in a small carry buffer,
+    so no sample is dropped or reordered. Cumulative cardinality error is kept
+    within the configured variation and the epoch still emits
+    ``ceil(len(sampler) / batch_size)`` optimizer steps. The configured reset
+    batch pays off any remaining sample debt at the fixed-step run boundary.
+    """
+
+    def __init__(
+        self,
+        sampler: torch.utils.data.Sampler[int],
+        sequence_lengths: Sequence[int],
+        batch_size: int,
+        dp_size: int,
+        allowed_variation: float,
+        bin_capacity: int,
+        tp_size: int,
+        cp_size: int,
+        fp8_enabled: bool = False,
+        fp8_recipe: Optional[str] = None,
+        cardinality_reset_batch: Optional[int] = None,
+        cardinality_reset_epoch: int = 0,
+    ):
+        if len(sampler) != len(sequence_lengths):
+            raise ValueError(
+                f"Sampler emits {len(sampler)} samples but sequence_lengths has {len(sequence_lengths)} entries."
+            )
+        if batch_size <= 0 or dp_size <= 0:
+            raise ValueError(f"batch_size and dp_size must be positive, got {batch_size=} and {dp_size=}.")
+        if not 0 < allowed_variation < 1:
+            raise ValueError(f"allowed_variation must be in (0, 1), got {allowed_variation}.")
+
+        self.sampler = sampler
+        self.batch_size = batch_size
+        self.dp_size = dp_size
+        self.max_variation = math.floor(batch_size * allowed_variation)
+        self.cardinality_reset_batch = cardinality_reset_batch
+        self.cardinality_reset_epoch = cardinality_reset_epoch
+        self._next_epoch_index = 0
+        if cardinality_reset_batch is not None and not 1 <= cardinality_reset_batch <= len(self):
+            raise ValueError(f"cardinality_reset_batch must be in [1, {len(self)}], got {cardinality_reset_batch}.")
+
+        self.packing_lengths = tuple(int(length) for length in sequence_lengths)
+        self.packer = make_sft_sequence_packer(
+            bin_capacity,
+            tp_size,
+            cp_size,
+            fp8_enabled=fp8_enabled,
+            fp8_recipe=fp8_recipe,
+        )
+
+    def __iter__(self) -> Iterator[List[int]]:
+        epoch_index = self._next_epoch_index
+        self._next_epoch_index += 1
+        return _DPAlignedPackingBatchSamplerIterator(self, epoch_index)
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.sampler) / self.batch_size)
+
+    def count_unpadded_bins(self, indices: Sequence[int]) -> int:
+        """Return the real MFFD bin count before the collator pads for DP."""
+        return len(self.packer.pack([self.packing_lengths[int(index)] for index in indices]))
+
+
+class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
+    """Stateful rolling-prefix optimizer for one sampler epoch."""
+
+    _BATCH_INDEX = "batch_index"
+    _BUFFER = "buffer"
+    _SAMPLES_EMITTED = "samples_emitted"
+    _SAMPLER_STATE = "sampler_state"
+    _SAMPLER_ITER_STATE = "sampler_iter_state"
+    _EPOCH_INDEX = "epoch_index"
+
+    def __init__(self, batch_sampler: DPAlignedPackingBatchSampler, epoch_index: int):
+        self.batch_sampler = batch_sampler
+        self.epoch_index = epoch_index
+        self.sampler_iter = iter(batch_sampler.sampler)
+        self.batch_index = 0
+        self.samples_emitted = 0
+        self.buffer: List[int] = []
+
+    def __iter__(self) -> "_DPAlignedPackingBatchSamplerIterator":
+        return self
+
+    def _fill(self, target_size: int) -> None:
+        while len(self.buffer) < target_size:
+            try:
+                self.buffer.append(next(self.sampler_iter))
+            except StopIteration:
+                return
+
+    def _fill_to_end(self) -> None:
+        while True:
+            try:
+                self.buffer.append(next(self.sampler_iter))
+            except StopIteration:
+                return
+
+    def _select_batch_size(self, low: int, high: int, target: int) -> int:
+        """Choose the closest prefix that avoids DP padding, if one exists.
+
+        Prefixes are visited nearest to the debt-correcting target first, with
+        larger batches winning equal-distance ties. If none is exactly aligned,
+        prefer the prefix requiring the fewest dummy bins, then the closest.
+        """
+        candidates = sorted(range(low, high + 1), key=lambda size: (abs(size - target), -size))
+        best_size = target
+        best_score = (self.batch_sampler.dp_size, 0)
+        for size in candidates:
+            bin_count = self.batch_sampler.count_unpadded_bins(self.buffer[:size])
+            dp_padding = -bin_count % self.batch_sampler.dp_size
+            if dp_padding == 0:
+                return size
+            score = (dp_padding, abs(size - target))
+            if score < best_score:
+                best_score = score
+                best_size = size
+        return best_size
+
+    def __next__(self) -> List[int]:
+        total_batches = len(self.batch_sampler)
+        if self.batch_index >= total_batches:
+            raise StopIteration
+
+        if self.batch_index == total_batches - 1:
+            # The tail owns every remaining index so an epoch neither drops nor
+            # carries examples into a newly shuffled sampler epoch.
+            self._fill_to_end()
+            if not self.buffer:
+                raise StopIteration
+            batch_size = len(self.buffer)
+        else:
+            nominal = self.batch_sampler.batch_size
+            variation = self.batch_sampler.max_variation
+            # Constrain both this batch and cumulative sample-count debt to
+            # +/- max_variation. The target repays all existing debt now.
+            cumulative_error = self.samples_emitted - self.batch_index * nominal
+            low = max(nominal - variation, nominal - variation - cumulative_error)
+            high = min(nominal + variation, nominal + variation - cumulative_error)
+            target = min(max(nominal - cumulative_error, low), high)
+
+            remaining_samples = len(self.batch_sampler.sampler) - self.samples_emitted
+            # Reserve a real row per DP rank in each future step when the
+            # epoch has enough examples; otherwise reserve one per step and
+            # let the collator supply zero-loss rows on short tails.
+            future_steps = total_batches - self.batch_index - 1
+            reserve = (
+                future_steps * self.batch_sampler.dp_size
+                if remaining_samples >= (future_steps + 1) * self.batch_sampler.dp_size
+                else future_steps
+            )
+            high = min(high, remaining_samples - reserve)
+            low = min(low, high)
+            target = min(max(target, low), high)
+            self._fill(high)
+            high = min(high, len(self.buffer))
+            low = min(low, high)
+            target = min(max(target, low), high)
+            if high <= 0:
+                raise StopIteration
+            if (
+                self.epoch_index == self.batch_sampler.cardinality_reset_epoch
+                and self.batch_index + 1 == self.batch_sampler.cardinality_reset_batch
+            ):
+                # A fixed-step run must consume the same nominal sample prefix
+                # as an unaligned run; repay debt at its final scheduled step.
+                batch_size = target
+            else:
+                batch_size = self._select_batch_size(low, high, target)
+
+        batch = self.buffer[:batch_size]
+        del self.buffer[:batch_size]
+        self.samples_emitted += batch_size
+        self.batch_index += 1
+        return batch
+
+    def state_dict(self) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            self._BATCH_INDEX: self.batch_index,
+            self._BUFFER: self.buffer.copy(),
+            self._SAMPLES_EMITTED: self.samples_emitted,
+            self._EPOCH_INDEX: self.epoch_index,
+        }
+        if isinstance(self.batch_sampler.sampler, Stateful):
+            state[self._SAMPLER_STATE] = self.batch_sampler.sampler.state_dict()
+        if isinstance(self.sampler_iter, Stateful):
+            state[self._SAMPLER_ITER_STATE] = self.sampler_iter.state_dict()
+        return state
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.batch_index = state[self._BATCH_INDEX]
+        self.buffer = list(state[self._BUFFER])
+        self.samples_emitted = state[self._SAMPLES_EMITTED]
+        self.epoch_index = state[self._EPOCH_INDEX]
+        self.batch_sampler._next_epoch_index = max(self.batch_sampler._next_epoch_index, self.epoch_index + 1)
+        if self._SAMPLER_STATE in state:
+            if not isinstance(self.batch_sampler.sampler, Stateful):
+                raise TypeError("Checkpoint contains sampler state for a non-stateful sampler.")
+            self.batch_sampler.sampler.load_state_dict(state[self._SAMPLER_STATE])
+        self.sampler_iter = iter(self.batch_sampler.sampler)
+        if self._SAMPLER_ITER_STATE in state:
+            if not isinstance(self.sampler_iter, Stateful):
+                raise TypeError("Checkpoint contains iterator state for a non-stateful sampler iterator.")
+            self.sampler_iter.load_state_dict(state[self._SAMPLER_ITER_STATE])
+
+
+def build_dp_aligned_packing_batch_sampler(
+    tokenized: "SFTDataset",
+    sampler: Optional[torch.utils.data.Sampler[int]],
+    generator: torch.Generator,
+    sft_cfg: "SFTConfig",
+    dp_size: int,
+) -> DPAlignedPackingBatchSampler:
+    """Build the DP-aligned batch policy from an SFT configuration."""
+    # A batch sampler always needs an explicit example sampler. Materialize the
+    # normal single-dataset random path that DataLoader otherwise owns.
+    if sampler is None:
+        sampler = RandomSampler(tokenized, generator=generator)
+
+    steps_per_epoch = math.ceil(len(sampler) / sft_cfg.batch_size)
+    cardinality_reset_batch = None
+    cardinality_reset_epoch = 0
+    if steps_per_epoch:
+        planned_steps = sft_cfg.num_steps if sft_cfg.num_steps is not None else sft_cfg.num_epochs * steps_per_epoch
+        if sft_cfg.max_training_steps is not None:
+            planned_steps = min(planned_steps, sft_cfg.max_training_steps)
+
+        # Repay batch-cardinality debt on the run's final step within an epoch,
+        # so a fixed-step run consumes the fixed-batching sample prefix.
+        if planned_steps > 0:
+            cardinality_reset_epoch, reset_index = divmod(planned_steps - 1, steps_per_epoch)
+            cardinality_reset_batch = reset_index + 1
+
+    transformer_config_kwargs = sft_cfg.megatron_config.transformer_config_kwargs or {}
+    return DPAlignedPackingBatchSampler(
+        sampler=sampler,
+        sequence_lengths=tokenized.sequence_lengths,
+        batch_size=sft_cfg.batch_size,
+        dp_size=dp_size,
+        allowed_variation=sft_cfg.packing_batch_size_allowed_variation,
+        bin_capacity=sft_cfg.resolved_bin_capacity(),
+        tp_size=sft_cfg.megatron_config.tensor_model_parallel_size,
+        cp_size=sft_cfg.megatron_config.context_parallel_size,
+        fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
+        fp8_recipe=transformer_config_kwargs.get("fp8_recipe"),
+        cardinality_reset_batch=cardinality_reset_batch,
+        cardinality_reset_epoch=cardinality_reset_epoch,
+    )
 
 
 class StatefulSequentialSampler(torch.utils.data.Sampler[int]):

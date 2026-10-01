@@ -53,6 +53,10 @@ from skyrl.train.config.sft_config import (
     _normalize_dataset_cfg,
     build_skyrl_config_for_sft,
 )
+from skyrl.train.dataset.collators import (
+    PACKED_SFT_REAL_EXAMPLES_KEY,
+    PACKED_SFT_REAL_TOKENS_KEY,
+)
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
 from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
 from skyrl.train.generators.utils import (
@@ -937,6 +941,7 @@ class SFTTrainer:
             if self.sft_cfg.use_sequence_packing or self.sft_cfg.remove_microbatch_padding:
                 logger.warning("VLM detected: disabling sequence packing / microbatch padding removal.")
             self.sft_cfg.use_sequence_packing = False
+            self.sft_cfg.align_packing_bins_to_dp = False
             self.sft_cfg.remove_microbatch_padding = False
             self.cfg.trainer.remove_microbatch_padding = False
 
@@ -1419,6 +1424,11 @@ class SFTTrainer:
         out of the loss), instead of being dropped. (Packed batches are not
         row-padded; the MFFD packer already handles a short example list.)
 
+        When ``align_packing_bins_to_dp`` is enabled, a stateful batch sampler moves only
+        contiguous batch boundaries and checkpoints its bounded read-ahead
+        carry. It works with every map-style SFT dataset path; custom samplers
+        (including the curriculum example) are rejected during validation.
+
         Resume note: ``StatefulDataLoader`` restores the *in-progress* epoch
         bit-exactly (the common case). For the built-in ``"random"`` sampler,
         epochs after the resumed one are re-shuffled into a valid but not
@@ -1443,6 +1453,28 @@ class SFTTrainer:
 
         sampler = self.build_train_sampler(tokenized)
         num_workers = self.sft_cfg.dataloader_num_workers
+
+        if self.sft_cfg.align_packing_bins_to_dp:
+            from skyrl.train.dataset.samplers import (
+                build_dp_aligned_packing_batch_sampler,
+            )
+
+            batch_sampler = build_dp_aligned_packing_batch_sampler(
+                tokenized=tokenized,
+                sampler=sampler,
+                generator=seeded_generator,
+                sft_cfg=self.sft_cfg,
+                dp_size=self._dp_size(),
+            )
+            return StatefulDataLoader(
+                tokenized,
+                batch_sampler=batch_sampler,
+                collate_fn=collate_fn,
+                generator=seeded_generator,
+                num_workers=num_workers,
+                persistent_workers=self.sft_cfg.dataloader_persistent_workers and num_workers > 0,
+                multiprocessing_context="spawn" if num_workers > 0 else None,
+            )
 
         return StatefulDataLoader(
             tokenized,
@@ -1814,6 +1846,7 @@ class SFTTrainer:
                     "train/tokens_per_second": tokens_per_second,
                     "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                     "train/actual_num_tokens": actual_num_tokens,
+                    "train/actual_batch_size": batch.batch_size,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
@@ -2023,14 +2056,17 @@ class SFTTrainer:
                     step_result = self.train_step(batch, self.global_step)
                     all_timings.update(step_result["timings"])
 
-                # Compute throughput using actual (non-padding) tokens. A padded
-                # tail batch appends ``pad_size`` rows (copies of row 0) that are
-                # masked out of the loss; exclude them from the token count so the
-                # throughput metric reflects only real tokens.
+                # Count original examples and tokens, excluding padding rows.
                 batch_padded_seq_len = batch["sequences"].shape[1]
-                pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
-                real_rows = batch["attention_mask"].shape[0] - pad_size
-                actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
+                if self.sft_cfg.use_sequence_packing:
+                    assert batch.metadata is not None
+                    actual_batch_size = batch.metadata[PACKED_SFT_REAL_EXAMPLES_KEY]
+                    actual_num_tokens = batch.metadata[PACKED_SFT_REAL_TOKENS_KEY]
+                else:
+                    pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
+                    real_rows = batch["attention_mask"].shape[0] - pad_size
+                    actual_batch_size = real_rows
+                    actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
                 self._total_tokens_processed += actual_num_tokens
                 tokens_per_second = actual_num_tokens / all_timings["step"]
 
@@ -2041,6 +2077,7 @@ class SFTTrainer:
                     "train/tokens_per_second": tokens_per_second,
                     "train/tokens_per_second_per_gpu": tokens_per_second / self._num_training_gpus,
                     "train/actual_num_tokens": actual_num_tokens,
+                    "train/actual_batch_size": actual_batch_size,
                     "train/batch_padded_seq_len": batch_padded_seq_len,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }

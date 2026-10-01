@@ -197,6 +197,13 @@ worker micro-batch.
 `max_length` to be set, and `max_tokens_per_microbatch` (if given) must be
 `>= max_length`.
 
+Set `align_packing_bins_to_dp=true` to vary each training batch's example
+count by up to `packing_batch_size_allowed_variation` (default `0.05`). The
+sampler moves only contiguous batch boundaries, preserves every example and
+its order, and checkpoints its bounded read-ahead carry. This avoids creating
+extra bins solely to round the packed-bin count up to `dp_size`. Custom
+samplers are not supported with this option yet.
+
 ## Checkpointing, resume, and HF export
 
 - `ckpt_path` / `ckpt_interval` -- write a distributed checkpoint every N steps
