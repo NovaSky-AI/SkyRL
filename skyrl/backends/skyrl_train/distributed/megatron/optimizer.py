@@ -16,6 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from typing import Union
 
 import torch
@@ -30,6 +31,8 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer_dtype import (
     coerce_optimizer_dtype_kwargs,
 )
 from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
+
+logger = logging.getLogger(__name__)
 
 
 def init_megatron_optim_config(
@@ -74,13 +77,40 @@ def get_megatron_optimizer_param_scheduler(
     """
     Get the optimizer parameter scheduler for Megatron.
     """
-    # TODO: support other schedulers for Megatron
-    if getattr(config, "scheduler", "constant_with_warmup") != "constant_with_warmup":
-        raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
+    # Map the SkyRL scheduler name to a Megatron ``lr_decay_style``. Decaying schedules
+    # (cosine/linear) decay ``lr`` -> ``min_lr`` over ``lr_decay_steps`` after the warmup.
+    _SCHEDULER_TO_DECAY_STYLE = {
+        "constant": "constant",
+        "constant_with_warmup": "constant",
+        "cosine": "cosine",
+        "cosine_with_warmup": "cosine",
+        "linear": "linear",
+        "linear_with_warmup": "linear",
+    }
+    scheduler_name = getattr(config, "scheduler", "constant_with_warmup")
+    if scheduler_name not in _SCHEDULER_TO_DECAY_STYLE:
+        raise ValueError(
+            f"Unsupported scheduler {scheduler_name!r} for Megatron; expected one of "
+            f"{sorted(_SCHEDULER_TO_DECAY_STYLE)}."
+        )
+    lr_decay_style = _SCHEDULER_TO_DECAY_STYLE[scheduler_name]
+
+    # Decay over the whole run unless an explicit ``lr_decay_steps`` is given. (Assign
+    # unconditionally -- the previous version left this undefined when lr_decay_steps was set.)
+    lr_decay_steps = getattr(config, "lr_decay_steps", None)
+    if lr_decay_steps is None:
+        lr_decay_steps = num_training_steps
+    # A decaying schedule needs a finite, real horizon. When num_steps is derived from epochs
+    # the trainer passes the true total; if it ever falls back to the ~1e9 default, cosine would
+    # be ~flat -- warn rather than silently no-op.
+    if lr_decay_style != "constant" and lr_decay_steps >= 1e9:
+        logger.warning(
+            f"scheduler={scheduler_name!r} but lr_decay_steps={lr_decay_steps} looks like the "
+            "unbounded default; the LR will barely decay. Ensure num_steps (or lr_decay_steps) "
+            "is set to the real training horizon."
+        )
 
     lr_warmup_steps = config.num_warmup_steps
-    if getattr(config, "lr_decay_steps", None) is None:
-        lr_decay_steps = num_training_steps
     if getattr(config, "lr_warmup_steps_ratio", None) is not None and (
         getattr(config, "lr_warmup_steps", None) is None or getattr(config, "lr_warmup_steps", None) <= 0
     ):
@@ -93,7 +123,7 @@ def get_megatron_optimizer_param_scheduler(
         min_lr=getattr(config, "min_lr", 0.0),
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
-        lr_decay_style="constant",
+        lr_decay_style=lr_decay_style,
         start_wd=config.weight_decay,
         end_wd=config.weight_decay,
         wd_incr_steps=num_training_steps,
