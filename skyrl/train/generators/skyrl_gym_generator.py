@@ -921,14 +921,14 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         parallel_env_steps = self.skyrl_gym_cfg.parallel_env_steps
         env_step_outputs = None
+        step_tasks: list[asyncio.Task] = []
         try:
             if parallel_env_steps:
-                env_step_outputs = await asyncio.gather(
-                    *[
-                        self._run_in_executor_if_available(env.step, output)
-                        for env, output in zip(envs, outputs)
-                    ]
-                )
+                step_tasks = [
+                    asyncio.create_task(self._run_in_executor_if_available(env.step, output))
+                    for env, output in zip(envs, outputs)
+                ]
+                env_step_outputs = await asyncio.gather(*step_tasks)
 
             for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
                 # step on environment and compute reward
@@ -960,6 +960,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                     await self._run_in_executor_if_available(env.close)
         finally:
             if parallel_env_steps:
+                for task in step_tasks:
+                    if not task.done():
+                        task.cancel()
+                if step_tasks:
+                    await asyncio.gather(*step_tasks, return_exceptions=True)
                 await asyncio.gather(
                     *[self._run_in_executor_if_available(env.close) for env in envs],
                     return_exceptions=True,
