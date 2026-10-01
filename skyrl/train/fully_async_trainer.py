@@ -731,8 +731,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        if self._vllm_metrics_scraper is not None:
-            await self._vllm_metrics_scraper.aclose()
+        await self.finalize_vllm_metrics("success")
         self.tracker.finish()
         logger.info("Training done!")
 
