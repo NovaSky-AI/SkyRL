@@ -18,6 +18,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Type, TypeVar,
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl.train.fused_lm_head import FUSED_LM_HEAD_BACKENDS, FusedLmHeadBackend
 from skyrl_gym.envs.search.env import SearchEnvConfig
 from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
 
@@ -1593,9 +1594,13 @@ class TrainerConfig(BaseConfig):
     materialized. Metric-only entropy and ``use_entropy_loss`` share the same
     projection. Uses ``logprobs_chunk_size`` to bound peak memory."""
     fused_lm_head_logprob_backend: str = "torch"
-    """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
-    The Triton backend requires CUDA + triton and falls back to ``"torch"``
-    when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
+    """Fused LM-head backend: ``"torch"``, ``"triton"``, or
+    ``"triton_block_sparse"``. The block-sparse backend preserves token order
+    and skips wholly inactive loss-mask row tiles for SFT or RL. It can regress
+    near a fully active mask; select it only after benchmarking representative
+    masks and sharding. Sample-support replay is not supported. Triton backends
+    require CUDA + triton and fall back to ``"torch"`` when unavailable.
+    Ignored unless ``fused_lm_head_logprob`` is true."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
@@ -1634,11 +1639,16 @@ class TrainerConfig(BaseConfig):
                 "fused_lm_head_logprob=True is only supported with the Megatron backend, "
                 f"got strategy={self.strategy!r}."
             )
-        if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
+        if self.fused_lm_head_logprob_backend not in FUSED_LM_HEAD_BACKENDS:
             raise ValueError(
-                "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
+                f"fused_lm_head_logprob_backend must be one of {FUSED_LM_HEAD_BACKENDS}, "
                 f"got {self.fused_lm_head_logprob_backend!r}."
             )
+        if (
+            self.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+            and not self.fused_lm_head_logprob
+        ):
+            raise ValueError("fused_lm_head_logprob_backend='triton_block_sparse' requires fused_lm_head_logprob=True.")
         if self.vocab_entropy_chunk_size is not None and (
             isinstance(self.vocab_entropy_chunk_size, bool)
             or not isinstance(self.vocab_entropy_chunk_size, int)
