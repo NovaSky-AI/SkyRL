@@ -39,6 +39,74 @@ def _trainer(tmp_path, trainer_type=RayPPOTrainer):
     return trainer
 
 
+class DeferredCheckpointDispatch:
+    """Leave model files absent until the caller drains their pending writes."""
+
+    def __init__(self, failing_model=None):
+        self.pending = {}
+        self.completed = []
+        self.failing_model = failing_model
+
+    def save_checkpoint(self, model, directory, tokenizer):
+        self.pending[model] = Path(directory)
+
+    def finalize_pending_saves(self, model):
+        directory = self.pending[model]
+        checkpoint = directory.parent
+        assert (checkpoint / "data.pt").is_file()
+        assert (checkpoint / "trainer_state.pt").is_file()
+        assert (checkpoint.parent / "latest_ckpt_global_step.txt").read_text() == "1"
+        if model == self.failing_model:
+            raise OSError(f"{model} write failed")
+        directory.mkdir()
+        torch.save({"model": model}, directory / "model.pt")
+        del self.pending[model]
+        self.completed.append(model)
+
+
+@pytest.mark.parametrize("has_critic", [False, True])
+def test_publication_waits_for_current_model_writes(tmp_path, has_critic):
+    trainer = _trainer(tmp_path)
+    previous = Path(trainer.save_checkpoints())
+    trainer.global_step = 2
+    trainer.cfg.trainer.critic.model.path = "critic" if has_critic else None
+    trainer.dispatch = DeferredCheckpointDispatch()
+    models = ["policy", "critic"] if has_critic else ["policy"]
+
+    def publish(path):
+        for model in models:
+            state = torch.load(Path(path, model, "model.pt"), weights_only=False)
+            assert state == {"model": model}
+        assert trainer.dispatch.pending == {}
+        assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "2"
+        assert previous.is_dir()
+
+    trainer._on_checkpoint_saved = publish
+
+    trainer.save_checkpoints()
+
+    assert trainer.dispatch.completed == models
+    assert not previous.exists()
+
+
+@pytest.mark.parametrize("failing_model", ["policy", "critic"])
+def test_pending_model_failure_keeps_previous_checkpoint_unpublished(tmp_path, failing_model):
+    trainer = _trainer(tmp_path)
+    previous = Path(trainer.save_checkpoints())
+    trainer.global_step = 2
+    trainer.cfg.trainer.critic.model.path = "critic"
+    trainer.dispatch = DeferredCheckpointDispatch(failing_model)
+    trainer._on_checkpoint_saved = MagicMock()
+
+    with pytest.raises(OSError, match=f"{failing_model} write failed"):
+        trainer.save_checkpoints()
+
+    assert (tmp_path / "latest_ckpt_global_step.txt").read_text() == "1"
+    assert previous.is_dir()
+    trainer._on_checkpoint_saved.assert_not_called()
+    assert trainer.dispatch.completed == (["policy"] if failing_model == "critic" else [])
+
+
 @pytest.mark.parametrize("failure", ["state", "write"])
 def test_dataloader_save_failure_preserves_previous_checkpoint(tmp_path, monkeypatch, failure):
     trainer = _trainer(tmp_path)

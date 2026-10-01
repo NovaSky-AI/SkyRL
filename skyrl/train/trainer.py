@@ -1735,6 +1735,12 @@ class RayPPOTrainer:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
+        # Megatron may return after enqueueing the current model write. Let it
+        # overlap metadata serialization, then finish before publishing or pruning.
+        self.dispatch.finalize_pending_saves("policy")
+        if self.has_critic:
+            self.dispatch.finalize_pending_saves("critic")
+
         # Atomic tracking - write this last after all saves succeed
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
         with io.open_file(latest_checkpoint_file, "w") as f:
