@@ -2,6 +2,12 @@
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py
 
+The opt-in full GLM-5.3-BF16 case requires two 8xB300 nodes (16 GPUs):
+one TP8/EP8 trainer and one TP8/EP8 inference engine. Set GLM53_MODEL_PATH
+to the same local checkpoint path on both nodes and select
+``-k glm-5.3-bf16_b300_tp8_ep8_adapter`` on the existing Ray cluster.
+The separate GLM-5.3-Flash row uses a four-layer model slice.
+
 LoRA rows of ``test_logprobs_matching_roundtrip`` (test_megatron_models.py): the
 same models, meshes, generation, forward and weight-sync flow, with a LoRA
 adapter on the policy. ``merge_lora=False`` rows sync the adapter and serve the
@@ -141,7 +147,15 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
         cfg.trainer.policy.language_model_only = True
         cfg.trainer.ref.language_model_only = True
         cfg.trainer.remove_microbatch_padding = False
-        cfg.trainer.policy.model.lora.target_modules = GLM5_3_FLASH_LORA_TARGET_MODULES[:7]
+        cfg.trainer.policy.model.lora.target_modules = [
+            "linear_q_down_proj",
+            "linear_q_up_proj",
+            "linear_kv_down_proj",
+            "linear_kv_up_proj",
+            "linear_proj",
+            "linear_fc1",
+            "linear_fc2",
+        ]
         cfg.trainer.policy.model.lora.sync_mode = "memory"
         cfg.trainer.policy.model.lora.max_loras = 1
         cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
@@ -181,7 +195,7 @@ def _mean_abs_diff(reference: torch.Tensor, actual: torch.Tensor, mask: torch.Te
 
 
 async def _sync_weights(policy, client, cfg, label: str):
-    """Offload the optimizer, publish the policy to the engines, then offload the model."""
+    """Publish the adapter, alternating GPU residency only for colocated workers."""
     if cfg.trainer.placement.colocate_all:
         policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
         await client.wake_up(tags=["weights"])
@@ -214,7 +228,8 @@ async def _sync_weights(policy, client, cfg, label: str):
             False,
             id="glm-5.3-bf16_b300_tp8_ep8_adapter",
             marks=pytest.mark.skipif(
-                not os.environ.get("GLM53_MODEL_PATH"), reason="Set GLM53_MODEL_PATH on an 8xB300 node"
+                not os.environ.get("GLM53_MODEL_PATH"),
+                reason="Full GLM-5.3 requires GLM53_MODEL_PATH and two 8xB300 nodes (16 GPUs)",
             ),
         ),
         pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, False, id="qwen3.5-0.8b-dense_tp2_adapter"),
@@ -398,7 +413,7 @@ async def test_lora_logprobs_matching_roundtrip(
                 updated_diff = _mean_abs_diff(
                     logprobs_t_2, logprobs_megatron_2, response_mask_2.bool(), "updated adapter: vLLM vs Megatron"
                 )
-                assert updated_diff < threshold, (
-                    f"Logprob diff should be less than {threshold}, but is {updated_diff:.6f}"
-                )
+                assert (
+                    updated_diff < threshold
+                ), f"Logprob diff should be less than {threshold}, but is {updated_diff:.6f}"
             print("ROUNDTRIP_PASS", flush=True)
