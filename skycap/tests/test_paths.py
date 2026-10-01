@@ -8,10 +8,18 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from skycap import CapturePool, record
+from skycap import CapturePool, CaptureService, record
 from skycap.cli import build_parser, build_server
 from skycap.graph import MessageGraph
-from skycap.paths import BUILTIN_RULES, Row, check_rows, final_path, import_rule, load_rule, rule_registry
+from skycap.paths import (
+    BUILTIN_RULES,
+    Row,
+    check_rows,
+    final_path,
+    import_rule,
+    load_rule,
+    rule_registry,
+)
 from skycap.samples import build_samples
 from tests.test_tokens import client, converse, token_stack, user
 
@@ -215,6 +223,8 @@ def test_rules_are_named_or_imported_and_the_built_in_names_are_reserved() -> No
     assert load_rule("final") is BUILTIN_RULES["final"]
     assert load_rule("tests.test_paths:last_reply") is last_reply
     assert set(rule_registry({"mine": "tests.test_paths:last_reply"})) == {"all", "final", "mine"}
+    service = CaptureService("http://engine/v1", path_rules={"mine": "tests.test_paths:last_reply"})
+    assert service.server.path_rules["mine"] is last_reply
     with pytest.raises(ValueError, match="built-in"):
         rule_registry({"final": last_reply})
     with pytest.raises(ValueError, match="pkg.module:function"):
