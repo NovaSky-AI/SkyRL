@@ -988,6 +988,9 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
     failing_env_ready = threading.Event()
     steps_in_flight = 0
     steps_lock = threading.Lock()
+    # Record violations here; do not assert inside close_fn — the production
+    # close gather uses return_exceptions=True and would swallow AssertionError.
+    close_during_step: list[int] = []
 
     def make_env():
         env = MagicMock()
@@ -1015,7 +1018,8 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
 
         def close_fn():
             with steps_lock:
-                assert steps_in_flight == 0, "close called while env.step still in flight"
+                if steps_in_flight > 0:
+                    close_during_step.append(env_idx)
 
         env.step.side_effect = step_fn
         env.close.side_effect = close_fn
@@ -1047,6 +1051,9 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
     with pytest.raises(RuntimeError, match="step boom"):
         await generator.generate(input_batch)
 
+    assert close_during_step == [], (
+        f"close overlapped in-flight step on env(s) {close_during_step}"
+    )
     assert len(envs_created) == 2
     assert all(env.close.called for env in envs_created)
 
