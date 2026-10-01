@@ -25,6 +25,9 @@ from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
     compose,
 )
 from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
+from examples.train_integrations.harbor_skycap.exposure import (  # noqa: E402
+    HarnessGateway,
+)
 from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
@@ -356,6 +359,23 @@ async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials, g
     assert kwargs["api_base"].startswith(f"{skycap.url}/t/")
     assert "collect_rollout_details" not in kwargs
     assert kwargs["llm_kwargs"]["api_key"] and kwargs["llm_kwargs"]["extra_body"]["cache_salt"]
+
+
+@pytest.mark.asyncio
+async def test_with_exposure_the_harness_calls_skycap_through_the_exposed_gateway(skycap, trials) -> None:
+    gateway = HarnessGateway(skycap.url)
+    exposed = f"http://127.0.0.1:{await asyncio.to_thread(gateway.start)}"
+    gen = HarborSkycapGenerator(
+        generator_cfg(), harbor_cfg(), [skycap.url], SimpleNamespace(weight_version=7), harness_urls={skycap.url: exposed}
+    )
+    try:
+        out = await gen.generate(batch("linear"), disable_tqdm=True)
+    finally:
+        await gen.close()
+        await asyncio.to_thread(gateway.stop)
+
+    assert out["rewards"] == [1.0] and sum(out["loss_masks"][0]) > 0
+    assert trials.configs[0]["agent"]["kwargs"]["api_base"].startswith(f"{exposed}/t/")
 
 
 @pytest.mark.asyncio
