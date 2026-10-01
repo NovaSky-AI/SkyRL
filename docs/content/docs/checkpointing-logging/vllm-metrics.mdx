@@ -31,6 +31,11 @@ output into the wandb log payload — the same payload used for training
 metrics, so the keys appear under whatever logger backend is configured
 (`wandb`, `mlflow`, `swanlab`, `tensorboard`, or `console`).
 
+Snapshots are filtered by the WorkerIds of inference actors launched by SkyRL.
+This membership is fixed; replacements and late joins are not supported.
+External deployments without launched actors retain unfiltered collection.
+If launched worker identities cannot be obtained, collection is disabled.
+
 Both `Trainer` and `FullyAsyncTrainer` log these:
 
 | Key                                | Source                       | Aggregation                |
@@ -41,12 +46,33 @@ Both `Trainer` and `FullyAsyncTrainer` log these:
 | `vllm/generation_throughput_tok_s` | counter delta / Δt           | summed before differencing |
 | `vllm/prompt_throughput_tok_s`     | counter delta / Δt           | summed before differencing |
 | `vllm/prefix_cache_hit_rate`       | hits Δ / queries Δ           | summed before ratio        |
+| `vllm/external_prefix_cache_hit_rate` | external hits Δ / queries Δ | summed before ratio      |
+| `vllm/num_preemptions`             | preemption-event delta       | sum across replicas        |
+| `vllm/preemptions_per_million_tokens` | preemptions × 1e6 / output-token Δ | summed before ratio |
+| `vllm/kv_offload_load_throughput_bytes_s` | load-byte Δ / Δt        | summed before differencing |
 | `vllm/ttft_seconds_avg`            | histogram sum Δ / count Δ    | summed before ratio        |
 | `vllm/tpot_seconds_avg`            | histogram sum Δ / count Δ    | summed before ratio        |
+| `vllm/ttft_seconds_p90`, `vllm/tpot_seconds_p90` | histogram bucket deltas | merged before quantile |
+
+TTFT uses `time_to_first_token_seconds`; TPOT uses the request-weighted
+`request_time_per_output_token_seconds` histogram, matching Serve LLM.
+Older runs used inter-token latency for `tpot_seconds_avg` and are not
+comparable to this definition. ITL, latency P50, duplicate request-TPOT keys,
+and offload store throughput are omitted from tracker output. Their raw
+Prometheus metrics remain available for Grafana.
+
+Throughput divides token/byte deltas by the supplied generation duration;
+without that duration, sampling uses elapsed wall time. Percentiles interpolate
+compatible cumulative bucket deltas after merging engines. A previously
+confirmed zero histogram count supplies a zero baseline for its first bucket
+exports; an absent count supplies no baseline. Invalid histogram windows do
+not produce latency metrics.
 
 Rate- and ratio-style metrics need two consecutive samples to take a delta,
 so they appear starting from the **second** training step. Counter resets
 (e.g. engine restart) are skipped rather than reported as negative rates.
+If any node endpoint fails, the partial snapshot is skipped and sampling
+reestablishes its baseline at the next complete snapshot.
 
 The full set of vLLM metrics is still available via the Prometheus endpoints
 themselves — only this curated subset is forwarded to wandb. The selection

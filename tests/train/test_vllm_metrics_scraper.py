@@ -3,8 +3,9 @@ uv run --isolated --extra dev pytest tests/train/test_vllm_metrics_scraper.py
 """
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import httpx
 import pytest
 
 from skyrl.train.utils.vllm_metrics_scraper import (
@@ -698,6 +699,34 @@ ray_vllm_time_to_first_token_seconds_bucket{WorkerId="other",le="1"} 900
     assert snapshot["ray_vllm_time_to_first_token_seconds_bucket::1"] == 2
 
 
+@pytest.mark.asyncio
+async def test_failed_node_scrape_skips_partial_totals_and_reestablishes_baseline():
+    step = 0
+
+    def respond(request):
+        worker = request.url.host
+        if step == 1 and worker == "b":
+            return httpx.Response(503)
+        text = (
+            f'ray_vllm_num_requests_running{{WorkerId="{worker}"}} 1\n'
+            f'ray_vllm_generation_tokens_total{{WorkerId="{worker}"}} {step * 10}\n'
+        )
+        return httpx.Response(200, text=text)
+
+    scraper = VLLMMetricsScraper(urls=["http://a/metrics", "http://b/metrics"], worker_ids=["a", "b"])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        scraper._client = client
+        await scraper.sample(generation_time_s=1)
+        step = 1
+        assert await scraper.sample(generation_time_s=1) == {}
+        step = 2
+        recovered = await scraper.sample(generation_time_s=1)
+        assert "vllm/generation_throughput_tok_s" not in recovered
+        step = 3
+        metrics = await scraper.sample(generation_time_s=1)
+    assert metrics["vllm/generation_throughput_tok_s"] == 20
+
+
 def test_offload_and_preemption_scalar_reductions():
     current = {
         "ray_vllm_num_preemptions_total": 2,
@@ -738,3 +767,33 @@ def test_logged_tpot_uses_request_histogram_and_only_mean_p90():
     assert metrics["vllm/ttft_seconds_avg"] == pytest.approx(1.2)
     assert metrics["vllm/ttft_seconds_p90"] == pytest.approx(1.8)
     assert not any("itl" in key or "request_tpot" in key or "p50" in key for key in metrics)
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError("identity failed"), TimeoutError("identity timed out")])
+def test_worker_identity_lookup_is_bounded_and_failure_does_not_abort_setup(tmp_path, monkeypatch, error):
+    from skyrl.train.config import SkyRLTrainConfig
+    from skyrl.train.entrypoints.main_base import BasePPOExp
+
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.export_path = str(tmp_path / "export")
+    cfg.trainer.ckpt_path = str(tmp_path / "checkpoints")
+    cfg.trainer.fully_async.simulate_training = True
+    experiment = BasePPOExp.__new__(BasePPOExp)
+    experiment.cfg = cfg
+    experiment.tokenizer = Mock()
+    experiment.train_dataset = None
+    experiment.eval_dataset = None
+    experiment.colocate_pg = None
+    actor = Mock()
+    actor.get_metrics_worker_id.remote.return_value = "identity-ref"
+    experiment._server_groups = [Mock(get_actors=Mock(return_value=[actor]))]
+    trainer = Mock()
+    experiment.get_trainer = Mock(return_value=trainer)
+    for method in ("get_tracker", "get_inference_client", "get_generator", "get_trajectory_logger"):
+        setattr(experiment, method, Mock())
+    lookup = Mock(return_value=["owner"], side_effect=error)
+    monkeypatch.setattr("skyrl.train.entrypoints.main_base.ray.get", lookup)
+
+    assert experiment._setup_trainer() is trainer
+    lookup.assert_called_once_with(["identity-ref"], timeout=10)
+    trainer._vllm_metrics_scraper.set_worker_ids.assert_called_once_with([] if error else ["owner"])

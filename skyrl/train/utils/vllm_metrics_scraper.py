@@ -205,11 +205,11 @@ class VLLMMetricsScraper:
         self._urls = urls if urls is not None else discover_ray_metrics_urls()
         self._timeout = request_timeout_s
         self._worker_ids = None if worker_ids is None else frozenset(worker_ids)
-        self.last_window = WindowStatistics(valid=False)
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
+        self._snapshot_complete = True
         # Explicit-window state (start/pause/resume/stop). ``_label is None``
         # means no window is open.
         self._label: Optional[str] = None
@@ -249,6 +249,7 @@ class VLLMMetricsScraper:
     async def _fetch_all(self) -> ParsedSamples:
         client = await self._get_client()
         texts = await asyncio.gather(*(self._fetch_one(client, u) for u in self._urls))
+        self._snapshot_complete = all(bool(text) for text in texts)
         merged: ParsedSamples = {}
         for text in texts:
             if not text:
@@ -268,6 +269,8 @@ class VLLMMetricsScraper:
             return None
 
         parsed = await self._fetch_all()
+        if not self._snapshot_complete:
+            return None
         if not parsed and not self._warned_empty:
             logger.warning(
                 "VLLMMetricsScraper: scraped Ray metrics agents but found no "
@@ -327,6 +330,8 @@ class VLLMMetricsScraper:
         """
         snapshot = await self._read_snapshot()
         if snapshot is None:
+            self._prev_aggregated = None
+            self._prev_timestamp = None
             return {}
 
         now = time.monotonic()
@@ -337,9 +342,6 @@ class VLLMMetricsScraper:
         else:
             out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
 
-        self.last_window = WindowStatistics.between(
-            self._prev_aggregated, snapshot, window if self._prev_timestamp is not None else None
-        )
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
         return out
@@ -396,7 +398,6 @@ class VLLMMetricsScraper:
         self._window_prev = None
         self._active_since = None
         self._paused = False
-        self.last_window = WindowStatistics.between(prev, new_snapshot, window)
         if new_snapshot is None:
             return {}
         return self._window_metrics(prev, new_snapshot, window, f"{label}/")
@@ -451,11 +452,6 @@ class VLLMMetricsScraper:
         h_d = delta(_COUNTER_PREFIX_HITS)
         if q_d is not None and h_d is not None and q_d > 0:
             out[f"{prefix}prefix_cache_hit_rate"] = h_d / q_d
-
-        ttft_sum_d = delta(_HIST_TTFT_SUM)
-        ttft_count_d = delta(_HIST_TTFT_COUNT)
-        if ttft_sum_d is not None and ttft_count_d is not None and ttft_count_d > 0:
-            out[f"{prefix}ttft_seconds_avg"] = ttft_sum_d / ttft_count_d
 
         stats = WindowStatistics.between(prev, cur, throughput_window_s)
         latencies = stats.latency_metrics(prefix)

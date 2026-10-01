@@ -27,28 +27,13 @@ def test_window_omits_missing_and_reset_counters():
     assert result.duration_seconds == 3
 
 
-def test_request_tpot_and_ttft_are_separate():
-    current = {}
-    for name, count, total in [
-        ("time_to_first_token_seconds", 10, 12),
-        ("request_time_per_output_token_seconds", 4, 2),
-    ]:
-        base = "ray_vllm_" + name
-        current.update(
-            {
-                base + "_count": count,
-                base + "_sum": total,
-                base + "_bucket::1": count / 2,
-                base + "_bucket::2": count,
-                base + "_bucket::+Inf": count,
-            }
-        )
-    result = WindowStatistics.between(dict.fromkeys(current, 0), current, 5)
-    metrics = result.latency_metrics("vllm/")
-    assert metrics["vllm/ttft_seconds_avg"] == 1.2
-    assert metrics["vllm/request_tpot_seconds_avg"] == 0.5
-    assert metrics["vllm/request_tpot_seconds_p50"] == 1
-    assert metrics["vllm/ttft_seconds_p90"] == pytest.approx(1.8)
+def test_invalid_histogram_window_omits_latency_metrics():
+    base = "ray_vllm_time_to_first_token_seconds"
+    previous = {base + "_count": 10, base + "_sum": 100, base + "_bucket::1": 5, base + "_bucket::+Inf": 10}
+    current = {base + "_count": 20, base + "_sum": 20, base + "_bucket::1": 10, base + "_bucket::+Inf": 20}
+    window = WindowStatistics.between(previous, current, 1)
+    assert not window.valid
+    assert window.latency_metrics("vllm/") == {}
 
 
 def test_lazy_histogram_buckets_use_confirmed_empty_baseline():
@@ -63,7 +48,6 @@ def test_lazy_histogram_buckets_use_confirmed_empty_baseline():
     }
     metrics = WindowStatistics.between(previous, current, 1).latency_metrics("vllm/")
     assert metrics["vllm/ttft_seconds_avg"] == pytest.approx(0.075)
-    assert metrics["vllm/ttft_seconds_p50"] == pytest.approx(0.1)
     assert metrics["vllm/ttft_seconds_p90"] == pytest.approx(0.18)
     # Absence without an explicit empty count is unknown.
     assert not WindowStatistics.between({}, current, 1).latency_metrics("vllm/")

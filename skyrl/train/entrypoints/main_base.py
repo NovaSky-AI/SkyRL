@@ -296,8 +296,14 @@ class BasePPOExp:
             groups = self._server_groups or ((self._prefill_server_groups or []) + (self._decode_server_groups or []))
             actors = [actor for group in (groups or []) for actor in group.get_actors()]
             if actors and self.cfg.generator.inference_engine.backend == "vllm":
-                worker_ids = ray.get([actor.get_metrics_worker_id.remote() for actor in actors])
-                trainer._vllm_metrics_scraper.set_worker_ids(worker_ids)
+                try:
+                    worker_ids = ray.get([actor.get_metrics_worker_id.remote() for actor in actors], timeout=10)
+                    trainer._vllm_metrics_scraper.set_worker_ids(worker_ids)
+                except Exception as error:
+                    trainer._vllm_metrics_scraper.set_worker_ids([])
+                    logger.warning(
+                        f"vLLM metrics disabled: could not identify launched workers ({type(error).__name__})"
+                    )
         # Install the trajectory logger after construction
         trainer.trajectory_logger = self.get_trajectory_logger()
         # Expose the trainer on self so callers can log exceptions raised

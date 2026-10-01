@@ -61,7 +61,9 @@ class WindowStatistics:
         return result
 
     def latency_metrics(self, prefix):
-        """Reduce merged histogram deltas to latency means and quantiles."""
+        """Reduce merged histogram deltas to latency means and P90 estimates."""
+        if not self.valid:
+            return {}
         out = {}
         for exported, public in (
             ("time_to_first_token_seconds", "ttft_seconds"),
@@ -77,8 +79,7 @@ class WindowStatistics:
                 for name, value in self.deltas.items()
                 if name.startswith(base + "_bucket::")
             }
-            for q in (0.5, 0.9):
-                value = histogram_quantile(q, buckets)
-                if value is not None:
-                    out[f"{prefix}{public}_p{int(q * 100)}"] = value
+            value = histogram_quantile(0.9, buckets)
+            if value is not None:
+                out[f"{prefix}{public}_p90"] = value
         return out
