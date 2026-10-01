@@ -125,17 +125,33 @@ def test_forward_backward_empty_outputs():
     assert output.metrics == {"loss:sum": 0.0}
 
 
-def test_forward_backward_omits_nonfinite_metric_from_stored_future():
+def test_forward_backward_preserves_nonfinite_metrics_from_stored_future():
     stored = types.ForwardBackwardOutput(
         loss_fn_output_type="scalar",
         loss_fn_outputs=[],
-        metrics={"total_loss:sum": 1.0, "importance_ratio:mean": math.nan},
+        metrics={
+            "total_loss:sum": 1.0,
+            "importance_ratio:mean": math.nan,
+            "overflow:mean": math.inf,
+            "underflow:mean": -math.inf,
+        },
     ).model_dump_json()
     result_data = json.loads(stored)
-    assert result_data["metrics"]["importance_ratio:mean"] is None
+    assert result_data["metrics"]["importance_ratio:mean"] == "NaN"
+    assert result_data["metrics"]["overflow:mean"] == "Infinity"
+    assert result_data["metrics"]["underflow:mean"] == "-Infinity"
 
     output = roundtrip_forward_backward(result_data)
-    assert output.metrics == {"total_loss:sum": 1.0}
+    assert output.metrics["total_loss:sum"] == 1.0
+    assert math.isnan(output.metrics["importance_ratio:mean"])
+    assert output.metrics["overflow:mean"] == math.inf
+    assert output.metrics["underflow:mean"] == -math.inf
+
+
+def test_forward_backward_legacy_null_metric_is_nan():
+    result_data = {"loss_fn_output_type": "scalar", "loss_fn_outputs": [], "metrics": {"importance_ratio:mean": None}}
+    output = roundtrip_forward_backward(result_data)
+    assert math.isnan(output.metrics["importance_ratio:mean"])
 
 
 def test_forward_backward_field_missing_in_one_datum():

@@ -100,6 +100,6 @@ TINKER_API_KEY=tml-dummy uv run --extra tinker --with-editable "$COOKBOOK_DIR[ma
   behavior_if_log_dir_exists=delete
 
 cd "$SKYRL_REPO_ROOT"
-uv run --isolated --no-project --with 'wandb==0.30.0' "$SCRIPT_DIR/get_summary.py" \
+uv run --isolated --extra fsdp "$SCRIPT_DIR/get_summary.py" \
   --run_name "$RUN_NAME" --project_name "$PROJECT_NAME" \
   --asserts "env/all/reward/total >= $REWARD_MIN_VALUE" "optim/kl_sample_train_v2 <= $KL_MAX_VALUE"
