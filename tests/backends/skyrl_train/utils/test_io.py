@@ -227,7 +227,7 @@ class TestCloudFileOperationsMocked:
             "s3://bucket/checkpoints/global_step_2500",
         ]
         mock_fs.isdir.return_value = True
-        mock_fs.find.return_value = []
+        mock_fs.info.side_effect = FileNotFoundError
         mock_get_filesystem.return_value = mock_fs
 
         cloud_path = "s3://bucket/checkpoints"
