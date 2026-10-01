@@ -217,8 +217,15 @@ class OptimizerConfig(BaseConfig):
     num_warmup_steps: int = 0
     """Number of mini-batch steps to warmup the optimizer."""
     scheduler: str = "constant_with_warmup"
-    """Learning rate scheduler. Intended to align with ``transformers.SchedulerType``:
-    https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType"""
+    """LR schedule. FSDP passes this straight to HF ``get_scheduler`` (aligns with
+    ``transformers.SchedulerType``:
+    https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType).
+    Megatron maps it to an ``lr_decay_style``: ``"constant_with_warmup"`` -> constant,
+    ``"cosine"`` -> cosine decay to ``min_lr`` over the training horizon, ``"linear"`` -> linear
+    decay (see ``get_megatron_optimizer_param_scheduler``)."""
+    min_lr: float = 0.0
+    """Floor the LR decays to (cosine/linear schedules). 0.0 decays to zero. Only consulted by
+    decaying schedules; ignored by ``constant_with_warmup``."""
 
 
 @dataclass
