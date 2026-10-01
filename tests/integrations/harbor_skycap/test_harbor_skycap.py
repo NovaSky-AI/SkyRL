@@ -324,7 +324,11 @@ async def test_with_exposure_the_harness_calls_skycap_through_the_exposed_gatewa
     gateway = HarnessGateway(skycap.url)
     exposed = f"http://127.0.0.1:{await asyncio.to_thread(gateway.start)}"
     gen = HarborSkycapGenerator(
-        generator_cfg(), harbor_cfg(), [skycap.url], SimpleNamespace(weight_version=7), harness_urls={skycap.url: exposed}
+        generator_cfg(),
+        harbor_cfg(),
+        [skycap.url],
+        SimpleNamespace(weight_version=7),
+        harness_urls={skycap.url: exposed},
     )
     try:
         out = await gen.generate(batch("linear"), disable_tqdm=True)
