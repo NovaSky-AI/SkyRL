@@ -1050,6 +1050,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "HF_TOKEN",
         "HF_HUB_OFFLINE",
         "HF_ENDPOINT",
+        # Kernel caches must be writable before workers import model modules.
+        # In particular, TileLang does not derive its cache from XDG_CACHE_HOME.
+        "XDG_CACHE_HOME",
+        "TILELANG_CACHE_DIR",
+        "TRITON_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
         "PYTORCH_CUDA_ALLOC_CONF",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",
