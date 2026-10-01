@@ -470,14 +470,19 @@ class VLLMServerActor(ServerActorProtocol):
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
-            """Reset the prefix cache, optionally resetting in-flight requests too."""
+            """Reset prefix cache, optionally including connector state or running requests."""
             try:
                 data = await request.json()
             except Exception:
                 data = {}
             reset_running_requests = data.get("reset_running_requests", False)
-            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
-            return {"status": "ok"}
+            reset_connector = data.get("reset_connector", False) or (
+                request.query_params.get("reset_external", "false").lower() == "true"
+            )
+            success = await engine.reset_prefix_cache(
+                reset_running_requests=reset_running_requests, reset_connector=reset_connector
+            )
+            return {"status": "ok", "success": bool(success)}
 
         @app.post("/fetch_weights")
         async def _fetch_weights(request: Request):
