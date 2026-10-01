@@ -9,6 +9,12 @@ from megatron.core.distributed import finalize_model_grads
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
+from skyrl.backends.skyrl_train.distributed.megatron.active_spans import (
+    ActiveSpanMetadata,
+    build_active_mask,
+    build_packed_active_metadata,
+    build_unpacked_active_metadata,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
     call_model_with_fused_lm_head,
     fused_lm_head_output_processor,
@@ -69,6 +75,76 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.train.config import TrainerConfig
 from skyrl.train.fused_lm_head import FusedLmHeadBackend
+
+_ACTIVE_MASK_KEY = "fused_lm_head_active_mask"
+_ACTIVE_SPANS_KEY = "fused_lm_head_active_spans"
+
+
+def _build_block_sparse_active_metadata(
+    batch: Dict[str, Any],
+    sub_seq_lengths: Optional[list[list[int]]],
+    *,
+    remove_microbatch_padding: bool,
+    fp8_enabled: bool,
+    fp8_recipe: Optional[str] = None,
+) -> ActiveSpanMetadata:
+    """Build the shared SFT/RL active mask and CP-local backward spans."""
+    if remove_microbatch_padding:
+        return build_packed_active_metadata(
+            batch["loss_mask"],
+            batch["num_actions"],
+            batch["sequences"].shape[1],
+            batch["attention_mask"],
+            sub_seq_lengths=sub_seq_lengths,
+            tp_size=mpu.get_tensor_model_parallel_world_size(),
+            cp_size=mpu.get_context_parallel_world_size(),
+            cp_rank=mpu.get_context_parallel_rank(),
+            fp8_enabled=fp8_enabled,
+            fp8_recipe=fp8_recipe,
+        )
+    return build_unpacked_active_metadata(
+        batch["loss_mask"],
+        batch["num_actions"],
+        batch["sequences"].shape[1],
+    )
+
+
+def _prepare_microbatch_host_metadata(
+    raw_batch: Dict[str, Any],
+    *,
+    block_sparse: bool,
+    remove_microbatch_padding: bool,
+    fp8_enabled: bool,
+    fp8_recipe: Optional[str],
+    include_active_spans: bool,
+) -> tuple[Dict[str, Any], Optional[list[list[int]]]]:
+    """Prepare the shared SFT/RL sparse metadata before the device copy."""
+    batch = dict(raw_batch)
+    sub_seq_lengths_field = batch.pop("sub_seq_lengths", None)
+    sub_seq_lengths = (
+        [tensor.tolist() for tensor in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
+    )
+    batch["sub_seq_lengths_list"] = sub_seq_lengths
+    batch[_ACTIVE_MASK_KEY] = None
+    batch[_ACTIVE_SPANS_KEY] = None
+    if (
+        block_sparse
+        and mpu.is_pipeline_last_stage(ignore_virtual=True)
+        and batch.get("loss_mask") is not None
+        and batch["loss_mask"].device.type == "cpu"
+        and batch["attention_mask"].device.type == "cpu"
+    ):
+        active_metadata = _build_block_sparse_active_metadata(
+            batch,
+            sub_seq_lengths,
+            remove_microbatch_padding=remove_microbatch_padding,
+            fp8_enabled=fp8_enabled,
+            fp8_recipe=fp8_recipe,
+        )
+        batch[_ACTIVE_MASK_KEY] = active_metadata.active_mask
+        if include_active_spans:
+            batch[_ACTIVE_SPANS_KEY] = active_metadata.active_spans
+    return batch, sub_seq_lengths
 
 
 def _pack_sequence_values(
@@ -141,22 +217,6 @@ def _build_packed_valid_mask(
     packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
     mask[packed_indices[attn]] = 1.0
     return mask.unsqueeze(0)
-
-
-def _build_active_mask(loss_mask: torch.Tensor, num_actions: int, sequence_length: int) -> torch.Tensor:
-    """Expand the action loss mask into prediction-row coordinates."""
-    if loss_mask.dim() != 2 or loss_mask.shape[1] != num_actions:
-        raise ValueError(f"Expected loss_mask shape [batch, {num_actions}], got {tuple(loss_mask.shape)}")
-    if num_actions > sequence_length - 1:
-        raise ValueError(f"num_actions={num_actions} exceeds the {sequence_length - 1} prediction rows")
-    active_mask = torch.zeros(
-        (loss_mask.shape[0], sequence_length - 1),
-        dtype=torch.bool,
-        device=loss_mask.device,
-    )
-    if num_actions > 0:
-        active_mask[:, -num_actions:] = loss_mask > 0
-    return active_mask
 
 
 def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
@@ -400,6 +460,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    active_mask=data[_ACTIVE_MASK_KEY],
                 )
             elif fused_lm_head:
                 token_logprobs = from_parallel_hidden_to_logprobs(
@@ -414,6 +475,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    active_mask=data[_ACTIVE_MASK_KEY],
                 )
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
@@ -444,23 +506,27 @@ class MegatronModelWrapper:
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
-            batch = next(batch_iter)
+            model_config = get_model_config(model)
+            fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
+            fp8_recipe = getattr(model_config, "fp8_recipe", None)
+            batch, sub_seq_lengths = _prepare_microbatch_host_metadata(
+                next(batch_iter),
+                block_sparse=self._fused_lm_head_block_sparse,
+                remove_microbatch_padding=self.remove_microbatch_padding,
+                fp8_enabled=fp8_enabled,
+                fp8_recipe=fp8_recipe,
+                include_active_spans=False,
+            )
             # Microbatches are held on CPU and transferred just before their forward
             # step to cap resident input memory (no-op if already on device).
             batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
-            model_config = get_model_config(model)
-            fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
-            fp8_recipe = getattr(model_config, "fp8_recipe", None)
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             router_padding_mask = batch.pop("router_padding_mask", None)
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
-            sub_seq_lengths_field = batch.get("sub_seq_lengths")
-            sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
-            batch["sub_seq_lengths_list"] = sub_seq_lengths
             sample_support = _microbatch_sample_support(
                 batch, sub_seq_lengths, enabled=self.cfg.algorithm.enable_sample_support_replay
             )
@@ -688,18 +754,19 @@ class MegatronModelWrapper:
             # num_microbatches when not provided (no padding microbatches).
             num_real_microbatches = data.get("num_real_microbatches", num_microbatches)
 
-            sparse_active_mask = None
+            sparse_active_mask = data[_ACTIVE_MASK_KEY]
             if self._fused_lm_head_block_sparse:
                 if loss_mask is None:
                     raise ValueError("The triton_block_sparse fused LM-head backend requires a loss mask")
-                sparse_active_mask = _build_active_mask(loss_mask, num_actions, sequences.shape[1])
-                if packed_seq_params is not None:
-                    sparse_active_mask = _pack_sequence_values(
-                        torch.nn.functional.pad(sparse_active_mask, (0, 1), value=False),
-                        data["attention_mask"],
-                        packed_seq_params,
-                        data.get("sub_seq_lengths_list"),
-                    )
+                if sparse_active_mask is None:
+                    sparse_active_mask = build_active_mask(loss_mask, num_actions, sequences.shape[1])
+                    if packed_seq_params is not None:
+                        sparse_active_mask = _pack_sequence_values(
+                            torch.nn.functional.pad(sparse_active_mask, (0, 1), value=False),
+                            data["attention_mask"],
+                            packed_seq_params,
+                            data.get("sub_seq_lengths_list"),
+                        )
 
             dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
             tp_grp = mpu.get_tensor_model_parallel_group()
@@ -724,6 +791,7 @@ class MegatronModelWrapper:
             fused_entropy_BS = None
             compute_fused_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
             if self.cfg.algorithm.enable_sample_support_replay:
+                # The SFT path takes no entropy term at all, so nothing there pays for the row.
                 compute_support_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
                 support_scores = compute_sample_support_scores(
                     logits,
@@ -762,6 +830,7 @@ class MegatronModelWrapper:
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
                     active_mask=sparse_active_mask,
+                    active_spans=data[_ACTIVE_SPANS_KEY],
                     return_entropy=compute_fused_entropy,
                     entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
                 )
@@ -783,6 +852,7 @@ class MegatronModelWrapper:
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
                     active_mask=sparse_active_mask,
+                    active_spans=data[_ACTIVE_SPANS_KEY],
                     return_entropy=compute_fused_entropy,
                     entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
                 )
@@ -820,9 +890,10 @@ class MegatronModelWrapper:
             action_log_probs = token_logprobs[:, -num_actions:]
             if self._fused_lm_head_block_sparse and resolved_loss_name != PolicyLossType.CROSS_ENTROPY:
                 # Several RL objectives form ratios before applying loss_mask.
-                # Give inactive operands the same finite value so masked rows
-                # cannot create overflow or NaN in those intermediates.
+                # Give every inactive operand the same finite value so masked
+                # rows cannot produce an overflow or NaN in that intermediate.
                 inactive = loss_mask <= 0
+                # The sparse scorer already guarantees zero action log-probs.
                 if old_action_log_probs is not None:
                     old_action_log_probs = old_action_log_probs.masked_fill(inactive, 0.0)
                 advantages = advantages.masked_fill(inactive, 0.0)
@@ -1103,14 +1174,25 @@ class MegatronModelWrapper:
             # (can be left, or right) as it uses attention_mask to locate real tokens. Same thing
             # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
-            batch = next(batch_iter)
+            model_config = get_model_config(model)
+            fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
+            fp8_recipe = getattr(model_config, "fp8_recipe", None)
+
+            # These ragged lengths and backward spans are host scheduling data.
+            # Resolve them before the device copy so neither path incurs a CUDA
+            # ``tolist`` synchronization.
+            batch, sub_seq_lengths = _prepare_microbatch_host_metadata(
+                next(batch_iter),
+                block_sparse=self._fused_lm_head_block_sparse,
+                remove_microbatch_padding=self.remove_microbatch_padding,
+                fp8_enabled=fp8_enabled,
+                fp8_recipe=fp8_recipe,
+                include_active_spans=not forward_only,
+            )
             # Microbatches are held on CPU and transferred just before their forward
             # step to cap resident input memory (no-op if already on device).
             batch = _copy_tensor_dict_to_device(batch, torch.cuda.current_device())
 
-            model_config = get_model_config(model)
-            fp8_enabled = is_fp8_enabled(getattr(model_config, "fp8", None))
-            fp8_recipe = getattr(model_config, "fp8_recipe", None)
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
             router_padding_mask = batch.pop("router_padding_mask", None)
 
@@ -1122,12 +1204,8 @@ class MegatronModelWrapper:
             # packing). preprocess_packed_seqs uses it to emit cu_seqlens
             # entries covering all sub-seqs, not one per row.
             #
-            # It arrives as a ``TensorList`` data field.
-            # ``preprocess_packed_seqs`` and the packed-logprob scatter use
-            # ``list[list[int]]``, so convert tensors -> python lists here.
-            sub_seq_lengths_field = batch.get("sub_seq_lengths")
-            sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
-            batch["sub_seq_lengths_list"] = sub_seq_lengths
+            # The CPU ``TensorList`` was converted above; both consumers use
+            # ordinary Python lengths and never need it on device.
             sample_support = _microbatch_sample_support(
                 batch, sub_seq_lengths, enabled=self.cfg.algorithm.enable_sample_support_replay
             )
