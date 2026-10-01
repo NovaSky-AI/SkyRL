@@ -1,0 +1,45 @@
+# Example Anyscale compute config (new schema) for 8 x 8xB200 workers on a Kubernetes-backed
+# Anyscale cloud, with AWS EFA mounted in the worker pods. Replace cloud, cloud_resource,
+# instance types and namespace with your cloud's values.
+#
+# The part that matters: the worker group's advanced_instance_config asks Kubernetes for one EFA
+# device per GPU on the "ray" container. Without it the pods have no /dev/infiniband, the
+# aws-ofi-nccl plugin finds no provider, and inter-node NCCL silently falls back to TCP sockets.
+# Keep the request off the head node: it has no EFA, and the head pod would never schedule.
+#
+#   anyscale compute-config create -n <name> -f efa_compute_config.yaml
+cloud: hackskyrl
+cloud_resource: chawla
+head_node:
+  instance_type: chawla-32CPU-128GB
+  resources:
+    CPU: 0
+    GPU: 0
+worker_nodes:
+  - name: 8xb200
+    instance_type: chawla-8xB200
+    min_nodes: 8
+    max_nodes: 8
+    market_type: ON_DEMAND
+    advanced_instance_config:
+      spec:
+        containers:
+          - name: ray
+            resources:
+              limits:
+                vpc.amazonaws.com/efa: "8"
+      metadata:
+        annotations:
+          karpenter.sh/do-not-disrupt: "true"
+        # Some clusters schedule through Kueue; ask your platform team which priority class to use.
+        # labels:
+        #   kueue.x-k8s.io/priority-class: "high"
+enable_cross_zone_scaling: false
+advanced_instance_config:
+  metadata:
+    annotations:
+      karpenter.sh/do-not-disrupt: "true"
+flags:
+  cloud_resource_strategy: input_order
+  target_kubernetes_namespace: lila-hackskyrl
+auto_select_worker_config: false
