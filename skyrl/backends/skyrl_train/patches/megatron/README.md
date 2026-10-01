@@ -20,7 +20,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 |---|---|
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection |
-| `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py` | `glm5_next/dsa.py` padded fused sparse attention vs dense |
+| `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py` (H100) | `glm5_next/dsa.py` padded fused sparse attention vs dense |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |

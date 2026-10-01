@@ -7,8 +7,11 @@ decline and megatron-core runs a dense ``[b, heads, sq, sk]`` masked softmax. ``
 zero-pads q/k into the RoPE slot and pads the indices with -1; this checks that the padded fused
 kernel matches megatron-core's dense reference, forward and backward.
 
+H100-only: the SparseMLA kernel needs ~166 KB of shared memory per block, more than an L4
+(sm89) allows ("Failed to set the allowed dynamic shared memory size to 169984").
+
 Run with:
-uv run --isolated --extra dev --extra megatron pytest -s \
+uv run --isolated --extra dev --extra megatron pytest -s -m h100 \
     tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py
 """
 
@@ -17,7 +20,7 @@ import types
 import pytest
 import torch
 
-pytestmark = pytest.mark.megatron
+pytestmark = [pytest.mark.megatron, pytest.mark.h100]
 
 LATENT = 512  # GLM-5.3-Flash kv_lora_rank; NoPE, so q/k width == latent == value width
 HEADS = 16  # 64 heads / TP4
