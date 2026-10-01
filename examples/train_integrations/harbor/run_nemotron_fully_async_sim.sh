@@ -16,7 +16,7 @@ set -euo pipefail
 : "${MAX_MODEL_LEN:=32768}"
 : "${MAX_GENERATE_LENGTH:=12288}"
 : "${OFFLOAD:=0}"
-: "${CPU_OFFLOAD_BYTES:=274877906944}"
+: "${CPU_OFFLOAD_BYTES:=549755813888}"
 : "${GRAFANA_URL:=http://localhost:9481}"
 : "${RAY_VERSION:=2.58.0}"
 # The account-wide cap is 500; this local cap leaves room for existing/lingering sandboxes.
