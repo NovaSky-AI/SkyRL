@@ -66,16 +66,23 @@ RENDERED_FIELDS = frozenset(
         "role",
         "content",
         "reasoning_content",
+        # Reasoning under its other name (DeepSeek V4, Gemma 4, Hunyuan 3, Laguna).
         "reasoning",
         "name",
         "tool_calls",
+        # On a tool result: the call it answers. DeepSeek V4, GLM 5 and Gemma 4 pair results with calls by it.
         "tool_call_id",
+        # Gemma 4: tool results carried on the assistant message.
         "tool_responses",
+        # DeepSeek V4: ``task`` emits a task token after the message, ``wo_eos`` omits the
+        # end-of-turn token, and ``response_format`` renders a JSON schema into the message.
         "task",
         "wo_eos",
         "response_format",
     }
 )
+#: ``id`` is rendered by Kimi K2 and K2.5, and pairs calls with results in DeepSeek V4, GLM 5 and Gemma 4.
+#: The flat ``name`` / ``arguments`` / ``tool_call_id`` are the spellings renderers accept besides ``function``.
 RENDERED_TOOL_CALL_FIELDS = frozenset({"id", "function", "name", "arguments", "tool_call_id"})
 RENDERED_FUNCTION_FIELDS = frozenset({"name", "arguments"})
 

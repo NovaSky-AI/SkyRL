@@ -2,9 +2,11 @@
 
 Planning, in order:
 
-1. Match the request's messages against the graph in message space. Where
-   the hashes stop, a message the graph holds in another spelling is
-   matched if the renderer renders both alike (``_match``).
+1. Match the request's messages against the graph in message space: walk
+   down from the root by match hash, one message at a time. When a message
+   has no node with its hash, it may still be a stored message spelled
+   differently; if the renderer renders both alike, it matches that node and
+   the walk continues (``_match``).
 2. If the matched prefix contains a model node, bridge from the deepest one:
    the renderer extends that call's exact prompt and completion with the new
    messages instead of re-rendering what the model sampled.
@@ -49,6 +51,9 @@ class Plan:
     chunks: list[list[int]]
     scaffold: list[int]
     bridged: bool
+    #: One match hash per request message: a matched message's is its node's, which differs from
+    #: the request's own for a message matched in another spelling, so committing it finds that node.
+    matches: list[str]
 
 
 def routes_from(graph: MessageGraph, planned: Plan) -> int:
@@ -81,10 +86,18 @@ def plan(
     tools_key: str,
     model: str | None,
 ) -> Plan:
+    """Where a request attaches to the graph, the prompt tokens it sends, and its new nodes' tokens.
+
+    ``matches`` are the request's match hashes (``match_hashes``), and
+    ``tools_key`` and ``model`` are what they were taken with. The steps are
+    in the module docstring. Planning changes the graph only by recording
+    aliases for messages matched in another spelling.
+    """
     if not messages:
         raise TokenError("a request needs at least one message")
     matched, rendered = _match(graph, renderer, messages, tools, matches, tools_key, model)
-    bridged = _bridge(graph, renderer, messages, tools, matched)
+    resolved = [graph.nodes[node_id].match_hash for node_id in matched] + list(matches[len(matched) :])
+    bridged = _bridge(graph, renderer, messages, tools, matched, resolved)
     if bridged is not None:
         return bridged
     if rendered is None:
@@ -99,7 +112,7 @@ def plan(
         parent, start = node_id, depth + 1
     indices = [i - start if i >= 0 else -1 for i in rendered.tail_indices[offset:]]
     chunks, scaffold = attribute(prompt[offset:], indices, len(messages) - start)
-    return Plan(prompt, parent, offset, start, chunks, scaffold, bridged=False)
+    return Plan(prompt, parent, offset, start, chunks, scaffold, bridged=False, matches=resolved)
 
 
 def _match(
@@ -113,52 +126,66 @@ def _match(
 ) -> tuple[list[int], Rendered | None]:
     """The longest prefix of ``messages`` in the graph, and the full render if one was needed.
 
-    Where the match hashes stop, the next message may still be a node's message
-    spelled differently, e.g. ``content: ""`` against no ``content``. Whether two
+    The walk down the graph by match hash stops at the first message with no
+    node under its parent. That message may still be a stored message spelled
+    differently, e.g. ``content: ""`` against no ``content``. Whether two
     spellings are the same message depends on the chat template, so the renderer
-    decides: a sibling whose rendered fields agree once empty strings are dropped
-    is swapped into the request, and if the request renders to the same tokens
-    either way, the message is that node. Its hash is recorded as an alias, so
-    later requests replaying this spelling match without rendering.
+    decides: a child of the parent whose rendered fields agree once empty
+    strings are dropped is swapped into the request, and if the request renders
+    to the same tokens either way, the message is that node. Its hash is
+    recorded as an alias, so later requests sending this spelling match by hash,
+    and the walk continues from that node.
+
+    Cost, for ``n`` messages: hash lookups are ``O(n)``, since the walk never
+    restarts. Renders happen only for a message whose hash misses and that has
+    a candidate: one render of the request, plus one per distinct candidate
+    spelling (``_candidates``). Each spelling is checked once per parent; after
+    that its alias matches by hash.
     """
     rendered: Rendered | None = None
     matched = graph.match(matches)
     while len(matched) < len(messages):
         depth = len(matched)
         parent = matched[-1] if matched else None
-        candidates = _candidates(graph, parent, messages[depth], tools_key, model)
-        if not candidates:
-            break
-        if rendered is None:
-            rendered = renderer.render(messages, tools)
-        for node_id in candidates:
+        same = None
+        for node_id in _candidates(graph, parent, messages[depth], tools_key, model):
+            if rendered is None:
+                rendered = renderer.render(messages, tools)
             swapped = [*messages[:depth], graph.nodes[node_id].message, *messages[depth + 1 :]]
             if renderer.render(swapped, tools).token_ids == rendered.token_ids:
-                graph.alias(parent, matches[depth], node_id)
+                same = node_id
                 break
-        else:
+        if same is None:
             break
-        matched = graph.match(matches)
+        graph.alias(parent, matches[depth], same)
+        matched += [same, *graph.match(matches[depth + 1 :], parent=same)]
     return matched, rendered
 
 
 def _candidates(
     graph: MessageGraph, parent: int | None, message: Mapping[str, Any], tools_key: str, model: str | None
 ) -> list[int]:
-    """Children of ``parent`` that may be ``message`` spelled differently, model-authored and latest first.
+    """Children of ``parent`` that may be ``message`` spelled differently, one per spelling.
 
-    A child qualifies if it was matched under this call's tools and model, and
-    its rendered fields equal the message's once empty strings are dropped too.
+    A child qualifies if its rendered fields equal the message's once empty
+    strings are dropped too, and it was matched under this call's tools and
+    model. Siblings with the same match hash render alike, so only one is
+    tried: the one history continues from (model-authored, then latest), as
+    in ``MessageGraph.add``.
     """
     loose = _loose(message)
     found = [
         node_id
         for node_id in graph.children(parent)
-        if hashing.token_match_hash(graph.nodes[node_id].message, tools=tools_key, model=model)
+        if _loose(graph.nodes[node_id].message) == loose
+        and hashing.token_match_hash(graph.nodes[node_id].message, tools=tools_key, model=model)
         == graph.nodes[node_id].match_hash
-        and _loose(graph.nodes[node_id].message) == loose
     ]
-    return sorted(found, key=lambda node_id: (graph.nodes[node_id].author == "model", node_id), reverse=True)
+    found.sort(key=lambda node_id: (graph.nodes[node_id].author == "model", node_id), reverse=True)
+    by_spelling: dict[str, int] = {}
+    for node_id in found:
+        by_spelling.setdefault(graph.nodes[node_id].match_hash, node_id)
+    return list(by_spelling.values())
 
 
 def _loose(message: Mapping[str, Any]) -> dict[str, Any]:
@@ -173,6 +200,7 @@ def _bridge(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
     matched: list[int],
+    matches: list[str],
 ) -> Plan | None:
     """Extend the deepest matched model call, if there is one and the renderer agrees."""
     for depth in range(len(matched) - 1, -1, -1):
@@ -189,7 +217,9 @@ def _bridge(
         if rendered is None:
             return None
         chunks, scaffold = attribute(rendered.token_ids[rendered.reused :], rendered.tail_indices, len(new_messages))
-        return Plan(rendered.token_ids, node.id, rendered.reused, depth + 1, chunks, scaffold, bridged=True)
+        return Plan(
+            rendered.token_ids, node.id, rendered.reused, depth + 1, chunks, scaffold, bridged=True, matches=matches
+        )
     return None
 
 
@@ -237,7 +267,6 @@ def commit(
     turn: Plan,
     *,
     messages: Sequence[Mapping[str, Any]],
-    matches: Sequence[str],
     reply: Mapping[str, Any],
     reply_match: str,
     output: EngineOutput,
@@ -258,8 +287,8 @@ def commit(
             role=messages[index].get("role"),
             author="client",
             message=messages[index],
-            match_hash=matches[index],
-            delta_hash=hashing.client_token_delta_hash(matches[index], chunk),
+            match_hash=turn.matches[index],
+            delta_hash=hashing.client_token_delta_hash(turn.matches[index], chunk),
             created_at=call.t_start,
             tokens=NodeTokens(token_ids=list(chunk), routed_experts=routed.slice(position, len(chunk))),
         )

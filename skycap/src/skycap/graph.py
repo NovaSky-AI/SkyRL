@@ -203,10 +203,9 @@ class MessageGraph:
             raise ValueError(f"node {node} is not a child of {parent}")
         self._by_match.setdefault((parent, match_hash), node)
 
-    def match(self, match_hashes: Sequence[str]) -> list[int]:
-        """The longest prefix of ``match_hashes`` already in the graph, as node ids."""
+    def match(self, match_hashes: Sequence[str], parent: int | None = None) -> list[int]:
+        """The longest prefix of ``match_hashes`` already in the graph below ``parent``, as node ids."""
         matched: list[int] = []
-        parent: int | None = None
         for match in match_hashes:
             node = self.child(parent, match)
             if node is None:
