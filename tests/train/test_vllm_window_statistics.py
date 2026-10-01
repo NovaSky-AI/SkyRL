@@ -5,8 +5,9 @@ import math
 import pytest
 
 from skyrl.train.utils.vllm_window_statistics import (
-    WindowStatistics,
+    counter_deltas,
     histogram_quantile,
+    latency_metrics,
 )
 
 
@@ -19,21 +20,15 @@ def test_histogram_quantiles():
 
 
 def test_window_omits_missing_and_reset_counters():
-    result = WindowStatistics.between(
-        {"tokens_total": 10, "bad_total": 20}, {"tokens_total": 25, "bad_total": 1, "new_total": 4}, 3
-    )
-    assert result.deltas == {"tokens_total": 15}
-    assert not result.valid
-    assert result.duration_seconds == 3
+    assert counter_deltas({"tokens_total": 10}, {"tokens_total": 25, "new_total": 4}) == {"tokens_total": 15}
+    assert counter_deltas({"bad_total": 20}, {"bad_total": 1}) is None
 
 
 def test_invalid_histogram_window_omits_latency_metrics():
     base = "ray_vllm_time_to_first_token_seconds"
     previous = {base + "_count": 10, base + "_sum": 100, base + "_bucket::1": 5, base + "_bucket::+Inf": 10}
     current = {base + "_count": 20, base + "_sum": 20, base + "_bucket::1": 10, base + "_bucket::+Inf": 20}
-    window = WindowStatistics.between(previous, current, 1)
-    assert not window.valid
-    assert window.latency_metrics("vllm/") == {}
+    assert latency_metrics(previous, current, "vllm/") == {}
 
 
 def test_lazy_histogram_buckets_use_confirmed_empty_baseline():
@@ -46,8 +41,8 @@ def test_lazy_histogram_buckets_use_confirmed_empty_baseline():
         base + "_bucket::0.2": 2,
         base + "_bucket::+Inf": 2,
     }
-    metrics = WindowStatistics.between(previous, current, 1).latency_metrics("vllm/")
+    metrics = latency_metrics(previous, current, "vllm/")
     assert metrics["vllm/ttft_seconds_avg"] == pytest.approx(0.075)
     assert metrics["vllm/ttft_seconds_p90"] == pytest.approx(0.18)
     # Absence without an explicit empty count is unknown.
-    assert not WindowStatistics.between({}, current, 1).latency_metrics("vllm/")
+    assert not latency_metrics({}, current, "vllm/")

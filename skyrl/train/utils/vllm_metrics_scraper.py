@@ -20,7 +20,7 @@ import ray
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
-from skyrl.train.utils.vllm_window_statistics import WindowStatistics
+from skyrl.train.utils.vllm_window_statistics import latency_metrics
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
 # AND the `ray_` prefix that Ray's metrics agent adds to every custom metric.
@@ -56,17 +56,13 @@ _SUM_METRICS = (
     _COUNTER_SPEC_DRAFTS,
     _COUNTER_SPEC_DRAFT_TOKENS,
     _COUNTER_SPEC_ACCEPTED_TOKENS,
-)
-_ADDITIONAL_COUNTERS = (
     "ray_vllm_num_preemptions_total",
     "ray_vllm_external_prefix_cache_queries_total",
     "ray_vllm_external_prefix_cache_hits_total",
-    "ray_vllm_kv_offload_store_bytes_total",
     "ray_vllm_kv_offload_load_bytes_total",
     "ray_vllm_request_time_per_output_token_seconds_sum",
     "ray_vllm_request_time_per_output_token_seconds_count",
 )
-_SUM_METRICS += _ADDITIONAL_COUNTERS
 _MEAN_METRICS = (_GAUGE_KV_CACHE_USAGE,)
 
 ParsedSamples = Dict[Tuple[str, FrozenSet[Tuple[str, str]]], float]
@@ -302,23 +298,18 @@ class VLLMMetricsScraper:
         for name, owners in schemas.items():
             if len({frozenset(bounds) for bounds in owners.values()}) != 1:
                 buckets = {key: value for key, value in buckets.items() if not key.startswith(name + "::")}
-        # Ray counters skip zero increments. A live engine gauge confirms the
-        # exporter exists; connector queries/store counters establish support.
-        if any(name == _GAUGE_NUM_RUNNING for name, _ in parsed):
-            buckets.setdefault("ray_vllm_num_preemptions_total", 0.0)
         sums = aggregate(parsed, _SUM_METRICS, how="sum")
         means = aggregate(parsed, _MEAN_METRICS, how="mean")
         per_pos = sum_by_position(parsed, _COUNTER_SPEC_ACCEPTED_PER_POS)
-        if "ray_vllm_num_preemptions_total" in sums:
-            buckets.pop("ray_vllm_num_preemptions_total", None)
+        # Ray counters skip zero increments. A live engine gauge confirms the exporter exists.
+        if any(name == _GAUGE_NUM_RUNNING for name, _ in parsed):
+            sums.setdefault("ray_vllm_num_preemptions_total", 0.0)
         for hits, queries in (
             ("ray_vllm_prefix_cache_hits_total", _COUNTER_PREFIX_QUERIES),
             ("ray_vllm_external_prefix_cache_hits_total", "ray_vllm_external_prefix_cache_queries_total"),
         ):
             if queries in sums:
                 sums.setdefault(hits, 0.0)
-        if "ray_vllm_kv_offload_store_bytes_total" in sums:
-            sums.setdefault("ray_vllm_kv_offload_load_bytes_total", 0.0)
         return {**sums, **means, **per_pos, **buckets}
 
     async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
@@ -453,15 +444,7 @@ class VLLMMetricsScraper:
         if q_d is not None and h_d is not None and q_d > 0:
             out[f"{prefix}prefix_cache_hit_rate"] = h_d / q_d
 
-        stats = WindowStatistics.between(prev, cur, throughput_window_s)
-        latencies = stats.latency_metrics(prefix)
-        for suffix in ("avg", "p90"):
-            request_key = f"{prefix}request_tpot_seconds_{suffix}"
-            if request_key in latencies:
-                out[f"{prefix}tpot_seconds_{suffix}"] = latencies[request_key]
-            ttft_key = f"{prefix}ttft_seconds_{suffix}"
-            if ttft_key in latencies:
-                out[ttft_key] = latencies[ttft_key]
+        out.update(latency_metrics(prev, cur, prefix))
         preemptions = delta("ray_vllm_num_preemptions_total")
         if preemptions is not None:
             out[prefix + "num_preemptions"] = preemptions
