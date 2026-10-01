@@ -50,6 +50,7 @@ args=(
   generator.inference_engine.tensor_parallel_size=8 generator.inference_engine.run_engines_locally=true
   generator.inference_engine.weight_sync_backend=nccl generator.inference_engine.gpu_memory_utilization=0.90
   "generator.inference_engine.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN"
+  generator.inference_engine.engine_init_kwargs.reasoning_parser=nemotron_v3
   "generator.inference_engine.max_num_seqs=$MAX_NUM_SEQS"
   "generator.inference_engine.engine_init_kwargs.max_num_batched_tokens=$MAX_NUM_BATCHED_TOKENS"
   generator.inference_engine.enable_ray_prometheus_stats=true
