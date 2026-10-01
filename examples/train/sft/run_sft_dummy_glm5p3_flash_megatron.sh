@@ -24,6 +24,9 @@ set -x
 #   SKYRL_DSA_INDEXER_TP_SHARD=1 bash ...
 #   -> ~163 GiB/GPU peak, ~4.1k tokens/s (fwd+bwd ~65 tokens/s/GPU). Add SKYRL_DSA_QUERY_CHUNK=65536
 #   to trade ~5 GiB for one extra DSA attention forward.
+# 1M tokens per sequence: the same plus MEGATRON_CP=2 MAX_LENGTH=1048576 (dp = 4, batch 4)
+#   -> ~163 GiB/GPU peak, fwd+bwd ~44 tokens/s/GPU. With TP8 the CP pair spans two nodes; keeping
+#   TP * CP within a node (e.g. TP4 CP2) avoids the cross-node all-to-alls.
 
 MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to a GLM-5.3-Flash config + tokenizer directory}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"
@@ -31,12 +34,14 @@ NUM_NODES="${NUM_NODES:-8}"
 NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-8}"
 NUM_STEPS="${NUM_STEPS:-4}"
 
-# KDA has no context-parallel path and megatron-core rejects mHC with PP>1, so TP is the only
-# dense-side divisor. dp = 64 / TP4 = 16; one full-length sequence per DP rank per step.
+# megatron-core rejects mHC with PP>1, so TP and CP are the dense-side divisors. CP is head-wise
+# (all-to-all) for KDA and key all-gather for DSA, on the packed (THD) path.
+# dp = 64 / (TP4 * CP1) = 16; one full-length sequence per DP rank per step.
 MEGATRON_TP="${MEGATRON_TP:-4}"
+MEGATRON_CP="${MEGATRON_CP:-1}"
 MEGATRON_EP="${MEGATRON_EP:-32}"
 MEGATRON_ETP="${MEGATRON_ETP:-2}"
-DP=$(( NUM_NODES * NUM_GPUS_PER_NODE / MEGATRON_TP ))
+DP=$(( NUM_NODES * NUM_GPUS_PER_NODE / (MEGATRON_TP * MEGATRON_CP) ))
 BATCH_SIZE="${BATCH_SIZE:-$DP}"
 
 RECOMPUTE_GRANULARITY="${RECOMPUTE_GRANULARITY:-selective}"
@@ -74,7 +79,7 @@ uv run --isolated --extra megatron \
     placement.num_gpus_per_node=$NUM_GPUS_PER_NODE \
     megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
     megatron_config.pipeline_model_parallel_size=1 \
-    megatron_config.context_parallel_size=1 \
+    megatron_config.context_parallel_size=$MEGATRON_CP \
     megatron_config.expert_model_parallel_size=$MEGATRON_EP \
     megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
     megatron_config.mtp_num_layers=0 \
@@ -91,6 +96,7 @@ uv run --isolated --extra megatron \
     megatron_config.transformer_config_kwargs.gradient_accumulation_fusion=false \
     megatron_config.transformer_config_kwargs.disable_parameter_transpose_cache=true \
     megatron_config.transformer_config_kwargs.dsa_kernel_backend=$DSA_KERNEL_BACKEND \
+    megatron_config.transformer_config_kwargs.cp_comm_type=allgather \
     megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true \
     megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0 \
     megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \

@@ -27,6 +27,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_mhc_full_recompute.py` | `patch_mhc_full_recompute.py` (loss/grads vs no recompute on a GLM-5.3-Flash slice) |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
 | `gpu_ci/patches/megatron/test_moe_combine_bf16_reduce.py` | `patch_moe_combine_bf16_reduce.py` (two ranks + wrapper) |
+| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1 (two ranks) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -61,6 +62,9 @@ model, `glm5_next/` is deleted too.
 ### NVIDIA/Megatron-LM#7054: KDA (Kimi Delta Attention)
 
 - **Carried as:** `mcore_ext/kda.py` (`KimiDeltaAttention`, `get_kda_module_spec`).
+  - SkyRL addition: head-wise (Ulysses) context parallelism, reusing megatron-core's
+    `GatedDeltaNet` all-to-all helpers (`ssm/gated_delta_net/common.py`). #7054 has its own
+    head-/chunk-wise CP (`cp_partition_mode`); compare against it before switching.
 - **Landed?** megatron-core defines a KDA module or `experimental_attention_variant="kda"`, and
   `TransformerConfig` has `kda_gate_lower_bound`
   (`grep -rn "KimiDeltaAttention\|kda_gate_lower_bound" .venv/.../megatron/core`).
@@ -70,7 +74,8 @@ model, `glm5_next/` is deleted too.
   - `glm5_next/bridge.py`: re-check the KDA parameter names (`q/k/v_conv1d`, `A_log`, `dt_bias`,
     `f_a/f_b/g_a/g_b_proj`) against upstream's module.
   - Delete `mcore_ext/kda.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`,
+  `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py`; the GLM roundtrip rows.
 
 ### NVIDIA/Megatron-LM#7521: mHC (manifold-constrained hyper-connections)
 
@@ -130,7 +135,9 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
       pinned `DSAIndexer`;
     - `Glm5NextDSAttention._forward_with_kpool_topk`: swaps the pinned `DSAttention.forward`'s
       token-level top-k for `fused_qk_topk_kpool`, and raises if the pooled selection doesn't run
-      exactly once;
+      exactly once; under context parallelism (`cp_comm_type=allgather`, which the pinned
+      `DSAttention` already supports for keys) `_gate_score_like_keys` all-gathers and reorders
+      the k-pool gate score the same way, so pools form over the whole sequence;
     - the `kpool <= 1` long-sequence guard;
     - `_pad_for_fused_absorbed_sparse_attention`: fits GLM-5.3's NoPE-MLA layout (q/k width 512,
       k-pool top-k width 2051) into the TileLang SparseMLA kernels' DeepSeek-V3.2 layout (576,
