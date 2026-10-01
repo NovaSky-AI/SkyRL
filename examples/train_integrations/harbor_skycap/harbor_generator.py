@@ -8,15 +8,18 @@ URL; skycap renders every prompt, calls the engine with token ids, and keeps a
 context graph, so a rewritten history is a branch rather than a hole and
 summarization is allowed.
 
-Per trial: create a trajectory, point the agent at ``trajectory.base_url``, run
-it, and ``finish`` with the reward to get a sample per path the ``train_paths``
-rule picks. ``compose`` turns those into the step-wise ``GeneratorOutput``.
+Per trial: create a trajectory, point the agent at its URL, run it, and
+``finish`` with the reward to get a sample per path the ``train_paths`` rule
+picks. ``compose`` turns those into the step-wise ``GeneratorOutput``. The URL
+is ``trajectory.base_url``, or, when the servers' harness routes are exposed to
+sandboxes (``exposure.py``), the same path on its server's exposed URL.
 """
 
 import asyncio
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import litellm
 from harbor.models.trial.config import TrialConfig
@@ -55,6 +58,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         capture_urls: List[str],
         inference_engine_client: Any = None,
         train_paths: str = "all",
+        harness_urls: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Args:
@@ -64,6 +68,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
             train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
+            harness_urls: per capture server, the URL its harness routes are exposed to sandboxes at
+                (``SkycapServers.harness_urls``). Empty or None: agents get the servers' own URLs.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -82,6 +88,13 @@ class HarborSkycapGenerator(GeneratorInterface):
         self._routed_experts = bool(getattr(generator_cfg.inference_engine, "enable_return_routed_experts", False))
         self.capture_urls = list(capture_urls)
         self.pool = CapturePool(self.capture_urls)
+        # Keyed as the pool names servers (``trajectory.server``).
+        self._harness_urls = {k.rstrip("/"): v.rstrip("/") for k, v in (harness_urls or {}).items()}
+        if self._harness_urls and set(self._harness_urls) != set(self.pool.urls):
+            raise ValueError(
+                "harness_urls must give an exposed URL for every capture server, or none: "
+                f"got {sorted(self._harness_urls)} for {sorted(self.pool.urls)}"
+            )
         self.inference_engine_client = inference_engine_client
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
@@ -193,7 +206,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             "attempt": attempt,
         }
         async with self.pool.trajectory(meta) as trajectory:
-            config = self._trial_config(prompt, trajectory.base_url, cache_salt)
+            config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt)
             async with self._rate_limiter:
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
@@ -238,6 +251,13 @@ class HarborSkycapGenerator(GeneratorInterface):
             stop_reason=stop_reason,
             unbridged_calls=finished.unbridged_calls,
         )
+
+    def _agent_url(self, trajectory: Any) -> str:
+        """The trajectory's URL as the agent reaches it: on its server's exposed URL, if any."""
+        exposed = self._harness_urls.get(trajectory.server)
+        if exposed is None:
+            return trajectory.base_url
+        return exposed + urlsplit(trajectory.base_url).path
 
     def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
         config = deepcopy(self._template)

@@ -14,7 +14,7 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 import ray
 import yaml
@@ -30,8 +30,27 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
+from ..exposure import Exposure, exposure_factory
 from ..harbor_generator import HarborSkycapGenerator
 from ..servers import SkycapServers, start_servers
+
+
+@dataclass
+class ExposureConfig:
+    type: str = "none"
+    """How agents that call the model from inside a remote sandbox reach skycap (``exposure.py``). Only the harness
+    routes are exposed; the control plane stays private. ``none`` (default): agents get each server's own URL, as
+    Terminus-2 needs, calling from this machine. ``external_host``: sandboxes reach server ``i`` at
+    ``host:port + i``, an address of this node or of a relay that forwards each port here (frp on a public VM).
+    ``cloudflare``: a Cloudflare quick tunnel per server, for development. ``module:Class``: an ``Exposure``
+    subclass of your own."""
+    host: Optional[str] = None
+    """For ``external_host``: the address sandboxes route to."""
+    port: int = 11500
+    """For ``external_host``: the first server's port; server ``i`` serves its harness routes on ``port + i``."""
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+    """The exposure class's constructor arguments: ``timeout`` and ``attempts`` for ``cloudflare``, or a custom
+    class's own."""
 
 
 @dataclass
@@ -61,6 +80,8 @@ class SkycapConfig:
     ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
+    exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    """How agents inside sandboxes reach the servers' harness routes."""
 
 
 @dataclass
@@ -100,7 +121,13 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         placement_strategy=cfg.skycap.placement_strategy,
         record_dir=cfg.skycap.record_dir or os.path.join(cfg.trainer.export_path, "skycap"),
         ttl=cfg.skycap.ttl,
+        exposure=_exposure(cfg.skycap.exposure),
     )
+
+
+def _exposure(cfg: ExposureConfig) -> Optional[Callable[[], Exposure]]:
+    """``skycap.exposure`` as a factory of per-server exposures; raises ``ValueError`` on a bad config."""
+    return exposure_factory(cfg.type, host=cfg.host, port=cfg.port, kwargs=cfg.kwargs)
 
 
 class HarborSkycapExp(HarborExp):
@@ -116,6 +143,7 @@ class HarborSkycapExp(HarborExp):
             capture_urls=self.skycap.urls,
             inference_engine_client=inference_engine_client,
             train_paths=cfg.skycap.train_paths,
+            harness_urls=self.skycap.harness_urls,
         )
         return self.generator
 
@@ -141,6 +169,7 @@ def main() -> None:
         defaults = yaml.safe_load(f)
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
+    _exposure(cfg.skycap.exposure)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)

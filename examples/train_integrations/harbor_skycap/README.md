@@ -27,7 +27,8 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
 The rest of the configuration is the sibling's: `harbor_trial_config` holds
 Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/default.yaml`.
 `skycap.*` sets the record directory (default `{trainer.export_path}/skycap`),
-the idle TTL, the port, the renderer pool size and which paths train.
+the idle TTL, the renderer pool size, which paths train, and how agents inside
+sandboxes reach skycap (`skycap.exposure`, [below](#agents-inside-sandboxes-exposure)).
 
 ## Which paths train
 
@@ -70,6 +71,7 @@ for what a rule may return.
 | --- | --- |
 | `entrypoints/main_harbor_skycap.py` | Starts the skycap servers in token mode, in front of the router, from the run's config. Stops them at the end, which writes every trajectory still in memory. |
 | `servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
+| `exposure.py`, `tunnel.py` | How agents inside sandboxes reach each server's harness routes: the harness-only gateway, the `Exposure` interface and its built-ins. `tunnel.py` runs a Cloudflare quick tunnel. |
 | `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
 | `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
 | `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
@@ -91,6 +93,73 @@ and vLLM's `mp` backend, as for SkyRL's own generator. Each row carries routes
 for its whole prompt and response, each from the forward pass that ran that
 token. A trial whose trained path lacks routes is retried, then masked, and
 counted in `generate/skycap/num_missing_route_trajectories`.
+
+## Agents inside sandboxes: exposure
+
+Terminus-2 calls the model from the trainer's process, so it reaches skycap at
+each server's own URL. An agent installed in its sandbox (Daytona, Modal, ...)
+calls the model from there, and needs a URL the sandbox network can reach.
+`skycap.exposure.type` picks how each server is made reachable:
+
+| `skycap.exposure.type` | Agents get | Needs, and limits |
+| --- | --- | --- |
+| `none` (default) | each server's own URL | Nothing: for agents that call from the trainer's process (Terminus-2). |
+| `external_host` | `http://{host}:{port + i}` for server `i` | `skycap.exposure.host` (and `port`, default 11500): an address the sandboxes route to. Either the node's own (a public IP or a network peered with the provider's; all servers on that node, e.g. `skycap.placement_strategy=STRICT_PACK`) or a relay's, such as [frp](https://github.com/fatedier/frp) on a small public VM with one TCP forward per server (`VM:port+i` to that server's node). Firewall it: the traffic is plain HTTP. |
+| `cloudflare` | a random `https://*.trycloudflare.com` URL per server | Outbound internet only, no account. Development only: a quick tunnel takes at most 200 requests in flight (run several servers past that), cuts a response that hasn't started within ~125 s, and has no SLA. `kwargs.timeout` and `kwargs.attempts` tune its startup. |
+| `module:Class` | whatever the class returns | Your own `Exposure` subclass, below. |
+
+For hundreds of concurrent agents, use `external_host` (directly, or through
+a relay): a quick tunnel's in-flight cap and response timeout are hit first.
+
+Only the harness routes (`/t/{id}/v1/chat/completions` and `/models`) are
+exposed, through a gateway in front of each server; the control plane (create,
+finish, read) stays private. The random trajectory id in the path is what a
+caller must know. When anything is exposed, every agent, Terminus-2 included,
+is given the exposed URL.
+
+```bash
+# Four servers behind an frp VM at 203.0.113.7 that forwards ports 11500-11503:
+  skycap.num_servers=4 skycap.exposure.type=external_host skycap.exposure.host=203.0.113.7
+# A quick tunnel per server:
+  skycap.exposure.type=cloudflare
+```
+
+A new way in (a named Cloudflare tunnel, a hosted relay, Tailscale, ...) is a
+subclass of `exposure.Exposure`, importable on every node. For example, named
+Cloudflare tunnels created beforehand, one per server:
+
+```python
+import subprocess
+
+from examples.train_integrations.harbor_skycap.exposure import Exposure
+
+class NamedTunnels(Exposure):
+    def __init__(self, tunnels: list[str], hostnames: list[str]) -> None:
+        # Only store options: each server's actor builds its own instance.
+        self.tunnels, self.hostnames = tunnels, hostnames
+        self.process = None
+
+    # bind(index) -> (host, port) of the server's gateway; by default a free loopback port.
+
+    def start(self, gateway_url: str, index: int) -> str:
+        # gateway_url serves this server's harness routes on this node, e.g. http://127.0.0.1:41234.
+        self.process = subprocess.Popen(["cloudflared", "tunnel", "run", "--url", gateway_url, self.tunnels[index]])
+        return f"https://{self.hostnames[index]}"  # agents get {this}/t/{trajectory id}/v1
+
+    def stop(self) -> None:  # also runs when opening failed
+        if self.process is not None:
+            self.process.terminate()
+```
+
+```bash
+  skycap.exposure.type=my_pkg.tunnels:NamedTunnels \
+  skycap.exposure.kwargs.tunnels="[skycap-0,skycap-1]" \
+  skycap.exposure.kwargs.hostnames="[skycap-0.example.com,skycap-1.example.com]"
+```
+
+The type, the import and the kwargs (against the constructor's signature) are
+checked before Ray starts. Each server's Ray actor builds its own instance,
+starts it after the server and stops it before the server.
 
 ## Limits
 
