@@ -164,6 +164,10 @@ class RayPPOTrainer:
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
         self._current_epoch: int = 0
+        # The loader can still belong to an exhausted epoch until its iterator
+        # observes StopIteration. Optimizer steps cannot identify this cursor,
+        # especially when dynamic sampling consumes several batches per update.
+        self._dataloader_epoch: int = 0
 
         configure_ray_worker_logging()
 
@@ -281,7 +285,7 @@ class RayPPOTrainer:
 
         # Compute start_epoch up-front so callback metadata is ready before
         # any event fires (including the baseline eval below).
-        start_epoch = self.global_step // len(self.train_dataloader)
+        start_epoch = self._dataloader_epoch
         self._current_epoch = start_epoch
         self._training_control.reset()
 
@@ -304,7 +308,9 @@ class RayPPOTrainer:
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
-        stop_training = False
+        stop_training = (
+            self.cfg.trainer.max_training_steps is not None and self.global_step > self.cfg.trainer.max_training_steps
+        )
 
         # booleans tracking whether we save ckpts
         # as well as hf model at step end
@@ -313,6 +319,8 @@ class RayPPOTrainer:
         self._profiler_start()
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
+                if stop_training:
+                    break
                 self._current_epoch = epoch
                 self._fire("on_epoch_start")
                 # ``step_started`` tracks the on_step_start/on_step_end pairing taking
@@ -551,6 +559,10 @@ class RayPPOTrainer:
                         break
 
                     del training_input, generator_output
+                else:
+                    # A checkpoint inside the final batch retains this epoch;
+                    # one after iterator exhaustion must resume the next epoch.
+                    self._dataloader_epoch = epoch + 1
 
                 # If dynamic sampling was still accumulating when the dataloader ran out, the step
                 # is left in flight with its `vllm/train` window open. Close it and drop the partial
@@ -1695,6 +1707,7 @@ class RayPPOTrainer:
         critic_save_dir = os.path.join(global_step_folder, "critic")
 
         io.makedirs(global_step_folder, exist_ok=True)
+        self._save_additional_checkpoint_state(global_step_folder)
 
         # Save policy checkpoint (dispatch handles offload/backload)
         self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
@@ -1705,17 +1718,16 @@ class RayPPOTrainer:
 
         # Save dataloader state
         dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        try:
-            dataloader_state_dict = self.train_dataloader.state_dict()
-            with io.open_file(dataloader_save_path, "wb") as f:
-                torch.save(dataloader_state_dict, f)
-            logger.info(f"Saved dataloader state to {dataloader_save_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save dataloader state: {e}")
+        dataloader_state_dict = self.train_dataloader.state_dict()
+        with io.open_file(dataloader_save_path, "wb") as f:
+            torch.save(dataloader_state_dict, f)
+        logger.info(f"Saved dataloader state to {dataloader_save_path}")
 
         # Save additional trainer state
         trainer_state = {
             "global_step": self.global_step,
+            "dataloader_epoch": self._dataloader_epoch,
+            "dataloader_generator_state": self.train_dataloader.generator.get_state(),
             "config": asdict(self.cfg),
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
@@ -1728,6 +1740,7 @@ class RayPPOTrainer:
         with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
 
+        self._on_checkpoint_saved(global_step_folder)
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
 
         # Clean up old checkpoints after successful save
@@ -1735,6 +1748,21 @@ class RayPPOTrainer:
             self._cleanup_old_checkpoints()
 
         return global_step_folder
+
+    def _save_additional_checkpoint_state(self, checkpoint_path: str) -> None:
+        """Save subclass state before model saves, publication, and retention.
+
+        Snapshot state that can change concurrently here, before distributed model
+        saves block the trainer. Raise on failure to leave the previous checkpoint
+        marker and retained checkpoints unchanged.
+        """
+
+    def _on_checkpoint_saved(self, checkpoint_path: str) -> None:
+        """Publish subclass metadata after native saves and before retention.
+
+        All native state and the latest marker have been written. Raise on failure
+        to keep previous checkpoints available for the caller's resume protocol.
+        """
 
     def _cleanup_old_checkpoints(self):
         if not self._node_ids:
@@ -1784,12 +1812,14 @@ class RayPPOTrainer:
             )
         else:
             # Get and validate resume path
-            checkpoint_path = Path(self.cfg.trainer.resume_path)
+            checkpoint_path = self.cfg.trainer.resume_path
             if not checkpoint_path:
                 raise ValueError("`trainer.resume_path` must be specified when resume_mode is 'from_path'")
+            # Keep remote URI schemes intact; pathlib collapses s3:// to s3:/.
+            checkpoint_path = os.fspath(checkpoint_path).rstrip("/")
 
             # Validate that it's a global_step directory
-            if GLOBAL_STEP_PREFIX not in checkpoint_path.name:
+            if not os.path.basename(checkpoint_path).startswith(GLOBAL_STEP_PREFIX):
                 raise ValueError(
                     f"`trainer.resume_path` must point to a directory whose name starting with {GLOBAL_STEP_PREFIX}, got: {checkpoint_path}"
                 )
@@ -1801,7 +1831,7 @@ class RayPPOTrainer:
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
-        global_step = extract_step_from_path(Path(checkpoint_path))
+        global_step = extract_step_from_path(checkpoint_path)
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
         logger.info(f"Resuming from global_step: {global_step}")
@@ -1820,19 +1850,25 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
+        dataloader_epoch = trainer_state.get("dataloader_epoch")
+        if type(dataloader_epoch) is not int or dataloader_epoch < 0:
+            raise ValueError("checkpoint dataloader_epoch must be a non-negative integer")
+        self._dataloader_epoch = dataloader_epoch
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
         # 2. Load dataloader state if available
         if io.exists(dataloader_state_path):
-            try:
-                with io.open_file(dataloader_state_path, "rb") as f:
-                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-                self.train_dataloader.load_state_dict(dataloader_state)
-                logger.info("Successfully loaded dataloader state")
-            except Exception as e:
-                logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
+            with io.open_file(dataloader_state_path, "rb") as f:
+                dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+            self.train_dataloader.load_state_dict(dataloader_state)
+            # StatefulDataLoader defers restoration until an iterator is built.
+            # Materialize it before restoring the generator shared by sampler
+            # and worker seeding, so the next epoch keeps its original shuffle.
+            self.train_dataloader.state_dict()
+            self.train_dataloader.generator.set_state(trainer_state["dataloader_generator_state"])
+            logger.info("Successfully loaded dataloader state")
         else:
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
