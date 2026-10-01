@@ -20,6 +20,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 |---|---|
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection |
+| `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py` | `glm5_next/dsa.py` padded fused sparse attention vs dense |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
@@ -114,7 +115,14 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
     - `Glm5NextDSAttention._forward_with_kpool_topk`: swaps the pinned `DSAttention.forward`'s
       token-level top-k for `fused_qk_topk_kpool`, and raises if the pooled selection doesn't run
       exactly once;
-    - the `kpool <= 1` long-sequence guard.
+    - the `kpool <= 1` long-sequence guard;
+    - `_pad_for_fused_absorbed_sparse_attention`: fits GLM-5.3's NoPE-MLA layout (q/k width 512,
+      k-pool top-k width 2051) into the TileLang SparseMLA kernels' DeepSeek-V3.2 layout (576,
+      multiple of 64) by zero-padding q/k and padding indices with -1. Exact. Without it the
+      kernels decline and megatron-core falls back to a dense `[heads, sq, sq]` FP32 softmax,
+      which OOMs at 32k. Needs `dsa_kernel_backend="tilelang"`. Tested by
+      `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py`; delete with it once
+      upstream's kernels (or a GLM-specific path) take NoPE MLA directly.
   - `glm5_next/layer_specs.py`: the `core_attention.module` / `submodules.indexer.module` swaps.
   - `glm5_next/provider.py`: `dsa_indexer_kpool`, `dsa_indexer_kpool_always_select_tail`.
 - **Landed?** megatron-core's `experimental_attention_variant/dsa.py` defines
