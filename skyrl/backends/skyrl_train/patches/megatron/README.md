@@ -26,6 +26,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `gpu_ci/patches/megatron/test_moe_node_dedup_dispatch.py` | `patch_moe_node_dedup_dispatch.py` vs the stock dispatcher (four ranks, two pseudo-nodes) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -177,6 +178,20 @@ Per-forward DSA index-share carrier under activation recompute.
   `_dsa_index_share_carrier_scope`, and applying the patch logs a warning telling you to delete it.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
+
+### `patch_moe_node_dedup_dispatch.py`: one inter-node copy per (token, node) in the MoE all-to-all
+
+Opt-in (`SKYRL_MOE_NODE_DEDUP=1`). megatron-core's all-to-all dispatcher sends a token once per
+selected expert; with top-8 over 288 experts on 8 nodes most tokens pick several experts on the
+same remote node. The patch sends each token once per destination node (to the same-local-index GPU
+there, with that node's routing bits and probabilities), fans copies out over NVLink, and sums each
+node's expert outputs there before one partial sum crosses back. Expert ranks see exactly the stock
+rows/order (checked against `output_splits` every call), so ETP, sorting and experts are untouched;
+the combine's bf16 sum is only re-associated. 1.41x faster fwd+bwd at 64k on 64 B200 whose
+inter-node NCCL runs over TCP. Applied in `make_megatron_module` (no-op unless enabled).
+- **Landed?** megatron-core's alltoall dispatcher deduplicates per node (or SkyRL switches to a
+  hierarchical dispatcher such as DeepEP/HybridEP where the network allows).
+- **Remove:** the module, its call in `make_megatron_module`, and `test_moe_node_dedup_dispatch.py`.
 
 ### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
 
