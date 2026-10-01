@@ -242,15 +242,22 @@ class FSDPStrategy(DistributedStrategy):
                     if buf is not None and not buf.is_meta:
                         non_persistent_snapshot[(sub_name, bname)] = buf.detach().clone()
 
-        module.to(torch.device("meta"))
+        # Preserve Parameter identity through both to(meta) and assign-based
+        # state loading, including shared embeddings tracked by FSDP.
+        previous_swap = torch.__future__.get_swap_module_params_on_conversion()
+        torch.__future__.set_swap_module_params_on_conversion(True)
+        try:
+            module.to(torch.device("meta"))
 
-        if dist.get_rank() == 0:
-            for (sub_name, bname), buf in non_persistent_snapshot.items():
-                sub = module.get_submodule(sub_name) if sub_name else module
-                sub._buffers[bname] = buf
+            if dist.get_rank() == 0:
+                for (sub_name, bname), buf in non_persistent_snapshot.items():
+                    sub = module.get_submodule(sub_name) if sub_name else module
+                    sub._buffers[bname] = buf
 
-        apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
-        fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+            apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
+            fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+        finally:
+            torch.__future__.set_swap_module_params_on_conversion(previous_swap)
         return module
 
     def _fsdp_init_train_model(self, model, optimizer, scheduler):
