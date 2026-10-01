@@ -42,8 +42,42 @@ class RMSNormInputHyperConnectionModule(HyperConnectionModule):
         s, b, nC = x.shape
         # The mHC mapping runs in FP32 (the parameters are kept in FP32 and the activations are
         # upcast here); compute_mappings casts the bounded mixing weights back down.
-        x_2d = x.reshape(s * b, nC).to(torch.float32)
-        weight = self.mapping_proj.weight.to(torch.float32)
-        proj = torch.matmul(x_2d, weight.t())
-        r = torch.rsqrt(x_2d.square().mean(dim=-1, keepdim=True) + self.norm_eps)
+        proj, r = _ProjectionAndRMSNorm.apply(x.reshape(s * b, nC), self.mapping_proj.weight, self.norm_eps)
         return proj.view(s, b, -1), r.view(s, b, 1)
+
+
+class _ProjectionAndRMSNorm(torch.autograd.Function):
+    """``proj = x32 @ w32^T`` and ``r = rsqrt(mean(x32^2) + eps)``, with ``x32 = x.float()``.
+
+    Same FP32 math as the plain autograd version, but saves the activation-dtype ``x`` (a view of
+    the residual stream, which is alive anyway) instead of its FP32 upcast, and redoes the upcast
+    in backward. Autograd would keep a ``[tokens, n * hidden]`` FP32 copy per mHC site for the
+    layer's lifetime: 2 GiB per site at 32k tokens per rank for GLM-5.3-Flash.
+    """
+
+    @staticmethod
+    def forward(ctx, x_2d: Tensor, weight: Tensor, eps: float) -> Tuple[Tensor, Tensor]:
+        x32 = x_2d.to(torch.float32)
+        w32 = weight.to(torch.float32)
+        proj = torch.matmul(x32, w32.t())
+        r = torch.rsqrt(x32.square().mean(dim=-1, keepdim=True) + eps)
+        ctx.save_for_backward(x_2d, weight, r)
+        return proj, r
+
+    @staticmethod
+    def backward(ctx, grad_proj: Tensor, grad_r: Tensor):
+        x_2d, weight, r = ctx.saved_tensors
+        x32 = x_2d.to(torch.float32)
+        w32 = weight.to(torch.float32)
+        grad_x = grad_w = None
+        if ctx.needs_input_grad[0]:
+            grad_x = torch.zeros_like(x32)
+            if grad_proj is not None:
+                grad_x = torch.matmul(grad_proj, w32)
+            if grad_r is not None:
+                # r = (m + eps)^(-1/2), m = mean(x^2)  =>  dr/dx = -r^3 * x / K
+                grad_x = grad_x - (grad_r * r.pow(3) / x32.shape[-1]) * x32
+            grad_x = grad_x.to(x_2d.dtype)
+        if ctx.needs_input_grad[1] and grad_proj is not None:
+            grad_w = torch.matmul(grad_proj.t(), x32).to(weight.dtype)
+        return grad_x, grad_w, None

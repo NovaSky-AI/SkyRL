@@ -54,6 +54,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_full_recompute import (
+    finalize_provider,
+    uses_skyrl_mhc_layer,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -105,7 +109,11 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     get_microbatch_iterator,
     reduce_metrics,
 )
-from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import (
+    SKYRL_MEGATRON_RANDOM_INIT,
+    SKYRL_OFFLOAD_CHECKPOINT_INPUTS,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+)
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -123,6 +131,33 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 )
 
 apply_shared_expert_lora_tp_patch()
+
+
+def _broadcast_tp_replicated_params(model_chunks: List[nn.Module]) -> None:
+    """Make random-init parameters that are replicated across tensor-parallel ranks identical.
+
+    Random init draws some TP-replicated parameters (e.g. the MoE router weight, the DSA k-pool
+    gate) independently on every TP rank. A loaded checkpoint gives every rank the same copy, and
+    their gradients are all-reduced over TP as if they were one tensor, so copy TP rank 0's values.
+    Expert parameters (``allreduce=False``) belong to the expert-parallel layout and are skipped.
+    """
+    tp_group = mpu.get_tensor_model_parallel_group()
+    if tp_group.size() == 1:
+        return
+    src = torch.distributed.get_global_rank(tp_group, 0)
+    changed = total = 0
+    for chunk in model_chunks:
+        for param in chunk.parameters():
+            if getattr(param, "tensor_model_parallel", False) or not getattr(param, "allreduce", True):
+                continue
+            before = param.data.clone()
+            torch.distributed.broadcast(param.data, src=src, group=tp_group)
+            changed += int(not torch.equal(before, param.data))
+            total += 1
+    if torch.distributed.get_rank() == 1:  # TP rank 1 of the first TP group (TP is the fastest-varying rank)
+        logger.info(
+            f"SKYRL_MEGATRON_RANDOM_INIT: synced {total} TP-replicated params from TP rank 0; {changed} differed"
+        )
 
 
 class MegatronWorker:
@@ -281,7 +316,9 @@ class MegatronWorker:
                 "DeepSeek-V3 bridge (vision tower + mm projector dropped)"
             )
 
-        provider = bridge.to_megatron_provider()
+        if SKYRL_MEGATRON_RANDOM_INIT:
+            logger.warning("SKYRL_MEGATRON_RANDOM_INIT=1: randomly initializing weights (checkpoint not loaded)")
+        provider = bridge.to_megatron_provider(load_weights=not SKYRL_MEGATRON_RANDOM_INIT)
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
@@ -331,14 +368,18 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
-        # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
-        # the residual it would re-materialize is the n-stream tensor consumed by the mHC
-        # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
-        # needs the mHC recompute managers, which SkyRL's mHC layer does not implement, so
-        # downgrade to selective recompute of the remaining modules instead of failing.
-        # Tied to the vendored mHC layer: see patches/megatron/README.md (Megatron-LM#7521) for
-        # when to change or delete this.
-        if getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
+        # megatron-core rejects mHC (hyper-connection) models under full activation recompute.
+        # SkyRL's own mHC layer (GLM-5.3-Flash) supports it -- finalize_provider() below bypasses
+        # that one check (see patches/megatron/patch_mhc_full_recompute.py). Any other mHC layer
+        # keeps megatron-core's guard; its suggestion -- selective recompute with "mhc" in
+        # recompute_modules -- needs mHC recompute managers, so downgrade to selective recompute
+        # of the remaining modules instead of failing. Tied to the vendored mHC layer: see
+        # patches/megatron/README.md (Megatron-LM#7521) for when to change or delete this.
+        if (
+            getattr(provider, "enable_mhc_connections", False)
+            and provider.recompute_granularity == "full"
+            and not uses_skyrl_mhc_layer(provider)
+        ):
             provider.recompute_granularity = "selective"
             provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
             provider.recompute_method = None
@@ -410,7 +451,7 @@ class MegatronWorker:
                 "(native process_mtp_loss disabled)"
             )
 
-        provider.finalize()
+        finalize_provider(provider)
 
         self.provider = provider
         self.bridge = bridge
@@ -526,6 +567,25 @@ class MegatronWorker:
         # Delete along with the patch module once the megatron-core pin includes
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
+        # Exact for a 2-rank expert-TP group; saves an FP32 copy of the MoE combine's rows.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_combine_bf16_reduce import (
+            patch_moe_combine_bf16_reduce,
+        )
+
+        patch_moe_combine_bf16_reduce()
+        # Opt-in (SKYRL_MOE_NODE_DEDUP=1): one inter-node copy per (token, node) in the MoE all-to-all.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_node_dedup_dispatch import (
+            patch_moe_node_dedup_dispatch,
+        )
+
+        patch_moe_node_dedup_dispatch()
+        if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
+            # After patch_dsa_index_share, which rebinds the same function.
+            from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
+                patch_offload_checkpoint_inputs,
+            )
+
+            patch_offload_checkpoint_inputs()
 
         # Give the Qwen3-VL ViT the language model's attention backend; megatron-core
         # now asserts NVTE_* attention env vars agree across all models in a process.
@@ -552,6 +612,8 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        if SKYRL_MEGATRON_RANDOM_INIT:
+            _broadcast_tp_replicated_params(model)
         return model
 
     def _forward_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
@@ -1089,6 +1151,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ``metrics`` (all-reduced across DP).
         """
         self.model.train()
+        torch.cuda.reset_peak_memory_stats()
 
         all_metrics = defaultdict(list)
 
@@ -1239,6 +1302,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if use_token_batching:
             status["num_microbatches"] = float(len(micro_buffer))
             status["num_padding_microbatches"] = float(num_padding_microbatches)
+
+        # Peak CUDA memory over this forward_backward call, max-reduced across ranks.
+        status["peak_mem_allocated_gb_max"] = torch.cuda.max_memory_allocated() / 1024**3
+        status["peak_mem_reserved_gb_max"] = torch.cuda.max_memory_reserved() / 1024**3
+
+        if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
+            from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
+                release_pinned_offload_cache,
+            )
+
+            release_pinned_offload_cache()
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)

@@ -180,6 +180,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             pre_mlp_layernorm_output, padding_mask, packed_seq_params
         )
         mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=moe_padding_mask)
+        _release_token_dispatcher_probs(self.mlp)
         if moe_unflatten_mbs is not None:
             mlp_output, mlp_bias = mlp_output_with_bias
             mlp_output = self._maybe_reflatten_from_moe(mlp_output, packed_seq_params, moe_unflatten_mbs)
@@ -197,3 +198,20 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         output = make_viewless_tensor(inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True)
         return output, None
+
+
+def _release_token_dispatcher_probs(mlp) -> None:
+    """Drop the router probabilities megatron-core's token dispatcher keeps after an MoE forward.
+
+    ``MoEAlltoAllTokenDispatcher.dispatch_preprocess`` stores ``self.probs`` (the router output,
+    with its ``grad_fn``) and reads it again only in the same forward's combine step. Left in
+    place, it pins that forward's autograd graph until the next forward overwrites it. Under full
+    recompute the forward re-runs inside each layer's backward, so every MoE layer keeps its
+    recomputed graph -- back to the checkpoint's detached input and that input's ``.grad`` -- for
+    the rest of backward: two n-stream tensors per MoE layer (~21 GiB/GPU at 64k tokens on
+    GLM-5.3-Flash, 42 MoE layers, TP8).
+    """
+    dispatcher = getattr(mlp, "token_dispatcher", None)
+    if dispatcher is not None and getattr(dispatcher, "probs", None) is not None:
+        dispatcher.probs = None
+

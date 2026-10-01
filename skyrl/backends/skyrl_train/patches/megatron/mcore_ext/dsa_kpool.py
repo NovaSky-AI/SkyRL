@@ -18,6 +18,10 @@ Everything they depend on -- ``_compute_index_scores``, ``hadamard_transform``, 
 -- already exists in the pinned megatron-core with identical signatures, so this module needs
 no patching of megatron itself.
 
+One deliberate deviation: ``fused_qk_topk_kpool`` scores and selects in query chunks (see the
+comment there), since the verbatim version materializes O(sq^2) per-head FP32 scores and OOMs
+at 32k context.
+
 DELETE THIS MODULE once the megatron-core pin includes #7522.
 """
 
@@ -33,6 +37,10 @@ try:
     from fast_hadamard_transform import hadamard_transform
 except ImportError:
     hadamard_transform = None
+
+
+# Upper bound on elements of one query chunk's per-head FP32 index scores (2 GiB).
+_KPOOL_SCORE_CHUNK_ELEMS = 1 << 29
 
 
 def _kpool_fp8_input(x: torch.Tensor) -> torch.Tensor:
@@ -174,6 +182,7 @@ def fused_qk_topk_kpool(
     use_relu: bool = True,
     always_select_tail: bool = True,
     fp8_indexer: bool = False,
+    query_shard_group=None,
 ):
     """Select complete causal pools and append each query's incomplete tail.
 
@@ -196,7 +205,6 @@ def fused_qk_topk_kpool(
 
     if fp8_indexer:
         q, k_pooled = _kpool_fp8_input(q), _kpool_fp8_input(k_pooled)
-    index_scores = _compute_index_scores(q, weights, k_pooled, use_relu=use_relu)
 
     # A pool is causal only when its final token is within the query's bounds.
     pool_positions = pool_token_base + (pool_size - 1)
@@ -207,31 +215,73 @@ def fused_qk_topk_kpool(
         varlen_ends=varlen_ends,
         key_positions=eff_key_positions,
         sk=num_pools,
-        device=index_scores.device,
+        device=q.device,
     )
-    if v_starts is not None:
-        index_scores = dsa_masking.apply_starts_ends_mask_to_scores(index_scores, v_starts, v_ends, k_pos)
-    elif mask is not None:
-        assert mask.dtype == index_scores.dtype, "Mask dtype must match index scores dtype"
-        index_scores = index_scores + mask
 
     # Keep the selection width fixed, including when fewer causal pools exist.
     budget = index_topk // pool_size
     select_k = min(budget, num_pools)
-    if select_k > 0:
-        topk_scores, pool_topk = index_scores.topk(select_k, dim=-1)
-        # [batch, seqlen_q, select_k] -> mask invalid pools
-        pool_topk = pool_topk.masked_fill(topk_scores == float("-inf"), -1)
-    else:
-        pool_topk = torch.empty(index_scores.shape[:-1] + (0,), dtype=torch.int64, device=index_scores.device)
-    if pool_topk.shape[-1] < budget:
-        pad = torch.full(
-            index_scores.shape[:-1] + (budget - pool_topk.shape[-1],),
-            -1,
-            dtype=torch.int64,
-            device=index_scores.device,
+
+    # SkyRL deviation from #7522: score and select in query chunks. _compute_index_scores
+    # materializes FP32 [chunk, batch, heads, num_pools] per-head scores (32 GiB at sq=32k for
+    # GLM-5.3-Flash's 32 heads) and the full [batch, sq, num_pools] matrix is O(sq^2), so only
+    # per-chunk scores and the [batch, sq, budget] selection are kept. Top-k is per query row, so
+    # this is exact. Full scores are returned only when one chunk covers every query.
+    sq, batch, n_heads = q.shape[0], q.shape[1], q.shape[2]
+    chunk = max(1, min(sq, _KPOOL_SCORE_CHUNK_ELEMS // max(1, batch * n_heads * num_pools)))
+    # SkyRL: with ``query_shard_group`` (inputs identical on every rank of the group, as for the
+    # tensor-parallel group, which all see the gathered sequence), each rank selects pools only
+    # for its contiguous slice of queries and the selections are all-gathered. The scoring is
+    # O(sq * num_pools) and otherwise replicated on every rank; per query row nothing changes.
+    shard_size = query_shard_group.size() if query_shard_group is not None else 1
+    rows_per_rank = -(-sq // shard_size)
+    q_lo = query_shard_group.rank() * rows_per_rank if shard_size > 1 else 0
+    q_hi = min(sq, q_lo + rows_per_rank) if shard_size > 1 else sq
+    pool_topk_chunks = []
+    index_scores = None
+    for q0 in range(q_lo, q_hi, chunk):
+        q1 = min(q_hi, q0 + chunk)
+        index_scores = _compute_index_scores(q[q0:q1], weights[q0:q1], k_pooled, use_relu=use_relu)
+        if v_starts is not None:
+            index_scores = dsa_masking.apply_starts_ends_mask_to_scores(
+                index_scores, v_starts[q0:q1], v_ends[q0:q1], k_pos
+            )
+        elif mask is not None:
+            assert mask.dtype == index_scores.dtype, "Mask dtype must match index scores dtype"
+            index_scores = index_scores + mask[..., q0:q1, :]
+
+        if select_k > 0:
+            topk_scores, pool_topk = index_scores.topk(select_k, dim=-1)
+            # [batch, seqlen_q, select_k] -> mask invalid pools
+            pool_topk = pool_topk.masked_fill(topk_scores == float("-inf"), -1)
+        else:
+            pool_topk = torch.empty(index_scores.shape[:-1] + (0,), dtype=torch.int64, device=index_scores.device)
+        if pool_topk.shape[-1] < budget:
+            pad = torch.full(
+                index_scores.shape[:-1] + (budget - pool_topk.shape[-1],),
+                -1,
+                dtype=torch.int64,
+                device=index_scores.device,
+            )
+            pool_topk = torch.cat([pool_topk, pad], dim=-1)
+        pool_topk_chunks.append(pool_topk)
+    if len(pool_topk_chunks) > 1 or shard_size > 1:
+        index_scores = None
+        local = (
+            torch.cat(pool_topk_chunks, dim=1)
+            if pool_topk_chunks
+            else torch.empty((batch, 0, budget), dtype=torch.int64, device=q.device)
         )
-        pool_topk = torch.cat([pool_topk, pad], dim=-1)
+        if shard_size > 1:
+            # Pool ids fit in int32; pad the (possibly short) last slice so shards are equal-sized.
+            local = local.to(torch.int32)
+            if local.shape[1] < rows_per_rank:
+                local = torch.nn.functional.pad(local, (0, 0, 0, rows_per_rank - local.shape[1]), value=-1)
+            gathered = torch.empty((shard_size, batch, rows_per_rank, budget), dtype=torch.int32, device=q.device)
+            torch.distributed.all_gather_into_tensor(gathered, local.contiguous(), group=query_shard_group)
+            local = gathered.permute(1, 0, 2, 3).reshape(batch, shard_size * rows_per_rank, budget)[:, :sq]
+            local = local.to(torch.int64)
+        pool_topk = local
 
     # Expand [batch * queries, pools] to a fixed token budget.
     rows = pool_topk.shape[0] * pool_topk.shape[1]

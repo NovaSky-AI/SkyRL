@@ -9,9 +9,12 @@ itself, so ``Glm5NextDSAttention`` swaps that selection for the vendored k-pool 
 (``mcore_ext/dsa_kpool.py``, NVIDIA/Megatron-LM#7522) whenever ``dsa_indexer_kpool > 1``.
 """
 
+import os
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
+from loguru import logger
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer.experimental_attention_variant import dsa_layout
@@ -25,6 +28,75 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
 from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.dsa_kpool import (
     fused_qk_topk_kpool,
 )
+
+# The fused absorbed sparse-attention kernels (TileLang SparseMLA) are specialized for the
+# DeepSeek-V3.2 / GLM-5 absorbed layout: q/k width 576 (512 latent + 64 RoPE) and a top-k width
+# divisible by 64. GLM-5.3-Flash is NoPE MLA (width 512) and its k-pool selection appends the
+# query's incomplete tail pool (2048 + pool_size - 1 = 2051 slots), so the kernels decline and
+# megatron-core falls back to a dense [b, heads, sq, sk] masked softmax -- O(L^2) memory.
+_FUSED_SPARSE_MLA_QK_DIM = 576
+_FUSED_SPARSE_MLA_TOPK_MULTIPLE = 64
+_fused_sparse_attention_logged = {"used": False, "declined": False}
+# Opt-in: run the fused sparse attention in query chunks of this many tokens, each checkpointed.
+_DSA_QUERY_CHUNK = int(os.environ.get("SKYRL_DSA_QUERY_CHUNK", "0"))
+# Opt-in: split the k-pool indexer's query rows across the tensor-parallel group (exact).
+_DSA_INDEXER_TP_SHARD = os.environ.get("SKYRL_DSA_INDEXER_TP_SHARD", "0").lower() in ("1", "true")
+
+
+def _pad_for_fused_absorbed_sparse_attention(fused_fn):
+    """Wrap ``dsa_kernels.run_fused_absorbed_sparse_attention`` to fit GLM-5.3 into its layout.
+
+    Exact: q/k are zero-padded from 512 to 576 channels in the RoPE slot (zero channels add nothing
+    to q.k; ``softmax_scale`` is passed explicitly; the value is still ``key[..., :512]``), and the
+    top-k indices are padded to a multiple of 64 with -1, which the kernels mask out. If the fused
+    backend still declines, the caller's dense fallback uses its own unpadded tensors.
+    """
+
+    def padded(config, query, key, topk_indices, softmax_scale, v_channels, topk_length=None):
+        qk_pad = _FUSED_SPARSE_MLA_QK_DIM - query.size(-1)
+        pad_qk = qk_pad > 0 and key.size(-1) == query.size(-1)
+        if pad_qk:
+            key = F.pad(key, (0, qk_pad))
+        topk_pad = -topk_indices.size(-1) % _FUSED_SPARSE_MLA_TOPK_MULTIPLE
+        if topk_pad:
+            topk_indices = F.pad(topk_indices, (0, topk_pad), value=-1)
+
+        def run(q, idx, lengths):
+            if pad_qk:
+                q = F.pad(q, (0, qk_pad))
+            return fused_fn(config, q, key, idx, softmax_scale, v_channels, topk_length=lengths)
+
+        # Each query attends only its own top-k keys, so query chunks are independent (key grads
+        # just sum). Checkpointing each chunk keeps only one chunk's padded q / kernel output
+        # alive instead of the whole sequence's -- at TP8 the kernel pads 8 local heads to 16, so
+        # that is ~13 GiB/GPU at 512k tokens -- for one extra kernel forward in backward.
+        sq = query.size(0)
+        if _DSA_QUERY_CHUNK and sq > _DSA_QUERY_CHUNK and topk_length is None:
+            outs = []
+            for q0 in range(0, sq, _DSA_QUERY_CHUNK):
+                q1 = min(sq, q0 + _DSA_QUERY_CHUNK)
+                args = (query[q0:q1], topk_indices[:, q0:q1], None)
+                if torch.is_grad_enabled():
+                    o = torch.utils.checkpoint.checkpoint(run, *args, use_reentrant=False)
+                else:
+                    o = run(*args)
+                if o is None:
+                    return None
+                outs.append(o)
+            out = torch.cat(outs, dim=0)
+        else:
+            out = run(query, topk_indices, topk_length)
+        key_ = "used" if out is not None else "declined"
+        if not _fused_sparse_attention_logged[key_]:
+            _fused_sparse_attention_logged[key_] = True
+            logger.info(
+                f"GLM-5.3-Flash DSA: fused absorbed sparse attention {key_} "
+                f"(backend={getattr(config, 'dsa_kernel_backend', None)}, padded qk_dim={key.size(-1)}, "
+                f"topk={topk_indices.size(-1)})"
+            )
+        return out
+
+    return padded
 
 
 class Glm5NextDSAttention(DSAttention):
@@ -62,6 +134,44 @@ class Glm5NextDSAttention(DSAttention):
             query, key, value, attention_mask, x, qr, *args, packed_seq_params=packed_seq_params, **kwargs
         )
 
+    def _gate_score_like_keys(
+        self, gate_score: torch.Tensor, k: torch.Tensor, packed_seq_params: Optional[PackedSeqParams]
+    ) -> torch.Tensor:
+        """Bring the k-pool gate score into the indexer keys' layout under context parallelism.
+
+        With allgather CP, ``DSAttention.forward`` all-gathers the indexer keys over the CP group
+        and reorders them from the load-balanced (zigzag) rank layout into global token order;
+        the pools are then formed over the whole sequence. The gate score is computed from this
+        rank's tokens only, so it gets the same gather and reorder.
+        """
+        if gate_score.size(0) == k.size(0):
+            return gate_score
+        cp_group = self.pg_collection.cp
+        cp_size = cp_group.size()
+        local_len = gate_score.size(0)
+        if cp_size <= 1 or local_len * cp_size != k.size(0):
+            raise RuntimeError(
+                f"k-pool gate score rows ({local_len}) do not match the indexer keys ({k.size(0)}, cp_size={cp_size})."
+            )
+        gathered = gather_from_sequence_parallel_region(gate_score, group=cp_group)
+        if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
+            cu_seqlens_q, cu_seqlens_kv = dsa_layout.get_packed_qk_cu_seqlens(packed_seq_params)
+            _, reorder = dsa_layout.build_packed_allgather_cp_query_positions_and_key_reorder(
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                cp_size=cp_size,
+                cp_rank=cp_group.rank(),
+                device=gate_score.device,
+                local_output_size=local_len,
+                key_local_output_size=local_len,
+                global_output_size=local_len * cp_size,
+            )
+        else:
+            reorder = dsa_layout.build_zigzag_allgather_cp_key_reorder(
+                sq=local_len, cp_size=cp_size, device=gate_score.device
+            )
+        return gathered.index_select(0, reorder)
+
     def _forward_with_kpool_topk(self, *args, packed_seq_params=None, **kwargs):
         """Run the pinned ``DSAttention.forward`` with its top-k step swapped for k-pool selection.
 
@@ -88,6 +198,15 @@ class Glm5NextDSAttention(DSAttention):
         if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
             _, cu_seqlens_kv = dsa_layout.get_packed_qk_cu_seqlens(packed_seq_params)
         kpool_calls = 0
+        # Every TP rank runs the indexer on the same gathered sequence with the same (replicated,
+        # never-trained) indexer weights, so its query rows can be split across the group.
+        indexer_shard_group = None
+        if _DSA_INDEXER_TP_SHARD:
+            from megatron.core import parallel_state as mpu
+
+            tp_group = mpu.get_tensor_model_parallel_group()
+            if tp_group.size() > 1:
+                indexer_shard_group = tp_group
 
         def kpool_topk(
             q,
@@ -110,7 +229,7 @@ class Glm5NextDSAttention(DSAttention):
                 weights,
                 index_topk,
                 indexer.index_kpool,
-                indexer._kpool_gate_score,
+                self._gate_score_like_keys(indexer._kpool_gate_score, k, packed_seq_params),
                 indexer.index_kpool_compress_ape,
                 mask=mask,
                 varlen_starts=varlen_starts,
@@ -119,19 +238,31 @@ class Glm5NextDSAttention(DSAttention):
                 cu_seqlens_kv=cu_seqlens_kv,
                 use_relu=use_relu,
                 always_select_tail=indexer.index_kpool_always_select_tail,
+                query_shard_group=indexer_shard_group,
             )
 
         def decline(*_args, **_kwargs):
             return None
 
-        saved = (mcore_dsa.fused_qk_topk_naive, dsa_kernels.run_fused_dsa_attention, dsa_kernels.run_fused_qk_topk)
+        saved = (
+            mcore_dsa.fused_qk_topk_naive,
+            dsa_kernels.run_fused_dsa_attention,
+            dsa_kernels.run_fused_qk_topk,
+            dsa_kernels.run_fused_absorbed_sparse_attention,
+        )
         mcore_dsa.fused_qk_topk_naive = kpool_topk
         dsa_kernels.run_fused_dsa_attention = decline
         dsa_kernels.run_fused_qk_topk = decline
+        dsa_kernels.run_fused_absorbed_sparse_attention = _pad_for_fused_absorbed_sparse_attention(saved[3])
         try:
             output = super().forward(*args, packed_seq_params=packed_seq_params, **kwargs)
         finally:
-            mcore_dsa.fused_qk_topk_naive, dsa_kernels.run_fused_dsa_attention, dsa_kernels.run_fused_qk_topk = saved
+            (
+                mcore_dsa.fused_qk_topk_naive,
+                dsa_kernels.run_fused_dsa_attention,
+                dsa_kernels.run_fused_qk_topk,
+                dsa_kernels.run_fused_absorbed_sparse_attention,
+            ) = saved
         # A pinned-megatron-core change that routes top-k elsewhere must fail here rather than
         # silently fall back to token-level selection.
         if not self.skip_topk and kpool_calls != 1:
