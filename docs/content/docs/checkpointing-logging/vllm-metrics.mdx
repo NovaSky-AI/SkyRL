@@ -110,14 +110,21 @@ A hard kill can leave a partial aggregate; check status and coverage before comp
 trainer:
   grafana_annotations:
     enabled: true
-    url: https://grafana.example.com
     token_env_var: GRAFANA_API_TOKEN
     tags: [training]
     record_directory: ~/skyrl_runs/annotations
 ```
 
-Set the named token environment variable on the driver. SkyRL forwards it to
-its runtime without logging the value. Annotation text is exactly the run name;
+SkyRL reads `RAY_GRAFANA_HOST` inside a task pinned to the Ray head node and
+sends annotation requests from that node. The URL needs no training setting;
+when the variable is unset, Ray's default `http://localhost:3000` is used.
+The browser-facing `RAY_GRAFANA_IFRAME_HOST` is not used for API requests.
+The cluster must already have a working Grafana backend. Missing or disabled
+Grafana leaves annotations unavailable without stopping training.
+
+Set the named token environment variable on the driver when Grafana requires
+authenticated annotation writes. SkyRL forwards it to its runtime without
+logging the value. Annotation text is exactly the run name;
 a unique invocation ID is stored in tags. A start event becomes a start/end
 region on handled finalization. Requests are bounded and failures do not stop
 training. Local records preserve annotation ID, timestamps, and status.
@@ -125,7 +132,10 @@ training. Local records preserve annotation ID, timestamps, and status.
 In Grafana, enable an organization annotation query with the `skyrl-run` tag.
 Regions cover startup through finalization; use the activity gauge to correlate
 generation. Optional `organization_id`, `dashboard_url`, and `timeout_seconds`
-settings control routing and links. No dashboard JSON is installed by SkyRL.
+settings control organization and links. The organization defaults to the head's
+`RAY_GRAFANA_ORG_ID`, or 1. Each head task uses zero CPUs and has no automatic
+retries. Its wait is bounded by the HTTP timeout plus 10 seconds for startup;
+a timed-out task is cancelled. No dashboard JSON is installed by SkyRL.
 
 ## Prometheus queries
 
