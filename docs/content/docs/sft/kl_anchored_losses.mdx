@@ -1,0 +1,173 @@
+---
+title: "KL-Anchored SFT (ASFT / kl_reg_sft)"
+---
+
+Standard SFT maximizes likelihood on your mixture and nothing else, so a long run drifts away
+from the base model and can erode capabilities the base already had. The anchored losses add a
+token-level KL penalty against a **frozen reference** (normally the base checkpoint you started
+from), which lets you keep learning the mixture while bounding how far the policy moves.
+
+Select the objective with `loss_type`:
+
+| `loss_type` | Objective | Use when |
+| --- | --- | --- |
+| `cross_entropy` (default) | `-log p(y)` | Plain SFT. |
+| `dft` | `-p(y).detach() * log p(y)` | Sharpen what the model already gets right. |
+| `asft` | DFT + KL anchor | Retention-focused, and you do **not** need to learn hard new tokens. |
+| `kl_reg_sft` | cross-entropy + KL anchor | **Usually the one you want**: normal CE learning plus retention. |
+
+## The math
+
+Both anchored losses are `base_term + kl_coef * KL_hat(policy || reference)` and differ only in
+the NLL weight:
+
+```
+r  = log pi_ref(y) - log pi_theta(y)        # per token, reference detached
+r  = clamp(r, -kl_clamp, +kl_clamp)
+
+KL_hat = expm1(r) - r                       # k3: non-negative, low variance
+       = -r                                 # k1
+
+asft:        loss = sum_masked[ -p(y).detach() * log p(y) + kl_coef * KL_hat ]
+kl_reg_sft:  loss = sum_masked[ -log p(y)                 + kl_coef * KL_hat ]
+```
+
+Two properties matter in practice:
+
+- **k3 is extremely convex.** `expm1(r)` grows exponentially, so a mis-paired reference does not
+  degrade gracefully — it detonates. `kl_clamp` (default 10) bounds any single token's
+  contribution to `expm1(10) ~ 2.2e4`.
+- **The `p(y)` weight in DFT suppresses low-probability tokens**, which are exactly the tokens
+  carrying capability the base model lacks. If your mixture is meant to *teach something new*,
+  prefer `kl_reg_sft`; `dft`/`asft` can cap the new capability while still protecting retention.
+
+If the batch carries no reference, both **raise** rather than silently training a different
+objective. To train without an anchor, ask for it explicitly: `dft` (the unanchored form of
+`asft`) or `cross_entropy` (the unanchored form of `kl_reg_sft`). Setting `kl_loss_coef=0`
+also disables the anchor while keeping the loss type.
+
+## Choosing the coefficient
+
+`kl_loss_coef` trades new learning against retention. Higher pulls harder toward base, which caps
+how far above base you can climb on the capabilities you are trying to add; lower approaches
+plain CE. In one internal 120B study, `0.01` with a cosine LR decay retained in-domain
+performance without capping new capability, while `0.03` measurably hurt out-of-distribution
+gains. Treat those as a starting point, not a law — retune per mixture.
+
+Always set `kl_warmup_steps` (e.g. 20) to ramp the coefficient linearly from 0. It absorbs any
+reference-vs-policy transient in the first steps. Note the side effect discussed under
+[Reading the metrics](#reading-the-metrics): during warmup the *loss* hides anchor problems,
+because the coefficient multiplying them is still near zero.
+
+## Where the reference comes from
+
+Set `ref_source`:
+
+- **`precomputed`** (recommended) — read a `ref_logprobs` column off a pretokenized dataset.
+  Zero train-time overhead. Requires an offline pass with the frozen base model.
+- **`live`** — stand up a frozen reference model group and run a no-grad forward every step. No
+  precompute and works with online tokenization, but roughly doubles model memory (the reference
+  gets its own placement group today) and adds a forward per step. Good for a first test.
+
+### Precomputed reference schema
+
+The offline job writes, per row, alongside `input_ids` / `loss_mask`:
+
+- `ref_logprobs`: `list[float]`, **same length as `input_ids`**, position-aligned, where
+  `ref_logprobs[t] = log pi_ref(input_ids[t] | input_ids[<t])`. Index 0 is a placeholder
+  (nothing predicts the first token) and must never fall inside a loss window.
+
+The loader windows and truncates `ref_logprobs` in lockstep with `loss_mask`, so it survives
+`max_length` truncation and multi-turn masks. Two rules to respect when generating it:
+
+1. Use the **same model revision** as `model.path`. A different snapshot means the reference and
+   the policy are different weights, and `r` is large everywhere from step 1.
+2. Do not let quantization or caching corrupt the values. If generating with an inference engine,
+   disable prefix caching (cached prefixes return no prompt logprobs) and avoid a quantized KV
+   cache — these values feed a KL term, so their error lands directly in the anchor.
+
+Mixed batches are rejected: either every example in a batch carries `ref_logprobs` or none do.
+
+## Configuration reference
+
+Flat SFT-config keys (each maps onto the corresponding `algorithm.asft_*` field):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `loss_type` | `cross_entropy` | `cross_entropy` \| `dft` \| `asft` \| `kl_reg_sft` |
+| `kl_loss_coef` | `0.03` | Anchor strength |
+| `kl_estimator` | `k3` | `k3` (non-negative) or `k1` |
+| `kl_clamp` | `10.0` | Bound on `\|r\|`; 0 disables |
+| `kl_warmup_steps` | `0` | Linear coefficient ramp |
+| `ref_source` | `precomputed` | `precomputed` \| `live` |
+| `ref_logprobs_key` | `ref_logprobs` | Dataset column name |
+
+Example:
+
+```bash
+uv run --isolated --extra dev --extra megatron -m skyrl.train.entrypoints.main_base \
+  strategy=megatron \
+  loss_type=kl_reg_sft \
+  kl_loss_coef=0.01 \
+  kl_estimator=k3 \
+  kl_clamp=10.0 \
+  kl_warmup_steps=20 \
+  ref_source=precomputed \
+  ref_logprobs_key=ref_logprobs \
+  pretokenized_dataset_paths="['/shared/datasets/my_mix_with_ref_logprobs']" \
+  optimizer_config.scheduler=cosine \
+  ...
+```
+
+## Reading the metrics
+
+Logged under `train/`. **Not all of these are equally trustworthy** — the distinction below cost
+real debugging time, so read it before drawing conclusions:
+
+| Metric | Trust | How to read it |
+| --- | --- | --- |
+| `asft_kl` | **High** | Masked mean KL. *The* diagnostic. Healthy: near 0 (a healthy 120B run measured 0.035 falling to ~0.001). Saturated: near `expm1(kl_clamp)` ~ 2.2e4. |
+| `asft_r_mean` | High | Masked mean `r`. Starts ~0 and should go **negative** as the policy fits the data better than base. Positive and growing means the policy is being pushed away from the data. |
+| `asft_r_gt5_frac` | High | Masked fraction with `r > 5`. Healthy runs: ~1e-3, falling. |
+| `asft_kl_clamped_frac` | High *(only on recent versions)* | Masked fraction beyond the clamp. Healthy: <1e-3. **Older versions counted the full tensor**, including prompt/pad positions where the reference is 0 by construction, which reads as ~0.8 on a packed run that is perfectly healthy. If you see a large value with a healthy `asft_kl`, check whether your version masks this metric. |
+| `asft_r_max` | **Low** | A max, so **one** outlier token pins it at `kl_clamp` — it sits at exactly 10.0 in verified-healthy runs. Do not treat this as a bug signal. |
+| `asft_kl_coef_effective` | High | Confirms the warmup ramp. |
+| `dft_weight_mean` | High | 1.0 for `kl_reg_sft`/CE, `<1` for `dft`/`asft`. |
+
+The sanity check at step 0: the policy **is** the reference, so `asft_kl` must be ~0. Anything
+large means a pairing problem, not a hyperparameter problem.
+
+## Watch `asft_kl` on the first steps
+
+Because k3 explodes rather than degrades, a mis-paired reference can waste an entire multi-day
+run — so check `asft_kl` as soon as the first steps land rather than waiting on the loss curve.
+
+The trap: with `kl_warmup_steps > 0` the **loss looks normal for the first several steps** even
+when the anchor is fully saturated, because `coef_effective` is still near zero. The loss then
+grows as `coef_effective * expm1(kl_clamp)` — one observed failure reached a loss of 123 by step
+11, which is exactly `0.0055 * 22016`. `asft_kl` is saturated from step 1, so it flags the same
+problem ten steps earlier. If it is anywhere near `expm1(kl_clamp)` (~2.2e4 at the default
+clamp), stop the run and work through the table below instead of tuning hyperparameters.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| `asft_kl` huge at step 1 | Reference mis-paired. Check ref/`input_ids` alignment, that `ref_logprobs` is nonzero wherever `loss_mask` is 1, the model revision matches, and that resume did not start from a non-base checkpoint. |
+| Loss grows ~linearly over exactly `kl_warmup_steps` | Not a learning-rate problem — it is a saturated anchor being ramped in. Compare loss against `coef_effective * expm1(kl_clamp)`. |
+| `asft_kl = 0` and `dft_weight_mean = 1` | No reference reached the loss; you are training plain CE. Check `ref_source`, the column name, and that the dataset actually carries the column. |
+| Large `clamped_frac` but small `asft_kl` | Almost certainly the unmasked-metric artifact on older versions (prompt/pad positions), not a real problem. Trust `asft_kl`. |
+| `asft_r_max` pinned at `kl_clamp` | Expected. It is a max over tokens; healthy runs do this. |
+| In-domain evals erode late in a long run | Anchor too weak, or LR too high late. A cosine decay to 0 arrests end-of-run drift. |
+
+## Sequence packing
+
+The anchored losses work with `use_sequence_packing=true`. The packed collator carries
+`ref_logprobs` through the identical slice and shift as `loss_mask`, so the anchor stays
+position-aligned inside each bin, and the worker slices the reference and the policy log-probs
+with the same window. Packing is usually a large throughput win for MoE models, where an unpacked
+micro-batch gives each expert very few tokens.
+
+One consequence worth knowing: a packed row spans **prompt and response**, and the reference is
+zero on prompt positions by construction. Those positions are masked out of the loss, but they do
+inflate any *unmasked* diagnostic — which is the origin of the `clamped_frac` caveat above.

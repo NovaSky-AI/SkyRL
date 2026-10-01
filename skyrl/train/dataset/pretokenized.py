@@ -51,7 +51,7 @@ from skyrl.train.dataset.sft_dataset import SFTDataset
 # always re-inferred from ``loss_mask``, and HF-style ``labels`` are not a
 # supported loss target (convert to a 0/1 ``loss_mask`` offline). All other
 # columns pass through untouched (e.g. ``pixel_values`` / ``image_grid_thw``).
-_CONSUMED_KEYS = frozenset({"input_ids", "attention_mask", "loss_mask", "num_actions", "labels"})
+_CONSUMED_KEYS = frozenset({"input_ids", "attention_mask", "loss_mask", "num_actions", "labels", "ref_logprobs"})
 
 _VLM_KEYS = ("pixel_values", "image_grid_thw")
 
@@ -289,18 +289,33 @@ class _NormalizeTransform:
         max_length = self.max_length
         out = {k: v for k, v in batch.items() if k not in _CONSUMED_KEYS}
         input_ids_out, attention_out, num_actions_out, loss_mask_out = [], [], [], []
-        for input_ids, loss_mask in zip(batch["input_ids"], batch["loss_mask"]):
+        # ASFT/kl_reg_sft reference log-probs: stored full-sequence (length == len(input_ids),
+        # position-aligned). Window + truncate them in lockstep with loss_mask so the KL anchor
+        # stays aligned; emitted in the same trailing-window form (length == num_actions).
+        ref_list = batch.get("ref_logprobs")
+        ref_out = [] if ref_list is not None else None
+        for i, (input_ids, loss_mask) in enumerate(zip(batch["input_ids"], batch["loss_mask"])):
             first = loss_mask.index(1)
+            ref = ref_list[i] if ref_list is not None else None
+            if ref is not None and len(ref) != len(input_ids):
+                raise ValueError(
+                    f"ref_logprobs length ({len(ref)}) must equal len(input_ids) ({len(input_ids)}); "
+                    "store the full-sequence reference log-probs."
+                )
             if max_length is not None and len(input_ids) > max_length:
                 # Text-row truncation, mirroring the online tokenization path:
                 # the prompt prefix is kept and the trailing window shrinks.
                 # (Over-length VLM rows were dropped at load.)
                 input_ids = input_ids[:max_length]
                 loss_mask = loss_mask[:max_length]
+                if ref is not None:
+                    ref = ref[:max_length]
             input_ids_out.append(input_ids)
             attention_out.append([1] * len(input_ids))
             num_actions_out.append(len(input_ids) - first)
             loss_mask_out.append(loss_mask[first:])
+            if ref_out is not None:
+                ref_out.append(ref[first:])
         out.update(
             {
                 "input_ids": input_ids_out,
@@ -309,6 +324,8 @@ class _NormalizeTransform:
                 "loss_mask": loss_mask_out,
             }
         )
+        if ref_out is not None:
+            out["ref_logprobs"] = ref_out
         return out
 
 

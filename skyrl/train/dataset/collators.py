@@ -166,6 +166,19 @@ class PackedDataCollator:
         seq_lengths: List[int] = []
         full_input_ids: List[np.ndarray] = []
         full_loss_masks: List[np.ndarray] = []
+        # ASFT: frozen-reference gold-token log-probs, packed exactly like
+        # loss_mask so the KL anchor stays position-aligned inside each bin.
+        # All-or-nothing across the batch, mirroring collate_sft_batch, which
+        # rejects mixed batches -- a partially-populated tensor would anchor
+        # some rows against a phantom log p_ref = 0.
+        num_with_ref = sum(1 for ex in examples if ex.get("ref_logprobs") is not None)
+        if num_with_ref not in (0, len(examples)):
+            raise ValueError(
+                f"Mixed batches with/without 'ref_logprobs' are not supported: "
+                f"{num_with_ref}/{len(examples)} examples carry it."
+            )
+        batch_has_ref = num_with_ref == len(examples)
+        full_ref_logprobs: List[np.ndarray] = []
         for ex in examples:
             s = len(ex["input_ids"])
             seq_lengths.append(s)
@@ -179,6 +192,19 @@ class PackedDataCollator:
             ), f"Reconstructed full loss_mask length {full_mask.shape[0]} != seq length {s}"
             full_loss_masks.append(full_mask)
             full_input_ids.append(np.asarray(ex["input_ids"], dtype=np.int64))
+            if batch_has_ref:
+                # Same window convention as loss_mask: covers the trailing
+                # ``num_actions`` positions, prompt prefix is 0.
+                ref = np.asarray(ex["ref_logprobs"], dtype=np.float32)
+                if ref.shape[0] != ex["num_actions"]:
+                    raise ValueError(
+                        f"ref_logprobs length {ref.shape[0]} != num_actions "
+                        f"{ex['num_actions']}; it must cover the action window."
+                    )
+                full_ref = np.empty(s, dtype=np.float32)
+                full_ref[:n_pad] = 0.0
+                full_ref[n_pad:] = ref
+                full_ref_logprobs.append(full_ref)
 
         # ------------------------------------------------------------------
         # 2. FFD pack with DP-symmetry constraints
@@ -274,6 +300,9 @@ class PackedDataCollator:
         # `token_logprobs[:, :-1]` semantics inside the loss function.
         loss_mask_np = np.zeros((num_bins, max_packed_len - 1), dtype=np.float32)
         loss_mask_width = max_packed_len - 1
+        # Same shape/shift as loss_mask so ``base_action_log_probs[p]`` refers to
+        # the same token as ``loss_mask[p]`` after packing.
+        ref_logprobs_np = np.zeros((num_bins, max_packed_len - 1), dtype=np.float32) if batch_has_ref else None
 
         for row_idx, bin_indices in enumerate(flat_bins):
             row_offset = 0
@@ -289,6 +318,10 @@ class PackedDataCollator:
                     n_write = write_end - row_offset
                     if n_write > 0:
                         loss_mask_np[row_idx, row_offset:write_end] = full_loss_masks[ex_idx][1 : 1 + n_write]
+                        if ref_logprobs_np is not None:
+                            # Identical slice/shift -- any divergence here would
+                            # anchor the KL against the wrong tokens silently.
+                            ref_logprobs_np[row_idx, row_offset:write_end] = full_ref_logprobs[ex_idx][1 : 1 + n_write]
 
                 # Match the aligned footprint consumed by preprocess_packed_seqs.
                 row_offset += _round_up(s, align_size)
@@ -328,6 +361,11 @@ class PackedDataCollator:
                 "attention_mask": attention_mask,
                 "loss_mask": loss_mask,
                 "sub_seq_lengths": sub_seq_lengths,
+                # ASFT KL anchor, same [num_bins, max_packed_len - 1] shape as loss_mask so
+                # the worker's ``base_action_log_probs[:, -num_actions:]`` slice lines up
+                # token-for-token. Deliberately NOT scaled by ``scale``: these are
+                # log-probabilities consumed as values, not per-token loss weights.
+                "base_action_log_probs": (torch.from_numpy(ref_logprobs_np) if ref_logprobs_np is not None else None),
             }
         )
         batch.metadata = {
