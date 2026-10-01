@@ -2,6 +2,7 @@
 server in token mode, which calls a mock SkyRL router."""
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,6 +29,8 @@ from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
 from skycap import CaptureService, Sample, record  # noqa: E402
+from skycap.graph import MessageGraph  # noqa: E402
+from skycap.paths import Row, final_path  # noqa: E402
 from skycap.tokens.engine import EngineError  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
@@ -50,6 +53,21 @@ from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
 )
 
 pytestmark = pytest.mark.integrations
+
+#: A custom path rule, as ``skycap.train_paths`` names it.
+SHORT_DISCARDS = "tests.integrations.harbor_skycap.test_harbor_skycap:final_and_short_discards"
+
+
+def final_and_short_discards(graph: MessageGraph) -> list[Row]:
+    """The README's example rule: the final path, plus each discarded reply under 64 sampled tokens."""
+    rows = final_path(graph)
+    final = set(rows[0].path) if rows else set()
+    for leaf in graph.leaves():
+        tokens = graph.nodes[leaf].tokens
+        if leaf not in final and graph.nodes[leaf].author == "model" and tokens is not None:
+            if len(tokens.token_ids) - tokens.sampled_start < 64:
+                rows.append(Row(graph.path_to(leaf), [leaf]))
+    return rows
 
 
 def generator_cfg(**overrides):
@@ -87,6 +105,7 @@ def skycap(router, tmp_path):
         sampling_overrides={"top_k": TOP_K},
         sampling_mask=True,
         record_dir=str(tmp_path / "record"),
+        path_rules={SHORT_DISCARDS: SHORT_DISCARDS},
         host="127.0.0.1",
     )
     service.start()
@@ -133,9 +152,15 @@ async def generator(skycap):
     """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
     made = []
 
-    def make(**cfg) -> HarborSkycapGenerator:
+    def make(train_paths: str = "all", **cfg) -> HarborSkycapGenerator:
         made.append(
-            HarborSkycapGenerator(generator_cfg(**cfg), harbor_cfg(), [skycap.url], SimpleNamespace(weight_version=7))
+            HarborSkycapGenerator(
+                generator_cfg(**cfg),
+                harbor_cfg(),
+                [skycap.url],
+                SimpleNamespace(weight_version=7),
+                train_paths=train_paths,
+            )
         )
         return made[-1]
 
@@ -206,6 +231,74 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
     # The rewritten history couldn't extend the tokens before it: one call, in one trajectory.
     assert out["rollout_metrics"]["generate/skycap/num_unbridged_trajectories"] == 1
     assert out["rollout_metrics"]["generate/skycap/num_unbridged_calls"] == 1
+
+
+def trained_text(out: dict, row: int) -> str:
+    """The trained tokens of a row, decoded."""
+    return decode([t for t, m in zip(out["response_ids"][row], out["loss_masks"][row]) if m])
+
+
+def replies(text: str) -> list[str]:
+    """The mock router's replies (``re<prompt length>``) in a decoded text, in order."""
+    return re.findall(r"re\d+", text)
+
+
+@pytest.mark.asyncio
+async def test_a_discarded_reply_is_its_own_path_and_trains_by_default(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("discard"), disable_tqdm=True)
+    validate_generator_output(1, out, step_wise=True)
+
+    assert out["is_last_step"] == [False, True] and out["rewards"] == [1.0, 1.0]
+    # Three replies, each trained once: the first and the discarded one on the dead end's row, the last on the other.
+    assert [len(replies(trained_text(out, row))) for row in range(2)] == [2, 1]
+
+
+@pytest.mark.asyncio
+async def test_final_trains_one_row_per_trial_without_the_discarded_reply(skycap, trials, generator) -> None:
+    every = await generator().generate(batch("discard"), disable_tqdm=True)
+    out = await generator(train_paths="final").generate(batch("discard"), disable_tqdm=True)
+    validate_generator_output(1, out, step_wise=True)
+
+    first, discarded = replies(trained_text(every, 0))
+    (last,) = replies(trained_text(every, 1))
+    assert out["is_last_step"] == [True] and out["rewards"] == [1.0]
+    assert out["rollout_metrics"]["generate/skycap/avg_num_paths"] == 1
+    # The row is the continued conversation, token for token, with both of its replies trained ...
+    tokens = out["prompt_token_ids"][0] + out["response_ids"][0]
+    assert tokens == every["prompt_token_ids"][1] + every["response_ids"][1]
+    assert replies(trained_text(out, 0)) == [first, last]
+    # ... and the discarded reply isn't in it at all.
+    assert replies(decode(tokens)) == [first, last] and discarded not in replies(decode(tokens))
+    assert len(out["response_ids"][0]) == len(out["loss_masks"][0]) == len(out["rollout_logprobs"][0])
+
+
+@pytest.mark.asyncio
+async def test_final_keeps_one_row_per_trial_across_a_mixed_batch(skycap, trials, generator) -> None:
+    out = await generator(train_paths="final").generate(
+        batch("discard", "summarize", "linear", repetitions=2), disable_tqdm=True
+    )
+    validate_generator_output(6, out, step_wise=True)
+
+    assert len(out["response_ids"]) == 6 and all(out["is_last_step"])
+    # A summarizing trial trains only what follows the summary: the history before it is off the final path.
+    summarized = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "summarize"]
+    assert all(decode(out["prompt_token_ids"][i]).startswith("usersummary") for i in summarized)
+
+
+@pytest.mark.asyncio
+async def test_a_custom_rule_by_import_path_picks_the_rows_and_is_recorded(skycap, trials, generator) -> None:
+    every = await generator().generate(batch("discard"), disable_tqdm=True)
+    out = await generator(train_paths=SHORT_DISCARDS).generate(batch("discard"), disable_tqdm=True)
+    validate_generator_output(1, out, step_wise=True)
+
+    first, discarded = replies(trained_text(every, 0))
+    (last,) = replies(trained_text(every, 1))
+    # The final path with both of its replies, then the short discarded reply as a row of its own.
+    assert out["is_last_step"] == [False, True] and out["rewards"] == [1.0, 1.0]
+    assert [replies(trained_text(out, row)) for row in range(2)] == [[first, last], [discarded]]
+    # The generator finished with the rule's name, and the record says so.
+    documents = [record.read_document(skycap.server.record_dir, i) for i in record.list_ids(skycap.server.record_dir)]
+    assert sorted(d["samples"]["paths"] for d in documents) == sorted(["all", SHORT_DISCARDS])
 
 
 @pytest.mark.asyncio
@@ -374,6 +467,23 @@ def test_the_generator_refuses_configs_it_cannot_serve() -> None:
         HarborSkycapGenerator(
             generator_cfg(inference_engine=SimpleNamespace(served_model_name="a/b")), {}, ["http://x"]
         )
+    with pytest.raises(ValueError, match="pkg.module:function"):
+        HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], train_paths="longest")
+    with pytest.raises(ModuleNotFoundError):
+        HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], train_paths="nowhere_skycap_test:rule")
+
+
+def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(monkeypatch) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    started = []
+    monkeypatch.setattr(main_harbor_skycap, "start_servers", lambda settings, **_: started.append(settings))
+    cfg = main_harbor_skycap.HarborSkycapConfig()
+    cfg.trainer.algorithm.max_seq_len = 1024
+    for train_paths in ("final", SHORT_DISCARDS):
+        cfg.skycap.train_paths = train_paths
+        main_harbor_skycap.start_skycap(cfg, "http://router")
+    assert [settings["path_rules"] for settings in started] == [{}, {SHORT_DISCARDS: SHORT_DISCARDS}]
 
 
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:

@@ -49,6 +49,9 @@ class Trajectory:
     #: Set once the server has released and written it. Sealed is not ended:
     #: a trajectory can fail mid-run and still be waiting for its ``finish``.
     ended: bool = False
+    #: What ``finish`` trained: ``{"paths": <rule name>, "rows": [{"leaf", "targets"}]}``, a row per sample,
+    #: with the node its path ends at and the model nodes it trains. None until finished.
+    samples: dict[str, Any] | None = None
 
     @property
     def is_open(self) -> bool:
@@ -91,6 +94,7 @@ class Trajectory:
             "tools": self.graph.tools,
             "failures": [dataclasses.asdict(f) for f in self.failures],
             "retries": {"replayed": self.replay.replayed, "coalesced": self.replay.coalesced},
+            "samples": self.samples,
             "nodes": [
                 {
                     "id": n.id,

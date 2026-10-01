@@ -214,6 +214,7 @@ def load(record_dir: Path, trajectory_id: str) -> Trajectory:
         created_at=document["created_at"],
         finished_at=document["finished_at"],
         ended=document["ended"],
+        samples=document.get("samples"),
     )
     retries = document.get("retries") or {}
     trajectory.replay.replayed = retries.get("replayed", 0)

@@ -47,14 +47,19 @@ class TokenStack:
 
 @asynccontextmanager
 async def token_stack(
-    *, engine: VLLMEngine | None = None, completion: Any = None, record_dir: Path | None = None, **options: Any
+    *,
+    engine: VLLMEngine | None = None,
+    completion: Any = None,
+    record_dir: Path | None = None,
+    path_rules: dict[str, Any] | None = None,
+    **options: Any,
 ) -> AsyncIterator[TokenStack]:
     mock = MockEngine(completion)
     engine_server = TestServer(mock.app())
     await engine_server.start_server()
     renderer = FakeRenderer()
     backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, engine=engine, **options)
-    server = CaptureServer(backend, record_dir=record_dir)
+    server = CaptureServer(backend, record_dir=record_dir, path_rules=path_rules)
     capture = TestServer(server.app())
     await capture.start_server()
     try:
