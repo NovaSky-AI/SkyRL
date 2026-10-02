@@ -126,6 +126,13 @@ class SkyRLLoraConfig(BaseConfig):
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
+    base_dtype: Optional[Literal["float32", "bfloat16"]] = None
+    """Storage dtype of the frozen base weights of a LoRA policy. FSDP policy only; requires ``rank > 0``.
+    Unset or ``"float32"`` keeps fp32 master weights for every parameter. ``"bfloat16"`` loads the base
+    model in bf16: PEFT still creates the adapter weights in fp32, and with the default
+    ``fsdp_config.mixed_precision`` (bf16 params) the forward pass computes in bf16 either way, so the
+    frozen weights take half the GPU memory and half the colocation offload traffic. Full fine-tuning
+    keeps fp32 master weights."""
 
     share_expert_adapters: bool = True
     """Share one LoRA adapter across local grouped experts."""

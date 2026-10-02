@@ -29,6 +29,7 @@ trainer:
         target_modules: "all-linear"  # Apply to all linear layers OR
         # specify specific modules as a list
         exclude_modules: null  # Modules to exclude from LoRA
+        base_dtype: null      # FSDP: "bfloat16" stores the frozen base in bf16
   critic:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -49,6 +50,7 @@ trainer:
 - **`lora_sync_path`**: Directory path where LoRA adapters are saved and synchronized between training and inference engines.
 - **`target_modules`**: Specifies which modules to apply LoRA to. By default, LoRA is applied to all linear layers in the model - you can customize which modules to target by providing a list of specific module names.
 - **`exclude_modules`**: Specifies which modules to exclude from LoRA application. By default, no modules are excluded.
+- **`base_dtype`** (FSDP policy only): Storage dtype of the frozen base weights. By default every parameter is kept as an fp32 master weight. `"bfloat16"` loads the base model in bf16 instead; the LoRA adapters stay in fp32 and compute is bf16 either way, so this halves the memory the frozen weights take on each GPU and the traffic of offloading them between colocated training and generation.
 
 ## Running LoRA Training
 
@@ -135,6 +137,8 @@ We recommend looking at the blog [LoRA Without Regret](https://thinkingmachines.
 2. **Rank:** Choose a rank large enough to match dataset complexity (e.g., 32–64 for most RL fine-tuning tasks). LoRA performs best when not capacity-limited.
 
 3. **Layer coverage:** Apply LoRA to *all* layers, particularly MLP/MoE layers — attention-only LoRA tends to underperform.
+
+4. **Memory (FSDP):** With LoRA the base model is never updated, so `trainer.policy.model.lora.base_dtype=bfloat16` stores it in bf16 rather than as fp32 master weights. On a single node, `trainer.policy.fsdp_config.fsdp_size=1` keeps a full copy of the model on each GPU (no weight sharding, gradient all-reduce only, like DDP), which avoids re-gathering the base weights on every forward and backward pass; the bf16 base is what makes that copy affordable.
 
 ## Current Limitations
 
