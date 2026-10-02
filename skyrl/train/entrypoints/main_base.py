@@ -40,6 +40,23 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
+async def _sleep_and_close(client: InferenceEngineInterface) -> None:
+    """Put the colocated engines to sleep, then close the HTTP session opened on this short-lived loop."""
+    try:
+        await client.sleep()
+    finally:
+        await client.close_current_async_session()
+
+
+async def _train_and_close(trainer: RayPPOTrainer) -> None:
+    """Run the training loop, then close the inference client's HTTP session on the loop that opened it."""
+    try:
+        await trainer.train()
+    finally:
+        if trainer.inference_engine_client is not None:
+            await trainer.inference_engine_client.close_current_async_session()
+
+
 class BasePPOExp:
     def __init__(self, cfg: SkyRLTrainConfig):
         """
@@ -242,7 +259,7 @@ class BasePPOExp:
 
         if is_colocated:
             # Callers must invoke get_inference_client() from a sync context (no running event loop).
-            asyncio.run(client.sleep())
+            asyncio.run(_sleep_and_close(client))
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client
@@ -318,7 +335,7 @@ class BasePPOExp:
         try:
             trainer = self._setup_trainer()
             # Start the training loop
-            asyncio.run(trainer.train())
+            asyncio.run(_train_and_close(trainer))
         except Exception as e:
             # OOMs raised inside actor init (e.g. FSDPPolicyWorkerBase.init_model)
             # surface here as RayTaskError. Without this they only land in Ray

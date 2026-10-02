@@ -27,21 +27,25 @@ class EvalOnlyEntrypoint(BasePPOExp):
     async def run(self, inference_engine_client: InferenceEngineInterface) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
-        await inference_engine_client.wake_up()
-        generator = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
+        try:
+            await inference_engine_client.wake_up()
+            generator = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
-        results: dict[str, Any] = await evaluate(
-            eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
-            generator=generator,
-            cfg=self.cfg,
-            global_step=None,
-            tokenizer=self.tokenizer,
-        )
+            results: dict[str, Any] = await evaluate(
+                eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
+                generator=generator,
+                cfg=self.cfg,
+                global_step=None,
+                tokenizer=self.tokenizer,
+            )
 
-        tracker = self.get_tracker()
-        tracker.log(results, step=0, commit=True)
+            tracker = self.get_tracker()
+            tracker.log(results, step=0, commit=True)
 
-        return results
+            return results
+        finally:
+            # Close the client's HTTP session on the loop that opened it (see _train_and_close in main_base).
+            await inference_engine_client.close_current_async_session()
 
 
 @ray.remote(num_cpus=1)
