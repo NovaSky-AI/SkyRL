@@ -1085,6 +1085,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
     env_vars.update(forwarded)
 
+    # NCCL and libfabric (EFA) tuning (e.g. NCCL_BUFFSIZE, NCCL_NCHANNELS_PER_NET_PEER, FI_PROVIDER)
+    # is read by the worker processes that create the communicators, so it must ride the runtime
+    # env too.
+    net = {k: v for k, v in os.environ.items() if k.startswith(("NCCL_", "FI_")) and k not in env_vars}
+    if net:
+        logger.info(f"Exporting NCCL_*/FI_* settings to ray runtime env: {sorted(net)}")
+    env_vars.update(net)
+
     # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32
     # scales; Blackwell (SM100+) defaults to power-of-two scales, the only mode TE
     # supports for blockwise quantization there (it emulates Float8BlockScaling on
