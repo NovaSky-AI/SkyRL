@@ -71,6 +71,7 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     reject_unsupported_sample_support_packing,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.workers.megatron.grad_sync import configure_no_sync
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
@@ -238,6 +239,7 @@ class MegatronModelWrapper:
         self._pending_grad_sync: Optional[dict] = None
 
         config = get_model_config(self.actor_module[0])
+        self._overlap_grad_reduce = configure_no_sync(self.actor_module, config)
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across
         # parallelism dimensions -- but deferred to optim_step rather than run per
@@ -274,6 +276,14 @@ class MegatronModelWrapper:
         """
         del model, kwargs  # replayed against self.actor_module with default process groups
         pending = self._pending_grad_sync
+        if self._overlap_grad_reduce and pending is not None:
+            # Overlapped reductions dispatch from the final microbatch's backward
+            # hook, so the previous call's gradients are already in flight.
+            raise RuntimeError(
+                "ddp_config.overlap_grad_reduce=True requires one forward_backward call "
+                "per optimizer step, but a second call was made before optim_step. "
+                "Set overlap_grad_reduce=False to accumulate across calls."
+            )
         if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
             num_tokens = pending["num_tokens"] + num_tokens
         self._pending_grad_sync = {"num_tokens": num_tokens}
