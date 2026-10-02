@@ -1,6 +1,4 @@
 import asyncio
-import sys
-import traceback
 
 from loguru import logger
 from tqdm import tqdm
@@ -13,6 +11,7 @@ from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import prepare_generator_input
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
+from skyrl.train.utils.async_utils import BackgroundFailure, cancel_background_tasks
 from skyrl.train.utils.trainer_utils import ResumeMode
 
 
@@ -52,6 +51,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         # Start from step 1
         self.global_step += 1
         self._profiler_start()
+        generator_task = None
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
                 # while this is just off by one, you can image a more general queue based approach
@@ -60,17 +60,18 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 generation_buffer = asyncio.Queue(maxsize=1)
                 self.sync_finished = asyncio.Event()
                 self.generation_ack = asyncio.Event()
+                generation_failure = BackgroundFailure()
 
                 # start generator task
-                generator_task = asyncio.create_task(self._run_generate_loop(generation_buffer))
+                generator_task = asyncio.create_task(self._run_generate_loop(generation_buffer, generation_failure))
 
                 for idx in range(len(self.train_dataloader)):
                     with Timer("step", self.all_timings):
-                        status = await self._run_training(generation_buffer)
+                        status = await self._run_training(generation_buffer, generation_failure)
 
                         # request the generation loop that we should sync sometime soon.
                         if idx != len(self.train_dataloader) - 1:
-                            await self.generation_ack.wait()
+                            await generation_failure.guard(self.generation_ack.wait())
 
                         # sync weights
                         async with Timer("sync_weights", self.all_timings):
@@ -116,6 +117,12 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
                 # cancel generation task for this epoch
                 generator_task.cancel()
+                await asyncio.gather(generator_task, return_exceptions=True)
+                generation_failure.raise_if_failed()
+        except BaseException:
+            if generator_task is not None:
+                await cancel_background_tasks([generator_task])
+            raise
         finally:
             self._profiler_stop()
 
@@ -131,9 +138,9 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         self.tracker.finish()
         logger.info("Training done!")
 
-    async def _run_training(self, generation_buffer):
+    async def _run_training(self, generation_buffer, failure: BackgroundFailure):
         # Get a generation future and await on the object
-        generator_output, uids = await generation_buffer.get()  # GeneratorOutput, List[str]
+        generator_output, uids = await failure.guard(generation_buffer.get())  # GeneratorOutput, List[str]
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -170,7 +177,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         return status
 
-    async def _run_generate_loop(self, generation_buffer: asyncio.Queue):
+    async def _run_generate_loop(self, generation_buffer: asyncio.Queue, failure: BackgroundFailure):
         try:
             for i, rand_prompts in enumerate(self.train_dataloader):
                 # truncate data to have even shards
@@ -202,8 +209,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                     await self.sync_finished.wait()
                     # Clear the sync request for next sync
                     self.sync_finished.clear()
-        # We have an explicit try-catch here because asyncio doesn't propagate exceptions to the main thread.
+        # A task's exception only surfaces when awaited, so record it to wake the training loop.
         except Exception as e:
-            logger.error(f"Generator errored out with exception: {e}")
-            logger.error(f"Traceback: \n{traceback.format_exc()}")
-            sys.exit(1)
+            logger.error(f"Generator errored out with exception: {e!r}")
+            failure.record(e, "generator")
+            raise
