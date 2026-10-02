@@ -6,7 +6,8 @@ top-level keys whose value is ``None``, ``[]`` or ``{}`` dropped, because
 clients disagree about spelling "absent". An SDK replaying an assistant
 message may drop ``"refusal": null`` or ``"annotations": []`` that the server
 sent; those are the same message, and hashing them apart would fork the graph
-on every turn.
+on every turn. Token mode goes further and hashes only the fields a renderer
+reads (``token_match_hash``).
 
 Nothing is canonicalized across providers: one trajectory speaks one dialect.
 """
@@ -56,23 +57,64 @@ def match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> 
     return digest([message_hash(message), tools, model or ""])
 
 
-def token_match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> str:
-    """Match token-mode messages by fields the renderer can use.
+#: The message fields a ``renderers`` renderer reads: at the top level, in a tool call, and in a
+#: tool call's ``function``. Token mode matches a message on these alone. Anything else is client
+#: metadata (LiteLLM's ``provider_specific_fields``, the SDK's ``refusal`` and ``annotations``)
+#: and can't change the tokens. Text mode matches on every field, because its upstream sees them all.
+RENDERED_FIELDS = frozenset(
+    {
+        "role",
+        "content",
+        "reasoning_content",
+        # Reasoning under its other name (DeepSeek V4, Gemma 4, Hunyuan 3, Laguna).
+        "reasoning",
+        "name",
+        "tool_calls",
+        # On a tool result: the call it answers. DeepSeek V4, GLM 5 and Gemma 4 pair results with calls by it.
+        "tool_call_id",
+        # Gemma 4: tool results carried on the assistant message.
+        "tool_responses",
+        # DeepSeek V4: ``task`` emits a task token after the message, ``wo_eos`` omits the
+        # end-of-turn token, and ``response_format`` renders a JSON schema into the message.
+        "task",
+        "wo_eos",
+        "response_format",
+    }
+)
+#: ``id`` is rendered by Kimi K2 and K2.5, and pairs calls with results in DeepSeek V4, GLM 5 and Gemma 4.
+#: The flat ``name`` / ``arguments`` / ``tool_call_id`` are the spellings renderers accept besides ``function``.
+RENDERED_TOOL_CALL_FIELDS = frozenset({"id", "function", "name", "arguments", "tool_call_id"})
+RENDERED_FUNCTION_FIELDS = frozenset({"name", "arguments"})
 
-    ``provider_specific_fields`` is client metadata, not rendered tokens. Text
-    mode keeps it in the regular match hash because its upstream may use it.
-    For assistant tool calls, an empty ``content`` renders like absent content.
+
+def rendered_fields(message: Mapping[str, Any]) -> dict[str, Any]:
+    """The part of ``message`` a renderer reads."""
+    kept = {key: value for key, value in message.items() if key in RENDERED_FIELDS}
+    calls = kept.get("tool_calls")
+    if isinstance(calls, list):
+        kept["tool_calls"] = [_rendered_call(call) for call in calls]
+    return kept
+
+
+def _rendered_call(call: Any) -> Any:
+    if not isinstance(call, Mapping):
+        return call
+    kept = {key: value for key, value in call.items() if key in RENDERED_TOOL_CALL_FIELDS}
+    function = kept.get("function")
+    if isinstance(function, Mapping):
+        kept["function"] = {key: value for key, value in function.items() if key in RENDERED_FUNCTION_FIELDS}
+    return kept
+
+
+def token_match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> str:
+    """``match_hash`` over the fields a renderer reads.
+
+    Two spellings that differ in a rendered field, such as ``content: ""``
+    against no ``content``, still hash apart. Whether a chat template renders
+    them alike is the renderer's call, made when a request is planned
+    (``tokens.turn``).
     """
-    empty_tool_content = (
-        message.get("role") == "assistant" and message.get("content") == "" and bool(message.get("tool_calls"))
-    )
-    if "provider_specific_fields" not in message and not empty_tool_content:
-        return match_hash(message, tools=tools, model=model)
-    matched_message = dict(message)
-    matched_message.pop("provider_specific_fields", None)
-    if empty_tool_content:
-        matched_message.pop("content", None)
-    return match_hash(matched_message, tools=tools, model=model)
+    return match_hash(rendered_fields(message), tools=tools, model=model)
 
 
 def sampling_key(sampling: Mapping[str, Any] | None) -> dict[str, Any]:
