@@ -155,6 +155,10 @@ megatron = [
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
+    # FlashMLA sparse-attention forward for megatron-core's `dsa_kernel_backend="cudnn"` DSA path
+    # (imported lazily as `flash_mla.flash_mla_sparse_fwd`). Not on PyPI: our own x86_64 build of
+    # the `nv_dev` branch, see [tool.uv.sources]. No aarch64 wheel yet.
+    "flash-mla==1.0.0+cu.13.0.torch.2.13.b7643bd; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "vllm==0.30.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
@@ -458,6 +462,14 @@ flash-attn = [
 # gates FA4 on this distribution's metadata, so without it TE never uses FA4.
 flash-attn-4 = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl", marker = "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64') and python_version < '3.15'" },
+]
+# FlashMLA `nv_dev` @ b7643bd, built against torch 2.13.0 + CUDA 13.0.88 (sm_90a + sm_100f):
+#   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.13-flashmla-b7643bd
+# x86_64 only; FlashMLA has no PyPI release to fall back to, so the dependency is x86_64-gated.
+flash-mla = [
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-flashmla-b7643bd/flash_mla-1.0.0%2Bcu.13.0.torch.2.13.b7643bd-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-flashmla-b7643bd/flash_mla-1.0.0%2Bcu.13.0.torch.2.13.b7643bd-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-flashmla-b7643bd/flash_mla-1.0.0%2Bcu.13.0.torch.2.13.b7643bd-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
 ]
 causal-conv1d = [
     { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
