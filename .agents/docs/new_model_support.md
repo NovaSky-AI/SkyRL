@@ -5,7 +5,7 @@ Assumptions: we have a vLLM PR with initial support for serving a model with ten
 Goal: We want to provide E2E training support in SkyRL for that model using Megatron and vLLM, supporting both LoRA, full finetuning, and advanced parallelism strategies.
 This should be done in stages, and we should aim to identify and fix gaps in upstream vLLM, Megatron-LM (megatron.core), and Megatron-Bridge.
 
-An example PR will have the file structure of https://github.com/NovaSky-AI/SkyRL/pull/2179, where all patches to vLLM, Megatron-LM (megatron.core), and Megatron-Bridge are in the `patches/` folder,
+An example PR will have the file structure of https://github.com/NovaSky-AI/SkyRL/pull/2179, where all patches to vLLM, Megatron-LM (megatron.core), and Megatron-Bridge are in the `skyrl/backends/skyrl_train/patches/` folder,
 and will be able to be removed by an agent once the upstream dependency gaps are resolved. It will also have an example GSM8K full finetuning and LoRA script on a minimal number of GPU nodes, and 
 an example DAPO script again with full finetuning and LoRA on minimal nodes.
 
@@ -22,10 +22,10 @@ Megatron Side:
 2. Megatron-Bridge HF <> GPT/HybridModel mapping with LoRA included
 
 vLLM Side:
-1. Basic TP=8 serving and weight reloading (full layerwise weight reloading correct for full finetuning)
+1. Basic TP serving and weight reloading (full layerwise weight reloading correct for full finetuning)
 2. LoRA mapping implemented for new model
 
-This step does not include running a backward pass, since the roundtrip logprob test just requires a megatron and vLLM forward pass. The compute requirements are just whatever is needed to do BF16 forward passes. We should use a wheel built off of the vllm branch, and ideally keep megatron-core/megatron-bridge versions pinned to whatever is current and implement all megatron layers on top on the patches/megatron folder. We should compile a list of issues to raise with vllm, megatron-core, and megatron-bridge to help upstream stable model support.
+This step does not include running a backward pass, since the roundtrip logprob test just requires a megatron and vLLM forward pass. The compute requirements are just whatever is needed to do BF16 forward passes. We should use a wheel built off of the vllm branch, and ideally keep megatron-core/megatron-bridge versions pinned to whatever is current and implement all megatron layers on top of the patches/megatron folder. We should compile a list of issues to raise with vllm, megatron-core, and megatron-bridge to help upstream stable model support.
 
 ## Stage 1: Basic E2E test with GSM8K: LoRA and full finetuning
 Goal: Verify E2E training works on GSM8K with minimal bells and whistles
@@ -35,7 +35,7 @@ Details: In this stage, we should get standard synchronous GSM8K training runnin
 ## Stage 2: Medium sized E2E test with DAPO: LoRA and full finetuning
 Goal: Verify E2E training on DAPO showing reward signal and R3 + checkpointing. This showing promising reward signal should be enough to establish initial stable model support
 
-Details: Models should show learning signal on the basic sync DAPO recipe with LoRA with around ~8K context (this can vary depending on how verbose the model is). Even if the model is maxxed out on AIME, it should show reward signal from the DAPO recipe's overlong buffer reducing context length over training. The outcome for this stage should be scripts like `examples/train/glm5_3_flash/run_dapo_glm5p3_flash_lora_sync_2node.sh` and `examples/train/glm5_3_flash/run_dapo_glm5p3_flash_fullft_sync_8node.sh` that show meaningful reward increase and shorter responses over the course of ~20 steps. We can still keep just whatever minimal parallelisms for train and inference, and use BF16 training and serving at this point. We should enable R3 for these runs to reduce logprob mismatch.
+Details: Models should show learning signal on the basic sync DAPO recipe with LoRA with around ~8K context (this can vary depending on how verbose the model is). Even if the model is maxxed out on AIME, it should show reward signal from the DAPO recipe's overlong buffer reducing context length over training. The outcome for this stage should be scripts like `examples/train/glm5_3_flash/run_dapo_glm5p3_flash_lora_sync_2node.sh` and `examples/train/glm5_3_flash/run_dapo_glm5p3_flash_fullft_sync_8node.sh` that show meaningful reward increase and shorter responses over the course of ~20 steps. We can still keep just whatever minimal parallelisms for train and inference, and use BF16 training and serving at this point. We should enable R3 for both LoRA and full finetuning runs to reduce logprob mismatch.
 
 In this step we should also verify checkpoint save and resume is working correctly for LoRA and full finetuning. This involves adapting `tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py` with the new model, and verifying checkpointing works for both LoRA and full finetuning. 
 
@@ -45,7 +45,7 @@ Goal: Identify gaps in performance knobs (i.e. quantization)
 ### Training performance optimization
 Goals: improve training throughput and enable long context training on the megatron side for the new model implementation.
 
-Details: This will involved things like making sure that optimized kernels (i.e. SparseMLA in Tilelang for GLM 5.3 Flash) are properly enabled for new model shapes, making sure that advanced megatron perf features (i.e. overlap grad reduce, full activation recompute, optimizer offload/precision aware optimizer etc.) are supported for the new model arch.
+Details: This will involve things like making sure that optimized kernels (i.e. SparseMLA in Tilelang for GLM 5.3 Flash) are properly enabled for new model shapes, making sure that advanced megatron perf features (i.e. overlap grad reduce, full activation recompute, optimizer offload/precision aware optimizer etc.) are supported for the new model arch.
 
 ### Quantization
 Goals: enable full MXFP8 training at parity with BF16 training.
