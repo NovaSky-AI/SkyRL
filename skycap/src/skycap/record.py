@@ -50,6 +50,16 @@ def sidecar_path(record_dir: Path, trajectory_id: str, kind: str) -> Path:
     return record_dir / f"{trajectory_id}.{kind}.zst"
 
 
+#: The sidecar kinds, in the order they are written.
+SIDECAR_KINDS = ("tokens", "experts", "sampling_mask")
+
+
+def record_files(record_dir: Path, trajectory_id: str) -> list[Path]:
+    """A written trajectory's files as they are on disk: its sidecars, then its document."""
+    sidecars = [sidecar_path(record_dir, trajectory_id, kind) for kind in SIDECAR_KINDS]
+    return [path for path in sidecars if path.exists()] + [document_path(record_dir, trajectory_id)]
+
+
 # -- writing ------------------------------------------------------------------
 def write(record_dir: Path, trajectory: Trajectory) -> Path:
     """Write the trajectory's files. Returns the document path."""
@@ -203,7 +213,7 @@ def read_sidecar(record_dir: Path, document: dict[str, Any], kind: str) -> dict[
 def load(record_dir: Path, trajectory_id: str) -> Trajectory:
     """Rebuild a written trajectory, graph and arrays included."""
     document = read_document(record_dir, trajectory_id)
-    arrays = {kind: read_sidecar(record_dir, document, kind) for kind in ("tokens", "experts", "sampling_mask")}
+    arrays = {kind: read_sidecar(record_dir, document, kind) for kind in SIDECAR_KINDS}
     trajectory = Trajectory(
         id=document["id"],
         meta=document["meta"],

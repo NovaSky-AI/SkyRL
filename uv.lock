@@ -8484,16 +8484,18 @@ tokens = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
+    { name = "fsspec", marker = "extra == 'remote'", specifier = ">=2024.2" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "orjson", specifier = ">=3.10" },
     { name = "renderers", marker = "extra == 'tokens'", specifier = ">=0.1.9.dev9" },
     { name = "transformers", marker = "extra == 'tokens'", specifier = ">=4.50" },
     { name = "zstandard", specifier = ">=0.22" },
 ]
-provides-extras = ["tokens"]
+provides-extras = ["tokens", "remote"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fsspec", specifier = ">=2024.2" },
     { name = "openai", specifier = ">=1.40" },
     { name = "pytest", specifier = ">=8.2" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
