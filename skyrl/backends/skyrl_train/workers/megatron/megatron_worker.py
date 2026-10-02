@@ -54,6 +54,9 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_grad_norm_mixed_dtype import (
+    patch_grad_norm_mixed_dtype,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -126,6 +129,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 )
 
 apply_shared_expert_lora_tp_patch()
+patch_grad_norm_mixed_dtype()
 
 
 class MegatronWorker:
