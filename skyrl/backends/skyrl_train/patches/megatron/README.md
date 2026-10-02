@@ -20,10 +20,11 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 |---|---|
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection |
-| `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py` (H100) | `glm5_next/dsa.py` padded fused sparse attention vs dense |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
+| `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -115,14 +116,7 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
     - `Glm5NextDSAttention._forward_with_kpool_topk`: swaps the pinned `DSAttention.forward`'s
       token-level top-k for `fused_qk_topk_kpool`, and raises if the pooled selection doesn't run
       exactly once;
-    - the `kpool <= 1` long-sequence guard;
-    - `_pad_for_fused_absorbed_sparse_attention`: fits GLM-5.3's NoPE-MLA layout (q/k width 512,
-      k-pool top-k width 2051) into the TileLang SparseMLA kernels' DeepSeek-V3.2 layout (576,
-      multiple of 64) by zero-padding q/k and padding indices with -1. Exact. Without it the
-      kernels decline and megatron-core falls back to a dense `[heads, sq, sq]` FP32 softmax,
-      which OOMs at 32k. Needs `dsa_kernel_backend="tilelang"`. Tested by
-      `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py`; delete with it once
-      upstream's kernels (or a GLM-specific path) take NoPE MLA directly.
+    - the `kpool <= 1` long-sequence guard.
   - `glm5_next/layer_specs.py`: the `core_attention.module` / `submodules.indexer.module` swaps.
   - `glm5_next/provider.py`: `dsa_indexer_kpool`, `dsa_indexer_kpool_always_select_tail`.
 - **Landed?** megatron-core's `experimental_attention_variant/dsa.py` defines
@@ -182,6 +176,19 @@ Per-forward DSA index-share carrier under activation recompute.
   `_dsa_index_share_carrier_scope`, and applying the patch logs a warning telling you to delete it.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
+
+### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
+
+Lets the TileLang SparseMLA kernel (`tilelang_dsa.fused_sparse_mla_absorbed`) take NoPE MLA
+(q/k width 512) and top-k widths that aren't a multiple of 64, by zero-padding q/k to 576 and the
+indices with -1. Exact. GLM-5.3-Flash needs both (width 512, k-pool selection 2048 + 3 = 2051).
+Without it the kernel declines and megatron-core falls back to a dense `[heads, sq, sq]` FP32
+softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
+- **Landed?** The patch checks for itself: it's a no-op, and logs a warning telling you to delete
+  it, when `fused_sparse_mla_absorbed`'s source contains `query.size(-1) not in (512, 576)`.
+- **Remove:** the `patch_sparse_mla_nope()` call in `MegatronWorker.make_megatron_module`, the
+  module, and its CPU and GPU tests (`test_sparse_mla_nope.py`, and its line in
+  `ci/gpu_ci_run_h100.sh`).
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 
