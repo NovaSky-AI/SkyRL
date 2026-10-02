@@ -1,5 +1,4 @@
 import copy
-import os
 from argparse import Namespace
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -19,7 +18,7 @@ from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
 )
 
-from .common import SERVER_PORT_STRIDE
+from .common import SERVER_PORT_STRIDE, VLLM_START_PORT
 from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
 from .utils import (
@@ -31,10 +30,6 @@ from .utils import (
 )
 from .vllm_router import VLLMRouter
 
-# Base port for the vLLM server group. Overridable because another service on the
-# host (e.g. a k8s LoadBalancer) can claim port 8000 and silently hijack /wake_up,
-# which then 404s from the other app.
-VLLM_START_PORT = int(os.environ.get("SKYRL_VLLM_START_PORT", 8000))
 # NOTE: We use the same base port for NIXL and Mooncake since they will not be
 # used together
 MOONCAKE_BOOTSTRAP_BASE_PORT = NIXL_SIDE_CHANNEL_BASE_PORT = 20_000
@@ -63,6 +58,8 @@ def create_inference_servers(
     cli_args: Namespace,
     log_path: str,
     placement_group=None,
+    *,
+    start_port: int = VLLM_START_PORT,
 ) -> InferenceServerSetup:
     """Build server groups and router from config.
 
@@ -73,10 +70,16 @@ def create_inference_servers(
 
     Args:
         ie_cfg: Inference engine config.
-        cli_args: vLLM CLI args from :func:`build_vllm_cli_args`.
+        cli_args: vLLM CLI args from :func:`build_vllm_cli_args` (the policy)
+            or :func:`build_frozen_vllm_cli_args` (a frozen model).
         log_path: Log path for SkyRL logs
         placement_group: Optional resolved placement group for colocated
             training.  ``None`` when not colocated.
+        start_port: Base of the first server's port window. Each server owns
+            ``SERVER_PORT_STRIDE`` ports from its base (HTTP port plus the DP
+            TCPStore probe range), so a second deployment on the same nodes
+            must start past the first one's ``num_engines * data_parallel_size``
+            windows.
 
     Returns:
         An :class:`InferenceServerSetup` with the router, URLs, and
@@ -123,7 +126,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(prefill_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
+                start_port=start_port + i * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=prefill_pg,
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -144,7 +147,7 @@ def create_inference_servers(
             ServerGroup(
                 cli_args=copy.deepcopy(decode_cli_args),
                 num_servers=ie_cfg.data_parallel_size,
-                start_port=VLLM_START_PORT + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
+                start_port=start_port + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 placement_group=decode_pg,
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -227,7 +230,7 @@ def create_inference_servers(
                 cli_args=cli_args,
                 num_servers=ie_cfg.data_parallel_size,
                 placement_group=placement_group,
-                start_port=VLLM_START_PORT + i * ie_cfg.data_parallel_size * SERVER_PORT_STRIDE,
+                start_port=start_port + i * ie_cfg.data_parallel_size * SERVER_PORT_STRIDE,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
                 placement_group_bundle_offset=i * gpus_per_server * ie_cfg.data_parallel_size,
@@ -258,6 +261,64 @@ def create_inference_servers(
             server_urls=server_urls,
             server_groups=server_groups,
         )
+
+
+def launch_remote_inference_client(
+    ie_cfg: InferenceEngineConfig,
+    cli_args: Namespace,
+    *,
+    model_name: str,
+    log_path: str,
+    placement_group: Optional[ResolvedPlacementGroup] = None,
+    start_port: int = VLLM_START_PORT,
+    tokenizer=None,
+    enable_return_routed_experts: bool = False,
+    enable_return_sample_support_set: bool = False,
+    uses_lora_weight_sync: bool = False,
+) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
+    """Launch a vLLM deployment this job owns and return the client that drives it.
+
+    The deployment is ``create_inference_servers`` (server groups plus router); the
+    client is a :class:`RemoteInferenceClient` whose data plane is the router and whose
+    control plane fans out to the servers. Used for the policy by
+    :func:`build_new_inference_client` and for a frozen model (a distillation teacher)
+    by ``skyrl.train.opd``; the two differ only in ``cli_args`` and ``start_port``.
+
+    Args:
+        ie_cfg: The deployment's engine config (engine count, parallelism, memory, ...).
+        cli_args: vLLM CLI args for the role, from :func:`build_vllm_cli_args` or
+            :func:`build_frozen_vllm_cli_args`.
+        model_name: The name the servers know the model by (``served_model_name`` or the path).
+        log_path: Log path for SkyRL logs.
+        placement_group: Resolved placement group when colocated with training, else ``None``
+            (the deployment then creates its own).
+        start_port: Base of the first server's port window; see :func:`create_inference_servers`.
+        tokenizer: Optional HF tokenizer for local tokenize/detokenize on the client.
+        enable_return_routed_experts: Policy only; see :class:`RemoteInferenceClient`.
+        enable_return_sample_support_set: Policy only; see :class:`RemoteInferenceClient`.
+        uses_lora_weight_sync: Policy only; see :class:`RemoteInferenceClient`.
+
+    Returns:
+        Tuple of (client, server_setup).
+    """
+    server_setup = create_inference_servers(
+        ie_cfg,
+        cli_args,
+        log_path=log_path,
+        placement_group=placement_group,
+        start_port=start_port,
+    )
+    client = RemoteInferenceClient(
+        proxy_url=server_setup.proxy_url,
+        server_urls=server_setup.server_urls,
+        model_name=model_name,
+        enable_return_routed_experts=enable_return_routed_experts,
+        enable_return_sample_support_set=enable_return_sample_support_set,
+        uses_lora_weight_sync=uses_lora_weight_sync,
+        data_parallel_size=ie_cfg.data_parallel_size,
+        tokenizer=tokenizer,
+    )
+    return client, server_setup
 
 
 def build_new_inference_client(
@@ -322,12 +383,16 @@ def build_new_inference_client(
                 "generator.inference_engine.run_engines_locally=false requires "
                 "external_proxy_url or external_server_urls."
             )
-        cli_args = build_vllm_cli_args(cfg)
-        server_setup = create_inference_servers(
+        return launch_remote_inference_client(
             ie_cfg,
-            cli_args,
+            build_vllm_cli_args(cfg),
+            model_name=ie_cfg.served_model_name or cfg.trainer.policy.model.path,
             log_path=cfg.trainer.log_path,
             placement_group=placement_group,
+            tokenizer=tokenizer,
+            enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
+            enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
+            uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         )
 
     client = RemoteInferenceClient(
