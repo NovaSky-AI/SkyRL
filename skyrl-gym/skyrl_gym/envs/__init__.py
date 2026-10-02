@@ -37,6 +37,11 @@ register(
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
 
+register(
+    id="tau_bench",
+    entry_point="skyrl_gym.envs.tau_bench.env:TauBenchEnv",
+)
+
 __all__ = [
     "deregister",
     "register",
