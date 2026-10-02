@@ -453,6 +453,9 @@ class PolicyLossType(StrEnum):
     KL_COV = "kl_cov"
     SAPO = "sapo"
     CROSS_ENTROPY = "cross_entropy"
+    DFT = "dft"
+    ASFT = "asft"
+    KL_REG_SFT = "kl_reg_sft"
     IMPORTANCE_SAMPLING = "importance_sampling"
     DPPO = "dppo"
 
@@ -495,6 +498,16 @@ class PolicyLossRegistry(BaseFunctionRegistry):
     @classmethod
     def repopulate_registry(cls):
         """Repopulate the registry with default policy loss functions."""
+        # Imported here rather than at module scope: sft_loss_utils imports this module, so a
+        # top-level import would be circular. Doing it first also means the decorators there
+        # have run before ``list_available()``, keeping the loop below idempotent.
+        from skyrl.backends.skyrl_train.utils.sft_loss_utils import (
+            asft_loss,
+            cross_entropy_loss,
+            dft_loss,
+            kl_reg_sft_loss,
+        )
+
         pl_avail = set(cls.list_available())
         pl_types = {
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
@@ -505,6 +518,9 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
+            "dft": [PolicyLossType.DFT, dft_loss],
+            "asft": [PolicyLossType.ASFT, asft_loss],
+            "kl_reg_sft": [PolicyLossType.KL_REG_SFT, kl_reg_sft_loss],
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
             "dppo": [PolicyLossType.DPPO, dppo_policy_loss],
             "rollout_is": [PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss],
@@ -1051,45 +1067,6 @@ def compute_policy_loss_kl_cov(
 
     # NOTE (sumanthrh): Since the pg clip ratio is not applicable for KL-COV so we just use 0.0
     return pg_loss, {"clip_ratio": 0.0}
-
-
-@register_policy_loss(PolicyLossType.CROSS_ENTROPY)
-def cross_entropy_loss(
-    log_probs: torch.Tensor,
-    old_log_probs: torch.Tensor,
-    advantages: torch.Tensor,
-    config: AlgorithmConfig,
-    loss_mask: Optional[torch.Tensor] = None,
-    rollout_logprobs: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, dict[str, float]]:
-    """
-    Cross-entropy loss for supervised fine-tuning (SFT).
-
-    This loss function computes the negative log-likelihood of the target tokens,
-    ignoring the old_log_probs and advantages which are only used for RL.
-
-    The loss is computed as: -log_probs * loss_mask, summed over all tokens.
-    This matches Tinker's cross_entropy semantics where the loss is a simple sum.
-
-    Args:
-        log_probs: Log probabilities from the model for each token
-        old_log_probs: Ignored (only used for RL losses)
-        advantages: Ignored (only used for RL losses)
-        config: Algorithm configuration
-        loss_mask: Mask indicating which tokens to include in loss (1=include, 0=ignore)
-        rollout_logprobs: Ignored (only used for RL losses)
-
-    Returns:
-        Tuple of (loss, clip_ratio) where clip_ratio is always 0.0 for SFT
-    """
-    # Simple negative log-likelihood: -log p(token)
-    elementwise_loss = -log_probs
-
-    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
-    loss = reduce_loss(elementwise_loss, loss_mask)
-
-    # No clipping in cross-entropy loss
-    return loss, {"clip_ratio": 0.0}
 
 
 @register_policy_loss(PolicyLossType.IMPORTANCE_SAMPLING)
