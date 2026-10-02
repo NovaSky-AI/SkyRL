@@ -16,8 +16,11 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPES,
+    SAMPLE_SUPPORT_LOGPROBS_DTYPES,
+    SAMPLE_SUPPORT_LOGPROBS_TORCH_DTYPE,
     SAMPLE_SUPPORT_TORCH_DTYPE,
     SampleSupport,
+    SampleSupportLogprobs,
 )
 
 logger = logging.getLogger(__name__)
@@ -243,6 +246,56 @@ def build_sample_support(
     return PackedTensor(packed, cu_seqlens)
 
 
+def build_sample_support_logprobs(
+    rollout_sample_support_logprobs: List[SampleSupportLogprobs],
+    response_lens: np.ndarray,
+) -> PackedTensor:
+    """Pack one response-token segment of sampler support logprobs per trajectory.
+
+    Rows are float32 ``[response_tokens, top_k]``, aligned with ``build_sample_support``; ``-inf``
+    marks padding members.
+    """
+    num_samples = len(rollout_sample_support_logprobs)
+    for sample_index, rows in enumerate(rollout_sample_support_logprobs):
+        if not isinstance(rows, np.ndarray):
+            raise TypeError(
+                f"rollout_sample_support_logprobs entries must be NumPy arrays, got {type(rows).__name__} "
+                f"at sample {sample_index}"
+            )
+        if rows.dtype not in SAMPLE_SUPPORT_LOGPROBS_DTYPES:
+            supported = ", ".join(dtype.name for dtype in SAMPLE_SUPPORT_LOGPROBS_DTYPES)
+            raise ValueError(
+                "rollout_sample_support_logprobs entries must use a canonical sample-support logprobs dtype "
+                f"({supported}), got {rows.dtype} at sample {sample_index}"
+            )
+
+    first_shape = rollout_sample_support_logprobs[0].shape
+    if len(first_shape) != 2 or first_shape[1] < 1:
+        raise ValueError(
+            "rollout_sample_support_logprobs must be [response_tokens, top_k] arrays, "
+            f"got shape {first_shape} at sample 0"
+        )
+    top_k = first_shape[1]
+
+    for sample_index, rows in enumerate(rollout_sample_support_logprobs):
+        if rows.ndim != 2 or rows.shape[1] != top_k:
+            raise ValueError(
+                f"rollout_sample_support_logprobs entries must share top_k {top_k}, "
+                f"got shape {rows.shape} at sample {sample_index}"
+            )
+        expected = int(response_lens[sample_index])
+        if rows.shape[0] != expected:
+            raise ValueError(
+                f"Trajectory {sample_index} has {rows.shape[0]} support logprob rows for {expected} response tokens"
+            )
+
+    cu_seqlens = cu_seqlens_from_lengths(response_lens)
+    packed = torch.empty((int(response_lens.sum()), top_k), dtype=SAMPLE_SUPPORT_LOGPROBS_TORCH_DTYPE)
+    for sample_index in range(num_samples):
+        _fill_sample_support_segment(packed, cu_seqlens, rollout_sample_support_logprobs, sample_index)
+    return PackedTensor(packed, cu_seqlens)
+
+
 def convert_prompts_responses_to_batch_tensors(
     pad_token_id: int,
     prompts: List[List[int]],
@@ -253,6 +306,7 @@ def convert_prompts_responses_to_batch_tensors(
     rollout_expert_indices: Optional[List[RoutedExpertIndices]] = None,
     rollout_sample_support: Optional[List[SampleSupport]] = None,
     max_seq_len: Optional[int] = None,
+    rollout_sample_support_logprobs: Optional[List[SampleSupportLogprobs]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -260,6 +314,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional[PackedTensor],
     Optional[PackedTensor],
     Optional[PackedTensor],
 ]:
@@ -324,6 +379,8 @@ def convert_prompts_responses_to_batch_tensors(
         rollout_sample_support: ``PackedTensor`` whose values are
             ``(sum(response_i), top_k)`` in canonical batch order, with ``cu_seqlens`` naming
             each trajectory's segment, or ``None``.
+        rollout_sample_support_logprobs: ``PackedTensor`` of float32 sampler logprobs with the same
+            layout as ``rollout_sample_support`` (``-inf`` on padding members), or ``None``.
     """
     _verify_inputs(prompts, responses, rewards, loss_masks)
 
@@ -410,6 +467,22 @@ def convert_prompts_responses_to_batch_tensors(
 
         sample_support_tensor = build_sample_support(rollout_sample_support, response_lens)
 
+    sample_support_logprobs_tensor = None
+    if rollout_sample_support_logprobs is not None:
+        if rollout_sample_support is None:
+            raise ValueError("rollout_sample_support_logprobs requires rollout_sample_support")
+        if not isinstance(rollout_sample_support_logprobs, list):
+            raise TypeError("rollout_sample_support_logprobs must be a list of NumPy arrays")
+        if len(rollout_sample_support_logprobs) != num_samples:
+            raise ValueError("rollout_sample_support_logprobs must contain logprobs for every trajectory")
+
+        sample_support_logprobs_tensor = build_sample_support_logprobs(rollout_sample_support_logprobs, response_lens)
+        if sample_support_logprobs_tensor.values.shape != sample_support_tensor.values.shape:
+            raise ValueError(
+                f"rollout_sample_support_logprobs shape {tuple(sample_support_logprobs_tensor.values.shape)} does not "
+                f"match rollout_sample_support shape {tuple(sample_support_tensor.values.shape)}"
+            )
+
     return (
         sequences,
         attention_mask,
@@ -419,6 +492,7 @@ def convert_prompts_responses_to_batch_tensors(
         logprobs_tensor,
         rollout_expert_indices_tensor,
         sample_support_tensor,
+        sample_support_logprobs_tensor,
     )
 
 

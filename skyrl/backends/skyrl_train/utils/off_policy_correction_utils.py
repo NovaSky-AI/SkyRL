@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 from omegaconf import DictConfig
@@ -383,3 +383,79 @@ def apply_off_policy_correction(
             loss = loss * tis_ratio
         metrics.update(off_policy_metrics)
     return loss, loss_mask, metrics
+
+
+def compute_score_centering_loss(
+    advantages: torch.Tensor,
+    topk_log_probs: torch.Tensor,
+    rollout_topk_logprobs: torch.Tensor,
+    loss_mask: Optional[torch.Tensor],
+    weight_fn: Callable[[torch.Tensor], torch.Tensor],
+    tail_eps: float = 1e-6,
+) -> Tuple[torch.Tensor, dict]:
+    """Per-token score-centering correction to add to an importance-weighted policy-gradient loss.
+
+    Implements Eq. 12 of "Score Centering Stabilizes Off-policy Reinforcement Learning"
+    (https://arxiv.org/abs/2609.20807). A policy-gradient step under training/inference mismatch
+    contains a drift term ``E_q[R] * E_q[grad log p]`` that distills the trainer toward the sampler
+    at every prefix. Subtracting the sampler-expected (weighted) score removes it exactly. The
+    sampler's next-token distribution is only known on its top-k head ``H``; the tail is modeled by
+    the trainer's distribution rescaled to the sampler's tail mass, which reduces the centering
+    term to a sum over the head::
+
+        L_center = A * sum_{v in H} sg[q_v * w_v - alpha * p_v] * log p_v
+        alpha    = rho * f(1 / rho),   rho = (1 - sum_H q_v) / (1 - sum_H p_v)
+
+    where ``w_v = f(p_v / q_v)`` is the same weight function the surrounding loss applies to the
+    sampled token, so composing with masked/truncated importance sampling stays exact.
+
+    Args:
+        advantages: ``(batch, num_actions)`` advantages.
+        topk_log_probs: ``(batch, num_actions, k)`` trainer logprobs of the sampler's head tokens
+            (differentiable).
+        rollout_topk_logprobs: ``(batch, num_actions, k)`` sampler logprobs of the same tokens;
+            ``-inf`` marks an absent entry.
+        loss_mask: ``(batch, num_actions)`` mask used only for metrics.
+        weight_fn: Elementwise importance weight ``f(r)`` of the surrounding loss (``f(r) = 1`` for
+            vanilla policy gradient).
+        tail_eps: Floor for the sampler and trainer tail masses.
+
+    Returns:
+        Tuple of (centering_loss, metrics): ``centering_loss`` has shape ``(batch, num_actions)``
+        and is added to the per-token loss before reduction.
+    """
+    with torch.no_grad():
+        sampler_logprobs = rollout_topk_logprobs.float()
+        head_valid = torch.isfinite(sampler_logprobs)
+        sampler_logprobs = torch.where(head_valid, sampler_logprobs, torch.zeros_like(sampler_logprobs))
+        # Padding members carry -inf on both sides; zero them so 0 * -inf cannot turn the sum into NaN.
+        trainer_logprobs = torch.where(head_valid, topk_log_probs.detach().float(), torch.zeros_like(sampler_logprobs))
+        zeros = torch.zeros_like(sampler_logprobs)
+        q_head = torch.where(head_valid, sampler_logprobs.exp(), zeros)
+        p_head = torch.where(head_valid, trainer_logprobs.exp(), zeros)
+        sampler_head_mass = q_head.sum(dim=-1)
+        trainer_head_mass = p_head.sum(dim=-1)
+        sampler_tail_mass = (1.0 - sampler_head_mass).clamp(min=tail_eps)
+        trainer_tail_mass = (1.0 - trainer_head_mass).clamp(min=tail_eps)
+        tail_mass_ratio = sampler_tail_mass / trainer_tail_mass
+        head_ratio = safe_exp_delta(trainer_logprobs - sampler_logprobs, clip=20.0, out_dtype=torch.float32)
+        head_weights = torch.where(head_valid, weight_fn(head_ratio), zeros)
+        # On the modeled tail p_v / q_hat_v = 1 / rho is constant, so its weight is a scalar.
+        tail_scale = tail_mass_ratio * weight_fn(1.0 / tail_mass_ratio)
+        residual = q_head * head_weights - tail_scale.unsqueeze(-1) * p_head
+
+    head_log_probs = torch.where(head_valid, topk_log_probs.float(), torch.zeros_like(topk_log_probs, dtype=torch.float32))
+    centering_term = (residual * head_log_probs).sum(dim=-1)
+    centering_loss = advantages * centering_term
+
+    metrics = {
+        "score_centering_sampler_head_mass": masked_mean(sampler_head_mass, loss_mask).detach().item(),
+        "score_centering_trainer_head_mass": masked_mean(trainer_head_mass, loss_mask).detach().item(),
+        "score_centering_tail_mass_ratio": masked_mean(tail_mass_ratio, loss_mask).detach().item(),
+        "score_centering_residual_abs_sum": masked_mean(residual.abs().sum(dim=-1), loss_mask).detach().item(),
+        # `centering_loss` carries the advantage scaling (e.g. 1/num_tokens under token-mean
+        # reduction); `score_centering_term_abs_mean` is the raw per-token correction magnitude.
+        "score_centering_term_abs_mean": masked_mean(centering_term.detach().abs(), loss_mask).detach().item(),
+        "score_centering_loss_abs_mean": masked_mean(centering_loss.detach().abs(), loss_mask).detach().item(),
+    }
+    return centering_loss, metrics

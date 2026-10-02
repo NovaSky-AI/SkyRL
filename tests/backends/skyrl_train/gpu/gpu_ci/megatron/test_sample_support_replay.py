@@ -93,7 +93,7 @@ def _training_inputs() -> tuple[TrainingInputBatch, TrainingInputBatch]:
 
     rewards = [[0.0] * len(response) for response in responses]
     loss_masks = [[1] * len(response) for response in responses]
-    sequences, attention_mask, response_mask, _, loss_mask, _, _, _ = convert_prompts_responses_to_batch_tensors(
+    sequences, attention_mask, response_mask, _, loss_mask, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
         pad_token_id=tokenizer.pad_token_id,
         prompts=prompt_ids,
         responses=responses,

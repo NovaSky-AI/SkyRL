@@ -12,7 +12,10 @@ from skyrl.backends.skyrl_train.training_batch import (
     make_packed_field_padding,
     packed_dummy_row_segments,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_LOGPROBS_FIELD,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
@@ -181,6 +184,7 @@ class BaseBatchIterator:
             rollout_expert_indices=batch.get("rollout_expert_indices"),
             router_padding_mask=batch.get("router_padding_mask"),
             rollout_sample_support=batch.get(SAMPLE_SUPPORT_FIELD),
+            rollout_sample_support_logprobs=batch.get(SAMPLE_SUPPORT_LOGPROBS_FIELD),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},

@@ -7,7 +7,11 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_DTYPE
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_DTYPE,
+    SAMPLE_SUPPORT_LOGPROBS_DTYPE,
+    SAMPLE_SUPPORT_LOGPROBS_PADDING,
+)
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import (
     compute_turn_token_counts,
@@ -33,6 +37,7 @@ def test_generator_output_concatenation():
         "rollout_logprobs",
         "rollout_expert_indices",
         "rollout_sample_support",
+        "rollout_sample_support_logprobs",
         # optional but present in the signature
         "trajectory_ids",
         "trajectory_generation_times",
@@ -58,6 +63,7 @@ def test_generator_output_concatenation():
         # Routes cover every trained token.
         "rollout_expert_indices": [np.zeros((3, 1, 2), dtype=np.uint8), np.ones((3, 1, 2), dtype=np.uint8)],
         "rollout_sample_support": [[[1, 2], [1, 2]], [[3, 4], [3, 4]]],
+        "rollout_sample_support_logprobs": [[[-0.1, -0.2], [-0.1, -0.2]], [[-0.3, -0.4], [-0.3, -0.4]]],
     }
 
     generator_output_2: GeneratorOutput = {
@@ -69,6 +75,7 @@ def test_generator_output_concatenation():
         "rollout_logprobs": [[0.5, 0.6, 0.7], [0.8]],
         "rollout_expert_indices": [np.full((5, 1, 2), 2, dtype=np.uint8), np.full((1, 1, 2), 3, dtype=np.uint8)],
         "rollout_sample_support": [[[5, 6], [5, 6], [5, 6]], [[7, 8]]],
+        "rollout_sample_support_logprobs": [[[-0.5, -0.6], [-0.5, -0.6], [-0.5, -0.6]], [[-0.7, -0.8]]],
     }
 
     generator_outputs = [generator_output_1, generator_output_2]
@@ -81,6 +88,12 @@ def test_generator_output_concatenation():
     assert concatenated_output["stop_reasons"] == ["stop", "stop", "stop", "stop"]
     assert concatenated_output["rollout_logprobs"] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6, 0.7], [0.8]]
     assert [rows[0] for rows in concatenated_output["rollout_sample_support"]] == [[1, 2], [3, 4], [5, 6], [7, 8]]
+    assert [rows[0] for rows in concatenated_output["rollout_sample_support_logprobs"]] == [
+        [-0.1, -0.2],
+        [-0.3, -0.4],
+        [-0.5, -0.6],
+        [-0.7, -0.8],
+    ]
     assert [int(routes.flat[0]) for routes in concatenated_output["rollout_expert_indices"]] == [0, 1, 2, 3]
     reversed_output = concatenate_generator_outputs([generator_output_2, generator_output_1])
     assert [rows[0] for rows in reversed_output["rollout_sample_support"]] == [[5, 6], [7, 8], [1, 2], [3, 4]]
@@ -108,7 +121,9 @@ def test_generator_output_concatenation():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
 
 
-@pytest.mark.parametrize("side_channel", ["rollout_expert_indices", "rollout_sample_support"])
+@pytest.mark.parametrize(
+    "side_channel", ["rollout_expert_indices", "rollout_sample_support", "rollout_sample_support_logprobs"]
+)
 def test_side_channel_concatenation_rejects_a_mix(side_channel):
     def make_output(value) -> GeneratorOutput:
         return {
@@ -121,7 +136,13 @@ def test_side_channel_concatenation_rejects_a_mix(side_channel):
             side_channel: value,
         }
 
-    populated = make_output([[[1, 2]]] if side_channel == "rollout_sample_support" else [np.zeros((1, 1, 2), np.uint8)])
+    populated = make_output(
+        {
+            "rollout_sample_support": [[[1, 2]]],
+            "rollout_sample_support_logprobs": [[[-0.1, -0.2]]],
+            "rollout_expert_indices": [np.zeros((1, 1, 2), np.uint8)],
+        }[side_channel]
+    )
     missing = make_output(None)
     for outputs in ([populated, missing], [missing, populated]):
         with pytest.raises(ValueError, match=f"all have null {side_channel}"):
@@ -610,6 +631,39 @@ class TestMergeStepwiseOutput:
         np.testing.assert_array_equal(support, np.array(expected, dtype=SAMPLE_SUPPORT_DTYPE))
         assert support.shape == (len(merged["response_ids"][0]), 3)
         assert support.dtype == SAMPLE_SUPPORT_DTYPE
+        assert merged["rollout_sample_support_logprobs"] is None
+
+    def test_sample_support_logprobs_follow_the_support_rows_through_merging(self):
+        tid = _make_tid("support-logprobs")
+        neg_inf = SAMPLE_SUPPORT_LOGPROBS_PADDING
+        gen_out: GeneratorOutput = {
+            "prompt_token_ids": [[10], [10, 20, 30]],
+            "response_ids": [[20], [40, 41]],
+            "rewards": [[1.0], [0.0, 5.0]],
+            "loss_masks": [[1], [1, 1]],
+            "stop_reasons": ["continue", "eos"],
+            "rollout_metrics": None,
+            "rollout_logprobs": None,
+            "rollout_sample_support": [
+                np.array([[20, 21, -1]], dtype=SAMPLE_SUPPORT_DTYPE),
+                np.array([[40, 44, -1], [41, 45, 46]], dtype=SAMPLE_SUPPORT_DTYPE),
+            ],
+            "rollout_sample_support_logprobs": [
+                np.array([[-0.1, -2.0, neg_inf]], dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE),
+                np.array([[-0.2, -1.5, neg_inf], [-0.3, -1.0, -3.0]], dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE),
+            ],
+            "trajectory_ids": [tid, tid],
+            "rollout_expert_indices": None,
+            "is_last_step": [False, True],
+        }
+
+        merged = merge_stepwise_output(gen_out)
+
+        logprobs = merged["rollout_sample_support_logprobs"][0]
+        expected = [[-0.1, -2.0, neg_inf], [neg_inf, neg_inf, neg_inf], [-0.2, -1.5, neg_inf], [-0.3, -1.0, -3.0]]
+        np.testing.assert_array_equal(logprobs, np.array(expected, dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE))
+        assert logprobs.shape == merged["rollout_sample_support"][0].shape
+        assert logprobs.dtype == SAMPLE_SUPPORT_LOGPROBS_DTYPE
 
     def test_native_output_carrying_dict_valued_time_splits(self):
         tid = _make_tid("timed")

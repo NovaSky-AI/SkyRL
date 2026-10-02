@@ -29,6 +29,7 @@ from loguru import logger
 
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
     apply_off_policy_correction,
+    compute_score_centering_loss,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
 from skyrl.train.config import AlgorithmConfig
@@ -455,11 +456,12 @@ class PolicyLossType(StrEnum):
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
     DPPO = "dppo"
+    REINFORCE = "reinforce"
 
 
 # Losses that optimize against rollout logprobs, so the "old" logprobs forward pass can be
 # skipped when nothing else needs them (see `RayPPOTrainer._skip_policy_forward`).
-LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO})
+LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO, PolicyLossType.REINFORCE})
 
 LOSSES_WITH_OLD_LOGPROBS = frozenset(
     {
@@ -508,6 +510,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
             "dppo": [PolicyLossType.DPPO, dppo_policy_loss],
             "rollout_is": [PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss],
+            "reinforce": [PolicyLossType.REINFORCE, reinforce_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -829,6 +832,8 @@ def rollout_is_policy_loss(
     config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    rollout_topk_logprobs: Optional[torch.Tensor] = None,
+    topk_log_probs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     """Calibrated importance-weighted policy gradient using rollout log-probs.
 
@@ -842,18 +847,95 @@ def rollout_is_policy_loss(
     old_log_probs are not available.
     It further uses hard zero instead of clamping, but that does not change
     the gradient only the loss value.
+
+    With ``config.score_centering.enabled`` the sampler-expected weighted score is subtracted
+    at every position (https://arxiv.org/abs/2609.20807), using the same calibration function
+    ``f`` as the weight. ``rollout_topk_logprobs`` and ``topk_log_probs`` are the sampler's and
+    the trainer's logprobs of the sampler's top-k head, shape ``(batch, num_actions, k)``.
     """
     assert rollout_logprobs is not None, "rollout_logprobs are required for rollout_is"
 
     ratio = safe_exp_delta(log_probs - rollout_logprobs, clip=20.0, out_dtype=log_probs.dtype)
 
-    in_range = (ratio > 1 - config.eps_clip_low) & (ratio < 1 + config.eps_clip_high)
-    calibrated_ratio = torch.where(in_range, ratio, torch.zeros_like(ratio))
+    eps_clip_low, eps_clip_high = config.eps_clip_low, config.eps_clip_high
+
+    def calibrate(r: torch.Tensor) -> torch.Tensor:
+        return torch.where((r > 1 - eps_clip_low) & (r < 1 + eps_clip_high), r, torch.zeros_like(r))
+
+    in_range = (ratio > 1 - eps_clip_low) & (ratio < 1 + eps_clip_high)
+    calibrated_ratio = calibrate(ratio)
 
     loss = -(calibrated_ratio.detach() * advantages * log_probs)
     clip_ratio = masked_mean((~in_range).float(), loss_mask).mean().detach().item()
 
     loss_metrics: dict[str, float] = {"clip_ratio": clip_ratio}
+
+    score_centering = getattr(config, "score_centering", None)
+    if score_centering is not None and score_centering.enabled:
+        assert rollout_topk_logprobs is not None and topk_log_probs is not None, (
+            "score centering requires the sampler top-k logprobs (`rollout_topk_logprobs`) and the trainer "
+            "logprobs of those tokens (`topk_log_probs`)"
+        )
+        centering_loss, centering_metrics = compute_score_centering_loss(
+            advantages,
+            topk_log_probs,
+            rollout_topk_logprobs,
+            loss_mask,
+            weight_fn=calibrate,
+            tail_eps=score_centering.tail_eps,
+        )
+        loss = loss + centering_loss
+        loss_metrics.update(centering_metrics)
+    loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(loss, loss_mask)
+    return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.REINFORCE)
+def reinforce_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+    rollout_topk_logprobs: Optional[torch.Tensor] = None,
+    topk_log_probs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """Plain policy gradient on the sampled rollouts, with no importance ratio.
+
+    L(θ) = -E_t[ Â_t · log π_θ(a_t|s_t) ]
+
+    This is the REINFORCE objective the score-centering paper (https://arxiv.org/abs/2609.20807)
+    builds on. On its own it carries the full drift term under training/inference mismatch;
+    with ``config.score_centering.enabled`` the sampler-expected score is subtracted (weight
+    function ``f = 1``), which is the paper's "SC" arm. Sequence/token masks from
+    ``off_policy_correction`` still apply through ``loss_mask``.
+    """
+    loss = -(advantages * log_probs)
+    loss_metrics: dict[str, float] = {}
+
+    score_centering = getattr(config, "score_centering", None)
+    if score_centering is not None and score_centering.enabled:
+        assert rollout_topk_logprobs is not None and topk_log_probs is not None, (
+            "score centering requires the sampler top-k logprobs (`rollout_topk_logprobs`) and the trainer "
+            "logprobs of those tokens (`topk_log_probs`)"
+        )
+        centering_loss, centering_metrics = compute_score_centering_loss(
+            advantages,
+            topk_log_probs,
+            rollout_topk_logprobs,
+            loss_mask,
+            weight_fn=torch.ones_like,
+            tail_eps=score_centering.tail_eps,
+        )
+        loss = loss + centering_loss
+        loss_metrics.update(centering_metrics)
+
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )

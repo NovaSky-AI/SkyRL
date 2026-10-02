@@ -27,8 +27,11 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPES,
+    SAMPLE_SUPPORT_LOGPROBS_DTYPES,
     SampleSupport,
+    SampleSupportLogprobs,
     validate_sample_support,
+    validate_sample_support_logprobs,
 )
 
 # Matches the floor vLLM applies at its own serving boundaries.
@@ -48,6 +51,7 @@ class PackedField(StrEnum):
 
     ROUTED_EXPERTS = "routed_experts"
     ROLLOUT_SAMPLE_SUPPORT = "rollout_sample_support"
+    ROLLOUT_SAMPLE_SUPPORT_LOGPROBS = "rollout_sample_support_logprobs"
 
 
 PACKED_SIDE_CHANNEL_FIELDS: tuple[str, ...] = tuple(PackedField)
@@ -198,6 +202,16 @@ def pack_sample_support(sample_support: SampleSupport) -> dict[str, Any]:
 def decode_packed_sample_support(payload: dict[str, Any]) -> SampleSupport:
     decoded, _ = unpack_ndarray(payload, allowed_dtypes=SAMPLE_SUPPORT_DTYPES, ndim=_SAMPLE_SUPPORT_NDIM)
     return validate_sample_support(decoded)
+
+
+def pack_sample_support_logprobs(logprobs: SampleSupportLogprobs) -> dict[str, Any]:
+    """Encode the sampler logprobs of the support members; base64 keeps the ``-inf`` padding intact."""
+    return pack_ndarray(validate_sample_support_logprobs(logprobs), allowed_dtypes=SAMPLE_SUPPORT_LOGPROBS_DTYPES)
+
+
+def decode_packed_sample_support_logprobs(payload: dict[str, Any]) -> SampleSupportLogprobs:
+    decoded, _ = unpack_ndarray(payload, allowed_dtypes=SAMPLE_SUPPORT_LOGPROBS_DTYPES, ndim=_SAMPLE_SUPPORT_NDIM)
+    return validate_sample_support_logprobs(decoded)
 
 
 def _data_prefix(field: str) -> bytes:

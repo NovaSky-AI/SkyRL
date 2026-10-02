@@ -2,7 +2,10 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, Tuple, TypedDict
 
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
-from skyrl.backends.skyrl_train.utils.sample_support import SampleSupport
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SampleSupport,
+    SampleSupportLogprobs,
+)
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
@@ -35,6 +38,9 @@ class InferenceEngineInput(TypedDict):
     routed_experts_prompt_starts: Optional[List[int]]
     # Per-batch opt-in; the engine must enable sample-support capture at startup.
     return_sample_support: Optional[bool]
+    # Per-batch opt-in for the sampler logprobs of the support members; requires
+    # ``return_sample_support``.
+    return_sample_support_logprobs: Optional[bool]
 
 
 class InferenceEngineOutput(TypedDict):
@@ -53,6 +59,9 @@ class InferenceEngineOutput(TypedDict):
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
     # One ``[generated_tokens, top_k]`` int32 support array per prompt.
     rollout_sample_support: Optional[List[SampleSupport]]
+    # One ``[generated_tokens, top_k]`` float32 array of sampler logprobs per prompt, row-aligned with
+    # ``rollout_sample_support`` (``-inf`` on padding entries).
+    rollout_sample_support_logprobs: Optional[List[SampleSupportLogprobs]]
 
 
 class InferenceEngineInterface(ABC):

@@ -1146,6 +1146,7 @@ def _make_side_channel_output(
     rollout_expert_indices=None,
     rollout_sample_support=None,
     loss_masks=None,
+    rollout_sample_support_logprobs=None,
 ):
     """A two-trajectory GeneratorOutput with 5- and 4-token sequences."""
     return GeneratorOutput(
@@ -1158,6 +1159,7 @@ def _make_side_channel_output(
         rollout_logprobs=None,
         rollout_expert_indices=rollout_expert_indices,
         rollout_sample_support=rollout_sample_support,
+        rollout_sample_support_logprobs=rollout_sample_support_logprobs,
     )
 
 
@@ -1257,6 +1259,46 @@ def test_validate_generator_output_rejects_none_sample_support_entry():
     output = _make_side_channel_output(rollout_sample_support=[None, _support(2)])
 
     with pytest.raises(AssertionError, match=r"rollout_sample_support\[0\] is None"):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def _support_logprobs(num_rows):
+    return np.full((num_rows, 3), -0.5, dtype=np.float32)
+
+
+def test_validate_generator_output_accepts_row_aligned_sample_support_logprobs():
+    output = _make_side_channel_output(
+        rollout_sample_support=[_support(2), _support(2)],
+        rollout_sample_support_logprobs=[_support_logprobs(2), _support_logprobs(2)],
+    )
+
+    validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_rejects_sample_support_logprobs_without_support():
+    output = _make_side_channel_output(rollout_sample_support_logprobs=[_support_logprobs(2), _support_logprobs(2)])
+
+    with pytest.raises(AssertionError, match="rollout_sample_support_logprobs requires rollout_sample_support"):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_rejects_misaligned_sample_support_logprobs():
+    output = _make_side_channel_output(
+        rollout_sample_support=[_support(2), _support(2)],
+        rollout_sample_support_logprobs=[_support_logprobs(2), _support_logprobs(1)],
+    )
+
+    with pytest.raises(AssertionError, match=r"rollout_sample_support_logprobs\[1\] has shape \(1, 3\)"):
+        validate_generator_output(num_prompts=2, generator_output=output)
+
+
+def test_validate_generator_output_rejects_none_sample_support_logprobs_entry():
+    output = _make_side_channel_output(
+        rollout_sample_support=[_support(2), _support(2)],
+        rollout_sample_support_logprobs=[None, _support_logprobs(2)],
+    )
+
+    with pytest.raises(AssertionError, match=r"rollout_sample_support_logprobs\[0\] is None"):
         validate_generator_output(num_prompts=2, generator_output=output)
 
 

@@ -178,6 +178,87 @@ def logprobs_from_logits_v2(
     return logprobs_labels
 
 
+class _LogprobsAndTopKLogprobsFromLogits(torch.autograd.Function):
+    """Label logprobs and top-k logprobs from one pass over the logits, chunked along tokens.
+
+    Forward computes ``log_softmax(logits)`` gathered at ``labels`` and at ``topk_ids`` without
+    materializing a full-vocabulary log-softmax. Backward recomputes the softmax per chunk and,
+    with ``inplace_backward``, writes the logits gradient into the logits buffer itself (as the
+    flash-attn cross entropy used by ``logprobs_from_logits`` does), so score centering adds no
+    second vocabulary-sized gradient tensor.
+    """
+
+    @staticmethod
+    def forward(ctx, logits, labels, topk_ids, chunk_size, inplace_backward):
+        num_tokens = logits.shape[0]
+        label_logprobs = torch.empty(num_tokens, dtype=torch.float32, device=logits.device)
+        topk_logprobs = torch.empty((num_tokens, topk_ids.shape[1]), dtype=torch.float32, device=logits.device)
+        for start in range(0, num_tokens, chunk_size):
+            end = min(start + chunk_size, num_tokens)
+            chunk = logits[start:end].float()
+            lse = torch.logsumexp(chunk, dim=-1)
+            label_logprobs[start:end] = chunk.gather(-1, labels[start:end, None]).squeeze(-1) - lse
+            topk_logprobs[start:end] = chunk.gather(-1, topk_ids[start:end]) - lse[:, None]
+        ctx.save_for_backward(logits, labels, topk_ids)
+        ctx.chunk_size = chunk_size
+        ctx.inplace_backward = inplace_backward
+        return label_logprobs, topk_logprobs
+
+    @staticmethod
+    def backward(ctx, grad_label_logprobs, grad_topk_logprobs):
+        logits, labels, topk_ids = ctx.saved_tensors
+        num_tokens = logits.shape[0]
+        if grad_label_logprobs is None:
+            grad_label_logprobs = torch.zeros(num_tokens, dtype=torch.float32, device=logits.device)
+        if grad_topk_logprobs is None:
+            grad_topk_logprobs = torch.zeros(topk_ids.shape, dtype=torch.float32, device=logits.device)
+        grad_logits = logits if ctx.inplace_backward else torch.empty_like(logits)
+        for start in range(0, num_tokens, ctx.chunk_size):
+            end = min(start + ctx.chunk_size, num_tokens)
+            grad_label = grad_label_logprobs[start:end].float()
+            grad_topk = grad_topk_logprobs[start:end].float()
+            # d log p_v / d logit_u = delta_{uv} - p_u
+            coef = grad_label + grad_topk.sum(dim=-1)
+            grad_chunk = torch.softmax(logits[start:end].float(), dim=-1) * (-coef[:, None])
+            grad_chunk.scatter_add_(-1, labels[start:end, None], grad_label[:, None])
+            grad_chunk.scatter_add_(-1, topk_ids[start:end], grad_topk)
+            grad_logits[start:end].copy_(grad_chunk)
+        return grad_logits, None, None, None, None
+
+
+def logprobs_and_topk_logprobs_from_logits(
+    logits: Float[torch.Tensor, "... vocab_size"],
+    labels: Integer[torch.Tensor, "..."],
+    topk_ids: Integer[torch.Tensor, "... k"],
+    chunk_size: int = 1024,
+    inplace_backward: bool = True,
+) -> tuple[Float[torch.Tensor, "..."], Float[torch.Tensor, "... k"]]:
+    """Per-token label logprobs plus logprobs of ``k`` extra token ids per position.
+
+    Used by score centering, which needs the trainer's logprob of every token in the sampler's
+    top-k head in addition to the sampled token. Both outputs are float32 and differentiable
+    with respect to ``logits``.
+
+    Args:
+        logits: ``(..., vocab_size)`` model outputs.
+        labels: ``(...)`` sampled token ids.
+        topk_ids: ``(..., k)`` token ids whose logprobs are also returned.
+        chunk_size: Number of token positions processed per chunk to bound peak memory.
+        inplace_backward: Write the logits gradient into the logits buffer.
+    """
+    batch_dims = logits.shape[:-1]
+    vocab_size = logits.shape[-1]
+    k = topk_ids.shape[-1]
+    label_logprobs, topk_logprobs = _LogprobsAndTopKLogprobsFromLogits.apply(
+        logits.reshape(-1, vocab_size),
+        labels.reshape(-1).long(),
+        topk_ids.reshape(-1, k).long(),
+        chunk_size,
+        inplace_backward,
+    )
+    return label_logprobs.view(*batch_dims), topk_logprobs.view(*batch_dims, k)
+
+
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor | None, dim: int | None = None) -> torch.Tensor:
     """Compute the mean of tensor elements, optionally masked and reduced along a dimension."""
     if mask is None:

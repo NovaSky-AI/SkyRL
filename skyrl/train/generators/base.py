@@ -6,7 +6,10 @@ import torch
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
-from skyrl.backends.skyrl_train.utils.sample_support import SampleSupport
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SampleSupport,
+    SampleSupportLogprobs,
+)
 
 TrainingPhase = Literal["train", "eval"]
 TRAINING_PHASE_TRAIN: TrainingPhase = "train"
@@ -58,6 +61,9 @@ class GeneratorOutput(TypedDict):
     rollout_expert_indices: Optional[List[RoutedExpertIndices]]
     # Per trajectory, sampler support for each response token; uncaptured rows are padding.
     rollout_sample_support: Optional[List[SampleSupport]]
+    # Per trajectory, sampler logprobs of the support members, row-aligned with
+    # ``rollout_sample_support`` (``-inf`` on padding entries).
+    rollout_sample_support_logprobs: Optional[List[SampleSupportLogprobs]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
     # Per-row env metrics (one dict per row in the flattened batch). Used by

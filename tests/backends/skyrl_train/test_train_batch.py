@@ -29,6 +29,9 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
 from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_LOGPROBS_FIELD,
+    SAMPLE_SUPPORT_LOGPROBS_PADDING,
+    SAMPLE_SUPPORT_LOGPROBS_TORCH_DTYPE,
     SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
 )
@@ -588,6 +591,7 @@ EXPECTED_TRAINING_INPUT_FIELDS = {
     "rollout_expert_indices",
     "router_padding_mask",
     SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_LOGPROBS_FIELD,
     "pixel_values",
     "image_grid_thw",
 }
@@ -621,6 +625,10 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
         # Support packs to response tokens; this fixture's response spans the whole row.
         SAMPLE_SUPPORT_FIELD: PackedTensor(
             torch.randint(0, 1000, (batch_size * seq_len, 4), dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
+            cu_seqlens_from_lengths([seq_len] * batch_size),
+        ),
+        SAMPLE_SUPPORT_LOGPROBS_FIELD: PackedTensor(
+            -torch.rand((batch_size * seq_len, 4), dtype=SAMPLE_SUPPORT_LOGPROBS_TORCH_DTYPE),
             cu_seqlens_from_lengths([seq_len] * batch_size),
         ),
         "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3
@@ -697,11 +705,17 @@ def test_pad_batch_all_fields():
     assert padded_support.sequence_lengths.tolist() == [seq_len] * pad_size
     assert torch.all(padded_support.values == SAMPLE_SUPPORT_PADDING)
 
+    padded_support_logprobs = padded[SAMPLE_SUPPORT_LOGPROBS_FIELD][batch_size:]
+    assert padded[SAMPLE_SUPPORT_LOGPROBS_FIELD][:batch_size] == batch[SAMPLE_SUPPORT_LOGPROBS_FIELD]
+    assert padded_support_logprobs.sequence_lengths.tolist() == [seq_len] * pad_size
+    assert torch.all(padded_support_logprobs.values == SAMPLE_SUPPORT_LOGPROBS_PADDING)
+
     regular_tensor_keys = EXPECTED_TRAINING_INPUT_FIELDS - {
         "loss_mask",
         "rollout_expert_indices",
         "router_padding_mask",
         SAMPLE_SUPPORT_FIELD,
+        SAMPLE_SUPPORT_LOGPROBS_FIELD,
         "pixel_values",
         "image_grid_thw",
     }
@@ -826,6 +840,10 @@ _ZERO_COPY_PAYLOADS: dict[str, Callable[[], BatchField]] = {
         torch.randint(0, 32_000, (sum(_ZERO_COPY_SEGMENT_LENGTHS), 20), dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
         cu_seqlens_from_lengths(_ZERO_COPY_SEGMENT_LENGTHS),
     ),
+    SAMPLE_SUPPORT_LOGPROBS_FIELD: lambda: PackedTensor(
+        -torch.rand((sum(_ZERO_COPY_SEGMENT_LENGTHS), 20), dtype=SAMPLE_SUPPORT_LOGPROBS_TORCH_DTYPE),
+        cu_seqlens_from_lengths(_ZERO_COPY_SEGMENT_LENGTHS),
+    ),
 }
 
 
@@ -915,6 +933,9 @@ def test_zero_copy_falls_back_for_bfloat16():
 _PACKED_PADDING_EXPECTED_ROW: dict[str, Callable[[PackedTensor], torch.Tensor]] = {
     ROUTE_KEY: lambda field: torch.arange(field.row_shape[-1], dtype=field.dtype),
     SAMPLE_SUPPORT_FIELD: lambda field: torch.full(field.row_shape, SAMPLE_SUPPORT_PADDING, dtype=field.dtype),
+    SAMPLE_SUPPORT_LOGPROBS_FIELD: lambda field: torch.full(
+        field.row_shape, SAMPLE_SUPPORT_LOGPROBS_PADDING, dtype=field.dtype
+    ),
 }
 
 
@@ -952,7 +973,9 @@ def test_appending_packed_field_padding_keeps_the_real_segments(key, pad_count):
     assert torch.equal(appended.values, _PACKED_PADDING_EXPECTED_ROW[key](field).expand_as(appended.values))
 
 
-@pytest.mark.parametrize(("key", "rows_per_dummy_row"), [(ROUTE_KEY, 1), (SAMPLE_SUPPORT_FIELD, 0)])
+@pytest.mark.parametrize(
+    ("key", "rows_per_dummy_row"), [(ROUTE_KEY, 1), (SAMPLE_SUPPORT_FIELD, 0), (SAMPLE_SUPPORT_LOGPROBS_FIELD, 0)]
+)
 def test_dummy_row_segments_cover_the_single_attended_token(key, rows_per_dummy_row):
     field = _ZERO_COPY_PAYLOADS[key]()
 

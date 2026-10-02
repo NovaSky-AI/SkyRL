@@ -75,6 +75,8 @@ class Experience:
     router_padding_mask: Optional[Bool[torch.Tensor, "batch seq_len"]] = None
     # Sampler support packed to response tokens: values [sum(response_len_i), top_k] + cu_seqlens.
     rollout_sample_support: Optional[PackedTensor] = None
+    # Sampler logprobs of the support members, same packing as ``rollout_sample_support``.
+    rollout_sample_support_logprobs: Optional[PackedTensor] = None
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
     metadata: Optional[Dict[str, Any]] = None
     pixel_values: Optional[TensorList] = None
@@ -110,6 +112,8 @@ class Experience:
             self.router_padding_mask = to(self.router_padding_mask, device)
         if self.rollout_sample_support is not None:
             self.rollout_sample_support = to(self.rollout_sample_support, device)
+        if self.rollout_sample_support_logprobs is not None:
+            self.rollout_sample_support_logprobs = to(self.rollout_sample_support_logprobs, device)
         if self.pixel_values is not None:
             self.pixel_values = self.pixel_values.to(device)
         if self.image_grid_thw is not None:
@@ -143,6 +147,8 @@ class Experience:
             self.router_padding_mask = self.router_padding_mask.pin_memory()
         if self.rollout_sample_support is not None:
             self.rollout_sample_support = self.rollout_sample_support.pin_memory()
+        if self.rollout_sample_support_logprobs is not None:
+            self.rollout_sample_support_logprobs = self.rollout_sample_support_logprobs.pin_memory()
         return self
 
 
