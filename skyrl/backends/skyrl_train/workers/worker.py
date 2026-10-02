@@ -64,6 +64,7 @@ from skyrl.env_vars import (
 )
 from skyrl.train.config import TorchProfilerConfig, TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
+from skyrl.train.utils import deadline
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     configure_ray_worker_logging,
@@ -930,7 +931,7 @@ class PPORayActorGroup:
         ]
         if nonblocking:
             return refs
-        return ray.get(refs)
+        return deadline.ray_get(refs, "offload_to_cpu")
 
     def backload_to_gpu(self, nonblocking: bool = False, backload_optimizer: bool = True, backload_model: bool = True):
         """Backload worker state to GPU
@@ -947,7 +948,7 @@ class PPORayActorGroup:
         ]
         if nonblocking:
             return refs
-        return ray.get(refs)
+        return deadline.ray_get(refs, "backload_to_gpu")
 
     def async_run_ray_method(self, dispatch_type: str, method_name: str, *args: Any, **kwargs: Any) -> List[ObjectRef]:
         """Run a method on all actors using specified dispatch type asynchronously.

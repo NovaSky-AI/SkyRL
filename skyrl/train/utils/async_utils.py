@@ -4,6 +4,10 @@ import asyncio
 import contextlib
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
+from loguru import logger
+
+from skyrl.train.utils import deadline
+
 T = TypeVar("T")
 TASK_SHUTDOWN_GRACE_S = 10.0
 
@@ -72,17 +76,26 @@ async def cancel_background_tasks(
 
 @contextlib.asynccontextmanager
 async def cleanup_preserving_primary(cleanup: Callable[[], Awaitable[Any]], description: str):
-    """Always await ``cleanup()`` on exit, without letting a cleanup error replace the body's exception.
+    """Run cleanup on exit without letting its error replace the body's exception.
 
     If the body raised (including cancellation), a cleanup failure is attached to that primary exception as a
-    note and the primary propagates. On success, a cleanup failure propagates normally.
+    note and the primary propagates. Failure-path cleanup uses the active step deadline and is skipped if it has
+    expired. On success, a cleanup failure propagates normally.
     """
     try:
         yield
     except BaseException as primary:
+        remaining_s = deadline.remaining()
+        if remaining_s == 0:
+            logger.warning(f"Skipping {description} during cleanup: the step deadline has expired")
+            raise
         try:
-            await cleanup()
+            async with asyncio.timeout(remaining_s):
+                await cleanup()
         except BaseException as cleanup_exc:
-            primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
+            if deadline.remaining() == 0:
+                primary.add_note(f"{description} did not finish during cleanup before the step deadline expired")
+            else:
+                primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
         raise
     await cleanup()

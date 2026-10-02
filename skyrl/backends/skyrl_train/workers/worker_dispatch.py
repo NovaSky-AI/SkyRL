@@ -25,6 +25,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils import deadline
 from skyrl.train.utils.async_utils import cleanup_preserving_primary
 
 if TYPE_CHECKING:
@@ -108,7 +109,10 @@ class WorkerDispatch:
             return
         if require_model_resident:
             self._ensure_on_gpu(role, need_optimizer=False, need_model=True)
-        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
+        deadline.ray_get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id),
+            "swap_to_adapter",
+        )
 
     def register_adapter(self, role: str, model_id: str) -> None:
         """Register a new adapter slot on every worker (subsequent
@@ -116,12 +120,17 @@ class WorkerDispatch:
         """
         if role not in self._actor_groups:
             return
-        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "register_adapter", model_id))
+        deadline.ray_get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "register_adapter", model_id),
+            "register_adapter",
+        )
 
     def delete_adapter(self, role: str, model_id: str) -> None:
         if role not in self._actor_groups:
             return
-        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "delete_adapter", model_id))
+        deadline.ray_get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "delete_adapter", model_id), "delete_adapter"
+        )
 
     def get_lcm_dp_size(self) -> int:
         """Get LCM of all models' dp_size."""
@@ -277,7 +286,7 @@ class WorkerDispatch:
             kwargs["loss_fn_config"] = loss_fn_config
 
         refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data, **kwargs)
-        results = ray.get(refs)
+        results = deadline.ray_get(refs, "forward")
 
         return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
 
@@ -326,7 +335,7 @@ class WorkerDispatch:
             chunk_refs=chunk_refs,
             **kwargs,
         )
-        results = ray.get(refs)
+        results = deadline.ray_get(refs, "forward")
         return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
 
     def stage_data(
@@ -392,7 +401,7 @@ class WorkerDispatch:
             kwargs["loss_fn_config"] = loss_fn_config
 
         refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data, **kwargs)
-        statuses = ray.get(refs)
+        statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
 
@@ -439,7 +448,7 @@ class WorkerDispatch:
             chunk_refs=chunk_refs,
             **kwargs,
         )
-        statuses = ray.get(refs)
+        statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
         return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
@@ -456,7 +465,7 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
-        grad_norms = ray.get(refs)
+        grad_norms = deadline.ray_get(refs, "optim_step")
 
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
@@ -538,8 +547,11 @@ class WorkerDispatch:
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""
-        ray.get(
-            self._actor_groups[model].async_run_ray_method("pass_through", "save_memory_snapshot", tag=f"{model}_{tag}")
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method(
+                "pass_through", "save_memory_snapshot", tag=f"{model}_{tag}"
+            ),
+            "save_memory_snapshot",
         )
 
     def save_checkpoint(self, model: str, ckpt_dir: str, tokenizer=None, model_id: Optional[str] = None) -> None:
@@ -547,15 +559,19 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
-        ray.get(
+        deadline.ray_get(
             self._actor_groups[model].async_run_ray_method(
                 "pass_through", "save_checkpoint", ckpt_dir=ckpt_dir, tokenizer=tokenizer
-            )
+            ),
+            "save_checkpoint",
         )
 
     def finalize_pending_saves(self, model: str) -> None:
         """Block until any in-flight async checkpoint write for ``model`` completes."""
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "finalize_pending_saves"))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "finalize_pending_saves"),
+            "finalize_pending_saves",
+        )
 
     def load_checkpoint(
         self,
@@ -569,21 +585,25 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=load_optimizer_states, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
-        ray.get(
+        deadline.ray_get(
             self._actor_groups[model].async_run_ray_method(
                 "pass_through",
                 "load_checkpoint",
                 ckpt_dir=ckpt_dir,
                 load_optimizer_states=load_optimizer_states,
                 load_lr_scheduler_states=load_lr_scheduler_states,
-            )
+            ),
+            "load_checkpoint",
         )
 
     def save_hf_model(self, model: str, export_dir: str, tokenizer) -> None:
         """Save model in HuggingFace format."""
         self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
 
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "save_hf_model", export_dir, tokenizer))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "save_hf_model", export_dir, tokenizer),
+            "save_hf_model",
+        )
 
     def init_model(self, model: str, model_path: str, num_training_steps: Optional[int] = None) -> None:
         """Initialize model from path. Offloads others in colocation group first."""
@@ -616,18 +636,22 @@ class WorkerDispatch:
     def empty_cache(self, model: Optional[str] = None) -> None:
         """Empty GPU cache for model(s)."""
         if model is not None:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "empty_cache"))
+            deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "empty_cache"), "empty_cache"
+            )
         else:
             refs = []
             for group in self._actor_groups.values():
                 refs.extend(group.async_run_ray_method("pass_through", "empty_cache"))
-            ray.get(refs)
+            deadline.ray_get(refs, "empty_cache")
 
     def get_node_ids(self) -> List[str]:
         """Get unique node IDs from all actor groups."""
         all_node_ids = []
         for group in self._actor_groups.values():
-            node_ids = ray.get(group.async_run_ray_method("pass_through", "get_ray_node_id"))
+            node_ids = deadline.ray_get(
+                group.async_run_ray_method("pass_through", "get_ray_node_id"), "get_ray_node_id"
+            )
             all_node_ids.extend(node_ids)
         return list(set(all_node_ids))
 
@@ -637,13 +661,14 @@ class WorkerDispatch:
 
     def init_weight_sync_state(self, inference_engine_client) -> None:
         """Initialize weight sync state for policy model."""
-        ray.get(
+        deadline.ray_get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "init_weight_sync_state",
                 inference_engine_client,
                 self.cfg.generator.inference_engine,
-            )
+            ),
+            "init_weight_sync_state",
         )
 
     def _broadcast_to_inference_engines(self, inference_engine_client, model_id: Optional[str] = None) -> None:
@@ -658,14 +683,15 @@ class WorkerDispatch:
         # It carries the HF tokenizer (~10MB — 0.13s pickle driver-side, 0.34s
         # unpickle on EVERY worker), so shipping it per sync costs ~0.5s of the
         # sync wall even via ray.put (deref still deserializes per worker).
-        ray.get(
+        deadline.ray_get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "broadcast_to_inference_engines",
                 None,
                 self.cfg.generator.inference_engine,
                 model_id=model_id,
-            )
+            ),
+            "broadcast_to_inference_engines",
         )
 
     def get_timing_metrics(self) -> Dict[str, float]:
