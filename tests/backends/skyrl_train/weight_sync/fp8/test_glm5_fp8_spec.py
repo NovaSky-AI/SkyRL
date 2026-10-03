@@ -78,3 +78,29 @@ def test_glm5_mxfp8_wire_keeps_kv_b_proj_bf16():
     assert GLM5_FP8_SPEC.should_quantize(name, (28672, 512), BLOCKWISE_FP8)
     assert GLM5_FP8_SPEC.ignored_layers(hf_config, MXFP8) == ["re:.*self_attn\\.kv_b_proj"]
     assert GLM5_FP8_SPEC.ignored_layers(hf_config, BLOCKWISE_FP8) == []
+
+
+@pytest.mark.vllm
+def test_glm5_mxfp8_ignore_matches_vllm_modules():
+    """vLLM's compressed-tensors matcher must skip kv_b_proj with the spec's pattern (else the wire
+    sends BF16 into a quantized layer) and leave every other linear, incl. fused ones, quantized."""
+    pytest.importorskip("vllm")
+    from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+        should_ignore_layer,
+    )
+
+    from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import MXFP8
+
+    ignore = GLM5_FP8_SPEC.ignored_layers(SimpleNamespace(model_type="glm_moe_dsa"), MXFP8)
+    # vLLM's GLM-5 (DeepSeek-V2/V3 family) packed modules.
+    fused = {"fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"], "gate_up_proj": ["gate_proj", "up_proj"]}
+    assert should_ignore_layer("model.layers.3.self_attn.kv_b_proj", ignore, fused)
+    for name in (
+        "model.layers.3.self_attn.q_b_proj",
+        "model.layers.3.self_attn.o_proj",
+        "model.layers.3.self_attn.fused_qkv_a_proj",
+        "model.layers.3.self_attn.indexer.wq_b",
+        "model.layers.0.mlp.gate_up_proj",
+        "model.layers.3.mlp.shared_experts.down_proj",
+    ):
+        assert not should_ignore_layer(name, ignore, fused), name

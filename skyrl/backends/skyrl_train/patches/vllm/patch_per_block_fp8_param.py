@@ -28,7 +28,9 @@ def apply_per_block_fp8_param_patch() -> bool:
     except ImportError:
         return False
 
-    compiled = deep_gemm.per_block_cast_to_fp8
+    compiled = getattr(deep_gemm, "per_block_cast_to_fp8", None)
+    if compiled is None:
+        return False
 
     def per_block_cast_to_fp8(x, *args, **kwargs):
         if isinstance(x, torch.Tensor) and type(x) is not torch.Tensor:
