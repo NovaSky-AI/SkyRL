@@ -8,21 +8,25 @@ URL; skycap renders every prompt, calls the engine with token ids, and keeps a
 context graph, so a rewritten history is a branch rather than a hole and
 summarization is allowed.
 
-Per trial: create a trajectory, point the agent at ``trajectory.base_url``, run
-it, and ``finish`` with the reward to get one sample per path. ``compose``
-turns those into the step-wise ``GeneratorOutput``.
+Per trial: create a trajectory, point the agent at its URL, run it, and
+``finish`` with the reward to get a sample per path the ``train_paths`` rule
+picks. ``compose`` turns those into the step-wise ``GeneratorOutput``. The URL
+is ``trajectory.base_url``, or, when the servers' harness routes are exposed to
+sandboxes (``exposure.py``), the same path on its server's exposed URL.
 """
 
 import asyncio
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import litellm
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
 from skycap import CapturePool
+from skycap.paths import load_rule
 from tqdm import tqdm
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
@@ -35,15 +39,13 @@ from skyrl.train.generators.base import (
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
+from .agents import binding
 from .compose import TrialOutcome, compose, split
 
 litellm.suppress_debug_info = True
 
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
 MAX_NUM_RETRIES_PER_TRIAL = 2
-
-#: skycap authenticates nothing, but LiteLLM won't build a client without a key.
-PLACEHOLDER_API_KEY = "skycap"
 
 
 class HarborSkycapGenerator(GeneratorInterface):
@@ -53,6 +55,8 @@ class HarborSkycapGenerator(GeneratorInterface):
         harbor_cfg: Dict[str, Any],
         capture_urls: List[str],
         inference_engine_client: Any = None,
+        train_paths: str = "all",
+        harness_urls: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Args:
@@ -60,7 +64,14 @@ class HarborSkycapGenerator(GeneratorInterface):
             harbor_cfg: Harbor's ``TrialConfig`` template.
             capture_urls: the skycap servers to spread trajectories over.
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
+            train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
+                rule's ``"pkg.module:function"``, which the servers must have been started with.
+            harness_urls: per capture server, the URL its harness routes are exposed to sandboxes at
+                (``SkycapServers.harness_urls``). Empty or None: agents get the servers' own URLs.
         """
+        # Imported here too, so a bad import path fails at startup rather than at the first finish.
+        load_rule(train_paths)
+        self.train_paths = train_paths
         if not getattr(generator_cfg, "step_wise_trajectories", False):
             raise ValueError(
                 "HarborSkycapGenerator emits one row per captured path, grouped per rollout the step-wise way. "
@@ -75,6 +86,13 @@ class HarborSkycapGenerator(GeneratorInterface):
         self._routed_experts = bool(getattr(generator_cfg.inference_engine, "enable_return_routed_experts", False))
         self.capture_urls = list(capture_urls)
         self.pool = CapturePool(self.capture_urls)
+        # Keyed as the pool names servers (``trajectory.server``).
+        self._harness_urls = {k.rstrip("/"): v.rstrip("/") for k, v in (harness_urls or {}).items()}
+        if self._harness_urls and set(self._harness_urls) != set(self.pool.urls):
+            raise ValueError(
+                "harness_urls must give an exposed URL for every capture server, or none: "
+                f"got {sorted(self._harness_urls)} for {sorted(self.pool.urls)}"
+            )
         self.inference_engine_client = inference_engine_client
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
@@ -83,7 +101,15 @@ class HarborSkycapGenerator(GeneratorInterface):
 
         self._template = deepcopy(harbor_cfg)
         agent = self._template.setdefault("agent", {})
-        agent["model_name"] = f"hosted_vllm/{served}"
+        #: How this run's agent is pointed at a trajectory's URL (``agents.py``).
+        self._binding = binding(agent.get("name"))
+        if self._binding.in_sandbox and not self._harness_urls:
+            raise ValueError(
+                f"Agent {agent.get('name')!r} calls the model from inside its sandbox, so skycap's harness routes "
+                "must be exposed to it: set skycap.exposure.type (external_host, cloudflare, or your own)."
+            )
+        self._binding.prepare()
+        agent["model_name"] = self._binding.model_name(served)
         kwargs = agent.setdefault("kwargs", {})
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
@@ -186,7 +212,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             "attempt": attempt,
         }
         async with self.pool.trajectory(meta) as trajectory:
-            config = self._trial_config(prompt, trajectory.base_url, cache_salt)
+            config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt)
             async with self._rate_limiter:
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
@@ -202,8 +228,13 @@ class HarborSkycapGenerator(GeneratorInterface):
                 logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
             else:
                 reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
-            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
+            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason}, paths=self.train_paths)
 
+        if exception == "NonZeroAgentExitCodeError" and finished.context_length_exceeded:
+            # An installed agent (mini-swe-agent, ...) has no ContextLengthExceededError of its own: skycap
+            # refused its prompt as too long, its client raised, and the agent exited non-zero. Treated as
+            # Terminus-2's context-length stop, so overlong filtering applies to it too.
+            reward, stop_reason = 0.0, "context_length"
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
@@ -232,18 +263,15 @@ class HarborSkycapGenerator(GeneratorInterface):
             unbridged_calls=finished.unbridged_calls,
         )
 
+    def _agent_url(self, trajectory: Any) -> str:
+        """The trajectory's URL as the agent reaches it: on its server's exposed URL, if any."""
+        exposed = self._harness_urls.get(trajectory.server)
+        if exposed is None:
+            return trajectory.base_url
+        return exposed + urlsplit(trajectory.base_url).path
+
     def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
-        kwargs = config["agent"]["kwargs"]
-        kwargs["api_base"] = base_url
-        llm_kwargs = kwargs.setdefault("llm_kwargs", {})
-        # Terminus-2 takes `api_base` itself but passes a key only through `llm_kwargs`.
-        llm_kwargs["api_key"] = PLACEHOLDER_API_KEY
-        if cache_salt is not None:
-            # LiteLLM merges `extra_body` into the request body, where skycap reads `cache_salt` and forwards it.
-            extra_body = llm_kwargs.setdefault("extra_body", {})
-            if not isinstance(extra_body, dict):
-                raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
-            extra_body["cache_salt"] = cache_salt
+        self._binding.configure(config["agent"], base_url, cache_salt)
         return config

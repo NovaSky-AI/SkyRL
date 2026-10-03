@@ -35,8 +35,9 @@ The decompressed document is a UTF-8 JSON object:
 | `annotations` | object | what the creator passed at finish, e.g. `{"reward": 1.0}` |
 | `created_at`, `finished_at` | float or null | Unix seconds |
 | `tools` | object | tool-set hash → the tool list, as sent |
-| `failures` | array | calls that produced no node: `{t, status, error, input_leaf}` |
+| `failures` | array | calls that produced no node: `{t, status, error, input_leaf, code}`, where `code` is set when skycap refused the call itself (`context_length_exceeded`: the prompt left no room within the model's context) and null otherwise |
 | `retries` | object | SDK retries answered from the original call: `{replayed, coalesced}` counts |
+| `samples` | object or null | what `finish` returned as training samples: `{paths, rows}`. `paths` names the path rule that picked them: `all` (a row per root-to-leaf path, each model node a target in exactly one), `final` (one row, the path to the last node, every model node on it a target), or a custom rule's name. Each row is `{leaf, targets}`: the node its path ends at (the path is that node and its ancestors) and the model node ids it trains. No node is a target in two rows. Null for a trajectory not ended by `finish` |
 | `nodes` | array | the graph, in creation order (below) |
 | `sidecars` | object | kind → sidecar manifest (below). Empty in text mode |
 

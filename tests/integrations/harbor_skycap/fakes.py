@@ -7,6 +7,7 @@
   padded to top_k with -1), and records ``/finish_session``.
 - ``FakeTrial``: what Harbor's ``Trial`` is to the generator. Its task path picks
   a script: a linear chat, a summarization (the history is rewritten), a
+  discarded reply asked again for (mini-swe-agent's format-error retry), a
   timeout or a crash.
 """
 
@@ -166,6 +167,11 @@ class FakeTrial:
             if script == "timeout":
                 return verified(0.0, "AgentTimeoutError")
             history += [{"role": "user", "content": "ok"}]
+            if script == "discard":
+                # As mini-swe-agent on a format error: the reply is dropped from the history and the
+                # agent asks again with an error message in its place.
+                await chat(session, history)
+                history += [{"role": "user", "content": "format error"}]
             history.append(await chat(session, history))
             if script == "summarize":
                 # The agent compacts: the next call starts from a rewritten history.

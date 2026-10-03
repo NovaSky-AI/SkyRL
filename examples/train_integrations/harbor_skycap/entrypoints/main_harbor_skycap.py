@@ -14,11 +14,12 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 import ray
 import yaml
 from loguru import logger
+from skycap.paths import BUILTIN_RULES
 
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
@@ -29,8 +30,28 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
+from ..agents import binding
+from ..exposure import Exposure, exposure_factory
 from ..harbor_generator import HarborSkycapGenerator
 from ..servers import SkycapServers, start_servers
+
+
+@dataclass
+class ExposureConfig:
+    type: str = "none"
+    """How agents that call the model from inside a remote sandbox reach skycap (``exposure.py``). Only the harness
+    routes are exposed; the control plane stays private. ``none`` (default): agents get each server's own URL, as
+    Terminus-2 needs, calling from this machine. ``external_host``: sandboxes reach server ``i`` at
+    ``host:port + i``, an address of this node or of a relay that forwards each port here (frp on a public VM).
+    ``cloudflare``: a Cloudflare quick tunnel per server, for development. ``module:Class``: an ``Exposure``
+    subclass of your own."""
+    host: Optional[str] = None
+    """For ``external_host``: the address sandboxes route to."""
+    port: int = 11500
+    """For ``external_host``: the first server's port; server ``i`` serves its harness routes on ``port + i``."""
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+    """The exposure class's constructor arguments: ``timeout`` and ``attempts`` for ``cloudflare``, or a custom
+    class's own."""
 
 
 @dataclass
@@ -48,11 +69,30 @@ class SkycapConfig:
     """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
     renderer_pool_size: int = 8
     """Renderers (tokenizer copies) each server renders prompts with in parallel."""
-    use_raw_content: bool = True
+    use_raw_content: Optional[bool] = None
     """Answer with the completion's own text as ``content``, a thinking model's reasoning inline, as
     SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
     ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
-    replies every replayed turn would lose its reasoning, edit history and fork the graph."""
+    replies every replayed turn would lose its reasoning, edit history and fork the graph.
+    None (default) picks per agent (``agents.py``): on for Terminus-2, off for agents that act through
+    tool calls (mini-swe-agent), which need them parsed."""
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+    """Options for skycap's renderer, as the chat template's kwargs: ``{enable_thinking: true}`` samples
+    Qwen3.5-2B with thinking, which its template leaves off by default."""
+    thinking_retention: Optional[str] = "all"
+    """What skycap's renderer does with earlier turns' thinking. ``all`` (default) keeps it: each turn extends
+    the previous prompt and completion token for token. ``tool_cycle`` drops it once a new user query arrives,
+    as Qwen's template does, re-rendering the prompt. None follows the chat template's own knobs. (A harness
+    that drops ``reasoning_content`` when replaying a reply forks the graph either way.)"""
+    train_paths: str = "all"
+    """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
+    each sampled message trained once, so a reply the harness discarded and asked again for trains with the
+    rollout's advantage too. ``final``: only the path to the rollout's last node, the conversation the harness
+    ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
+    a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
+    train), importable on every node; the skycap servers are started with it."""
+    exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    """How agents inside sandboxes reach the servers' harness routes."""
 
 
 @dataclass
@@ -62,9 +102,11 @@ class HarborSkycapConfig(HarborSkyRLConfig):
 
 def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     """skycap servers in token mode, in front of SkyRL's router."""
+    agent = binding(cfg.harbor_trial_config.get("agent", {}).get("name"))
     ie = cfg.generator.inference_engine
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
+    train_paths = cfg.skycap.train_paths
     settings = {
         "upstream_url": engine_url,
         "tokenizer": cfg.trainer.policy.model.path,
@@ -80,7 +122,13 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
             "min_p": sampling.min_p,
         },
         "sampling_mask": ie.enable_return_sample_support_set,
-        "use_raw_content": cfg.skycap.use_raw_content,
+        "chat_template_kwargs": (
+            dict(cfg.skycap.chat_template_kwargs) if cfg.skycap.chat_template_kwargs is not None else None
+        ),
+        "thinking_retention": cfg.skycap.thinking_retention,
+        "use_raw_content": agent.raw_content if cfg.skycap.use_raw_content is None else cfg.skycap.use_raw_content,
+        # A custom rule is imported by each server, under the name the generator finishes with.
+        "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
     }
     return start_servers(
         settings,
@@ -89,7 +137,13 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         placement_strategy=cfg.skycap.placement_strategy,
         record_dir=cfg.skycap.record_dir or os.path.join(cfg.trainer.export_path, "skycap"),
         ttl=cfg.skycap.ttl,
+        exposure=_exposure(cfg.skycap.exposure),
     )
+
+
+def _exposure(cfg: ExposureConfig) -> Optional[Callable[[], Exposure]]:
+    """``skycap.exposure`` as a factory of per-server exposures; raises ``ValueError`` on a bad config."""
+    return exposure_factory(cfg.type, host=cfg.host, port=cfg.port, kwargs=cfg.kwargs)
 
 
 class HarborSkycapExp(HarborExp):
@@ -104,6 +158,8 @@ class HarborSkycapExp(HarborExp):
             harbor_cfg=cfg.harbor_trial_config,
             capture_urls=self.skycap.urls,
             inference_engine_client=inference_engine_client,
+            train_paths=cfg.skycap.train_paths,
+            harness_urls=self.skycap.harness_urls,
         )
         return self.generator
 
@@ -129,6 +185,7 @@ def main() -> None:
         defaults = yaml.safe_load(f)
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
+    _exposure(cfg.skycap.exposure)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)
