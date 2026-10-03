@@ -87,10 +87,9 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
             cfg.trainer.remove_microbatch_padding = False
     if "qwen3.5" in model_name.lower():
         # Qwen3.5 hybrid GDN checkpoints report a ...ForConditionalGeneration arch
-        # and auto-dispatch to the VL bridge -> Qwen3VLModel, which self-packs and
-        # double-packs against SkyRL's sample packing (corrupting the GDN
-        # cu_seqlens). language_model_only routes them to the native GPTModel + GDN
-        # thd path instead, which supports packed sequences directly.
+        # and auto-dispatch to the VL bridge -> Qwen3VLModel. language_model_only
+        # routes them to the native GPTModel + GDN thd path, which is what this
+        # text-only test exercises.
         cfg.trainer.remove_microbatch_padding = True
         cfg.trainer.policy.language_model_only = True
         cfg.trainer.ref.language_model_only = True

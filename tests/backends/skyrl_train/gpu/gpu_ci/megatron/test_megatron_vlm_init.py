@@ -277,12 +277,9 @@ async def test_vlm_sft_hf_parity(ray_init_fixture):
 @pytest.mark.parametrize(
     ("tp", "cp", "sequence_parallel_size", "remove_microbatch_padding", "gpus_per_node", "expected_substring"),
     [
-        # Qwen3VL packs sequences internally, `remove_microbatch_padding` is not supported
-        (1, 1, 1, True, 2, "pack sequences inside their own forward"),
         (2, 1, 2, False, 2, "sequence parallelism"),
     ],
     ids=[
-        "microbatch_padding",
         "sequence_parallel",
     ],
 )
