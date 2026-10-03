@@ -54,7 +54,10 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     shift_mask_for_mtp,
     unpadded_vocab_shard_width,
 )
-from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorList,
+    concat_nonempty_tensors,
+)
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
@@ -457,10 +460,15 @@ class MegatronModelWrapper:
             )
 
             vlm_inputs = {}
+            # Text-only rows of a mixed batch carry empty tensors; skip them.
             if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
-                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+                pixel_values = concat_nonempty_tensors(batch["pixel_values"])
+                if pixel_values is not None:
+                    vlm_inputs["pixel_values"] = pixel_values
             if batch.get("image_grid_thw") is not None:
-                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+                image_grid_thw = concat_nonempty_tensors(batch["image_grid_thw"])
+                if image_grid_thw is not None:
+                    vlm_inputs["image_grid_thw"] = image_grid_thw
 
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
@@ -1100,10 +1108,15 @@ class MegatronModelWrapper:
             )
 
             vlm_inputs = {}
+            # Text-only rows of a mixed batch carry empty tensors; skip them.
             if batch.get("pixel_values") is not None and mpu.get_pipeline_model_parallel_rank() == 0:
-                vlm_inputs["pixel_values"] = torch.cat(batch["pixel_values"].tensors, dim=0)
+                pixel_values = concat_nonempty_tensors(batch["pixel_values"])
+                if pixel_values is not None:
+                    vlm_inputs["pixel_values"] = pixel_values
             if batch.get("image_grid_thw") is not None:
-                vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
+                image_grid_thw = concat_nonempty_tensors(batch["image_grid_thw"])
+                if image_grid_thw is not None:
+                    vlm_inputs["image_grid_thw"] = image_grid_thw
 
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(

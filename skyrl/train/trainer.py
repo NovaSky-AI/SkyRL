@@ -892,8 +892,32 @@ class RayPPOTrainer:
             assert len(pixel_values) == len(
                 image_grid_thw
             ), "Number of pixel values should match number of image grid thw"
-            pixel_values = TensorList(pixel_values)
-            image_grid_thw = TensorList(image_grid_thw)
+            # Text-only trajectories of a mixed batch have no image tensors (None). Give them empty
+            # tensors so the batch stays row-aligned; the model wrappers skip empty rows.
+            reference = next((t for t in pixel_values if t is not None), None)
+            num_text_only = sum(t is None for t in pixel_values)
+            if reference is not None and num_text_only > 0 and self.cfg.trainer.strategy == "fsdp":
+                # On FSDP, a rank whose micro-batch has no images skips the vision tower, whose sharded
+                # weights are all-gathered collectively on every forward, so the ranks deadlock.
+                # TODO(xgui): run a dummy vision forward (tiny fake image, output scaled by 0) on
+                # text-only micro-batches so every rank joins the same collectives, then drop this check.
+                raise ValueError(
+                    f"Mixed image and text-only batches are not supported on the FSDP backend: {num_text_only} of "
+                    f"{len(pixel_values)} trajectories have no images. Use an all-image dataset or "
+                    "trainer.strategy=megatron."
+                )
+            if reference is None:
+                pixel_values = None
+                image_grid_thw = None
+            else:
+                pixel_values = [
+                    t if t is not None else reference.new_zeros((0, *reference.shape[1:])) for t in pixel_values
+                ]
+                image_grid_thw = [
+                    t if t is not None else reference.new_zeros((0, 3), dtype=torch.long) for t in image_grid_thw
+                ]
+                pixel_values = TensorList(pixel_values)
+                image_grid_thw = TensorList(image_grid_thw)
 
         # 2. Convert to tensors.
         (

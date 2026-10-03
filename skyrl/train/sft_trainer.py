@@ -172,6 +172,11 @@ def _tokenize_alpaca_slice_worker(args):
     return results
 
 
+# Bump when tokenization output changes for the same inputs, so stale cache entries are not reused.
+# 2: OpenAI ``image_url`` parts are tokenized with their image tensors (previously text-only).
+_SFT_TOKENIZATION_CACHE_VERSION = 2
+
+
 def _compute_cache_key(
     dataset_name: str,
     dataset_split: str,
@@ -205,6 +210,7 @@ def _compute_cache_key(
     # Build a deterministic string from all relevant parameters
     cache_params = json.dumps(
         {
+            "cache_version": _SFT_TOKENIZATION_CACHE_VERSION,
             "dataset_name": dataset_name,
             "dataset_split": dataset_split,
             "model_path": model_path,
@@ -382,6 +388,88 @@ def _normalize_tool_call_payload(tc: Any) -> Optional[list]:
 _NORMALIZED_KEYS = frozenset({"role", "content", "tool_calls"})
 
 
+def _resolve_num_training_steps(sft_cfg) -> Optional[int]:
+    """Step count handed to the workers' LR scheduler at ``init_model``.
+
+    ``None`` when the run is epoch-based and uncapped. The Megatron scheduler is built before the
+    dataloader exists and cannot take ``None``, so that backend requires an explicit
+    count rather than a silent default; FSDP resolves it later from the dataloader.
+    """
+    num_training_steps = sft_cfg.dummy_run_max_steps if sft_cfg.dummy_run_full_ctx else sft_cfg.num_steps
+    if sft_cfg.max_training_steps is not None:
+        num_training_steps = (
+            sft_cfg.max_training_steps
+            if num_training_steps is None
+            else min(num_training_steps, sft_cfg.max_training_steps)
+        )
+    if num_training_steps is None and sft_cfg.strategy == "megatron":
+        raise ValueError(
+            "Megatron SFT needs an explicit training step count for its LR scheduler: set num_steps, or keep "
+            "num_epochs and set max_training_steps (>= num_epochs * steps_per_epoch, and > "
+            "optimizer_config.num_warmup_steps)."
+        )
+    return num_training_steps
+
+
+def _normalize_content_parts(content):
+    """Map OpenAI-style multimodal parts onto the ``{"type": "image", "image": ...}`` form.
+
+    RL datasets (and OpenAI clients) write ``{"type": "image_url", "image_url": {"url": ...}}``;
+    the HF processor path only recognizes ``type == "image"``, so those parts were silently
+    tokenized as text with an image placeholder and no pixels. Video parts are
+    rejected explicitly rather than dropped.
+    """
+    if not isinstance(content, list):
+        return content
+    out = []
+    for part in content:
+        if not isinstance(part, dict):
+            out.append(part)
+            continue
+        ptype = part.get("type")
+        if ptype == "image_url":
+            url = part.get("image_url")
+            if isinstance(url, dict):
+                url = url.get("url")
+            if not url:
+                raise ValueError("image_url content part has no url")
+            out.append({"type": "image", "image": url})
+        elif ptype in ("video", "video_url", "input_video"):
+            raise NotImplementedError("Video inputs are not supported by the SFT trainer yet")
+        else:
+            out.append(part)
+    return out
+
+
+def _check_modality_homogeneity(sources, names) -> None:
+    """Fail at load time if the training data mixes image and text-only rows.
+
+    The collator requires every row of a batch to carry images or none of them; with a random
+    sampler a mixed dataset only fails mid-epoch. ``sources`` are the per-dataset
+    objects returned by ``load_dataset``: lists of tokenized rows or ``PretokenizedDataset``.
+    """
+    # TODO(xgui): support mixed text+image SFT batches (empty image tensors for text rows, as the RL path
+    # does) as a follow-up, then drop this check and the one in collate_sft_batch.
+    with_images = 0
+    total = 0
+    for source in sources:
+        counts = getattr(source, "modality_counts", None)
+        if callable(counts):
+            n_img, n_total = counts()
+        else:
+            rows = list(source)
+            n_total = len(rows)
+            n_img = sum(1 for r in rows if r.get("pixel_values") is not None)
+        with_images += n_img
+        total += n_total
+    if 0 < with_images < total:
+        raise ValueError(
+            f"Training data mixes {with_images} image rows with {total - with_images} text-only rows "
+            f"(datasets: {list(names)}). Mixed text+image training is not supported; every row must carry "
+            "images or none may."
+        )
+
+
 def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
     """Return messages in a shape that HF chat templates accept.
 
@@ -395,7 +483,7 @@ def _normalize_chat_messages(messages: list[dict]) -> list[dict]:
         role = msg["role"]
         new_msg = {k: v for k, v in msg.items() if k not in _NORMALIZED_KEYS}
         new_msg["role"] = role
-        new_msg["content"] = msg.get("content", "") or ""
+        new_msg["content"] = _normalize_content_parts(msg.get("content", "") or "")
         if role == "assistant":
             tool_calls = _normalize_tool_call_payload(msg.get("tool_calls"))
             if tool_calls:
@@ -976,17 +1064,7 @@ class SFTTrainer:
             sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
             record_memory=self.cfg.trainer.policy.record_memory,
         )
-        num_training_steps = (
-            self.sft_cfg.dummy_run_max_steps if self.sft_cfg.dummy_run_full_ctx else self.sft_cfg.num_steps
-        )
-        if self.sft_cfg.max_training_steps is not None:
-            num_training_steps = (
-                self.sft_cfg.max_training_steps
-                if num_training_steps is None
-                else min(num_training_steps, self.sft_cfg.max_training_steps)
-            )
-        # num_steps may be None when num_epochs is used; without an explicit cap,
-        # the worker will use its default large value for the LR scheduler.
+        num_training_steps = _resolve_num_training_steps(self.sft_cfg)
         ray.get(
             actor_group.async_init_model(
                 self.sft_cfg.model.path,
@@ -1264,6 +1342,7 @@ class SFTTrainer:
                 if len(source) == 0:
                     raise ValueError(f"Training dataset '{name}' (split '{split}') tokenized to 0 examples.")
                 sources.append(TextDataset(source))
+        _check_modality_homogeneity(sources, source_names)
         if len(sources) == 1:
             return sources[0]
         per_dataset = ", ".join(f"{name}={len(source)}" for name, source in zip(source_names, sources))
@@ -2130,8 +2209,9 @@ class SFTTrainer:
 
         # Save final checkpoint (if checkpointing is enabled). Skip if the last
         # in-loop iteration already saved (either via ckpt_interval or via a
-        # callback-driven force-save) so we don't double-save.
-        if self.sft_cfg.ckpt_path and not did_save_last_step:
+        # callback-driven force-save) so we don't double-save. ckpt_interval <= 0
+        # means checkpointing is off, final save included.
+        if self.sft_cfg.ckpt_path and self.sft_cfg.ckpt_interval > 0 and not did_save_last_step:
             final_step = num_steps
             logger.info(f"Saving final checkpoint at step {final_step}")
             ckpt_path = self.save_checkpoint()

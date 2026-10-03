@@ -48,7 +48,7 @@ trainer:
 - **`dropout`**: Dropout rate applied to LoRA layers. Helps with regularization.
 - **`lora_sync_path`**: Directory path where LoRA adapters are saved and synchronized between training and inference engines.
 - **`target_modules`**: Specifies which modules to apply LoRA to. By default, LoRA is applied to all linear layers in the model - you can customize which modules to target by providing a list of specific module names.
-- **`exclude_modules`**: Specifies which modules to exclude from LoRA application. By default, no modules are excluded.
+- **`exclude_modules`**: Specifies which modules to exclude from LoRA application. By default, no modules are excluded. For vision-language models on FSDP it is required: set it to a PEFT regex that matches the vision tower and projector (e.g. `'.*visual.*'` for Qwen2.5-VL / Qwen3-VL), because vLLM applies LoRA only to the language model. On Megatron, `target_modules=all-linear` already targets only the language model of a VLM.
 
 ## Running LoRA Training
 
