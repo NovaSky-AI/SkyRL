@@ -3,8 +3,8 @@
 Trajectory capture for RL rollouts. A harness points its unchanged OpenAI client
 at a per-trajectory URL. skycap records every model call into a context graph —
 one node per message, where resamples, subagents, compaction and harness edits
-are forks — and, when the trajectory finishes, returns one training sample per
-root-to-leaf path.
+are forks — and, when the trajectory finishes, returns training samples: by
+default one per root-to-leaf path.
 
 skycap is its own package inside this repository and does not depend on
 `skyrl`.
@@ -84,6 +84,42 @@ Creates go round-robin over the servers, and each trajectory's URL names its
 server, so no router or load balancer is involved. An SDK retry
 (`x-stainless-retry-count`) gets the original call's reply rather than a second
 sample.
+
+### Which paths train
+
+`finish` returns a sample per root-to-leaf path of the graph, each sampled
+message a target in exactly one of them. `finish(..., paths="final")` returns
+only the path to the trajectory's last node, with every sampled message on it a
+target: branches off it, such as a reply the harness discarded and asked again
+for, don't train.
+
+Those are the two built-in path rules (`skycap.paths`). A custom rule is a
+function of the graph that returns rows, each a path from a root and the model
+nodes on it to train. skycap builds the samples (tokens, loss masks, routes)
+from the rows, after checking that each path follows parent links, every target
+is a model node on its path, and no node is a target twice:
+
+```python
+from skycap.graph import MessageGraph
+from skycap.paths import Row
+
+def last_reply(graph: MessageGraph) -> list[Row]:
+    """Only the final reply trains, with the conversation before it as context."""
+    if not len(graph):
+        return []
+    path = graph.path_to(len(graph) - 1)
+    replies = [node for node in path if graph.nodes[node].author == "model"]
+    return [Row(path, replies[-1:])]
+
+service = CaptureService(..., path_rules={"last_reply": last_reply})  # or "my_rules:last_reply"
+await trajectory.finish({"reward": 1.0}, paths="last_reply")
+```
+
+A server accepts only the rules it was given, so a request never imports code.
+`skycap serve --path-rule last_reply=my_rules:last_reply` does the same;
+without `NAME=`, a rule is named by its import path. The record's `samples`
+field says which rule trained a trajectory, and a repeated `finish` can't ask
+for another one.
 
 ## The record
 

@@ -58,11 +58,19 @@ class Trajectory:
         self.result: FinishResult | None = None
         #: What the last ``finish`` sent, so a failed one can be sent again unchanged.
         self.finishing: dict[str, Any] | None = None
+        self.finishing_paths = "all"
 
-    async def finish(self, annotations: dict[str, Any] | None = None) -> FinishResult:
-        """Seal the trajectory and get its samples. Safe to call more than once."""
+    async def finish(self, annotations: dict[str, Any] | None = None, *, paths: str = "all") -> FinishResult:
+        """Seal the trajectory and get its samples. Safe to call more than once.
+
+        ``paths`` names the path rule that picks the samples (``skycap.paths``): ``all``, a sample per
+        root-to-leaf path; ``final``, only the path to the last node; or a custom rule the server has.
+        """
         self.finishing = annotations or {}
-        body = await self._pool._post(f"{self.server}/trajectories/{self.id}/finish", {"annotations": self.finishing})
+        self.finishing_paths = paths
+        body = await self._pool._post(
+            f"{self.server}/trajectories/{self.id}/finish", {"annotations": self.finishing, "paths": paths}
+        )
         self.result = FinishResult(
             id=body["id"],
             status=body["status"],
@@ -164,7 +172,7 @@ class CapturePool:
                 if annotations is None:
                     annotations = {"error": type(error).__name__}
                 try:
-                    await trajectory.finish(annotations)
+                    await trajectory.finish(annotations, paths=trajectory.finishing_paths)
                 except Exception:  # noqa: BLE001 - the block's own error is the one to raise
                     pass
             raise

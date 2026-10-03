@@ -1,8 +1,9 @@
-"""Training samples: one row per root-to-leaf path.
+"""Training samples: one per row a path rule picks (``skycap.paths``).
 
-Each model-authored node is a training target in exactly one row, the first
-path (in leaf creation order) that contains it. A shared prefix appears in
-every row that shares it and trains once.
+By default (``all``) that is one row per root-to-leaf path, each model-authored
+node a training target in exactly one row, the first path (in leaf creation
+order) that contains it. A shared prefix appears in every row that shares it
+and trains once.
 
 In token mode a row also carries the concatenated tokens of its path, aligned
 arrays for training: a loss mask over the sampled tokens of its targets, the
@@ -12,12 +13,14 @@ the sampling mask (when every target has one).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from skycap.graph import MessageGraph, Node
+from skycap.paths import PathRule, Row, all_paths, check_rows
 from skycap.tokens.engine import pack, unpack
 
 
@@ -71,16 +74,19 @@ class Sample:
         )
 
 
-def build_samples(graph: MessageGraph) -> list[Sample]:
-    trained: set[int] = set()
+def build_samples(graph: MessageGraph, rule: PathRule = all_paths) -> list[Sample]:
+    """A sample per row ``rule`` picks from the graph."""
+    return samples_for(graph, rule(graph))
+
+
+def samples_for(graph: MessageGraph, rows: Iterable[Row]) -> list[Sample]:
+    """A sample per row, once ``check_rows`` has accepted them."""
     samples: list[Sample] = []
-    for path in graph.paths():
-        targets = [node for node in path if graph.nodes[node].author == "model" and node not in trained]
-        trained.update(targets)
-        sample = Sample(
-            leaf=path[-1], path=path, messages=[graph.nodes[node].message for node in path], targets=targets
-        )
+    for path, targets in check_rows(graph, rows):
         nodes = [graph.nodes[node] for node in path]
+        sample = Sample(
+            leaf=path[-1], path=list(path), messages=[node.message for node in nodes], targets=list(targets)
+        )
         if all(node.tokens is not None for node in nodes):
             _fill_tokens(sample, nodes, set(targets))
         samples.append(sample)
