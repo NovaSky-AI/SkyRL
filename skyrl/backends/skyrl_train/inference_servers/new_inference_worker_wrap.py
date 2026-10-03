@@ -140,6 +140,14 @@ from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E40
 
 apply_kimi_k25_lora_patch()
 
+# Online fp8_per_block quantization hands the torch.compile'd per_block_cast_to_fp8 a vLLM
+# parameter subclass, which dynamo cannot trace (RecursionError on the first weight sync).
+from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import (  # noqa: E402
+    apply_per_block_fp8_param_patch,
+)
+
+apply_per_block_fp8_param_patch()
+
 # R3 on monolithic MoE kernels (FlashInfer TRT-LLM FP8): the routed-experts capture callback is
 # bound once at startup and lost when a weight sync rebuilds the kernel (vllm#59449 / #59455).
 from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import (  # noqa: E402
