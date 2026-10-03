@@ -46,6 +46,17 @@ MASKED_STOP_REASONS = frozenset({"agent_timeout", "error"})
 
 
 @dataclass
+class Attempt:
+    """One Harbor attempt at a trial: its phase durations in seconds (None where Harbor has no
+    timestamps), and the exception it ended with, if any."""
+
+    environment_setup_time: Optional[float] = None
+    agent_execution_time: Optional[float] = None
+    verifier_time: Optional[float] = None
+    exception: Optional[str] = None
+
+
+@dataclass
 class TrialOutcome:
     """One trial: skycap's samples, plus what only Harbor knows."""
 
@@ -60,6 +71,8 @@ class TrialOutcome:
     unbridged_calls: int = 0
     # R3: the trial finished, but a trained path lacked routed experts.
     missing_routes: bool = False
+    # Every attempt the trial took, retries included, in order.
+    attempts: List[Attempt] = field(default_factory=list)
 
 
 @dataclass
@@ -239,4 +252,28 @@ def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_i
     metrics["generate/skycap/num_unbridged_trajectories"] = sum(o.unbridged_calls > 0 for o in outcomes)
     metrics["generate/skycap/num_unbridged_calls"] = sum(o.unbridged_calls for o in outcomes)
     metrics["generate/skycap/num_missing_route_trajectories"] = sum(o.missing_routes for o in outcomes)
+    metrics.update(_attempt_metrics([a for o in outcomes for a in o.attempts]))
+    metrics["generate/skycap/num_retried_attempts"] = sum(max(len(o.attempts) - 1, 0) for o in outcomes)
+    return metrics
+
+
+def _attempt_metrics(attempts: List[Attempt]) -> Dict[str, Any]:
+    """Harbor's phases per attempt, so a slow sandbox shows even when a retry rescues the trial.
+
+    An attempt that failed at sandbox start counts with its time up to the failure.
+    """
+    metrics: Dict[str, Any] = {"generate/skycap/num_attempts": len(attempts)}
+    for phase in ("environment_setup", "agent_execution", "verifier"):
+        times = [t for t in (getattr(a, f"{phase}_time") for a in attempts) if t is not None]
+        if times:
+            arr = np.asarray(times, dtype=np.float64)
+            metrics[f"generate/skycap/{phase}_time_mean"] = float(np.mean(arr))
+            metrics[f"generate/skycap/{phase}_time_p90"] = float(np.percentile(arr, 90))
+            metrics[f"generate/skycap/{phase}_time_max"] = float(np.max(arr))
+    # Always present, so a healthy step charts as zero rather than a gap.
+    metrics["generate/skycap/num_failed_attempts"] = sum(a.exception is not None for a in attempts)
+    for attempt in attempts:
+        if attempt.exception is not None:
+            key = f"generate/skycap/num_failed_attempts/{attempt.exception}"
+            metrics[key] = metrics.get(key, 0) + 1
     return metrics
