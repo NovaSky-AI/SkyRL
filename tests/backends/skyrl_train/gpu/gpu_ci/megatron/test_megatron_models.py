@@ -37,7 +37,10 @@ from skyrl.backends.skyrl_train.inference_servers.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
-from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl.train.dataset.preprocess import (
+    convert_prompts_responses_to_batch_tensors,
+    make_router_padding_mask,
+)
 from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
@@ -279,7 +282,7 @@ async def generate_with_vllm(
     if rewards and not isinstance(rewards[0], list):
         rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
 
-    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, _, _ = (
+    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, routes_t, _ = (
         convert_prompts_responses_to_batch_tensors(
             pad_token_id=tokenizer.pad_token_id,
             prompts=generator_output["prompt_token_ids"],
@@ -287,6 +290,7 @@ async def generate_with_vllm(
             rewards=rewards,
             loss_masks=generator_output["loss_masks"],
             logprobs=generator_output.get("rollout_logprobs"),
+            rollout_expert_indices=generator_output.get("rollout_expert_indices"),
         )
     )
     if return_training_input:
@@ -304,7 +308,14 @@ async def generate_with_vllm(
                     if logprobs_t is not None
                     else torch.zeros((batch_size, num_actions), dtype=torch.float32)
                 ),
-                "rollout_expert_indices": None,
+                "rollout_expert_indices": routes_t,
+                "router_padding_mask": (
+                    make_router_padding_mask(
+                        attention_mask, [len(r) for r in generator_output["rollout_expert_indices"]]
+                    )
+                    if routes_t is not None
+                    else None
+                ),
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
