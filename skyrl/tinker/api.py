@@ -869,6 +869,7 @@ class FutureResponse(BaseModel):
     future_id: str
     status: str = "pending"
     request_id: str
+    sample_sequence_ids: list[str] | None = None
 
 
 class TelemetryEvent(BaseModel):
@@ -1739,7 +1740,12 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         )
         await session.commit()
 
-    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+    return FutureResponse(
+        future_id=str(request_id),
+        status="pending",
+        request_id=str(request_id),
+        sample_sequence_ids=[str(uuid4()) for _ in range(request.num_samples)],
+    )
 
 
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
