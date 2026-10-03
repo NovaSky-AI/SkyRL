@@ -253,8 +253,8 @@ class MegatronWorker:
         bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
 
         # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
-        # path (which supports sample packing) instead of the VL Qwen3VLModel
-        # (which doesn't). Must run before to_megatron_provider; no-op otherwise.
+        # path instead of the VL Qwen3VLModel, so the vision tower is not built.
+        # Must run before to_megatron_provider; no-op otherwise.
         if language_model_only and maybe_force_qwen35_text_bridge(bridge, hf_config):
             logger.info(
                 "language_model_only=True: forcing Qwen3.5 text->GPTModel bridge "
