@@ -293,7 +293,7 @@ class TestFSDPConfigOverrides:
 
 
 class TestMaxTokensPerMicrobatch:
-    """``max_tokens_per_microbatch`` is the FFD bin capacity.
+    """``max_tokens_per_microbatch`` is the MFFD bin capacity.
 
     It must be ``>= max_length`` (any single sequence fits in a bin) but need
     not be a multiple of ``max_length``.
