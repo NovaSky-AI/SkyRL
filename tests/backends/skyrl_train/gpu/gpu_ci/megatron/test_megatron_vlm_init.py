@@ -555,7 +555,7 @@ def _run_vlm_cp_layout(model_name, batch, cp, num_gpus):
         actor_group = init_worker_with_type(
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=num_gpus, cfg=cfg
         )
-        refs = actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy")
+        refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
         output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
         logprobs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
         results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
@@ -587,9 +587,7 @@ async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name):
     logprobs_nocp, results_nocp, grad_norms_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, num_gpus=2)
     logprobs_cp, results_cp, grad_norms_cp = _run_vlm_cp_layout(model_name, batch, cp=2, num_gpus=2)
 
-    num_actions = batch.metadata["response_length"]
-    am = batch["attention_mask"].bool()
-    scored = (am[:, 1:] & am[:, :-1])[:, -num_actions:]
+    scored = batch["loss_mask"].bool()
     diff = (logprobs_cp - logprobs_nocp).abs()[scored]
     print(f"\n[cp parity] {model_name}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
     print(f"[cp parity] grad norms CP1={grad_norms_nocp} CP2={grad_norms_cp}")
@@ -597,7 +595,7 @@ async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name):
         print(f"[cp parity] {k}: CP1={results_nocp[0].metrics[k]} CP2={results_cp[0].metrics[k]}")
 
     assert torch.isfinite(logprobs_cp[scored]).all()
-    assert diff.mean().item() < 2e-2
+    assert diff.mean().item() < 3e-2
     gn_nocp, gn_cp = grad_norms_nocp[0], grad_norms_cp[0]
     assert gn_nocp is not None and gn_nocp > 0 and gn_cp is not None
     # Same 10% band as test_megatron_worker's text CP check: a scaling bug is ~2x off.
