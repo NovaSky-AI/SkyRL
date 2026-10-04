@@ -153,3 +153,54 @@ def test_setup_uses_server_groups_to_assign_worker_roles(tmp_path, monkeypatch):
     lookup.assert_called_once_with([a.get_ray_worker_id.remote.return_value for a in actors], timeout=10)
     trainer._vllm_metrics_scraper.set_worker_roles.assert_called_once_with({"prefill": ["p0", "p1"], "decode": ["d0"]})
     trainer._vllm_metrics_scraper.set_worker_ids.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "enable_pd,server_pd,status", [(False, False, 200), (False, True, 200), (True, True, 200), (True, True, 404)]
+)
+def test_external_setup_resolves_http_workers_and_preserves_legacy_collection(
+    tmp_path, monkeypatch, enable_pd, server_pd, status
+):
+    from skyrl.train.config import SkyRLTrainConfig
+    from skyrl.train.entrypoints.main_base import BasePPOExp
+
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.enable_pd = enable_pd
+    cfg.generator.inference_engine.run_engines_locally = False
+    cfg.generator.inference_engine.external_server_urls = ["http://prefill/", "http://decode"]
+    cfg.trainer.fully_async.simulate_training = True
+    cfg.trainer.export_path = str(tmp_path / "export")
+    cfg.trainer.ckpt_path = str(tmp_path / "checkpoints")
+    exp = BasePPOExp.__new__(BasePPOExp)
+    exp.cfg = cfg
+    exp.tokenizer = Mock()
+    exp.train_dataset = exp.eval_dataset = exp.colocate_pg = None
+    exp._server_groups = exp._prefill_server_groups = exp._decode_server_groups = []
+    trainer = Mock()
+    scraper = VLLMMetricsScraper(urls=["http://agent/metrics"])
+    trainer._vllm_metrics_scraper = scraper
+    exp.get_trainer = Mock(return_value=trainer)
+    for method in ("get_tracker", "get_inference_client", "get_generator", "get_trajectory_logger"):
+        setattr(exp, method, Mock())
+    lookup = Mock()
+    monkeypatch.setattr("skyrl.train.entrypoints.main_base.ray.get", lookup)
+
+    def respond(request):
+        assert request.url.path == "/get_metrics_worker_info"
+        role = request.url.host
+        return httpx.Response(
+            status, json={"worker_id": {"prefill": "p0", "decode": "d0"}[role], "role": role if server_pd else None}
+        )
+
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(
+        "skyrl.train.utils.vllm_metrics_scraper.httpx.AsyncClient",
+        lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    assert exp._setup_trainer() is trainer
+    lookup.assert_not_called()
+    assert scraper._worker_ids == (frozenset({"p0", "d0"}) if status == 200 else None)
+    assert scraper.has_worker_roles == (server_pd and status == 200)
+    if scraper.has_worker_roles:
+        assert scraper._role_scrapers["prefill"]._worker_ids == frozenset({"p0"})
+        assert scraper._role_scrapers["decode"]._worker_ids == frozenset({"d0"})

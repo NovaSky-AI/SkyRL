@@ -316,6 +316,19 @@ class BasePPOExp:
                     logger.warning(
                         f"vLLM metrics disabled: could not identify launched workers ({type(error).__name__})"
                     )
+            elif self.cfg.generator.inference_engine.external_server_urls is not None:
+                try:
+                    asyncio.run(
+                        trainer._vllm_metrics_scraper.set_external_servers(
+                            self.cfg.generator.inference_engine.external_server_urls, enable_pd
+                        )
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Could not identify external vLLM metrics workers "
+                        f"({type(error).__name__}); using cluster-wide collection. "
+                        "PD run summaries require known worker roles."
+                    )
         # Install the trajectory logger after construction
         trainer.trajectory_logger = self.get_trajectory_logger()
         # Expose the trainer on self so callers can log exceptions raised

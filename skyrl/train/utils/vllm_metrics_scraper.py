@@ -238,7 +238,7 @@ class VLLMMetricsScraper:
             )
 
     def set_worker_ids(self, worker_ids: Iterable[str]) -> None:
-        """Restrict snapshots to the fixed set of servers launched for this run."""
+        """Restrict snapshots to a fixed set of inference frontend workers."""
         self._worker_ids = frozenset(worker_ids)
         self._role_scrapers = {}
 
@@ -259,6 +259,31 @@ class VLLMMetricsScraper:
             role: VLLMMetricsScraper(urls=self._urls, request_timeout_s=self._timeout, worker_ids=ids)
             for role, ids in groups.items()
         }
+
+    async def set_external_servers(self, server_urls: Iterable[str], enable_pd: bool) -> None:
+        """Resolve frontend worker identities from external SkyRL servers."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            responses = await asyncio.gather(
+                *(client.get(url.rstrip("/") + "/get_metrics_worker_info") for url in server_urls)
+            )
+        workers = []
+        groups = {"prefill": [], "decode": []}
+        for response in responses:
+            response.raise_for_status()
+            info = response.json()
+            worker = info.get("worker_id")
+            if not isinstance(worker, str) or not worker:
+                raise ValueError("External server did not identify its Ray metrics worker")
+            workers.append(worker)
+            role = info.get("role")
+            if role is not None:
+                groups[role].append(worker)
+        if enable_pd or any(groups.values()):
+            if sum(len(ids) for ids in groups.values()) != len(workers):
+                raise ValueError("External PD servers must all report a prefill or decode role")
+            self.set_worker_roles(groups)
+        else:
+            self.set_worker_ids(workers)
 
     def _role_metrics(self, results: List[Dict[str, float]]) -> Dict[str, float]:
         """Keep the existing metrics under separate prefill and decode scopes."""
