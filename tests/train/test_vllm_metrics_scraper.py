@@ -785,7 +785,7 @@ def test_worker_identity_lookup_is_bounded_and_failure_does_not_abort_setup(tmp_
     experiment.eval_dataset = None
     experiment.colocate_pg = None
     actor = Mock()
-    actor.get_metrics_worker_id.remote.return_value = "identity-ref"
+    actor.get_ray_worker_id.remote.return_value = "identity-ref"
     experiment._server_groups = [Mock(get_actors=Mock(return_value=[actor]))]
     trainer = Mock()
     experiment.get_trainer = Mock(return_value=trainer)

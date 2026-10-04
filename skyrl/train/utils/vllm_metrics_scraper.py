@@ -34,8 +34,16 @@ _COUNTER_PREFIX_QUERIES = "ray_vllm_prefix_cache_queries_total"
 _COUNTER_PREFIX_HITS = "ray_vllm_prefix_cache_hits_total"
 _COUNTER_PROMPT_TOKENS = "ray_vllm_prompt_tokens_total"
 _COUNTER_GENERATION_TOKENS = "ray_vllm_generation_tokens_total"
+_COUNTER_PREEMPTIONS = "ray_vllm_num_preemptions_total"
+_COUNTER_EXTERNAL_PREFIX_QUERIES = "ray_vllm_external_prefix_cache_queries_total"
+_COUNTER_EXTERNAL_PREFIX_HITS = "ray_vllm_external_prefix_cache_hits_total"
+_COUNTER_KV_OFFLOAD_LOAD_BYTES = "ray_vllm_kv_offload_load_bytes_total"
 _HIST_TTFT_SUM = "ray_vllm_time_to_first_token_seconds_sum"
 _HIST_TTFT_COUNT = "ray_vllm_time_to_first_token_seconds_count"
+_HIST_TTFT_BUCKET = "ray_vllm_time_to_first_token_seconds_bucket"
+_HIST_REQUEST_TPOT_SUM = "ray_vllm_request_time_per_output_token_seconds_sum"
+_HIST_REQUEST_TPOT_COUNT = "ray_vllm_request_time_per_output_token_seconds_count"
+_HIST_REQUEST_TPOT_BUCKET = "ray_vllm_request_time_per_output_token_seconds_bucket"
 # Speculative-decoding (MTP draft) counters. The per-position counter additionally carries a
 # `position` label ("0".."k-1"); it is summed per-position in `sum_by_position` rather than through
 # `_SUM_METRICS` (which would collapse the label and lose the per-depth breakdown).
@@ -56,12 +64,12 @@ _SUM_METRICS = (
     _COUNTER_SPEC_DRAFTS,
     _COUNTER_SPEC_DRAFT_TOKENS,
     _COUNTER_SPEC_ACCEPTED_TOKENS,
-    "ray_vllm_num_preemptions_total",
-    "ray_vllm_external_prefix_cache_queries_total",
-    "ray_vllm_external_prefix_cache_hits_total",
-    "ray_vllm_kv_offload_load_bytes_total",
-    "ray_vllm_request_time_per_output_token_seconds_sum",
-    "ray_vllm_request_time_per_output_token_seconds_count",
+    _COUNTER_PREEMPTIONS,
+    _COUNTER_EXTERNAL_PREFIX_QUERIES,
+    _COUNTER_EXTERNAL_PREFIX_HITS,
+    _COUNTER_KV_OFFLOAD_LOAD_BYTES,
+    _HIST_REQUEST_TPOT_SUM,
+    _HIST_REQUEST_TPOT_COUNT,
 )
 _MEAN_METRICS = (_GAUGE_KV_CACHE_USAGE,)
 
@@ -282,10 +290,7 @@ class VLLMMetricsScraper:
         buckets = {}
         schemas = {}
         for (name, labels), value in parsed.items():
-            if name not in {
-                "ray_vllm_time_to_first_token_seconds_bucket",
-                "ray_vllm_request_time_per_output_token_seconds_bucket",
-            }:
+            if name not in {_HIST_TTFT_BUCKET, _HIST_REQUEST_TPOT_BUCKET}:
                 continue
             label_dict = dict(labels)
             bound = label_dict.get("le")
@@ -303,10 +308,10 @@ class VLLMMetricsScraper:
         per_pos = sum_by_position(parsed, _COUNTER_SPEC_ACCEPTED_PER_POS)
         # Ray counters skip zero increments. A live engine gauge confirms the exporter exists.
         if any(name == _GAUGE_NUM_RUNNING for name, _ in parsed):
-            sums.setdefault("ray_vllm_num_preemptions_total", 0.0)
+            sums.setdefault(_COUNTER_PREEMPTIONS, 0.0)
         for hits, queries in (
-            ("ray_vllm_prefix_cache_hits_total", _COUNTER_PREFIX_QUERIES),
-            ("ray_vllm_external_prefix_cache_hits_total", "ray_vllm_external_prefix_cache_queries_total"),
+            (_COUNTER_PREFIX_HITS, _COUNTER_PREFIX_QUERIES),
+            (_COUNTER_EXTERNAL_PREFIX_HITS, _COUNTER_EXTERNAL_PREFIX_QUERIES),
         ):
             if queries in sums:
                 sums.setdefault(hits, 0.0)
@@ -445,16 +450,16 @@ class VLLMMetricsScraper:
             out[f"{prefix}prefix_cache_hit_rate"] = h_d / q_d
 
         out.update(latency_metrics(prev, cur, prefix))
-        preemptions = delta("ray_vllm_num_preemptions_total")
+        preemptions = delta(_COUNTER_PREEMPTIONS)
         if preemptions is not None:
             out[prefix + "num_preemptions"] = preemptions
             if gen_d is not None and gen_d > 0:
                 out[prefix + "preemptions_per_million_tokens"] = preemptions * 1e6 / gen_d
-        external_q = delta("ray_vllm_external_prefix_cache_queries_total")
-        external_h = delta("ray_vllm_external_prefix_cache_hits_total")
+        external_q = delta(_COUNTER_EXTERNAL_PREFIX_QUERIES)
+        external_h = delta(_COUNTER_EXTERNAL_PREFIX_HITS)
         if external_q is not None and external_q > 0 and external_h is not None:
             out[prefix + "external_prefix_cache_hit_rate"] = external_h / external_q
-        load_bytes = delta("ray_vllm_kv_offload_load_bytes_total")
+        load_bytes = delta(_COUNTER_KV_OFFLOAD_LOAD_BYTES)
         if load_bytes is not None and has_window:
             out[f"{prefix}kv_offload_load_throughput_bytes_s"] = load_bytes / throughput_window_s
 

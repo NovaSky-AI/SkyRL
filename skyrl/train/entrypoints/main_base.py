@@ -297,7 +297,7 @@ class BasePPOExp:
             actors = [actor for group in (groups or []) for actor in group.get_actors()]
             if actors and self.cfg.generator.inference_engine.backend == "vllm":
                 try:
-                    worker_ids = ray.get([actor.get_metrics_worker_id.remote() for actor in actors], timeout=10)
+                    worker_ids = ray.get([actor.get_ray_worker_id.remote() for actor in actors], timeout=10)
                     trainer._vllm_metrics_scraper.set_worker_ids(worker_ids)
                 except Exception as error:
                     trainer._vllm_metrics_scraper.set_worker_ids([])
