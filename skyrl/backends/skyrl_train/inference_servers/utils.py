@@ -91,6 +91,11 @@ def _apply_serialized_fp8_weight_sync_defaults(
         raise ValueError("engine_init_kwargs.hf_overrides must be a dict when FP8 weight sync is enabled")
 
     qcfg_value = hf_overrides.get("quantization_config")
+    # TODO(benji agent): it does not make sense to have qconfig from the user if skyrl is building it
+    # even though we have set or validate which checks for most conflicts, it is still possible for the user
+    # to have some weird config like store_dtype: "mxfp4" that would mess things up
+    # the best is just to ignore the user's quant config (log a warning if they provide to say that its overriden)
+    # if skyrl is building its own quant config
     qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
     if not isinstance(qcfg, dict):
         raise ValueError(
@@ -99,7 +104,7 @@ def _apply_serialized_fp8_weight_sync_defaults(
 
     ignored_layers = _serialized_fp8_ignored_layers(model_path, mode)
     if ignored_layers:
-        logger.info(
+        logger.info( # TODO(benji agent): this logging is misleading, since this is only engine init, not the actual weight sync. change the wording to show that this is engine init
             "FP8 weight sync (%s) will leave %d vLLM modules unquantized "
             "to match the model's FP8 quantization spec.",
             mode,
