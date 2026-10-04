@@ -1449,6 +1449,22 @@ class MTPConfig(BaseConfig):
 
 
 @dataclass
+class GrafanaAnnotationsConfig(BaseConfig):
+    """Configure optional organization-scoped Grafana run annotations."""
+
+    enabled: bool = False
+    """Publish a run-name start marker and close it as a region when training ends."""
+    token_env_var: str = "GRAFANA_API_TOKEN"
+    """Environment variable containing the annotation API token; never stored in run config."""
+    organization_id: Optional[int] = None
+    """Organization override; otherwise use the head's RAY_GRAFANA_ORG_ID (default 1)."""
+    tags: List[str] = field(default_factory=list)
+    """Additional annotation tags, such as a cluster name."""
+    timeout_seconds: float = 5.0
+    """HTTP timeout per request."""
+
+
+@dataclass
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     use_expandable_segments: bool = True
@@ -1620,6 +1636,9 @@ class TrainerConfig(BaseConfig):
     """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
     The Triton backend requires CUDA + triton and falls back to ``"torch"``
     when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
+
+    grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
+    """Optional Grafana run annotation publishing, disabled by default."""
 
     def __post_init__(self):
         # ref model defaults to the policy model

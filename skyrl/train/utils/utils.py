@@ -906,6 +906,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
+    annotation_cfg = cfg.trainer.grafana_annotations
+    if annotation_cfg.enabled and (token := os.environ.get(annotation_cfg.token_env_var)):
+        env_vars[annotation_cfg.token_env_var] = token
 
     # TileLang JITs kernels by shelling out to nvcc, and picks its toolkit from CUDA_HOME,
     # defaulting to the pip wheel tree (site-packages/nvidia/cu13). That tree can be internally
@@ -1069,7 +1072,8 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "NCCL_DEBUG",
     ):
         if value := os.environ.get(var_name):
-            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            logged_value = "[REDACTED]" if var_name == "HF_TOKEN" else value
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {logged_value}")
             env_vars[var_name] = value
 
     # Forward any SKYRL_* overrides set in the launching shell (e.g.

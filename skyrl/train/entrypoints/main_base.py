@@ -330,6 +330,14 @@ class BasePPOExp:
         self.trainer = None
         self.tracker = None
         status = "failed"
+        annotation = None
+        trainer_cfg = getattr(getattr(self, "cfg", None), "trainer", None)
+        annotation_cfg = getattr(trainer_cfg, "grafana_annotations", None)
+        if annotation_cfg is not None and annotation_cfg.enabled:
+            from skyrl.train.utils.grafana_annotations import GrafanaRunAnnotation
+
+            annotation = GrafanaRunAnnotation(annotation_cfg, trainer_cfg.run_name)
+            annotation.start()
         try:
             trainer = self._setup_trainer()
 
@@ -362,6 +370,8 @@ class BasePPOExp:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")
             raise
         finally:
+            if annotation is not None:
+                annotation.finish()
             if self.tracker is not None:
                 try:
                     self.tracker.run_status = status
