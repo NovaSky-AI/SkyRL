@@ -6,6 +6,7 @@ import pickle
 import threading
 import time
 from typing import Dict, List, Optional
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import httpx
@@ -524,6 +525,19 @@ class TestRemoteInferenceClientInit:
 
 
 class TestDataPlane:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [aiohttp.ServerDisconnectedError(), aiohttp.ClientOSError(104, "reset")])
+    async def test_ambiguous_transport_failure_is_not_retried(self, monkeypatch, error):
+        client = RemoteGenerateClient(proxy_url="http://unused")
+        session = MagicMock()
+        session.post.side_effect = error
+        monkeypatch.setattr(client, "_get_session", AsyncMock(return_value=session))
+
+        with pytest.raises(type(error)):
+            await client._post("http://unused/v1/completions", json={})
+
+        session.post.assert_called_once()
+
     """Test data plane methods."""
 
     @pytest.mark.asyncio
@@ -755,18 +769,15 @@ class TestPackedSideChannelBodies:
         assert counts["drifted"] == 1
 
     @pytest.mark.asyncio
-    async def test_undecodable_body_is_retried_then_spliced(self, client, mock_servers):
+    async def test_undecodable_body_is_not_retried(self, client, mock_servers):
         await client._post(f"{mock_servers['proxy_url']}/test/reset_packed_body_calls", json={})
 
-        body = await self._post_packed(client, mock_servers, "/test/flaky_packed_body")
+        with pytest.raises(aiohttp.ClientResponseError, match="gateway hiccup"):
+            await self._post_packed(client, mock_servers, "/test/flaky_packed_body")
 
         async with httpx.AsyncClient() as http:
             counts = (await http.get(f"{mock_servers['proxy_url']}/test/packed_body_calls")).json()
-        assert counts["flaky"] == 2
-        assert np.array_equal(
-            decode_packed_routed_experts(body["choices"][0][PackedField.ROUTED_EXPERTS]),
-            _ROUTES,
-        )
+        assert counts["flaky"] == 1
 
     @pytest.mark.asyncio
     async def test_client_error_with_non_json_body_surfaces_the_text(self, client, mock_servers):

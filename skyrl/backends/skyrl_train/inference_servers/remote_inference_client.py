@@ -227,7 +227,7 @@ class RemoteGenerateClient:
         *,
         packed_side_channels: bool = False,
     ) -> Any:
-        """POST JSON with retries, optionally splicing packed arrays before parsing."""
+        """POST JSON, retrying only connection establishment failures."""
         session = await self._get_session()
         last_exc: Optional[Exception] = None
         for attempt in range(_DATA_PLANE_RETRIES):
@@ -237,7 +237,7 @@ class RemoteGenerateClient:
                         raw = await resp.read()
                         body = load_packed_body(raw) if packed_side_channels else orjson.loads(raw)
                     except orjson.JSONDecodeError as exc:
-                        if 400 <= resp.status < 500:
+                        if resp.status >= 400:
                             text = await resp.text()
                             raise aiohttp.ClientResponseError(
                                 resp.request_info,
@@ -246,7 +246,6 @@ class RemoteGenerateClient:
                                 message=text or resp.reason,
                                 headers=resp.headers,
                             ) from exc
-                        last_exc = exc
                         # The bare JSONDecodeError says only "line 1 column 1 (char 0)", which
                         # gives no hint whether the body was empty, an HTML error page, or a
                         # plain-text 5xx. Capture the status and a snippet so a failure here is
@@ -261,11 +260,10 @@ class RemoteGenerateClient:
                             f"{attempt + 1}/{_DATA_PLANE_RETRIES}: status={resp.status} "
                             f"len={len(text)} body={text[:500]!r}"
                         )
-                        await asyncio.sleep(1)
-                        continue
+                        raise
                     raise_for_status(resp, body)
                     return body
-            except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as exc:
+            except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as exc:
                 last_exc = exc
                 logger.debug(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {exc}")
                 await asyncio.sleep(1)
@@ -777,7 +775,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Sample completions via /inference/v1/generate (Tinker API).
 
         Maps Tinker-style sample requests to the vLLM generate endpoint.
-        Uses self._post() for automatic retry + backoff on transient errors.
+        Uses self._post() to retry connection-establishment failures.
 
         Args:
             request_payload: SampleRequestPayload with {"json": <request-body>}.
