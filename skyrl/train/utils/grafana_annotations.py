@@ -80,6 +80,3 @@ class GrafanaRunAnnotation:
                 self._request("PUT", f"/api/annotations/{self.annotation_id}", self._payload(end_ms))
         except Exception as error:
             logger.warning(f"Grafana final annotation failed ({type(error).__name__})")
-        if self.config.dashboard_url:
-            separator = "&" if "?" in self.config.dashboard_url else "?"
-            logger.info(f"Grafana run: {self.config.dashboard_url}{separator}from={self.start_ms}&to={end_ms}")

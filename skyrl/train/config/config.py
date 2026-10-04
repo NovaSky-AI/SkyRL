@@ -1462,14 +1462,10 @@ class GrafanaAnnotationsConfig(BaseConfig):
     """Additional annotation tags, such as a cluster name."""
     timeout_seconds: float = 5.0
     """HTTP timeout per request; the head-task wait allows 10 additional seconds for startup."""
-    dashboard_url: str = ""
-    """Optional dashboard URL printed with the run's start and end times."""
 
 
 @dataclass
 class TrainerConfig(BaseConfig):
-    grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
-    """Optional Grafana run annotation publishing, disabled by default."""
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     use_expandable_segments: bool = True
     """Enable PyTorch's CUDA ``expandable_segments`` allocator on the training workers.
@@ -1640,6 +1636,9 @@ class TrainerConfig(BaseConfig):
     """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
     The Triton backend requires CUDA + triton and falls back to ``"torch"``
     when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
+
+    grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
+    """Optional Grafana run annotation publishing, disabled by default."""
 
     def __post_init__(self):
         # ref model defaults to the policy model

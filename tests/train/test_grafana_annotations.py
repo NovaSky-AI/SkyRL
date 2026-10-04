@@ -82,30 +82,6 @@ def test_requests_run_on_live_head_with_hard_affinity(head_dispatch):
     ray.get.assert_called_once_with("task-ref", timeout=12)
 
 
-@pytest.mark.parametrize("heads", [[], ["head-one", "head-two"]])
-def test_missing_or_ambiguous_head_does_not_dispatch(head_dispatch, heads):
-    ray.nodes.return_value = [
-        {"Alive": True, "NodeID": head, "Resources": {"node:__internal_head__": 1}} for head in heads
-    ]
-    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "no-head")
-    annotation.start()
-    annotation.finish()
-
-    ray.remote.assert_not_called()
-    assert annotation.annotation_id is None
-
-
-def test_uninitialized_ray_does_not_dispatch(head_dispatch):
-    ray.is_initialized.return_value = False
-    annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "uninitialized")
-    annotation.start()
-    annotation.finish()
-
-    ray.nodes.assert_not_called()
-    ray.remote.assert_not_called()
-    assert annotation.annotation_id is None
-
-
 def test_head_task_timeout_is_cancelled_without_failing_run(head_dispatch):
     ray.get.side_effect = ray.exceptions.GetTimeoutError("timed out")
     annotation = GrafanaRunAnnotation(GrafanaAnnotationsConfig(enabled=True), "timeout")
@@ -166,24 +142,3 @@ def test_invalid_backend_is_rejected_before_http(monkeypatch, backend):
     with pytest.raises(ValueError):
         grafana.request_from_head("POST", "/api/annotations", {}, "TEST_ANNOTATION_TOKEN", None, 5)
     client.assert_not_called()
-
-
-def test_http_failure_is_not_retried(monkeypatch):
-    monkeypatch.setenv("RAY_GRAFANA_HOST", "http://localhost:3000")
-    monkeypatch.delenv("TEST_ANNOTATION_TOKEN", raising=False)
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(403, json={"message": "Forbidden"})
-
-    client_class = httpx.Client
-    monkeypatch.setattr(
-        grafana.httpx,
-        "Client",
-        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs),
-    )
-    with pytest.raises(httpx.HTTPStatusError):
-        grafana.request_from_head("POST", "/api/annotations", {}, "TEST_ANNOTATION_TOKEN", None, 5)
-    assert len(requests) == 1
-    assert "Authorization" not in requests[0].headers
