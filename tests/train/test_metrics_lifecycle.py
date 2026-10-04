@@ -49,21 +49,24 @@ def test_entrypoint_finalizes_before_exception_logging(fail):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("resumed,enable_pd", [(False, False), (True, False), (False, True)])
-async def test_trainer_finalizes_once_and_omits_resumed_or_pd_aggregates(resumed, enable_pd):
+@pytest.mark.parametrize(
+    "resumed,enable_pd,known_roles",
+    [(False, False, False), (True, False, False), (False, True, False), (False, True, True), (True, True, True)],
+)
+async def test_trainer_finalizes_once_and_omits_resumed_or_unknown_pd_aggregates(resumed, enable_pd, known_roles):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer._metrics_finalized = False
     trainer.tracker = Tracking("test", "test", backend="console")
     trainer._resumed_from_checkpoint = resumed
     trainer.cfg = SimpleNamespace(generator=SimpleNamespace(inference_engine=SimpleNamespace(enable_pd=enable_pd)))
     trainer.tracker.update_summary = Mock()
-    scraper = SimpleNamespace(finalize=AsyncMock(return_value={"tokens": 10}))
+    scraper = SimpleNamespace(finalize=AsyncMock(return_value={"tokens": 10}), has_worker_roles=known_roles)
     trainer._vllm_metrics_scraper = scraper
     await trainer.finalize_metrics("failed")
     await trainer.finalize_metrics("failed")
     scraper.finalize.assert_awaited_once()
     assert trainer.tracker.run_status == "failed"
-    if resumed or enable_pd:
+    if resumed or (enable_pd and not known_roles):
         trainer.tracker.update_summary.assert_called_once_with({"run_status": "failed"})
     else:
         assert trainer.tracker.update_summary.call_args_list[0].args == ({"tokens": 10},)
