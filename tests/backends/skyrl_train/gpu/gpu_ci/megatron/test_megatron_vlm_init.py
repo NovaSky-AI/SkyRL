@@ -359,3 +359,153 @@ async def test_vlm_train(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
         training_losses.append(step_i_outputs["loss"])
 
     assert training_losses[0] > training_losses[-1]
+
+
+# Packed-vs-unpacked parity. Microbatches of 4 samples (plus a trailing single-sample
+# microbatch), so every packed row has samples after the first: a sample-boundary leak
+# (wrong mRoPE restart, or GDN state / conv carried across samples) can only show up there.
+PACKING_MICRO_BATCH = 4
+PACKING_PROMPTS = [
+    ("Describe this picture in one short sentence.", (56, 56), "A small square of noise."),
+    ("What shapes can you see here? Answer briefly.", (112, 84), "Mostly scattered dots with no clear shape."),
+    ("Is this image bright or dark?", (224, 168), "It is a mix of bright and dark pixels."),
+    ("Count the colors.", (84, 224), "Too many colors to count; it looks like random noise."),
+    ("Give a title for this image.", (140, 140), "Static."),
+    ("Without any image: what is two plus three?", None, "Two plus three is five."),
+    ("What would you call this texture?", (196, 112), "A grainy, television-static texture."),
+    ("Summarize the image.", (70, 154), "Random colored noise in a tall rectangle."),
+    ("One word for this image?", (168, 56), "Noise."),
+]
+
+
+def get_packing_parity_batch(model_name: str) -> TrainingInputBatch:
+    """Variable-length image (and one text-only) samples, left-padded, scoring every token."""
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+    gen = torch.Generator().manual_seed(0)
+    rows = []
+    for prompt, size, answer in PACKING_PROMPTS:
+        user_content = [{"type": "text", "text": prompt}]
+        images = None
+        if size is not None:
+            from PIL import Image
+
+            w, h = size
+            pixels = torch.randint(0, 256, (h, w, 3), generator=gen, dtype=torch.uint8).numpy()
+            images = [Image.fromarray(pixels)]
+            user_content = [{"type": "image"}] + user_content
+        messages = [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": answer},
+        ]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        out = processor(text=[text], images=images, return_tensors="pt")
+        rows.append((out["input_ids"][0].tolist(), out.get("pixel_values"), out.get("image_grid_thw")))
+
+    pixel_dim = next(pv.shape[-1] for _, pv, _ in rows if pv is not None)
+    max_len = max(len(ids) for ids, _, _ in rows)
+    pad_token_id = processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
+    sequences, attention_mask, pixel_values, image_grid_thw = [], [], [], []
+    for ids, pv, grid in rows:
+        pad = max_len - len(ids)
+        sequences.append([pad_token_id] * pad + ids)
+        attention_mask.append([0] * pad + [1] * len(ids))
+        # Text-only rows carry empty vision tensors.
+        pixel_values.append(pv if pv is not None else torch.zeros(0, pixel_dim))
+        image_grid_thw.append(grid if grid is not None else torch.zeros(0, 3, dtype=torch.long))
+
+    batch_size = len(rows)
+    num_actions = max_len - 1  # score every position that has a predecessor
+    loss_mask = torch.tensor(attention_mask)[:, -num_actions:].float()
+    zeros = torch.zeros(batch_size, num_actions)
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor(sequences),
+            "attention_mask": torch.tensor(attention_mask),
+            "action_log_probs": zeros,
+            "base_action_log_probs": zeros,
+            "rollout_logprobs": zeros,
+            "values": zeros,
+            "returns": zeros,
+            "advantages": zeros,
+            "loss_mask": loss_mask,
+            "response_mask": loss_mask,
+            "pixel_values": TensorList(pixel_values),
+            "image_grid_thw": TensorList(image_grid_thw),
+        }
+    )
+    data.metadata = {"response_length": num_actions}
+    return data
+
+
+def _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding) -> torch.Tensor:
+    cfg = get_test_actor_config(model_name=model_name)
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.policy_num_gpus_per_node = tp
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.micro_train_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
+    try:
+        actor_group = init_worker_with_type("policy", shared_pg=None, colocate_all=False, num_gpus_per_node=tp, cfg=cfg)
+        refs = actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy")
+        output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
+        return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
+    finally:
+        ray.shutdown()
+        ray_init_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_name", "tp"),
+    [
+        ("Qwen/Qwen3-VL-2B-Instruct", 1),
+        ("Qwen/Qwen3-VL-2B-Instruct", 2),
+        # Qwen3.5 goes through the same Qwen3VLModel but with GatedDeltaNet layers, whose
+        # state and conv must reset at every packed sample boundary.
+        ("Qwen/Qwen3.5-0.8B", 1),
+        ("Qwen/Qwen3.5-0.8B", 2),
+    ],
+    ids=["qwen3_vl_tp1", "qwen3_vl_tp2_sp", "qwen3_5_vl_tp1", "qwen3_5_vl_tp2_sp"],
+)
+@pytest.mark.megatron
+async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp):
+    """Sample packing must not change per-token logprobs of image+text samples.
+
+    Compares every scored token of each sample, split by the sample's slot in its
+    packed microbatch: slot 0 differs only by kernel numerics (nothing precedes it);
+    later slots would additionally show any leak across the sample boundary.
+    """
+    batch = get_packing_parity_batch(model_name)
+    unpacked = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=False)
+    packed = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=True)
+    assert packed.shape == unpacked.shape
+
+    num_actions = batch.metadata["response_length"]
+    am = batch["attention_mask"].bool()
+    # A token is scored only if it and its predecessor are both real (the first token of
+    # each sample is predicted from padding unpacked, but from the previous sample packed).
+    scored = (am[:, 1:] & am[:, :-1])[:, -num_actions:]
+    diff = (packed - unpacked).abs()
+    assert torch.isfinite(packed[scored]).all() and torch.isfinite(unpacked[scored]).all()
+
+    slots = torch.arange(len(PACKING_PROMPTS)) % PACKING_MICRO_BATCH
+    stats = {}
+    for name, rows in (("first", slots == 0), ("later", slots > 0)):
+        d = diff[rows][scored[rows]]
+        stats[name] = (d.max().item(), d.mean().item(), d.numel())
+    print(f"\n[packing parity] {model_name} tp={tp}")
+    for name, (mx, mean, n) in stats.items():
+        print(f"  {name:5s} samples: max={mx:.4f} mean={mean:.5f} tokens={n}")
+    for i in range(len(PACKING_PROMPTS)):
+        d = diff[i][scored[i]]
+        print(f"  sample {i} slot {slots[i].item()}: max={d.max().item():.4f} mean={d.mean().item():.5f}")
+
+    first_max, first_mean, _ = stats["first"]
+    later_max, later_mean, _ = stats["later"]
+    # Overall agreement, same bar as test_megatron_forward's average-diff check.
+    assert diff[scored].mean().item() < 2e-2, stats
+    # No boundary leak: later samples must not be materially worse than first samples.
+    assert later_mean <= 3 * first_mean + 5e-3, stats
+    assert later_max <= 3 * first_max + 0.25, stats
