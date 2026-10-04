@@ -124,17 +124,17 @@ async def test_forwarding_retries_connection_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forwarding_retries_transient_5xx_once() -> None:
+async def test_forwarding_does_not_retry_ambiguous_5xx() -> None:
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
     client._cached_proxy_url = "http://old"
     client._resolve_proxy_url = AsyncMock(side_effect=["http://old", "http://new"])
-    expected = object()
-    client._forward = AsyncMock(side_effect=[TransientInferenceError("503 from router"), expected])
+    client._forward = AsyncMock(side_effect=TransientInferenceError("500 from router after backend timeout"))
 
-    result = await client._forward_with_retry(object(), "model", base_model=None)
+    with pytest.raises(TransientInferenceError, match="backend timeout"):
+        await client._forward_with_retry(object(), "model", base_model=None)
 
-    assert result is expected
-    assert client._forward.await_count == 2
+    client._forward.assert_awaited_once()
+    client._resolve_proxy_url.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

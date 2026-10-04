@@ -125,14 +125,14 @@ class SkyRLTrainInferenceForwardingClient:
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> bytes:
         # Retry only failures where the request demonstrably did not execute:
-        # connect-phase errors and 5xx rejections from the router. Read and
-        # write failures are ambiguous: vLLM may still be executing the
+        # connect-phase errors. Router 5xx responses and read/write failures
+        # are ambiguous: vLLM may still be executing the
         # request, so retrying would duplicate generation load.
         try:
             try:
                 proxy_url = await self._resolve_proxy_url()
                 return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-            except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError, TransientInferenceError) as e:
+            except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as e:
                 logger.warning(
                     "Transient error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
                     self._cached_proxy_url,

@@ -429,6 +429,8 @@ def build_router_args(
         host=default_bind_host(get_node_ip()),
         port=port,
         policy="consistent_hash",
+        # Router transport timeouts can occur after generation has started.
+        disable_retries=True,
     )
 
     if is_pd:

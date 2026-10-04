@@ -110,6 +110,7 @@ class TestBuildRouterArgs:
         assert args.worker_urls == urls
         assert args.port == 30000
         assert args.policy == "consistent_hash"
+        assert args.disable_retries is True
         assert args.vllm_pd_disaggregation is False
 
     def test_pd_mode(self):
@@ -135,12 +136,17 @@ class TestBuildRouterArgs:
     def test_router_init_kwargs_override(self):
         cfg = SkyRLTrainConfig()
         ie_cfg = cfg.generator.inference_engine
-        cfg.generator.inference_engine.router_init_kwargs = {"policy": "round_robin", "request_timeout_secs": 60}
+        cfg.generator.inference_engine.router_init_kwargs = {
+            "policy": "round_robin",
+            "request_timeout_secs": 60,
+            "disable_retries": False,
+        }
         urls = ["http://w1:8000"]
         with patch("skyrl.backends.skyrl_train.inference_servers.common.get_open_port", return_value=30000):
             args = build_router_args(ie_cfg, server_urls=urls)
         assert args.policy == "round_robin"
         assert args.request_timeout_secs == 60
+        assert args.disable_retries is False
 
     def test_pd_mode_mooncake(self):
         cfg = SkyRLTrainConfig()
