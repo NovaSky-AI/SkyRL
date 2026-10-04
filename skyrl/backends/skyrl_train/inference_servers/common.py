@@ -127,29 +127,32 @@ def get_open_port(start_port: int | None = None) -> int:
         return s.getsockname()[1]
 
 
-def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
-    """Find an available port and hold the socket to prevent race conditions.
+def find_and_reserve_port(start_port: int, *, host: str = "0.0.0.0") -> Tuple[int, socket.socket]:
+    """Reserve a port on the server's bind address until the caller closes it.
 
-    This keeps the socket bound so no other process can claim the same port
-    between discovery and actual server startup.
+    IPv6 sockets retain the OS default, matching the native server listeners.
+    Closing the reservation before server startup still leaves a rebind race.
 
     Returns:
         (port, socket) -- caller must close the socket before rebinding.
     """
     port = start_port
     end_port = start_port + SERVER_PORT_STRIDE
+    addresses = socket.getaddrinfo(host, start_port, type=socket.SOCK_STREAM)
     sock: socket.socket | None = None
     while port < end_port:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", port))
-            sock.listen(1)
-            return port, sock
-        except OSError:
-            if sock:
-                sock.close()
-            port += 1
+        for family, socktype, proto, _, address in addresses:
+            sock = None
+            try:
+                sock = socket.socket(family, socktype, proto)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((address[0], port, *address[2:]))
+                sock.listen(1)
+                return port, sock
+            except OSError:
+                if sock is not None:
+                    sock.close()
+        port += 1
     raise RuntimeError(
         f"No available port found in [{start_port}, {end_port}). "
         f"Free up the port range or raise SERVER_PORT_STRIDE."
