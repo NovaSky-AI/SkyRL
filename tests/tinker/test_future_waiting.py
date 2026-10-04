@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import suppress
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -202,6 +203,7 @@ def _stub_request(async_engine, waiters, headers: dict | None = None):
             )
         ),
         headers=headers or {},
+        is_disconnected=AsyncMock(return_value=False),
     )
 
 

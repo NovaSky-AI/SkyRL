@@ -1787,6 +1787,9 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
             content = external_future_store.proto_result(request_id) if found_in_memory else None
             if content is None:
                 async with req.app.state.proto_serialization_lock:
+                    # Polls can disconnect while waiting for this lock or the result.
+                    if await req.is_disconnected():
+                        return Response(status_code=499)
                     content = external_future_store.proto_result(request_id) if found_in_memory else None
                     if content is None:
                         content = await asyncio.to_thread(

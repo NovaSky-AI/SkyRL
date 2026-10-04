@@ -16,6 +16,7 @@ import asyncio
 import sys
 from contextlib import suppress
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import aiohttp
 import numpy as np
@@ -38,6 +39,39 @@ from skyrl.tinker.external_future_store import ExternalFutureStore
 BASE_MODEL = "test-model"
 RETRIEVED_TTL_SECONDS = 1.0
 SWEEP_INTERVAL_SECONDS = 0.2
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="relies on uvicorn disconnect handling over a real socket")
+async def test_abandoned_persisted_poll_skips_serialization(served_app, monkeypatch):
+    """A poll that disconnects while queued must not encode an undeliverable result."""
+    result = types.ForwardBackwardOutput(loss_fn_output_type="scalar", loss_fn_outputs=[], metrics={})
+    entered = asyncio.Event()
+
+    async def completed_future(*args):
+        entered.set()
+        return RequestStatus.COMPLETED, types.RequestType.FORWARD, result.model_dump_json()
+
+    monkeypatch.setattr(api, "wait_for_future", completed_future)
+    serialize = Mock(wraps=api._serialize_proto_result)
+    monkeypatch.setattr(api, "_serialize_proto_result", serialize)
+    lock = api.app.state.proto_serialization_lock
+    async with aiohttp.ClientSession() as client:
+        async with lock:
+            with pytest.raises(asyncio.TimeoutError):
+                await client.post(
+                    f"{served_app.url}/retrieve_future",
+                    json={"request_id": "123"},
+                    timeout=aiohttp.ClientTimeout(total=0.3),
+                )
+            assert entered.is_set()
+            await asyncio.sleep(0.1)
+
+        # This live poll queues behind the abandoned one and still gets the result.
+        async with client.post(f"{served_app.url}/retrieve_future", json={"request_id": "123"}) as response:
+            assert response.status == 200
+            pb.ForwardBackwardOutput.FromString(await response.read())
+        assert serialize.call_count == 1
 
 
 class _GatedForwarder:
