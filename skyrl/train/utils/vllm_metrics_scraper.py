@@ -334,6 +334,8 @@ class VLLMMetricsScraper:
         # Ray counters skip zero increments. A live engine gauge confirms the exporter exists.
         if any(name == _GAUGE_NUM_RUNNING for name, _ in parsed):
             sums.setdefault(_COUNTER_PREEMPTIONS, 0.0)
+            sums.setdefault(_COUNTER_PROMPT_TOKENS, 0.0)
+            sums.setdefault(_COUNTER_GENERATION_TOKENS, 0.0)
         for hits, queries in (
             (_COUNTER_PREFIX_HITS, _COUNTER_PREFIX_QUERIES),
             (_COUNTER_EXTERNAL_PREFIX_HITS, _COUNTER_EXTERNAL_PREFIX_QUERIES),

@@ -700,6 +700,48 @@ ray_vllm_time_to_first_token_seconds_bucket{WorkerId="other",le="1"} 900
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sync", [False, True])
+async def test_cold_start_tokens_are_included_in_step_and_run_metrics(monkeypatch, sync):
+    phase = 0
+    now = 0.0
+    monkeypatch.setattr("skyrl.train.utils.vllm_metrics_scraper.time", Mock(monotonic=lambda: now))
+
+    def respond(request):
+        text = 'ray_vllm_num_requests_running{WorkerId="worker"} 0\n'
+        if phase:
+            generated, prompted = {1: (100, 200), 2: (300, 500)}[phase]
+            text += (
+                f'ray_vllm_generation_tokens_total{{WorkerId="worker"}} {generated}\n'
+                f'ray_vllm_prompt_tokens_total{{WorkerId="worker"}} {prompted}\n'
+            )
+        return httpx.Response(200, text=text)
+
+    scraper = VLLMMetricsScraper(urls=["http://test/metrics"], worker_ids=["worker"])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        scraper._client = client
+        if not sync:
+            await scraper.sample()
+        for next_phase, seconds in ((1, 2), (2, 8)):
+            if sync:
+                await scraper.start("vllm/train")
+            phase = next_phase
+            now += seconds
+            metrics = await scraper.stop() if sync else await scraper.sample()
+            if phase == 1:
+                prefix = "vllm/train/" if sync else "vllm/"
+                assert metrics[prefix + "generation_throughput_tok_s"] == 50
+                assert metrics[prefix + "prompt_throughput_tok_s"] == 100
+        summary = scraper.run_statistics.summary()
+
+    prefix = "vllm_correct_aggregate/train/" if sync else "vllm_correct_aggregate/combined/"
+    assert summary[prefix + "output_tokens_total"] == 300
+    assert summary[prefix + "prompt_tokens_total"] == 500
+    assert summary[prefix + "generation_throughput_tok_s"] == 30
+    assert summary[prefix + "prompt_throughput_tok_s"] == 50
+    assert summary[prefix + "measurement_seconds"] == 10
+
+
+@pytest.mark.asyncio
 async def test_failed_node_scrape_skips_partial_totals_and_reestablishes_baseline():
     step = 0
 
