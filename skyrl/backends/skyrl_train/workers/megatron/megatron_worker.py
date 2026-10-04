@@ -988,6 +988,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # micro-batching (when `max_tokens_per_microbatch > 0`) is handled inside
             # `_forward_logprobs`, which also reorders back to the original sample order.
             log_probs = self._forward_logprobs(data)
+            # All ranks must finish the forward collectives; only collection ranks return token arrays.
+            if not self.mesh_rank.is_collection_dp_rank():
+                return WorkerOutput()
             loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
             return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
@@ -1866,6 +1869,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         ``max_tokens_per_microbatch > 0``) is handled inside ``_forward_logprobs``.
         """
         log_probs = self._forward_logprobs(data)
+        if not self.mesh_rank.is_collection_dp_rank():
+            return WorkerOutput()
         loss_fn_outputs = [{"logprobs": log_probs[i].tolist()} for i in range(log_probs.shape[0])]
         return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
