@@ -22,6 +22,7 @@ import ray
 from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
+from skyrl.train.utils.vllm_run_statistics import RunStatistics
 from skyrl.train.utils.vllm_window_statistics import latency_metrics
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
@@ -39,6 +40,7 @@ _COUNTER_GENERATION_TOKENS = "ray_vllm_generation_tokens_total"
 _COUNTER_PREEMPTIONS = "ray_vllm_num_preemptions_total"
 _COUNTER_EXTERNAL_PREFIX_QUERIES = "ray_vllm_external_prefix_cache_queries_total"
 _COUNTER_EXTERNAL_PREFIX_HITS = "ray_vllm_external_prefix_cache_hits_total"
+_COUNTER_KV_OFFLOAD_STORE_BYTES = "ray_vllm_kv_offload_store_bytes_total"
 _COUNTER_KV_OFFLOAD_LOAD_BYTES = "ray_vllm_kv_offload_load_bytes_total"
 _HIST_TTFT_SUM = "ray_vllm_time_to_first_token_seconds_sum"
 _HIST_TTFT_COUNT = "ray_vllm_time_to_first_token_seconds_count"
@@ -69,6 +71,7 @@ _SUM_METRICS = (
     _COUNTER_PREEMPTIONS,
     _COUNTER_EXTERNAL_PREFIX_QUERIES,
     _COUNTER_EXTERNAL_PREFIX_HITS,
+    _COUNTER_KV_OFFLOAD_STORE_BYTES,
     _COUNTER_KV_OFFLOAD_LOAD_BYTES,
     _HIST_REQUEST_TPOT_SUM,
     _HIST_REQUEST_TPOT_COUNT,
@@ -211,6 +214,7 @@ class VLLMMetricsScraper:
         self._urls = urls if urls is not None else discover_ray_metrics_urls()
         self._timeout = request_timeout_s
         self._worker_ids = None if worker_ids is None else frozenset(worker_ids)
+        self.run_statistics = RunStatistics()
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
         self._client: Optional[httpx.AsyncClient] = None
@@ -306,6 +310,8 @@ class VLLMMetricsScraper:
                 counters = engine_counters.setdefault(engine, {})
                 counters[name] = counters.get(name, 0.0) + value
         self._engine_snapshot = engine_counters
+        if self._worker_ids is not None and {engine[0] for engine in engine_counters} != self._worker_ids:
+            return None
         buckets = {}
         schemas = {}
         for (name, labels), value in parsed.items():
@@ -334,7 +340,20 @@ class VLLMMetricsScraper:
         ):
             if queries in sums:
                 sums.setdefault(hits, 0.0)
+        if _COUNTER_KV_OFFLOAD_STORE_BYTES in sums:
+            sums.setdefault(_COUNTER_KV_OFFLOAD_LOAD_BYTES, 0.0)
         return {**sums, **means, **per_pos, **buckets}
+
+    async def finalize(self) -> Dict[str, float]:
+        """Attempt one final collection and close the HTTP client."""
+        try:
+            if self._label is not None:
+                await self.stop()
+            else:
+                await self.sample()
+            return self.run_statistics.summary()
+        finally:
+            await self.aclose()
 
     async def sample(self, generation_time_s: Optional[float] = None) -> Dict[str, float]:
         """Return ``vllm/...`` scalars for the current step (empty if unavailable).
@@ -345,6 +364,7 @@ class VLLMMetricsScraper:
         """
         snapshot = await self._read_snapshot()
         if snapshot is None:
+            self.run_statistics.incomplete.add("combined")
             self._prev_aggregated = None
             self._prev_timestamp = None
             self._previous_engines = {}
@@ -355,6 +375,7 @@ class VLLMMetricsScraper:
             dt = max(now - self._prev_timestamp, 1e-9)
             window = generation_time_s if (generation_time_s is not None and generation_time_s > 0) else dt
             out = self._window_metrics(self._prev_aggregated, snapshot, window, "vllm/")
+            self.run_statistics.add("combined", self._prev_aggregated, snapshot, window)
         else:
             out = self._window_metrics(None, snapshot, None, "vllm/")  # gauges only
 
@@ -418,6 +439,7 @@ class VLLMMetricsScraper:
         self._window_prev = None
         self._active_since = None
         self._paused = False
+        self.run_statistics.add(label.removeprefix("vllm/"), prev, new_snapshot, window)
         if new_snapshot is None:
             return {}
         result = self._window_metrics(prev, new_snapshot, window, f"{label}/")
