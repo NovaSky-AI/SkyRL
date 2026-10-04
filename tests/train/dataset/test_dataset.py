@@ -53,6 +53,33 @@ def test_prompt_dataset_filtering(mock_load_dataset, mock_tokenizer, sample_data
     assert extra == {"answer": "a1"}
 
 
+@patch("datasets.load_dataset")
+def test_prompt_filter_uses_generation_chat_template_kwargs(mock_load_dataset):
+    class ThinkingTokenizer:
+        def apply_chat_template(self, _prompt, *, enable_thinking=False, **kwargs):
+            assert kwargs["add_generation_prompt"] is True
+            assert kwargs["return_dict"] is False
+            assert kwargs["tokenize"] is True
+            return [1, 2, 3, 4] if enable_thinking else [1]
+
+    mock_load_dataset.return_value = {"train": Dataset.from_dict({"prompt": [[{"role": "user", "content": "hi"}]]})}
+
+    dataset = PromptDataset(
+        datasets=["dummy.parquet"],
+        tokenizer=ThinkingTokenizer(),
+        max_prompt_length=2,
+        num_workers=1,
+        chat_template_kwargs={
+            "enable_thinking": True,
+            "add_generation_prompt": False,
+            "return_dict": True,
+            "tokenize": False,
+        },
+    )
+
+    assert len(dataset) == 0
+
+
 def test_collate_fn():
     dataset = PromptDataset.__new__(PromptDataset)  # Bypass __init__
     sample_data = [("prompt 1", "env", {"answer": "a1"}, "1"), ("prompt 2", "env", {"answer": "a2"}, "2")]
