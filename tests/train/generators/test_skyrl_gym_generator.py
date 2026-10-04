@@ -2,6 +2,8 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator.py
 """
 
+import threading
+import time
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -152,6 +154,7 @@ def generator_cfg():
 def mock_env_cfg():
     cfg = MagicMock()
     cfg.max_env_workers = 0
+    cfg.parallel_env_steps = False
     cfg.env_class = "gsm8k"
     return cfg
 
@@ -874,6 +877,185 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert generator_output["rewards"][0] == 1.0
     assert generator_output["stop_reasons"][0] == "stop"
     assert generator_output["loss_masks"][0] == [1] * len(MOCK_LLM_OUTPUT_IDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_env_steps", [False, True])
+@patch("skyrl_gym.make")
+async def test_generate_batched_parallel_env_steps(
+    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg, parallel_env_steps
+):
+    """Sequential and parallel env.step paths produce identical batched outputs."""
+
+    def make_env():
+        env = MagicMock()
+        env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+        env.step.side_effect = lambda x: BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
+        )
+        env.close.return_value = None
+        env.get_metrics.return_value = {}
+        return env
+
+    mock_make.side_effect = lambda *args, **kwargs: make_env()
+    mock_env_cfg.parallel_env_steps = parallel_env_steps
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    prompts = [
+        [{"role": "user", "content": "What is 3 + 5?"}],
+        [{"role": "user", "content": "What is 4 + 6?"}],
+    ]
+    input_batch: GeneratorInput = {
+        "prompts": prompts,
+        "env_extras": [{"answer": "8"}, {"answer": "10"}],
+        "env_classes": [mock_env_cfg.env_class for _ in prompts],
+    }
+
+    output: GeneratorOutput = await generator.generate(input_batch)
+
+    assert len(output["response_ids"]) == 2
+    assert output["response_ids"][0] == MOCK_LLM_OUTPUT_IDS
+    assert output["response_ids"][1] == MOCK_LLM_OUTPUT_IDS
+    assert output["rewards"] == [1.0, 1.0]
+    assert output["loss_masks"] == [[1] * len(MOCK_LLM_OUTPUT_IDS)] * 2
+    assert output["stop_reasons"] == ["stop", "stop"]
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_batched_parallel_env_steps_closes_on_bookkeep_failure(
+    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    """Parallel mode closes all envs even when bookkeeping fails mid-loop."""
+    envs_created = []
+
+    def make_env():
+        env = MagicMock()
+        env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+        env.step.side_effect = lambda x: BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
+        )
+        env.close.return_value = None
+        if len(envs_created) == 1:
+            env.get_metrics.side_effect = RuntimeError("boom")
+        else:
+            env.get_metrics.return_value = {}
+        envs_created.append(env)
+        return env
+
+    mock_make.side_effect = lambda *args, **kwargs: make_env()
+    mock_env_cfg.parallel_env_steps = True
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch: GeneratorInput = {
+        "prompts": [
+            [{"role": "user", "content": "What is 3 + 5?"}],
+            [{"role": "user", "content": "What is 4 + 6?"}],
+        ],
+        "env_extras": [{"answer": "8"}, {"answer": "10"}],
+        "env_classes": [mock_env_cfg.env_class, mock_env_cfg.env_class],
+    }
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await generator.generate(input_batch)
+
+    assert len(envs_created) == 2
+    assert all(env.close.called for env in envs_created)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
+    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+):
+    """Parallel mode settles in-flight steps before closing envs when a step fails."""
+    envs_created = []
+    sibling_in_step = threading.Event()
+    failing_env_ready = threading.Event()
+    steps_in_flight = 0
+    steps_lock = threading.Lock()
+    # Record violations here; do not assert inside close_fn — the production
+    # close gather uses return_exceptions=True and would swallow AssertionError.
+    close_during_step: list[int] = []
+
+    def make_env():
+        env = MagicMock()
+        env_idx = len(envs_created)
+        env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+        def step_fn(x):
+            nonlocal steps_in_flight
+            with steps_lock:
+                steps_in_flight += 1
+            try:
+                if env_idx == 0:
+                    sibling_in_step.set()
+                    failing_env_ready.wait(timeout=2.0)
+                    raise RuntimeError("step boom")
+                sibling_in_step.wait(timeout=2.0)
+                failing_env_ready.set()
+                time.sleep(0.1)
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
+                )
+            finally:
+                with steps_lock:
+                    steps_in_flight -= 1
+
+        def close_fn():
+            with steps_lock:
+                if steps_in_flight > 0:
+                    close_during_step.append(env_idx)
+
+        env.step.side_effect = step_fn
+        env.close.side_effect = close_fn
+        env.get_metrics.return_value = {}
+        envs_created.append(env)
+        return env
+
+    mock_make.side_effect = lambda *args, **kwargs: make_env()
+    mock_env_cfg.parallel_env_steps = True
+    mock_env_cfg.max_env_workers = 2
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    generator.base_conversation_token_ids = []
+
+    input_batch: GeneratorInput = {
+        "prompts": [
+            [{"role": "user", "content": "What is 3 + 5?"}],
+            [{"role": "user", "content": "What is 4 + 6?"}],
+        ],
+        "env_extras": [{"answer": "8"}, {"answer": "10"}],
+        "env_classes": [mock_env_cfg.env_class, mock_env_cfg.env_class],
+    }
+
+    with pytest.raises(RuntimeError, match="step boom"):
+        await generator.generate(input_batch)
+
+    assert close_during_step == [], (
+        f"close overlapped in-flight step on env(s) {close_during_step}"
+    )
+    assert len(envs_created) == 2
+    assert all(env.close.called for env in envs_created)
 
 
 @pytest.mark.asyncio
