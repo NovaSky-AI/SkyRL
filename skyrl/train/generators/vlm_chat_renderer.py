@@ -1,49 +1,27 @@
-"""Chat renderers that turn messages into token ids for ``SkyRLGymGenerator``'s agent loop.
+"""Renders chat messages through the inference server for ``SkyRLVLMGymGenerator``.
 
-``HFTokenizerRenderer`` applies the chat template with the local tokenizer and is used for text
-rollouts. ``VLLMChatRenderer`` renders through the inference server's
-``/v1/chat/completions/render`` and is used when ``generator.vision_language_generator=True``: the
-number of image placeholder tokens is only known after the model's image processor runs.
-
-Both keep the rollout token-in-token-out. Observations are rendered after a fixed base conversation
-and only the suffix is appended, so earlier turns are never re-rendered. Follows
+``VLLMChatRenderer`` renders through ``/v1/chat/completions/render``, since the number of image
+placeholder tokens is only known after the model's image processor runs. Observations are rendered
+after a fixed base conversation and only the suffix is appended, so earlier turns are never
+re-rendered and the rollout stays token-in-token-out. This is the same approach
+``SkyRLGymGenerator.get_obs_ids_from_obs`` uses with the local tokenizer. Follows
 https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
 """
 
 import asyncio
 import copy
-from typing import Any, Dict, List, NamedTuple, Optional, Protocol
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     MultiModalFeatures,
 )
-from skyrl.train.generators.utils import get_generation_prompt_ids
 
 
 class RenderedTokens(NamedTuple):
     token_ids: List[int]
     # Placeholder offsets are relative to ``token_ids``.
     features: Optional[MultiModalFeatures]
-
-
-class ChatRenderer(Protocol):
-    async def render_prompt(
-        self,
-        messages: ConversationType,
-        add_generation_prompt: bool = True,
-        chat_template: Optional[str] = None,
-    ) -> RenderedTokens:
-        """Render a whole conversation."""
-        ...
-
-    async def render_observation(self, new_obs: ConversationType, is_done: bool) -> RenderedTokens:
-        """Render observation messages as they follow an assistant turn.
-
-        Returns the observation tokens (plus the generation prompt unless ``is_done``) and their
-        features, with placeholder offsets relative to the returned tokens.
-        """
-        ...
 
 
 def _num_placeholders(features: Optional[MultiModalFeatures]) -> int:
@@ -129,91 +107,11 @@ def truncate_mm_features(features: Optional[MultiModalFeatures], num_tokens: int
     return kept if kept["mm_placeholders"] else None
 
 
-class HFTokenizerRenderer:
-    """Renders with the local tokenizer's chat template. Never returns multi-modal features."""
-
-    def __init__(
-        self,
-        tokenizer: Any,
-        base_conversation: ConversationType,
-        use_conversation_multi_turn: bool,
-        chat_template_kwargs: Optional[Dict[str, Any]] = None,
-    ):
-        """
-        Args:
-            tokenizer: HF tokenizer.
-            base_conversation: fixed conversation that observations are rendered after.
-            use_conversation_multi_turn: if True, observations are chat-templated user messages;
-                otherwise their content is encoded directly, to continue the assistant message.
-            chat_template_kwargs: forwarded to ``apply_chat_template``.
-        """
-        self.tokenizer = tokenizer
-        self.base_conversation = base_conversation
-        self.use_conversation_multi_turn = use_conversation_multi_turn
-        self.chat_template_kwargs = dict(chat_template_kwargs or {})
-        # get generation prompt ids for the tokenizer if needed
-        self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if use_conversation_multi_turn else None
-        self.base_conversation_token_ids = tokenizer.apply_chat_template(
-            base_conversation,
-            add_generation_prompt=False,
-            tokenize=True,
-            return_dict=False,
-            **self.chat_template_kwargs,
-        )
-        # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
-        # For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator#multi-turn-tokenization-and-ti-to
-        self.base_conversation_token_ids = _trim_after_last_eos(
-            self.base_conversation_token_ids, tokenizer.eos_token_id
-        )
-
-    async def render_prompt(
-        self,
-        messages: ConversationType,
-        add_generation_prompt: bool = True,
-        chat_template: Optional[str] = None,
-    ) -> RenderedTokens:
-        token_ids = self.tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=add_generation_prompt,
-            chat_template=chat_template,
-            tokenize=True,
-            return_dict=False,
-            **self.chat_template_kwargs,
-        )
-        return RenderedTokens(token_ids=token_ids, features=None)
-
-    async def render_observation(self, new_obs: ConversationType, is_done: bool) -> RenderedTokens:
-        if self.use_conversation_multi_turn:
-            # 2. apply chat template for observations, also generate generation prompt for next turn
-            obs_ids_to_add = []
-            if len(new_obs) > 0:
-                # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
-                # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-                obs_ids_to_add = self.tokenizer.apply_chat_template(
-                    [*self.base_conversation, *new_obs],
-                    add_generation_prompt=not is_done,
-                    tokenize=True,
-                    return_dict=False,
-                    **self.chat_template_kwargs,
-                )[len(self.base_conversation_token_ids) :]
-            elif not is_done:
-                obs_ids_to_add = self.generation_prompt_ids
-        else:
-            # Build observation token ids (encoded directly, not using chat template)
-            # no generation prompt is added in this case
-            obs_ids_to_add = []
-            if len(new_obs) > 0:
-                for obs in new_obs:
-                    obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
-                    obs_ids_to_add.extend(obs_tokens)
-        return RenderedTokens(token_ids=obs_ids_to_add, features=None)
-
-
 class VLLMChatRenderer:
     """Renders chat messages into token ids and multi-modal features via the inference server.
 
     Observations are rendered as ``[*base_conversation, *new_obs]`` and the tokens after the
-    rendered base are kept, the same fixed-base approach ``HFTokenizerRenderer.render_observation``
+    rendered base are kept, the same fixed-base approach ``SkyRLGymGenerator.get_obs_ids_from_obs``
     uses with the local tokenizer. Two checks guard the slice on every observation: the render must
     start with the rendered base, and no placeholder may fall inside the base.
 
@@ -249,12 +147,8 @@ class VLLMChatRenderer:
         self._image_position_checked = False
         self._lock = asyncio.Lock()
 
-    async def _render(
-        self, messages: ConversationType, add_generation_prompt: bool, chat_template: Optional[str] = None
-    ) -> RenderedTokens:
+    async def _render(self, messages: ConversationType, add_generation_prompt: bool) -> RenderedTokens:
         body: Dict[str, Any] = {"messages": messages, "add_generation_prompt": add_generation_prompt}
-        if chat_template is not None:
-            body["chat_template"] = chat_template
         if self._model_name is not None:
             body["model"] = self._model_name
         if self._chat_template_kwargs:
@@ -331,19 +225,18 @@ class VLLMChatRenderer:
                 "Remove the option from `generator.chat_template_kwargs`."
             )
 
-    async def render_prompt(
-        self,
-        messages: ConversationType,
-        add_generation_prompt: bool = True,
-        chat_template: Optional[str] = None,
-    ) -> RenderedTokens:
-        rendered = await self._render(
-            messages, add_generation_prompt=add_generation_prompt, chat_template=chat_template
-        )
+    async def render_prompt(self, messages: ConversationType, add_generation_prompt: bool = True) -> RenderedTokens:
+        """Render a whole conversation."""
+        rendered = await self._render(messages, add_generation_prompt=add_generation_prompt)
         features = rendered.features if _num_placeholders(rendered.features) else None
         return RenderedTokens(token_ids=rendered.token_ids, features=features)
 
     async def render_observation(self, new_obs: ConversationType, is_done: bool) -> RenderedTokens:
+        """Render observation messages as they follow an assistant turn.
+
+        Returns the observation tokens (plus the generation prompt unless ``is_done``) and their
+        features, with placeholder offsets relative to the returned tokens.
+        """
         if not new_obs and is_done:
             return RenderedTokens(token_ids=[], features=None)
         base_ids = await self._get_base_token_ids()

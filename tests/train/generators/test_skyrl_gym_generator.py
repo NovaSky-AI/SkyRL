@@ -328,7 +328,7 @@ async def test_cache_salt_threaded_to_engine_input(
         tokenizer=mock_tokenizer,
         policy_model_name=policy_model_name,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     input_batch = {
         "prompts": [[{"role": "user", "content": "What is 2 + 2?"}]],
@@ -400,7 +400,7 @@ async def test_agent_loop_single_turn(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "What is 2 + 2?"}]
     extras = {"answer": "4"}
@@ -495,7 +495,7 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     output = await generator.agent_loop(
         [{"role": "user", "content": "Start"}],
@@ -564,7 +564,7 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     input_batch: GeneratorInput = {
         "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
@@ -711,7 +711,7 @@ async def test_generate_retains_routed_experts_only_for_the_train_phase(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     input_batch: GeneratorInput = {
         "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
@@ -771,7 +771,7 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     output = await generator.agent_loop(
         [{"role": "user", "content": "Start"}],
@@ -825,7 +825,7 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     output = await generator.agent_loop(
         [{"role": "user", "content": "Start"}],
@@ -855,7 +855,7 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompts = [[{"role": "user", "content": "What is 3 + 5?"}]]
     env_extras = [{"answer": "8"}]
@@ -894,7 +894,7 @@ async def test_generate_batched_metrics_use_truncated_responses(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     input_batch: GeneratorInput = {
         "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
@@ -930,7 +930,7 @@ async def test_generate_interface_compliance(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # Create test data based on batched mode
     if batched:
@@ -1052,7 +1052,7 @@ async def test_length_limit_exceeded_during_conversation(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "Start conversation"}]
     extras = {"test": "value"}
@@ -1141,7 +1141,7 @@ async def test_multi_turn_response_truncation(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "Initial prompt"}]
     extras = {}
@@ -1222,7 +1222,7 @@ async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mo
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     prompt = [{"role": "user", "content": "Initial input"}]
     env_extras = {}
@@ -1285,7 +1285,7 @@ async def test_apply_overlong_filtering_non_batched(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # First test: response that doesn't end with eos token (should be filtered)
     async def llm_generate_side_effect(input_batch, model=None):
@@ -1406,7 +1406,7 @@ async def test_apply_overlong_filtering_batched(
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
     # Test batched mode with response that doesn't end with eos token
     prompts = [[{"role": "user", "content": "Test prompt"}]]
@@ -1596,7 +1596,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
         tokenizer=mock_tokenizer,
     )
     # Ensure base_conversation_token_ids doesn't shift observation slicing in test
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     prompt = [{"role": "user", "content": "Q?"}]
     extras = {}
@@ -1864,7 +1864,7 @@ async def test_step_wise_trajectories_trajectory_ids(mock_make, mock_tokenizer, 
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     # Create input with trajectory_ids
     prompts = [[{"role": "user", "content": "Q1?"}], [{"role": "user", "content": "Q2?"}]]
@@ -1981,7 +1981,7 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     # Create input with trajectory_ids
     prompts = [[{"role": "user", "content": "Q?"}]]
@@ -2142,7 +2142,7 @@ async def test_step_wise_trajectory_completion_time_metrics(mock_make, mock_toke
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     num_trajectories = 2
     prompts = [[{"role": "user", "content": f"Q{i}?"}] for i in range(num_trajectories)]
@@ -2283,7 +2283,7 @@ async def test_llm_vs_env_time_split_metrics(mock_make, mock_tokenizer, mock_llm
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
     )
-    generator.renderer.base_conversation_token_ids = []
+    generator.base_conversation_token_ids = []
 
     num_trajectories = 2
     prompts = [[{"role": "user", "content": f"Q{i}?"}] for i in range(num_trajectories)]

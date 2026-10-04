@@ -1,5 +1,5 @@
 """
-GPU E2E test for SkyRLGymGenerator with `generator.vision_language_generator=True`.
+GPU E2E test for SkyRLVLMGymGenerator.
 
 Requires a local vLLM install with multi-modal /inference/v1/generate support.
 
@@ -22,7 +22,7 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
 )
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
 from skyrl_gym.envs import deregister, register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
@@ -186,7 +186,7 @@ async def test_vlm_generator_color_classification(ray_init_fixture):
         env_cfg = cfg.environment.skyrl_gym
         generator_cfg = cfg.generator
 
-        generator = SkyRLGymGenerator(
+        generator = SkyRLVLMGymGenerator(
             generator_cfg=generator_cfg,
             skyrl_gym_cfg=env_cfg,
             inference_engine_client=inference_client,

@@ -1386,9 +1386,9 @@ class GeneratorConfig(BaseConfig):
     trajectory. Advantages are computed from the last step of each trajectory and propagated to the previous steps. See
     https://docs.skyrl.ai/docs/tutorials/step-wise-training"""
     vision_language_generator: bool = False
-    """If True, render the prompt and environment observations through the inference server's
-    ``/v1/chat/completions/render`` endpoint so image content parts become image placeholder tokens
-    and features (multi-modal text+image rollouts). Rollouts stay token-in-token-out."""
+    """If True, use SkyRLVLMGymGenerator (multi-modal text+image rollouts). The prompt and each
+    observation are rendered through the inference server's ``/v1/chat/completions/render`` and
+    rollouts stay token-in-token-out."""
     vision_language_rerender_check: bool = False
     """Debug check for ``vision_language_generator``: at the end of each trajectory, re-render the
     whole conversation and log a warning if its tokens differ from the token-in-token-out
@@ -1889,6 +1889,9 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
             if self.generator.vision_language_generator:
                 raise ValueError("sample-support capture does not support vision_language_generator")
+
+        if self.generator.vision_language_rerender_check and not self.generator.vision_language_generator:
+            raise ValueError("`vision_language_rerender_check=True` requires `vision_language_generator=True`.")
 
         # The VLM generator does not populate routed-expert indices.
         if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:

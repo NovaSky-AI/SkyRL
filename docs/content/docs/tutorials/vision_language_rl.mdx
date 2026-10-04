@@ -39,7 +39,7 @@ generator.vision_language_generator=true \
 trainer.remove_microbatch_padding=false \
 ```
 
-- **`generator.vision_language_generator=true`** — Renders the prompt and each environment observation through the inference server's `/v1/chat/completions/render` endpoint, so `image_url` content parts become image placeholder tokens and image features. Rollouts stay token-in-token-out: each observation is rendered on its own and appended, and the image features for the whole trajectory are sent with every generation request and passed to the trainer.
+- **`generator.vision_language_generator=true`** — Switches from the default gym generator to a VLM generator, which renders the prompt and each environment observation through the inference server's `/v1/chat/completions/render` endpoint so that `image_url` content parts become image placeholder tokens and image features. Rollouts stay token-in-token-out: each observation is rendered on its own and appended, and the image features for the whole trajectory are sent with every generation request and passed to the trainer.
 - **`trainer.remove_microbatch_padding=false`** — sample packing is currently unsupported for VLM training (see callout below).
 
 <Callout type="info">

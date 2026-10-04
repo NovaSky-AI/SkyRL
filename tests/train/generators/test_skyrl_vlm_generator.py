@@ -1,5 +1,5 @@
 """
-CPU tests for SkyRLGymGenerator with ``generator.vision_language_generator=True``.
+CPU tests for SkyRLVLMGymGenerator.
 
 The inference server's ``/v1/chat/completions/render`` is mocked with the model's HF chat template.
 Each image expands to ``IMAGE_TOKENS`` placeholder tokens and carries its URL as its hash and
@@ -23,20 +23,20 @@ from skyrl.train.config import (
     SkyRLGymConfig,
 )
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
-from skyrl.train.generators.chat_renderer import (
+from skyrl.train.generators.skyrl_vlm_generator import SkyRLVLMGymGenerator
+from skyrl.train.generators.vlm_chat_renderer import (
     VLLMChatRenderer,
     append_mm_features,
     shift_mm_features,
     truncate_mm_features,
 )
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_gym.envs import deregister, register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.registration import registry
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 IMAGE_TOKENS = 4
-DECODE_MM_KWARGS = "skyrl.backends.renderer.decode_mm_kwargs"
+DECODE_MM_KWARGS = "skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs"
 
 
 def _image_message(url: str, text: str) -> Dict[str, Any]:
@@ -204,13 +204,13 @@ class MockLLM:
         }
 
 
-def _build_generator(tokenizer, render: MockRenderServer, llm: MockLLM, **cfg_overrides) -> SkyRLGymGenerator:
+def _build_generator(tokenizer, render: MockRenderServer, llm: MockLLM, **cfg_overrides) -> SkyRLVLMGymGenerator:
     mock_client = MagicMock()
     mock_client.model_name = MODEL_NAME
     mock_client.finish_session = AsyncMock()
     mock_client.render_chat_completion = AsyncMock(side_effect=render.__call__)
     mock_client.generate = AsyncMock(side_effect=llm.__call__)
-    return SkyRLGymGenerator(
+    return SkyRLVLMGymGenerator(
         generator_cfg=_generator_cfg(**cfg_overrides),
         skyrl_gym_cfg=SkyRLGymConfig(max_env_workers=0),
         inference_engine_client=mock_client,
@@ -242,10 +242,10 @@ def _fake_decode(kwargs_data):
 @pytest.mark.parametrize(
     "overrides, match",
     [
-        ({"step_wise_trajectories": True}, "step_wise_trajectories"),
+        ({"step_wise_trajectories": True}, "step-wise"),
         ({"use_conversation_multi_turn": False}, "use_conversation_multi_turn"),
         ({"chat_template": ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")}, "custom chat"),
-        ({"vision_language_generator": False, "vision_language_rerender_check": True}, "rerender_check"),
+        ({"batched": True}, "batched"),
     ],
 )
 def test_vlm_validate_cfg_refusals(tokenizer, overrides, match):
@@ -427,35 +427,6 @@ async def test_vlm_rerender_check_logs_a_mismatch(_mock_decode, tokenizer):
     finally:
         logger.remove(handler_id)
     assert any("differs from the token-in-token-out sequence" in m for m in messages)
-
-
-@pytest.mark.asyncio
-@patch(DECODE_MM_KWARGS, side_effect=_fake_decode)
-async def test_vlm_generate_batched(_mock_decode, tokenizer):
-    """Batched generation renders each prompt through /render and sends and returns its images."""
-    render, llm = MockRenderServer(tokenizer), MockLLM(tokenizer)
-    generator = _build_generator(tokenizer, render, llm, batched=True, max_turns=1)
-    prompts = [
-        [_image_message("img://a", "first")],
-        [{"role": "user", "content": "text only"}],
-        [_image_message("img://b", "second"), _image_message("img://c", "third")],
-    ]
-    output: GeneratorOutput = await generator.generate(
-        {"prompts": prompts, "env_extras": [{}] * 3, "env_classes": ["cpu_vlm_test_env"] * 3}
-    )
-
-    assert len(llm.requests) == 1
-    request = llm.requests[0]
-    assert request["prompt_token_ids"] == output["prompt_token_ids"]
-    expected_urls = [["img://a"], [], ["img://b", "img://c"]]
-    for prompt_ids, features, urls in zip(request["prompt_token_ids"], request["mm_features"], expected_urls):
-        if not urls:
-            assert features is None
-            continue
-        assert features["mm_placeholders"]["image"] == _placeholder_runs(prompt_ids, render.image_pad_id)
-        assert features["mm_hashes"]["image"] == urls
-    assert output["pixel_values"] == [["kwargs:img://a"], None, ["kwargs:img://b", "kwargs:img://c"]]
-    assert output["response_ids"] == [llm.response_ids] * 3
 
 
 # ---------------------------------------------------------------------------
