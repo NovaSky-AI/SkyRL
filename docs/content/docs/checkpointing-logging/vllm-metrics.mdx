@@ -126,8 +126,7 @@ variable. SkyRL forwards the token to Ray without logging its value.
 In the dashboard's annotation settings, add a Grafana organization query
 filtered by the `skyrl-run` tag and show it on all panels. The region covers
 startup through finalization. `organization_id` can override the head's
-`RAY_GRAFANA_ORG_ID` setting, which defaults to 1. `timeout_seconds` controls
-the HTTP timeout; each head task allows an additional 10 seconds for startup.
+`RAY_GRAFANA_ORG_ID` setting, which defaults to 1.
 Annotation failures do not stop training. A failed start request or hard kill
 can leave an annotation without an end time.
 

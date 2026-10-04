@@ -9,6 +9,8 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from skyrl.utils.grafana import request_from_head
 
+_HTTP_TIMEOUT_SECONDS = 5.0
+
 
 class GrafanaRunAnnotation:
     """Create a start marker and update it to a region on finalization."""
@@ -40,12 +42,12 @@ class GrafanaRunAnnotation:
                 payload,
                 self.config.token_env_var,
                 self.config.organization_id,
-                self.config.timeout_seconds,
+                _HTTP_TIMEOUT_SECONDS,
             )
         )
         try:
             # Allow extra time for Ray to schedule the head task and start its worker.
-            return ray.get(task, timeout=self.config.timeout_seconds + 10)
+            return ray.get(task, timeout=_HTTP_TIMEOUT_SECONDS + 10)
         except ray.exceptions.GetTimeoutError:
             ray.cancel(task, force=True)
             raise

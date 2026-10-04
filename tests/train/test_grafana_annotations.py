@@ -65,9 +65,10 @@ def head_dispatch(monkeypatch):
     return task, decorator
 
 
-def test_requests_run_on_live_head_with_hard_affinity(head_dispatch):
+def test_requests_run_on_live_head_with_hard_affinity(head_dispatch, monkeypatch):
     task, decorator = head_dispatch
-    config = GrafanaAnnotationsConfig(enabled=True, timeout_seconds=2)
+    monkeypatch.setattr("skyrl.train.utils.grafana_annotations._HTTP_TIMEOUT_SECONDS", 2)
+    config = GrafanaAnnotationsConfig(enabled=True)
     annotation = GrafanaRunAnnotation(config, "worker-trainer")
     payload = annotation._payload()
 
@@ -123,9 +124,9 @@ def test_head_http_uses_backend_env_and_organization(
     monkeypatch.setattr(grafana.httpx, "Client", client_factory)
 
     assert grafana.request_from_head(
-        "POST", "/api/annotations", {"text": "run"}, config.token_env_var, override, config.timeout_seconds
+        "POST", "/api/annotations", {"text": "run"}, config.token_env_var, override, 5
     ) == {"id": 42}
-    client_factory.assert_called_once_with(timeout=config.timeout_seconds)
+    client_factory.assert_called_once_with(timeout=5)
     assert len(requests) == 1
     assert str(requests[0].url) == expected_url
     assert requests[0].headers["X-Grafana-Org-Id"] == expected_org

@@ -1460,8 +1460,6 @@ class GrafanaAnnotationsConfig(BaseConfig):
     """Organization override; otherwise use the head's RAY_GRAFANA_ORG_ID (default 1)."""
     tags: List[str] = field(default_factory=list)
     """Additional annotation tags, such as a cluster name."""
-    timeout_seconds: float = 5.0
-    """HTTP timeout per request."""
 
 
 @dataclass
