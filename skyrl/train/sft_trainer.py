@@ -72,6 +72,7 @@ from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
     cleanup_old_checkpoints,
     extract_step_from_path,
+    shutdown_dataloader,
     validate_consistency_for_latest_checkpoint,
 )
 from skyrl.train.utils.utils import ResolvedPlacementGroup, Timer
@@ -2246,13 +2247,25 @@ class SFTTrainer:
     # ------------------------------------------------------------------ #
 
     def shutdown(self):
-        """Finish tracking.
+        """Stop DataLoader workers and finish tracking.
 
         Does NOT call ``ray.shutdown()`` -- when running inside a Ray task
         (the normal path via ``sft_entrypoint``), shutting down Ray from
         within the task would be incorrect.  The head-node process owns
         the Ray lifecycle.
         """
+        try:
+            shutdown_dataloader(self.train_dataloader)
+        except Exception:
+            logger.exception("Failed to shut down train DataLoader workers")
+
+        if self.eval_dataloaders is not None:
+            for name, dataloader in self.eval_dataloaders:
+                try:
+                    shutdown_dataloader(dataloader)
+                except Exception:
+                    logger.exception(f"Failed to shut down eval/{name} DataLoader workers")
+
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.stop()
         if self.tracker is not None:
