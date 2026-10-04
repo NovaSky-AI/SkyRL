@@ -421,7 +421,8 @@ class VLLMMetricsScraper:
         if new_snapshot is None:
             return {}
         result = self._window_metrics(prev, new_snapshot, window, f"{label}/")
-        result.update(engine_imbalance(self._window_engines, self._engine_snapshot, f"{label}/"))
+        if prev is not None:
+            result.update(engine_imbalance(self._window_engines, self._engine_snapshot, f"{label}/"))
         return result
 
     @classmethod
