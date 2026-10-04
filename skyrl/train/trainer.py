@@ -245,7 +245,9 @@ class RayPPOTrainer:
         try:
             if self._vllm_metrics_scraper is not None:
                 summary = await asyncio.wait_for(self._vllm_metrics_scraper.finalize(), timeout=10)
-                if not self._resumed_from_checkpoint and not self.cfg.generator.inference_engine.enable_pd:
+                if not self._resumed_from_checkpoint and (
+                    not self.cfg.generator.inference_engine.enable_pd or self._vllm_metrics_scraper.has_worker_roles
+                ):
                     self.tracker.update_summary(summary)
         except Exception as e:
             logger.warning(f"Could not finalize vLLM metrics: {e}")
