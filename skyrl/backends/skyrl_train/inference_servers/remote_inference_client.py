@@ -53,6 +53,7 @@ from enum import Enum
 from typing import (
     Any,
     Dict,
+    Iterable,
     List,
     Literal,
     Optional,
@@ -64,6 +65,8 @@ from typing import (
 
 import aiohttp
 import orjson
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
@@ -102,6 +105,49 @@ _TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+class InferenceServerHTTPError(aiohttp.ClientResponseError):
+    """A picklable ``ClientResponseError`` for an HTTP error from an inference server.
+
+    aiohttp's own error holds ``CIMultiDictProxy`` request info and headers, which can't be pickled, so Ray
+    replaces it with a bare ``RayError``. This keeps only plain fields and rebuilds the rest on unpickle.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        url: str,
+        status: int,
+        message: str,
+        headers: Optional[Iterable[Tuple[str, str]]] = None,
+    ) -> None:
+        request_info = aiohttp.RequestInfo(URL(url), method, CIMultiDictProxy(CIMultiDict()), URL(url))
+        super().__init__(request_info, (), status=status, message=message, headers=CIMultiDict(headers or ()))
+
+    @classmethod
+    def from_response(cls, resp: aiohttp.ClientResponse, message: str) -> "InferenceServerHTTPError":
+        return cls(resp.method, str(resp.url), resp.status, message, resp.headers.items())
+
+    def __reduce__(self):
+        # ClientResponseError forces args=(request_info, history), so the default reduce can't rebuild it.
+        args = (
+            self.request_info.method,
+            str(self.request_info.url),
+            self.status,
+            self.message,
+            list(self.headers.items()),
+        )
+        notes = getattr(self, "__notes__", None)
+        return type(self), args, {"__notes__": notes} if notes else None
+
+
+async def _read_json_body(resp: aiohttp.ClientResponse) -> Any:
+    """``resp.json()``, raising a picklable :class:`InferenceServerHTTPError` on a non-JSON body."""
+    try:
+        return await resp.json()
+    except aiohttp.ContentTypeError:
+        raise InferenceServerHTTPError.from_response(resp, await resp.text() or resp.reason) from None
 
 
 def _extract_session_id_and_body(
@@ -239,13 +285,7 @@ class RemoteGenerateClient:
                     except orjson.JSONDecodeError as exc:
                         if 400 <= resp.status < 500:
                             text = await resp.text()
-                            raise aiohttp.ClientResponseError(
-                                resp.request_info,
-                                resp.history,
-                                status=resp.status,
-                                message=text or resp.reason,
-                                headers=resp.headers,
-                            ) from exc
+                            raise InferenceServerHTTPError.from_response(resp, text or resp.reason) from exc
                         last_exc = exc
                         # The bare JSONDecodeError says only "line 1 column 1 (char 0)", which
                         # gives no hint whether the body was empty, an HTML error page, or a
@@ -1106,7 +1146,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
         async with session.request(method, url, json=json, params=params) as resp:
-            body = await resp.json() if resp.content_length else None
+            body = await _read_json_body(resp) if resp.content_length else None
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
 
@@ -1362,7 +1402,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             )
             async with session.post(url, json=payload) as resp:
                 if resp.status >= 400:
-                    body = await resp.json()
+                    body = await _read_json_body(resp)
                     raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
@@ -1396,7 +1436,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             url = f"{server_url}/v1/unload_lora_adapter"
             async with session.post(url, json=payload) as resp:
                 if resp.status >= 400:
-                    body = await resp.json()
+                    body = await _read_json_body(resp)
                     raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
@@ -1513,18 +1553,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:
     """Modified version of resp.raise_for_status() that reads the body for the error message.
 
-    Raises aiohttp.ClientResponseError with the error message from the body if there is an error
+    Raises InferenceServerHTTPError (a picklable aiohttp.ClientResponseError) with the error message from the body if there is an error
 
     The standard `raise_for_status()` only uses the HTTP reason phrase (e.g. "Bad Request"), which is often unhelpful. APIs typically put more descriptive error details in the response body. This function bridges that gap by surfacing the body's error message in the exception.
     """
-    if resp.status >= 400 and body is not None:
-        error_detail = body.get("error", {})
+    if resp.status >= 400:
+        error_detail = body.get("error", {}) if isinstance(body, dict) else {}
         detail_msg = error_detail.get("message", resp.reason) if isinstance(error_detail, dict) else resp.reason
-        raise aiohttp.ClientResponseError(
-            resp.request_info,
-            resp.history,
-            status=resp.status,
-            message=detail_msg,
-            headers=resp.headers,
-        )
-    resp.raise_for_status()
+        raise InferenceServerHTTPError.from_response(resp, detail_msg)

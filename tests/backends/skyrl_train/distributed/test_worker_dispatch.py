@@ -129,21 +129,25 @@ class TestSaveWeights:
 
     @pytest.mark.asyncio
     async def test_non_colocated_resumes_on_broadcast_failure(self):
-        """resume_generation must be called even if broadcast raises."""
+        """A failed resume must not hide the broadcast failure."""
         from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
         dispatch.cfg = _fft_dispatch_cfg()
         dispatch._inference_engine_client = AsyncMock()
-        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=RuntimeError("broadcast failed"))
+        dispatch._inference_engine_client.resume_generation.side_effect = ConnectionError("resume failed")
+        primary = RuntimeError("broadcast failed")
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=primary)
         dispatch._prepare_for_weight_sync = AsyncMock()
         dispatch._finish_weight_sync = MagicMock()
         dispatch.ensure_active_adapter = MagicMock()
 
-        with pytest.raises(RuntimeError, match="broadcast failed"):
+        with pytest.raises(RuntimeError) as exc_info:
             await dispatch.save_weights_for_sampler()
 
+        assert exc_info.value is primary
+        assert "resume_generation also failed during cleanup: ConnectionError('resume failed')" in primary.__notes__
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
 
