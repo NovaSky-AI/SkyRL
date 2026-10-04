@@ -21,7 +21,7 @@ from skyrl.utils.log import logger
 
 
 class TransientInferenceError(RuntimeError):
-    """A 5xx from vllm-router/vLLM: the request was rejected, not executed, so it is safe to retry."""
+    """A router/backend 5xx; generation may have started, so replay is unsafe."""
 
 
 _ROUTER_CONNECT_TIMEOUT_SECONDS = 60.0
