@@ -49,6 +49,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.weight_sync.cache import should_reset_kv_cache
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
@@ -593,14 +594,16 @@ class Worker(DistributedTorchRayActor):
         return asyncio.to_thread(run)
 
     def _should_reset_prefix_cache(self, inference_engine_cfg) -> bool:
-        """Whether this sync should clear the inference engines' prefix cache.
+        """Whether this sync should invalidate cached KV, including running requests.
 
-        Always for synchronous training; for fully-async only when
-        ``clear_kv_cache_on_weight_sync`` is set (otherwise in-flight requests
-        keep generating against their cached prefixes across the sync).
+        Synchronous training only needs to invalidate reusable prefix blocks.
+        Fully-async training honors ``clear_kv_cache_on_weight_sync`` even when
+        prefix caching is disabled, since running requests still hold KV.
         """
-        return inference_engine_cfg.enable_prefix_caching and (
-            not self.cfg.fully_async.enabled or self.cfg.fully_async.clear_kv_cache_on_weight_sync
+        return should_reset_kv_cache(
+            enable_prefix_caching=inference_engine_cfg.enable_prefix_caching,
+            fully_async=self.cfg.fully_async.enabled,
+            clear_kv_cache_on_weight_sync=self.cfg.fully_async.clear_kv_cache_on_weight_sync,
         )
 
     def _reset_prefix_cache_task(self, inference_engine_client, inference_engine_cfg):
