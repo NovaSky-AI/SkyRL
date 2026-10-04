@@ -17,7 +17,7 @@ def test_weighted_rates_and_cache_hits_use_raw_totals():
     assert summary["vllm_correct_aggregate/train/generation_throughput_tok_s"] == 30
     assert summary["vllm_correct_aggregate/train/external_prefix_cache_hit_rate"] == pytest.approx(0.14)
     assert summary["vllm_correct_aggregate/train/output_tokens_total"] == 300
-    assert summary["vllm_correct_aggregate/train/active_generation_seconds"] == 10
+    assert summary["vllm_correct_aggregate/train/measurement_seconds"] == 10
 
 
 @pytest.mark.parametrize("terminal", [None, {"ray_vllm_generation_tokens_total": 1}])

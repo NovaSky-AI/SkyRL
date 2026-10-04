@@ -341,7 +341,7 @@ class BasePPOExp:
                     run_status = "success"
                 finally:
                     try:
-                        await trainer.finalize_vllm_metrics(run_status)
+                        await trainer.finalize_metrics(run_status)
                     except Exception as finalization_error:
                         logger.warning(f"Could not finalize run metrics: {finalization_error}")
 

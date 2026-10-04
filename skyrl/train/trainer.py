@@ -236,7 +236,7 @@ class RayPPOTrainer:
             if self.cfg.trainer.max_training_steps is not None:
                 self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
 
-    async def finalize_vllm_metrics(self, status: str) -> None:
+    async def finalize_metrics(self, status: str) -> None:
         """Finalize observations before the tracker closes, including failed runs."""
         if self._metrics_finalized:
             return
@@ -618,7 +618,7 @@ class RayPPOTrainer:
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        await self.finalize_vllm_metrics("success")
+        await self.finalize_metrics("success")
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.stop()
 

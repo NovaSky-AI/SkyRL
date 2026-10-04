@@ -41,7 +41,7 @@ class RunStatistics:
             result.update(
                 {key: value for key, value in metrics.items() if "draft_num_" not in key and "_pos_" not in key}
             )
-            result[prefix + "active_generation_seconds"] = self.seconds[scope]
+            result[prefix + "measurement_seconds"] = self.seconds[scope]
             for counter, public in (
                 ("generation_tokens", "output_tokens_total"),
                 ("prompt_tokens", "prompt_tokens_total"),

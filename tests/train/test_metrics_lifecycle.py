@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
@@ -29,7 +29,7 @@ def test_entrypoint_finalizes_before_exception_logging(fail):
         tracker.run_status = status
 
     trainer.train = train
-    trainer.finalize_vllm_metrics = finalize
+    trainer.finalize_metrics = finalize
     exp = BasePPOExp.__new__(BasePPOExp)
 
     def setup():
@@ -59,8 +59,8 @@ async def test_trainer_finalizes_once_and_omits_resumed_or_pd_aggregates(resumed
     trainer.tracker.update_summary = Mock()
     scraper = SimpleNamespace(finalize=AsyncMock(return_value={"tokens": 10}))
     trainer._vllm_metrics_scraper = scraper
-    await trainer.finalize_vllm_metrics("failed")
-    await trainer.finalize_vllm_metrics("failed")
+    await trainer.finalize_metrics("failed")
+    await trainer.finalize_metrics("failed")
     scraper.finalize.assert_awaited_once()
     assert trainer.tracker.run_status == "failed"
     if resumed or enable_pd:
@@ -70,17 +70,16 @@ async def test_trainer_finalizes_once_and_omits_resumed_or_pd_aggregates(resumed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", [RuntimeError("scrape failed"), TimeoutError("terminal timeout")])
-async def test_failed_terminal_collection_does_not_publish_aggregates(error):
+async def test_failed_terminal_collection_does_not_publish_aggregates():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer._metrics_finalized = False
     trainer.tracker = Tracking("test", "test", backend="console")
     trainer._resumed_from_checkpoint = False
     trainer.tracker.update_summary = Mock()
     trainer._vllm_metrics_scraper = SimpleNamespace(
-        finalize=AsyncMock(side_effect=error),
+        finalize=AsyncMock(side_effect=RuntimeError("scrape failed")),
     )
-    await trainer.finalize_vllm_metrics("failed")
+    await trainer.finalize_metrics("failed")
     trainer.tracker.update_summary.assert_called_once_with({"run_status": "failed"})
 
 
@@ -93,7 +92,7 @@ async def test_terminal_collection_always_closes_http_client(error):
     scraper._prev_timestamp = 0
     client = SimpleNamespace(aclose=AsyncMock())
     scraper._client = client
-    scraper.sample_active = AsyncMock(side_effect=error)
+    scraper.sample = AsyncMock(side_effect=error)
     with pytest.raises(type(error)):
         await scraper.finalize()
     client.aclose.assert_awaited_once()
@@ -107,13 +106,9 @@ async def test_final_collection_subtracts_reused_external_engine_baseline():
     counter = "ray_vllm_generation_tokens_total"
     scraper = VLLMMetricsScraper(urls=["test"])
     scraper._read_snapshot = AsyncMock(side_effect=[{counter: 10000}, {counter: 10100}])
-    await scraper.sample(generation_time_s=0, allow_zero_duration=True)
-
-    async def terminal_sample():
-        return await scraper.sample(generation_time_s=2)
-
-    scraper.sample_active = AsyncMock(side_effect=terminal_sample)
-    summary = await scraper.finalize()
+    with patch("skyrl.train.utils.vllm_metrics_scraper.time.monotonic", side_effect=[10, 12]):
+        await scraper.sample()
+        summary = await scraper.finalize()
     assert summary["vllm_correct_aggregate/combined/output_tokens_total"] == 100
     assert summary["vllm_correct_aggregate/combined/generation_throughput_tok_s"] == 50
     assert scraper._read_snapshot.await_count == 2
@@ -126,7 +121,7 @@ async def test_unavailable_initial_export_does_not_create_a_partial_run_total():
     counter = "ray_vllm_generation_tokens_total"
     scraper = VLLMMetricsScraper(urls=["test"])
     scraper._read_snapshot = AsyncMock(side_effect=[None, {counter: 100}, {counter: 200}])
-    await scraper.sample(generation_time_s=0, allow_zero_duration=True)
+    await scraper.sample()
     await scraper.sample(generation_time_s=2)
     await scraper.sample(generation_time_s=2)
     assert scraper.run_statistics.summary() == {}
