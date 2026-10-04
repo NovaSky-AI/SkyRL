@@ -35,6 +35,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     gdn_in_proj_lora_is_safe,
     get_model_config,
     get_moe_metrics,
+    keep_skyrl_loss_scaling,
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
@@ -541,6 +542,9 @@ class MegatronWorker:
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
+
+        if self.is_vlm and getattr(self.provider, "context_parallel_size", 1) > 1:
+            self.provider.register_pre_wrap_hook(keep_skyrl_loss_scaling)
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:

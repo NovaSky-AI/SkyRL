@@ -291,11 +291,21 @@ class MegatronModelWrapper:
         Megatron-Bridge's Qwen3-VL model rebuilds 3D mRoPE positions per packed
         sub-sequence from ``packed_seq_params`` (``rope.get_rope_index``), without
         re-packing the stream (NVIDIA-NeMo/Megatron-Bridge#4532).
-        TODO(xgui): context parallelism. preprocess_packed_seqs pre-shards the stream
-        per CP rank, which the bridge model only accepts with explicit rank-local
-        3D position ids.
+
+        Context parallelism: the full packed stream goes to every CP rank
+        (``preprocess_packed_seqs(shard_for_cp=False)``) and the model computes mRoPE,
+        places image features and applies the CP split itself. Its rank-local logits are
+        expected in the same 2*CP zigzag layout SkyRL's packed log-prob gather uses
+        (test_megatron_vlm_cp_vs_no_cp checks this).
         """
-        assert mpu.get_context_parallel_world_size() == 1, "VLM + context parallelism unsupported"
+        cp_size = mpu.get_context_parallel_world_size()
+        if cp_size > 1:
+            if not self.remove_microbatch_padding:
+                raise ValueError("VLM context parallelism requires trainer.remove_microbatch_padding=true")
+            if getattr(get_model_config(self.actor_module[0]), "mtp_num_layers", None):
+                # TODO(xgui): the native MTP block re-embeds position_ids in the packed layout,
+                # which SkyRL still pre-shards per CP rank.
+                raise ValueError("VLM context parallelism with MTP is not supported")
         assert (
             mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
         ), "VLM + sequence parallelism unsupported"
@@ -460,6 +470,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    shard_for_cp=not self.is_vlm,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(
@@ -1103,6 +1114,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    shard_for_cp=not self.is_vlm,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(

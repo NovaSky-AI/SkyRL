@@ -509,3 +509,83 @@ async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp)
     # No boundary leak: later samples must not be materially worse than first samples.
     assert later_mean <= 3 * first_mean + 5e-3, stats
     assert later_max <= 3 * first_max + 0.25, stats
+
+
+def _vlm_cp_training_batch(model_name: str) -> TrainingInputBatch:
+    """The packing-parity batch (first 8 samples) with non-trivial PPO inputs."""
+    batch = get_packing_parity_batch(model_name)[:8]
+    shape = batch["advantages"].shape
+    batch["advantages"] = torch.full(shape, 0.5)
+    for key in ("action_log_probs", "base_action_log_probs", "rollout_logprobs"):
+        batch[key] = torch.full(shape, -1.0)
+    batch.metadata["global_step"] = 0
+    return batch
+
+
+def _run_vlm_cp_layout(model_name, batch, cp, num_gpus):
+    """Packed forward logprobs, then one forward_backward + optim_step; returns (logprobs, results, grad_norms)."""
+    cfg = get_test_actor_config(model_name=model_name)
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.remove_microbatch_padding = True
+    cfg.trainer.algorithm.use_kl_loss = True
+    cfg.trainer.algorithm.kl_loss_coef = 0.1
+    cfg.trainer.train_batch_size = len(batch)
+    cfg.trainer.policy_mini_batch_size = len(batch)
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.micro_train_batch_size_per_gpu = PACKING_MICRO_BATCH
+    try:
+        actor_group = init_worker_with_type(
+            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=num_gpus, cfg=cfg
+        )
+        refs = actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy")
+        output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
+        logprobs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+        grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        return logprobs, results, grad_norms
+    finally:
+        ray.shutdown()
+        ray_init_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    ["Qwen/Qwen3-VL-2B-Instruct", "Qwen/Qwen3.5-0.8B"],
+    ids=["qwen3_vl", "qwen3_5_vl"],
+)
+@pytest.mark.megatron
+async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name):
+    """VLM context parallelism must match CP=1: per-token logprobs and the gradient.
+
+    The full packed stream goes to every CP rank and Megatron-Bridge's Qwen3VLModel
+    computes mRoPE, places image features and applies the CP split itself. Images span
+    the 2*CP chunk boundaries of most samples, so a mismatched split shows up as large
+    logprob differences. The grad-norm check covers loss scaling: the bridge forces
+    calculate_per_token_loss under CP, which SkyRL clears (keep_skyrl_loss_scaling).
+    Both layouts run on 2 GPUs: CP=1 -> DP=2, CP=2 -> DP=1.
+    """
+    batch = _vlm_cp_training_batch(model_name)
+    logprobs_nocp, results_nocp, grad_norms_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, num_gpus=2)
+    logprobs_cp, results_cp, grad_norms_cp = _run_vlm_cp_layout(model_name, batch, cp=2, num_gpus=2)
+
+    num_actions = batch.metadata["response_length"]
+    am = batch["attention_mask"].bool()
+    scored = (am[:, 1:] & am[:, :-1])[:, -num_actions:]
+    diff = (logprobs_cp - logprobs_nocp).abs()[scored]
+    print(f"\n[cp parity] {model_name}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
+    print(f"[cp parity] grad norms CP1={grad_norms_nocp} CP2={grad_norms_cp}")
+    for k in ("policy_loss", "policy_kl"):
+        print(f"[cp parity] {k}: CP1={results_nocp[0].metrics[k]} CP2={results_cp[0].metrics[k]}")
+
+    assert torch.isfinite(logprobs_cp[scored]).all()
+    assert diff.mean().item() < 2e-2
+    gn_nocp, gn_cp = grad_norms_nocp[0], grad_norms_cp[0]
+    assert gn_nocp is not None and gn_nocp > 0 and gn_cp is not None
+    # Same 10% band as test_megatron_worker's text CP check: a scaling bug is ~2x off.
+    assert abs(gn_cp - gn_nocp) / gn_nocp < 0.1, (gn_cp, gn_nocp)
