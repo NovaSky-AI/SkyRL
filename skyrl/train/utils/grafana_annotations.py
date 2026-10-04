@@ -44,6 +44,7 @@ class GrafanaRunAnnotation:
             )
         )
         try:
+            # Allow extra time for Ray to schedule the head task and start its worker.
             return ray.get(task, timeout=self.config.timeout_seconds + 10)
         except ray.exceptions.GetTimeoutError:
             ray.cancel(task, force=True)

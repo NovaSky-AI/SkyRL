@@ -1461,7 +1461,7 @@ class GrafanaAnnotationsConfig(BaseConfig):
     tags: List[str] = field(default_factory=list)
     """Additional annotation tags, such as a cluster name."""
     timeout_seconds: float = 5.0
-    """HTTP timeout per request; the head-task wait allows 10 additional seconds for startup."""
+    """HTTP timeout per request."""
 
 
 @dataclass
