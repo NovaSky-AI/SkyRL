@@ -294,12 +294,23 @@ class BasePPOExp:
             colocate_pg=self.colocate_pg,
         )
         if trainer._vllm_metrics_scraper is not None:
-            groups = self._server_groups or ((self._prefill_server_groups or []) + (self._decode_server_groups or []))
+            enable_pd = self.cfg.generator.inference_engine.enable_pd
+            groups = (
+                (self._prefill_server_groups or []) + (self._decode_server_groups or [])
+                if enable_pd
+                else self._server_groups
+            )
             actors = [actor for group in (groups or []) for actor in group.get_actors()]
             if actors and self.cfg.generator.inference_engine.backend == "vllm":
                 try:
                     worker_ids = ray.get([actor.get_ray_worker_id.remote() for actor in actors], timeout=10)
-                    trainer._vllm_metrics_scraper.set_worker_ids(worker_ids)
+                    if enable_pd:
+                        num_prefill = sum(len(group.get_actors()) for group in (self._prefill_server_groups or []))
+                        trainer._vllm_metrics_scraper.set_worker_roles(
+                            {"prefill": worker_ids[:num_prefill], "decode": worker_ids[num_prefill:]}
+                        )
+                    else:
+                        trainer._vllm_metrics_scraper.set_worker_ids(worker_ids)
                 except Exception as error:
                     trainer._vllm_metrics_scraper.set_worker_ids([])
                     logger.warning(
