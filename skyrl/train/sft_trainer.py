@@ -2216,7 +2216,11 @@ class SFTTrainer:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
-        # Atomic tracking -- write this last after all saves succeed
+        # Async workers return before shards and completion metadata are written.
+        # Wait before advertising this checkpoint or deleting the previous one.
+        self.dispatch.finalize_pending_saves("policy")
+
+        # Publish only after the model checkpoint has completed successfully.
         latest_file = os.path.join(self.sft_cfg.ckpt_path, "latest_ckpt_global_step.txt")
         with io.open_file(latest_file, "w") as f:
             f.write(str(step))
