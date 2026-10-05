@@ -608,7 +608,7 @@ async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name):
     the 2*CP chunk boundaries of most samples, so a mismatched split shows up as large
     logprob differences. The grad-norm check covers loss scaling: the bridge forces
     calculate_per_token_loss under CP, so CP=2 runs Megatron's per-token mode (DDP sums,
-    no token-count division; megatron_loss_output) while CP=1 runs the default mode.
+    no token-count division) while CP=1 runs the default mode.
     Both layouts use DP=1 (CP=1 on 1 GPU, CP=2 on 2 GPUs) so their microbatches are
     identical and only the CP split differs; the bf16 floor still applies (changing
     only microbatch composition moves these logprobs by ~0.034 mean), so the logprob
