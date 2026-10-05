@@ -1,12 +1,21 @@
 import argparse
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import aiohttp
 import pytest
+from aiohttp import web
 
-from skyrl.tinker.api import _should_forward_sample_requests
+from skyrl.tinker.api import (
+    EncodedTextChunk,
+    ModelInput,
+    SampleRequest,
+    SamplingParams,
+    _should_forward_sample_requests,
+)
 from skyrl.tinker.config import EngineConfig, add_model
+from skyrl.tinker.db_models import RequestStatus
 from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
     SkyRLTrainInferenceForwardingClient,
@@ -85,8 +94,7 @@ async def test_forwarding_client_uses_configured_timeout_and_connection_limit() 
         session = client._get_session()
         assert session.timeout.sock_connect == 60.0
         assert session.timeout.sock_read == 1800.0
-        # No overall deadline: a request may wait in the connector queue for
-        # as long as the engine takes to get to it.
+        # The forwarding scope supplies one overall deadline across attempts.
         assert session.timeout.total is None
         assert session.connector.limit == 64
     finally:
@@ -111,6 +119,7 @@ def _connect_error(message: str) -> aiohttp.ClientConnectorError:
 @pytest.mark.asyncio
 async def test_forwarding_retries_connection_failure() -> None:
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
+    client.engine_config = EngineConfig(base_model="test-model")
     client._cached_proxy_url = "http://old"
     client._resolve_proxy_url = AsyncMock(side_effect=["http://old", "http://new"])
     expected = object()
@@ -126,6 +135,7 @@ async def test_forwarding_retries_connection_failure() -> None:
 @pytest.mark.asyncio
 async def test_forwarding_retries_transient_5xx_once() -> None:
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
+    client.engine_config = EngineConfig(base_model="test-model")
     client._cached_proxy_url = "http://old"
     client._resolve_proxy_url = AsyncMock(side_effect=["http://old", "http://new"])
     expected = object()
@@ -140,6 +150,7 @@ async def test_forwarding_retries_transient_5xx_once() -> None:
 @pytest.mark.asyncio
 async def test_forwarding_does_not_retry_4xx() -> None:
     client = object.__new__(SkyRLTrainInferenceForwardingClient)
+    client.engine_config = EngineConfig(base_model="test-model")
     client._cached_proxy_url = "http://inference"
     client._resolve_proxy_url = AsyncMock(return_value="http://inference")
     client._forward = AsyncMock(side_effect=RuntimeError("vLLM /v1/completions returned 400: bad request"))
@@ -167,3 +178,62 @@ async def test_forwarding_does_not_retry_read_timeout() -> None:
     assert "timed out after 123s" in message
     client._resolve_proxy_url.assert_awaited_once_with()
     client._forward.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_status", "delay", "budget", "expected_status", "expected_calls"),
+    [
+        (200, 0.1, 0.5, RequestStatus.COMPLETED, 1),
+        (200, 0.6, 0.4, RequestStatus.FAILED, 1),
+        (500, 0.1, 0.5, RequestStatus.COMPLETED, 2),
+        (500, 0.3, 0.5, RequestStatus.FAILED, 2),
+    ],
+)
+async def test_forwarded_future_shares_deadline_across_http_attempts(
+    first_status, delay, budget, expected_status, expected_calls
+) -> None:
+    calls = 0
+
+    async def complete(request):
+        nonlocal calls
+        await request.read()
+        calls += 1
+        status = first_status if calls == 1 else 200
+        await asyncio.sleep(delay)
+        return web.json_response(
+            {"choices": [{"token_ids": [2], "logprobs": {"token_logprobs": [-0.1]}, "finish_reason": "length"}]},
+            status=status,
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    store = ExternalFutureStore()
+    client = SkyRLTrainInferenceForwardingClient(
+        EngineConfig(base_model="test-model", forwarding_inference_timeout_sec=budget),
+        db_engine=None,
+        external_future_store=store,
+    )
+    client._resolve_proxy_url = AsyncMock(return_value=f"http://127.0.0.1:{runner.addresses[0][1]}")
+    request = SampleRequest(
+        base_model="test-model",
+        prompt=ModelInput(chunks=[EncodedTextChunk(tokens=[1])]),
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+    request_id = store.create("", request)
+    try:
+        await client.call_and_store_result(request_id, request, "", "", base_model="test-model")
+        result = await store.wait(request_id, timeout=1)
+        assert result is not None
+        assert result[0] == expected_status
+        assert calls == expected_calls
+        if expected_status == RequestStatus.FAILED:
+            assert f"timed out after {budget:g}s" in result[2]
+        else:
+            assert store.proto_result(request_id)
+    finally:
+        await client.aclose()
+        await runner.cleanup()

@@ -51,8 +51,7 @@ class SkyRLTrainInferenceForwardingClient:
         max_num_seqs. Default `forwarding_inference_max_connections=None` is
         unlimited; the only cost is file descriptors (raise `ulimit -n`
         accordingly). Requests beyond the limit wait in the connector's FIFO
-        queue with no deadline, so a backlog of many thousands of samples
-        drains at the engine's pace instead of failing.
+        queue within the request's overall forwarding deadline.
 
         aiohttp rather than httpx: httpcore's pool rescans every connection
         for every request, so its per-request CPU grows with the number of
@@ -129,28 +128,27 @@ class SkyRLTrainInferenceForwardingClient:
         # write failures are ambiguous: vLLM may still be executing the
         # request, so retrying would duplicate generation load.
         try:
-            try:
-                proxy_url = await self._resolve_proxy_url()
-                return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-            except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError, TransientInferenceError) as e:
-                logger.warning(
-                    "Transient error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
-                    self._cached_proxy_url,
-                    type(e).__name__,
-                    e,
-                )
-                proxy_url = await self._resolve_proxy_url(force_refresh=True)
-                return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except aiohttp.SocketTimeoutError as e:
-            # Not retried (see above). Long-context requests routinely exceed the
-            # default read deadline, so tell the caller how to raise it. The
-            # message is stored in the ErrorResponse and shown to clients.
+            async with asyncio.timeout(self.engine_config.forwarding_inference_timeout_sec):
+                try:
+                    proxy_url = await self._resolve_proxy_url()
+                    return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+                except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError, TransientInferenceError) as e:
+                    logger.warning(
+                        "Transient error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
+                        self._cached_proxy_url,
+                        type(e).__name__,
+                        e,
+                    )
+                    proxy_url = await self._resolve_proxy_url(force_refresh=True)
+                    return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
+        except aiohttp.ConnectionTimeoutError:
+            raise
+        except TimeoutError as e:
             timeout_sec = self.engine_config.forwarding_inference_timeout_sec
             raise RuntimeError(
-                f"Inference request to {self._cached_proxy_url} timed out after {timeout_sec:g}s waiting for "
-                "a response (read timeout). The request was not retried because vLLM may still be "
-                "executing it. If requests are expected to take this long (long prompts, large max_tokens, "
-                "or queueing behind other requests), increase the deadline with "
+                f"Inference request to {self._cached_proxy_url} timed out after {timeout_sec:g}s "
+                "including queueing and retries. No further retry was attempted because vLLM may still be "
+                "executing it. Increase the forwarding deadline with "
                 "`--forwarding-inference-timeout-sec` (EngineConfig.forwarding_inference_timeout_sec) or "
                 "the SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC environment variable."
             ) from e

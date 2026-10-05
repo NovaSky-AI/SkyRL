@@ -71,9 +71,9 @@ class EngineConfig(BaseModel):
         default=2048.0,
         gt=0,
         description=(
-            "Read timeout in seconds for API-side requests forwarded to the "
-            "SkyRL-Train-managed inference engine. This must cover time spent "
-            "queued behind other requests as well as generation time: with the "
+            "Total timeout in seconds for API-side requests forwarded to the "
+            "SkyRL-Train-managed inference engine, shared across retries. This must cover "
+            "connection setup, queueing, generation, and response transfer: with the "
             "default unlimited connection count a large rollout burst waits inside "
             "vLLM's queue, and 128x128 bursts routinely exceed 300s there."
         ),
