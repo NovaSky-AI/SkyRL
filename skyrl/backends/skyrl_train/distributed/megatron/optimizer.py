@@ -29,6 +29,9 @@ from omegaconf import DictConfig
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_dtype import (
     coerce_optimizer_dtype_kwargs,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_optimizer_group_order import (
+    patch_optimizer_group_order,
+)
 from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
 
 
@@ -59,7 +62,8 @@ def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
 ):
-    # Base optimizer.
+    # Core consumes this mapping during initial optimizer state allocation.
+    patch_optimizer_group_order()
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
