@@ -1381,8 +1381,12 @@ class GeneratorConfig(BaseConfig):
     use_cache_salt: bool = True
     """Salt vLLM's prefix cache with the policy version so cache blocks are only shared across trajectories that started
     with the same policy weight version. The salt is keyed on the engine's weight version, captured at the start of each
-    ``generate`` call. Matters for fully-async RL; a no-op for synchronous training (which resets the
-    cache each sync) and when prefix caching is off, so it is safe to leave on by default."""
+    ``generate`` call. ``RemoteInferenceClient`` also salts every ``generate``, ``sample``, ``chat_completion`` and
+    ``completion`` request that carries no salt with the weight version current when it is sent. Requests sent straight
+    to the inference endpoint (``get_endpoint_url()``), e.g. by an agent harness, bypass the client and must pass
+    ``cache_salt`` themselves (see ``RemoteInferenceClient.cache_salt``). Matters for fully-async RL; a no-op for
+    synchronous training (which resets the cache each sync) and when prefix caching is off, so it is safe to leave on
+    by default."""
     apply_overlong_filtering: bool = False
     """Apply DAPO Overlong Filtering: mask out all tokens in the loss mask for trajectories that
     exceed max length (truncated, no EOS token)."""
