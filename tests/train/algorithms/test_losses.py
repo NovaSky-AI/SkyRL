@@ -4,11 +4,15 @@ Tests for policy loss functions.
 uv run --isolated --extra dev -- pytest tests/train/algorithms/test_losses.py
 """
 
+import threading
+
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    compute_trajectory_log_importance_weights,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import (
@@ -20,6 +24,7 @@ from skyrl.train.config import (
     OffPolicyCorrectionConfig,
     SAPOConfig,
 )
+from tests.train.util import ThreadedAllReduce
 
 NULL_OFF_POLICY_CORR = OffPolicyCorrectionConfig(
     tis_ratio_type=None,
@@ -424,6 +429,354 @@ def test_gspo_importance_sampling_levels():
             assert torch.allclose(
                 seq_weights, seq_weights[0], rtol=1e-6
             ), f"GSPO should have uniform importance weights within sequence {seq_idx}"
+
+
+# Sequence ratios 0.93, 0.61, 1.69, 1.49 and 0.68 with advantages +, -, +, -, +: rows 1 and 2 clip,
+# rows 0, 3 and 4 do not.
+GSPO_GOLDEN_LOG_PROBS = [
+    [-0.9, -1.4, -0.2, -2.1, -1.0],
+    [-1.1, -1.5, -1.9, -0.9, -1.5],
+    [-1.6, 0.0, -0.4, -0.6, -0.2],
+    [-0.7, -0.3, -1.0, -0.45, -0.65],
+    [-0.9, -1.0, -1.1, -1.15, -0.8],
+]
+GSPO_GOLDEN_OLD_LOG_PROBS = [
+    [-1.0, -1.0, -0.5, -1.8, -1.0],
+    [-0.6, -0.9, -1.5, -0.4, -1.0],
+    [-1.2, -0.5, -0.9, -1.0, -0.9],
+    [-1.1, -0.8, -1.3, -0.9, -1.0],
+    [-0.5, -0.7, -0.6, -0.8, -1.0],
+]
+GSPO_GOLDEN_ROLLOUT_LOGPROBS = [
+    [-1.1, -0.9, -0.6, -1.7, -1.0],
+    [-0.6, -1.0, -1.4, -0.4, -1.1],
+    [-1.3, -0.6, -0.8, -1.2, -0.8],
+    [-1.0, -0.9, -1.2, -0.8, -1.1],
+    [-0.6, -0.6, -0.7, -0.9, -1.0],
+]
+GSPO_GOLDEN_ADVANTAGES = [
+    [1.0, 1.0, 1.0, 1.0, 0.0],
+    [-0.5, -0.5, -0.5, -0.5, -0.5],
+    [0.0, 2.0, 2.0, 2.0, 2.0],
+    [-1.0, -1.0, -1.0, -1.0, -1.0],
+    [0.8, 0.8, 0.8, 0.8, 0.0],
+]
+GSPO_GOLDEN_LOSS_MASK = [
+    [1.0, 1.0, 1.0, 1.0, 0.0],
+    [1.0, 1.0, 1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 1.0, 0.0],
+]
+
+
+@pytest.mark.parametrize(
+    "off_policy_correction, loss_reduction, expected_loss, expected_metrics, expected_grad",
+    [
+        (
+            OffPolicyCorrectionConfig(),
+            "sequence_mean",
+            -6.663854598999023,
+            {"clip_ratio": 0.40909090638160706},
+            [
+                [-0.9277434945106506] * 4 + [0.0],
+                [0.0] * 5,
+                [0.0] * 5,
+                [1.491824746131897] * 5,
+                [-0.5430013537406921] * 4 + [0.0],
+            ],
+        ),
+        (
+            OffPolicyCorrectionConfig(tis_ratio_type="token", token_tis_ratio_clip_high=2.0),
+            "token_mean",
+            -7.2169060707092285,
+            {
+                "clip_ratio": 0.40909090638160706,
+                "is_ratio_mean": 1.0189385414123535,
+                "is_ratio_std": 0.35202884674072266,
+                "is_ratio_max": 1.2214027643203735,
+                "is_ratio_min": 0.0,
+                "tis_token_clip_high_ratio": 0.0,
+            },
+            [
+                [-1.0253151655197144, -0.8394569754600525, -1.0253151655197144, -0.839457094669342, 0.0],
+                [0.0] * 5,
+                [0.0] * 5,
+                [1.3498587608337402, 1.6487212181091309, 1.3498589992523193, 1.3498588800430298, 1.6487213373184204],
+                [-0.6001092791557312, -0.4913279414176941, -0.6001092195510864, -0.6001092195510864, 0.0],
+            ],
+        ),
+    ],
+)
+def test_gspo_sequence_level_golden(
+    off_policy_correction, loss_reduction, expected_loss, expected_metrics, expected_grad
+):
+    """Pins the default (sequence-level) GSPO loss, metrics and gradients for fixed inputs."""
+    config = AlgorithmConfig(
+        policy_loss_type="gspo",
+        loss_reduction=loss_reduction,
+        eps_clip_low=0.2,
+        eps_clip_high=0.28,
+        off_policy_correction=off_policy_correction,
+    )
+    log_probs = torch.tensor(GSPO_GOLDEN_LOG_PROBS, requires_grad=True)
+
+    loss, metrics = PolicyLossRegistry.get("gspo")(
+        log_probs,
+        torch.tensor(GSPO_GOLDEN_OLD_LOG_PROBS),
+        torch.tensor(GSPO_GOLDEN_ADVANTAGES),
+        config,
+        loss_mask=torch.tensor(GSPO_GOLDEN_LOSS_MASK),
+        rollout_logprobs=torch.tensor(GSPO_GOLDEN_ROLLOUT_LOGPROBS),
+    )
+    loss.backward()
+
+    # A few float32 ULPs of slack, for CPU vector math that differs across machines.
+    assert loss.item() == pytest.approx(expected_loss, rel=1e-6)
+    assert metrics == pytest.approx(expected_metrics, rel=1e-6, abs=1e-7)
+    torch.testing.assert_close(log_probs.grad, torch.tensor(expected_grad), rtol=1e-6, atol=1e-7)
+
+
+# One row per step: (trajectory index, old log-probs, log-ratios). Per step, trajectory 0 clips at
+# step 0 and trajectory 1 at step 0, but neither clips at the trajectory level; trajectory 2 clips
+# at both levels and trajectory 3 has a single step.
+STEP_WISE_ROWS = [
+    (0, [-1.0, -1.2, -0.8], [0.4, 0.6, 0.5]),
+    (0, [-0.9, -1.1], [-0.5, -0.3]),
+    (0, [-1.3, -0.7, -1.0, -1.05], [0.1, -0.1, 0.05, -0.05]),
+    (1, [-0.6, -1.4], [-0.2, -0.4]),
+    (1, [-1.0, -0.9, -1.1], [0.0, 0.2, 0.1]),
+    (2, [-0.7, -1.2], [0.3, 0.4]),
+    (2, [-0.8, -1.0, -0.9], [0.35, 0.25, 0.45]),
+    (3, [-0.5, -0.8], [0.05, -0.15]),
+]
+TRAJECTORY_ADVANTAGES = [1.5, -0.7, 0.9, 0.3]
+
+
+def _gspo_config() -> AlgorithmConfig:
+    return AlgorithmConfig(
+        policy_loss_type="gspo",
+        loss_reduction="sequence_mean",
+        eps_clip_low=0.2,
+        eps_clip_high=0.28,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+
+def _right_aligned(rows, width):
+    """Returns ``(values, mask)`` with each row's values right-aligned in a zero-padded tensor."""
+    values = torch.zeros(len(rows), width)
+    mask = torch.zeros(len(rows), width)
+    for i, row in enumerate(rows):
+        values[i, width - len(row) :] = torch.tensor(row)
+        mask[i, width - len(row) :] = 1.0
+    return values, mask
+
+
+def _step_wise_batch():
+    """Returns ``(log_probs, old_log_probs, advantages, loss_mask, trajectory_index)``, one row per step."""
+    old_log_probs, loss_mask = _right_aligned([old for _, old, _ in STEP_WISE_ROWS], width=4)
+    log_ratio, _ = _right_aligned([ratio for _, _, ratio in STEP_WISE_ROWS], width=4)
+    trajectory_index = torch.tensor([trajectory for trajectory, _, _ in STEP_WISE_ROWS])
+    advantages = torch.tensor(TRAJECTORY_ADVANTAGES)[trajectory_index].unsqueeze(-1) * loss_mask
+    return old_log_probs + log_ratio, old_log_probs, advantages, loss_mask, trajectory_index
+
+
+def _merged_batch():
+    """Same tokens as ``_step_wise_batch``, with each trajectory's steps concatenated into one row."""
+    olds = [[] for _ in TRAJECTORY_ADVANTAGES]
+    ratios = [[] for _ in TRAJECTORY_ADVANTAGES]
+    for trajectory, old, ratio in STEP_WISE_ROWS:
+        olds[trajectory] += old
+        ratios[trajectory] += ratio
+    width = max(len(old) for old in olds)
+    old_log_probs, loss_mask = _right_aligned(olds, width)
+    log_ratio, _ = _right_aligned(ratios, width)
+    advantages = torch.tensor(TRAJECTORY_ADVANTAGES).unsqueeze(-1) * loss_mask
+    return old_log_probs + log_ratio, old_log_probs, advantages, loss_mask
+
+
+def test_gspo_trajectory_level_with_single_step_trajectories_matches_sequence_level():
+    """With one row per trajectory, trajectory-level weights reproduce sequence-level GSPO exactly."""
+    config = _gspo_config()
+    loss_fn = PolicyLossRegistry.get("gspo")
+    old_log_probs = torch.tensor(GSPO_GOLDEN_OLD_LOG_PROBS)
+    advantages = torch.tensor(GSPO_GOLDEN_ADVANTAGES)
+    loss_mask = torch.tensor(GSPO_GOLDEN_LOSS_MASK)
+    sequence_log_probs = torch.tensor(GSPO_GOLDEN_LOG_PROBS, requires_grad=True)
+    trajectory_log_probs = torch.tensor(GSPO_GOLDEN_LOG_PROBS, requires_grad=True)
+
+    weights = compute_trajectory_log_importance_weights(
+        trajectory_log_probs.detach(), old_log_probs, loss_mask, trajectory_index=torch.arange(len(loss_mask))
+    )
+    sequence_loss, sequence_metrics = loss_fn(sequence_log_probs, old_log_probs, advantages, config, loss_mask)
+    trajectory_loss, trajectory_metrics = loss_fn(
+        trajectory_log_probs,
+        old_log_probs,
+        advantages,
+        config,
+        loss_mask,
+        trajectory_log_importance_weights=weights,
+    )
+    sequence_loss.backward()
+    trajectory_loss.backward()
+
+    assert torch.equal(trajectory_loss, sequence_loss)
+    assert torch.equal(trajectory_log_probs.grad, sequence_log_probs.grad)
+    assert trajectory_metrics.pop("gspo_traj_step_log_weight_abs_diff") == 0.0
+    assert trajectory_metrics == sequence_metrics
+
+
+def test_gspo_trajectory_level_matches_sequence_level_on_merged_trajectories(monkeypatch):
+    """Trajectory-level GSPO on per-step rows equals sequence-level GSPO on the concatenated steps.
+
+    Compares per-token ratios (via the log weights and the gradients, which are ``-advantage * ratio``
+    on unclipped tokens), clip masks, and unreduced per-token losses. The tolerance covers float32
+    sums of the same terms taken in a different order.
+    """
+    monkeypatch.setattr(ppo_utils, "reduce_loss", lambda loss, loss_mask: loss * loss_mask)
+    config = _gspo_config()
+    loss_fn = PolicyLossRegistry.get("gspo")
+    tolerance = dict(rtol=1e-6, atol=1e-6)
+
+    log_probs, old_log_probs, advantages, loss_mask, trajectory_index = _step_wise_batch()
+    log_probs.requires_grad_(True)
+    weights = compute_trajectory_log_importance_weights(log_probs.detach(), old_log_probs, loss_mask, trajectory_index)
+    step_losses, step_metrics = loss_fn(
+        log_probs, old_log_probs, advantages, config, loss_mask, trajectory_log_importance_weights=weights
+    )
+    step_losses.sum().backward()
+
+    merged_log_probs, merged_old_log_probs, merged_advantages, merged_mask = _merged_batch()
+    merged_log_probs.requires_grad_(True)
+    merged_losses, merged_metrics = loss_fn(
+        merged_log_probs, merged_old_log_probs, merged_advantages, config, merged_mask
+    )
+    merged_losses.sum().backward()
+
+    merged_weights = masked_mean(merged_log_probs.detach() - merged_old_log_probs, merged_mask, dim=-1)
+    torch.testing.assert_close(weights, merged_weights[trajectory_index], **tolerance)
+
+    tokens, merged_tokens = loss_mask.bool(), merged_mask.bool()
+    torch.testing.assert_close(step_losses.detach()[tokens], merged_losses.detach()[merged_tokens], **tolerance)
+    step_grads, merged_grads = log_probs.grad[tokens], merged_log_probs.grad[merged_tokens]
+    torch.testing.assert_close(step_grads, merged_grads, **tolerance)
+    clipped = step_grads == 0
+    assert torch.equal(clipped, merged_grads == 0)
+    assert clipped.any() and not clipped.all()
+    assert step_metrics["clip_ratio"] == pytest.approx(merged_metrics["clip_ratio"])
+
+    step_weights = masked_mean(log_probs.detach() - old_log_probs, loss_mask, dim=-1)
+    assert step_metrics["gspo_traj_step_log_weight_abs_diff"] == pytest.approx(
+        (weights - step_weights).abs().mean().item()
+    )
+
+    # Sequence-level GSPO on the same per-step rows clips differently.
+    sequence_losses, sequence_metrics = loss_fn(log_probs.detach(), old_log_probs, advantages, config, loss_mask)
+    assert not torch.allclose(sequence_losses[tokens], merged_losses.detach()[merged_tokens], **tolerance)
+    assert sequence_metrics["clip_ratio"] > merged_metrics["clip_ratio"]
+
+
+def test_trajectory_gspo_is_invariant_to_row_order_and_microbatch_split():
+    """Permuting rows or regrouping them into microbatches leaves weights, loss and gradients unchanged."""
+    config = _gspo_config()
+    loss_fn = PolicyLossRegistry.get("gspo")
+    log_probs, old_log_probs, advantages, loss_mask, trajectory_index = _step_wise_batch()
+
+    def run(order, microbatch_sizes):
+        order = torch.tensor(order)
+        rows_log_probs = log_probs[order].clone().requires_grad_(True)
+        weights = compute_trajectory_log_importance_weights(
+            rows_log_probs.detach(), old_log_probs[order], loss_mask[order], trajectory_index[order]
+        )
+        total_loss = sum(
+            loss_fn(
+                rows_log_probs[rows],
+                old_log_probs[order][rows],
+                advantages[order][rows],
+                config,
+                loss_mask[order][rows],
+                trajectory_log_importance_weights=weights[rows],
+            )[0]
+            for rows in torch.arange(len(order)).split(microbatch_sizes)
+        )
+        total_loss.backward()
+        inverse = torch.argsort(order)
+        return weights[inverse], total_loss.detach(), rows_log_probs.grad[inverse]
+
+    reference = run(list(range(8)), [8])
+    for order, microbatch_sizes in [
+        (list(range(8)), [3, 5]),
+        ([5, 0, 7, 2, 4, 1, 6, 3], [2, 2, 4]),
+        ([7, 6, 5, 4, 3, 2, 1, 0], [1, 6, 1]),
+    ]:
+        for actual, expected in zip(run(order, microbatch_sizes), reference):
+            torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_trajectory_log_importance_weights_with_two_dp_ranks_match_one_rank(monkeypatch):
+    """Splitting rows over two DP ranks (trajectory 0 spans both) gives the single-rank weights."""
+    log_probs, old_log_probs, _, loss_mask, trajectory_index = _step_wise_batch()
+    expected = compute_trajectory_log_importance_weights(log_probs, old_log_probs, loss_mask, trajectory_index)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", ThreadedAllReduce(world_size=2))
+    shards = [slice(0, 2), slice(2, 8)]
+    results = [None, None]
+
+    def run_rank(rank):
+        rows = shards[rank]
+        results[rank] = compute_trajectory_log_importance_weights(
+            log_probs[rows], old_log_probs[rows], loss_mask[rows], trajectory_index[rows], dp_group=object()
+        )
+
+    threads = [threading.Thread(target=run_rank, args=(rank,)) for rank in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    torch.testing.assert_close(torch.cat(results), expected, rtol=1e-6, atol=1e-7)
+    # Without the reduction each rank sees only part of trajectory 0.
+    rank0_only = compute_trajectory_log_importance_weights(
+        log_probs[:2], old_log_probs[:2], loss_mask[:2], trajectory_index[:2]
+    )
+    assert not torch.allclose(rank0_only, expected[:2])
+
+
+def test_trajectory_log_importance_weights_ignore_padding_rows():
+    """Fully masked padding rows with their own trajectory indices change neither real weights nor the loss."""
+    config = _gspo_config()
+    loss_fn = PolicyLossRegistry.get("gspo")
+    log_probs, old_log_probs, advantages, loss_mask, trajectory_index = _step_wise_batch()
+    num_rows, num_pad = len(trajectory_index), 2
+
+    def pad(tensor):
+        # Like `pad_training_input_batch`, padding rows copy row 0.
+        return torch.cat([tensor, tensor[[0] * num_pad]])
+
+    padded_mask = torch.cat([loss_mask, torch.zeros(num_pad, loss_mask.shape[1])])
+    padded_index = torch.cat([trajectory_index, trajectory_index.max() + 1 + torch.arange(num_pad)])
+
+    weights = compute_trajectory_log_importance_weights(log_probs, old_log_probs, loss_mask, trajectory_index)
+    padded_weights = compute_trajectory_log_importance_weights(
+        pad(log_probs), pad(old_log_probs), padded_mask, padded_index
+    )
+    assert torch.equal(padded_weights[:num_rows], weights)
+    assert torch.equal(padded_weights[num_rows:], torch.zeros(num_pad))
+
+    loss, metrics = loss_fn(
+        log_probs, old_log_probs, advantages, config, loss_mask, trajectory_log_importance_weights=weights
+    )
+    padded_loss, padded_metrics = loss_fn(
+        pad(log_probs),
+        pad(old_log_probs),
+        pad(advantages),
+        config,
+        padded_mask,
+        trajectory_log_importance_weights=padded_weights,
+    )
+    torch.testing.assert_close(padded_loss, loss)
+    assert padded_metrics == pytest.approx(metrics)
 
 
 def test_clip_cov_policy_loss():

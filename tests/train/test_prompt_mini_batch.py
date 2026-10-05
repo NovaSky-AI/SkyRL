@@ -310,3 +310,19 @@ class TestStageChunksVariable:
         mb_loss = torch.cat([c["loss_mask"] for c in chunks_put], dim=0)
         assert torch.equal(mb_loss[:5], batch["loss_mask"][:5])
         assert torch.all(mb_loss[5:] == 0)
+
+    def test_trajectory_index_survives_slicing_padding_and_dp_chunking(self):
+        """Rows keep their step-wise trajectory index; padding rows get indices unused in their mini-batch."""
+        batch = _make_batch(7)
+        # Trajectories: rows [0, 1, 2], [3, 4], [5], [6].
+        batch["trajectory_index"] = torch.tensor([0, 0, 0, 1, 1, 2, 3])
+        boundaries = [(0, 3), (3, 7)]
+
+        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
+            chunks_put = []
+            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
+            MeshDispatch.stage_chunks(dp_size=2, data=batch, mini_batch_boundaries=boundaries)
+
+        # Mini-batch 0 is padded from 3 to 4 rows, and trajectory 0 spans both DP ranks.
+        assert [chunk["trajectory_index"].tolist() for chunk in chunks_put] == [[0, 0], [0, 1], [1, 1], [2, 3]]
+        assert torch.equal(torch.cat([chunk["sequences"] for chunk in chunks_put[2:]]), batch["sequences"][3:7])

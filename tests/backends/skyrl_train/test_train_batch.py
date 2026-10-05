@@ -590,6 +590,8 @@ EXPECTED_TRAINING_INPUT_FIELDS = {
     SAMPLE_SUPPORT_FIELD,
     "pixel_values",
     "image_grid_thw",
+    "trajectory_index",
+    "trajectory_log_importance_weights",
 }
 
 
@@ -625,6 +627,8 @@ def _make_full_training_batch(batch_size: int = 4, seq_len: int = 5) -> Training
         ),
         "pixel_values": TensorList([torch.randn(i + 1, 3) for i in range(batch_size)]),  # batch_size * (i + 1) * 3
         "image_grid_thw": TensorList([torch.tensor([[1, 2, 3]]) for _ in range(batch_size)]),  # batch_size * 1 * 3
+        "trajectory_index": torch.arange(batch_size) // 2,  # matches `is_last_step` below
+        "trajectory_log_importance_weights": torch.randn(batch_size),
     }
     batch = TrainingInputBatch(data)
     batch.metadata = {
@@ -704,11 +708,15 @@ def test_pad_batch_all_fields():
         SAMPLE_SUPPORT_FIELD,
         "pixel_values",
         "image_grid_thw",
+        "trajectory_index",
     }
     for key in regular_tensor_keys:
         assert torch.equal(padded[key][:batch_size], batch[key]), f"Original rows changed for {key!r}"
         for i in range(batch_size, batch_size + pad_size):
             assert torch.equal(padded[key][i], batch[key][0]), f"Padding row {i} of {key!r} is not row 0"
+
+    # trajectory_index: original rows untouched, each padding row gets a new trajectory.
+    assert padded["trajectory_index"].tolist() == [0, 0, 1, 1, 2, 3, 4]
 
     # TensorList fields (pixel_values, image_grid_thw): original rows untouched,
     # padding rows are clones of row 0.

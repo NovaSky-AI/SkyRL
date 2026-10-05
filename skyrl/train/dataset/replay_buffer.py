@@ -82,6 +82,9 @@ class Experience:
     # Per-row sub-sequence lengths for sequence packing (one 1-D int tensor per
     # packed row); ``None`` when packing is off.
     sub_seq_lengths: Optional[TensorList] = None
+    # GSPO log weight of each row's whole step-wise trajectory; ``None`` unless
+    # ``gspo_ratio_level="trajectory"``.
+    trajectory_log_importance_weights: Optional[Float[torch.Tensor, "batch"]] = None  # noqa: F821
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -116,6 +119,8 @@ class Experience:
             self.image_grid_thw = self.image_grid_thw.to(device)
         if self.sub_seq_lengths is not None:
             self.sub_seq_lengths = self.sub_seq_lengths.to(device)
+        if self.trajectory_log_importance_weights is not None:
+            self.trajectory_log_importance_weights = to(self.trajectory_log_importance_weights, device)
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)

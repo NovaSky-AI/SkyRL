@@ -544,6 +544,10 @@ class TrainingInput(TypedDict, total=False):
     rollout_sample_support: Optional[PackedTensor]
     pixel_values: Optional[TensorList]  # list of `batch_size` [num_patches_i, dim] tensors
     image_grid_thw: Optional[TensorList]  # list of `batch_size` [num_images_i, 3] tensors
+    # Step-wise trajectory of each row, unique within a mini-batch; set for `gspo_ratio_level="trajectory"`
+    trajectory_index: Optional[Integer[torch.Tensor, "batch_size"]]  # noqa: F821
+    # GSPO log weight of the row's whole trajectory, added by the policy worker before the loss
+    trajectory_log_importance_weights: Optional[Float[torch.Tensor, "batch_size"]]  # noqa: F821
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):
@@ -667,6 +671,10 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
         elif key == "router_padding_mask":
             additional_dims = tensor.shape[1:]
             padding_tensor = torch.ones(pad_size, *additional_dims, dtype=torch.bool, device=tensor.device)
+            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+        elif key == "trajectory_index":
+            # Like the `is_last_step` padding below: each padding row is a trajectory of its own.
+            padding_tensor = tensor.max() + 1 + torch.arange(pad_size, dtype=tensor.dtype, device=tensor.device)
             new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
         else:
             # Copy row 0 `pad_size` times. Loss masked so values don't affect the loss. Just need valid shape/dtype.

@@ -485,6 +485,27 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "is_last_step), which only exist when step-wise training is enabled."
         )
 
+    gspo_ratio_level = cfg.trainer.algorithm.gspo_ratio_level
+    if gspo_ratio_level not in ("sequence", "trajectory"):
+        raise ValueError(
+            f"`trainer.algorithm.gspo_ratio_level` must be 'sequence' or 'trajectory', got {gspo_ratio_level!r}"
+        )
+    if gspo_ratio_level == "trajectory":
+        if cfg.trainer.algorithm.policy_loss_type != "gspo":
+            raise ValueError(
+                "`trainer.algorithm.gspo_ratio_level='trajectory'` requires "
+                f"`trainer.algorithm.policy_loss_type='gspo'`, got {cfg.trainer.algorithm.policy_loss_type!r}"
+            )
+        if not cfg.generator.step_wise_trajectories:
+            raise ValueError(
+                "`trainer.algorithm.gspo_ratio_level='trajectory'` requires `generator.step_wise_trajectories=True`."
+            )
+        if cfg.trainer.strategy != "fsdp":
+            raise NotImplementedError(
+                "`trainer.algorithm.gspo_ratio_level='trajectory'` is only implemented for `trainer.strategy='fsdp'`, "
+                f"got {cfg.trainer.strategy!r}"
+            )
+
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "token_mean_legacy",

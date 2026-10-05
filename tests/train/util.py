@@ -1,5 +1,10 @@
 # utility functions used for CPU tests
 
+import threading
+
+import torch
+import torch.distributed as dist
+
 from skyrl.train.config import (
     AlgorithmConfig,
     DataConfig,
@@ -10,6 +15,27 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
     TrainerConfig,
 )
+
+
+class ThreadedAllReduce:
+    """Stands in for ``torch.distributed.all_reduce`` across ``world_size`` threads, one per rank."""
+
+    def __init__(self, world_size: int):
+        # The timeout turns a rank that died before reaching the collective into a failure, not a hang.
+        self._barrier = threading.Barrier(world_size, timeout=60)
+        self._lock = threading.Lock()
+        self._contributions = []
+
+    def __call__(self, tensor, op=dist.ReduceOp.SUM, group=None):
+        with self._lock:
+            self._contributions.append(tensor.clone())
+        self._barrier.wait()
+        stacked = torch.stack(self._contributions)
+        reduced = stacked.amax(dim=0) if op == dist.ReduceOp.MAX else stacked.sum(dim=0)
+        if self._barrier.wait() == 0:
+            self._contributions.clear()
+        self._barrier.wait()
+        tensor.copy_(reduced)
 
 
 def example_dummy_config():

@@ -954,6 +954,16 @@ class AlgorithmConfig(BaseConfig):
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability
       divergences rather than probability ratios, improving on PPO clipping behavior.
     """
+    gspo_ratio_level: str = "sequence"
+    """Scope of the GSPO sequence-level importance ratio: ``"sequence"`` (default) or ``"trajectory"``.
+
+    - ``"sequence"``: one ratio per training sequence. With ``generator.step_wise_trajectories=True``
+      every turn is its own sequence, so the ratio is per turn.
+    - ``"trajectory"``: one ratio per step-wise trajectory, computed over the loss tokens of all its
+      turns, as if the turns were one sequence. Costs one extra no-grad forward pass per mini-batch.
+      Requires ``policy_loss_type="gspo"``, ``generator.step_wise_trajectories=True`` and
+      ``trainer.strategy="fsdp"``.
+    """
     loss_reduction: str = "token_mean"
     """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
 
