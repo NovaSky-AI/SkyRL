@@ -451,15 +451,17 @@ def get_packing_parity_batch(model_name: str) -> TrainingInputBatch:
     return data
 
 
-def _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding) -> torch.Tensor:
+def _megatron_vlm_forward_logprobs(
+    model_name, batch, tp, remove_microbatch_padding, micro_batch=PACKING_MICRO_BATCH
+) -> torch.Tensor:
     """Inference forward (the RL old/ref-logprob path): [B, response_length], right-aligned."""
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = tp
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
-    cfg.trainer.micro_forward_batch_size_per_gpu = PACKING_MICRO_BATCH
-    cfg.trainer.micro_train_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.micro_forward_batch_size_per_gpu = micro_batch
+    cfg.trainer.micro_train_batch_size_per_gpu = micro_batch
     cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
     try:
         actor_group = init_worker_with_type("policy", shared_pg=None, colocate_all=False, num_gpus_per_node=tp, cfg=cfg)
@@ -486,39 +488,64 @@ def _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padd
 )
 @pytest.mark.megatron
 async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp):
-    """Sample packing must not change per-token logprobs of the answer tokens.
+    """Sample packing must add no error beyond ordinary batching.
 
-    Stats are split by each sample's slot in its packed microbatch: a leak across a
-    sample boundary can only make later slots worse than slot 0. Packed and unpacked
-    run different kernels, so they agree only to bf16 precision (and a whole
-    microbatch can shift together when the kernel path changes).
+    Packed and padded (unpacked) microbatches run different kernels on different
+    shapes, so in bf16 they agree only to rounding -- and so does unpacked with
+    itself when the microbatch composition changes. The reference is therefore
+    each sample run alone (unpacked, one sample per microbatch), and the check is
+    that packed microbatches of 4 are no further from it than unpacked ones.
+    A sample-boundary leak (mRoPE restart, GatedDeltaNet state/conv carried
+    across samples) would also make later slots of a packed microbatch worse
+    than slot 0.
     """
     batch = get_packing_parity_batch(model_name)
+    num_actions = batch.metadata["response_length"]
     unpacked = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=False)
     packed = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=True)
-    num_actions = batch.metadata["response_length"]
     assert packed.shape == unpacked.shape == (len(PACKING_PROMPTS), num_actions)
 
+    # Reference: every sample alone. At TP>1 (sequence parallel) a microbatch with no image
+    # crashes Megatron-Bridge's split_deepstack_embs (fixed upstream in Megatron-Bridge#3869,
+    # not yet merged), so the text-only row is left out of the reference there.
+    has_image = torch.tensor([size is not None for _, size, _ in PACKING_PROMPTS])
+    ref_rows = torch.arange(len(PACKING_PROMPTS)) if tp == 1 else has_image.nonzero().flatten()
+    ref_batch = TrainingInputBatch({k: (None if v is None else v[ref_rows]) for k, v in batch.items()})
+    ref_batch.metadata = batch.metadata
+    alone = _megatron_vlm_forward_logprobs(model_name, ref_batch, tp, remove_microbatch_padding=False, micro_batch=1)
+
     scored = batch["loss_mask"].bool()
-    diff = (packed - unpacked).abs()
-    assert torch.isfinite(packed[scored]).all() and torch.isfinite(unpacked[scored]).all()
+    for name, t in (("unpacked", unpacked), ("packed", packed), ("alone", alone)):
+        rows_scored = scored[ref_rows] if name == "alone" else scored
+        assert torch.isfinite(t[rows_scored]).all(), name
+    ref_scored = scored[ref_rows]
+    packed_vs_alone = (packed[ref_rows] - alone).abs()
+    unpacked_vs_alone = (unpacked[ref_rows] - alone).abs()
+    packed_vs_unpacked = (packed - unpacked).abs()
 
-    slots = torch.arange(len(PACKING_PROMPTS)) % PACKING_MICRO_BATCH
-    stats = {}
-    for name, rows in (("first", slots == 0), ("later", slots > 0)):
-        d = diff[rows][scored[rows]]
-        stats[name] = (d.max().item(), d.mean().item(), d.numel())
-    print(f"\n[packing parity] {model_name} tp={tp}")
-    for name, (mx, mean, n) in stats.items():
-        print(f"  {name:5s} samples: max={mx:.4f} mean={mean:.5f} tokens={n}")
-    for i in range(len(PACKING_PROMPTS)):
-        d = diff[i][scored[i]]
-        print(f"  sample {i} slot {slots[i].item()}: max={d.max().item():.4f} mean={d.mean().item():.5f}")
+    slots = (torch.arange(len(PACKING_PROMPTS)) % PACKING_MICRO_BATCH)[ref_rows]
+    print(f"\n[packing parity] {model_name} tp={tp}  (mean/max abs logprob diff on answer tokens)")
+    for name, d, m in (
+        ("packed vs alone", packed_vs_alone, ref_scored),
+        ("unpacked vs alone", unpacked_vs_alone, ref_scored),
+        ("packed vs unpacked", packed_vs_unpacked, scored),
+    ):
+        print(f"  {name:18s}: mean={d[m].mean().item():.5f} max={d[m].max().item():.4f}")
+    for j, i in enumerate(ref_rows.tolist()):
+        m = ref_scored[j]
+        print(
+            f"  sample {i} slot {slots[j].item()}: packed-alone={packed_vs_alone[j][m].mean().item():.5f} "
+            f"unpacked-alone={unpacked_vs_alone[j][m].mean().item():.5f}"
+        )
 
-    first_max, first_mean, _ = stats["first"]
-    later_max, later_mean, _ = stats["later"]
-    # bf16 agreement on answer tokens (HF bf16 vs fp32 differs by ~5e-2 mean on these).
-    assert diff[scored].mean().item() < 3e-2, stats
-    # No boundary leak: later samples must not be materially worse than first samples.
-    assert later_mean <= 3 * first_mean + 1e-2, stats
-    assert later_max <= 3 * first_max + 0.25, stats
+    packed_err = packed_vs_alone[ref_scored].mean().item()
+    unpacked_err = unpacked_vs_alone[ref_scored].mean().item()
+    # Packing must not add error beyond what ordinary batching already shows.
+    assert packed_err <= 1.5 * unpacked_err + 5e-3, (packed_err, unpacked_err)
+    # Guard against gross breakage (a wrong position or boundary is >> bf16 noise).
+    assert packed_vs_unpacked[scored].mean().item() < 5e-2
+    # No boundary leak: later slots of a packed microbatch are not worse than slot 0.
+    first, later = slots == 0, slots > 0
+    first_d, later_d = packed_vs_alone[first][ref_scored[first]], packed_vs_alone[later][ref_scored[later]]
+    assert later_d.mean().item() <= 3 * first_d.mean().item() + 1e-2, (later_d.mean(), first_d.mean())
+    assert later_d.max().item() <= 3 * first_d.max().item() + 0.25, (later_d.max(), first_d.max())
