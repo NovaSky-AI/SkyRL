@@ -70,6 +70,10 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
     reject_unsupported_sample_support_packing,
 )
+
+# Importing this registers the SFT objectives (cross_entropy/dft/asft/kl_reg_sft) into
+# PolicyLossRegistry, which is looked up by name below.
+from skyrl.backends.skyrl_train.utils.sft_loss_utils import LOSSES_WITH_BASE_LOGPROBS
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
@@ -780,13 +784,22 @@ class MegatronModelWrapper:
             action_log_probs = token_logprobs[:, -num_actions:]
 
             # policy loss should be calculated based on the selected token logprobs
+            loss_fn_kwargs = dict(
+                config=loss_config,
+                loss_mask=loss_mask,
+                rollout_logprobs=rollout_action_logprobs,
+            )
+            # Only losses that opt in (e.g. ASFT's KL anchor) receive the frozen-reference
+            # gold-token log-probs; all other losses keep their existing signature.
+            if resolved_loss_name in LOSSES_WITH_BASE_LOGPROBS:
+                loss_fn_kwargs["base_log_probs"] = (
+                    base_action_log_probs[:, -num_actions:] if base_action_log_probs is not None else None
+                )
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
-                config=loss_config,
-                loss_mask=loss_mask,
-                rollout_logprobs=rollout_action_logprobs,
+                **loss_fn_kwargs,
             )
 
             # Decoupled MTP / draft loss: soft-CE distillation of the detached-input MTP head against

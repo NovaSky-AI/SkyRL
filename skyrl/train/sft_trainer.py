@@ -695,6 +695,22 @@ def _tokenize_chat_all_assistants(
 # ---------------------------------------------------------------------------
 
 
+_LOSS_METRICS_PREFIX = "loss_metrics/"
+
+
+def _loss_metrics_log_dict(step_result: dict) -> dict:
+    """Scalar loss metrics from a ``train_step`` result, ready to merge into a log dict.
+
+    The worker namespaces these under ``loss_metrics/`` so RL's aggregation can find them;
+    strip it here so panels read ``train/asft_kl`` rather than ``train/loss_metrics/asft_kl``.
+    """
+    return {
+        f"train/{k.removeprefix(_LOSS_METRICS_PREFIX)}": v
+        for k, v in (step_result.get("metrics") or {}).items()
+        if isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+
+
 def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     """Collate tokenized examples into a TrainingInputBatch.
 
@@ -729,6 +745,19 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     pixel_values = []
     image_grid_thw = []
 
+    # ASFT reference log-probs (frozen base model gold-token log-probs), right-aligned to
+    # ``max_num_actions`` exactly like ``loss_mask``. Carried through as ``base_action_log_probs``
+    # (the same field RL uses for reference log-probs) and consumed by the ``asft`` loss. All-or-
+    # nothing per batch, mirroring the image handling above.
+    num_with_ref = sum("ref_logprobs" in ex for ex in examples)
+    if num_with_ref not in (0, num_examples):
+        raise ValueError(
+            f"Mixed batches with/without 'ref_logprobs' are not supported: {num_with_ref}/{num_examples} "
+            "samples carry reference log-probs. Precompute reference log-probs for the whole dataset."
+        )
+    batch_has_ref = num_with_ref > 0
+    ref_logprobs_np = np.zeros((num_examples, max_num_actions), dtype=np.float32) if batch_has_ref else None
+
     for i, ex in enumerate(examples):
         # Left-pad sequences; right-align response loss masks.
         pad_len = max_len - len(ex["input_ids"])
@@ -737,6 +766,15 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
 
         action_pad = max_num_actions - ex["num_actions"]
         loss_mask_np[i, action_pad:] = ex["loss_mask"]
+
+        if batch_has_ref:
+            ref = ex["ref_logprobs"]
+            if len(ref) != ex["num_actions"]:
+                raise ValueError(
+                    f"ref_logprobs length {len(ref)} != num_actions {ex['num_actions']} for example {i}; "
+                    "reference log-probs must be aligned to the response/action tokens (use pretokenized data)."
+                )
+            ref_logprobs_np[i, action_pad:] = ref
 
         if batch_has_images:
             pixel_values.append(torch.as_tensor(ex["pixel_values"]))
@@ -747,6 +785,7 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
             "sequences": torch.from_numpy(sequences_np),
             "attention_mask": torch.from_numpy(attention_mask_np),
             "loss_mask": torch.from_numpy(loss_mask_np),
+            "base_action_log_probs": torch.from_numpy(ref_logprobs_np) if batch_has_ref else None,
             "pixel_values": TensorList(pixel_values) if batch_has_images else None,
             "image_grid_thw": TensorList(image_grid_thw) if batch_has_images else None,
         }
@@ -806,6 +845,11 @@ class SFTTrainer:
         trainer.shutdown()
     """
 
+    # Frozen reference model group for the anchored SFT losses, populated by
+    # ``_init_workers`` only when ``_asft_live_ref``. Declared at class level so the
+    # attribute exists even on instances built without ``__init__``.
+    ref_actor_group = None
+
     def __init__(
         self,
         cfg: SFTConfig,
@@ -821,6 +865,7 @@ class SFTTrainer:
         self.processor = None  # set in setup() for VLM models
         self.is_vlm = False
         self.dispatch: WorkerDispatch | None = None
+        self.ref_actor_group = None
         self.tracker: Tracking | None = None
         # Stateful dataloaders, built in train() once data is tokenized.
         self.train_dataloader: StatefulDataLoader | None = None
@@ -848,6 +893,19 @@ class SFTTrainer:
     def _torch_profiler_enabled(self) -> bool:
         """Whether to dispatch policy profiler RPCs."""
         return self.cfg.trainer.policy.torch_profiler_config.enable
+
+    @property
+    def _asft_live_ref(self) -> bool:
+        """Whether to stand up a live frozen-reference model group.
+
+        The anchored SFT losses need per-token reference log-probs; ``ref_source=live``
+        computes them each step from a second model group, while ``precomputed`` reads them
+        from a ``ref_logprobs`` dataset column and needs no extra GPUs.
+
+        Derived rather than cached in ``__init__`` so it cannot go stale against ``sft_cfg``
+        and so ``_init_workers`` stays usable on a trainer built without a full ``__init__``.
+        """
+        return self.sft_cfg.loss_type in {"asft", "kl_reg_sft"} and self.sft_cfg.ref_source == "live"
 
     def _build_collator(self, tokenizer):
         """Select the batch collator from the configured packing mode.
@@ -995,7 +1053,47 @@ class SFTTrainer:
         )
         ray.get(actor_group.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
 
-        self.dispatch = WorkerDispatch(self.cfg, policy_actor_group=actor_group)
+        # Live ASFT reference model group (frozen), on its own placement group. The reference is
+        # forward-only, so it can usually run on fewer GPUs than the policy -- see
+        # ``ref_placement_num_nodes``. Colocation/offload with the policy is the planned
+        # optimization; the config already carries colocate_policy_ref for that.
+        if self._asft_live_ref:
+            ref_num_nodes = self.sft_cfg.ref_placement_num_nodes or self.sft_cfg.placement.num_nodes
+            ref_num_gpus = self.sft_cfg.ref_placement_num_gpus_per_node or num_gpus
+            if (ref_num_nodes, ref_num_gpus) != (self.sft_cfg.placement.num_nodes, num_gpus):
+                logger.info(
+                    f"Live reference group sized independently of the policy: "
+                    f"{ref_num_nodes} node(s) x {ref_num_gpus} GPU(s) "
+                    f"(policy: {self.sft_cfg.placement.num_nodes} x {num_gpus})."
+                )
+            ref_raw_pg = placement_group(
+                [{"GPU": ref_num_gpus, "CPU": ref_num_gpus}] * ref_num_nodes,
+                strategy="PACK",
+            )
+            get_ray_pg_ready_with_timeout(ref_raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            ref_pg = ResolvedPlacementGroup(ref_raw_pg)
+            self.ref_actor_group = PPORayActorGroup(
+                self.cfg.trainer,
+                num_nodes=ref_num_nodes,
+                num_gpus_per_node=ref_num_gpus,
+                ray_actor_type=PolicyWorker,
+                pg=ref_pg,
+                num_gpus_per_actor=1,
+                colocate_all=False,
+                sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
+                record_memory=self.cfg.trainer.policy.record_memory,
+            )
+            # Reference is the frozen base model; init from the same checkpoint, no optimizer steps
+            # are ever issued against it (we only ever call dispatch.forward("ref", ...)).
+            ray.get(self.ref_actor_group.async_init_model(self.sft_cfg.model.path))
+            ray.get(
+                self.ref_actor_group.async_run_ray_method(
+                    "pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id
+                )
+            )
+            logger.info("ASFT live reference model group initialized (ref_source=live).")
+
+        self.dispatch = WorkerDispatch(self.cfg, policy_actor_group=actor_group, ref_actor_group=self.ref_actor_group)
 
     def _init_tracker(self):
         self.tracker = Tracking(
@@ -1680,6 +1778,105 @@ class SFTTrainer:
         eval_loss = total_loss_weighted / max(total_tokens, 1)
         return eval_loss, num_eval_batches
 
+    def _inject_live_ref_logprobs(self, batch: TrainingInputBatch) -> None:
+        """Compute frozen-reference log-probs for ``batch`` and store them as
+        ``base_action_log_probs`` (consumed by the ``asft`` loss's KL anchor).
+
+        Runs a no-grad forward on the reference actor group (``loss_fn=None`` -> per-sample
+        ``logprobs``) and scatters each sample's response log-probs into the ``loss_mask>0``
+        positions of a ``[B, num_actions]`` tensor.
+
+        Supports single-turn AND multi-turn masks. The reference forward (``loss_fn=None``)
+        returns a log-prob for every response-window position, not just the masked ones, so we
+        write the full window position-for-position and let ``loss_mask`` select the trainable
+        tokens. Interior gaps (user turns between assistant turns) therefore get their real
+        reference log-prob at every position and are masked out downstream like any other
+        non-response token -- no contiguity assumption, no degrade-to-DFT fallback.
+        """
+        loss_mask = batch["loss_mask"]
+
+        # Reference forward. loss_fn=None returns per-sample log-probs of length
+        # == response_length (the FULL response window), not trimmed to the masked
+        # tokens (see worker.forward / _forward_micro_batch). sub_seq_lengths is
+        # forwarded when present so packed batches keep their bin layout.
+        fwd_keys = ["sequences", "attention_mask", "loss_mask"]
+        for optional_key in ("sub_seq_lengths", "pixel_values", "image_grid_thw"):
+            if batch.get(optional_key) is not None:
+                fwd_keys.append(optional_key)
+        data_fwd = batch.select(keys=fwd_keys, metadata_keys=["response_length"])
+
+        output = self.dispatch.forward("ref", data_fwd, loss_fn=None)
+        self.dispatch.empty_cache("ref")
+
+        width = loss_mask.shape[1]
+        base = torch.zeros_like(loss_mask, dtype=torch.float32)
+        per_sample = output.loss_fn_outputs
+
+        n_missing = 0
+        for i in range(loss_mask.shape[0]):
+            lp = per_sample[i].get("logprobs") if i < len(per_sample) else None
+            if not lp:
+                # A wholly-missing sample stays at zero and would anchor against a
+                # phantom log p_ref = 0 (p_ref = 1.0); warned below. Rare -- the
+                # forward returns one row per sample.
+                n_missing += 1
+                continue
+            lp_t = torch.tensor(lp, dtype=torch.float32, device=base.device)
+            n = lp_t.shape[0]
+            if n == width:
+                # Full window, position-aligned: the common case. Writing the whole
+                # window and letting loss_mask select handles single-turn, multi-turn
+                # (interior gaps) and packed bins uniformly -- no contiguity assumed.
+                base[i] = lp_t
+            elif n == int((loss_mask[i] > 0).sum().item()):
+                # Masked-only log-probs, in order -> scatter onto the exact trainable
+                # positions. Also multi-turn-safe.
+                idx = torch.where(loss_mask[i] > 0)[0]
+                base[i, idx] = lp_t
+            elif n < width:
+                # Legacy contiguous trailing block (single-turn only): correct only
+                # when the trainable tokens are the trailing n positions.
+                base[i, -n:] = lp_t
+            else:
+                raise ValueError(
+                    f"ASFT live reference: sample {i} returned {n} log-probs but the response "
+                    f"window is only {width} wide; cannot align to loss_mask."
+                )
+
+        if n_missing:
+            logger.warning(
+                f"ASFT live reference: {n_missing}/{loss_mask.shape[0]} samples returned no "
+                "log-probs; those rows keep base_action_log_probs=0, which anchors them to a "
+                "phantom p_ref=1.0 and can blow up the k3 estimator."
+            )
+        batch["base_action_log_probs"] = base
+
+    def _asft_kl_coef_for_step(self, step: int) -> Optional[float]:
+        """Linearly ramp ``asft_kl_coef`` over the first N steps, else ``None``.
+
+        Returns ``None`` when no ramp applies (not ASFT, or warmup disabled) so the
+        caller sends no override and the configured coefficient is used as-is.
+
+        The reference log-probs come from a *different engine* than the policy
+        (vLLM offline, or a frozen actor group) so step-1 disagreement is expected
+        even though the weights are identical. k3 puts that disagreement through
+        ``exp()``: an observed run opened at asft_kl 8e4 with grad_norm 1.7e6
+        before settling to ~0.08 by step 5. Ramping the coefficient keeps that
+        opening transient from landing as a destructive update, and costs nothing
+        once the two engines agree.
+        """
+        if self.sft_cfg.loss_type not in {"asft", "kl_reg_sft"}:
+            return None
+        # Read from ``sft_cfg`` -- the SFT-native config the trainer is built
+        # with. ``self.cfg`` is a SkyRLTrainConfig and has no ``algorithm``
+        # attribute (that lives at ``cfg.trainer.algorithm``, and is populated
+        # FROM these same sft_cfg fields by build_skyrl_config_for_sft).
+        warmup = int(getattr(self.sft_cfg, "kl_warmup_steps", 0) or 0)
+        if warmup <= 0:
+            return None
+        base = float(getattr(self.sft_cfg, "kl_loss_coef", 0.0))
+        return base * min(1.0, (step + 1) / warmup)
+
     def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
         """Execute a single training step: forward_backward + optim_step.
 
@@ -1691,12 +1888,29 @@ class SFTTrainer:
             Dict with ``loss``, ``grad_norm``, and ``timings``.
         """
         timings: dict[str, float] = {}
+        # Live reference (asft/kl_reg_sft + ref_source=live): forward the frozen reference
+        # model and inject its per-token log-probs as base_action_log_probs so the anchored
+        # loss can form its KL anchor. (The precomputed path instead carries
+        # base_action_log_probs via collate_sft_batch.)
+        if self._asft_live_ref:
+            with Timer("ref_forward", timings):
+                self._inject_live_ref_logprobs(batch)
         with Timer("forward_backward", timings):
             # SFT consumes metrics only; skip per-token loss_fn_outputs.
+            # Per-step KL-anchor coefficient ramp (kl_reg_sft/asft warmup), merged into
+            # AlgorithmConfig in the worker. None outside warmup -> configured coef used as-is.
+            loss_fn_config = None
+            ramped = self._asft_kl_coef_for_step(step)
+            if ramped is not None:
+                loss_fn_config = {"asft_kl_coef": ramped}
             output = self.dispatch.forward_backward(
                 "policy",
                 batch,
-                loss_fn="cross_entropy",
+                # SFT objective: "cross_entropy" (default), "dft", "asft" (DFT+KL), or
+                # "kl_reg_sft" (CE+KL). Anchored losses read their reference log-probs from
+                # the batch's base_action_log_probs (precomputed column, or injected live above).
+                loss_fn=self.sft_cfg.loss_type,
+                loss_fn_config=loss_fn_config,
                 return_per_token_outputs=False,
             )
         with Timer("optim_step", timings):
@@ -1713,6 +1927,7 @@ class SFTTrainer:
             "loss": loss_val,
             "grad_norm": grad_norm,
             "timings": timings,
+            "metrics": metrics,  # Pass full metrics (asft_kl, dft_weight_mean, etc.) for logging
         }
 
     def _validate_batch_parallelism(self):
@@ -1816,6 +2031,7 @@ class SFTTrainer:
                     "train/actual_num_tokens": actual_num_tokens,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
+                log_dict.update(_loss_metrics_log_dict(step_result))
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())
@@ -2044,6 +2260,7 @@ class SFTTrainer:
                     "train/batch_padded_seq_len": batch_padded_seq_len,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
+                log_dict.update(_loss_metrics_log_dict(step_result))
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())

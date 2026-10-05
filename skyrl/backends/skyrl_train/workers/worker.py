@@ -48,6 +48,10 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+
+# Importing this registers the SFT objectives (cross_entropy/dft/asft/kl_reg_sft) into
+# PolicyLossRegistry, which is looked up by name below.
+from skyrl.backends.skyrl_train.utils.sft_loss_utils import LOSSES_WITH_BASE_LOGPROBS
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -1141,13 +1145,20 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
+            loss_fn_kwargs = dict(
+                config=loss_config,
+                loss_mask=loss_mask,
+                rollout_logprobs=rollout_action_logprobs,
+            )
+            # Only losses that opt in (e.g. ASFT's KL anchor) receive the frozen-reference
+            # gold-token log-probs; all other losses keep their existing signature.
+            if resolved_loss_name in LOSSES_WITH_BASE_LOGPROBS:
+                loss_fn_kwargs["base_log_probs"] = base_action_log_probs
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
-                config=loss_config,
-                loss_mask=loss_mask,
-                rollout_logprobs=rollout_action_logprobs,
+                **loss_fn_kwargs,
             )
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
@@ -1247,23 +1258,22 @@ class PolicyWorkerBase(Worker):
 
             # Build per-sequence loss_fn_outputs with logprobs.
             batch_size = action_log_probs.shape[0]
-            seq_len = action_log_probs.shape[1]
-
-            if response_mask is not None:
-                valid_lens = response_mask.sum(dim=1).int().tolist()
-            elif loss_mask is not None:
-                valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
-            else:
-                valid_lens = [seq_len] * batch_size
 
             detached_log_probs = action_log_probs.detach().cpu()
-            loss_fn_outputs = []
-            for i, valid_len in enumerate(valid_lens):
-                loss_fn_outputs.append(
-                    {
-                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
-                    }
-                )
+            if response_mask is not None:
+                valid_lens = response_mask.sum(dim=1).int().tolist()
+                loss_fn_outputs = [
+                    {"logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else []}
+                    for i, valid_len in enumerate(valid_lens)
+                ]
+            elif loss_mask is not None:
+                # Gather exactly the masked positions rather than a trailing slice: a
+                # multi-turn loss_mask has interior gaps (asst / user / asst), so the masked
+                # token count does not correspond to a contiguous suffix.
+                mask_cpu = (loss_mask > 0).cpu()
+                loss_fn_outputs = [{"logprobs": detached_log_probs[i][mask_cpu[i]].tolist()} for i in range(batch_size)]
+            else:
+                loss_fn_outputs = [{"logprobs": detached_log_probs[i].tolist()} for i in range(batch_size)]
 
             status = {
                 "final_loss": unscaled_loss.item(),

@@ -222,6 +222,54 @@ class SFTConfig(BaseConfig):
     """Number of training epochs. Used when num_steps is None. Default: 1 epoch."""
     batch_size: int = 4
     micro_train_batch_size_per_gpu: int = 2
+
+    # ---- Loss selection (SFT / DFT / ASFT) ----
+    loss_type: str = "cross_entropy"
+    """SFT training objective: ``"cross_entropy"`` (standard NLL), ``"dft"`` (Dynamic Fine-Tuning:
+    prob-weighted NLL), ``"asft"`` (Anchored SFT: DFT + KL anchor to the frozen base model), or
+    ``"kl_reg_sft"`` (cross-entropy + KL anchor: ASFT without the DFT ``p(y)`` reweighting, for
+    learning new/hard in-mixture capability that DFT would suppress while still anchoring
+    in-distribution retention). ``"asft"``/``"kl_reg_sft"`` use the same KL-anchor knobs
+    (``kl_loss_coef``, ``kl_estimator``, ``kl_clamp``, ``kl_warmup_steps``, ``ref_source``) and the
+    same precomputed reference log-prob column (``ref_logprobs_key``); without a reference both
+    raise rather than silently training a different objective -- use ``"dft"`` or
+    ``"cross_entropy"`` to opt out of the anchor explicitly."""
+    kl_loss_coef: float = 0.03
+    """KL-anchor coefficient for ``loss_type="asft"`` (maps to ``algorithm.asft_kl_coef``). 0.03 is
+    the paper's bf16 recommendation."""
+    kl_estimator: str = "k3"
+    """Token-level KL estimator for ``loss_type="asft"``: ``"k3"`` or ``"k1"`` (maps to
+    ``algorithm.asft_kl_estimator``)."""
+    kl_clamp: float = 10.0
+    """Clamp ``|log pi_ref - log pi_theta|`` before k3's exponential; 0 disables (maps to
+    ``algorithm.asft_kl_clamp``). Bounds the contribution of any single token."""
+    kl_warmup_steps: int = 0
+    """Ramp ``kl_loss_coef`` linearly from 0 over the first N steps; 0 disables (maps to
+    ``algorithm.asft_kl_warmup_steps``). Absorbs the reference-vs-policy transient at step 1."""
+    ref_source: str = "precomputed"
+    """Where ASFT's reference log-probs come from:
+    ``"precomputed"`` -- read from the dataset's ``ref_logprobs`` column (run
+    ``precompute_ref_logprobs.py`` offline; zero train-time overhead), or
+    ``"live"`` -- stand up a frozen reference model group and run a no-grad forward each step
+    (no precompute, but ~2x model memory + an extra forward; requires its own GPUs today).
+    Ignored unless ``loss_type="asft"``."""
+    ref_logprobs_key: str = "ref_logprobs"
+    """Dataset column carrying precomputed frozen-reference gold-token log-probs (one list per
+    example, aligned to the assistant/response tokens). Consumed only when ``loss_type="asft"``
+    and ``ref_source="precomputed"``."""
+    ref_placement_num_nodes: Optional[int] = None
+    """Nodes for the live reference group (``ref_source="live"``); ``None`` mirrors the policy.
+
+    The reference is forward-only -- no gradients, optimizer moments, or backward activations --
+    so it needs substantially less memory than the policy and mirroring the policy's placement
+    leaves most of those GPUs idle. Size it down to reclaim them, subject to two constraints:
+    the group must still hold the model-parallel footprint (TP x PP x CP) implied by
+    ``policy.megatron_config``, and fewer GPUs means a smaller DP degree, so the per-step
+    reference forward gets slower. Ignored unless ``ref_source="live"``."""
+    ref_placement_num_gpus_per_node: Optional[int] = None
+    """GPUs per node for the live reference group; ``None`` mirrors the policy.
+    See :attr:`ref_placement_num_nodes`."""
+
     logger: str = "console"  # "console" or "wandb"
     project_name: str = "skyrl_sft"
     run_name: str = "skyrl_sft_run"
@@ -558,6 +606,18 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
+
+    # Loss selection
+    _valid_sft_losses = {"cross_entropy", "dft", "asft", "kl_reg_sft"}
+    if cfg.loss_type not in _valid_sft_losses:
+        raise ValueError(f"Unknown loss_type '{cfg.loss_type}'. Must be one of {sorted(_valid_sft_losses)}.")
+    if cfg.loss_type in {"asft", "kl_reg_sft"}:
+        if cfg.kl_estimator not in {"k1", "k3"}:
+            raise ValueError(f"Unknown kl_estimator '{cfg.kl_estimator}'. Must be 'k1' or 'k3'.")
+        if cfg.kl_loss_coef < 0:
+            raise ValueError(f"kl_loss_coef must be >= 0, got {cfg.kl_loss_coef}")
+        if cfg.ref_source not in {"precomputed", "live"}:
+            raise ValueError(f"Unknown ref_source '{cfg.ref_source}'. Must be 'precomputed' or 'live'.")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
     if cfg.max_training_steps is not None and cfg.max_training_steps <= 0:
@@ -659,9 +719,18 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     cfg.trainer.policy.record_memory = sft_cfg.record_memory
     cfg.trainer.policy.torch_profiler_config = sft_cfg.torch_profiler_config
 
-    # SFT doesn't use KL/ref model
+    # SFT doesn't use the RL KL/ref-model machinery. The ASFT KL anchor is applied *inside* the
+    # policy loss (via precomputed reference log-probs), not through use_kl_loss/use_kl_in_reward.
     cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.algorithm.use_kl_in_reward = False
+
+    # Loss selection + ASFT KL-anchor knobs. ``policy_loss_type`` is what the worker resolves; the
+    # SFT trainer also passes ``loss_type`` explicitly to forward_backward (see train_step).
+    cfg.trainer.algorithm.policy_loss_type = sft_cfg.loss_type
+    cfg.trainer.algorithm.asft_kl_coef = sft_cfg.kl_loss_coef
+    cfg.trainer.algorithm.asft_kl_estimator = sft_cfg.kl_estimator
+    cfg.trainer.algorithm.asft_kl_clamp = sft_cfg.kl_clamp
+    cfg.trainer.algorithm.asft_kl_warmup_steps = sft_cfg.kl_warmup_steps
 
     # Training params
     cfg.trainer.micro_train_batch_size_per_gpu = sft_cfg.micro_train_batch_size_per_gpu

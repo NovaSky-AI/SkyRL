@@ -217,8 +217,15 @@ class OptimizerConfig(BaseConfig):
     num_warmup_steps: int = 0
     """Number of mini-batch steps to warmup the optimizer."""
     scheduler: str = "constant_with_warmup"
-    """Learning rate scheduler. Intended to align with ``transformers.SchedulerType``:
-    https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType"""
+    """LR schedule. FSDP passes this straight to HF ``get_scheduler`` (aligns with
+    ``transformers.SchedulerType``:
+    https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.SchedulerType).
+    Megatron maps it to an ``lr_decay_style``: ``"constant_with_warmup"`` -> constant,
+    ``"cosine"`` -> cosine decay to ``min_lr`` over the training horizon, ``"linear"`` -> linear
+    decay (see ``get_megatron_optimizer_param_scheduler``)."""
+    min_lr: float = 0.0
+    """Floor the LR decays to (cosine/linear schedules). 0.0 decays to zero. Only consulted by
+    decaying schedules; ignored by ``constant_with_warmup``."""
 
 
 @dataclass
@@ -953,7 +960,21 @@ class AlgorithmConfig(BaseConfig):
     - ``"dppo"``: DPPO, from Rethinking the Trust Region in LLM Reinforcement Learning
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability
       divergences rather than probability ratios, improving on PPO clipping behavior.
+    - SFT losses: ``"cross_entropy"``, ``"dft"`` (DFT), ``"asft"`` (DFT + KL anchor), and
+      ``"kl_reg_sft"`` (cross-entropy + KL anchor). The ``asft_*`` fields below configure the anchor.
     """
+    asft_kl_coef: float = 0.03
+    """KL-anchor coefficient for the ``"asft"``/``"kl_reg_sft"`` losses; 0 disables the anchor."""
+    asft_kl_estimator: str = "k3"
+    """Token-level KL estimator: ``"k3"`` (default, non-negative, low variance) or ``"k1"``
+    (log-ratio, unbiased but higher variance)."""
+    asft_kl_clamp: float = 10.0
+    """Clamp ``|r| = |log pi_ref - log pi_theta|`` before k3's exponential (0 disables).
+    k3's gradient is ``-exp(r)``, so a single outlier token can dominate a batch. Monitor
+    ``asft_kl_clamped_frac``."""
+    asft_kl_warmup_steps: int = 0
+    """Linearly ramp ``asft_kl_coef`` from 0 over the first N optimizer steps (0 disables).
+    Absorbs the step-1 reference-vs-policy transient."""
     loss_reduction: str = "token_mean"
     """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
 
