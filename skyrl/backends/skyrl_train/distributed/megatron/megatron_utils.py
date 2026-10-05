@@ -38,7 +38,7 @@ from megatron.core.transformer.moe.moe_utils import (
     get_moe_layer_wise_logging_tracker,
     reduce_aux_losses_tracker_across_ranks,
 )
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
@@ -757,6 +757,32 @@ def preprocess_packed_seqs(
         return input_ids_rmpad.unsqueeze(0), packed_seq_params
     else:
         return input_ids, packed_seq_params
+
+
+def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
+    """Whether the VLM handles a packed [1, T] stream itself.
+
+    True when every model chunk is Megatron-Bridge's ``Qwen3VLModel`` (Qwen3-VL,
+    Qwen3.5-VL), which rebuilds 3D mRoPE positions per packed sub-sequence from
+    ``packed_seq_params``, or sets ``model_owns_packing = True`` (NeMo-RL's opt-in
+    attribute for models that pack and split for context parallelism themselves).
+    """
+    try:
+        from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
+            Qwen3VLModel,
+        )
+    except ImportError:
+        Qwen3VLModel = None
+
+    chunks = model if isinstance(model, (list, tuple)) else [model]
+    for chunk in chunks:
+        unwrapped = unwrap_model(chunk)
+        if getattr(unwrapped, "model_owns_packing", False):
+            continue
+        if Qwen3VLModel is not None and isinstance(unwrapped, Qwen3VLModel):
+            continue
+        return False
+    return bool(chunks)
 
 
 def remove_left_padding(
