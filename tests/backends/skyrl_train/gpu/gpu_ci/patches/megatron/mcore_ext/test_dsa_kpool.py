@@ -113,3 +113,51 @@ def test_kpool_selects_every_visible_token_below_topk(seqlen):
                     f"query {query}: always_select_tail dropped part of the incomplete pool "
                     f"{sorted(tail)}; missing {sorted(tail - set(got.tolist()))}"
                 )
+
+
+@pytest.mark.parametrize("seq_lens", [[1000], [300, 517, 183]])
+def test_kpool_query_chunking_is_exact(seq_lens, monkeypatch):
+    """Scoring in query chunks (SkyRL's deviation from #7522) must select the same pools.
+
+    The verbatim path materializes O(sq^2) per-head FP32 scores; the chunked path keeps only a
+    chunk of them. Top-k is per query row, so forcing many small chunks -- including ones that
+    straddle packed-document boundaries -- must reproduce the single-chunk indices exactly.
+    """
+    from megatron.core.transformer.experimental_attention_variant.dsa_masking import (
+        generate_varlen_mask_params_for_positions,
+    )
+
+    from skyrl.backends.skyrl_train.patches.megatron.mcore_ext import dsa_kpool
+
+    device = "cuda"
+    seqlen = sum(seq_lens)
+    cu = torch.tensor([0] + seq_lens, device=device).cumsum(0)
+    positions = torch.cat([torch.arange(n, device=device) for n in seq_lens])
+    starts, ends = generate_varlen_mask_params_for_positions(cu, positions)
+    q, k, weights, gate, ape = _make_inputs(seqlen, device=device)
+
+    def run():
+        return dsa_kpool.fused_qk_topk_kpool(
+            q,
+            k,
+            weights,
+            index_topk=INDEX_TOPK,
+            pool_size=POOL_SIZE,
+            gate_score=gate,
+            ape=ape,
+            varlen_starts=starts,
+            varlen_ends=ends,
+            cu_seqlens_kv=cu,
+            always_select_tail=True,
+        )
+
+    full_scores, full_indices = run()
+    assert full_scores is not None, "one chunk should cover every query at this size"
+
+    num_pools = sum(n // POOL_SIZE for n in seq_lens)
+    # 37 queries per chunk: not a divisor of any segment length or of the pool size.
+    monkeypatch.setattr(dsa_kpool, "_KPOOL_SCORE_CHUNK_ELEMS", 37 * N_HEADS * num_pools)
+    chunked_scores, chunked_indices = run()
+
+    assert chunked_scores is None
+    assert torch.equal(chunked_indices, full_indices)
