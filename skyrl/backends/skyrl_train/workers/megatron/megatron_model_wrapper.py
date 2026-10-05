@@ -310,7 +310,7 @@ class MegatronModelWrapper:
         re-packing the stream (NVIDIA-NeMo/Megatron-Bridge#4532). Other VLMs only run
         unpacked (``model_owns_vlm_packing``).
 
-        Context parallelism: the full packed stream goes to every CP rank
+        Context parallelism: for those models the full packed stream goes to every CP rank
         (``preprocess_packed_seqs(shard_for_cp=False)``) and the model computes mRoPE,
         places image features and applies the CP split itself. Its rank-local logits are
         expected in the same 2*CP zigzag layout SkyRL's packed log-prob gather uses
@@ -325,6 +325,8 @@ class MegatronModelWrapper:
             )
         cp_size = mpu.get_context_parallel_world_size()
         if cp_size > 1:
+            # Packing is required for CP, so the check above already limits VLM CP to models that
+            # apply the CP split themselves (shard_for_cp=False below relies on it).
             if not self.remove_microbatch_padding:
                 raise ValueError("VLM context parallelism requires trainer.remove_microbatch_padding=true")
             if getattr(get_model_config(self.actor_module[0]), "mtp_num_layers", None):
@@ -495,7 +497,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
-                    shard_for_cp=not self.is_vlm,
+                    shard_for_cp=not self.model_owns_vlm_packing,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(
@@ -1149,7 +1151,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
-                    shard_for_cp=not self.is_vlm,
+                    shard_for_cp=not self.model_owns_vlm_packing,
                 )
                 batch["packed_seq_params"] = packed_seq_params
                 batch["packed_targets"] = _build_packed_targets(
