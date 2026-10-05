@@ -1097,6 +1097,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # Single model_id per sub-batch (split upstream); pass it so the
         # dispatch layer can swap to the right LoRA adapter before the op.
         model_id = prepared_batch.all_model_ids[0] if prepared_batch.all_model_ids else None
+        return_per_token_outputs = self.config.return_per_token_outputs
         if role == "critic":
             self._dispatch.set_algorithm_config(
                 "critic",
@@ -1110,7 +1111,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 loss_fn=loss_fn,
                 loss_fn_config=loss_fn_config,
                 model_id=model_id,
-                return_per_token_outputs=self.config.return_per_token_outputs,
+                return_per_token_outputs=return_per_token_outputs,
             )
 
         # Trim padding entries from loss_fn_outputs
