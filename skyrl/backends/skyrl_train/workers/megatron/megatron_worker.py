@@ -132,33 +132,6 @@ apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
 
 
-def _broadcast_tp_replicated_params(model_chunks: List[nn.Module]) -> None:
-    """Make random-init parameters that are replicated across tensor-parallel ranks identical.
-
-    Random init draws some TP-replicated parameters (e.g. the MoE router weight, the DSA k-pool
-    gate) independently on every TP rank. A loaded checkpoint gives every rank the same copy, and
-    their gradients are all-reduced over TP as if they were one tensor, so copy TP rank 0's values.
-    Expert parameters (``allreduce=False``) belong to the expert-parallel layout and are skipped.
-    """
-    tp_group = mpu.get_tensor_model_parallel_group()
-    if tp_group.size() == 1:
-        return
-    src = torch.distributed.get_global_rank(tp_group, 0)
-    changed = total = 0
-    for chunk in model_chunks:
-        for param in chunk.parameters():
-            if getattr(param, "tensor_model_parallel", False) or not getattr(param, "allreduce", True):
-                continue
-            before = param.data.clone()
-            torch.distributed.broadcast(param.data, src=src, group=tp_group)
-            changed += int(not torch.equal(before, param.data))
-            total += 1
-    if torch.distributed.get_rank() == 1:  # TP rank 1 of the first TP group (TP is the fastest-varying rank)
-        logger.info(
-            f"SKYRL_MEGATRON_RANDOM_INIT: synced {total} TP-replicated params from TP rank 0; {changed} differed"
-        )
-
-
 class MegatronWorker:
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
@@ -317,6 +290,8 @@ class MegatronWorker:
 
         if SKYRL_MEGATRON_RANDOM_INIT:
             logger.warning("SKYRL_MEGATRON_RANDOM_INIT=1: randomly initializing weights (checkpoint not loaded)")
+        # Random init needs no extra sync: MegatronStrategy.set_seed seeds every TP rank alike and calls
+        # model_parallel_cuda_manual_seed, so TP-replicated parameters come out identical.
         provider = bridge.to_megatron_provider(load_weights=not SKYRL_MEGATRON_RANDOM_INIT)
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
@@ -596,8 +571,6 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
-        if SKYRL_MEGATRON_RANDOM_INIT:
-            _broadcast_tp_replicated_params(model)
         return model
 
     def _forward_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
