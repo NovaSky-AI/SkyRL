@@ -9,27 +9,57 @@ set -x
 # HF config.json + tokenizer files, present at the same path on every node. Weight values don't
 # affect memory or throughput on random tokens.
 #
+# MODEL_PATH: a directory with zai-org/GLM-5.3-Flash's config.json (drop its "quantization_config")
+# and tokenizer files (tokenizer.json, tokenizer_config.json, chat_template.jinja).
+#
 # Usage:
-#   MAX_LENGTH=8192 bash examples/train/sft/run_sft_dummy_glm5p3_flash_megatron.sh [extra overrides...]
+#   MODEL_PATH=/path/to/glm5p3_flash_cfg MAX_LENGTH=8192 \
+#       bash examples/train/sft/run_sft_dummy_glm5p3_flash_megatron.sh [extra overrides...]
+#
+# Defaults fit up to 16k tokens per sequence. Long context (measured on 64 B200, FP32 grads, no
+# precision changes), e.g. 512k tokens per sequence:
+#   MEGATRON_TP=8 RECOMPUTE_GRANULARITY=full RECOMPUTE_METHOD=uniform RECOMPUTE_NUM_LAYERS=1 \
+#   RECOMPUTE_MODULES='[core_attn]' MAX_LENGTH=524288 \
+#   SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1 SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED=1 \
+#   SKYRL_DSA_INDEXER_TP_SHARD=1 bash ...
+#   -> over EFA: 144 GiB/GPU allocated, warm step ~227 s, ~18.5k tokens/s (fwd+bwd ~310
+#   tokens/s/GPU); over TCP: ~4.1k tokens/s. SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS=2147483648 (8 GiB
+#   indexer score chunks) cut the EFA step to ~215 s (~19.5k tokens/s) at the same peak. Add
+#   SKYRL_DSA_QUERY_CHUNK=65536 to trade ~5 GiB for one extra DSA attention forward. Without the
+#   checkpoint offload, or with optimizer_offload_fraction=0.5, 512k at TP8 runs out of memory.
+# 1M tokens per sequence: the same plus MEGATRON_CP=2 MAX_LENGTH=1048576 (dp = 4, batch 4)
+#   -> ~163 GiB/GPU peak, fwd+bwd ~44 tokens/s/GPU.
+# When inter-node traffic is slow (NCCL over TCP, ~1 GB/s per GPU; check NCCL_DEBUG=INFO for
+# "NET/Socket" vs "NET/OFI"), the MoE and CP all-to-alls dominate the step. Two opt-ins cut the
+# cross-node bytes (measured over TCP; over EFA node-dedup made 512k ~15% slower, so leave it off):
+#   SKYRL_KDA_CP_EXCHANGE=allgather  KDA CP exchanges hidden states, not projections (1M: 52 tok/s/GPU)
+#   SKYRL_MOE_NODE_DEDUP=1           MoE tokens cross once per node, not once per expert
+#   -> 1M with both: fwd+bwd 977 s = ~67 tokens/s/GPU, ~4.2k tokens/s, nvidia-smi peak ~174 GiB.
 
-MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/glm53_flash_cfg}"
+MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to a GLM-5.3-Flash config + tokenizer directory}"
 MAX_LENGTH="${MAX_LENGTH:-8192}"
 NUM_NODES="${NUM_NODES:-8}"
 NUM_GPUS_PER_NODE="${NUM_GPUS_PER_NODE:-8}"
 NUM_STEPS="${NUM_STEPS:-4}"
 
-# KDA has no context-parallel path and megatron-core rejects mHC with PP>1, so TP is the only
-# dense-side divisor. dp = 64 / TP4 = 16; one full-length sequence per DP rank per step.
+# megatron-core rejects mHC with PP>1, so TP and CP are the dense-side divisors. CP is head-wise
+# (all-to-all) for KDA and key all-gather for DSA, on the packed (THD) path.
+# dp = 64 / (TP4 * CP1) = 16; one full-length sequence per DP rank per step.
 MEGATRON_TP="${MEGATRON_TP:-4}"
+MEGATRON_CP="${MEGATRON_CP:-1}"
 MEGATRON_EP="${MEGATRON_EP:-32}"
 MEGATRON_ETP="${MEGATRON_ETP:-2}"
-DP=$(( NUM_NODES * NUM_GPUS_PER_NODE / MEGATRON_TP ))
+DP=$(( NUM_NODES * NUM_GPUS_PER_NODE / (MEGATRON_TP * MEGATRON_CP) ))
 BATCH_SIZE="${BATCH_SIZE:-$DP}"
 
 RECOMPUTE_GRANULARITY="${RECOMPUTE_GRANULARITY:-selective}"
 RECOMPUTE_MODULES="${RECOMPUTE_MODULES:-[core_attn,moe]}"
 RECOMPUTE_METHOD="${RECOMPUTE_METHOD:-null}"
 RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-null}"
+# Fused TileLang SparseMLA for the DSA layers. patch_sparse_mla_nope.py pads GLM-5.3's NoPE-MLA layout
+# into the kernel's; without a backend megatron-core falls back to dense [heads, sq, sq] FP32
+# scores (128 GiB/GPU at 32k with 32 local heads).
+DSA_KERNEL_BACKEND="${DSA_KERNEL_BACKEND:-tilelang}"
 
 export SKYRL_MEGATRON_RANDOM_INIT=1
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
@@ -57,7 +87,7 @@ uv run --isolated --extra megatron \
     placement.num_gpus_per_node=$NUM_GPUS_PER_NODE \
     megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
     megatron_config.pipeline_model_parallel_size=1 \
-    megatron_config.context_parallel_size=1 \
+    megatron_config.context_parallel_size=$MEGATRON_CP \
     megatron_config.expert_model_parallel_size=$MEGATRON_EP \
     megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
     megatron_config.mtp_num_layers=0 \
@@ -73,6 +103,8 @@ uv run --isolated --extra megatron \
     megatron_config.transformer_config_kwargs.mlp_chunks_for_training=64 \
     megatron_config.transformer_config_kwargs.gradient_accumulation_fusion=false \
     megatron_config.transformer_config_kwargs.disable_parameter_transpose_cache=true \
+    megatron_config.transformer_config_kwargs.dsa_kernel_backend=$DSA_KERNEL_BACKEND \
+    megatron_config.transformer_config_kwargs.cp_comm_type=allgather \
     megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true \
     megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0 \
     megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
