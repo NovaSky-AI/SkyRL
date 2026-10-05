@@ -452,19 +452,21 @@ def get_packing_parity_batch(model_name: str) -> TrainingInputBatch:
 
 
 def _megatron_vlm_forward_logprobs(
-    model_name, batch, tp, remove_microbatch_padding, micro_batch=PACKING_MICRO_BATCH
+    model_name, batch, tp, remove_microbatch_padding, micro_batch=PACKING_MICRO_BATCH, pp=1
 ) -> torch.Tensor:
     """Inference forward (the RL old/ref-logprob path): [B, response_length], right-aligned."""
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
-    cfg.trainer.placement.policy_num_gpus_per_node = tp
+    cfg.trainer.placement.policy_num_gpus_per_node = tp * pp
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
-    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
     cfg.trainer.micro_forward_batch_size_per_gpu = micro_batch
     cfg.trainer.micro_train_batch_size_per_gpu = micro_batch
     cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
     try:
-        actor_group = init_worker_with_type("policy", shared_pg=None, colocate_all=False, num_gpus_per_node=tp, cfg=cfg)
+        actor_group = init_worker_with_type(
+            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=tp * pp, cfg=cfg
+        )
         refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
         output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
@@ -475,19 +477,22 @@ def _megatron_vlm_forward_logprobs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_name", "tp"),
+    ("model_name", "tp", "pp"),
     [
-        ("Qwen/Qwen3-VL-2B-Instruct", 1),
-        ("Qwen/Qwen3-VL-2B-Instruct", 2),
+        ("Qwen/Qwen3-VL-2B-Instruct", 1, 1),
+        ("Qwen/Qwen3-VL-2B-Instruct", 2, 1),
+        # PP=2: pixel values reach only the first stage; every stage rebuilds mRoPE positions.
+        ("Qwen/Qwen3-VL-2B-Instruct", 1, 2),
         # Qwen3.5 goes through the same Qwen3VLModel but with GatedDeltaNet layers, whose
         # state and conv must reset at every packed sample boundary.
-        ("Qwen/Qwen3.5-0.8B", 1),
-        ("Qwen/Qwen3.5-0.8B", 2),
+        ("Qwen/Qwen3.5-0.8B", 1, 1),
+        ("Qwen/Qwen3.5-0.8B", 2, 1),
+        ("Qwen/Qwen3.5-0.8B", 1, 2),
     ],
-    ids=["qwen3_vl_tp1", "qwen3_vl_tp2_sp", "qwen3_5_vl_tp1", "qwen3_5_vl_tp2_sp"],
+    ids=["qwen3_vl_tp1", "qwen3_vl_tp2_sp", "qwen3_vl_pp2", "qwen3_5_vl_tp1", "qwen3_5_vl_tp2_sp", "qwen3_5_vl_pp2"],
 )
 @pytest.mark.megatron
-async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp):
+async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp, pp):
     """Sample packing must add no error beyond ordinary batching.
 
     Packed and padded (unpacked) microbatches run different kernels on different
@@ -501,8 +506,8 @@ async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp)
     """
     batch = get_packing_parity_batch(model_name)
     num_actions = batch.metadata["response_length"]
-    unpacked = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=False)
-    packed = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=True)
+    unpacked = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=False, pp=pp)
+    packed = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=True, pp=pp)
     assert packed.shape == unpacked.shape == (len(PACKING_PROMPTS), num_actions)
 
     # Reference: every sample alone. At TP>1 (sequence parallel) a microbatch with no image
@@ -512,7 +517,9 @@ async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp)
     ref_rows = torch.arange(len(PACKING_PROMPTS)) if tp == 1 else has_image.nonzero().flatten()
     ref_batch = TrainingInputBatch({k: (None if v is None else v[ref_rows]) for k, v in batch.items()})
     ref_batch.metadata = batch.metadata
-    alone = _megatron_vlm_forward_logprobs(model_name, ref_batch, tp, remove_microbatch_padding=False, micro_batch=1)
+    alone = _megatron_vlm_forward_logprobs(
+        model_name, ref_batch, tp, remove_microbatch_padding=False, micro_batch=1, pp=pp
+    )
 
     scored = batch["loss_mask"].bool()
     for name, t in (("unpacked", unpacked), ("packed", packed), ("alone", alone)):
@@ -524,7 +531,7 @@ async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp)
     packed_vs_unpacked = (packed - unpacked).abs()
 
     slots = (torch.arange(len(PACKING_PROMPTS)) % PACKING_MICRO_BATCH)[ref_rows]
-    print(f"\n[packing parity] {model_name} tp={tp}  (mean/max abs logprob diff on answer tokens)")
+    print(f"\n[packing parity] {model_name} tp={tp} pp={pp}  (mean/max abs logprob diff on answer tokens)")
     for name, d, m in (
         ("packed vs alone", packed_vs_alone, ref_scored),
         ("unpacked vs alone", unpacked_vs_alone, ref_scored),
