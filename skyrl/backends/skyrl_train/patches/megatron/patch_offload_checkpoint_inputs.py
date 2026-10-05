@@ -7,7 +7,8 @@ GLM-5.3-Flash those are the mHC n-stream residuals (``[s / TP, b, 4 * hidden]``)
 ~1.4 MB per token per GPU at TP8, the largest term in long-context memory after the recompute
 working set.
 
-``torch.autograd.graph.save_on_cpu`` around the block-level ``checkpointed_forward`` moves exactly
+``torch.autograd.graph.save_on_cpu`` around the block-level ``checkpointed_forward`` (in both
+``transformer_block`` and ``hybrid_block``, which import it by name) moves exactly
 those to host memory and brings each back when backward unpacks it. The recompute inside
 backward runs outside the context, so its activations stay on the GPU. Host cost: the same bytes
 in host RAM per GPU (e.g. ~45 GiB/GPU at 256k tokens on 64 GPUs); PCIe cost: one D2H + one H2D
@@ -17,6 +18,7 @@ Enable with ``SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1``.
 """
 
 import functools
+import importlib
 import os
 
 import torch
@@ -30,23 +32,43 @@ _APPLIED = False
 _PIN_MEMORY = os.environ.get("SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED", "0").lower() in ("1", "true")
 
 
-def patch_offload_checkpoint_inputs() -> bool:
-    """Wrap ``transformer_block.checkpointed_forward`` in ``save_on_cpu``. Idempotent."""
-    global _APPLIED
-    if _APPLIED:
-        return True
-    from megatron.core.transformer import transformer_block
+# Modules that do `from megatron.core.recompute import checkpointed_forward` and therefore hold
+# their own reference; wrapping only one leaves the other's models silently unpatched. Same list as
+# patch_dsa_index_share.py, for the megatron-core rev pinned in pyproject.toml.
+_IMPORTERS = (
+    "megatron.core.transformer.transformer_block",
+    "megatron.core.models.hybrid.hybrid_block",
+)
 
-    inner = transformer_block.checkpointed_forward
 
+def _wrap(inner):
     @functools.wraps(inner)
     def checkpointed_forward(*args, **kwargs):
         with torch.autograd.graph.save_on_cpu(pin_memory=_PIN_MEMORY):
             return inner(*args, **kwargs)
 
-    transformer_block.checkpointed_forward = checkpointed_forward
+    return checkpointed_forward
+
+
+def patch_offload_checkpoint_inputs() -> bool:
+    """Wrap every importer's ``checkpointed_forward`` in ``save_on_cpu``. Idempotent.
+
+    Wraps each module's own current reference, so it composes with ``patch_dsa_index_share``,
+    which rebinds the same name in the same modules and must be applied first.
+    """
+    global _APPLIED
+    if _APPLIED:
+        return True
+    wrapped = []
+    for name in _IMPORTERS:
+        module = importlib.import_module(name)
+        module.checkpointed_forward = _wrap(module.checkpointed_forward)
+        wrapped.append(name.rsplit(".", 1)[-1])
     _APPLIED = True
-    logger.info(f"Full-recompute checkpoint inputs are kept in host memory (pinned={_PIN_MEMORY})")
+    logger.info(
+        f"Full-recompute checkpoint inputs are kept in host memory (pinned={_PIN_MEMORY}); "
+        f"wrapped checkpointed_forward in {', '.join(wrapped)}"
+    )
     return True
 
 

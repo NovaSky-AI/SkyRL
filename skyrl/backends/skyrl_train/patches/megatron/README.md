@@ -26,6 +26,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `patches/megatron/test_offload_checkpoint_inputs.py` (CPU) | `patch_offload_checkpoint_inputs.py` wraps every importer, fake functions |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -198,7 +199,8 @@ softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
 
 ### `patch_offload_checkpoint_inputs.py`: opt-in, not an upstream bug
 
-Wraps `transformer_block.checkpointed_forward` in `torch.autograd.graph.save_on_cpu` when
+Wraps `checkpointed_forward` in both modules that import it by name (`transformer_block` and
+`hybrid_block`) in `torch.autograd.graph.save_on_cpu` when
 `SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1`, so full-recompute checkpoint inputs (one hidden state per
 layer) wait in host memory. Applied in `make_megatron_module` after `patch_dsa_index_share()`,
 which rebinds the same function. Pageable by default (exact-size host allocations); pinned with
@@ -209,7 +211,8 @@ node runs out of host RAM.
 - **Landed?** Not a fix to retire; delete it if megatron-core grows its own offload of
   checkpointed layer inputs, or if nobody needs contexts past ~288k tokens per sequence.
 - **Remove:** the module, its call in `make_megatron_module`, the `release_pinned_offload_cache()`
-  call in `forward_backward`, and `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`.
+  call in `forward_backward`, `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`, and
+  `patches/megatron/test_offload_checkpoint_inputs.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 
