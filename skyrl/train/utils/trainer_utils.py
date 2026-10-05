@@ -888,6 +888,14 @@ def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses:
             )
 
 
+def trajectory_index_from_is_last_step(is_last_step: torch.Tensor) -> torch.Tensor:
+    """Maps each step-wise row to its trajectory: ``[F, T, F, F, T] -> [0, 0, 1, 1, 1]``.
+
+    Relies on the contiguous ordering checked by ``_validate_step_wise_fields``.
+    """
+    return torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
+
+
 def build_dataloader(
     cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train: bool = True, is_fully_async: bool = False
 ) -> StatefulDataLoader:

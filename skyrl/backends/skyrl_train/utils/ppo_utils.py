@@ -24,6 +24,7 @@ from typing import Callable, List, Optional, Tuple, Union
 import numpy as np
 import ray
 import torch
+import torch.distributed as dist
 from jaxtyping import Float
 from loguru import logger
 
@@ -668,6 +669,7 @@ def gspo_policy_loss(
     config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    trajectory_log_importance_weights: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     """
     GSPO (Group Sequence Policy Optimization) policy loss function,
@@ -680,6 +682,10 @@ def gspo_policy_loss(
 
     The variant of GSPO used here is GSPO-token, a generalization which allows for token-level
     advantages [equations 14 and 15 in the paper].
+
+    ``trajectory_log_importance_weights`` (shape ``(batch,)``, from
+    ``compute_trajectory_log_importance_weights``) replaces each row's own sequence-level log weight
+    with that of its whole step-wise trajectory (``trainer.algorithm.gspo_ratio_level="trajectory"``).
     """
     # GSPO must use sequence_mean reduction
     loss_reduction = config.loss_reduction
@@ -699,6 +705,9 @@ def gspo_policy_loss(
     # Key GSPO innovation: sequence-level importance sampling
     # Instead of using per-token ratios, compute sequence-averaged ratios
     log_importance_weights = masked_mean(log_ratio, loss_mask, dim=-1).unsqueeze(-1)
+    if trajectory_log_importance_weights is not None:
+        step_log_importance_weights = log_importance_weights
+        log_importance_weights = trajectory_log_importance_weights.unsqueeze(-1)
 
     # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
     # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_probs - sg[log_probs]
@@ -719,6 +728,11 @@ def gspo_policy_loss(
 
     # apply off policy correction
     loss_metrics = {"clip_ratio": clip_ratio}
+    if trajectory_log_importance_weights is not None:
+        # Averaged over rows that have loss tokens, so padding rows do not dilute it.
+        rows_with_tokens = None if loss_mask is None else (loss_mask.sum(dim=-1, keepdim=True) > 0).float()
+        log_weight_abs_diff = (log_importance_weights - step_log_importance_weights).abs()
+        loss_metrics["gspo_traj_step_log_weight_abs_diff"] = masked_mean(log_weight_abs_diff, rows_with_tokens).item()
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )
@@ -727,6 +741,42 @@ def gspo_policy_loss(
     loss = reduce_loss(loss, loss_mask)
 
     return loss, loss_metrics
+
+
+@torch.no_grad()
+def compute_trajectory_log_importance_weights(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    trajectory_index: torch.Tensor,
+    dp_group: Optional["dist.ProcessGroup"] = None,
+) -> torch.Tensor:
+    """GSPO log importance weight of each row's whole step-wise trajectory.
+
+    For every trajectory this is ``sum(loss_mask * (log_probs - old_log_probs)) / sum(loss_mask)`` over
+    all of its rows, i.e. the sequence-level GSPO log weight of the trajectory's steps concatenated.
+
+    Args:
+        log_probs: Current-policy log-probs, ``(batch, response_len)``.
+        old_log_probs: Old-policy log-probs, ``(batch, response_len)``.
+        loss_mask: ``(batch, response_len)``.
+        trajectory_index: Integer trajectory index of each row, ``(batch,)``.
+        dp_group: Data-parallel group whose ranks hold disjoint rows of the same mini-batch. The
+            per-trajectory sums are all-reduced over it. ``None`` skips the reduction.
+
+    Returns:
+        Detached log weights, ``(batch,)``.
+    """
+    log_ratio_sums = ((log_probs - old_log_probs) * loss_mask).sum(dim=-1)
+    num_trajectories = trajectory_index.max().reshape(1) + 1
+    if dp_group is not None:
+        dist.all_reduce(num_trajectories, op=dist.ReduceOp.MAX, group=dp_group)
+    sums = log_ratio_sums.new_zeros(2, int(num_trajectories.item()))
+    sums[0].index_add_(0, trajectory_index, log_ratio_sums)
+    sums[1].index_add_(0, trajectory_index, loss_mask.sum(dim=-1).to(sums.dtype))
+    if dp_group is not None:
+        dist.all_reduce(sums, op=dist.ReduceOp.SUM, group=dp_group)
+    return (sums[0] / sums[1].clamp(min=1.0))[trajectory_index]
 
 
 @register_policy_loss(PolicyLossType.CISPO)

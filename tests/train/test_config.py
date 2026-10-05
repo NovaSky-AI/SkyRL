@@ -1485,3 +1485,38 @@ class TestMegatronRouterReplayValidation:
 
         with pytest.raises(AssertionError, match="pipeline_parallel_size=1"):
             validate_inference_engine_cfg(cfg)
+
+
+TRAJECTORY_GSPO_OVERRIDES = [
+    "trainer.logger=console",
+    "generator.step_wise_trajectories=true",
+    "trainer.algorithm.policy_loss_type=gspo",
+    "trainer.algorithm.gspo_ratio_level=trajectory",
+]
+
+
+def test_gspo_ratio_level_defaults_to_sequence():
+    assert SkyRLTrainConfig().trainer.algorithm.gspo_ratio_level == "sequence"
+
+
+def test_trajectory_gspo_ratio_level_accepts_step_wise_gspo_on_fsdp():
+    validate_cfg(SkyRLTrainConfig.from_cli_overrides(TRAJECTORY_GSPO_OVERRIDES))
+
+
+@pytest.mark.parametrize(
+    "override, error, match",
+    [
+        ("trainer.algorithm.gspo_ratio_level=turn", ValueError, "must be 'sequence' or 'trajectory'"),
+        ("generator.step_wise_trajectories=false", ValueError, "requires `generator.step_wise_trajectories=True`"),
+        (
+            "trainer.algorithm.policy_loss_type=regular",
+            ValueError,
+            "requires `trainer.algorithm.policy_loss_type='gspo'`",
+        ),
+        ("trainer.strategy=megatron", NotImplementedError, "only implemented for `trainer.strategy='fsdp'`"),
+    ],
+)
+def test_trajectory_gspo_ratio_level_rejects_unsupported_configs(override, error, match):
+    cfg = SkyRLTrainConfig.from_cli_overrides(TRAJECTORY_GSPO_OVERRIDES + [override])
+    with pytest.raises(error, match=match):
+        validate_cfg(cfg)

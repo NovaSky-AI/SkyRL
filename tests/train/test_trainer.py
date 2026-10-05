@@ -2,6 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -10,7 +11,13 @@ import torch
 from jaxtyping import Float, Integer
 from pytest import approx
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    compute_trajectory_log_importance_weights,
+)
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
     SAMPLE_SUPPORT_PADDING,
@@ -20,7 +27,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import validate_batch_sizes
-from tests.train.util import example_dummy_config
+from tests.train.util import ThreadedAllReduce, example_dummy_config
 
 
 @pytest.fixture
@@ -147,6 +154,179 @@ def test_convert_to_training_input_records_sample_support_metrics(dummy_config, 
 
     assert trainer.all_metrics["generate/sample_support_size_mean"] == 2.5
     assert trainer.all_metrics["generate/sample_support_full_fraction"] == 0.25
+
+
+@pytest.mark.parametrize("gspo_ratio_level", ["sequence", "trajectory"])
+def test_convert_to_training_input_adds_trajectory_index_for_trajectory_gspo(
+    gspo_ratio_level, dummy_config, dummy_tokenizer, dummy_generator
+):
+    dummy_config.generator.step_wise_trajectories = True
+    dummy_config.trainer.algorithm.policy_loss_type = "gspo"
+    dummy_config.trainer.algorithm.gspo_ratio_level = gspo_ratio_level
+    dummy_config.trainer.policy_mini_batch_size = 2
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=dummy_tokenizer,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 1
+    # Trajectory 0 has three steps, trajectory 1 has two.
+    generator_output = {
+        "prompt_token_ids": [[1], [1, 2, 3], [1, 2, 3, 4, 5], [6], [6, 7, 8]],
+        "response_ids": [[2, 3], [4, 5], [9], [7, 8], [9, 10]],
+        "rewards": [[0.0, 0.0], [0.0, 0.0], [1.0], [0.0, 0.0], [0.0, 0.5]],
+        "loss_masks": [[1, 1], [1, 1], [1], [1, 1], [1, 1]],
+        "is_last_step": [False, False, True, False, True],
+    }
+
+    training_input = trainer.convert_to_training_input(generator_output, ["p0", "p0", "p0", "p1", "p1"])
+
+    if gspo_ratio_level == "trajectory":
+        assert training_input["trajectory_index"].tolist() == [0, 0, 0, 1, 1]
+    else:
+        assert "trajectory_index" not in training_input
+
+
+def _fake_current_log_probs(sequences: torch.Tensor, response_length: int) -> torch.Tensor:
+    """Stands in for the policy forward pass: depends only on each row's tokens."""
+    return -(sequences[:, -response_length:] % 5).float() / 4 - 0.25
+
+
+def _step_wise_policy_batch() -> TrainingInputBatch:
+    """Six step-wise rows of three trajectories (rows [0, 1, 2], [3, 4] and [5]) of varied lengths.
+
+    Row ``i`` holds tokens ``8 * i + arange(8)``, so a row can be identified from its tokens.
+    """
+    batch_size, seq_len, response_length = 6, 8, 4
+    valid_lengths = torch.tensor([3, 8, 5, 8, 2, 6])
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.arange(batch_size * seq_len).reshape(batch_size, seq_len),
+            "attention_mask": (torch.arange(seq_len) >= seq_len - valid_lengths.unsqueeze(-1)).long(),
+            "action_log_probs": -torch.linspace(0.2, 2.0, batch_size * response_length).reshape(batch_size, -1),
+            "advantages": torch.ones(batch_size, response_length),
+            "loss_mask": torch.tensor(
+                [[0, 1, 1, 1], [1, 1, 1, 1], [0, 0, 1, 1], [1, 1, 1, 1], [0, 0, 1, 1], [0, 1, 1, 1]],
+                dtype=torch.float,
+            ),
+            "response_mask": torch.ones(batch_size, response_length),
+            "trajectory_index": torch.tensor([0, 0, 0, 1, 1, 2]),
+        }
+    )
+    data.metadata = {"response_length": response_length}
+    return data
+
+
+def _gspo_policy_worker(gspo_ratio_level: str, max_tokens_per_microbatch: int) -> PolicyWorkerBase:
+    """A policy worker with a fake forward pass whose ``_forward_backward_micro`` records experiences."""
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.algorithm.policy_loss_type = "gspo"
+    cfg.trainer.algorithm.gspo_ratio_level = gspo_ratio_level
+    cfg.trainer.micro_train_batch_size_per_gpu = 4
+    cfg.trainer.max_tokens_per_microbatch = max_tokens_per_microbatch
+    worker = PolicyWorkerBase(
+        cfg=cfg.trainer,
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
+    worker.strategy = MagicMock()
+    worker.strategy.all_reduce.side_effect = lambda d, op, group=None: d
+    worker.device_mesh = MagicMock()
+    worker.device_mesh.get_group.return_value = None
+    worker.model = MagicMock()
+    worker.record_memory = False
+
+    def fake_forward_micro_batch(micro_batch):
+        output = TrainingOutputBatch(
+            {"output": _fake_current_log_probs(micro_batch["sequences"], micro_batch.metadata["response_length"])}
+        )
+        output.metadata = micro_batch.metadata
+        return output
+
+    worker.experiences = []
+
+    def record_forward_backward_micro(experience, microbatch_weight, **kwargs):
+        worker.experiences.append(experience)
+        return {"policy_loss": 0.0}
+
+    worker._forward_micro_batch = MagicMock(side_effect=fake_forward_micro_batch)
+    worker._forward_backward_micro = record_forward_backward_micro
+    return worker
+
+
+def _row_weights(experiences) -> dict:
+    """Maps each recorded row (by its first token) to the trajectory log weight it reached the loss with."""
+    return {
+        int(token) // 8: weight.item()
+        for experience in experiences
+        for token, weight in zip(experience.sequences[:, 0], experience.trajectory_log_importance_weights)
+    }
+
+
+def _expected_trajectory_weights(data: TrainingInputBatch) -> dict:
+    current_log_probs = _fake_current_log_probs(data["sequences"], data.metadata["response_length"])
+    weights = compute_trajectory_log_importance_weights(
+        current_log_probs, data["action_log_probs"], data["loss_mask"], data["trajectory_index"]
+    )
+    return {row: weight.item() for row, weight in enumerate(weights)}
+
+
+@pytest.mark.parametrize("max_tokens_per_microbatch", [0, 10])
+def test_policy_worker_attaches_trajectory_gspo_weights(max_tokens_per_microbatch):
+    """Each row reaches the loss with its trajectory's weight, for sample- and token-based microbatching."""
+    data = _step_wise_policy_batch()
+    expected = _expected_trajectory_weights(data)
+    worker = _gspo_policy_worker("trajectory", max_tokens_per_microbatch)
+
+    worker.forward_backward(data)
+
+    assert worker._forward_micro_batch.call_count == len(worker.experiences) > 1
+    rows = [int(token) // 8 for experience in worker.experiences for token in experience.sequences[:, 0]]
+    if max_tokens_per_microbatch > 0:
+        assert rows != sorted(rows), "token-based microbatching should reorder rows"
+    actual = _row_weights(worker.experiences)
+    assert actual == approx(expected)
+    # Trajectory 1 is split across microbatches but keeps one weight.
+    assert actual[3] == actual[4]
+
+
+def test_policy_worker_skips_trajectory_prepass_by_default():
+    worker = _gspo_policy_worker("sequence", max_tokens_per_microbatch=0)
+
+    worker.forward_backward(_step_wise_policy_batch())
+
+    worker._forward_micro_batch.assert_not_called()
+    assert all(experience.trajectory_log_importance_weights is None for experience in worker.experiences)
+
+
+def test_policy_worker_sums_trajectory_weights_over_dp_ranks():
+    """Two DP ranks that split trajectory 0 attach the same weights as one rank holding all rows."""
+    data = _step_wise_policy_batch()
+    expected = _expected_trajectory_weights(data)
+    workers = [_gspo_policy_worker("trajectory", max_tokens_per_microbatch=0) for _ in range(2)]
+    for worker in workers:
+        worker.device_mesh.get_group.return_value = object()
+    shards = [data[0:2], data[2:6]]
+
+    with patch("torch.distributed.all_reduce", ThreadedAllReduce(world_size=2)):
+        threads = [threading.Thread(target=w.forward_backward, args=(shard,)) for w, shard in zip(workers, shards)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    for worker in workers:
+        worker.device_mesh.get_group.assert_any_call("dp")
+    assert _row_weights(workers[0].experiences + workers[1].experiences) == approx(expected)
 
 
 def test_calculate_kl_create_experience_batched(dummy_config):

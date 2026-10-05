@@ -96,6 +96,7 @@ from skyrl.train.utils.trainer_utils import (
     extract_step_from_path,
     finalize_minibatch_rollout_logprob_diff_std,
     run_on_each_node,
+    trajectory_index_from_is_last_step,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
     zero_variance_filter,
@@ -970,6 +971,10 @@ class RayPPOTrainer:
         training_input.metadata = {"uids": uids}
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
+            if self.cfg.trainer.algorithm.gspo_ratio_level == "trajectory":
+                training_input["trajectory_index"] = trajectory_index_from_is_last_step(
+                    torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
+                )
 
         # 4. Compute mini-batch boundaries for train_critic_and_policy(). It excludes the ones
         # we will add in pad_training_input_batch().
@@ -1213,9 +1218,7 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
-            traj_ids = (
-                torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
-            )
+            traj_ids = trajectory_index_from_is_last_step(is_last_step)
             num_traj = traj_ids[-1].item() + 1
             assert num_traj == len(
                 last_step_advantages

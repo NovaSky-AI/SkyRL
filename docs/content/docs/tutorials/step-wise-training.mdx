@@ -33,7 +33,7 @@ When step-wise is enabled, a batch of T trajectories with an average of M turns 
 
 Some algorithms have their behavior altered by step-wise decomposition, since each turn is now treated as its own sequence:
 
-- **GSPO loss**, which computes a sequence-level importance weight — under step-wise training, it operates over one turn rather than the entire trajectory.
+- **GSPO loss**, which computes a sequence-level importance weight — under step-wise training, it operates over one turn rather than the entire trajectory. Set `trainer.algorithm.gspo_ratio_level="trajectory"` to compute it over the entire trajectory; see [Trajectory-level GSPO](#trajectory-level-gspo).
 - **Off-policy rollout correction** besides token-level TIS (`trainer.algorithm.off_policy_correction.tis_ratio_type="token"`) — sequence-level corrections aggregate over a different scope.
 - **Loss reduction methods** like `sequence_mean` and `seq_mean_token_sum_norm` — trajectories with more turns contribute proportionally more to the loss.
 
@@ -54,6 +54,28 @@ This flag is defined in `GeneratorConfig` ([skyrl/train/config/config.py](https:
 class GeneratorConfig(BaseConfig):
     step_wise_trajectories: bool = False
 ```
+
+### Trajectory-level GSPO
+
+GSPO scales every token of a sequence by one importance ratio: the exponential of the mean log-ratio between the current and the old policy over the sequence's loss tokens. With step-wise training each turn is a sequence, so by default this ratio, and therefore PPO clipping, is decided separately for every turn. To decide it once per trajectory, as in non-step-wise training, set:
+
+```bash
+trainer.algorithm.policy_loss_type=gspo
+trainer.algorithm.gspo_ratio_level=trajectory
+generator.step_wise_trajectories=true
+```
+
+Each trajectory's ratio is then computed over the loss tokens of all of its turns. Ratios, clipping, and gradients are the same as sequence-level GSPO on the turns concatenated into one sequence.
+
+The turns of a trajectory can be spread over data-parallel ranks and micro-batches. Before training on a mini-batch, the policy worker therefore runs one extra forward pass without gradients over its rows, sums each trajectory's log-ratios and token counts across data-parallel ranks, and trains with the resulting per-trajectory ratio. GSPO uses this ratio only as a constant (it is not differentiated), and the parameters do not change until the optimizer step at the end of the mini-batch, so the extra pass yields the same ratio as one pass over the whole trajectory. The cost is one extra forward pass per mini-batch and epoch.
+
+`policy/loss_metrics/gspo_traj_step_log_weight_abs_diff` reports the mean absolute difference between each turn's own log-ratio and its trajectory's, i.e. how far the two modes disagree.
+
+Notes:
+
+- Only `trainer.strategy=fsdp` supports trajectory-level GSPO today.
+- With `generator.merge_stepwise_output=true`, turns that only append to the conversation are already merged into one sequence. Trajectory-level GSPO also covers turns that cannot be merged, e.g. after context management.
+- Off-policy correction other than token-level TIS and the `loss_reduction` modes still treat each turn as a sequence.
 
 ## GeneratorOutput Format
 

@@ -44,6 +44,7 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
+    compute_trajectory_log_importance_weights,
     ppo_critic_loss,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
@@ -1008,6 +1009,9 @@ class PolicyWorkerBase(Worker):
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
             ``metrics`` (all-reduced across DP).
         """
+        if loss_fn is None and self.cfg.algorithm.gspo_ratio_level == "trajectory":
+            data["trajectory_log_importance_weights"] = self._trajectory_log_importance_weights(data)
+
         microbatch_iterator = get_microbatch_iterator(
             data,
             micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
@@ -1060,6 +1064,29 @@ class PolicyWorkerBase(Worker):
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
+
+    def _trajectory_log_importance_weights(self, data: TrainingInputBatch) -> torch.Tensor:
+        """GSPO log weight of each row's whole trajectory under the current parameters, ``(batch,)``.
+
+        Runs an extra forward pass with the same microbatching as the training pass. GSPO uses this
+        weight only as a detached value, and the parameters do not change until ``optim_step``, so
+        the result equals what one forward over every step of each trajectory would give.
+        """
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
+        outputs = [self._forward_micro_batch(microbatch) for microbatch in microbatch_iterator]
+        log_probs = microbatch_iterator.reorder_and_combine_batches(outputs)["output"]
+        device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device("cpu")
+        return compute_trajectory_log_importance_weights(
+            log_probs.to(device),
+            data["action_log_probs"].to(device),
+            data["loss_mask"].to(device),
+            data["trajectory_index"].to(device),
+            dp_group=self.device_mesh.get_group("dp"),
+        ).cpu()
 
     def _forward_backward_micro(
         self,
@@ -1141,6 +1168,9 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
+            trajectory_kwargs = {}
+            if experience.trajectory_log_importance_weights is not None:
+                trajectory_kwargs["trajectory_log_importance_weights"] = experience.trajectory_log_importance_weights
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
@@ -1148,6 +1178,7 @@ class PolicyWorkerBase(Worker):
                 config=loss_config,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                **trajectory_kwargs,
             )
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
