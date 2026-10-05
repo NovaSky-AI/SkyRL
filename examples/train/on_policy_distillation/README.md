@@ -125,6 +125,11 @@ zero-variance filtering, dynamic sampling, batch-normalized advantages, losses t
 old-logprob forward pass (`rollout_is`, `dppo`, and `cispo` with `cispo_anchor=rollout`), and `gae`
 in pure mode, where a critic's whitened value residuals would replace the teacher signal.
 
+The two math scripts set one thing beyond these defaults, to match the 2025-11 writeup they reproduce:
+`trainer.algorithm.loss_reduction=seq_mean_token_sum_norm` with `trainer.algorithm.max_seq_len` set to
+the longest prompt plus the longest response (2048 + 8192). That sums the batch's token losses and
+divides by a constant, where the default `token_mean` divides by the batch's own token count.
+
 ## How it works
 
 - `skyrl.train.opd.trainer.OPDTrainer.generate` splits the batch into one `GeneratorInput` per prompt
