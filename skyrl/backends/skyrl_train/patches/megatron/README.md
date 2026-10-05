@@ -26,6 +26,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -121,6 +122,13 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
     rank x 131,072 pools, one B200) one selection takes 3.31 s there vs 2.64 s at 2 GiB and
     2.60 s at 8 GiB, with peak extra memory 0.6 / 2.4 / 8.6 GiB. When removing, carry the
     configurable cap over unless upstream's default has grown.
+    Second deviation, opt-in with `SKYRL_DSA_INDEXER_TP_SHARD=1` (wired in `glm5_next/dsa.py`):
+    `query_shard_group` splits the query rows across the tensor-parallel group, whose ranks all
+    score the same gathered sequence with the same frozen indexer weights, and all-gathers the
+    pool selections. The scoring is O(sq^2) (every query scores every pool) and was redundant on
+    every TP rank: at 512k tokens, TP8, 64 B200 (TCP NCCL) sharding cut warm fwd+bwd 1545 -> 1094 s,
+    i.e. ~1/3 of the step was replicated indexer scoring. Bitwise-identical selections
+    (`test_dsa_kpool_tp_shard.py`).
   - `glm5_next/dsa.py`:
     - `Glm5NextDSAIndexer`: k-pool gate/ape parameters and the gate score, hand-merged onto the
       pinned `DSAIndexer`;
