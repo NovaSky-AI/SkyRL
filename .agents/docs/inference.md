@@ -8,7 +8,8 @@ For training-to-inference weight transfer (`NewInferenceWorkerWrap`, broadcast v
 - `RemoteInferenceClient` interacts with HTTP endpoints: 
     - **Data plane**: Interact with router for completions requests.
     - **Control plane**: Fan-out to individual server URLs for weight sync, pause/resume.
-- Shared inference interfaces and types live in `inference_servers/base.py` (`InferenceEngineInterface`, `InferenceEngineInput`/`Output`, `ConversationType`); shared helpers (`build_engine_runtime_env`, `get_sampling_params_for_backend`) live in `inference_servers/engine_utils.py`.
+- Shared inference interfaces and types live in `inference_servers/base.py` (`InferenceEngineInterface`, `InferenceEngineInput`/`Output`, `ConversationType`, the prefix-cache salt builder `build_vllm_cache_salt`); shared helpers (`build_engine_runtime_env`, `get_sampling_params_for_backend`) live in `inference_servers/engine_utils.py`.
+- Prefix-cache salt (`generator.use_cache_salt`): generators salt each trajectory with the weight version it started at; `RemoteInferenceClient` salts any generation request that carries no salt with the current version. `WorkerDispatch.save_weights_for_sampler` advances the version (`increment_weight_version`) as soon as its own KEEP pause holds, so requests sent during the sync get the new salt. Requests sent straight to the router bypass the client and must carry their own salt.
 
 ## vLLM Router
 

@@ -71,6 +71,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineOutput,
     MMPlaceholderRangeInfo,
     MultiModalFeatures,
+    build_vllm_cache_salt,
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedField,
@@ -443,6 +444,13 @@ class RemoteInferenceClient(InferenceEngineInterface):
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
+    use_cache_salt: bool = False
+    """Give generation requests that carry no ``cache_salt`` the salt of the current ``weight_version`` (see
+    :meth:`cache_salt`), so vLLM never serves them prefix-cache blocks computed under other weights. Applies to
+    ``generate``, ``sample``, ``chat_completion`` and ``completion``; a caller-provided salt is sent unchanged.
+    Set from ``generator.use_cache_salt``. Requests sent straight to ``get_endpoint_url()`` bypass this client
+    and must carry their own salt."""
+
     # Private fields excluded from repr for cleaner output
     _generate_client: Optional[RemoteGenerateClient] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
@@ -460,6 +468,24 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def increment_weight_version(self) -> None:
         """Advance the weight version. Called once per completed weight sync to the engines."""
         self._weight_version += 1
+
+    def cache_salt(self, model: Optional[str] = None) -> Optional[str]:
+        """The prefix-cache salt for a request sent now, or None when ``use_cache_salt`` is off.
+
+        Keyed on this instance's ``weight_version``, which only the ``WorkerDispatch`` holding this instance
+        advances: a copy pickled into another process keeps the version it was copied at. A multi-turn caller
+        that wants prefix reuse across the turns of one trajectory captures this once, at the start of the
+        trajectory, and sends it with every turn, as the generators do.
+        """
+        if not self.use_cache_salt:
+            return None
+        return build_vllm_cache_salt(self._weight_version, model)
+
+    def _add_default_cache_salt(self, body: Dict[str, Any]) -> None:
+        if body.get("cache_salt") is None:
+            cache_salt = self.cache_salt(body.get("model"))
+            if cache_salt is not None:
+                body["cache_salt"] = cache_salt
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
@@ -575,6 +601,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session_ids = input_batch.get("session_ids")
         mm_features = input_batch.get("mm_features")
         cache_salt = input_batch.get("cache_salt")
+        if cache_salt is None:
+            cache_salt = self.cache_salt(model)
         routed_experts_prompt_starts = input_batch.get("routed_experts_prompt_starts")
         if routed_experts_prompt_starts is not None:
             if not self.enable_return_routed_experts:
@@ -830,6 +858,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         }
         if mm_features is not None:
             payload["features"] = mm_features
+        if body.get("cache_salt") is not None:
+            payload["cache_salt"] = body["cache_salt"]
+        self._add_default_cache_salt(payload)
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -899,6 +930,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """
         session_id, body = _extract_session_id_and_body(request_payload)
         body["model"] = self._resolve_model(body.get("model"), "chat_completion")
+        self._add_default_cache_salt(body)
 
         headers = {"Content-Type": "application/json"}
         if session_id:
@@ -963,6 +995,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """
         session_id, body = _extract_session_id_and_body(request_payload)
         body["model"] = self._resolve_model(body.get("model"), "completion")
+        self._add_default_cache_salt(body)
 
         headers = {"Content-Type": "application/json"}
         if session_id:

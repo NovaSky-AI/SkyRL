@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from skyrl.backends.skyrl_train.inference_servers import (
     remote_inference_client as remote_client_module,
 )
+from skyrl.backends.skyrl_train.inference_servers.base import build_vllm_cache_salt
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedArrayKey,
@@ -72,6 +73,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     app.state.last_chat_model = None
     app.state.last_completion_model = None
     app.state.last_render_model = None
+    # Last request ``cache_salt`` per route: "generate" (both generate endpoints), "chat", "completion".
+    app.state.last_cache_salts = {}
     # Per-server LoRA registry: lora_name -> lora_path
     app.state.lora_registry = {}
     app.state.fetch_weights_requests = []
@@ -148,6 +151,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def get_lora_registry():
         return {"registry": dict(app.state.lora_registry)}
 
+    @app.get("/test/last_cache_salts")
+    async def get_last_cache_salts():
+        return dict(app.state.last_cache_salts)
+
     @app.get("/get_world_size")
     async def get_world_size():
         app.state.world_size_calls += 1
@@ -161,6 +168,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def completions(request: Request):
         body = await request.json()
         app.state.last_completion_model = body.get("model")
+        app.state.last_cache_salts["completion"] = body.get("cache_salt")
         prompts = body.get("prompt", [])
         n_prompts = len(prompts) if isinstance(prompts, list) else 1
         return {
@@ -179,6 +187,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         app.state.last_generate_sampling_params = sp
         input_token_ids = body.get("token_ids", [])
         app.state.last_generate_model = body.get("model")
+        app.state.last_cache_salts["generate"] = body.get("cache_salt")
         n = sp.get("n", 1)
         # If logprobs is explicitly set (sample path), use n for num_choices.
         # Otherwise (generate path), use len(token_ids) for per-prompt responses.
@@ -239,6 +248,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def chat_completions(request: Request):
         body = await request.json()
         app.state.last_chat_model = body.get("model")
+        app.state.last_cache_salts["chat"] = body.get("cache_salt")
         return {
             "choices": [{"message": {"content": f"Chat from server {server_id}"}}],
             "model": body.get("model"),
@@ -1338,6 +1348,115 @@ async def _get_last_models(server_urls: List[str]) -> List[Dict[str, Optional[st
             resp = await http.get(f"{url}/test/last_models")
             last.append(resp.json())
     return last
+
+
+async def _send(client: RemoteInferenceClient, route: str, cache_salt: Optional[str] = None) -> Optional[str]:
+    """Send one request on ``route`` and return the ``cache_salt`` the server received."""
+    if route == "chat":
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        if cache_salt is not None:
+            body["cache_salt"] = cache_salt
+        await client.chat_completion({"json": body, "headers": {}})
+    elif route == "completion":
+        body = {"prompt": "hello"}
+        if cache_salt is not None:
+            body["cache_salt"] = cache_salt
+        await client.completion({"json": body, "headers": {}})
+    elif route == "generate":
+        input_batch = {"prompt_token_ids": [[1, 2, 3]], "sampling_params": {"max_tokens": 8}}
+        if cache_salt is not None:
+            input_batch["cache_salt"] = cache_salt
+        await client.generate(input_batch)
+    else:
+        body = {
+            "prompt": {"chunks": [{"tokens": [1, 2, 3]}]},
+            "num_samples": 1,
+            "sampling_params": {"temperature": 0.7, "max_tokens": 8},
+        }
+        if cache_salt is not None:
+            body["cache_salt"] = cache_salt
+        await client.sample({"json": body})
+    async with httpx.AsyncClient() as http:
+        resp = await http.get(f"{client.proxy_url}/test/last_cache_salts")
+    return resp.json()["generate" if route == "sample" else route]
+
+
+class TestCacheSalt:
+    """With ``use_cache_salt`` on, every generation request leaves the client with a ``cache_salt``."""
+
+    ROUTES = ["chat", "completion", "generate", "sample"]
+
+    @staticmethod
+    def _client(mock_servers, use_cache_salt: bool) -> RemoteInferenceClient:
+        return RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            model_name="Qwen/Qwen3-0.6B",
+            data_parallel_size=1,
+            use_cache_salt=use_cache_salt,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ROUTES)
+    async def test_unsalted_request_gets_the_current_version(self, mock_servers, route):
+        client = self._client(mock_servers, use_cache_salt=True)
+        try:
+            assert await _send(client, route) == build_vllm_cache_salt(0, "Qwen/Qwen3-0.6B")
+            client.increment_weight_version()
+            assert await _send(client, route) == build_vllm_cache_salt(1, "Qwen/Qwen3-0.6B")
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ROUTES)
+    async def test_caller_salt_is_kept(self, mock_servers, route):
+        client = self._client(mock_servers, use_cache_salt=True)
+        client.increment_weight_version()
+        try:
+            assert await _send(client, route, cache_salt="trajectory-start-salt") == "trajectory-start-salt"
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ROUTES)
+    async def test_disabled_sends_no_salt(self, mock_servers, route):
+        client = self._client(mock_servers, use_cache_salt=False)
+        try:
+            assert client.cache_salt("Qwen/Qwen3-0.6B") is None
+            assert await _send(client, route) is None
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
+    async def test_salt_names_the_requested_model(self, mock_servers):
+        client = self._client(mock_servers, use_cache_salt=True)
+        try:
+            await client.chat_completion(
+                {"json": {"model": "tenant-a", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
+            )
+            async with httpx.AsyncClient() as http:
+                salts = (await http.get(f"{client.proxy_url}/test/last_cache_salts")).json()
+            assert salts["chat"] == build_vllm_cache_salt(0, "tenant-a")
+        finally:
+            await client.teardown()
+
+    @pytest.mark.parametrize("use_cache_salt", [True, False])
+    def test_built_client_follows_generator_config(self, mock_servers, use_cache_salt):
+        cfg = SkyRLTrainConfig()
+        cfg.generator.use_cache_salt = use_cache_salt
+        cfg.generator.inference_engine.external_proxy_url = mock_servers["proxy_url"]
+        cfg.generator.inference_engine.external_server_urls = mock_servers["server_urls"]
+
+        client, _ = build_new_inference_client(cfg, tokenizer=None)
+
+        assert client.use_cache_salt is use_cache_salt
+
+    def test_pickled_copy_keeps_its_version(self, mock_servers):
+        client = self._client(mock_servers, use_cache_salt=True)
+        copy = pickle.loads(pickle.dumps(client))
+        client.increment_weight_version()
+        assert copy.cache_salt() == "0"
+        assert client.cache_salt() == "1"
 
 
 class TestLoRAControlPlane:

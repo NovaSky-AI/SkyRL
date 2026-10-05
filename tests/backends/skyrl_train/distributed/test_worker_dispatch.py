@@ -205,6 +205,97 @@ class TestSaveWeights:
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
 
 
+# (case id, dispatch overrides, weight_version a request sent during the transfer sees)
+_WEIGHT_VERSION_CASES = [
+    ("nccl", {}, 1),
+    ("sharded_rdt", {"backend": "sharded_rdt"}, 1),
+    ("megatron_merge_lora", {"strategy": "megatron", "lora_rank": 32, "merge_lora": True}, 1),
+    ("offload_kv_fully_async", {"offload_kv": True, "fully_async": True}, 1),
+    ("offload_kv_sync_trainer", {"offload_kv": True}, 0),
+    ("delta", {"backend": "delta"}, 0),
+    ("inplace_lora", {"lora_rank": 32}, 0),
+    ("colocated", {"colocate_all": True}, 0),
+]
+
+
+class TestWeightVersion:
+    """Where ``save_weights_for_sampler`` advances the client's ``weight_version``, the prefix-cache salt.
+
+    A request sent while the dispatch holds generation paused runs only after the new weights land, so on the
+    paused paths it must already carry the new version. Elsewhere the old weights keep serving until the
+    transfer finishes (delta pauses inside the engine, in-place LoRA never pauses), or nothing is generating.
+    """
+
+    @staticmethod
+    def _dispatch(
+        *,
+        colocate_all=False,
+        backend="nccl",
+        strategy="fsdp",
+        lora_rank=0,
+        merge_lora=False,
+        offload_kv=False,
+        fully_async=False,
+    ):
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        cfg = _fft_dispatch_cfg(weight_sync_backend=backend)
+        cfg.trainer.strategy = strategy
+        cfg.trainer.policy.model.lora.rank = lora_rank
+        cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
+        cfg.trainer.fully_async = SimpleNamespace(enabled=fully_async, clear_kv_cache_on_weight_sync=False)
+        cfg.generator.inference_engine.offload_kv_for_weight_sync = offload_kv
+
+        client = RemoteInferenceClient(proxy_url="http://router", server_urls=["http://server"], data_parallel_size=1)
+        events = []
+        for name in ("pause_generation", "resume_generation", "sleep", "wake_up", "sleep_for_weight_sync"):
+            setattr(client, name, AsyncMock(side_effect=lambda *a, _name=name, **kw: events.append(_name)))
+        client.wake_for_weight_sync = AsyncMock()
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = colocate_all
+        dispatch.cfg = cfg
+        dispatch._inference_engine_client = client
+        dispatch._broadcast_to_inference_engines = MagicMock(
+            side_effect=lambda *a, **kw: events.append(f"transfer@v{client.weight_version}")
+        )
+        dispatch._prepare_for_weight_sync = AsyncMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+        return dispatch, client, events
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "overrides,version_during_transfer",
+        [case[1:] for case in _WEIGHT_VERSION_CASES],
+        ids=[case[0] for case in _WEIGHT_VERSION_CASES],
+    )
+    async def test_version_advances_once_and_before_paused_transfer(self, overrides, version_during_transfer):
+        dispatch, client, events = self._dispatch(**overrides)
+
+        await dispatch.save_weights_for_sampler()
+        assert f"transfer@v{version_during_transfer}" in events
+        assert client.weight_version == 1
+
+        await dispatch.save_weights_for_sampler()
+        assert client.weight_version == 2
+
+    @pytest.mark.asyncio
+    async def test_salt_of_a_request_sent_during_a_paused_sync_is_the_new_version(self):
+        dispatch, client, events = self._dispatch()
+        client.use_cache_salt = True
+        salts = []
+        dispatch._broadcast_to_inference_engines.side_effect = lambda *a, **kw: salts.append(client.cache_salt("m"))
+
+        await dispatch.save_weights_for_sampler()
+
+        assert events == ["pause_generation", "resume_generation"]
+        assert salts == [client.cache_salt("m")] == ["m:1"]
+
+
 def _adapter_sync_dispatch(*, model_on_gpu: bool, optimizer_on_gpu: bool = False):
     """Dispatch wired for the colocated adapter-only sync path
     (megatron + lora.rank>0 + merge_lora=False + colocate_all)."""

@@ -103,7 +103,12 @@ For fully async specifically, the following are the main knobs to tune:
   sync. Defaults to `false` for fully async training, which reuses KV cache from stale policies during generation —
   avoiding recomputation at the cost of using slightly stale KV cache. Set to `true` to match synchronous RL behavior.
   Note that prefix-cache blocks are still isolated per policy version by `generator.use_cache_salt` (on by default), so
-  cache is reused within a weight version and not shared across versions.
+  cache is reused within a weight version and not shared across versions. This holds for requests that carry a
+  `cache_salt`: SkyRL's generators salt each trajectory with the version it started at, and `RemoteInferenceClient`
+  salts any other request with the version current when it is sent. An agent harness that calls the inference
+  endpoint (`get_endpoint_url()`) directly must send the salt itself, e.g. `extra_body={"cache_salt": salt}` with
+  `salt = inference_engine_client.cache_salt(model)` captured when the trajectory starts. Without it, its requests can
+  reuse prefix-cache blocks computed under any earlier policy.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 

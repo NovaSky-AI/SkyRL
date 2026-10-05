@@ -766,6 +766,9 @@ class WorkerDispatch:
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
+        # Requests sent during a paused sync only run on the new weights, so the paused paths advance the policy
+        # version (the prefix-cache salt, see `GeneratorConfig.use_cache_salt`) as soon as the pause holds.
+        version_advanced = False
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             _broadcast_and_finish()
@@ -789,6 +792,8 @@ class WorkerDispatch:
                     # reset the prefix cache anyway (clear_kv_cache_on_weight_sync).
                     offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
                     await self._inference_engine_client.pause_generation()
+                    self._inference_engine_client.increment_weight_version()
+                    version_advanced = True
                     try:
                         await self._inference_engine_client.sleep_for_weight_sync(offload_kv=offload_kv)
                         await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
@@ -815,11 +820,12 @@ class WorkerDispatch:
                     _broadcast_and_finish()
                 else:
                     await self._inference_engine_client.pause_generation()
+                    self._inference_engine_client.increment_weight_version()
+                    version_advanced = True
                     try:
                         _broadcast_and_finish()
                     finally:
                         await self._inference_engine_client.resume_generation()
 
-        # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
-        # (see `GeneratorConfig.use_cache_salt`).
-        self._inference_engine_client.increment_weight_version()
+        if not version_advanced:
+            self._inference_engine_client.increment_weight_version()
