@@ -57,6 +57,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_param_gather import (
+    patch_mhc_param_gather,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -546,6 +549,10 @@ class MegatronWorker:
         # now asserts NVTE_* attention env vars agree across all models in a process.
         # Delete along with the patch module once Bridge's get_vision_model_config copies it.
         patch_vision_attention_backend()
+        # mHC reads its child projection weight through functional kernels, bypassing
+        # the child's DDP pre-hook. Publish it before either mapping implementation.
+        if getattr(self.provider, "enable_mhc_connections", False):
+            patch_mhc_param_gather()
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type, experts_shared_outer_loras=experts_shared_outer_loras)
