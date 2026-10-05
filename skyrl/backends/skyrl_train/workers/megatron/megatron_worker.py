@@ -540,6 +540,13 @@ class MegatronWorker:
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
 
+        # Opt-in (SKYRL_MOE_NODE_DEDUP=1): one inter-node copy per (token, node) in the MoE all-to-all.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_node_dedup_dispatch import (
+            patch_moe_node_dedup_dispatch,
+        )
+
+        patch_moe_node_dedup_dispatch()
+
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
         # dense O(L^2) softmax. Delete along with the patch module once the megatron-core pin
