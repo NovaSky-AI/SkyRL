@@ -69,7 +69,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
     runtime_role: Literal["trainer", "inference", "combined"] = "combined"
-    return_backward_per_token_outputs: bool = True
+    return_per_token_outputs: bool = True
     """Return cross-entropy backward token arrays. Disable for custom-loss
     clients that consume only backward metrics. Forward-only logprobs and
     other loss functions are unaffected."""
@@ -1110,7 +1110,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 loss_fn=loss_fn,
                 loss_fn_config=loss_fn_config,
                 model_id=model_id,
-                return_per_token_outputs=self.config.return_backward_per_token_outputs,
+                return_per_token_outputs=self.config.return_per_token_outputs,
             )
 
         # Trim padding entries from loss_fn_outputs
