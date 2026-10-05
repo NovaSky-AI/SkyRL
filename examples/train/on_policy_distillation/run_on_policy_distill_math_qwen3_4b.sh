@@ -45,6 +45,14 @@ N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=false
 LR=1e-5
+MAX_PROMPT_LENGTH=2048
+MAX_RESPONSE_LENGTH=8192
+
+# Loss aggregation of the 2025-11 writeup these scripts reproduce: the batch's token losses are summed and
+# divided by a constant, the number of sequences times MAX_SEQ_LEN (longest prompt + longest response).
+# The entrypoint's default, token_mean, divides by the batch's own token count instead.
+LOSS_REDUCTION="seq_mean_token_sum_norm"
+MAX_SEQ_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   data.train_data="['$TRAIN_FILE']" \
@@ -57,6 +65,8 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   trainer.teacher.max_concurrency=$TEACHER_MAX_CONCURRENCY \
   trainer.algorithm.opd.kl_coef=$KL_COEF \
   trainer.algorithm.opd.use_task_reward=$USE_TASK_REWARD \
+  trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  trainer.algorithm.max_seq_len=$MAX_SEQ_LEN \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
@@ -71,14 +81,14 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=2 \
   trainer.micro_train_batch_size_per_gpu=2 \
-  trainer.max_prompt_length=2048 \
+  trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
-  generator.sampling_params.max_generate_length=8192 \
+  generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
-  generator.eval_sampling_params.max_generate_length=8192 \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.num_warmup_steps=0 \
