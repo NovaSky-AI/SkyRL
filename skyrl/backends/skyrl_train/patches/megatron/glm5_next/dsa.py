@@ -66,6 +66,44 @@ class Glm5NextDSAttention(DSAttention):
             query, key, value, attention_mask, x, qr, *args, packed_seq_params=packed_seq_params, **kwargs
         )
 
+    def _gate_score_like_keys(
+        self, gate_score: torch.Tensor, k: torch.Tensor, packed_seq_params: Optional[PackedSeqParams]
+    ) -> torch.Tensor:
+        """Bring the k-pool gate score into the indexer keys' layout under context parallelism.
+
+        With allgather CP, ``DSAttention.forward`` all-gathers the indexer keys over the CP group
+        and reorders them from the load-balanced (zigzag) rank layout into global token order;
+        the pools are then formed over the whole sequence. The gate score is computed from this
+        rank's tokens only, so it gets the same gather and reorder.
+        """
+        if gate_score.size(0) == k.size(0):
+            return gate_score
+        cp_group = self.pg_collection.cp
+        cp_size = cp_group.size()
+        local_len = gate_score.size(0)
+        if cp_size <= 1 or local_len * cp_size != k.size(0):
+            raise RuntimeError(
+                f"k-pool gate score rows ({local_len}) do not match the indexer keys ({k.size(0)}, cp_size={cp_size})."
+            )
+        gathered = gather_from_sequence_parallel_region(gate_score, group=cp_group)
+        if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
+            cu_seqlens_q, cu_seqlens_kv = dsa_layout.get_packed_qk_cu_seqlens(packed_seq_params)
+            _, reorder = dsa_layout.build_packed_allgather_cp_query_positions_and_key_reorder(
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                cp_size=cp_size,
+                cp_rank=cp_group.rank(),
+                device=gate_score.device,
+                local_output_size=local_len,
+                key_local_output_size=local_len,
+                global_output_size=local_len * cp_size,
+            )
+        else:
+            reorder = dsa_layout.build_zigzag_allgather_cp_key_reorder(
+                sq=local_len, cp_size=cp_size, device=gate_score.device
+            )
+        return gathered.index_select(0, reorder)
+
     def _forward_with_kpool_topk(self, *args, packed_seq_params=None, **kwargs):
         """Run the pinned ``DSAttention.forward`` with its top-k step swapped for k-pool selection.
 
@@ -123,7 +161,7 @@ class Glm5NextDSAttention(DSAttention):
                 weights,
                 index_topk,
                 indexer.index_kpool,
-                indexer._kpool_gate_score,
+                self._gate_score_like_keys(indexer._kpool_gate_score, k, packed_seq_params),
                 indexer.index_kpool_compress_ape,
                 mask=mask,
                 varlen_starts=varlen_starts,
