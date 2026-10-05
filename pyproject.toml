@@ -116,7 +116,8 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.30.0; sys_platform == 'linux'",
+    "vllm==0.29.1rc1.dev496+g8644d2af2; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "vllm==0.30.0; sys_platform == 'linux' and platform_machine != 'x86_64' and platform_machine != 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -159,7 +160,8 @@ megatron = [
     # (imported lazily as `flash_mla.flash_mla_sparse_fwd`). Not on PyPI: our own x86_64 build of
     # the `nv_dev` branch, see [tool.uv.sources]. No aarch64 wheel yet.
     "flash-mla==1.0.0+cu.13.0.torch.2.13.b7643bd; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "vllm==0.30.0; sys_platform == 'linux'",
+    "vllm==0.29.1rc1.dev496+g8644d2af2; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "vllm==0.30.0; sys_platform == 'linux' and platform_machine != 'x86_64' and platform_machine != 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -333,10 +335,6 @@ override-dependencies = [
     "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
     "nvidia-cutlass-dsl[cu13]==4.7.1; sys_platform == 'linux'",
     "quack-kernels[cu13]==0.6.5; sys_platform == 'linux'",
-    # vLLM allows xgrammar>=0.2.1,<1.0.0, but 0.2.4/0.2.5 never published a
-    # cp312 linux x86_64 wheel (only cp310/cp311 + aarch64/macOS), so resolving
-    # to them breaks install on x86_64 py3.12. 0.2.3 has the wheel.
-    "xgrammar==0.2.3",
     "torch==2.13.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
     # torch: 0.30.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.30.0 pulls
@@ -513,8 +511,8 @@ torchvision = [
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
 # NVRx 0.6 wheels require glibc 2.39; its supported source build also works on Ubuntu 22.04.
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
-# Megatron-Bridge upstream snapshot, with the matching Core revision below.
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0", marker = "sys_platform == 'linux'"}
+# MiMo-V2.6 checkpoint conversion (Megatron-Bridge #6201).
+megatron-bridge = {git = "https://github.com/kalectory/Megatron-Bridge", rev = "574fc53505492acda3bc8b5eae913a85b6e24840", marker = "sys_platform == 'linux'"}
 # megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
@@ -523,7 +521,12 @@ megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev =
 # Upstream PRs not yet in these pins (GLM-5.3-Flash's KDA / mHC / k-pool DSA, and a few bug
 # fixes) are carried in skyrl/backends/skyrl_train/patches/megatron/. When bumping either pin,
 # follow skyrl/backends/skyrl_train/patches/megatron/README.md to retire whatever has landed.
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "d476c21be396dc666d2e04fa8c199c3851a1551f", marker = "sys_platform == 'linux'"}
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "6a3660905a2736b5670baed1ca5954372937918b", marker = "sys_platform == 'linux'"}
+# Official CUDA 13 build with the v0.30 release fixes plus MiMo QKV/router fixes.
+vllm = [
+    { url = "https://wheels.vllm.ai/8644d2af2fb7c4588190a8d7f6c26a3cbef78a0f/vllm-0.29.1rc1.dev496%2Bg8644d2af2-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://wheels.vllm.ai/8644d2af2fb7c4588190a8d7f6c26a3cbef78a0f/vllm-0.29.1rc1.dev496%2Bg8644d2af2-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
