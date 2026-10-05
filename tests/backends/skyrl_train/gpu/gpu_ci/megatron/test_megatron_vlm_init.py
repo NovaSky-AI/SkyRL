@@ -569,12 +569,13 @@ def _vlm_cp_training_batch(model_name: str) -> TrainingInputBatch:
     return batch
 
 
-def _run_vlm_cp_layout(model_name, batch, cp, num_gpus):
+def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
     """Packed forward logprobs, then one forward_backward + optim_step; returns (logprobs, results, grad_norms)."""
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
+    num_gpus = tp * cp
     cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
-    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.remove_microbatch_padding = True
@@ -602,12 +603,18 @@ def _run_vlm_cp_layout(model_name, batch, cp, num_gpus):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name",
-    ["Qwen/Qwen3-VL-2B-Instruct", "Qwen/Qwen3.5-0.8B"],
-    ids=["qwen3_vl", "qwen3_5_vl"],
+    ("model_name", "tp"),
+    [
+        ("Qwen/Qwen3-VL-2B-Instruct", 1),
+        ("Qwen/Qwen3.5-0.8B", 1),
+        # TP=2 turns on sequence parallelism: the deepstack/SP split runs on top of the CP split.
+        ("Qwen/Qwen3-VL-2B-Instruct", 2),
+        ("Qwen/Qwen3.5-0.8B", 2),
+    ],
+    ids=["qwen3_vl", "qwen3_5_vl", "qwen3_vl_tp2_sp", "qwen3_5_vl_tp2_sp"],
 )
 @pytest.mark.megatron
-async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name):
+async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name, tp):
     """VLM context parallelism must match CP=1: per-token logprobs and the gradient.
 
     The full packed stream goes to every CP rank and Megatron-Bridge's Qwen3VLModel
@@ -616,18 +623,18 @@ async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name):
     logprob differences. The grad-norm check covers loss scaling: the bridge forces
     calculate_per_token_loss under CP, so CP=2 runs Megatron's per-token mode (DDP sums,
     no token-count division) while CP=1 runs the default mode.
-    Both layouts use DP=1 (CP=1 on 1 GPU, CP=2 on 2 GPUs) so their microbatches are
+    Both layouts use DP=1 (TP*1 vs TP*2 GPUs) so their microbatches are
     identical and only the CP split differs; the bf16 floor still applies (changing
     only microbatch composition moves these logprobs by ~0.034 mean), so the logprob
     bar is the bf16 floor while a wrong split shows up as O(1) differences.
     """
     batch = _vlm_cp_training_batch(model_name)
-    logprobs_nocp, results_nocp, grad_norms_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, num_gpus=1)
-    logprobs_cp, results_cp, grad_norms_cp = _run_vlm_cp_layout(model_name, batch, cp=2, num_gpus=2)
+    logprobs_nocp, results_nocp, grad_norms_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, tp=tp)
+    logprobs_cp, results_cp, grad_norms_cp = _run_vlm_cp_layout(model_name, batch, cp=2, tp=tp)
 
     scored = batch["loss_mask"].bool()
     diff = (logprobs_cp - logprobs_nocp).abs()[scored]
-    print(f"\n[cp parity] {model_name}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
+    print(f"\n[cp parity] {model_name} tp={tp}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
     print(f"[cp parity] grad norms CP1={grad_norms_nocp} CP2={grad_norms_cp}")
     for k in ("policy_loss", "policy_kl"):
         print(f"[cp parity] {k}: CP1={results_nocp[0].metrics[k]} CP2={results_cp[0].metrics[k]}")
