@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from skycap.paths import PathRule
 from skycap.server import Backend, CaptureServer
 from skycap.text import TextBackend
 
@@ -44,11 +45,17 @@ def build_backend(
     sampling_mask: bool = False,
     logprobs_mode: str = "processed_logprobs",
     use_raw_content: bool = False,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+    thinking_retention: str | None = "all",
 ) -> Backend:
     """What ``skycap serve`` and ``CaptureService`` run, from the options they share.
 
     Token mode renders with ``tokenizer`` through ``renderers``, or with ``renderer`` when one is given
-    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default.
+    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default. ``chat_template_kwargs`` configure
+    that renderer, as the chat template's would (e.g. ``{"enable_thinking": True}``). ``thinking_retention``
+    is its policy for earlier thinking: ``"all"`` keeps it, so each turn extends the last prompt and completion
+    token for token; ``"tool_cycle"`` drops it once a new user query arrives, as Qwen's template does; None
+    follows the chat template's own knobs.
     """
     if mode == "text":
         return TextBackend(upstream_url, api_key=api_key)
@@ -61,7 +68,12 @@ def build_backend(
     if renderer is None:
         from skycap.tokens.renderer import RenderersRenderer
 
-        renderer = RenderersRenderer(tokenizer, size=renderer_pool_size)
+        renderer = RenderersRenderer(
+            tokenizer,
+            size=renderer_pool_size,
+            thinking_retention=thinking_retention,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     return TokensBackend(
         upstream_url,
         renderer,
@@ -80,7 +92,9 @@ class CaptureService:
     """The model options are ``build_backend``'s; the rest place and persist the server.
 
     ``port=0`` lets the OS pick a free port. ``advertise_host`` is the address clients use to reach
-    this server, which ``url`` carries once started.
+    this server, which ``url`` carries once started. ``path_rules`` are the custom path rules
+    ``finish`` may name besides ``all`` and ``final``, each a function or its ``"pkg.module:function"``
+    import path (``skycap.paths``).
     """
 
     def __init__(
@@ -99,8 +113,11 @@ class CaptureService:
         sampling_mask: bool = False,
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+        thinking_retention: str | None = "all",
         record_dir: str | None = None,
         ttl: float = 3600.0,
+        path_rules: Mapping[str, PathRule | str] | None = None,
         host: str = "0.0.0.0",
         port: int = 0,
         advertise_host: str = "127.0.0.1",
@@ -119,8 +136,10 @@ class CaptureService:
             sampling_mask=sampling_mask,
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
+            chat_template_kwargs=chat_template_kwargs,
+            thinking_retention=thinking_retention,
         )
-        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl)
+        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules)
         self._host, self._port = host, port
         self._advertise_host = advertise_host
         self._thread: threading.Thread | None = None

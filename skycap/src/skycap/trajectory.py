@@ -27,6 +27,8 @@ class Failure:
     status: int | None
     error: str
     input_leaf: int | None = None
+    #: The error's machine-readable code when skycap refused the call itself, e.g. ``context_length_exceeded``.
+    code: str | None = None
 
 
 @dataclass(eq=False)
@@ -49,10 +51,18 @@ class Trajectory:
     #: Set once the server has released and written it. Sealed is not ended:
     #: a trajectory can fail mid-run and still be waiting for its ``finish``.
     ended: bool = False
+    #: What ``finish`` trained: ``{"paths": <rule name>, "rows": [{"leaf", "targets"}]}``, a row per sample,
+    #: with the node its path ends at and the model nodes it trains. None until finished.
+    samples: dict[str, Any] | None = None
 
     @property
     def is_open(self) -> bool:
         return self.status == "open"
+
+    @property
+    def context_length_exceeded(self) -> bool:
+        """Whether skycap refused one of its prompts as too long for the model's context."""
+        return any(failure.code == "context_length_exceeded" for failure in self.failures)
 
     def touch(self) -> None:
         self.last_active = time.monotonic()
@@ -91,6 +101,7 @@ class Trajectory:
             "tools": self.graph.tools,
             "failures": [dataclasses.asdict(f) for f in self.failures],
             "retries": {"replayed": self.replay.replayed, "coalesced": self.replay.coalesced},
+            "samples": self.samples,
             "nodes": [
                 {
                     "id": n.id,

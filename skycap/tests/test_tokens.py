@@ -47,14 +47,19 @@ class TokenStack:
 
 @asynccontextmanager
 async def token_stack(
-    *, engine: VLLMEngine | None = None, completion: Any = None, record_dir: Path | None = None, **options: Any
+    *,
+    engine: VLLMEngine | None = None,
+    completion: Any = None,
+    record_dir: Path | None = None,
+    path_rules: dict[str, Any] | None = None,
+    **options: Any,
 ) -> AsyncIterator[TokenStack]:
     mock = MockEngine(completion)
     engine_server = TestServer(mock.app())
     await engine_server.start_server()
     renderer = FakeRenderer()
     backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, engine=engine, **options)
-    server = CaptureServer(backend, record_dir=record_dir)
+    server = CaptureServer(backend, record_dir=record_dir, path_rules=path_rules)
     capture = TestServer(server.app())
     await capture.start_server()
     try:
@@ -316,6 +321,25 @@ async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
 
 
+async def test_replayed_reasoning_content_matches_and_extends_the_sampled_thinking() -> None:
+    # What LiteLLM's `openai/` provider does for mini-swe-agent: the reply comes back with its reasoning_content.
+    thinking = [*encode("THINK:hmm|answer"), END]
+    async with token_stack(completion=lambda prompt, sampling: thinking) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        reply = (await llm.chat.completions.create(model="policy", messages=[user("q")])).choices[0].message
+        replayed = reply.model_dump(exclude_none=True)
+        assert replayed["reasoning_content"] == "hmm"
+        await llm.chat.completions.create(model="policy", messages=[user("q"), replayed, user("more")])
+        graph = stack.server.trajectories[created["id"]].graph
+
+        assert graph.branch_points() == []
+        assert len(graph.paths()) == 1
+        first, second = stack.engine.requests[-2:]
+        assert second["token_ids"][: len(first["token_ids"]) + len(thinking)] == first["token_ids"] + thinking
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
+
+
 async def test_use_raw_content_keeps_reasoning_inline_so_a_verbatim_replay_stays_one_path() -> None:
     thinking = [*encode("THINK:hmm|answer"), END]
     async with token_stack(completion=lambda prompt, sampling: thinking, use_raw_content=True) as stack:
@@ -397,7 +421,20 @@ async def test_a_prompt_that_leaves_no_room_is_refused() -> None:
         with pytest.raises(openai.BadRequestError) as raised:
             await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")])
         assert "context_length_exceeded" in str(raised.value)
+        # OpenAI's wording, which LiteLLM maps to ContextWindowExceededError.
+        assert "maximum context length is 5 tokens" in str(raised.value)
         assert stack.engine.requests == []
+        # Recorded, and reported by `finish`, so a harness that only exits on it can be told apart.
+        failure = stack.server.trajectories[created["id"]].failures[-1]
+        assert (failure.status, failure.code) == (400, "context_length_exceeded")
+        assert (await stack.finish(created["id"]))["context_length_exceeded"] is True
+
+
+async def test_finish_reports_no_context_overflow_for_a_normal_rollout() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        await converse(client(created["base_url"]), "a")
+        assert (await stack.finish(created["id"]))["context_length_exceeded"] is False
 
 
 # -- failures ---------------------------------------------------------------------------

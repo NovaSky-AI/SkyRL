@@ -5,10 +5,13 @@ servers never collide, and advertises its node's address. The actors sit in one
 placement group whose strategy is configurable: ``SPREAD`` by default, so one
 node going away takes one server rather than all of them. The generator spreads
 trajectories over the pool's URLs round-robin.
+
+With an exposure (``exposure.py``), each actor also makes its server's harness
+routes reachable from agents inside sandboxes, and stops that before the server.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ray
 from loguru import logger
@@ -20,14 +23,25 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     get_node_ip,
 )
 
+from .exposure import Exposure
+
 
 @ray.remote(num_cpus=0)
 class SkycapServerActor:
-    def __init__(self, settings: Dict[str, Any], record_dir: Optional[str], ttl: float) -> None:
+    def __init__(
+        self,
+        settings: Dict[str, Any],
+        record_dir: Optional[str],
+        ttl: float,
+        exposure: Optional[Callable[[], Exposure]] = None,
+        index: int = 0,
+    ) -> None:
         from skycap import CaptureService
 
         from .engine import SkyRLEngine
 
+        self.exposure = exposure() if exposure is not None else None
+        self.index = index
         node_ip = get_node_ip()
         self.service = CaptureService(
             mode="tokens",
@@ -40,10 +54,17 @@ class SkycapServerActor:
             **settings,
         )
 
-    def start(self) -> str:
-        return self.service.start()
+    def start(self) -> Tuple[str, Optional[str]]:
+        """Start serving. Returns the server's URL, and the URL its harness routes are exposed at, if any."""
+        url = self.service.start()
+        if self.exposure is None:
+            return url, None
+        return url, self.exposure.open(url, self.index)
 
     def stop(self, timeout: float) -> bool:
+        # Close the way in before stopping the server behind it.
+        if self.exposure is not None:
+            self.exposure.close()
         return self.service.stop(timeout)
 
 
@@ -54,6 +75,8 @@ class SkycapServers:
     actors: List[Any]
     urls: List[str]
     pg: Any
+    #: Server URL to the URL agents in sandboxes reach its harness routes at; empty when nothing is exposed.
+    harness_urls: Dict[str, str] = field(default_factory=dict)
     stop_timeout: float = 600.0
     _stopped: bool = field(default=False, repr=False)
 
@@ -79,10 +102,12 @@ def start_servers(
     placement_strategy: str,
     record_dir: Optional[str],
     ttl: float,
+    exposure: Optional[Callable[[], Exposure]] = None,
 ) -> SkycapServers:
     """``num_servers`` skycap servers in token mode, in front of SkyRL's router.
 
     ``settings`` are ``skycap.CaptureService``'s options (``upstream_url``, ``tokenizer``, sampling, ...).
+    ``exposure`` builds each server's ``Exposure`` (``exposure.exposure_factory``); None exposes nothing.
     """
     if num_servers < 1:
         raise ValueError("skycap.num_servers must be at least 1")
@@ -92,9 +117,22 @@ def start_servers(
         SkycapServerActor.options(
             num_cpus=num_cpus_per_server,
             scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=i),
-        ).remote(settings, record_dir, ttl)
+        ).remote(settings, record_dir, ttl, exposure, i)
         for i in range(num_servers)
     ]
-    urls = ray.get([actor.start.remote() for actor in actors])
-    logger.info(f"skycap serving at {urls}")
-    return SkycapServers(actors=actors, urls=urls, pg=pg)
+    servers = SkycapServers(actors=actors, urls=[], pg=pg)
+    try:
+        started = ray.get([actor.start.remote() for actor in actors])
+    except BaseException:
+        # A server or its exposure failed to start: close what the others opened (tunnels are processes).
+        try:
+            servers.stop()
+        except Exception:  # noqa: BLE001 - the start failure is the error to raise
+            logger.exception("stopping skycap after a failed start")
+        raise
+    servers.urls = [url for url, _ in started]
+    servers.harness_urls = {url: exposed for url, exposed in started if exposed is not None}
+    logger.info(f"skycap serving at {servers.urls}")
+    if servers.harness_urls:
+        logger.info(f"skycap harness routes exposed to sandboxes at {list(servers.harness_urls.values())}")
+    return servers

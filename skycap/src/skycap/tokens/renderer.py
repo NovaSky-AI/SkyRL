@@ -93,7 +93,7 @@ class RenderersRenderer:
         tokenizer: str,
         *,
         size: int = 8,
-        thinking_retention: str = "all",
+        thinking_retention: str | None = "all",
         chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         from renderers import AutoRendererConfig, create_renderer
