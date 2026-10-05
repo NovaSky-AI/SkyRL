@@ -9,9 +9,11 @@ itself, so ``Glm5NextDSAttention`` swaps that selection for the vendored k-pool 
 (``mcore_ext/dsa_kpool.py``, NVIDIA/Megatron-LM#7522) whenever ``dsa_indexer_kpool > 1``.
 """
 
+import os
 from typing import Optional, Tuple
 
 import torch
+from loguru import logger
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer.experimental_attention_variant import dsa_layout
@@ -25,6 +27,56 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
 from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.dsa_kpool import (
     fused_qk_topk_kpool,
 )
+
+# Opt-in: run the fused sparse attention in query chunks of this many tokens, each checkpointed.
+# Backend-agnostic: on ``dsa_kernel_backend="tilelang"`` the kernel takes GLM-5.3's NoPE /
+# 2051-wide k-pool layout through ``patch_sparse_mla_nope`` (NVIDIA/Megatron-LM#7617 backport).
+_DSA_QUERY_CHUNK = int(os.environ.get("SKYRL_DSA_QUERY_CHUNK", "0"))
+_fused_sparse_attention_logged = {"used": False, "declined": False}
+
+
+def _query_chunked_fused_absorbed_sparse_attention(fused_fn):
+    """Wrap ``dsa_kernels.run_fused_absorbed_sparse_attention`` to run in ``_DSA_QUERY_CHUNK`` chunks.
+
+    If the fused backend declines, the caller's dense fallback runs as before. The first call logs
+    whether the fused kernel was used or declined.
+    """
+
+    def chunked(config, query, key, topk_indices, softmax_scale, v_channels, topk_length=None):
+        def run(q, idx, lengths):
+            return fused_fn(config, q, key, idx, softmax_scale, v_channels, topk_length=lengths)
+
+        # Each query attends only its own top-k keys, so query chunks are independent (key grads
+        # just sum). Checkpointing each chunk keeps only one chunk's padded q / kernel output
+        # alive instead of the whole sequence's -- at TP8 the kernel pads 8 local heads to 16, so
+        # that is ~13 GiB/GPU at 512k tokens -- for one extra kernel forward in backward.
+        sq = query.size(0)
+        if _DSA_QUERY_CHUNK and sq > _DSA_QUERY_CHUNK and topk_length is None:
+            outs = []
+            for q0 in range(0, sq, _DSA_QUERY_CHUNK):
+                q1 = min(sq, q0 + _DSA_QUERY_CHUNK)
+                args = (query[q0:q1], topk_indices[:, q0:q1], None)
+                if torch.is_grad_enabled():
+                    o = torch.utils.checkpoint.checkpoint(run, *args, use_reentrant=False)
+                else:
+                    o = run(*args)
+                if o is None:
+                    return None
+                outs.append(o)
+            out = torch.cat(outs, dim=0)
+        else:
+            out = run(query, topk_indices, topk_length)
+        key_ = "used" if out is not None else "declined"
+        if not _fused_sparse_attention_logged[key_]:
+            _fused_sparse_attention_logged[key_] = True
+            logger.info(
+                f"GLM-5.3-Flash DSA: fused absorbed sparse attention {key_} "
+                f"(backend={getattr(config, 'dsa_kernel_backend', None)}, qk_dim={key.size(-1)}, "
+                f"topk={topk_indices.size(-1)}, query_chunk={_DSA_QUERY_CHUNK})"
+            )
+        return out
+
+    return chunked
 
 
 class Glm5NextDSAttention(DSAttention):
@@ -124,14 +176,25 @@ class Glm5NextDSAttention(DSAttention):
         def decline(*_args, **_kwargs):
             return None
 
-        saved = (mcore_dsa.fused_qk_topk_naive, dsa_kernels.run_fused_dsa_attention, dsa_kernels.run_fused_qk_topk)
+        saved = (
+            mcore_dsa.fused_qk_topk_naive,
+            dsa_kernels.run_fused_dsa_attention,
+            dsa_kernels.run_fused_qk_topk,
+            dsa_kernels.run_fused_absorbed_sparse_attention,
+        )
         mcore_dsa.fused_qk_topk_naive = kpool_topk
         dsa_kernels.run_fused_dsa_attention = decline
         dsa_kernels.run_fused_qk_topk = decline
+        dsa_kernels.run_fused_absorbed_sparse_attention = _query_chunked_fused_absorbed_sparse_attention(saved[3])
         try:
             output = super().forward(*args, packed_seq_params=packed_seq_params, **kwargs)
         finally:
-            mcore_dsa.fused_qk_topk_naive, dsa_kernels.run_fused_dsa_attention, dsa_kernels.run_fused_qk_topk = saved
+            (
+                mcore_dsa.fused_qk_topk_naive,
+                dsa_kernels.run_fused_dsa_attention,
+                dsa_kernels.run_fused_qk_topk,
+                dsa_kernels.run_fused_absorbed_sparse_attention,
+            ) = saved
         # A pinned-megatron-core change that routes top-k elsewhere must fail here rather than
         # silently fall back to token-level selection.
         if not self.skip_topk and kpool_calls != 1:
