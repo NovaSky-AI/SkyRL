@@ -257,22 +257,13 @@ class MegatronModelWrapper:
         So we record the request here and replay it exactly once from
         :meth:`run_pending_grad_sync`, called by the worker's ``optim_step``.
 
-        ``num_tokens`` is only non-None under ``calculate_per_token_loss``. The loss of each
-        ``forward_backward`` call is multiplied by that call's global token count so the
-        final division cancels (see ``to_loss_output``); with several calls the division
-        would use the window's summed count instead, so that mode supports one call per
-        optimizer step.
+        ``num_tokens`` (only non-None under ``calculate_per_token_loss``) is dropped: SkyRL's
+        loss is already normalized through the pre-scaled advantages (NovaSky-AI/SkyRL#1296),
+        so the replayed sync never divides gradients by a token count (see
+        ``megatron_loss_output``). That also keeps accumulation across calls a plain sum.
         """
-        del model, kwargs  # replayed against self.actor_module with default process groups
-        pending = self._pending_grad_sync
-        if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
-            # TODO(xgui): support accumulating several forward_backward calls (e.g. Tinker) under
-            # calculate_per_token_loss by scaling with the window's token count.
-            raise ValueError(
-                "calculate_per_token_loss (on for Megatron-Bridge Qwen-VL models with context parallelism) "
-                "supports one forward_backward call per optim_step; got a second call before optim_step."
-            )
-        self._pending_grad_sync = {"num_tokens": num_tokens}
+        del model, kwargs, num_tokens  # replayed against self.actor_module with default process groups
+        self._pending_grad_sync = {"num_tokens": None}
 
     def run_pending_grad_sync(self) -> None:
         """Reduce gradients across DP/TP/PP exactly once for the accumulated window.
@@ -281,9 +272,8 @@ class MegatronModelWrapper:
         whose ``forward_backward`` got no microbatches never reaches the schedule's
         finalize hook, and skipping the reduce here would hang the ranks that do run it.
         """
-        pending = self._pending_grad_sync
         self._pending_grad_sync = None
-        finalize_model_grads_with_expert_adapter_sync(self.actor_module, pending["num_tokens"] if pending else None)
+        finalize_model_grads_with_expert_adapter_sync(self.actor_module, None)
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -670,6 +660,8 @@ class MegatronModelWrapper:
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
 
+        per_token_loss = bool(getattr(model_config, "calculate_per_token_loss", False))
+
         def to_loss_output(data, normalized_loss, regularizer, metrics):
             num_microbatches = data["num_microbatches"]
             return megatron_loss_output(
@@ -679,8 +671,10 @@ class MegatronModelWrapper:
                 num_microbatches=num_microbatches,
                 num_real_microbatches=data.get("num_real_microbatches", num_microbatches),
                 dp_size=mpu.get_data_parallel_world_size(with_context_parallel=False),
-                num_tokens_local=data.get("num_tokens_local"),
-                num_tokens_global=data.get("num_tokens_global"),
+                per_token_loss=per_token_loss,
+                num_tokens=(
+                    int(data["loss_mask"].sum().item()) if per_token_loss and data.get("loss_mask") is not None else 0
+                ),
             )
 
         def loss_func(logits, *, data, metadata_layout: Optional[TokenMetadataLayout]):
