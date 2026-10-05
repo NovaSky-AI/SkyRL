@@ -70,9 +70,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     lifetime."""
     runtime_role: Literal["trainer", "inference", "combined"] = "combined"
     return_per_token_outputs: bool = True
-    """Return cross-entropy backward token arrays. Disable for custom-loss
-    clients that consume only backward metrics. Forward-only logprobs and
-    other loss functions are unaffected."""
+    """Include per-token arrays in cross-entropy backward results."""
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
