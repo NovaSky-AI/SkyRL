@@ -51,7 +51,6 @@ from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
-    BatchIterator,
     TokenBasedBatchIterator,
     all_reduce_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
@@ -1311,8 +1310,9 @@ class PolicyWorkerBase(Worker):
           with per-sample ``loss_fn_outputs`` (``logprobs`` key) and empty
           ``metrics``.
         - When ``loss_fn`` is set (e.g., ``"cross_entropy"``): runs the loss in ``no_grad`` mode
-          (no backward), iterating over micro-batches of ``micro_forward_batch_size_per_gpu``,
-          and returns a :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` plus
+          (no backward), iterating over micro-batches of ``micro_forward_batch_size_per_gpu``
+          (or of at most ``max_tokens_per_microbatch`` tokens when set), and returns a
+          :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` plus
           ``metrics`` (e.g. ``"loss"``).  Metrics are all-reduced across the DP group
           to mirror :meth:`forward_backward`.
 
@@ -1338,21 +1338,32 @@ class PolicyWorkerBase(Worker):
             loss_fn_outputs = [{"logprobs": row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
             return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
-        micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
         all_metrics = defaultdict(list)
-        all_loss_fn_outputs: List[Dict[str, Any]] = []
+        loss_fn_output_batches = []  # per-microbatch; restored to input order below
 
-        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
+        for microbatch in microbatch_iterator:
             metrics = self._forward_micro_with_loss(
-                micro_batch,
+                BaseBatchIterator.batch_to_experience(microbatch),
                 loss_fn=loss_fn,
                 loss_fn_config=loss_fn_config,
                 return_per_token_outputs=return_per_token_outputs,
             )
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
             for k, v in metrics.items():
                 all_metrics[k].append(v)
+
+        # Token-based batching permutes samples and appends padding microbatches.
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         result = reduce_metrics(all_metrics, sum_loss_metrics=True)
         dp_group = self.device_mesh.get_group("dp")

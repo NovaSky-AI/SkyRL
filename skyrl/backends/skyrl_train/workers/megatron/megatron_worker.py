@@ -993,15 +993,20 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.model.eval()
 
-        micro_batch_size = self.cfg.micro_forward_batch_size_per_gpu
         all_metrics = defaultdict(list)
-        all_loss_fn_outputs: List[Dict[str, Any]] = []
 
         self._drop_pixel_values_on_non_first_pp_stage(data)
 
+        use_token_batching = self.cfg.max_tokens_per_microbatch > 0
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
+
         # Build micro-batch dicts expected by forward_backward_mini_batch
         micro_buffer = []
-        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
+        for experience in (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator):
             sequences = experience.sequences
             attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
@@ -1032,18 +1037,31 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         experience.rollout_sample_support if self.enable_sample_support_replay else None
                     ),
                     "sub_seq_lengths": experience.sub_seq_lengths,
+                    "is_padding_batch": (
+                        experience.metadata.get("is_padding_batch", False) if experience.metadata else False
+                    ),
                     **vlm_inputs,
                 }
             )
 
+        # Padding microbatches only equalize the microbatch count across DP ranks.
+        num_padding_microbatches = getattr(microbatch_iterator, "num_padding_microbatches", 0)
+        num_real_microbatches = len(micro_buffer) - num_padding_microbatches
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
+            m_batch["num_real_microbatches"] = num_real_microbatches
 
         if not micro_buffer:
             return WorkerOutput()
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
-        micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        if use_token_batching:
+            # Megatron's forward_backward_func requires a uniform micro_batch_size.
+            micro_bsz = max(m["sequences"].shape[0] for m in micro_buffer)
+            micro_buffer = [self._pad_microbatch_to_size(m, micro_bsz) for m in micro_buffer]
+        else:
+            micro_bsz = micro_buffer[0]["sequences"].shape[0]
 
         with torch.no_grad():
             metrics_list = self.model.forward_backward_mini_batch(
@@ -1061,17 +1079,27 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.cuda.empty_cache()
 
         # Aggregate metrics across micro-batches
-        for metrics in metrics_list:
+        loss_fn_output_batches = []
+        for m_batch, metrics in zip(micro_buffer, metrics_list):
             if metrics is None:
+                loss_fn_output_batches.append([])
                 continue
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
+            if m_batch["is_padding_batch"]:
+                continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
         status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
+
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
