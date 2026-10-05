@@ -35,7 +35,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     gdn_in_proj_lora_is_safe,
     get_model_config,
     get_moe_metrics,
-    keep_skyrl_loss_scaling,
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
@@ -43,7 +42,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    is_fp8_enabled,
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
     validate_mxfp8_gdn_tp_alignment,
@@ -543,15 +546,18 @@ class MegatronWorker:
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
 
-        if self.is_vlm and getattr(self.provider, "context_parallel_size", 1) > 1:
-            self.provider.register_pre_wrap_hook(keep_skyrl_loss_scaling)
-
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
             default_ddp_config.use_distributed_optimizer = True
         if ddp_config is not None:
             for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
+        if getattr(self.provider, "calculate_per_token_loss", False) and default_ddp_config.average_in_collective:
+            # Per-token loss normalization (forced by Megatron-Bridge's Qwen-VL providers under CP)
+            # sums gradients across DP x CP and divides by the global token count in
+            # finalize_model_grads; Megatron's DDP asserts average_in_collective is off for it.
+            logger.info("calculate_per_token_loss is on: setting ddp_config.average_in_collective=False")
+            default_ddp_config.average_in_collective = False
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
@@ -1055,6 +1061,45 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
+    def _set_per_token_loss_counts(self, micro_buffer: List[dict]) -> None:
+        """Attach token counts for Megatron's per-token loss normalization, if it is on.
+
+        With ``calculate_per_token_loss`` (forced on by Megatron-Bridge's Qwen-VL
+        providers when CP > 1), Megatron sums gradients over DP x CP and
+        ``finalize_model_grads`` divides them by the all-reduced sum of the
+        ``num_tokens`` every microbatch's loss returns. SkyRL's policy loss is
+        already normalized (advantages are pre-scaled per mini-batch), so the loss
+        function returns this rank's per-microbatch token count and multiplies the
+        loss by the global total, which the final division then cancels. Counts are
+        the tokens each CP rank processes (padded packed length / CP); the MoE
+        router's aux-loss scaling assumes the same quantity.
+        """
+        if not getattr(get_model_config(self.actor_module[0]), "calculate_per_token_loss", False):
+            return
+        if not self.cfg.remove_microbatch_padding:
+            raise ValueError("calculate_per_token_loss requires trainer.remove_microbatch_padding=true")
+        model_config = get_model_config(self.actor_module[0])
+        cp_size = mpu.get_context_parallel_world_size()
+        align = get_packed_seq_align_size(
+            mpu.get_tensor_model_parallel_world_size(),
+            cp_size,
+            fp8_enabled=is_fp8_enabled(getattr(model_config, "fp8", None)),
+            fp8_recipe=getattr(model_config, "fp8_recipe", None),
+        )
+        local_counts = []
+        for m_batch in micro_buffer:
+            if m_batch.get("sub_seq_lengths") is not None:
+                seqlens = [int(n) for row in m_batch["sub_seq_lengths"] for n in row.tolist()]
+            else:
+                seqlens = m_batch["attention_mask"].sum(dim=-1).tolist()
+            padded_total = sum(-(-int(n) // align) * align for n in seqlens)
+            local_counts.append(padded_total // cp_size)
+        total = torch.tensor(sum(local_counts), dtype=torch.int64, device=torch.cuda.current_device())
+        torch.distributed.all_reduce(total, group=mpu.get_data_parallel_group(with_context_parallel=True))
+        for m_batch, count in zip(micro_buffer, local_counts):
+            m_batch["num_tokens_local"] = count
+            m_batch["num_tokens_global"] = int(total.item())
+
     def forward_backward(
         self,
         data: TrainingInputBatch,
@@ -1161,6 +1206,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             m_batch["num_real_microbatches"] = num_real_microbatches
 
         if not micro_buffer:
+            # Still join the per-token count all-reduce so ranks with microbatches don't hang.
+            self._set_per_token_loss_counts(micro_buffer)
             return WorkerOutput()
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
@@ -1174,6 +1221,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             micro_bsz = max_micro_bsz
         else:
             micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        self._set_per_token_loss_counts(micro_buffer)
 
         # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
         # (matches how status all-reduce treats metrics as identical within a DP group).

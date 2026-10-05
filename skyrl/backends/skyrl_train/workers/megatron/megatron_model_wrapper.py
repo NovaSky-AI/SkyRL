@@ -16,6 +16,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
     call_model_with_fused_lm_head,
     fused_lm_head_output_processor,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.loss_scaling import (
+    megatron_loss_output,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
@@ -254,14 +257,21 @@ class MegatronModelWrapper:
         So we record the request here and replay it exactly once from
         :meth:`run_pending_grad_sync`, called by the worker's ``optim_step``.
 
-        ``num_tokens`` is only non-None under ``calculate_per_token_loss`` (never set by
-        SkyRL, whose loss scaling assumes the per-microbatch path); accumulate it across
-        calls so the deferred sync divides by the whole window's token count if it ever is.
+        ``num_tokens`` is only non-None under ``calculate_per_token_loss``. The loss of each
+        ``forward_backward`` call is multiplied by that call's global token count so the
+        final division cancels (see ``to_loss_output``); with several calls the division
+        would use the window's summed count instead, so that mode supports one call per
+        optimizer step.
         """
         del model, kwargs  # replayed against self.actor_module with default process groups
         pending = self._pending_grad_sync
         if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
-            num_tokens = pending["num_tokens"] + num_tokens
+            # TODO(xgui): support accumulating several forward_backward calls (e.g. Tinker) under
+            # calculate_per_token_loss by scaling with the window's token count.
+            raise ValueError(
+                "calculate_per_token_loss (on for Megatron-Bridge Qwen-VL models with context parallelism) "
+                "supports one forward_backward call per optim_step; got a second call before optim_step."
+            )
         self._pending_grad_sync = {"num_tokens": num_tokens}
 
     def run_pending_grad_sync(self) -> None:
@@ -660,6 +670,19 @@ class MegatronModelWrapper:
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
 
+        def to_loss_output(data, normalized_loss, regularizer, metrics):
+            num_microbatches = data["num_microbatches"]
+            return megatron_loss_output(
+                normalized_loss,
+                regularizer,
+                metrics,
+                num_microbatches=num_microbatches,
+                num_real_microbatches=data.get("num_real_microbatches", num_microbatches),
+                dp_size=mpu.get_data_parallel_world_size(with_context_parallel=False),
+                num_tokens_local=data.get("num_tokens_local"),
+                num_tokens_global=data.get("num_tokens_global"),
+            )
+
         def loss_func(logits, *, data, metadata_layout: Optional[TokenMetadataLayout]):
             sequences = data["sequences"]
             packed_seq_params = data.get("packed_seq_params")
@@ -863,13 +886,9 @@ class MegatronModelWrapper:
                 # Megatron's schedule separately multiplies loss by the CP size for two-output loss funcs,
                 # so CP ranks are not included in this correction factor.
                 # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
-                # so we multiply by both factors to recover the correct sum reduction.
-                grad_sum_correction_factor = num_microbatches * dp_size
-                loss = policy_loss * grad_sum_correction_factor
-                # Fold the per-token-mean MTP/draft loss in with the same micro-batch correction as the RL path.
-                if draft_loss is not None:
-                    kl_entropy_microbatch_scale = num_microbatches / max(1, num_real_microbatches)
-                    loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
+                # so we multiply by both factors to recover the correct sum reduction (see to_loss_output).
+                # The per-token-mean MTP/draft loss gets the same micro-batch correction as the RL path.
+                sft_regularizer = mtp_loss_weight * draft_loss if draft_loss is not None else 0.0
                 unscaled_loss = policy_loss
 
                 # Only build per-token outputs for callers that consume them.
@@ -920,7 +939,7 @@ class MegatronModelWrapper:
                 }
                 if draft_loss is not None:
                     metrics["mtp_loss"] = draft_loss.detach().item()
-                return loss, metrics
+                return to_loss_output(data, policy_loss, sft_regularizer, metrics)
 
             # RL path: add optional KL/entropy terms
             with torch.set_grad_enabled(loss_config.use_entropy_loss):
@@ -1018,17 +1037,14 @@ class MegatronModelWrapper:
             # num_real/num_total. Scale up by num_microbatches/num_real_microbatches so the
             # terms are averaged over real microbatches only (no-op when there is no padding).
             kl_entropy_microbatch_scale = num_microbatches / max(1, num_real_microbatches)
-            loss = (
-                policy_loss * grad_sum_correction_factor
-                + (kl_loss_term - entropy_loss_term) * kl_entropy_microbatch_scale
-            )
+            regularizer = kl_loss_term - entropy_loss_term
             # The decoupled MTP/draft loss is a per-token mean (like KL/entropy), so fold it in with
             # the same micro-batch correction. Its gradient only reaches the MTP-head parameters: the
             # trunk hidden states, the re-embedding, the output weight and the teacher distribution
             # are all detached.
             if draft_loss is not None:
-                loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
-            unscaled_loss = loss / grad_sum_correction_factor
+                regularizer = regularizer + mtp_loss_weight * draft_loss
+            unscaled_loss = policy_loss + regularizer * kl_entropy_microbatch_scale / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
             batch_size = action_log_probs.shape[0]
@@ -1064,7 +1080,7 @@ class MegatronModelWrapper:
             metrics.update(
                 compute_minibatch_rollout_logprob_diff_metrics(action_log_probs, rollout_action_logprobs, loss_mask)
             )
-            return loss, metrics
+            return to_loss_output(data, policy_loss, regularizer, metrics)
 
         def forward_step(batch_iter, model):
             # NOTE(Charlie): despite the name, methods like `remove_left_padding()` are padding-agnostic

@@ -759,27 +759,6 @@ def preprocess_packed_seqs(
         return input_ids, packed_seq_params
 
 
-def keep_skyrl_loss_scaling(model: List[nn.Module]) -> List[nn.Module]:
-    """Pre-DDP-wrap hook: undo ``calculate_per_token_loss`` forced on by Megatron-Bridge.
-
-    The bridge's Qwen VL providers turn on ``calculate_per_token_loss`` whenever
-    CP > 1, and ``Qwen3VLModel.__init__`` asserts it. The flag only changes how
-    Megatron normalizes the loss: DDP then skips its 1/(dp*cp) scaling and
-    ``finalize_model_grads`` divides by the token count the loss function returns.
-    SkyRL's loss function returns ``(loss, metrics)`` without a token count and
-    relies on the default scaling, the same as for text models under CP. So clear
-    the flag after the model is built and before DDP reads it.
-    """
-    seen = set()
-    for chunk in model:
-        for module in chunk.modules():
-            config = getattr(module, "config", None)
-            if config is not None and id(config) not in seen and getattr(config, "calculate_per_token_loss", False):
-                config.calculate_per_token_loss = False
-                seen.add(id(config))
-    return model
-
-
 def remove_left_padding(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,

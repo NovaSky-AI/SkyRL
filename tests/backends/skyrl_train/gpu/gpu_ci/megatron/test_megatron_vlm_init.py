@@ -607,7 +607,8 @@ async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name):
     computes mRoPE, places image features and applies the CP split itself. Images span
     the 2*CP chunk boundaries of most samples, so a mismatched split shows up as large
     logprob differences. The grad-norm check covers loss scaling: the bridge forces
-    calculate_per_token_loss under CP, which SkyRL clears (keep_skyrl_loss_scaling).
+    calculate_per_token_loss under CP, so CP=2 runs Megatron's per-token mode
+    (megatron_loss_output returns num_tokens) while CP=1 runs the default mode.
     Both layouts run on 2 GPUs: CP=1 -> DP=2, CP=2 -> DP=1.
     """
     batch = _vlm_cp_training_batch(model_name)
