@@ -254,13 +254,22 @@ class MegatronModelWrapper:
         So we record the request here and replay it exactly once from
         :meth:`run_pending_grad_sync`, called by the worker's ``optim_step``.
 
-        ``num_tokens`` (only non-None under ``calculate_per_token_loss``) is dropped: SkyRL's
-        loss is already normalized through the pre-scaled advantages (NovaSky-AI/SkyRL#1296),
-        so the replayed sync never divides gradients by a token count (see
-        ``loss_func``). That also keeps accumulation across calls a plain sum.
+        ``num_tokens`` is only non-None under ``calculate_per_token_loss``. The loss of each
+        ``forward_backward`` call is multiplied by that call's global token count so the
+        final division cancels (see ``loss_func``); with several calls the division
+        would use the window's summed count instead, so that mode supports one call per
+        optimizer step.
         """
-        del model, kwargs, num_tokens  # replayed against self.actor_module with default process groups
-        self._pending_grad_sync = {"num_tokens": None}
+        del model, kwargs  # replayed against self.actor_module with default process groups
+        pending = self._pending_grad_sync
+        if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
+            # TODO(xgui): support accumulating several forward_backward calls (e.g. Tinker) under
+            # calculate_per_token_loss by scaling with the window's token count.
+            raise ValueError(
+                "calculate_per_token_loss (on for Megatron-Bridge Qwen-VL models with context parallelism) "
+                "supports one forward_backward call per optim_step; got a second call before optim_step."
+            )
+        self._pending_grad_sync = {"num_tokens": num_tokens}
 
     def run_pending_grad_sync(self) -> None:
         """Reduce gradients across DP/TP/PP exactly once for the accumulated window.
@@ -269,8 +278,9 @@ class MegatronModelWrapper:
         whose ``forward_backward`` got no microbatches never reaches the schedule's
         finalize hook, and skipping the reduce here would hang the ranks that do run it.
         """
+        pending = self._pending_grad_sync
         self._pending_grad_sync = None
-        finalize_model_grads_with_expert_adapter_sync(self.actor_module, None)
+        finalize_model_grads_with_expert_adapter_sync(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -685,11 +695,13 @@ class MegatronModelWrapper:
             # intended gradient is the sum of every microbatch's policy loss over all DP x CP ranks;
             # KL / entropy / MTP terms are per-microbatch means averaged over DP and real microbatches.
             if per_token_loss:
-                # calculate_per_token_loss: the schedule leaves a 3-tuple loss unscaled and DDP sums over
-                # DP x CP, which already is that sum; finalize_model_grads is run without a token count
-                # (see _defer_finalize_model_grads), so no correction is needed for the policy loss.
-                grad_sum_correction_factor = 1
-                kl_entropy_microbatch_scale = 1 / (dp_size * max(1, num_real_microbatches))
+                # calculate_per_token_loss: the schedule leaves a 3-tuple loss unscaled, DDP sums over
+                # DP x CP, and finalize_model_grads divides by the global token count. Multiply by that
+                # count (attached by the worker) so the division cancels, as in verl's Megatron engine.
+                # Forward-only loss passes have no gradient sync, so the counts default there.
+                num_tokens_global = data.get("num_tokens_global", 1)
+                grad_sum_correction_factor = num_tokens_global
+                kl_entropy_microbatch_scale = num_tokens_global / (dp_size * max(1, num_real_microbatches))
             else:
                 # Default: Megatron divides loss by num_microbatches
                 # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
@@ -708,7 +720,8 @@ class MegatronModelWrapper:
 
             def loss_output(loss, metrics):
                 if per_token_loss:
-                    return loss, loss_mask.sum().int(), metrics
+                    num_tokens_local = data.get("num_tokens_local", 0)
+                    return loss, torch.tensor(num_tokens_local, dtype=torch.int, device=loss.device), metrics
                 return loss, metrics
 
             # Fused LM-head: `logits` is actually decoder hidden states [B, S, H]
