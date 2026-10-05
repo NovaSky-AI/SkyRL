@@ -263,7 +263,12 @@ class MegatronModelWrapper:
         del model, kwargs  # replayed against self.actor_module with default process groups
         pending = self._pending_grad_sync
         if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
-            # TODO(xgui): support accumulating several forward_backward calls (e.g. Tinker) under
+            # Reached only when calculate_per_token_loss is on (Megatron-Bridge Qwen-VL models with
+            # context_parallel_size > 1) AND a second forward_backward runs before optim_step: e.g. a
+            # Tinker client calling forward_backward several times per optim_step
+            # (skyrl/backends/skyrl_train_backend.py forward_backward / optim_step). The RL and SFT
+            # trainers call forward_backward once per optim_step and never get here.
+            # TODO(xgui): support accumulating several forward_backward calls under
             # calculate_per_token_loss by scaling with the window's token count.
             raise ValueError(
                 "calculate_per_token_loss (on for Megatron-Bridge Qwen-VL models with context parallelism) "
