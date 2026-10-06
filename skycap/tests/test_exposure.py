@@ -270,7 +270,7 @@ def test_a_tunnel_stopped_while_it_starts_gives_up(tmp_path: Path, monkeypatch) 
         '#!/bin/sh\necho "INF |  https://corp-provides-trademark-effective.trycloudflare.com  |"\nsleep 600\n'
     )
     fake.chmod(0o755)
-    monkeypatch.setattr(tunnel, "_cloudflared", lambda: str(fake))
+    monkeypatch.setattr(tunnel, "_cloudflared", lambda stopped=None: str(fake))
     monkeypatch.setattr(tunnel, "_reaches_skycap", lambda url: False)
     opened = tunnel.CloudflareTunnel("http://127.0.0.1:9")
     errors: list[BaseException] = []
@@ -296,9 +296,20 @@ def test_a_tunnel_stopped_while_it_starts_gives_up(tmp_path: Path, monkeypatch) 
         quick.start("http://127.0.0.1:9")
 
 
-def test_the_cli_refuses_expose_kwargs_that_are_not_an_object() -> None:
+def test_the_cli_refuses_expose_kwargs_that_are_not_an_object_or_without_expose() -> None:
     with pytest.raises(SystemExit, match="must be a JSON object"):
         main(["serve", "--upstream-url", "http://e/v1", "--expose", "cloudflare", "--expose-kwargs", "[]"])
+    with pytest.raises(SystemExit, match="without --expose"):
+        main(["serve", "--upstream-url", "http://e/v1", "--expose-kwargs", '{"host": "h", "port": 1}'])
+
+
+async def test_a_start_that_times_out_stops_the_server(tmp_path: Path) -> None:
+    exposure = BlockingExposure()
+    service = CaptureService("http://127.0.0.1:9/v1", host="127.0.0.1", exposure=exposure)
+    with pytest.raises(TimeoutError):
+        await asyncio.to_thread(service.start, 1.0)
+    # Not left opening its exposure in the background.
+    assert exposure.stops == 1 and service._thread is None
 
 
 # -- the tunnel's process ------------------------------------------------------------

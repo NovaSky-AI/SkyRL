@@ -43,8 +43,10 @@ class ExposureConfig:
     """How agents that run inside a remote sandbox (Harbor's installed agents: mini-swe-agent, Claude Code, ...)
     reach skycap; Terminus-2 calls from this cluster and never needs it. ``none`` (default); ``cloudflare``, a
     Cloudflare quick tunnel per server (development: at most 200 calls in flight per tunnel, ~125 s to a
-    response's first byte); ``external_host``, ``kwargs.host`` routes to the servers' node and server ``i``
-    listens on ``kwargs.port + i`` (default 11500); or an ``Exposure`` subclass, ``"pkg.module:Class"``.
+    response's first byte); ``external_host``, server ``i`` listens on ``kwargs.port + i`` (default 11500) on its
+    node and is reached at ``kwargs.host``: a relay that forwards each port to its server's node (frp), or the
+    node's own address with every server on that node (``skycap.placement_strategy=STRICT_PACK``); or an
+    ``Exposure`` subclass, ``"pkg.module:Class"``.
     Only the harness routes are exposed; see skycap's README."""
     kwargs: Dict[str, Any] = field(default_factory=dict)
     """The exposure's constructor arguments: ``host`` and ``port`` for ``external_host``, ``timeout`` and

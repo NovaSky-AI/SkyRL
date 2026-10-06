@@ -17,7 +17,6 @@ route there.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import threading
 from collections.abc import Callable, Mapping
@@ -160,6 +159,8 @@ class CaptureService:
         self._thread = threading.Thread(target=self._run, name="skycap", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout):
+            # Not left running unowned: with an exposure, its opening would go on and serve later.
+            self.stop()
             raise TimeoutError(f"skycap did not start within {timeout}s")
         if self._error is not None:
             raise RuntimeError("skycap failed to start") from self._error
@@ -256,8 +257,12 @@ async def serve(
                 logger.info("stopped while the exposure was opening")
                 opened = False
                 await _close(exposure)
-                with contextlib.suppress(Exception):
-                    await starting
+                # An exposure whose start ignores its stop isn't waited for forever: the server stops anyway.
+                done, _ = await asyncio.wait({starting}, timeout=STOP_GRACE)
+                if not done:
+                    logger.warning("the exposure's start didn't give up within %ss of its stop", STOP_GRACE)
+                elif not starting.cancelled():
+                    starting.exception()  # retrieved: it is expected to fail once stopped
                 return
             stop_requested.cancel()
             server.exposed_url = starting.result().rstrip("/")
@@ -272,6 +277,10 @@ async def serve(
         if harness is not None:
             await harness.cleanup()
         await runner.cleanup()
+
+
+#: Seconds a stopped exposure's start may take to give up before the server stops without it.
+STOP_GRACE = 30.0
 
 
 async def _close(exposure: Exposure) -> None:

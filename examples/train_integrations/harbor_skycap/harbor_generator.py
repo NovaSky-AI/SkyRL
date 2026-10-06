@@ -103,6 +103,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         self._template = deepcopy(harbor_cfg)
         agent = self._template.setdefault("agent", {})
         self._in_sandbox = runs_in_sandbox(agent)
+        self._warned_unexposed = False
         if self._in_sandbox:
             # Harbor's mini-swe-agent refuses to start unless this process's environment holds a key for the
             # model's provider, and ``hosted_vllm`` has none it knows; skycap checks no key.
@@ -276,6 +277,13 @@ class HarborSkycapGenerator(GeneratorInterface):
         """Where the agent calls its trajectory: on the server's exposed URL when it runs in its sandbox."""
         if self._in_sandbox and trajectory.exposed_base_url is not None:
             return trajectory.exposed_base_url
+        if self._in_sandbox and not self._warned_unexposed:
+            # Fine for a sandbox on this network (Docker); a remote one can't reach the server's own URL.
+            logger.warning(
+                f"{self._template['agent'].get('name')} runs inside its sandbox, but skycap isn't exposed "
+                "(skycap.exposure.type=none): it gets the server's own URL, which a remote sandbox can't reach"
+            )
+            self._warned_unexposed = True
         return trajectory.base_url
 
     def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
@@ -304,10 +312,13 @@ class HarborSkycapGenerator(GeneratorInterface):
 def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
     """Whether Harbor's agent ``agent`` (a ``TrialConfig.agent``) is installed in the sandbox and calls the model
     from there, as mini-swe-agent and Claude Code do, rather than from this process, as Terminus-2 does."""
-    import_path = agent.get("import_path")
-    if import_path:
-        module, _, name = import_path.partition(":")
-        cls = getattr(importlib.import_module(module), name)
+    # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
+    name, import_path = agent.get("name"), agent.get("import_path")
+    if name is not None and name in AgentName.values():
+        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
+    elif import_path:
+        module, _, attribute = import_path.partition(":")
+        cls = getattr(importlib.import_module(module), attribute)
     else:
-        cls = AgentFactory._AGENT_MAP.get(AgentName(agent.get("name") or AgentName.ORACLE.value))
+        return False
     return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)

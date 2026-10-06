@@ -120,6 +120,10 @@ def test_installed_agents_run_in_the_sandbox_and_terminus_does_not() -> None:
     assert not runs_in_sandbox({"name": "terminus-2"}) and not runs_in_sandbox({})
     assert runs_in_sandbox({"import_path": "harbor.agents.installed.mini_swe_agent:MiniSweAgent"})
     assert not runs_in_sandbox({"import_path": "harbor.agents.terminus_2:Terminus2"})
+    # As Harbor decides: a known name wins over an import path, as with the default config's terminus-2.
+    mini = "harbor.agents.installed.mini_swe_agent:MiniSweAgent"
+    assert not runs_in_sandbox({"name": "terminus-2", "import_path": mini})
+    assert runs_in_sandbox({"name": "not-an-agent-name", "import_path": mini})
 
 
 # -- the URL each agent gets ----------------------------------------------------------------
@@ -180,3 +184,4 @@ async def test_without_exposure_an_agent_in_the_sandbox_gets_the_servers_url(rou
         service.stop()
     (config,) = trials.configs
     assert config["agent"]["env"]["OPENAI_API_BASE"].startswith(f"{service.url}/t/")
+    assert gen._warned_unexposed  # and it said so: a remote sandbox can't reach that URL

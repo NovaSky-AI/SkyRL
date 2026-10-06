@@ -37,7 +37,8 @@ class Exposure:
     The server binds its harness listener at ``bind()``, then calls ``start`` with the listener's
     local URL, and ``stop`` once, before it stops listening. ``start`` may block (a tunnel coming
     up); the server runs it off its event loop. If the server is stopped while ``start`` runs,
-    ``stop`` is called from another thread meanwhile, and should make ``start`` give up soon.
+    ``stop`` is called from another thread meanwhile, and should make ``start`` give up soon; the
+    server waits a while for it, then stops anyway. An instance serves one server, once.
     """
 
     def bind(self) -> tuple[str, int]:

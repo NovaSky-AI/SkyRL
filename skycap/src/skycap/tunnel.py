@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
 #: A quick tunnel's own URL in cloudflared's output. api.trycloudflare.com is where tunnels are
 #: requested from, and shows up in cloudflared's error lines when that request fails.
 TUNNEL_URL = re.compile(r"https://(?!api\.)[-a-z0-9]+\.trycloudflare\.com")
-#: Seconds the cloudflared download may go without receiving data.
+#: Seconds the cloudflared download may go without receiving data, and may take in all.
 DOWNLOAD_TIMEOUT = 60.0
+DOWNLOAD_DEADLINE = 600.0
 
 #: Runs "$@" and kills it once stdin reaches EOF: when ``stop_tied`` closes the pipe, or when the process
 #: holding its other end dies, which the kernel does however that process exits. The watcher's output
@@ -104,7 +105,7 @@ class CloudflareTunnel:
     def _start_once(self, timeout: float) -> str:
         if self._stopped.is_set():
             raise RuntimeError("the tunnel was stopped while it was starting")
-        process = spawn_tied([_cloudflared(), "tunnel", "--no-autoupdate", "--url", self.local_url])
+        process = spawn_tied([_cloudflared(self._stopped), "tunnel", "--no-autoupdate", "--url", self.local_url])
         self._process = process
         found: dict[str, str] = {}
         printed = threading.Event()
@@ -173,8 +174,11 @@ def _reaches_skycap(url: str) -> bool:
         return False
 
 
-def _cloudflared() -> str:
-    """The cloudflared binary: on PATH, or downloaded once from Cloudflare's releases (Linux only)."""
+def _cloudflared(stopped: threading.Event | None = None) -> str:
+    """The cloudflared binary: on PATH, or downloaded once from Cloudflare's releases (Linux only).
+
+    A download gives up when ``stopped`` is set, as when the tunnel is stopped while it starts.
+    """
     found = shutil.which("cloudflared")
     if found:
         return found
@@ -192,8 +196,14 @@ def _cloudflared() -> str:
         fd, partial = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".partial")
         os.close(fd)
         try:
+            deadline = time.monotonic() + DOWNLOAD_DEADLINE
             with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response, open(partial, "wb") as out:
-                shutil.copyfileobj(response, out)
+                while chunk := response.read(1 << 20):
+                    if stopped is not None and stopped.is_set():
+                        raise RuntimeError("the tunnel was stopped while it was starting")
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"downloading cloudflared took over {DOWNLOAD_DEADLINE}s")
+                    out.write(chunk)
             os.chmod(partial, os.stat(partial).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             os.replace(partial, path)
         finally:

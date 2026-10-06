@@ -130,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.command == "serve":
+        if args.expose is None and args.expose_kwargs:
+            raise SystemExit("--expose-kwargs is given without --expose")
         if args.expose is None:
             web.run_app(build_server(args).app(), host=args.host, port=args.port)
         else:
