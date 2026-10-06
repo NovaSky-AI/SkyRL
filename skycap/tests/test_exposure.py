@@ -296,6 +296,36 @@ def test_a_tunnel_stopped_while_it_starts_gives_up(tmp_path: Path, monkeypatch) 
         quick.start("http://127.0.0.1:9")
 
 
+class FakeDownload:
+    def __init__(self, data: bytes, length: int) -> None:
+        self.headers = {"Content-Length": str(length)}
+        self._chunks = [data]
+
+    def read(self, size: int) -> bytes:
+        return self._chunks.pop() if self._chunks else b""
+
+    def __enter__(self) -> FakeDownload:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+
+def test_a_cut_off_cloudflared_download_is_not_kept(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(tunnel.shutil, "which", lambda name: None)
+    monkeypatch.setattr(tunnel.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(tunnel.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(tunnel.urllib.request, "urlopen", lambda url, timeout: FakeDownload(b"#!", 1000))
+    with pytest.raises(OSError, match="cut off: 2 of 1000"):
+        tunnel._cloudflared()
+    assert list((tmp_path / "skycap").iterdir()) == []  # neither the binary nor the partial file
+    # A complete one is kept, executable.
+    monkeypatch.setattr(tunnel.urllib.request, "urlopen", lambda url, timeout: FakeDownload(b"#!/bin/sh\n", 10))
+    path = Path(tunnel._cloudflared())
+    assert path.read_bytes() == b"#!/bin/sh\n" and path.stat().st_mode & 0o111
+
+
 def test_the_cli_refuses_expose_kwargs_that_are_not_an_object_or_without_expose() -> None:
     with pytest.raises(SystemExit, match="must be a JSON object"):
         main(["serve", "--upstream-url", "http://e/v1", "--expose", "cloudflare", "--expose-kwargs", "[]"])

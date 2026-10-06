@@ -198,12 +198,18 @@ def _cloudflared(stopped: threading.Event | None = None) -> str:
         try:
             deadline = time.monotonic() + DOWNLOAD_DEADLINE
             with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response, open(partial, "wb") as out:
+                expected = response.headers.get("Content-Length")
+                received = 0
                 while chunk := response.read(1 << 20):
                     if stopped is not None and stopped.is_set():
                         raise RuntimeError("the tunnel was stopped while it was starting")
                     if time.monotonic() > deadline:
                         raise TimeoutError(f"downloading cloudflared took over {DOWNLOAD_DEADLINE}s")
                     out.write(chunk)
+                    received += len(chunk)
+            # A cut-off download must not be renamed into place, where every later start would run it.
+            if expected is not None and received != int(expected):
+                raise OSError(f"cloudflared download was cut off: {received} of {expected} bytes")
             os.chmod(partial, os.stat(partial).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             os.replace(partial, path)
         finally:
