@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 
 from aiohttp import web
 
 from skycap import __version__
+from skycap.exposure import Exposure, load_exposure
 from skycap.server import CaptureServer
-from skycap.service import build_backend
+from skycap.service import build_backend, serve
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +87,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="a custom path rule finish may name besides `all` and `final`, by NAME or else by its import path; "
         "repeatable",
     )
+    serve.add_argument(
+        "--expose",
+        default=None,
+        metavar="external_host|cloudflare|MODULE:CLASS",
+        help="also serve the harness routes alone, reachable from outside this network this way (skycap.exposure); "
+        "create then returns each trajectory's exposed_base_url",
+    )
+    serve.add_argument(
+        "--expose-kwargs",
+        type=json.loads,
+        default={},
+        help='JSON arguments of the exposure, e.g. \'{"host": "203.0.113.7", "port": 11500}\' for external_host',
+    )
     return parser
 
 
@@ -112,8 +130,31 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.command == "serve":
-        web.run_app(build_server(args).app(), host=args.host, port=args.port)
+        if args.expose is None:
+            web.run_app(build_server(args).app(), host=args.host, port=args.port)
+        else:
+            try:
+                exposure = load_exposure(args.expose, **args.expose_kwargs)
+            except ValueError as error:
+                raise SystemExit(f"--expose: {error}") from None
+            asyncio.run(_serve_exposed(build_server(args), args.host, args.port, exposure))
     return 0
+
+
+async def _serve_exposed(server: CaptureServer, host: str, port: int, exposure: Exposure) -> None:
+    """``skycap serve --expose``: the server, its exposed harness listener, until SIGINT or SIGTERM."""
+    stopping = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stopping.set)
+
+    def ready(url: str, harness_url: str | None) -> None:
+        logger.info("skycap serving at %s; harness routes at %s, exposed at %s", url, harness_url, server.exposed_url)
+
+    advertise = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    await serve(
+        server, host=host, port=port, advertise_host=advertise, exposure=exposure, stopping=stopping, ready=ready
+    )
 
 
 if __name__ == "__main__":

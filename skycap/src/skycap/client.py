@@ -55,12 +55,22 @@ class FinishResult:
 
 
 class Trajectory:
-    def __init__(self, pool: CapturePool, server: str, trajectory_id: str, base_url: str, paths: str = "all") -> None:
+    def __init__(
+        self,
+        pool: CapturePool,
+        server: str,
+        trajectory_id: str,
+        base_url: str,
+        paths: str = "all",
+        exposed_base_url: str | None = None,
+    ) -> None:
         self._pool = pool
         self.server = server
         self.id = trajectory_id
         #: Point the harness's OpenAI client here.
         self.base_url = base_url
+        #: Or here, for a harness outside this network, when the server is exposed (``skycap.exposure``).
+        self.exposed_base_url = exposed_base_url
         self.result: FinishResult | None = None
         #: What the last ``finish`` sent, so a failed one can be sent again unchanged.
         self.finishing: dict[str, Any] | None = None
@@ -161,7 +171,7 @@ class CapturePool:
                     raise
                 errors.append(str(error))
                 continue
-            return Trajectory(self, server, body["id"], body["base_url"], paths)
+            return Trajectory(self, server, body["id"], body["base_url"], paths, body.get("exposed_base_url"))
         raise CaptureError(f"no capture server reachable: {'; '.join(errors)}")
 
     @asynccontextmanager

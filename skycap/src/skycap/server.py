@@ -1,6 +1,6 @@
 """The capture server: a control plane plus one OpenAI-compatible route per trajectory.
 
-    POST /trajectories                    {meta}                -> {id, base_url}
+    POST /trajectories                    {meta}                -> {id, base_url[, exposed_base_url]}
     POST /trajectories/{id}/finish        {annotations, paths}  -> {status, samples}
     GET  /trajectories/{id}                                      -> the trajectory document
     POST /t/{id}/v1/chat/completions                             (the harness)
@@ -12,6 +12,11 @@ A trajectory's route is its URL: the harness needs no header and no SDK patch.
 committed, so its samples are final the moment they are returned. ``paths``
 names the path rule that picks them (``skycap.paths``): ``all`` (default),
 ``final``, or a custom rule the server was built with.
+
+``harness_app`` serves the harness routes alone. A server with an exposure
+(``skycap.exposure``) listens a second time with it, for harnesses outside this
+network, and ``create`` adds the trajectory's route on the exposed URL,
+``exposed_base_url``. The control plane is never routed there.
 
 With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
@@ -83,6 +88,8 @@ class CaptureServer:
         self.sweep_interval = sweep_interval
         self.trajectories: dict[str, Trajectory] = {}
         self._sweeper: asyncio.Task[None] | None = None
+        #: Where the harness listener is reached from outside, once an exposure has opened it.
+        self.exposed_url: str | None = None
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=1024**3)
@@ -94,6 +101,16 @@ class CaptureServer:
         app.router.add_get("/t/{id}/v1/models", self.models)
         app.on_startup.append(self._on_startup)
         app.on_cleanup.append(self._on_cleanup)
+        return app
+
+    def harness_app(self) -> web.Application:
+        """The harness routes alone, served alongside ``app`` by the same server.
+
+        It has no control plane to reach and no lifecycle of its own: ``app`` starts and stops the backend.
+        """
+        app = web.Application(client_max_size=1024**3)
+        app.router.add_post("/t/{id}/v1/chat/completions", self.chat)
+        app.router.add_get("/t/{id}/v1/models", self.models)
         return app
 
     async def _on_startup(self, app: web.Application) -> None:
@@ -250,7 +267,10 @@ class CaptureServer:
         self.trajectories[trajectory.id] = trajectory
         # The route is on the host the pool reached us at: harnesses reach it the same way.
         base = f"{request.scheme}://{request.host}"
-        return _json({"id": trajectory.id, "base_url": f"{base}/t/{trajectory.id}/v1"})
+        created = {"id": trajectory.id, "base_url": f"{base}/t/{trajectory.id}/v1"}
+        if self.exposed_url is not None:
+            created["exposed_base_url"] = f"{self.exposed_url}/t/{trajectory.id}/v1"
+        return _json(created)
 
     async def finish(self, request: web.Request) -> web.Response:
         body = await _read_json(request, default={})
