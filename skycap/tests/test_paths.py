@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from skycap import CapturePool, CaptureService, record
+from skycap import CapturePool, CaptureService, PathRuleError, record
 from skycap.cli import build_parser, build_server
-from skycap.graph import MessageGraph
+from skycap.graph import CallInfo, MessageGraph
 from skycap.paths import (
     BUILTIN_RULES,
     Row,
@@ -107,6 +107,29 @@ async def test_final_on_a_linear_conversation_is_the_one_all_sample() -> None:
 
 def test_final_of_an_empty_graph_is_no_sample() -> None:
     assert build_samples(MessageGraph(), final_path) == []
+
+
+def test_final_follows_the_last_call_when_its_reply_is_found_rather_than_made() -> None:
+    graph = MessageGraph()
+
+    def add(parent: int | None, author: str, text: str, t_end: float | None = None) -> int:
+        node, _ = graph.add(
+            parent, role="user" if author == "client" else "assistant", author=author,
+            message={"content": text}, match_hash=text, delta_hash=text, created_at=0.0,
+        )  # fmt: skip
+        if t_end is not None:
+            node.calls.append(CallInfo(t_start=t_end - 1, t_end=t_end))
+        return node.id
+
+    prompt = add(None, "client", "hi")
+    reply = add(prompt, "model", "a", t_end=1.0)
+    # The harness goes on from the reply, then throws that turn away and asks again from "hi". The model
+    # answers as it did the first time, so the last call's reply is found, and the last node made is a dead end.
+    dead_end = add(add(reply, "client", "more"), "model", "b", t_end=2.0)
+    graph.nodes[reply].calls.append(CallInfo(t_start=2.5, t_end=3.0))
+
+    assert graph.nodes[-1].id == dead_end
+    assert final_path(graph) == [Row([prompt, reply], [reply])]
 
 
 async def test_finish_takes_paths_and_refuses_an_unknown_one_without_ending_the_trajectory() -> None:
@@ -271,6 +294,94 @@ async def test_a_failing_rule_is_a_500_and_the_trajectory_is_still_written(tmp_p
     document = record.read_document(tmp_path, created["id"])
     assert document["status"] == "finished" and document["annotations"] == {"reward": 1.0}
     assert document["samples"] is None
+
+
+async def test_a_rule_that_failed_once_is_recorded_by_the_finish_that_succeeds(tmp_path: Path) -> None:
+    calls = []
+
+    def flaky(graph: MessageGraph) -> list[Row]:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("flaky")
+        return final_path(graph)
+
+    async with token_stack(record_dir=tmp_path, path_rules={"flaky": flaky}) as stack:
+        created = await stack.create()
+        await _discard_then_retry(client(created["base_url"]))
+        url = f"{stack.url}/trajectories/{created['id']}/finish"
+        finish = {"annotations": {"reward": 1.0}, "paths": "flaky"}
+        async with stack.http.post(url, json=finish) as response:
+            assert response.status == 500 and (await response.json())["code"] == "path_rule_failed"
+        assert record.read_document(tmp_path, created["id"])["samples"] is None
+        # The trajectory was written and dropped: the retry reads it back, and its samples are written too.
+        async with stack.http.post(url, json=finish) as response:
+            assert response.status == 200
+            body = await response.json()
+        document = record.read_document(tmp_path, created["id"])
+        assert document["samples"] == {
+            "paths": "flaky",
+            "rows": [{"leaf": s["leaf"], "targets": s["targets"]} for s in body["samples"]],
+        }
+        # So a later finish can't ask for another rule.
+        async with stack.http.post(url, json={**finish, "paths": "all"}) as response:
+            assert response.status == 409
+
+    assert len(calls) == 2 and len(body["samples"]) == 1
+
+
+async def test_an_unknown_trajectory_is_a_404_whatever_paths_it_names() -> None:
+    async with token_stack() as stack:
+        async with stack.http.post(
+            f"{stack.url}/trajectories/tr_missing/finish", json={"paths": "longest"}
+        ) as response:
+            assert response.status == 404
+
+
+async def test_a_repeat_finish_needs_only_the_recorded_rows_not_the_rule(tmp_path: Path) -> None:
+    async with token_stack(record_dir=tmp_path, path_rules={"last_reply": last_reply}) as stack:
+        created = await stack.create()
+        await _discard_then_retry(client(created["base_url"]))
+        url = f"/trajectories/{created['id']}/finish"
+        finish = {"annotations": {"reward": 1.0}, "paths": "last_reply"}
+        async with stack.http.post(stack.url + url, json=finish) as response:
+            first = await response.json()
+    # A server started without the rule still answers a repeat from the record, and refuses a new rule name.
+    async with token_stack(record_dir=tmp_path) as stack:
+        async with stack.http.post(stack.url + url, json=finish) as response:
+            assert response.status == 200
+            again = await response.json()
+        async with stack.http.post(stack.url + url, json={**finish, "paths": "final"}) as response:
+            assert response.status == 409
+
+    assert again["samples"] == first["samples"]
+
+
+async def test_the_pool_finishes_with_its_paths_and_raises_a_rule_failure_as_such(tmp_path: Path) -> None:
+    def broken(graph: MessageGraph) -> list[Row]:
+        raise RuntimeError("broken")
+
+    async with (
+        token_stack(record_dir=tmp_path, path_rules={"broken": broken}) as stack,
+        CapturePool([stack.url]) as pool,
+    ):
+        # A block that raises before its finish is finished with the trajectory's rule, not "all".
+        with pytest.raises(RuntimeError, match="harness crashed"):
+            async with pool.trajectory(paths="final") as crashed:
+                await _discard_then_retry(client(crashed.base_url))
+                raise RuntimeError("harness crashed")
+        # The same rule when the block's own finish names none.
+        async with pool.trajectory(paths="final") as finished:
+            await _discard_then_retry(client(finished.base_url))
+            await finished.finish({"reward": 1.0})
+        with pytest.raises(PathRuleError, match="broken"):
+            async with pool.trajectory(paths="broken") as failing:
+                await converse(client(failing.base_url), "hi")
+                await failing.finish({"reward": 1.0})
+
+    assert record.read_document(tmp_path, crashed.id)["samples"]["paths"] == "final"
+    assert finished.result is not None and len(finished.result.samples) == 1
+    assert record.read_document(tmp_path, finished.id)["samples"]["paths"] == "final"
+    assert record.read_document(tmp_path, failing.id)["samples"] is None
 
 
 # -- the record says what trained ------------------------------------------------

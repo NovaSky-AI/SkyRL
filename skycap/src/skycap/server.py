@@ -34,7 +34,7 @@ from aiohttp import web
 
 from skycap import record
 from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
-from skycap.paths import PathRule, Row, rule_registry
+from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
 from skycap.samples import Sample, build_samples, samples_for
 from skycap.trajectory import Status, Trajectory, new_trajectory_id
 
@@ -136,9 +136,11 @@ class CaptureServer:
         With ``paths`` (a ``finish``), the sealed graph's samples are built by
         that rule and recorded, so the record says what trained, and returned.
         A rule that raises leaves the trajectory ended and written without
-        samples, and its error is raised.
+        samples, and its error is raised; a later ``finish`` runs it again, and
+        the trajectory is written again if that one records samples.
         """
         ended_now = not trajectory.ended
+        recorded = trajectory.samples is not None
         if trajectory.is_open:
             trajectory.seal(status, annotations)
         elif not trajectory.ended:
@@ -157,7 +159,8 @@ class CaptureServer:
             except Exception:
                 logger.exception("releasing %s failed", trajectory.id)
         unwritten = self.trajectories.get(trajectory.id) is trajectory
-        if (ended_now or unwritten) and await self._persist(trajectory):
+        recorded_now = not recorded and trajectory.samples is not None
+        if (ended_now or unwritten or recorded_now) and await self._persist(trajectory):
             self.trajectories.pop(trajectory.id, None)
         if error is not None:
             raise error
@@ -255,8 +258,8 @@ class CaptureServer:
         if annotations is not None and not isinstance(annotations, dict):
             return _json({"error": "`annotations` must be an object"}, 400)
         paths = body.get("paths", "all") if isinstance(body, dict) else "all"
-        if not isinstance(paths, str) or paths not in self.path_rules:
-            return _json({"error": f"`paths` must be one of {sorted(self.path_rules)}"}, 400)
+        if not isinstance(paths, str):
+            return _json({"error": "`paths` must be a string"}, 400)
         trajectory = await self._lookup(request.match_info["id"])
         if trajectory is None:
             return _json({"error": "unknown trajectory"}, 404)
@@ -264,14 +267,19 @@ class CaptureServer:
             # A repeat is answered as the first finish was. New annotations on it would be
             # silently lost, so they are refused instead.
             return _json({"error": "trajectory already finished; its annotations can't change"}, 409)
-        if trajectory.ended and trajectory.samples is not None and trajectory.samples["paths"] != paths:
-            # Likewise, the record says which rule trained it, so a repeat can't ask for another.
-            return _json({"error": f"trajectory already finished with paths={trajectory.samples['paths']!r}"}, 409)
+        if trajectory.samples is not None:
+            # Likewise, the record says which rule trained it, so a repeat can't ask for another. A repeat
+            # naming that rule is answered from the recorded rows, so the server needn't still have it.
+            if trajectory.samples["paths"] != paths:
+                return _json({"error": f"trajectory already finished with paths={trajectory.samples['paths']!r}"}, 409)
+        elif paths not in self.path_rules:
+            return _json({"error": f"`paths` must be one of {sorted(self.path_rules)}"}, 400)
         try:
             samples = await self.end(trajectory, "finished", annotations, paths=paths)
         except Exception as error:  # noqa: BLE001 - a custom rule's failure, reported to the caller
             logger.exception("path rule %r failed on %s", paths, trajectory.id)
-            return _json({"error": f"path rule {paths!r} failed: {type(error).__name__}: {error}"}, 500)
+            message = f"path rule {paths!r} failed: {type(error).__name__}: {error}"
+            return _json({"error": message, "code": PATH_RULE_FAILED}, 500)
         return _json(
             {
                 "id": trajectory.id,

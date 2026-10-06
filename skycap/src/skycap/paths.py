@@ -9,9 +9,12 @@ Two rules are built in:
 
 * ``all`` -- a row per root-to-leaf path, in leaf creation order. Each model
   node trains in the first row that contains it, so a shared prefix trains once.
-* ``final`` -- one row: the path to the last node, the conversation as the
-  harness left it, with every model node on it a target. Branches off it, such
-  as a reply the harness discarded and asked again for, don't train.
+* ``final`` -- one row: the path to the reply of the last model call to
+  return, the conversation as the harness left it, with every model node on it
+  a target. Branches off it, such as a reply the harness discarded and asked
+  again for, don't train. It assumes the harness's last call is its main loop's:
+  one whose side calls (a subagent, a summarizer) can return after that needs a
+  custom rule.
 
 Any other function of that shape is a custom rule. A server accepts the rules
 it was built with, by name (``rule_registry``): a ``finish`` request names one and
@@ -45,6 +48,9 @@ class Row(NamedTuple):
 #: A function of the sealed graph to the rows that train. A plain ``(path, targets)`` tuple is a row too.
 PathRule = Callable[[MessageGraph], Iterable[Row]]
 
+#: The ``code`` of a ``finish`` error body when the path rule raised, so a client can tell it from a server fault.
+PATH_RULE_FAILED = "path_rule_failed"
+
 
 def all_paths(graph: MessageGraph) -> list[Row]:
     """A row per root-to-leaf path; each model node trains in the first path that contains it."""
@@ -58,11 +64,13 @@ def all_paths(graph: MessageGraph) -> list[Row]:
 
 
 def final_path(graph: MessageGraph) -> list[Row]:
-    """The path to the last node made, with every model node on it a target."""
-    if not len(graph):
+    """The path to the last model call's reply, with every model node on it a target."""
+    # By the call rather than the last node made: a reply equal to an earlier one is found, not made, so the
+    # last node made can be on a branch the harness discarded. Ties go to the node made later.
+    ends = [(call.t_end, node.id) for node in graph for call in node.calls]
+    if not ends:
         return []
-    # The last node made is a leaf: nothing is ever added under it later.
-    path = graph.path_to(graph.nodes[-1].id)
+    path = graph.path_to(max(ends)[1])
     return [Row(path, [node for node in path if graph.nodes[node].author == "model"])]
 
 

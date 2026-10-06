@@ -89,9 +89,11 @@ sample.
 
 `finish` returns a sample per root-to-leaf path of the graph, each sampled
 message a target in exactly one of them. `finish(..., paths="final")` returns
-only the path to the trajectory's last node, with every sampled message on it a
-target: branches off it, such as a reply the harness discarded and asked again
-for, don't train.
+only the path to the reply of the trajectory's last model call, with every
+sampled message on it a target: branches off it, such as a reply the harness
+discarded and asked again for, don't train. It takes the last call to be the
+main loop's; a harness whose side calls (a subagent, a summarizer) can return
+after that needs a custom rule.
 
 Those are the two built-in path rules (`skycap.paths`). A custom rule is a
 function of the graph that returns rows, each a path from a root and the model
@@ -101,15 +103,11 @@ is a model node on its path, and no node is a target twice:
 
 ```python
 from skycap.graph import MessageGraph
-from skycap.paths import Row
+from skycap.paths import Row, final_path
 
 def last_reply(graph: MessageGraph) -> list[Row]:
     """Only the final reply trains, with the conversation before it as context."""
-    if not len(graph):
-        return []
-    path = graph.path_to(len(graph) - 1)
-    replies = [node for node in path if graph.nodes[node].author == "model"]
-    return [Row(path, replies[-1:])]
+    return [Row(row.path, row.targets[-1:]) for row in final_path(graph)]
 
 service = CaptureService(..., path_rules={"last_reply": last_reply})  # or "my_rules:last_reply"
 await trajectory.finish({"reward": 1.0}, paths="last_reply")
@@ -119,7 +117,11 @@ A server accepts only the rules it was given, so a request never imports code.
 `skycap serve --path-rule last_reply=my_rules:last_reply` does the same;
 without `NAME=`, a rule is named by its import path. The record's `samples`
 field says which rule trained a trajectory, and a repeated `finish` can't ask
-for another one.
+for another one. A rule that raises fails the `finish` with `PathRuleError`
+(HTTP 500, `"code": "path_rule_failed"`); the trajectory is still ended and
+written, without samples, and a later `finish` runs the rule again.
+`pool.trajectory(meta, paths=...)` sets the rule a trajectory is finished
+with, including when its block raises before finishing.
 
 ## The record
 

@@ -56,6 +56,8 @@ pytestmark = pytest.mark.integrations
 
 #: A custom path rule, as ``skycap.train_paths`` names it.
 SHORT_DISCARDS = "tests.integrations.harbor_skycap.test_harbor_skycap:final_and_short_discards"
+#: A custom path rule that always raises.
+BROKEN = "tests.integrations.harbor_skycap.test_harbor_skycap:broken_rule"
 
 
 def final_and_short_discards(graph: MessageGraph) -> list[Row]:
@@ -68,6 +70,10 @@ def final_and_short_discards(graph: MessageGraph) -> list[Row]:
             if len(tokens.token_ids) - tokens.sampled_start < 64:
                 rows.append(Row(graph.path_to(leaf), [leaf]))
     return rows
+
+
+def broken_rule(graph: MessageGraph) -> list[Row]:
+    raise RuntimeError("a bug in the rule")
 
 
 def generator_cfg(**overrides):
@@ -105,7 +111,7 @@ def skycap(router, tmp_path):
         sampling_overrides={"top_k": TOP_K},
         sampling_mask=True,
         record_dir=str(tmp_path / "record"),
-        path_rules={SHORT_DISCARDS: SHORT_DISCARDS},
+        path_rules={SHORT_DISCARDS: SHORT_DISCARDS, BROKEN: BROKEN},
         host="127.0.0.1",
     )
     service.start()
@@ -299,6 +305,27 @@ async def test_a_custom_rule_by_import_path_picks_the_rows_and_is_recorded(skyca
     # The generator finished with the rule's name, and the record says so.
     documents = [record.read_document(skycap.server.record_dir, i) for i in record.list_ids(skycap.server.record_dir)]
     assert sorted(d["samples"]["paths"] for d in documents) == sorted(["all", SHORT_DISCARDS])
+
+
+@pytest.mark.asyncio
+async def test_a_failing_path_rule_masks_the_trial_without_running_it_again(skycap, trials, generator) -> None:
+    out = await generator(train_paths=BROKEN).generate(batch("linear"), disable_tqdm=True)
+
+    assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
+    assert len(trials.configs) == 1
+    assert out["rollout_metrics"]["generate/harbor/num_failed_attempts/PathRuleError"] == 1
+    (trajectory_id,) = record.list_ids(skycap.server.record_dir)
+    document = record.read_document(skycap.server.record_dir, trajectory_id)
+    assert document["status"] == "finished" and document["samples"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_crashing_trial_is_finished_with_the_configured_rule(skycap, trials, generator) -> None:
+    await generator(train_paths="final").generate(batch("crash"), disable_tqdm=True)
+
+    ids = list(record.list_ids(skycap.server.record_dir))
+    assert len(ids) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
+    assert {record.read_document(skycap.server.record_dir, i)["samples"]["paths"] for i in ids} == {"final"}
 
 
 @pytest.mark.asyncio

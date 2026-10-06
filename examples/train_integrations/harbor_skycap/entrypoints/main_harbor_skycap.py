@@ -57,8 +57,8 @@ class SkycapConfig:
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the
-    rollout's advantage too. ``final``: only the path to the rollout's last node, the conversation the harness
-    ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
+    rollout's advantage too. ``final``: only the path to the reply of the rollout's last model call, the
+    conversation the harness ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
 

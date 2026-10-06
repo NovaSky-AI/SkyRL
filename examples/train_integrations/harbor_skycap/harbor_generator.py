@@ -22,7 +22,7 @@ import litellm
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
-from skycap import CapturePool
+from skycap import CapturePool, PathRuleError
 from skycap.paths import load_rule
 from tqdm import tqdm
 
@@ -159,7 +159,11 @@ class HarborSkycapGenerator(GeneratorInterface):
         step: Optional[int],
         attempts: TrialAttempts,
     ) -> TrialOutcome:
-        """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch."""
+        """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch.
+
+        A path rule that raises is not retried: the rule runs on what the trial captured, so another run of the
+        trial would mostly pay for the sandbox and the agent again to fail the same way. The rollout is masked.
+        """
         started = time.monotonic()
         missing_routes = False
         for attempt in range(MAX_NUM_RETRIES_PER_TRIAL):
@@ -167,6 +171,10 @@ class HarborSkycapGenerator(GeneratorInterface):
             attempts.start()
             try:
                 outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, attempt, attempts)
+            except PathRuleError as error:
+                logger.error(f"{prefix}: path rule {self.train_paths!r} failed, not retrying: {error}")
+                attempts.fail(error)
+                break
             except Exception as error:  # noqa: BLE001 - retried, then masked
                 logger.warning(f"{prefix} failed: {type(error).__name__}: {error}")
                 attempts.fail(error)
@@ -200,7 +208,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             "step": step,
             "attempt": attempt,
         }
-        async with self.pool.trajectory(meta) as trajectory:
+        async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
             config = self._trial_config(prompt, trajectory.base_url, cache_salt)
             async with self._rate_limiter:
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
@@ -218,7 +226,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
             else:
                 reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
-            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason}, paths=self.train_paths)
+            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
 
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.

@@ -6,9 +6,19 @@ from skycap.client import (  # noqa: E402
     CaptureError,
     CapturePool,
     FinishResult,
+    PathRuleError,
     Trajectory,
 )
 from skycap.samples import Sample  # noqa: E402
 from skycap.service import CaptureService  # noqa: E402
 
-__all__ = ["CaptureError", "CapturePool", "CaptureService", "FinishResult", "Sample", "Trajectory", "__version__"]
+__all__ = [
+    "CaptureError",
+    "CapturePool",
+    "CaptureService",
+    "FinishResult",
+    "PathRuleError",
+    "Sample",
+    "Trajectory",
+    "__version__",
+]

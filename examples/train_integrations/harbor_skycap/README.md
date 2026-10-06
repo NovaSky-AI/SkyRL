@@ -36,12 +36,14 @@ the idle TTL, the port, the renderer pool size and which paths train.
 - `all` (default): every root-to-leaf path, each sampled message trained once.
   A reply the harness discarded and asked again for (mini-swe-agent on a format
   error) is a dead-end path, and trains with the rollout's advantage too.
-- `final`: only the path to the rollout's last node, the conversation the
-  harness ended with. One row per rollout; nothing off it trains.
+- `final`: only the path to the reply of the rollout's last model call, the
+  conversation the harness ended with. One row per rollout; nothing off it
+  trains.
 - `pkg.module:function`: a custom rule, a function of skycap's context graph to
   rows, each a path and the model nodes on it to train. skycap builds the
   tokens, loss masks and routes, and checks the rows. The module must be
-  importable on every node, since each skycap server imports it at start.
+  importable on every node, since each skycap server imports it at start. A
+  rule that raises masks that rollout without retrying the trial.
 
 For example, the final path plus every discarded reply under 64 sampled tokens,
 each as a row of its own (`skycap.train_paths=my_rules:final_and_short_discards`):
