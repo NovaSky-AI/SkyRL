@@ -101,6 +101,10 @@ for sample in result.samples:
     sample.routed_experts, sample.sampling_mask, sample.media
 ```
 
+A token-mode call may bound its own prompt with `max_prompt_tokens` in the
+body (`extra_body` in the OpenAI SDK): a longer prompt is refused with
+`context_length_exceeded` before inference, and the trajectory stays open.
+
 Creates go round-robin over the servers, and each trajectory's URL names its
 server, so no router or load balancer is involved. An SDK retry
 (`x-stainless-retry-count`) gets the original call's reply rather than a second

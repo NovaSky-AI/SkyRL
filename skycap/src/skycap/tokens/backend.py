@@ -174,6 +174,15 @@ class TokensBackend:
         except turn.TokenError as error:
             return _error(str(error), 400)
 
+        # A caller's own bound on the prompt, checked before inference: the trajectory stays open.
+        max_prompt_tokens = chat.body.get("max_prompt_tokens")
+        if max_prompt_tokens is not None and len(planned.prompt_ids) > max_prompt_tokens:
+            return _error(
+                f"prompt of {len(planned.prompt_ids)} tokens exceeds max_prompt_tokens={max_prompt_tokens}",
+                400,
+                code="context_length_exceeded",
+            )
+
         # `max_completion_tokens` is an alias of `max_tokens`; resolving it on each side before
         # merging is what lets an override win over a caller's alias.
         sampling = {**_resolve_max_tokens(chat.sampling), **_resolve_max_tokens(self.sampling_overrides)}

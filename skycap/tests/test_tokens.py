@@ -52,6 +52,7 @@ async def token_stack(
     completion: Any = None,
     record_dir: Path | None = None,
     path_rules: dict[str, Any] | None = None,
+    keep_unrecorded: bool = True,
     **options: Any,
 ) -> AsyncIterator[TokenStack]:
     mock = MockEngine(completion)
@@ -59,7 +60,7 @@ async def token_stack(
     await engine_server.start_server()
     renderer = FakeRenderer()
     backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, engine=engine, **options)
-    server = CaptureServer(backend, record_dir=record_dir, path_rules=path_rules)
+    server = CaptureServer(backend, record_dir=record_dir, path_rules=path_rules, keep_unrecorded=keep_unrecorded)
     capture = TestServer(server.app())
     await capture.start_server()
     try:
@@ -727,3 +728,42 @@ def test_a_node_with_no_tokens_keeps_the_paths_routed_experts() -> None:
     empty = routing.slice(3, 0)
 
     assert empty is not None and empty.shape == (0, 2, 2)
+
+
+async def test_a_prompt_over_the_callers_bound_is_refused_and_the_trajectory_stays_open() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        messages = await converse(llm, "hi")
+        messages.append(user("a much longer follow-up"))
+        with pytest.raises(openai.BadRequestError) as refused:
+            await llm.chat.completions.create(model="policy", messages=messages, extra_body={"max_prompt_tokens": 20})
+
+        assert refused.value.code == "context_length_exceeded"
+        assert len(stack.engine.requests) == 1
+        await llm.chat.completions.create(model="policy", messages=messages, extra_body={"max_prompt_tokens": 1000})
+        assert len(stack.engine.requests) == 2
+        assert stack.server.trajectories[created["id"]].is_open
+
+
+async def test_min_tokens_reaches_the_engine() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        await converse(client(created["base_url"]), "hi", extra_body={"min_tokens": 1})
+
+        assert stack.engine.requests[0]["sampling_params"]["min_tokens"] == 1
+
+
+async def test_without_a_record_an_ended_trajectory_can_be_dropped() -> None:
+    async with token_stack(keep_unrecorded=False) as stack:
+        created = await stack.create()
+        await converse(client(created["base_url"]), "hi")
+        finished = await stack.finish(created["id"])
+
+        assert finished["status"] == "finished" and len(finished["samples"]) == 1
+        assert created["id"] not in stack.server.trajectories
+
+
+def test_dropping_unrecorded_trajectories_needs_no_record_dir(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="no record_dir"):
+        CaptureServer(TokensBackend("http://engine", FakeRenderer()), record_dir=tmp_path, keep_unrecorded=False)

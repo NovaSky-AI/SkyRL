@@ -16,7 +16,10 @@ names the path rule that picks them (``skycap.paths``): ``all`` (default),
 With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
 and then dropped from memory; reads of it are served from disk. Without one,
-ended trajectories stay in memory, which is only for tests and development.
+ended trajectories stay in memory, which is only for tests and development,
+unless ``keep_unrecorded=False``: then a trajectory is dropped once it ends,
+and the reply to its ``finish`` is the only copy of its samples. That is for a
+trainer that keeps no record.
 """
 
 from __future__ import annotations
@@ -72,8 +75,12 @@ class CaptureServer:
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
+        keep_unrecorded: bool = True,
     ) -> None:
+        if record_dir is not None and not keep_unrecorded:
+            raise ValueError("keep_unrecorded=False is for a server with no record_dir")
         self.backend = backend
+        self.keep_unrecorded = keep_unrecorded
         #: The rules ``finish`` accepts, by name: the built-in ones plus ``path_rules``, each given as a
         #: function or as its ``"pkg.module:function"`` import path.
         self.path_rules = rule_registry(path_rules)
@@ -161,6 +168,9 @@ class CaptureServer:
         unwritten = self.trajectories.get(trajectory.id) is trajectory
         recorded_now = not recorded and trajectory.samples is not None
         if (ended_now or unwritten or recorded_now) and await self._persist(trajectory):
+            self.trajectories.pop(trajectory.id, None)
+        elif not self.keep_unrecorded and error is None:
+            # A rule that raised keeps the trajectory, so a later finish can run it again.
             self.trajectories.pop(trajectory.id, None)
         if error is not None:
             raise error

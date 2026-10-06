@@ -96,7 +96,8 @@ class CaptureService:
     ``port=0`` lets the OS pick a free port. ``advertise_host`` is the address clients use to reach
     this server, which ``url`` carries once started. ``path_rules`` are the custom path rules
     ``finish`` may name besides ``all`` and ``final``, each a function or its ``"pkg.module:function"``
-    import path (``skycap.paths``).
+    import path (``skycap.paths``). Without a ``record_dir``, ``keep_unrecorded=False`` drops each
+    trajectory once it ends instead of keeping it in memory (``CaptureServer``).
     """
 
     def __init__(
@@ -120,6 +121,7 @@ class CaptureService:
         record_dir: str | None = None,
         ttl: float = 3600.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
+        keep_unrecorded: bool = True,
         host: str = "0.0.0.0",
         port: int = 0,
         advertise_host: str = "127.0.0.1",
@@ -141,7 +143,9 @@ class CaptureService:
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
         )
-        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules)
+        self.server = CaptureServer(
+            backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules, keep_unrecorded=keep_unrecorded
+        )
         self._host, self._port = host, port
         self._advertise_host = advertise_host
         self._thread: threading.Thread | None = None
