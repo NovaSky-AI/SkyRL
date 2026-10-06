@@ -117,10 +117,41 @@ prefill can report a placeholder output token. SkyRL keeps those observations
 in their role scopes without adding the two roles' totals or merging their
 latency histograms. Missing series and undefined ratios remain omitted.
 
-Role TTFT measures time within that engine's request. Prefill and decode TTFT
-describe different parts of serving and cannot be added to obtain client TTFT.
-End-to-end latency includes the proxy and transfer path and needs separate
-client instrumentation.
+Selected metrics also use the common keys from regular serving, such as
+`vllm/train/prompt_throughput_tok_s` and
+`vllm_correct_aggregate/train/output_tokens_total`. The same mapping applies
+to sync `train`/`eval` steps, fully async `vllm/*` steps and all run-summary
+scopes. Every role-scoped value remains available.
+
+| Common metric suffix | PD source |
+| --- | --- |
+| `prompt_throughput_tok_s`, `prompt_tokens_total` | Prefill |
+| `generation_throughput_tok_s`, `output_tokens_total` | Decode |
+| `ttft_seconds_avg` | Prefill mean + decode mean |
+| `tpot_seconds_avg`, `tpot_seconds_p90` | Decode |
+| `prefix_cache_hit_rate`, `external_prefix_cache_hit_rate` | Prefill |
+| `kv_cache_usage_perc` | Prefill |
+| `prompt_throughput_cv`, `prompt_throughput_cv_num_engines` | Prefill |
+| `generation_throughput_cv`, `generation_throughput_cv_num_engines` | Decode |
+
+Role TTFT measures engine arrival through first output, including that engine's
+queue. In sequential PD serving, the sum of the two means approximates the
+engine portions of TTFT when both cover the same requests. It excludes gaps
+between engine observations, such as proxy/network overhead. Async sampling
+can include different request cohorts in each role. This approximation is not
+client-observed TTFT; measuring that requires client instrumentation.
+There is no common PD `ttft_seconds_p90`: role quantiles cannot be added.
+Both role-specific TTFT P90s remain available. Request TPOT comes from decode's
+first-to-last output interval, excluding the initial wait for KV transfer.
+
+The common KV-usage value is the mean prefill-engine usage, a convention for
+comparisons rather than total cluster pressure. Decode can exhaust its cache
+independently; use both role metrics to investigate capacity and preemptions.
+Queues, preemptions, offload metrics, speculative-decoding diagnostics and
+measurement durations stay role-scoped. Throughput retains its source role's
+existing denominator. Gauges and engine CV remain step metrics only.
+Missing selected-role values omit the common key; the common TTFT mean
+requires both role means.
 
 Both roles retain the fresh-run, baseline and finalization rules above. A
 missing worker or reset omits the affected role's summary. External PD
