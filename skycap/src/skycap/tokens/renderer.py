@@ -168,22 +168,29 @@ class RenderersRenderer:
         tokenizer: str,
         *,
         size: int = 8,
+        renderer: str | None = None,
         thinking_retention: str = "all",
         chat_template_kwargs: Mapping[str, Any] | None = None,
         processor_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
-        from renderers import AutoRendererConfig, create_renderer
+        """``renderer`` names the ``renderers`` renderer (``qwen3-vl``, ``qwen3.5``, ...). By default it is
+        looked up from ``tokenizer``, which finds only the exact Hugging Face names the library lists, so a
+        local checkpoint or a fine-tune names it."""
+        from pydantic import TypeAdapter
+        from renderers import AutoRendererConfig, RendererConfig, create_renderer
         from renderers.base import is_multimodal, load_tokenizer
 
         self.name = tokenizer
+        if renderer is None:
+            config = AutoRendererConfig(thinking_retention=thinking_retention)
+        else:
+            config = TypeAdapter(RendererConfig).validate_python(
+                {"name": renderer, "thinking_retention": thinking_retention}
+            )
 
         def build() -> tuple[Any, Any]:
             loaded = load_tokenizer(tokenizer)
-            renderer = create_renderer(
-                loaded,
-                AutoRendererConfig(thinking_retention=thinking_retention),
-                chat_template_kwargs=chat_template_kwargs,
-            )
+            renderer = create_renderer(loaded, config, chat_template_kwargs=chat_template_kwargs)
             if processor_kwargs and is_multimodal(renderer):
                 from transformers import AutoProcessor
 

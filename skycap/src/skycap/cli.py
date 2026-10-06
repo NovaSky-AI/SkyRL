@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tokens.add_argument("--renderer-pool-size", type=int, default=8)
     tokens.add_argument(
+        "--renderer",
+        default=None,
+        help="the `renderers` renderer (e.g. qwen3-vl), when --tokenizer is not a name the library maps",
+    )
+    tokens.add_argument(
         "--chat-template-kwargs",
         type=json.loads,
         default=None,
@@ -107,6 +112,7 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         api_key=os.environ.get(args.upstream_api_key_env),
         tokenizer=args.tokenizer,
         renderer_pool_size=args.renderer_pool_size,
+        renderer_name=args.renderer,
         chat_template_kwargs=args.chat_template_kwargs,
         processor_kwargs=args.processor_kwargs,
         model=args.model,

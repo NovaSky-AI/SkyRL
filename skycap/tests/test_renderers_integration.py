@@ -141,7 +141,7 @@ def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: Ren
     assert b"".join(spans) == data
 
 
-VL_TOKENIZER = "Qwen/Qwen3-VL-4B-Instruct"
+VL_TOKENIZER = "Qwen/Qwen3-VL-2B-Instruct"
 
 
 @pytest.fixture(scope="module")
@@ -149,7 +149,7 @@ def vl_renderer() -> RenderersRenderer:
     pytest.importorskip("PIL")
     pytest.importorskip("torchvision")
     try:
-        return RenderersRenderer(VL_TOKENIZER, size=1, processor_kwargs={"max_pixels": 200704})
+        return RenderersRenderer(VL_TOKENIZER, size=1, renderer="qwen3-vl", processor_kwargs={"max_pixels": 200704})
     except Exception as error:  # noqa: BLE001 - no network and no cache
         pytest.skip(f"processor unavailable: {error}")
 
