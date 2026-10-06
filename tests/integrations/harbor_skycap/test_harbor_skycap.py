@@ -511,6 +511,12 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
         cfg.skycap.train_paths = train_paths
         main_harbor_skycap.start_skycap(cfg, "http://router")
     assert [settings["path_rules"] for settings in started] == [{}, {SHORT_DISCARDS: SHORT_DISCARDS}]
+    # A rule that won't load fails before any server starts.
+    for train_paths, error in (("longest", ValueError), ("nowhere_skycap_test:rule", ModuleNotFoundError)):
+        cfg.skycap.train_paths = train_paths
+        with pytest.raises(error):
+            main_harbor_skycap.start_skycap(cfg, "http://router")
+    assert len(started) == 2
 
 
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:

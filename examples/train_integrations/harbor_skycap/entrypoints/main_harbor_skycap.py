@@ -19,7 +19,7 @@ from typing import Any, Optional
 import ray
 import yaml
 from loguru import logger
-from skycap.paths import BUILTIN_RULES
+from skycap.paths import BUILTIN_RULES, load_rule
 
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
@@ -74,6 +74,8 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
     train_paths = cfg.skycap.train_paths
+    # Here first, so a rule that won't import fails on the driver rather than in every server actor.
+    load_rule(train_paths)
     settings = {
         "upstream_url": engine_url,
         "tokenizer": cfg.trainer.policy.model.path,
