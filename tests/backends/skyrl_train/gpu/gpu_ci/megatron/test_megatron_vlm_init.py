@@ -26,6 +26,7 @@ from skyrl.train.config import (
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
 from skyrl.train.sft_trainer import SFTTrainer
 from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
     ray_init_for_tests,
@@ -414,7 +415,7 @@ def get_packing_parity_batch(model_name: str) -> TrainingInputBatch:
         assert 0 < len(ids) - prefix <= len(ids) // 2, (prefix, len(ids))
         rows.append((ids, len(ids) - prefix, out.get("pixel_values"), out.get("image_grid_thw")))
 
-    pixel_dim = next(pv.shape[-1] for _, _, pv, _ in rows if pv is not None)
+    ref_pv = next(pv for _, _, pv, _ in rows if pv is not None)
     max_len = max(len(ids) for ids, _, _, _ in rows)
     num_actions = max(resp_len for _, resp_len, _, _ in rows)
     pad_token_id = processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
@@ -425,7 +426,7 @@ def get_packing_parity_batch(model_name: str) -> TrainingInputBatch:
         attention_mask.append([0] * pad + [1] * len(ids))
         loss_mask.append([0] * (num_actions - resp_len) + [1] * resp_len)
         # Text-only rows carry empty vision tensors.
-        pixel_values.append(pv if pv is not None else torch.zeros(0, pixel_dim))
+        pixel_values.append(pv if pv is not None else ref_pv.new_zeros((0, *ref_pv.shape[1:])))
         image_grid_thw.append(grid if grid is not None else torch.zeros(0, 3, dtype=torch.long))
 
     batch_size = len(rows)
@@ -463,16 +464,14 @@ def _megatron_vlm_forward_logprobs(
     cfg.trainer.micro_forward_batch_size_per_gpu = micro_batch
     cfg.trainer.micro_train_batch_size_per_gpu = micro_batch
     cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
-    try:
+    # A fresh Ray runtime per forward frees the GPUs for the next one.
+    with ray_init():
         actor_group = init_worker_with_type(
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=tp * pp, cfg=cfg
         )
         refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
         output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
-    finally:
-        ray.shutdown()
-        ray_init_for_tests()
 
 
 @pytest.mark.asyncio
@@ -492,7 +491,7 @@ def _megatron_vlm_forward_logprobs(
     ids=["qwen3_vl_tp1", "qwen3_vl_tp2_sp", "qwen3_vl_pp2", "qwen3_5_vl_tp1", "qwen3_5_vl_tp2_sp", "qwen3_5_vl_pp2"],
 )
 @pytest.mark.megatron
-async def test_megatron_vlm_packed_vs_unpacked(ray_init_fixture, model_name, tp, pp):
+async def test_megatron_vlm_packed_vs_unpacked(model_name, tp, pp):
     """Sample packing must add no error beyond ordinary batching.
 
     Packed and padded (unpacked) microbatches run different kernels on different
