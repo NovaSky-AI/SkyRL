@@ -234,8 +234,11 @@ class ModelMetadata(BaseModel):
     loaded_checkpoint_id: str | None = None
 
 
+SEQ_ID_BLOCK = 1_000_000_000
+
+
 def make_routing_session_id(sampling_session_id: str | None, seq_id: int | None) -> str | None:
-    """Stable per-request routing key for the ``X-Session-ID`` header, or None.
+    """Stable routing key for the ``X-Session-ID`` header, or None.
 
     Combines the (per-client) ``sampling_session_id`` with the (per-request)
     ``seq_id`` into the "deterministic request id" the Tinker SDK describes.
@@ -249,6 +252,10 @@ def make_routing_session_id(sampling_session_id: str | None, seq_id: int | None)
     """
     if sampling_session_id is None or seq_id is None:
         return None
+    # An unpickled SDK client numbers its requests inside its own block of SEQ_ID_BLOCK ids; a caller
+    # that keeps one such client per conversation routes every turn to the engine holding its prefix cache.
+    if seq_id >= SEQ_ID_BLOCK:
+        return f"{sampling_session_id}:{seq_id // SEQ_ID_BLOCK}"
     return f"{sampling_session_id}:{seq_id}"
 
 
