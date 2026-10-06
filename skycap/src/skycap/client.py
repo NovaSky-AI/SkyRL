@@ -171,7 +171,14 @@ class CapturePool:
                     raise
                 errors.append(str(error))
                 continue
-            return Trajectory(self, server, body["id"], body["base_url"], paths, body.get("exposed_base_url"))
+            return Trajectory(
+                self,
+                server=server,
+                trajectory_id=body["id"],
+                base_url=body["base_url"],
+                paths=paths,
+                exposed_base_url=body.get("exposed_base_url"),
+            )
         raise CaptureError(f"no capture server reachable: {'; '.join(errors)}")
 
     @asynccontextmanager

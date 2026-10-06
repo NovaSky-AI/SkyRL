@@ -17,6 +17,7 @@ route there.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 from collections.abc import Callable, Mapping
@@ -189,6 +190,11 @@ class CaptureService:
             self._error = error
             self._ready.set()
             logger.exception("skycap stopped with an error")
+            return
+        if not self._ready.is_set():
+            # Stopped before it was ready (while its exposure was opening): start must not wait on.
+            self._error = RuntimeError("skycap was stopped while it was starting")
+            self._ready.set()
 
     async def _serve(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -241,22 +247,38 @@ async def serve(
             await web.TCPSite(harness, bind_host, bind_port).start()
             harness_url = _http_url(_LOOPBACK.get(bind_host, bind_host), harness.addresses[0][1])
             opened = True
-            # Off the loop: a tunnel can take a minute to come up, and the control plane serves meanwhile.
-            server.exposed_url = (await asyncio.to_thread(exposure.start, harness_url)).rstrip("/")
+            # Off the loop: a tunnel can take a minute to come up, and the control plane serves meanwhile. A stop
+            # requested meanwhile closes the exposure, which makes its start give up, and the server stops.
+            starting = asyncio.ensure_future(asyncio.to_thread(exposure.start, harness_url))
+            stop_requested = asyncio.ensure_future(stopping.wait())
+            await asyncio.wait({starting, stop_requested}, return_when=asyncio.FIRST_COMPLETED)
+            if not starting.done():
+                logger.info("stopped while the exposure was opening")
+                opened = False
+                await _close(exposure)
+                with contextlib.suppress(Exception):
+                    await starting
+                return
+            stop_requested.cancel()
+            server.exposed_url = starting.result().rstrip("/")
             logger.info("skycap harness routes exposed at %s", server.exposed_url)
         ready(url, harness_url)
         await stopping.wait()
     finally:
         if opened:
             assert exposure is not None
-            try:
-                await asyncio.to_thread(exposure.stop)
-            except Exception:
-                logger.exception("closing the exposure failed")
-            server.exposed_url = None
+            await _close(exposure)
+        server.exposed_url = None
         if harness is not None:
             await harness.cleanup()
         await runner.cleanup()
+
+
+async def _close(exposure: Exposure) -> None:
+    try:
+        await asyncio.to_thread(exposure.stop)
+    except Exception:
+        logger.exception("closing the exposure failed")
 
 
 #: Where a listener bound on a wildcard address is reached from this node.

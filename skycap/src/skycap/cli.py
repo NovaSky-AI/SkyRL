@@ -133,15 +133,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.expose is None:
             web.run_app(build_server(args).app(), host=args.host, port=args.port)
         else:
+            if not isinstance(args.expose_kwargs, dict):
+                raise SystemExit(f"--expose-kwargs must be a JSON object, not {args.expose_kwargs!r}")
             try:
                 exposure = load_exposure(args.expose, **args.expose_kwargs)
             except ValueError as error:
                 raise SystemExit(f"--expose: {error}") from None
-            asyncio.run(_serve_exposed(build_server(args), args.host, args.port, exposure))
+            asyncio.run(_serve_exposed(build_server(args), host=args.host, port=args.port, exposure=exposure))
     return 0
 
 
-async def _serve_exposed(server: CaptureServer, host: str, port: int, exposure: Exposure) -> None:
+async def _serve_exposed(server: CaptureServer, *, host: str, port: int, exposure: Exposure) -> None:
     """``skycap serve --expose``: the server, its exposed harness listener, until SIGINT or SIGTERM."""
     stopping = asyncio.Event()
     loop = asyncio.get_running_loop()

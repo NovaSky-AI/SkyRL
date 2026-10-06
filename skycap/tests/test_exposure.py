@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ import yarl
 from aiohttp.test_utils import TestServer
 
 from skycap import CapturePool, CaptureService, record, tunnel
-from skycap.cli import build_parser
+from skycap.cli import build_parser, main
 from skycap.exposure import CloudflareQuickTunnel, Exposure, ExternalHost, load_exposure
 from tests.mock_openai import API_KEY, MockOpenAI
 from tests.test_tokens import client, converse
@@ -229,6 +230,75 @@ async def test_the_cloudflare_exposure_tunnels_to_the_harness_listener(tmp_path:
         assert trajectory.exposed_base_url == f"{service.exposed_url}/t/{trajectory.id}/v1"
     (fake,) = opened
     assert fake.local_url == service.harness_url and fake.started == (5.0, 1) and fake.stopped
+
+
+class BlockingExposure(Exposure):
+    """An exposure whose ``start`` doesn't return until it is stopped, like a tunnel that never comes up."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.stopped = threading.Event()
+        self.stops = 0
+
+    def start(self, harness_url: str) -> str:
+        self.started.set()
+        self.stopped.wait(60)
+        raise RuntimeError("stopped before the way in opened")
+
+    def stop(self) -> None:
+        self.stops += 1
+        self.stopped.set()
+
+
+async def test_stopping_while_the_exposure_opens_stops_the_server_at_once(tmp_path: Path) -> None:
+    exposure = BlockingExposure()
+    service = CaptureService("http://127.0.0.1:9/v1", host="127.0.0.1", exposure=exposure)
+    starting = asyncio.ensure_future(asyncio.to_thread(service.start))
+    assert await asyncio.to_thread(exposure.started.wait, 30)
+    stopped_at = time.monotonic()
+    assert await asyncio.to_thread(service.stop, 30)
+    with pytest.raises(RuntimeError, match="skycap failed to start") as raised:
+        await starting
+    assert "stopped while it was starting" in str(raised.value.__cause__)
+    assert time.monotonic() - stopped_at < 10 and exposure.stops == 1
+
+
+def test_a_tunnel_stopped_while_it_starts_gives_up(tmp_path: Path, monkeypatch) -> None:
+    # A cloudflared that prints its URL and runs, behind which the tunnel never reaches skycap.
+    fake = tmp_path / "cloudflared"
+    fake.write_text(
+        '#!/bin/sh\necho "INF |  https://corp-provides-trademark-effective.trycloudflare.com  |"\nsleep 600\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setattr(tunnel, "_cloudflared", lambda: str(fake))
+    monkeypatch.setattr(tunnel, "_reaches_skycap", lambda url: False)
+    opened = tunnel.CloudflareTunnel("http://127.0.0.1:9")
+    errors: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            opened.start(timeout=60.0, attempts=3)
+        except BaseException as error:  # noqa: BLE001 - checked below
+            errors.append(error)
+
+    thread = threading.Thread(target=start)
+    thread.start()
+    time.sleep(1.0)
+    stopped_at = time.monotonic()
+    opened.stop()
+    thread.join(10)
+    assert not thread.is_alive() and time.monotonic() - stopped_at < 5
+    assert len(errors) == 1 and "stopped while it was starting" in str(errors[0])
+    # Stopped before it started, a quick tunnel exposure gives up at once.
+    quick = CloudflareQuickTunnel()
+    quick.stop()
+    with pytest.raises(RuntimeError, match="stopped while it was starting"):
+        quick.start("http://127.0.0.1:9")
+
+
+def test_the_cli_refuses_expose_kwargs_that_are_not_an_object() -> None:
+    with pytest.raises(SystemExit, match="must be a JSON object"):
+        main(["serve", "--upstream-url", "http://e/v1", "--expose", "cloudflare", "--expose-kwargs", "[]"])
 
 
 # -- the tunnel's process ------------------------------------------------------------

@@ -35,8 +35,9 @@ class Exposure:
     """Makes one server's harness listener reachable. Subclass it for a new way in.
 
     The server binds its harness listener at ``bind()``, then calls ``start`` with the listener's
-    local URL, and ``stop`` before it stops listening. ``start`` may block (a tunnel coming up);
-    the server runs it off its event loop.
+    local URL, and ``stop`` once, before it stops listening. ``start`` may block (a tunnel coming
+    up); the server runs it off its event loop. If the server is stopped while ``start`` runs,
+    ``stop`` is called from another thread meanwhile, and should make ``start`` give up soon.
     """
 
     def bind(self) -> tuple[str, int]:
@@ -83,17 +84,21 @@ class CloudflareQuickTunnel(Exposure):
         self.timeout = timeout
         self.attempts = attempts
         self._tunnel: Any = None
+        self._stopped = False
 
     def start(self, harness_url: str) -> str:
         from skycap.tunnel import CloudflareTunnel
 
-        self._tunnel = CloudflareTunnel(harness_url)
-        return self._tunnel.start(timeout=self.timeout, attempts=self.attempts)
+        tunnel = CloudflareTunnel(harness_url)
+        self._tunnel = tunnel
+        if self._stopped:  # stopped before the tunnel existed: its start gives up at once
+            tunnel.stop()
+        return tunnel.start(timeout=self.timeout, attempts=self.attempts)
 
     def stop(self) -> None:
+        self._stopped = True
         if self._tunnel is not None:
             self._tunnel.stop()
-            self._tunnel = None
 
 
 #: The exposures named without an import path.

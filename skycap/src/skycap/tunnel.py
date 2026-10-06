@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 #: A quick tunnel's own URL in cloudflared's output. api.trycloudflare.com is where tunnels are
 #: requested from, and shows up in cloudflared's error lines when that request fails.
 TUNNEL_URL = re.compile(r"https://(?!api\.)[-a-z0-9]+\.trycloudflare\.com")
+#: Seconds the cloudflared download may go without receiving data.
+DOWNLOAD_TIMEOUT = 60.0
 
 #: Runs "$@" and kills it once stdin reaches EOF: when ``stop_tied`` closes the pipe, or when the process
 #: holding its other end dies, which the kernel does however that process exits. The watcher's output
@@ -78,12 +80,15 @@ class CloudflareTunnel:
         self.local_url = local_url
         self.url: str | None = None
         self._process: subprocess.Popen[str] | None = None
+        #: Set by ``stop``, which may come from another thread while ``start`` still waits for the tunnel.
+        self._stopped = threading.Event()
 
     def start(self, timeout: float = 120.0, attempts: int = 3) -> str:
         """Open the tunnel and return its URL once it reaches the local URL.
 
         Creating a quick tunnel sometimes fails on Cloudflare's side; each attempt starts
-        cloudflared afresh, and the last one's error names what it printed.
+        cloudflared afresh, and the last one's error names what it printed. A ``stop`` from
+        another thread makes it give up within about a second.
         """
         for attempt in range(1, attempts + 1):
             try:
@@ -92,10 +97,13 @@ class CloudflareTunnel:
                 if attempt == attempts:
                     raise
                 logger.warning("quick tunnel attempt %d/%d failed, retrying: %s", attempt, attempts, error)
-                time.sleep(5 * attempt)
-        raise AssertionError("unreachable")
+                if self._stopped.wait(5 * attempt):
+                    break
+        raise RuntimeError("the tunnel was stopped while it was starting")
 
     def _start_once(self, timeout: float) -> str:
+        if self._stopped.is_set():
+            raise RuntimeError("the tunnel was stopped while it was starting")
         process = spawn_tied([_cloudflared(), "tunnel", "--no-autoupdate", "--url", self.local_url])
         self._process = process
         found: dict[str, str] = {}
@@ -115,8 +123,13 @@ class CloudflareTunnel:
 
         threading.Thread(target=read_output, name="cloudflared", daemon=True).start()
         deadline = time.monotonic() + timeout
-        if not printed.wait(timeout) or "url" not in found:
-            self.stop()
+        while not printed.wait(0.5) and time.monotonic() < deadline and not self._stopped.is_set():
+            pass
+        if self._stopped.is_set():
+            self._kill()
+            raise RuntimeError("the tunnel was stopped while it was starting")
+        if "url" not in found:
+            self._kill()
             raise TimeoutError(f"cloudflared gave no tunnel URL within {timeout}s; it printed: {list(recent)[-5:]}")
         url = found["url"]
         # The URL is printed before it resolves, and its DNS can flap for a while after, so wait
@@ -124,19 +137,26 @@ class CloudflareTunnel:
         # where a tunnel not yet up gets an error page or no address.
         probe = f"{url}/t/tr_probe/v1/models"
         streak = 0
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not self._stopped.is_set():
             streak = streak + 1 if _reaches_skycap(probe) else 0
             if streak >= self.STABLE_PROBES:
                 logger.info("tunnel %s -> %s", url, self.local_url)
                 self.url = url
                 return url
-            time.sleep(2)
-        self.stop()
+            self._stopped.wait(2)
+        self._kill()
+        if self._stopped.is_set():
+            raise RuntimeError("the tunnel was stopped while it was starting")
         raise TimeoutError(
             f"tunnel {url} did not reach {self.local_url} within {timeout}s; cloudflared printed: {list(recent)[-5:]}"
         )
 
     def stop(self, timeout: float = 10.0) -> None:
+        """Close the tunnel. Safe to call from another thread while ``start`` runs, which then gives up."""
+        self._stopped.set()
+        self._kill(timeout)
+
+    def _kill(self, timeout: float = 10.0) -> None:
         process, self._process = self._process, None
         if process is not None:
             stop_tied(process, timeout)
@@ -172,7 +192,8 @@ def _cloudflared() -> str:
         fd, partial = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".partial")
         os.close(fd)
         try:
-            urllib.request.urlretrieve(url, partial)
+            with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response, open(partial, "wb") as out:
+                shutil.copyfileobj(response, out)
             os.chmod(partial, os.stat(partial).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             os.replace(partial, path)
         finally:
