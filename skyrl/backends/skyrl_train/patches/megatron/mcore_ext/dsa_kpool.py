@@ -20,7 +20,8 @@ no patching of megatron itself.
 
 One deliberate deviation: ``fused_qk_topk_kpool`` scores and selects in query chunks (see the
 comment there), since the verbatim version materializes O(sq^2) per-head FP32 scores and OOMs
-at 32k context.
+at 32k context. #7522 has since chunked as well (b27efd8, a fixed 256 MiB cap); the chunk loop
+here follows its structure with a configurable, larger cap.
 
 DELETE THIS MODULE once the megatron-core pin includes #7522.
 """
@@ -167,6 +168,51 @@ def _kpool_compress_keys_per_seg(
     return k_pooled_global, pool_token_base
 
 
+@torch.no_grad()
+def _kpool_topk_in_query_chunks(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    k_pooled: torch.Tensor,
+    budget: int,
+    select_k: int,
+    chunk: int,
+    use_relu: bool,
+    mask: Optional[torch.Tensor],
+    v_starts: Optional[torch.Tensor],
+    v_ends: Optional[torch.Tensor],
+    k_pos: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """``_compute_index_scores`` + masking + top-k, one query chunk at a time.
+
+    Returns ``[batch, sq, budget]`` pool ids, -1 for unused slots. Bitwise the same as the one-shot
+    path: the same FP32 einsum, ReLU, head weighting and head sum, with ReLU and weighting in place
+    so a chunk holds one FP32 score buffer instead of two or three (the selection is discrete, so
+    no autograd graph is needed), ``k_pooled`` cast to FP32 once, and the output preallocated.
+    """
+    sq, batch = q.shape[0], q.shape[1]
+    pool_topk = torch.full((batch, sq, budget), -1, dtype=torch.int64, device=q.device)
+    if select_k == 0:
+        return pool_topk
+    k_fp32 = k_pooled.float()
+    for q0 in range(0, sq, chunk):
+        q1 = min(sq, q0 + chunk)
+        scores = torch.einsum("sbhd,tbd->sbht", q[q0:q1].float(), k_fp32)
+        if use_relu:
+            scores.relu_()
+        scores.mul_(weights[q0:q1].unsqueeze(-1))
+        # [chunk, batch, num_pools] -> [batch, chunk, num_pools]
+        scores = scores.sum(dim=2).transpose(0, 1)
+        if v_starts is not None:
+            scores = dsa_masking.apply_starts_ends_mask_to_scores(scores, v_starts[q0:q1], v_ends[q0:q1], k_pos)
+        elif mask is not None:
+            assert mask.dtype == scores.dtype, "Mask dtype must match index scores dtype"
+            scores.add_(mask[..., q0:q1, :])
+        topk_scores, topk_ids = scores.topk(select_k, dim=-1)
+        del scores
+        pool_topk[:, q0:q1, :select_k] = topk_ids.masked_fill_(topk_scores == float("-inf"), -1)
+    return pool_topk
+
+
 def fused_qk_topk_kpool(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -223,43 +269,29 @@ def fused_qk_topk_kpool(
     select_k = min(budget, num_pools)
 
     # SkyRL deviation from #7522: score and select in query chunks. _compute_index_scores
-    # materializes FP32 [chunk, batch, heads, num_pools] per-head scores (32 GiB at sq=32k for
-    # GLM-5.3-Flash's 32 heads) and the full [batch, sq, num_pools] matrix is O(sq^2), so only
-    # per-chunk scores and the [batch, sq, budget] selection are kept. Top-k is per query row, so
-    # this is exact. Full scores are returned only when one chunk covers every query.
+    # materializes FP32 [sq, batch, heads, num_pools] per-head scores (32 GiB at sq=32k for
+    # GLM-5.3-Flash's 32 heads) and the full [batch, sq, num_pools] matrix is O(sq^2), so past one
+    # chunk only the [batch, sq, budget] selection is kept. Top-k is per query row, so this is
+    # exact. Full scores (with autograd) are returned only when one chunk covers every query.
     sq, batch, n_heads = q.shape[0], q.shape[1], q.shape[2]
     chunk = max(1, min(sq, _KPOOL_SCORE_CHUNK_ELEMS // max(1, batch * n_heads * num_pools)))
-    pool_topk_chunks = []
-    index_scores = None
-    for q0 in range(0, sq, chunk):
-        q1 = min(sq, q0 + chunk)
-        index_scores = _compute_index_scores(q[q0:q1], weights[q0:q1], k_pooled, use_relu=use_relu)
+    if chunk >= sq:
+        index_scores = _compute_index_scores(q, weights, k_pooled, use_relu=use_relu)
         if v_starts is not None:
-            index_scores = dsa_masking.apply_starts_ends_mask_to_scores(
-                index_scores, v_starts[q0:q1], v_ends[q0:q1], k_pos
-            )
+            index_scores = dsa_masking.apply_starts_ends_mask_to_scores(index_scores, v_starts, v_ends, k_pos)
         elif mask is not None:
             assert mask.dtype == index_scores.dtype, "Mask dtype must match index scores dtype"
-            index_scores = index_scores + mask[..., q0:q1, :]
-
+            index_scores = index_scores + mask
+        pool_topk = torch.full((batch, sq, budget), -1, dtype=torch.int64, device=q.device)
         if select_k > 0:
-            topk_scores, pool_topk = index_scores.topk(select_k, dim=-1)
+            topk_scores, topk_ids = index_scores.topk(select_k, dim=-1)
             # [batch, seqlen_q, select_k] -> mask invalid pools
-            pool_topk = pool_topk.masked_fill(topk_scores == float("-inf"), -1)
-        else:
-            pool_topk = torch.empty(index_scores.shape[:-1] + (0,), dtype=torch.int64, device=index_scores.device)
-        if pool_topk.shape[-1] < budget:
-            pad = torch.full(
-                index_scores.shape[:-1] + (budget - pool_topk.shape[-1],),
-                -1,
-                dtype=torch.int64,
-                device=index_scores.device,
-            )
-            pool_topk = torch.cat([pool_topk, pad], dim=-1)
-        pool_topk_chunks.append(pool_topk)
-    if len(pool_topk_chunks) > 1:
+            pool_topk[..., :select_k] = topk_ids.masked_fill(topk_scores == float("-inf"), -1)
+    else:
         index_scores = None
-        pool_topk = torch.cat(pool_topk_chunks, dim=1)
+        pool_topk = _kpool_topk_in_query_chunks(
+            q, weights, k_pooled, budget, select_k, chunk, use_relu, mask, v_starts, v_ends, k_pos
+        )
 
     # Expand [batch * queries, pools] to a fixed token budget.
     rows = pool_topk.shape[0] * pool_topk.shape[1]

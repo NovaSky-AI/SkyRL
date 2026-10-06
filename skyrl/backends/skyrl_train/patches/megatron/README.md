@@ -115,8 +115,12 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
     materializes FP32 `[sq, b, heads, sq / kpool]` per-head scores (32 GiB/GPU at 32k), so
     GLM-5.3-Flash can't train past ~16k. Top-k is per query row, so chunking is exact
     (`test_kpool_query_chunking_is_exact`); `SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS` sets the chunk
-    cap (default 2 GiB of FP32 scores; 8 GiB was ~5% faster at 512k tokens). When removing, check
-    that upstream bounds this memory too, or carry the chunking over.
+    cap (default 2 GiB of FP32 scores). Past one chunk the loop follows #7522 @ `b27efd8`, which
+    now chunks too: no-grad, in-place ReLU and head weighting, one FP32 cast of the pooled keys, a
+    preallocated selection. Upstream's cap is a fixed 256 MiB; at 512k (65,536 query rows per TP8
+    rank x 131,072 pools, one B200) one selection takes 3.31 s there vs 2.64 s at 2 GiB and
+    2.60 s at 8 GiB, with peak extra memory 0.6 / 2.4 / 8.6 GiB. When removing, carry the
+    configurable cap over unless upstream's default has grown.
   - `glm5_next/dsa.py`:
     - `Glm5NextDSAIndexer`: k-pool gate/ape parameters and the gate score, hand-merged onto the
       pinned `DSAIndexer`;
