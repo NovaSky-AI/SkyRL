@@ -165,7 +165,7 @@ from skycap import CapturePool
 
 pool = CapturePool(["http://capture-0:8080", "http://capture-1:8080"])
 async with pool.trajectory({"task": "t1", "step": 3}) as trajectory:
-    run_harness(base_url=trajectory.base_url)        # any OpenAI client
+    run_harness(base_url=trajectory.base_url, api_key=trajectory.api_key)  # any OpenAI client
     result = await trajectory.finish({"reward": 1.0})
 
 result.status          # "finished", or "failed" if a turn couldn't be attributed exactly
@@ -178,6 +178,18 @@ Creates go round-robin over the servers, and each trajectory's URL names its
 server, so no router or load balancer is involved. An SDK retry
 (`x-stainless-retry-count`) gets the original call's reply rather than a second
 sample.
+
+### Per-trajectory API keys
+
+`create` mints an API key for each trajectory (`trajectory.api_key`). A server
+started with `--require-api-key` (`CaptureService(require_api_key=True)`)
+answers a trajectory's harness routes only when the call carries that key as
+`Authorization: Bearer <key>`, which is what an OpenAI client does with its
+`api_key`. Use it when the routes are reachable from outside the trainer's
+network, for an agent in a remote sandbox: a caller who learns a trajectory's
+URL can't add calls to it without its key, and a key opens no other
+trajectory. The control plane is not keyed. A key lives only in memory: it is
+never written to the record, and it stops working when the trajectory ends.
 
 ### Which paths train
 

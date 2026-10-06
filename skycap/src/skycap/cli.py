@@ -100,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         default={},
         help='JSON arguments of the exposure, e.g. \'{"host": "203.0.113.7", "port": 11500}\' for external_host',
     )
+    serve.add_argument(
+        "--require-api-key",
+        action="store_true",
+        help="harness routes answer only a caller sending the trajectory's own key (create returns it) "
+        "as `Authorization: Bearer <key>`, as an OpenAI client does with its api_key",
+    )
     return parser
 
 
@@ -123,7 +129,9 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
     for spec in args.path_rule:
         name, _, rule = spec.rpartition("=")
         rules[name or rule] = rule
-    return CaptureServer(backend, record_dir=args.record_dir, ttl=args.ttl, path_rules=rules)
+    return CaptureServer(
+        backend, record_dir=args.record_dir, ttl=args.ttl, path_rules=rules, require_api_key=args.require_api_key
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

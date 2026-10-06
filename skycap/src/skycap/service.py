@@ -92,6 +92,7 @@ class CaptureService:
     ``finish`` may name besides ``all`` and ``final``, each a function or its ``"pkg.module:function"``
     import path (``skycap.paths``). ``exposure`` makes the harness routes reachable from outside this
     network (``skycap.exposure``); opening it can take a while (a tunnel), which ``start`` waits for.
+    With ``require_api_key``, harness routes need the trajectory's own key (``Trajectory.api_key``).
     """
 
     def __init__(
@@ -113,6 +114,7 @@ class CaptureService:
         record_dir: str | None = None,
         ttl: float = 3600.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
+        require_api_key: bool = False,
         host: str = "0.0.0.0",
         port: int = 0,
         advertise_host: str = "127.0.0.1",
@@ -133,7 +135,9 @@ class CaptureService:
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
         )
-        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules)
+        self.server = CaptureServer(
+            backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules, require_api_key=require_api_key
+        )
         self._host, self._port = host, port
         self._advertise_host = advertise_host
         self._exposure = exposure
