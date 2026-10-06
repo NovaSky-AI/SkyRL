@@ -22,9 +22,10 @@ set -x
 #   RECOMPUTE_MODULES='[core_attn]' MAX_LENGTH=524288 \
 #   SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1 SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED=1 \
 #   SKYRL_DSA_INDEXER_TP_SHARD=1 bash ...
-#   -> over EFA: 144 GiB/GPU allocated, warm step ~227 s, ~18.5k tokens/s (fwd+bwd ~310
-#   tokens/s/GPU); over TCP: ~4.1k tokens/s. SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS=2147483648 (8 GiB
-#   indexer score chunks) cut the EFA step to ~215 s (~19.5k tokens/s) at the same peak. Add
+#   -> over EFA: 144 GiB/GPU allocated, warm step ~215-227 s, ~18.5-19.5k tokens/s (~300
+#   tokens/s/GPU); over TCP: ~4.1k tokens/s. The k-pool indexer's score chunk cap
+#   (SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS) barely matters past its 2 GiB default: 8 GiB saves <1 s
+#   per step (2.64 -> 2.60 s per indexer call at 512k, 22 calls per step) for 6 GiB more. Add
 #   SKYRL_DSA_QUERY_CHUNK=65536 to trade ~5 GiB for one extra DSA attention forward. Without the
 #   checkpoint offload, or with optimizer_offload_fraction=0.5, 512k at TP8 runs out of memory.
 # 1M tokens per sequence: the same plus MEGATRON_CP=2 MAX_LENGTH=1048576 (dp = 4, batch 4)
