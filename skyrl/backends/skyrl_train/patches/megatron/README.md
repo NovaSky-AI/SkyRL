@@ -184,11 +184,16 @@ Per-forward DSA index-share carrier under activation recompute.
 `MoEAlltoAllTokenDispatcher.combine_preprocess` reduce-scatters expert outputs across the
 expert-TP group as `reduce_scatter(hidden.to(probs.dtype)).to(hidden.dtype)`; with an FP32 router
 (GLM-5.3-Flash) that is an FP32 copy of every token-expert row (~19 GiB/GPU at 576k tokens, TP8 /
-EP32 x ETP2). For exactly two ranks a bf16 reduce-scatter (FP32 accumulate, one rounding) is
-bit-identical, so the wrapper reduces in the activation dtype there; other group sizes are
-untouched. Applied unconditionally in `make_megatron_module`.
-- **Landed?** megatron-core's `combine_preprocess` no longer upcasts before the reduce-scatter, or
-  does so only when needed.
+EP32 x ETP2). For exactly two ranks a bf16 reduce-scatter with NCCL's Ring or PAT kernels (FP32
+accumulate, one rounding) is bit-identical, and Ring is NCCL's default for a 2-rank reduce-scatter
+at every size (NCCL 2.29.7, B200), so the reduce-scatter runs in the activation dtype there. NVLS
+rounds in the switch (<= 1 bf16 ulp off on ~10-20% of elements), so the upcast stays when
+`NCCL_ALGO` asks for NVLS, and for other group sizes. The decision is one method, `_tp_reduce_dtype`, installed with a copy of the pinned
+`combine_preprocess` that differs only in calling it (the test diffs the two). Written to be
+proposed upstream as is. Applied unconditionally in `make_megatron_module`; refuses to install,
+with a warning, if megatron-core's `combine_preprocess` no longer matches the copy.
+- **Landed?** `MoEAlltoAllTokenDispatcher` has `_tp_reduce_dtype` (the patch warns), or its
+  `combine_preprocess` no longer upcasts before a 2-rank reduce-scatter.
 - **Remove:** the module, its call in `make_megatron_module`, and `test_moe_combine_bf16_reduce.py`.
 
 ### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
