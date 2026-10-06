@@ -1129,6 +1129,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
             ``metrics`` (all-reduced across DP).
         """
+        self.model.begin_forward_backward()
         self.model.train()
 
         all_metrics = defaultdict(list)

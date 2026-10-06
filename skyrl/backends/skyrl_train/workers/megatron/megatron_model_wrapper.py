@@ -227,8 +227,12 @@ class MegatronModelWrapper:
         # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
         # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
         self._pending_grad_sync: Optional[dict] = None
+        # Set by `begin_forward_backward`, cleared by `run_pending_grad_sync`.
+        self._forward_backward_since_grad_sync = False
 
         config = get_model_config(self.actor_module[0])
+        # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
+        self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across
         # parallelism dimensions -- but deferred to optim_step rather than run per
@@ -266,8 +270,17 @@ class MegatronModelWrapper:
         optimizer step.
         """
         del model, kwargs  # replayed against self.actor_module with default process groups
-        pending = self._pending_grad_sync
-        if pending is not None and pending["num_tokens"] is not None and num_tokens is not None:
+        # Under calculate_per_token_loss, `begin_forward_backward` allows one call per window,
+        # so ``num_tokens`` is never overwritten here.
+        self._pending_grad_sync = {"num_tokens": num_tokens}
+
+    def begin_forward_backward(self) -> None:
+        """Called by the worker at the start of every ``forward_backward``, on every rank.
+
+        Under ``calculate_per_token_loss`` a second ``forward_backward`` before ``optim_step``
+        is refused here, before its backward adds gradients to the window.
+        """
+        if self._per_token_loss and self._forward_backward_since_grad_sync:
             # Reached only when calculate_per_token_loss is on (Megatron-Bridge Qwen-VL models with
             # context_parallel_size > 1) AND a second forward_backward runs before optim_step: e.g. a
             # Tinker client calling forward_backward several times per optim_step
@@ -279,7 +292,7 @@ class MegatronModelWrapper:
                 "calculate_per_token_loss (on for Megatron-Bridge Qwen-VL models with context parallelism) "
                 "supports one forward_backward call per optim_step; got a second call before optim_step."
             )
-        self._pending_grad_sync = {"num_tokens": num_tokens}
+        self._forward_backward_since_grad_sync = True
 
     def run_pending_grad_sync(self) -> None:
         """Reduce gradients across DP/TP/PP exactly once for the accumulated window.
@@ -290,6 +303,7 @@ class MegatronModelWrapper:
         """
         pending = self._pending_grad_sync
         self._pending_grad_sync = None
+        self._forward_backward_since_grad_sync = False
         finalize_model_grads_with_expert_adapter_sync(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
@@ -656,8 +670,7 @@ class MegatronModelWrapper:
         # (with the trunk input detached) for us to score. Training only.
         model_config = get_model_config(self.actor_module[0])
         mtp_enabled = (not forward_only) and bool(getattr(model_config, "mtp_num_layers", None))
-        # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
-        per_token_loss = bool(getattr(model_config, "calculate_per_token_loss", False))
+        per_token_loss = self._per_token_loss
         # Defaults live on the MegatronConfig dataclass (config.py) -- read the fields directly
         # rather than restating them in getattr fallbacks that could drift.
         mcfg = self.cfg.policy.megatron_config

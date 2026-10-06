@@ -593,6 +593,11 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
         output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
         logprobs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
         results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+        if cp > 1:
+            # calculate_per_token_loss allows one forward_backward per optim_step. The second call is
+            # refused before its backward, so the grad norm below still covers only the first call.
+            with pytest.raises(ray.exceptions.RayTaskError, match="one forward_backward call per optim_step"):
+                ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
         grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         return logprobs, results, grad_norms
 
