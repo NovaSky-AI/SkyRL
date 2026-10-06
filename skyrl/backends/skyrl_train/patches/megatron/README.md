@@ -26,6 +26,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py` | `glm5_next/dsa.py` query-chunked fused sparse attention vs one-shot |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -117,7 +118,15 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
     - `Glm5NextDSAttention._forward_with_kpool_topk`: swaps the pinned `DSAttention.forward`'s
       token-level top-k for `fused_qk_topk_kpool`, and raises if the pooled selection doesn't run
       exactly once;
-    - the `kpool <= 1` long-sequence guard.
+    - the `kpool <= 1` long-sequence guard;
+    - `_query_chunked_fused_absorbed_sparse_attention`: opt-in (`SKYRL_DSA_QUERY_CHUNK=<tokens>`)
+      runs the fused absorbed sparse attention in query chunks, each checkpointed (recomputed in
+      backward). The checkpoint is what saves memory -- without it autograd keeps every chunk's
+      padded query and kernel output, as much as one unchunked call -- so chunking always implies
+      the recompute: one extra kernel forward in backward; key grads summed across chunks in a
+      different order. Wraps whichever `dsa_kernel_backend` is selected; on `tilelang` the kernel
+      takes GLM-5.3-Flash's layout through `patch_sparse_mla_nope.py`. Tested by
+      `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py`.
   - `glm5_next/layer_specs.py`: the `core_attention.module` / `submodules.indexer.module` swaps.
   - `glm5_next/provider.py`: `dsa_indexer_kpool`, `dsa_indexer_kpool_always_select_tail`.
 - **Landed?** megatron-core's `experimental_attention_variant/dsa.py` defines
