@@ -57,6 +57,7 @@ class TestGradScaleFunc:
         mock_config_obj = MagicMock()
         mock_config_obj.finalize_model_grads_func = None
         mock_config_obj.grad_scale_func = None
+        mock_config_obj.calculate_per_token_loss = False
 
         mock_optimizer = MagicMock()
         mock_optimizer.scale_loss = MagicMock(return_value=1.0)
@@ -86,6 +87,7 @@ class TestGradScaleFunc:
         mock_config_obj = MagicMock()
         mock_config_obj.finalize_model_grads_func = None
         mock_config_obj.grad_scale_func = None
+        mock_config_obj.calculate_per_token_loss = False
 
         with patch(
             "skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper.get_model_config",
