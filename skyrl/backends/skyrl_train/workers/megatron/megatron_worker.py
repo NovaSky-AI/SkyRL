@@ -129,6 +129,7 @@ if TYPE_CHECKING:
 
 import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
+    maybe_force_glm5_next_vl_bridge,
     maybe_force_qwen35_text_bridge,
 )
 
@@ -292,6 +293,11 @@ class MegatronWorker:
                 "DeepSeek-V3 bridge (vision tower + mm projector dropped)"
             )
 
+        # GLM-5.3-Flash dispatches to its text-only GPTModel bridge by default; the full
+        # checkpoint (HF vision tower + language model) needs the VL bridge.
+        if self.is_vlm and maybe_force_glm5_next_vl_bridge(bridge, hf_config):
+            logger.info("language_model_only=False: GLM-5.3-Flash -> Glm5NextVLBridge (HF vision tower + GPTModel)")
+
         if SKYRL_MEGATRON_RANDOM_INIT:
             logger.warning("SKYRL_MEGATRON_RANDOM_INIT=1: randomly initializing weights (checkpoint not loaded)")
         # Random init needs no extra sync: MegatronStrategy.set_seed seeds every TP rank alike and calls
@@ -318,6 +324,18 @@ class MegatronWorker:
         rope_params = getattr(hf_config, "rope_parameters", None) or getattr(hf_config, "rope_scaling", None)
         if isinstance(rope_params, dict) and "rope_theta" in rope_params:
             provider.rotary_base = rope_params["rope_theta"]
+
+        freeze_vision_model = megatron_config.freeze_vision_model
+        freeze_vision_projection = megatron_config.freeze_vision_projection
+        if freeze_vision_model or freeze_vision_projection:
+            if not self.is_vlm or not hasattr(provider, "freeze_vision_model"):
+                raise ValueError(
+                    "megatron_config.freeze_vision_model / freeze_vision_projection need a vision-language "
+                    f"model with a vision tower on the Megatron side; got {type(provider).__name__} "
+                    f"(is_vlm={self.is_vlm}, language_model_only={language_model_only})."
+                )
+            provider.freeze_vision_model = freeze_vision_model
+            provider.freeze_vision_projection = freeze_vision_projection
 
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size

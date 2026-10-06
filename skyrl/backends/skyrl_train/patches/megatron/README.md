@@ -153,10 +153,18 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
 - **Carried as:** `glm5_next/`: `provider.py`, `layer_specs.py`, `dsa.py`, and `bridge.py`
   (`Glm5NextBridge`, registered for `Glm5NextForConditionalGeneration` on import, plus the
   `HyperConnectionScaleMapping` / `HyperConnectionScaleSliceMapping` custom mappings).
+  The vision-language model is carried too: `vl_model.py` (`Glm5NextVLModel`, a port of the PR's
+  `GLM53FlashModel` wrapper around our `GPTModel`), `Glm5NextVLModelProvider` in `provider.py`, and
+  `Glm5NextVLBridge` in `bridge.py`, registered under the sentinel architecture
+  `Glm5NextVLForConditionalGeneration` and selected by
+  `model_bridges.maybe_force_glm5_next_vl_bridge` when `language_model_only=false`.
 - **Landed?** Megatron-Bridge registers a bridge for `Glm5NextForConditionalGeneration` /
   `model_type="glm5_next"` (e.g. under `megatron/bridge/models/glm*`).
 - **Remove:**
-  - `workers/megatron/model_bridges.py`: drop the `glm5_next` import that registers the bridge.
+  - `workers/megatron/model_bridges.py`: drop the `glm5_next` import that registers the bridge,
+    and `maybe_force_glm5_next_vl_bridge` (plus its call in `megatron_worker.py`) once upstream
+    dispatches `Glm5NextForConditionalGeneration` to the VL model and has a text-only path for
+    `language_model_only=True`.
   - Tests that import from `glm5_next`: repoint them at Megatron-Bridge.
   - `.agents/docs/backends/megatron.md` and `docs/content/docs/.../supported_models.mdx`: update
     the model entry.
@@ -164,7 +172,9 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
     - `language_model_only=True` handling;
     - the `head_dim=0` NoPE RoPE skip;
     - the k-pool field mapping;
-    - the mHC scale mappings.
+    - the mHC scale mappings;
+    - the VL wrapper: `model_owns_packing`, the fp32 ViT `inv_freq`, the zero-valued vision
+      term on image-free microbatches, and `freeze()` covering the downsample conv.
   - Delete `glm5_next/`.
 - **Verify:** the full [Verification](#verification) set.
 

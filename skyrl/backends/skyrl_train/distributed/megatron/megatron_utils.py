@@ -829,7 +829,8 @@ def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
     True when every model chunk is Megatron-Bridge's ``Qwen3VLModel`` (Qwen3-VL,
     Qwen3.5-VL), which rebuilds 3D mRoPE positions per packed sub-sequence from
     ``packed_seq_params``, or sets ``model_owns_packing = True`` (NeMo-RL's opt-in
-    attribute for models that pack and split for context parallelism themselves).
+    attribute for models that pack and split for context parallelism themselves;
+    GLM-5.3-Flash's ``Glm5NextVLModel``).
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (

@@ -339,7 +339,8 @@ class MegatronModelWrapper:
             raise ValueError(
                 "trainer.remove_microbatch_padding=true (sample packing) is supported for VLMs only on "
                 "Megatron-Bridge's Qwen3VLModel (Qwen3-VL, Qwen3.5-VL), which rebuilds mRoPE positions per "
-                f"packed sample; got {model_cls}. Set trainer.remove_microbatch_padding=false."
+                "packed sample, and on models that set model_owns_packing (GLM-5.3-Flash); "
+                f"got {model_cls}. Set trainer.remove_microbatch_padding=false."
             )
         cp_size = mpu.get_context_parallel_world_size()
         if cp_size > 1:
