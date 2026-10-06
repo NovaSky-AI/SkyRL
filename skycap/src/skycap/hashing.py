@@ -7,7 +7,10 @@ clients disagree about spelling "absent". An SDK replaying an assistant
 message may drop ``"refusal": null`` or ``"annotations": []`` that the server
 sent; those are the same message, and hashing them apart would fork the graph
 on every turn. Token mode goes further and hashes only the fields a renderer
-reads (``token_match_hash``).
+reads (``MatchKey.tokens``).
+
+Two hashes are taken per node: a match hash, by a ``MatchKey``, and a delta
+hash (``*_delta_hash``), which builds on it.
 
 Nothing is canonicalized across providers: one trajectory speaks one dialect.
 """
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -39,22 +43,45 @@ def canonical_message(message: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in message.items() if value not in (None, [], {})}
 
 
-def message_hash(message: Mapping[str, Any]) -> str:
-    return digest(canonical_message(message))
-
-
 def tools_hash(tools: Sequence[Mapping[str, Any]] | None) -> str:
     """Order matters: a chat template renders tools in the order given."""
     return digest(list(tools)) if tools else ""
 
 
-def match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> str:
-    """What a message is matched by: itself, the tool set and the model it was seen with.
+@dataclass(frozen=True, slots=True)
+class MatchKey:
+    """What one call's messages are matched by: the fields that count, the call's tool set and its model.
 
-    Tools, because a chat template renders their schemas into the prompt. The
-    model, because two models answering alike are still two samples.
+    Calling it on a message gives the message's match hash (see ``MessageGraph``).
+    Tools count because a chat template renders their schemas into the prompt;
+    the model, because two models answering alike are still two samples. Which
+    fields count depends on the mode. Text mode sends the whole message
+    upstream, so every field counts (``text``). Token mode renders the message
+    itself, so only the fields a renderer reads count (``tokens``). Two
+    spellings that differ in a rendered field, such as ``content: ""`` against
+    no ``content``, hash apart in both; whether a chat template renders them
+    alike is decided when a token-mode request is planned (``tokens.turn``).
     """
-    return digest([message_hash(message), tools, model or ""])
+
+    #: The call's ``tools_hash``.
+    tools: str
+    model: str | None
+    rendered_only: bool
+
+    @classmethod
+    def text(cls, tools: str, model: str | None) -> MatchKey:
+        return cls(tools, model, rendered_only=False)
+
+    @classmethod
+    def tokens(cls, tools: str, model: str | None) -> MatchKey:
+        return cls(tools, model, rendered_only=True)
+
+    def fields(self, message: Mapping[str, Any]) -> dict[str, Any]:
+        """The fields of ``message`` that count, with empty values dropped."""
+        return canonical_message(rendered_fields(message) if self.rendered_only else message)
+
+    def __call__(self, message: Mapping[str, Any]) -> str:
+        return digest([digest(self.fields(message)), self.tools, self.model or ""])
 
 
 #: The message fields a ``renderers`` renderer reads: at the top level, in a tool call, and in a
@@ -113,17 +140,6 @@ def _pick(mapping: Mapping[str, Any], fields: frozenset[str]) -> dict[str, Any]:
         if key in fields:
             picked[key] = value
     return picked
-
-
-def token_match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> str:
-    """``match_hash`` over the fields a renderer reads.
-
-    Two spellings that differ in a rendered field, such as ``content: ""``
-    against no ``content``, still hash apart. Whether a chat template renders
-    them alike is the renderer's call, made when a request is planned
-    (``tokens.turn``).
-    """
-    return match_hash(rendered_fields(message), tools=tools, model=model)
 
 
 def sampling_key(sampling: Mapping[str, Any] | None) -> dict[str, Any]:

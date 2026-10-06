@@ -15,7 +15,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from skycap import record
-from skycap.hashing import match_hash, token_match_hash
+from skycap.hashing import MatchKey
 from skycap.samples import build_samples
 from skycap.server import CaptureServer
 from skycap.tokens.backend import STATUS_HEADER, TokensBackend
@@ -84,13 +84,31 @@ async def converse(llm: openai.AsyncOpenAI, *texts: str, **kwargs: Any) -> list[
 
 
 # -- attribution ---------------------------------------------------------------
+TEXT_KEY = MatchKey.text("", "policy")
+TOKEN_KEY = MatchKey.tokens("", "policy")
+
+
+def test_match_keys_keep_the_hash_values_recorded_before_them() -> None:
+    """Records store match hashes, so the values a ``MatchKey`` gives must not drift."""
+    message = {
+        "role": "assistant",
+        "content": "hi",
+        "refusal": None,
+        "provider_specific_fields": {"x": 1},
+        "tool_calls": [{"id": "c0", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+    }
+
+    assert MatchKey.text("t", "policy")(message) == "f378894da4b0e48303e35fdf42be5375"
+    assert MatchKey.tokens("t", "policy")(message) == "2bc94eedd73c39da36f6e5cee703ab40"
+
+
 @pytest.mark.parametrize("fields", [{"refusal": None}, {"response_id": "resp_1", "refusal": None}])
 def test_token_match_ignores_provider_specific_fields(fields: dict) -> None:
     reply = {"role": "assistant", "content": "answer"}
     replay = {**reply, "provider_specific_fields": fields}
 
-    assert token_match_hash(reply, tools="", model="policy") == token_match_hash(replay, tools="", model="policy")
-    assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
+    assert TOKEN_KEY(reply) == TOKEN_KEY(replay)
+    assert TEXT_KEY(reply) != TEXT_KEY(replay)
 
 
 def test_token_match_leaves_empty_tool_content_to_the_renderer() -> None:
@@ -106,14 +124,10 @@ def test_token_match_leaves_empty_tool_content_to_the_renderer() -> None:
     replayed = _without_content(returned)
     with_metadata = {**replayed, "provider_specific_fields": {"refusal": None}}
 
-    assert _token_key(with_metadata) == _token_key(replayed)
-    assert _token_key(returned) != _token_key(replayed)
-    assert match_hash(returned, tools="", model="policy") != match_hash(with_metadata, tools="", model="policy")
-    assert _token_key(returned) != _token_key({**replayed, "content": "Summary so far"})
-
-
-def _token_key(message: dict) -> str:
-    return token_match_hash(message, tools="", model="policy")
+    assert TOKEN_KEY(with_metadata) == TOKEN_KEY(replayed)
+    assert TOKEN_KEY(returned) != TOKEN_KEY(replayed)
+    assert TEXT_KEY(returned) != TEXT_KEY(with_metadata)
+    assert TOKEN_KEY(returned) != TOKEN_KEY({**replayed, "content": "Summary so far"})
 
 
 def _without_content(message: dict) -> dict:
@@ -141,8 +155,8 @@ def test_token_match_ignores_unrendered_fields_inside_tool_calls() -> None:
     }
     edited = {**returned, "tool_calls": [{**tool_call, "function": {"name": "search", "arguments": '{"q":1}'}}]}
 
-    assert _token_key(returned) == _token_key(replayed)
-    assert _token_key(returned) != _token_key(edited)
+    assert TOKEN_KEY(returned) == TOKEN_KEY(replayed)
+    assert TOKEN_KEY(returned) != TOKEN_KEY(edited)
 
 
 def test_scaffold_belongs_to_the_following_message_and_the_tail_to_the_reply() -> None:

@@ -237,7 +237,8 @@ class MessageGraph:
         if tools_key and tools is not None:
             self.tools.setdefault(tools_key, [dict(tool) for tool in tools])
         call.tools = tools_key or None
-        matches = [hashing.match_hash(m, tools=tools_key, model=model) for m in messages]
+        key = hashing.MatchKey.text(tools_key, model)
+        matches = [key(message) for message in messages]
         matched = self.match(matches)
         parent = matched[-1] if matched else None
         created: list[int] = []
@@ -254,7 +255,7 @@ class MessageGraph:
             if new:
                 created.append(node.id)
             parent = node.id
-        output_match = hashing.match_hash(output, tools=tools_key, model=model)
+        output_match = key(output)
         reply, new = self.add(
             parent,
             role=output.get("role"),

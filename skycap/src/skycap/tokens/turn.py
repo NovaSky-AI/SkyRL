@@ -72,30 +72,23 @@ def routes_from(graph: MessageGraph, planned: Plan) -> int:
     return planned.prefix_len - 1
 
 
-def match_hashes(messages: Sequence[Mapping[str, Any]], tools: str, model: str | None) -> list[str]:
-    return [hashing.token_match_hash(m, tools=tools, model=model) for m in messages]
-
-
 def plan(
     graph: MessageGraph,
     renderer: TokenRenderer,
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
-    matches: Sequence[str],
-    *,
-    tools_key: str,
-    model: str | None,
+    key: hashing.MatchKey,
 ) -> Plan:
     """Where a request attaches to the graph, the prompt tokens it sends, and its new nodes' tokens.
 
-    ``matches`` are the request's match hashes (``match_hashes``), and
-    ``tools_key`` and ``model`` are what they were taken with. The steps are
-    in the module docstring. Planning changes the graph only by recording
-    aliases for messages matched in another spelling.
+    ``key`` is the call's ``MatchKey.tokens``. The steps are in the module
+    docstring. Planning changes the graph only by recording aliases for
+    messages matched in another spelling.
     """
     if not messages:
         raise TokenError("a request needs at least one message")
-    matched, rendered = _match(graph, renderer, messages, tools, matches, tools_key, model)
+    matches = [key(message) for message in messages]
+    matched, rendered = _match(graph, renderer, messages, tools, matches, key)
     # A matched message takes its node's hash, which differs from the request's for a respelling.
     resolved = list(matches)
     for depth, node_id in enumerate(matched):
@@ -124,8 +117,7 @@ def _match(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
     matches: Sequence[str],
-    tools_key: str,
-    model: str | None,
+    key: hashing.MatchKey,
 ) -> tuple[list[int], Rendered | None]:
     """The longest prefix of ``messages`` in the graph, and the full render if one was needed.
 
@@ -151,7 +143,7 @@ def _match(
         depth = len(matched)
         parent = matched[-1] if matched else None
         same = None
-        for node_id in _candidates(graph, parent, messages[depth], tools_key, model):
+        for node_id in _candidates(graph, parent, messages[depth], key):
             if rendered is None:
                 rendered = renderer.render(messages, tools)
             swapped = [*messages[:depth], graph.nodes[node_id].message, *messages[depth + 1 :]]
@@ -166,23 +158,23 @@ def _match(
 
 
 def _candidates(
-    graph: MessageGraph, parent: int | None, message: Mapping[str, Any], tools_key: str, model: str | None
+    graph: MessageGraph, parent: int | None, message: Mapping[str, Any], key: hashing.MatchKey
 ) -> list[int]:
     """Children of ``parent`` that may be ``message`` spelled differently, one per spelling.
 
-    A child qualifies if its rendered fields equal the message's once empty
-    strings are dropped too, and it was matched under this call's tools and
+    A child qualifies if its fields equal the message's once empty strings are
+    dropped too, and it was matched by this call's key: the same tools and
     model. Siblings with the same match hash render alike, so only one is
     tried: the one history continues from (model-authored, then latest), as
     in ``MessageGraph.add``.
     """
-    loose = _loose(message)
+    loose = _loose(message, key)
     found: list[int] = []
     for node_id in graph.children(parent):
         node = graph.nodes[node_id]
-        if _loose(node.message) != loose:
+        if _loose(node.message, key) != loose:
             continue
-        if hashing.token_match_hash(node.message, tools=tools_key, model=model) != node.match_hash:
+        if key(node.message) != node.match_hash:
             continue
         found.append(node_id)
 
@@ -195,12 +187,12 @@ def _candidates(
     return list(by_spelling.values())
 
 
-def _loose(message: Mapping[str, Any]) -> dict[str, Any]:
-    """The message's rendered fields, with empty strings dropped as well as empty values."""
+def _loose(message: Mapping[str, Any], key: hashing.MatchKey) -> dict[str, Any]:
+    """The fields ``key`` matches ``message`` on, with empty strings dropped as well as empty values."""
     loose = {}
-    for key, value in hashing.canonical_message(hashing.rendered_fields(message)).items():
+    for field, value in key.fields(message).items():
         if value != "":
-            loose[key] = value
+            loose[field] = value
     return loose
 
 
