@@ -1,3 +1,4 @@
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
@@ -227,12 +228,16 @@ class MegatronModelWrapper:
         # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
         # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
         self._pending_grad_sync: Optional[dict] = None
-        # Set by `begin_forward_backward`, cleared by `run_pending_grad_sync`.
-        self._forward_backward_since_grad_sync = False
 
         config = get_model_config(self.actor_module[0])
         # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
         self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
+        if self._per_token_loss and any(
+            getattr(getattr(chunk, "ddp_config", None), "overlap_grad_reduce", False) for chunk in self.actor_module
+        ):
+            # _per_token_grad_scaling rescales the grad buffers between calls, which would race
+            # with reductions still in flight.
+            raise ValueError("calculate_per_token_loss (VLM context parallelism) requires overlap_grad_reduce=false")
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across
         # parallelism dimensions -- but deferred to optim_step rather than run per
@@ -263,36 +268,36 @@ class MegatronModelWrapper:
         So we record the request here and replay it exactly once from
         :meth:`run_pending_grad_sync`, called by the worker's ``optim_step``.
 
-        ``num_tokens`` is only non-None under ``calculate_per_token_loss``. The loss of each
-        ``forward_backward`` call is multiplied by that call's global token count so the
-        final division cancels (see ``loss_func``); with several calls the division
-        would use the window's summed count instead, so that mode supports one call per
-        optimizer step.
+        ``num_tokens`` is only non-None under ``calculate_per_token_loss``. It is dropped: that
+        mode's division by the token count is applied to each call's gradients by
+        :meth:`_per_token_grad_scaling`, so the replay must not divide again.
         """
-        del model, kwargs  # replayed against self.actor_module with default process groups
-        # Under calculate_per_token_loss, `begin_forward_backward` allows one call per window,
-        # so ``num_tokens`` is never overwritten here.
-        self._pending_grad_sync = {"num_tokens": num_tokens}
+        del model, num_tokens, kwargs  # replayed against self.actor_module with default process groups
+        self._pending_grad_sync = {"num_tokens": None}
 
-    def begin_forward_backward(self) -> None:
-        """Called by the worker at the start of every ``forward_backward``, on every rank.
+    @contextmanager
+    def _per_token_grad_scaling(self, num_tokens_global: int):
+        """Apply ``calculate_per_token_loss``'s division by the token count to this call's gradients only.
 
-        Under ``calculate_per_token_loss`` a second ``forward_backward`` before ``optim_step``
-        is refused here, before its backward adds gradients to the window.
+        Megatron divides the accumulated gradients once, at finalize, by the token count summed
+        over the window. Each call's loss is multiplied by its own global token count N (see
+        ``loss_func``), and the MoE router's aux loss by its token count, so with several calls
+        per window that single division would weight each call by N / window_total instead of
+        adding them up. Scaling the buffer by N before the call and by 1/N after it divides only
+        this call's gradients by N. The finalize replay then skips the division.
+
+        Gradients are still local here (the DP/CP reduction runs once, from
+        ``run_pending_grad_sync``), and ``scale_gradients`` is the per-chunk method finalize
+        uses for that division, so it covers the same buffers and needs no collective.
         """
-        if self._per_token_loss and self._forward_backward_since_grad_sync:
-            # Reached only when calculate_per_token_loss is on (Megatron-Bridge Qwen-VL models with
-            # context_parallel_size > 1) AND a second forward_backward runs before optim_step: e.g. a
-            # Tinker client calling forward_backward several times per optim_step
-            # (skyrl/backends/skyrl_train_backend.py forward_backward / optim_step). The RL and SFT
-            # trainers call forward_backward once per optim_step and never get here.
-            # TODO(xgui): support accumulating several forward_backward calls under
-            # calculate_per_token_loss by scaling with the window's token count.
-            raise ValueError(
-                "calculate_per_token_loss (on for Megatron-Bridge Qwen-VL models with context parallelism) "
-                "supports one forward_backward call per optim_step; got a second call before optim_step."
-            )
-        self._forward_backward_since_grad_sync = True
+        num_tokens_global = max(1, int(num_tokens_global))
+        for chunk in self.actor_module:
+            chunk.scale_gradients(float(num_tokens_global))
+        try:
+            yield
+        finally:
+            for chunk in self.actor_module:
+                chunk.scale_gradients(1.0 / num_tokens_global)
 
     def run_pending_grad_sync(self) -> None:
         """Reduce gradients across DP/TP/PP exactly once for the accumulated window.
@@ -303,7 +308,6 @@ class MegatronModelWrapper:
         """
         pending = self._pending_grad_sync
         self._pending_grad_sync = None
-        self._forward_backward_since_grad_sync = False
         finalize_model_grads_with_expert_adapter_sync(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
@@ -729,8 +733,9 @@ class MegatronModelWrapper:
             # KL / entropy / MTP terms are per-microbatch means averaged over DP and real microbatches.
             if per_token_loss:
                 # calculate_per_token_loss: the schedule leaves a 3-tuple loss unscaled, DDP sums over
-                # DP x CP, and finalize_model_grads divides by the global token count. Multiply by that
-                # count (attached by the worker) so the division cancels, as in verl's Megatron engine.
+                # DP x CP, and this call's gradients are divided by its global token count
+                # (_per_token_grad_scaling). Multiply by that count (attached by the worker) so the
+                # division cancels, as in verl's Megatron engine.
                 # Forward-only loss passes have no gradient sync, so the counts default there.
                 num_tokens_global = data.get("num_tokens_global", 1)
                 grad_sum_correction_factor = num_tokens_global
@@ -1319,7 +1324,12 @@ class MegatronModelWrapper:
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
         replay_enabled = any(batch["rollout_expert_indices"] is not None for batch in micro_batches)
-        with router_replay_schedule(replay_enabled):
+        grad_scaling = (
+            self._per_token_grad_scaling(micro_batches[0]["num_tokens_global"])
+            if per_token_loss and not forward_only
+            else nullcontext()
+        )
+        with router_replay_schedule(replay_enabled), grad_scaling:
             metrics_list = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,

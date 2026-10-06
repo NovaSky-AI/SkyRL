@@ -1065,15 +1065,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """Attach token counts for Megatron's per-token loss normalization, if it is on.
 
         With ``calculate_per_token_loss`` (forced on by Megatron-Bridge's Qwen-VL
-        providers when CP > 1), Megatron sums gradients over DP x CP and
-        ``finalize_model_grads`` divides them by the all-reduced sum of the
-        ``num_tokens`` every microbatch's loss returns. SkyRL's policy loss is
-        already normalized (advantages are pre-scaled per mini-batch, #1296), so the
-        loss function returns this rank's per-microbatch token count and multiplies
-        the loss by the global total, which the final division then cancels (as in
-        verl's Megatron engine). Counts are the tokens each CP rank processes (padded
-        packed length / CP); the MoE router's aux-loss scaling assumes the same
-        quantity, so finalize's division also normalizes the MoE aux / z losses.
+        providers when CP > 1), Megatron sums gradients over DP x CP and divides
+        them by the global token count; SkyRL applies that division to each
+        ``forward_backward`` call's gradients (``_per_token_grad_scaling``), so calls
+        accumulate. SkyRL's policy loss is already normalized (advantages are
+        pre-scaled per mini-batch, #1296), so the loss function returns this rank's
+        per-microbatch token count and multiplies the loss by the global total, which
+        the division then cancels (as in verl's Megatron engine). Counts are the
+        tokens each CP rank processes (padded packed length / CP); the MoE router's
+        aux-loss scaling assumes the same quantity, so the division also normalizes
+        the MoE aux / z losses.
         """
         if not getattr(get_model_config(self.actor_module[0]), "calculate_per_token_loss", False):
             return
@@ -1129,7 +1130,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
             ``metrics`` (all-reduced across DP).
         """
-        self.model.begin_forward_backward()
         self.model.train()
 
         all_metrics = defaultdict(list)

@@ -569,7 +569,8 @@ def _vlm_cp_training_batch(model_name: str) -> TrainingInputBatch:
 
 
 def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
-    """Packed forward logprobs, then one forward_backward + optim_step; returns (logprobs, results, grad_norms)."""
+    """Packed forward logprobs, one forward_backward + optim_step, then two half-batch
+    forward_backward calls + optim_step; returns (logprobs, results, grad_norms, split_grad_norms)."""
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
     num_gpus = tp * cp
@@ -593,13 +594,15 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
         output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
         logprobs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
         results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
-        if cp > 1:
-            # calculate_per_token_loss allows one forward_backward per optim_step. The second call is
-            # refused before its backward, so the grad norm below still covers only the first call.
-            with pytest.raises(ray.exceptions.RayTaskError, match="one forward_backward call per optim_step"):
-                ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
         grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
-        return logprobs, results, grad_norms
+        # Gradient accumulation over two forward_backward calls in one optimizer step (as a
+        # Tinker client may do). Under calculate_per_token_loss each call's gradients are
+        # divided by that call's own token count.
+        half = len(batch) // 2
+        for part in (batch.slice(0, half), batch.slice(half, len(batch))):
+            ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", part))
+        split_grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        return logprobs, results, grad_norms, split_grad_norms
 
 
 @pytest.mark.asyncio
@@ -630,13 +633,14 @@ async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
     bar is the bf16 floor while a wrong split shows up as O(1) differences.
     """
     batch = _vlm_cp_training_batch(model_name)
-    logprobs_nocp, results_nocp, grad_norms_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, tp=tp)
-    logprobs_cp, results_cp, grad_norms_cp = _run_vlm_cp_layout(model_name, batch, cp=2, tp=tp)
+    logprobs_nocp, results_nocp, grad_norms_nocp, split_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, tp=tp)
+    logprobs_cp, results_cp, grad_norms_cp, split_cp = _run_vlm_cp_layout(model_name, batch, cp=2, tp=tp)
 
     scored = batch["loss_mask"].bool()
     diff = (logprobs_cp - logprobs_nocp).abs()[scored]
     print(f"\n[cp parity] {model_name} tp={tp}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
     print(f"[cp parity] grad norms CP1={grad_norms_nocp} CP2={grad_norms_cp}")
+    print(f"[cp parity] two-call grad norms CP1={split_nocp} CP2={split_cp}")
     for k in ("policy_loss", "policy_kl"):
         print(f"[cp parity] {k}: CP1={results_nocp[0].metrics[k]} CP2={results_cp[0].metrics[k]}")
 
@@ -648,3 +652,8 @@ async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
     assert gn_nocp is not None and gn_nocp > 0 and gn_cp is not None
     # Same 10% band as test_megatron_worker's text CP check: a scaling bug is ~2x off.
     assert abs(gn_cp - gn_nocp) / gn_nocp < 0.1, (gn_cp, gn_nocp)
+    # Two calls per optimizer step accumulate as in the default mode. Dividing the window once
+    # by the summed token count would average the two calls instead, about half the norm.
+    split_gn_nocp, split_gn_cp = split_nocp[0], split_cp[0]
+    assert split_gn_nocp is not None and split_gn_nocp > 0 and split_gn_cp is not None
+    assert abs(split_gn_cp - split_gn_nocp) / split_gn_nocp < 0.1, (split_gn_cp, split_gn_nocp)
