@@ -154,7 +154,8 @@ class Glm5NextVLModel(MegatronModule):
             embeds = self.language_model.embedding(input_ids=input_ids, position_ids=None)
             embeds = embeds.transpose(0, 1).contiguous()  # [B, S, H] for the HF placeholder mask
 
-            if pixel_values is not None:
+            # An image-free microbatch carries an empty [0, D] pixel_values tensor, not None.
+            if pixel_values is not None and pixel_values.numel() > 0:
                 if image_grid_thw is None:
                     raise ValueError("pixel_values were given without image_grid_thw.")
                 image_embeds = self.get_image_features(pixel_values, image_grid_thw).pooler_output

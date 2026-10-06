@@ -68,9 +68,14 @@ def _config(model_path: str, language_model_only: bool = False) -> SkyRLTrainCon
     cfg.trainer.policy.language_model_only = language_model_only
     cfg.trainer.ref.language_model_only = language_model_only
     cfg.generator.inference_engine.language_model_only = language_model_only
+    # Policy-only forward: no colocated inference engine, no reference model.
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = TP
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = EP
+    # ETP defaults to TP; ETP x EP must divide the world size.
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
     # Forward-only: the optimizer state of ~24B params does not fit next to the weights.
     cfg.trainer.policy.inference_only_init = True
     validate_cfg(cfg)
@@ -218,12 +223,16 @@ def test_glm5_vlm_packed_vs_alone(glm5_vl_slice):
 @pytest.mark.h100
 @pytest.mark.megatron
 def test_glm5_vlm_text_only_matches_language_model_only(glm5_vl_slice):
-    """On text-only samples the VL wrapper must reproduce the text-only GPTModel path exactly:
-    the only difference is where the sequence-parallel scatter happens."""
+    """On text-only samples the VL wrapper must match the text-only GPTModel path: the only
+    difference is where the sequence-parallel scatter happens. The MoE forward is not
+    run-to-run deterministic (same path twice: mean ~0.012, max ~0.055 |dlogprob| on this
+    slice), so the bar is that noise level, not bitwise equality."""
     processor, rows = _build_rows(glm5_vl_slice)
     text_rows = [i for i, (_, size, _) in enumerate(PROMPTS) if size is None]
     batch = _batch(processor, rows, keep=text_rows)
     vl = _megatron_logprobs(glm5_vl_slice, batch, micro_batch=len(text_rows))
     text = _megatron_logprobs(glm5_vl_slice, batch, micro_batch=len(text_rows), language_model_only=True)
     scored = batch["loss_mask"].bool()
-    assert (vl - text).abs()[scored].max().item() < 1e-3
+    diff = (vl - text).abs()[scored]
+    print(f"\n[glm5 vl vs lm-only, text rows] mean={diff.mean().item():.4f} max={diff.max().item():.4f}")
+    assert diff.mean().item() < 0.03
