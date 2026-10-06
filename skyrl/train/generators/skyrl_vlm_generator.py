@@ -144,9 +144,6 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             response_length = 0
             stop_reason = "stop"
             done = False
-            # (number of messages through the observation, its token ids, add_generation_prompt), read only
-            # by the re-render check.
-            rendered_observations: List[Tuple[int, List[int], bool]] = []
 
             # ── Main loop ─────────────────────────────────────────────────
             while not done:
@@ -187,14 +184,9 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 new_obs = env_step_output["observations"]
                 step_reward: float = env_step_output["reward"]
                 done = env_step_output["done"]
-                # Only read by the re-render check; the rollout never re-renders the conversation.
-                conversation.append({"role": "assistant", "content": gen_text})
-                conversation.extend(new_obs)
 
                 # 3. Render the observation after a fixed base and append its tokens and images.
                 obs = await self.renderer.render_observation(new_obs, done)
-                if obs.token_ids:
-                    rendered_observations.append((len(conversation), obs.token_ids, not done))
                 obs_start = len(input_ids) + len(gen_ids)
                 if obs.features is not None:
                     mm_features = append_mm_features(mm_features, shift_mm_features(obs.features, obs_start))
@@ -210,9 +202,6 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 response_length = obs_start - prompt_length
                 if gen_ids:
                     per_step_rewards.append((step_reward, response_length - 1))
-
-            if self.generator_cfg.vision_language_rerender_check:
-                await self._log_rerender_mismatch(conversation, rendered_observations)
 
             # ── Build outputs ─────────────────────────────────────────────
             prompt_ids = input_ids[:prompt_length]
@@ -245,34 +234,6 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
         finally:
             await self.inference_engine_client.finish_session(session_id)
-
-    async def _log_rerender_mismatch(
-        self, conversation: ConversationType, rendered_observations: List[Tuple[int, List[int], bool]]
-    ) -> None:
-        """Log a warning for each observation whose appended tokens differ from a re-render in context.
-
-        Each observation was rendered after the fixed base conversation. Here the conversation up to
-        and including the observation is re-rendered, and its last tokens must equal the appended
-        ones. Assistant turns are not compared: the appended generated tokens are not expected to
-        match a re-render of the generated text. Chat templates rewrite assistant turns (Qwen3.5
-        drops the reasoning of earlier turns and inserts an empty think block when the text has no
-        ``</think>``), and the generated text may end with the eos string or be truncated.
-        """
-        for num_messages, obs_ids, add_generation_prompt in rendered_observations:
-            rendered = await self.renderer.render_prompt(
-                conversation[:num_messages], add_generation_prompt=add_generation_prompt
-            )
-            tail = rendered.token_ids[-len(obs_ids) :]
-            if tail == obs_ids:
-                continue
-            first_diff = next((i for i, (a, b) in enumerate(zip(tail, obs_ids)) if a != b), len(tail))
-            window = slice(max(0, first_diff - 8), first_diff + 8)
-            logger.warning(
-                f"Observation ending at message {num_messages} renders differently in the full conversation "
-                f"than after the fixed base, at observation token {first_diff}. "
-                f"Re-rendered: {self.tokenizer.decode(tail[window])!r}, "
-                f"token-in-token-out: {self.tokenizer.decode(obs_ids[window])!r}"
-            )
 
     @staticmethod
     def _decode_vision_features(

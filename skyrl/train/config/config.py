@@ -1389,11 +1389,6 @@ class GeneratorConfig(BaseConfig):
     """If True, use SkyRLVLMGymGenerator (multi-modal text+image rollouts). The prompt and each
     observation are rendered through the inference server's ``/v1/chat/completions/render`` and
     rollouts stay token-in-token-out."""
-    vision_language_rerender_check: bool = False
-    """Debug check for ``vision_language_generator``: at the end of each trajectory, re-render the
-    conversation up to each observation and log a warning if the observation's tokens differ from
-    the ones appended after the fixed base conversation. Assistant turns are not compared. Costs one
-    extra render per observation."""
     merge_stepwise_output: bool = False
     """When True (and step_wise_trajectories is True), apply prefix-aware merging
     to collapse multi-turn step-wise sequences into single sequences before training."""
@@ -1889,9 +1884,6 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
             if self.generator.vision_language_generator:
                 raise ValueError("sample-support capture does not support vision_language_generator")
-
-        if self.generator.vision_language_rerender_check and not self.generator.vision_language_generator:
-            raise ValueError("`vision_language_rerender_check=True` requires `vision_language_generator=True`.")
 
         # The VLM generator does not populate routed-expert indices.
         if self.generator.inference_engine.enable_return_routed_experts and self.generator.vision_language_generator:

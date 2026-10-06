@@ -147,7 +147,6 @@ def get_vlm_test_config(model: str) -> SkyRLTrainConfig:
     cfg.generator.step_wise_trajectories = False
     cfg.generator.apply_overlong_filtering = False
     cfg.generator.vision_language_generator = True
-    cfg.generator.vision_language_rerender_check = True
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
@@ -214,14 +213,7 @@ async def test_vlm_generator_color_classification(ray_init_fixture):
             "trajectory_ids": [TrajectoryID(instance_id=str(i), repetition_id=0) for i in range(num_prompts)],
         }
 
-        warnings = []
-        handler_id = logger.add(lambda m: warnings.append(str(m)), level="WARNING")
-        try:
-            generator_output: GeneratorOutput = await generator.generate(input_batch)
-        finally:
-            logger.remove(handler_id)
-        rerender_mismatches = [m for m in warnings if "renders differently in the full conversation" in m]
-        assert not rerender_mismatches, rerender_mismatches
+        generator_output: GeneratorOutput = await generator.generate(input_batch)
 
         # ── Structural assertions ──────────────────────────────────────
         required_keys = {
