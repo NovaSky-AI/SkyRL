@@ -585,7 +585,7 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_forward_batch_size_per_gpu = PACKING_MICRO_BATCH
     cfg.trainer.micro_train_batch_size_per_gpu = PACKING_MICRO_BATCH
-    try:
+    with ray_init():
         actor_group = init_worker_with_type(
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=num_gpus, cfg=cfg
         )
@@ -595,9 +595,6 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
         results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
         grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         return logprobs, results, grad_norms
-    finally:
-        ray.shutdown()
-        ray_init_for_tests()
 
 
 @pytest.mark.asyncio
@@ -613,7 +610,7 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
     ids=["qwen3_vl", "qwen3_5_vl", "qwen3_vl_tp2_sp", "qwen3_5_vl_tp2_sp"],
 )
 @pytest.mark.megatron
-async def test_megatron_vlm_cp_vs_no_cp(ray_init_fixture, model_name, tp):
+async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
     """VLM context parallelism must match CP=1: per-token logprobs and the gradient.
 
     The full packed stream goes to every CP rank and Megatron-Bridge's Qwen3VLModel
