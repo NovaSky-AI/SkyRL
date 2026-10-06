@@ -594,7 +594,11 @@ def _forward_logprobs(actor_group, batch: TrainingInputBatch) -> torch.Tensor:
 
 def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
     """Packed forward logprobs, one forward_backward + optim_step, then two half-batch
-    forward_backward calls + optim_step; returns (logprobs, results, grad_norms, split_grad_norms)."""
+    forward_backward calls + optim_step; returns (logprobs, results, grad_norms, split_grad_norms).
+
+    lr is 0, so optim_step only reduces, reports and clears the gradients: both phases see the
+    same weights and their grad norms are directly comparable.
+    """
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
     num_gpus = tp * cp
@@ -610,6 +614,7 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_forward_batch_size_per_gpu = PACKING_MICRO_BATCH
     cfg.trainer.micro_train_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.policy.optimizer_config.lr = 0
     with ray_init():
         actor_group = init_worker_with_type(
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=num_gpus, cfg=cfg
@@ -620,9 +625,8 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
         grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         # Gradient accumulation over two forward_backward calls in one optimizer step (as a
         # Tinker client may do). Under calculate_per_token_loss each call's gradients are
-        # divided by that call's own token count. The step above changed the weights, so the
-        # old logprobs are recomputed.
-        train_batch = _on_policy(batch, _forward_logprobs(actor_group, batch))
+        # divided by that call's own token count. The halves are the two microbatches of the
+        # full-batch call, so both modes should give the full-batch gradient.
         half = len(batch) // 2
         for part in (train_batch.slice(0, half), train_batch.slice(half, len(batch))):
             ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", part))
@@ -651,7 +655,9 @@ async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
     the 2*CP chunk boundaries of most samples, so a mismatched split shows up as large
     logprob differences. The grad-norm check covers loss scaling: the bridge forces
     calculate_per_token_loss under CP, so CP=2 runs Megatron's per-token mode (DDP sums,
-    no token-count division) while CP=1 runs the default mode.
+    each call's gradients divided by its token count) while CP=1 runs the default mode.
+    The batch is on-policy (old logprobs from the layout's own forward), so PPO clipping
+    can't differ between layouts.
     Both layouts use DP=1 (TP*1 vs TP*2 GPUs) so their microbatches are
     identical and only the CP split differs; the bf16 floor still applies (changing
     only microbatch composition moves these logprobs by ~0.034 mean), so the logprob
@@ -677,8 +683,8 @@ async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
     assert gn_nocp is not None and gn_nocp > 0 and gn_cp is not None
     # Same 10% band as test_megatron_worker's text CP check: a scaling bug is ~2x off.
     assert abs(gn_cp - gn_nocp) / gn_nocp < 0.1, (gn_cp, gn_nocp)
-    # Two calls per optimizer step accumulate as in the default mode. Dividing the window once
-    # by the summed token count would average the two calls instead, about half the norm.
-    split_gn_nocp, split_gn_cp = split_nocp[0], split_cp[0]
-    assert split_gn_nocp is not None and split_gn_nocp > 0 and split_gn_cp is not None
-    assert abs(split_gn_cp - split_gn_nocp) / split_gn_nocp < 0.1, (split_gn_cp, split_gn_nocp)
+    # Two calls per optimizer step must add up to the one-call gradient in each layout (same
+    # weights, lr=0). Dividing the window once by the summed token count would average the two
+    # calls instead, about half the norm.
+    for gn, split_gn in ((gn_nocp, split_nocp[0]), (gn_cp, split_cp[0])):
+        assert split_gn is not None and abs(split_gn - gn) / gn < 0.02, (split_gn, gn)
