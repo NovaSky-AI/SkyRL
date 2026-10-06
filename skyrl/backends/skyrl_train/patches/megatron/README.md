@@ -27,6 +27,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
+| `gpu_ci/patches/megatron/test_mhc_full_recompute.py` | `patch_mhc_full_recompute.py`, `patch_moe_release_dispatcher_probs.py` (loss/grads vs no recompute on a GLM-5.3-Flash slice) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -88,19 +89,19 @@ Two pieces, which may land separately.
   - Delete `mcore_ext/hyper_connection.py`.
 
 **b) MoE sub-layers in the mHC layer**
-- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
+- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`). Its
+  full recompute relies on `patch_moe_release_dispatcher_probs.py` (below), which is not mHC-specific.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
   no `NotImplementedError` for MoE.
 - **Remove:**
   - `glm5_next/layer_specs.py`: build the specs on megatron-core's layer.
   - `workers/megatron/megatron_worker.py`: the `enable_mhc_connections` block in `init_configs`
-    downgrades `recompute_granularity="full"` to selective and drops `'mhc'`. It exists because
-    megatron-core rejects mHC under full recompute, and our layer doesn't implement the mHC
-    recompute managers that megatron-core's suggested alternative (`'mhc'` in
-    `recompute_modules`) needs. With upstream's layer, keep a downgrade from full to selective
-    **with** `'mhc'` in `recompute_modules`, or delete the block entirely if upstream now allows
-    full recompute with mHC. SkyRL's default config is full recompute, and the GLM roundtrip
-    tests run on defaults.
+    downgrades `recompute_granularity="full"` to selective and drops `'mhc'` for any mHC layer
+    *other than* ours; ours keeps full recompute through `patch_mhc_full_recompute.py` (see
+    Standalone patches). Moving GLM onto upstream's layer takes it off that bypass: then keep a
+    downgrade from full to selective **with** `'mhc'` in `recompute_modules`, or delete the block
+    entirely if upstream now allows full recompute with mHC. SkyRL's default config is full
+    recompute, and the GLM roundtrip tests run on defaults.
   - Delete `mcore_ext/mhc_transformer_layer.py`.
 - **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`; the GLM roundtrip rows.
   These run with the default full recompute, so they exercise the worker block above.
@@ -191,6 +192,24 @@ softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
 - **Remove:** the `patch_sparse_mla_nope()` call in `MegatronWorker.make_megatron_module`, the
   module, and its CPU and GPU tests (`test_sparse_mla_nope.py`, and its line in
   `ci/gpu_ci_run_h100.sh`).
+
+### `patch_mhc_full_recompute.py`: megatron-core's mHC + full-recompute guard (NVIDIA/Megatron-LM#7521)
+
+`TransformerConfig.__post_init__` raises for `enable_mhc_connections` with
+`recompute_granularity="full"`. The guard protects megatron-core's own mHC layer, which threads
+recompute managers through every mHC site; SkyRL's `mcore_ext/mhc_transformer_layer.py` uses none,
+so megatron-core's generic `checkpointed_forward` can checkpoint it like any layer.
+`finalize_provider` (called in place of `provider.finalize()` in `MegatronWorker.init_configs`)
+bypasses only that check, for `Glm5NextModelProvider`; every other full-recompute and mHC
+validation still runs. This is what takes GLM-5.3-Flash past ~32k tokens per GPU. Since SkyRL's
+default is full recompute, GLM runs on defaults now get it instead of a silent downgrade to
+selective `core_attn`.
+- **Landed?** megatron-core's `__post_init__` no longer raises "enable_mhc_connections is not yet
+  compatible with full activation recompute".
+- **Remove:** the module, the `finalize_provider` / `uses_skyrl_mhc_layer` import and calls in
+  `megatron_worker.py` (back to `provider.finalize()`, and the downgrade condition loses its
+  `not uses_skyrl_mhc_layer(provider)` term), and `gpu_ci/patches/megatron/test_mhc_full_recompute.py`.
+  Also delete it if GLM moves onto megatron-core's mHC layer (see #7521 b above).
 
 ### `patch_moe_release_dispatcher_probs.py`: no upstream PR yet
 
