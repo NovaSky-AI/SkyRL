@@ -55,9 +55,7 @@ class BackgroundFailure:
             failure_wait.cancel()
 
 
-async def cancel_background_tasks(
-    tasks: Iterable[asyncio.Task[Any]], grace_s: float = TASK_SHUTDOWN_GRACE_S
-) -> None:
+async def cancel_background_tasks(tasks: Iterable[asyncio.Task[Any]], grace_s: float = TASK_SHUTDOWN_GRACE_S) -> None:
     """Cancel background tasks without waiting indefinitely for cleanup."""
     tasks = set(tasks)
     for task in tasks:
