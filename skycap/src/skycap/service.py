@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from skycap.env_vars import SKYCAP_START_EXPOSURE_TIMEOUT, SKYCAP_START_TIMEOUT
 from skycap.exposure import Exposure
 from skycap.paths import PathRule
 from skycap.server import Backend, CaptureServer
@@ -153,9 +154,10 @@ class CaptureService:
 
     def start(self, timeout: float | None = None) -> str:
         """Start serving and return the server's URL. Returns once it accepts connections and any exposure
-        is open. ``timeout`` defaults to 60 s, or 600 s with an exposure."""
+        is open. ``timeout`` defaults to ``SKYCAP_START_TIMEOUT`` (60 s), or ``SKYCAP_START_EXPOSURE_TIMEOUT``
+        (600 s) with an exposure."""
         if timeout is None:
-            timeout = 600.0 if self._exposure is not None else 60.0
+            timeout = SKYCAP_START_EXPOSURE_TIMEOUT if self._exposure is not None else SKYCAP_START_TIMEOUT
         self._thread = threading.Thread(target=self._run, name="skycap", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout):
