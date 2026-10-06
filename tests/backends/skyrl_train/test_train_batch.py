@@ -8,7 +8,9 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import (
+    LOSS_TOKEN_ALIGNED_PADDING,
     PACKED_FIELD_PADDING,
+    TENSOR_LIST_FIELD_PADDING,
     BatchField,
     TensorBatch,
     TensorFormat,
@@ -18,9 +20,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     _deserialize_tensor,
     _serialize_tensor,
     append_packed_field_padding,
+    append_tensor_list_padding,
     make_packed_field_padding,
     packed_dummy_row_segments,
     pad_training_input_batch,
+    register_tensor_list_padding,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
@@ -651,9 +655,9 @@ def test_pad_batch_all_fields():
     """Comprehensive test: pad_training_input_batch pads every field correctly.
 
     Verifies: all tensor fields have correct batch dim, original rows are untouched,
-    loss_mask padding is zero, other tensor padding is row-0 clones, TensorList padding
-    is row-0 clones, metadata (uids, is_last_step) is extended correctly, and
-    the input batch is not mutated.
+    loss_mask padding is zero, other tensor padding is row-0 clones, vision TensorList
+    padding is row-0 clones (their ``copied_row`` rule), metadata (uids, is_last_step) is
+    extended correctly, and the input batch is not mutated.
     """
     batch_size, seq_len, pad_size = 4, 5, 3
     batch = _make_full_training_batch(batch_size=batch_size, seq_len=seq_len)
@@ -967,3 +971,102 @@ def test_dummy_row_segments_cover_the_single_attended_token(key, rows_per_dummy_
 def test_packed_field_padding_refuses_an_unregistered_field():
     with pytest.raises(ValueError, match="no padding rule"):
         make_packed_field_padding("unregistered", _ZERO_COPY_PAYLOADS[ROUTE_KEY](), segment_lengths=[1])
+
+
+# ── TensorList field padding ─────────────────────────────────────────────────
+
+LOSS_TOKEN_PAYLOAD_KEY = "teacher_topk_logprobs"
+IMAGE_TOKEN_ID = 151655  # Qwen3-VL's image placeholder token
+SPATIAL_MERGE_SIZE = 2  # Qwen-VL vision_config.spatial_merge_size
+
+
+@pytest.fixture
+def loss_token_payload_key():
+    register_tensor_list_padding(LOSS_TOKEN_PAYLOAD_KEY, LOSS_TOKEN_ALIGNED_PADDING)
+    yield LOSS_TOKEN_PAYLOAD_KEY
+    del TENSOR_LIST_FIELD_PADDING[LOSS_TOKEN_PAYLOAD_KEY]
+
+
+def test_padded_rows_carry_no_loss_token_payload(loss_token_payload_key):
+    """A payload with one entry per loss token gets zero rows on padded rows, whose loss_mask is all zero."""
+    num_rows, dp_size, top_k = 18, 8, 4
+    loss_mask = torch.ones(num_rows, 6, dtype=torch.int)
+    payload = [torch.full((int(row.sum()), top_k), float(i), dtype=torch.bfloat16) for i, row in enumerate(loss_mask)]
+    batch = TrainingInputBatch({"loss_mask": loss_mask, loss_token_payload_key: TensorList(payload)})
+    batch.metadata = {"response_length": 6}
+    real_rows = [row.clone() for row in payload]
+
+    padded = pad_training_input_batch(batch[0:num_rows], (-num_rows) % dp_size)
+
+    assert len(padded) == 24
+    for row in range(len(padded)):
+        assert padded[loss_token_payload_key][row].shape[0] == int(padded["loss_mask"][row].sum()), f"row {row}"
+    for row, before in enumerate(real_rows):
+        assert padded[loss_token_payload_key][row].dtype == before.dtype
+        assert torch.equal(padded[loss_token_payload_key][row], before), f"real row {row} changed"
+    for row in range(num_rows, len(padded)):
+        assert padded[loss_token_payload_key][row].shape == (0, top_k)
+        assert padded[loss_token_payload_key][row].dtype == torch.bfloat16
+    assert append_tensor_list_padding(loss_token_payload_key, batch[loss_token_payload_key], 1)[-1].shape == (0, top_k)
+
+
+def _image_features(image_grid_thw: torch.Tensor) -> int:
+    """Image tokens a Qwen-VL model expects for one row's images: one per merged patch."""
+    return int(image_grid_thw.prod(dim=-1).sum()) // SPATIAL_MERGE_SIZE**2
+
+
+def test_padded_rows_keep_image_tokens_and_image_features_consistent():
+    """A padded row copies row 0's ``sequences``, image tokens included, so it needs row 0's image.
+
+    Qwen-VL models raise ``Image features and image tokens do not match`` when the image
+    tokens of a micro-batch and the features computed from its ``pixel_values`` disagree.
+    """
+    # An image row, a text-only row with empty placeholders (as Tinker builds them), and a two-image row.
+    grids = [torch.tensor([[1, 4, 4]]), torch.empty(0, 3, dtype=torch.long), torch.tensor([[1, 2, 4], [1, 2, 2]])]
+    sequences = torch.zeros(len(grids), 8, dtype=torch.long)
+    for row, image_grid_thw in enumerate(grids):
+        sequences[row, : _image_features(image_grid_thw)] = IMAGE_TOKEN_ID
+    batch = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": torch.ones_like(sequences),
+            "loss_mask": torch.ones(len(grids), 4),
+            "pixel_values": TensorList([torch.randn(int(g.prod(dim=-1).sum()), 6) for g in grids]),
+            "image_grid_thw": TensorList(grids),
+        }
+    )
+    batch.metadata = {"response_length": 4}
+
+    padded = pad_training_input_batch(batch, pad_size=2)
+
+    for row in range(len(padded)):
+        features = _image_features(padded["image_grid_thw"][row])
+        assert int((padded["sequences"][row] == IMAGE_TOKEN_ID).sum()) == features, f"row {row}"
+        assert padded["pixel_values"][row].shape[0] == features * SPATIAL_MERGE_SIZE**2, f"row {row}"
+
+
+def test_every_tensor_list_batch_field_has_a_padding_rule():
+    """``sub_seq_lengths`` is the packed SFT collator's batch field; it is not in ``TrainingInput``."""
+    tensor_list_fields = {
+        name for name, annotation in TrainingInput.__annotations__.items() if TensorList in get_args(annotation)
+    }
+    assert tensor_list_fields | {"sub_seq_lengths"} == set(TENSOR_LIST_FIELD_PADDING)
+
+
+def test_unregistered_tensor_list_field_clones_row_0_and_gets_empty_dummy_rows():
+    field = TensorList([torch.randn(2, 3), torch.randn(5, 3)])
+    batch = TrainingInputBatch({"loss_mask": torch.ones(2, 4), "unregistered": field})
+    batch.metadata = {}
+
+    padded = pad_training_input_batch(batch, pad_size=2)
+
+    for row in (2, 3):
+        assert torch.equal(padded["unregistered"][row], field[0])
+        assert padded["unregistered"][row].data_ptr() != field[0].data_ptr()
+    assert append_tensor_list_padding("unregistered", field, 1)[2].shape == (0, 3)
+
+
+def test_tensor_list_padding_rule_cannot_be_replaced():
+    register_tensor_list_padding("pixel_values", TENSOR_LIST_FIELD_PADDING["pixel_values"])
+    with pytest.raises(ValueError, match="already has a different padding rule"):
+        register_tensor_list_padding("pixel_values", LOSS_TOKEN_ALIGNED_PADDING)

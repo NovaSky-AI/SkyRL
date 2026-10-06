@@ -523,6 +523,9 @@ class TrainingInput(TypedDict, total=False):
     Only the width differs: ``seq_len`` spans prompt+response, while ``response_len``
     covers response tokens only and has no representation of the prompt. Built by
     ``convert_prompts_responses_to_batch_tensors``, which documents the layout in full.
+
+    Ragged fields need a padding rule: ``PackedTensor`` fields in ``PACKED_FIELD_PADDING``,
+    ``TensorList`` fields in ``TENSOR_LIST_FIELD_PADDING`` (see ``register_tensor_list_padding``).
     """
 
     sequences: Integer[torch.Tensor, "batch_size seq_len"]  # prompt + response token ids
@@ -605,6 +608,58 @@ def packed_dummy_row_segments(key: str, count: int) -> List[int]:
     return [_packed_field_padding_rule(key).dummy_row_length] * count
 
 
+def _clone_row(row: torch.Tensor) -> torch.Tensor:
+    return row.clone()
+
+
+def _zero_rows(row: torch.Tensor) -> torch.Tensor:
+    return row.new_empty((0, *row.shape[1:]))
+
+
+@dataclass(frozen=True)
+class TensorListFieldPadding:
+    """Padding rule for a ragged ``TensorList`` batch field.
+
+    Each function maps the field's row 0 to the entry of one padded row. ``copied_row`` is
+    used by ``pad_training_input_batch``, whose rows copy row 0's dense fields with an
+    all-zero ``loss_mask``. ``dummy_row`` is used by ``append_tensor_list_padding``, whose
+    rows have one attended token and no loss tokens.
+    """
+
+    copied_row: Callable[[torch.Tensor], torch.Tensor]
+    dummy_row: Callable[[torch.Tensor], torch.Tensor]
+
+
+# Fields aligned to a row's inputs must match that row's `sequences` and `attention_mask`.
+TENSOR_LIST_FIELD_PADDING: Dict[str, TensorListFieldPadding] = {
+    # A copied row repeats row 0's image tokens, so it needs row 0's image; a dummy row has none.
+    "pixel_values": TensorListFieldPadding(copied_row=_clone_row, dummy_row=_zero_rows),
+    "image_grid_thw": TensorListFieldPadding(copied_row=_clone_row, dummy_row=_zero_rows),
+    # Lengths sum to the row's attended tokens: row 0's for a copied row, 1 for a dummy row.
+    "sub_seq_lengths": TensorListFieldPadding(copied_row=_clone_row, dummy_row=lambda row: row.new_ones(1)),
+}
+
+# For a payload with `loss_mask[i].sum()` rows per batch row: padded rows have no loss tokens.
+LOSS_TOKEN_ALIGNED_PADDING = TensorListFieldPadding(copied_row=_zero_rows, dummy_row=_zero_rows)
+
+# Fields without a rule: copied rows clone row 0, dummy rows are empty.
+_DEFAULT_TENSOR_LIST_PADDING = TensorListFieldPadding(copied_row=_clone_row, dummy_row=_zero_rows)
+
+
+def register_tensor_list_padding(key: str, rule: TensorListFieldPadding) -> None:
+    """Set the padding rule of the ``TensorList`` batch field ``key``.
+
+    The registry is per process: register when the module that adds the field is imported.
+    """
+    if TENSOR_LIST_FIELD_PADDING.get(key, rule) != rule:
+        raise ValueError(f"TensorList field {key!r} already has a different padding rule")
+    TENSOR_LIST_FIELD_PADDING[key] = rule
+
+
+def _tensor_list_padding_rule(key: str) -> TensorListFieldPadding:
+    return TENSOR_LIST_FIELD_PADDING.get(key, _DEFAULT_TENSOR_LIST_PADDING)
+
+
 def append_tensor_list_padding(key: str, field: TensorList, count: int) -> TensorList:
     """Extend a ragged ``TensorList`` field with ``count`` synthetic batch rows.
 
@@ -612,6 +667,7 @@ def append_tensor_list_padding(key: str, field: TensorList, count: int) -> Tenso
     rest of the batch: consumers either check their length against
     ``sequences.shape[0]`` or derive the batch size from them.
 
+    Each row is the field's ``dummy_row`` from ``TENSOR_LIST_FIELD_PADDING``.
     ``sub_seq_lengths`` gets ``[1]``: one sub-sequence of one valid token, matching a
     synthetic row's single attended token. Other fields (e.g. ``pixel_values``,
     ``image_grid_thw``) get a zero-row tensor of the same trailing shape and dtype,
@@ -619,16 +675,17 @@ def append_tensor_list_padding(key: str, field: TensorList, count: int) -> Tenso
     """
     if count <= 0:
         return field
-    reference = field.tensors[0]
-    if key == "sub_seq_lengths":
-        row = torch.ones(1, dtype=reference.dtype, device=reference.device)
-    else:
-        row = torch.empty(0, *reference.shape[1:], dtype=reference.dtype, device=reference.device)
-    return TensorList.cat([field, TensorList([row.clone() for _ in range(count)])])
+    make_row = _tensor_list_padding_rule(key).dummy_row
+    return TensorList.cat([field, TensorList([make_row(field.tensors[0]) for _ in range(count)])])
 
 
 def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) -> TrainingInputBatch:
-    """Pad `pad_size` entries to `unpadded_batch`, return a newly allocated TrainingInputBatch. If pad_size is 0, return the original batch."""
+    """Pad `pad_size` entries to `unpadded_batch`, return a newly allocated TrainingInputBatch. If pad_size is 0, return the original batch.
+
+    A padded row copies row 0's dense fields, except for an all-zero ``loss_mask`` and an
+    all-True ``router_padding_mask``. ``PackedTensor`` and ``TensorList`` fields follow their
+    rules in ``PACKED_FIELD_PADDING`` and ``TENSOR_LIST_FIELD_PADDING`` (``copied_row``).
+    """
     # TODO(Charlie): This incurs 2x CPU memory usage when pad_size > 0. Optimize when needed.
     # Padding allocates and concatenates; it should not happen on GPU hot path.
     assert unpadded_batch.device is None or unpadded_batch.device == torch.device(
@@ -652,8 +709,8 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
 
         if isinstance(tensor, TensorList):
             assert len(tensor) > 0, f"Cannot pad empty TensorList field {key!r}"
-            padding = TensorList([tensor[0].clone() for _ in range(pad_size)])
-            new_tensors[key] = TensorList.cat([tensor, padding])
+            make_row = _tensor_list_padding_rule(key).copied_row
+            new_tensors[key] = TensorList.cat([tensor, TensorList([make_row(tensor[0]) for _ in range(pad_size)])])
         elif isinstance(tensor, PackedTensor):
             # Padded rows copy row 0, including its segment length.
             new_tensors[key] = append_packed_field_padding(

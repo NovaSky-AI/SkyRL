@@ -11,7 +11,12 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.dispatch import MeshDispatch
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    LOSS_TOKEN_ALIGNED_PADDING,
+    TENSOR_LIST_FIELD_PADDING,
+    TensorList,
+    TrainingInputBatch,
+)
 from skyrl.train.dataset.preprocess import (
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
@@ -310,3 +315,30 @@ class TestStageChunksVariable:
         mb_loss = torch.cat([c["loss_mask"] for c in chunks_put], dim=0)
         assert torch.equal(mb_loss[:5], batch["loss_mask"][:5])
         assert torch.all(mb_loss[5:] == 0)
+
+    def test_loss_token_payload_matches_loss_mask_in_every_chunk(self, monkeypatch):
+        """A payload with one entry per loss token stays aligned on rows padded for DP divisibility."""
+        key = "teacher_topk_logprobs"
+        monkeypatch.setitem(TENSOR_LIST_FIELD_PADDING, key, LOSS_TOKEN_ALIGNED_PADDING)
+        batch = _make_batch(7)
+        batch["loss_mask"][1] = 0  # real rows without loss tokens, one of them first in its mini-batch
+        batch["loss_mask"][5] = 0
+        batch["loss_mask"][3, :4] = 0
+        payload = [torch.full((int(row.sum()), 2), float(i)) for i, row in enumerate(batch["loss_mask"])]
+        batch[key] = TensorList(payload)
+        boundaries = [(0, 5), (5, 7)]
+
+        with patch("skyrl.backends.skyrl_train.distributed.dispatch.ray") as mock_ray:
+            chunks_put = []
+            mock_ray.put.side_effect = lambda x: (chunks_put.append(x), len(chunks_put) - 1)[1]
+            MeshDispatch.stage_chunks(dp_size=4, data=batch, mini_batch_boundaries=boundaries)
+
+        # Mini-batches of 5 and 2 rows are padded to 8 and 4, then split into 4 chunks each.
+        assert [len(chunk) for chunk in chunks_put] == [2, 2, 2, 2, 1, 1, 1, 1]
+        for chunk in chunks_put:
+            for row in range(len(chunk)):
+                assert chunk[key][row].shape[0] == int(chunk["loss_mask"][row].sum())
+        for (start, end), chunks in zip(boundaries, [chunks_put[:4], chunks_put[4:]]):
+            staged = TensorList.cat([chunk[key] for chunk in chunks])
+            for offset, row in enumerate(range(start, end)):
+                assert torch.equal(staged[offset], payload[row])
