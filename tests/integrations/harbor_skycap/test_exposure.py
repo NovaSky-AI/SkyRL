@@ -2,7 +2,11 @@
 exposure named by import path, the gateway, and the URL the generator hands the agent."""
 
 import asyncio
+import signal
 import socket
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -215,6 +219,59 @@ def test_the_cloudflare_exposure_opens_a_quick_tunnel_to_the_gateway(service, mo
     (fake,) = opened
     assert url == "https://corp-provides-trademark-effective.trycloudflare.com"
     assert fake.local_url.startswith("http://127.0.0.1:") and fake.started == (5.0, 1) and fake.stopped
+
+
+SLEEPER = [sys.executable, "-c", "import os, time; print(os.getpid(), flush=True); time.sleep(600)"]
+
+
+def alive(pid: int) -> bool:
+    """Whether ``pid`` runs: not gone, and not a zombie its new parent hasn't reaped."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def wait_dead(pid: int, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    return not alive(pid)
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="reads /proc")
+def test_a_tied_process_stops_when_its_parent_is_killed() -> None:
+    # The parent starts the process tied and is then killed with SIGKILL, so nothing of its own runs.
+    parent = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys, time; from examples.train_integrations.harbor_skycap.tunnel import spawn_tied; "
+            f"p = spawn_tied({SLEEPER!r}); print(p.stdout.readline().strip(), flush=True); time.sleep(600)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=Path(__file__).resolve().parents[3],
+    )
+    pid = int(parent.stdout.readline())
+    assert alive(pid)
+    parent.send_signal(signal.SIGKILL)
+    parent.wait()
+    assert wait_dead(pid)
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="reads /proc")
+def test_stopping_a_tied_process_stops_it_and_its_wrapper() -> None:
+    process = tunnel.spawn_tied(SLEEPER)
+    pid = int(process.stdout.readline())
+    started = time.monotonic()
+    tunnel.stop_tied(process, timeout=10.0)
+    assert time.monotonic() - started < 5.0
+    assert process.returncode is not None and wait_dead(pid)
+    # A command that exits on its own closes the wrapper's stdout, so a reader of it sees the exit.
+    quick = tunnel.spawn_tied([sys.executable, "-c", "print('done')"])
+    assert quick.stdout.read() == "done\n"
+    tunnel.stop_tied(quick, timeout=10.0)
 
 
 def test_a_failed_tunnel_request_is_not_taken_for_the_tunnel() -> None:

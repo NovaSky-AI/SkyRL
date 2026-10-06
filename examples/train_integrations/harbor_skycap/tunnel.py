@@ -3,12 +3,18 @@
 It needs no account and is gone when it stops. ``exposure.CloudflareQuickTunnel``
 opens one per skycap server, to the server's harness gateway. The cloudflared
 binary is taken from ``PATH``, or downloaded once from Cloudflare's releases.
+
+cloudflared is tied to the process that started it (``spawn_tied``): it is
+stopped when that process exits however it exits, a ``kill -9`` or Ray's
+``ray.kill`` of a server actor included, so a tunnel never outlives its server.
 """
 
+import contextlib
 import os
 import platform
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import threading
@@ -17,13 +23,46 @@ import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
-from typing import Deque, Optional
+from typing import Deque, List, Optional
 
 from loguru import logger
 
 #: A quick tunnel's own URL in cloudflared's output. api.trycloudflare.com is where tunnels are
 #: requested from, and shows up in cloudflared's error lines when that request fails.
 TUNNEL_URL = re.compile(r"https://(?!api\.)[-a-z0-9]+\.trycloudflare\.com")
+
+#: Runs "$@" and kills it once stdin reaches EOF: when ``stop`` closes the pipe, or when the process
+#: holding its other end dies, which the kernel does however that process exits. The watcher's output
+#: goes to /dev/null so that the command's exit closes stdout, which is how a reader sees it exit.
+_TIED = 'exec 3<&0; "$@" 0<&- 3<&- & child=$!; ( cat <&3 >/dev/null; kill "$child" ) >/dev/null 2>&1 & wait "$child"'
+
+
+def spawn_tied(args: List[str]) -> subprocess.Popen:
+    """Start ``args`` so that it stops when this process exits, however it exits.
+
+    The process returned is a ``sh`` wrapper in a session of its own; its stdout carries the
+    command's stdout and stderr. ``stop_tied`` stops it.
+    """
+    return subprocess.Popen(
+        ["sh", "-c", _TIED, "sh", *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def stop_tied(process: subprocess.Popen, timeout: float) -> None:
+    """Stop what ``spawn_tied`` started: close its stdin, then kill its process group if it lingers."""
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+        process.wait(timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
 
 
 class CloudflareTunnel:
@@ -55,12 +94,7 @@ class CloudflareTunnel:
 
     def _start_once(self, timeout: float) -> str:
         self.url = None
-        self._process = subprocess.Popen(
-            [_cloudflared(), "tunnel", "--no-autoupdate", "--url", self.local_url],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        self._process = spawn_tied([_cloudflared(), "tunnel", "--no-autoupdate", "--url", self.local_url])
         found = threading.Event()
         recent: Deque[str] = deque(maxlen=20)
 
@@ -98,14 +132,9 @@ class CloudflareTunnel:
         )
 
     def stop(self, timeout: float = 10.0) -> None:
-        if self._process is None:
-            return
-        self._process.terminate()
-        try:
-            self._process.wait(timeout)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-        self._process = None
+        process, self._process = self._process, None
+        if process is not None:
+            stop_tied(process, timeout)
 
 
 def _reaches_skycap(url: str) -> bool:
