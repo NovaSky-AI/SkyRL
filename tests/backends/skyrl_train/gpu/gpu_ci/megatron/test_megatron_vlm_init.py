@@ -558,7 +558,11 @@ async def test_megatron_vlm_packed_vs_unpacked(model_name, tp, pp):
 
 
 def _vlm_cp_training_batch(model_name: str) -> TrainingInputBatch:
-    """The packing-parity batch (first 8 samples) with non-trivial PPO inputs."""
+    """The packing-parity batch (first 8 samples) with non-trivial PPO inputs.
+
+    The old and rollout logprobs are placeholders: ``_run_vlm_cp_layout`` replaces them with
+    the layout's own forward logprobs before training.
+    """
     batch = get_packing_parity_batch(model_name)[:8]
     shape = batch["advantages"].shape
     batch["advantages"] = torch.full(shape, 0.5)
@@ -566,6 +570,26 @@ def _vlm_cp_training_batch(model_name: str) -> TrainingInputBatch:
         batch[key] = torch.full(shape, -1.0)
     batch.metadata["global_step"] = 0
     return batch
+
+
+def _on_policy(batch: TrainingInputBatch, logprobs: torch.Tensor) -> TrainingInputBatch:
+    """Copy of ``batch`` with old and rollout logprobs set to ``logprobs`` (importance ratio 1).
+
+    Fixed old logprobs put some tokens near the PPO clip boundary, where bf16-level logprob
+    differences between parallel layouts clip different tokens and move the grad norm by
+    several percent. With ratio 1 no token is near the boundary.
+    """
+    on_policy = TrainingInputBatch({k: v for k, v in batch.items()})
+    on_policy.metadata = batch.metadata
+    on_policy["action_log_probs"] = logprobs.clone()
+    on_policy["rollout_logprobs"] = logprobs.clone()
+    return on_policy
+
+
+def _forward_logprobs(actor_group, batch: TrainingInputBatch) -> torch.Tensor:
+    refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
+    output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
+    return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
 
 
 def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
@@ -590,16 +614,17 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
         actor_group = init_worker_with_type(
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=num_gpus, cfg=cfg
         )
-        refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
-        output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
-        logprobs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
-        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+        logprobs = _forward_logprobs(actor_group, batch)
+        train_batch = _on_policy(batch, logprobs)
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", train_batch))
         grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         # Gradient accumulation over two forward_backward calls in one optimizer step (as a
         # Tinker client may do). Under calculate_per_token_loss each call's gradients are
-        # divided by that call's own token count.
+        # divided by that call's own token count. The step above changed the weights, so the
+        # old logprobs are recomputed.
+        train_batch = _on_policy(batch, _forward_logprobs(actor_group, batch))
         half = len(batch) // 2
-        for part in (batch.slice(0, half), batch.slice(half, len(batch))):
+        for part in (train_batch.slice(0, half), train_batch.slice(half, len(batch))):
             ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", part))
         split_grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         return logprobs, results, grad_norms, split_grad_norms
