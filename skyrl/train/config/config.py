@@ -1391,9 +1391,9 @@ class GeneratorConfig(BaseConfig):
     rollouts stay token-in-token-out."""
     vision_language_rerender_check: bool = False
     """Debug check for ``vision_language_generator``: at the end of each trajectory, re-render the
-    whole conversation and log a warning if its tokens differ from the token-in-token-out
-    sequence. Differences inside assistant turns are expected when re-tokenizing generated text
-    splits it differently. Costs one extra render per trajectory."""
+    conversation up to each observation and log a warning if the observation's tokens differ from
+    the ones appended after the fixed base conversation. Assistant turns are not compared. Costs one
+    extra render per observation."""
     merge_stepwise_output: bool = False
     """When True (and step_wise_trajectories is True), apply prefix-aware merging
     to collapse multi-turn step-wise sequences into single sequences before training."""

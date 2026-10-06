@@ -410,23 +410,55 @@ async def test_vlm_refuses_image_numbering_templates(_mock_decode, tokenizer):
         await generator.generate(_input_batch("cpu_vlm_image_obs_env"))
 
 
+class MockNumberedUserRenderServer(MockRenderServer):
+    """Prefixes each user message with its position among the user messages, which the fixed base cannot reproduce."""
+
+    async def __call__(self, request_payload):
+        payload = copy.deepcopy(request_payload)
+        user_index = 0
+        for message in payload["json"]["messages"]:
+            if message["role"] == "user":
+                user_index += 1
+                message["content"] = f"[{user_index}] {message['content']}"
+        return await super().__call__(payload)
+
+
+async def _rerender_warnings(generator, env_class: str = "cpu_vlm_test_env") -> List[str]:
+    messages = []
+    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        await generator.generate(_input_batch(env_class))
+    finally:
+        logger.remove(handler_id)
+    return [m for m in messages if "renders differently in the full conversation" in m]
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("env_class", ["cpu_vlm_test_env", "cpu_vlm_image_obs_env"])
 @patch(DECODE_MM_KWARGS, side_effect=_fake_decode)
-async def test_vlm_rerender_check_logs_a_mismatch(_mock_decode, tokenizer):
-    # The engine returns ids that re-tokenizing the text does not reproduce.
-    llm = MockLLM(tokenizer, response_text="hello")
+async def test_vlm_rerender_check_ignores_assistant_turns(_mock_decode, tokenizer, env_class):
+    # The engine returns ids that re-tokenizing the text does not reproduce, and text that keeps the
+    # eos string, so the re-rendered assistant turns differ from the appended ones.
+    llm = MockLLM(tokenizer, response_text="hello", response_suffix=tokenizer.eos_token)
     llm.response_ids = tokenizer.encode("hel", add_special_tokens=False) + tokenizer.encode(
         "lo" + tokenizer.eos_token, add_special_tokens=False
     )
     assert llm.response_ids != tokenizer.encode("hello" + tokenizer.eos_token, add_special_tokens=False)
     generator = _build_generator(tokenizer, MockRenderServer(tokenizer), llm, vision_language_rerender_check=True)
-    messages = []
-    handler_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
-    try:
-        await generator.generate(_input_batch())
-    finally:
-        logger.remove(handler_id)
-    assert any("differs from the token-in-token-out sequence" in m for m in messages)
+    assert await _rerender_warnings(generator, env_class) == []
+
+
+@pytest.mark.asyncio
+@patch(DECODE_MM_KWARGS, side_effect=_fake_decode)
+async def test_vlm_rerender_check_logs_an_observation_mismatch(_mock_decode, tokenizer):
+    generator = _build_generator(
+        tokenizer, MockNumberedUserRenderServer(tokenizer), MockLLM(tokenizer), vision_language_rerender_check=True
+    )
+    warnings = await _rerender_warnings(generator)
+    # After the fixed base, every observation is the second user message; in the conversation, the
+    # first observation is too, but the second is the third.
+    assert len(warnings) == 1
+    assert "[3]" in warnings[0] and "[2]" in warnings[0]
 
 
 # ---------------------------------------------------------------------------

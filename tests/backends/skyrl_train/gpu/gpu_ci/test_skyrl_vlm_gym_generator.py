@@ -214,7 +214,14 @@ async def test_vlm_generator_color_classification(ray_init_fixture):
             "trajectory_ids": [TrajectoryID(instance_id=str(i), repetition_id=0) for i in range(num_prompts)],
         }
 
-        generator_output: GeneratorOutput = await generator.generate(input_batch)
+        warnings = []
+        handler_id = logger.add(lambda m: warnings.append(str(m)), level="WARNING")
+        try:
+            generator_output: GeneratorOutput = await generator.generate(input_batch)
+        finally:
+            logger.remove(handler_id)
+        rerender_mismatches = [m for m in warnings if "renders differently in the full conversation" in m]
+        assert not rerender_mismatches, rerender_mismatches
 
         # ── Structural assertions ──────────────────────────────────────
         required_keys = {
