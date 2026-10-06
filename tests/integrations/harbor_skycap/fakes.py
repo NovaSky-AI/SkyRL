@@ -175,7 +175,8 @@ class FakeTrial:
     async def run(self) -> SimpleNamespace:
         script = str(self.config["task"]["path"])
         kwargs = self.config["agent"]["kwargs"]
-        base_url = kwargs["api_base"]
+        # As the agent finds its endpoint: an installed one in the sandbox's environment, Terminus-2 in its kwargs.
+        base_url = (self.config["agent"].get("env") or {}).get("OPENAI_API_BASE") or kwargs["api_base"]
         extra = kwargs.get("llm_kwargs", {}).get("extra_body", {})
 
         async def chat(session: aiohttp.ClientSession, messages: list[dict[str, Any]]) -> dict[str, Any]:
