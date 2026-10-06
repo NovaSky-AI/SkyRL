@@ -78,23 +78,6 @@ _SUM_METRICS = (
 )
 _MEAN_METRICS = (_GAUGE_KV_CACHE_USAGE,)
 
-# Common PD keys select one role's existing reduction. TTFT mean uses both roles below.
-_PD_METRIC_ROLES = {
-    "prompt_throughput_tok_s": "prefill",
-    "prompt_tokens_total": "prefill",
-    "generation_throughput_tok_s": "decode",
-    "output_tokens_total": "decode",
-    "tpot_seconds_avg": "decode",
-    "tpot_seconds_p90": "decode",
-    "prefix_cache_hit_rate": "prefill",
-    "external_prefix_cache_hit_rate": "prefill",
-    "kv_cache_usage_perc": "prefill",
-    "prompt_throughput_cv": "prefill",
-    "prompt_throughput_cv_num_engines": "prefill",
-    "generation_throughput_cv": "decode",
-    "generation_throughput_cv_num_engines": "decode",
-}
-
 ParsedSamples = Dict[Tuple[str, FrozenSet[Tuple[str, str]]], float]
 
 
@@ -278,19 +261,12 @@ class VLLMMetricsScraper:
         }
 
     def _role_metrics(self, results: List[Dict[str, float]]) -> Dict[str, float]:
-        """Keep role scopes and add selected common keys for PD comparisons."""
+        """Keep the existing metrics under separate prefill and decode scopes."""
         out = {}
         for role, metrics in zip(self._role_scrapers, results):
             for key, value in metrics.items():
                 prefix, name = key.rsplit("/", 1)
                 out[f"{prefix}/{role}/{name}"] = value
-                if _PD_METRIC_ROLES.get(name) == role:
-                    out[key] = value
-        # Sequential PD engine means approximate TTFT for matching request cohorts.
-        # Their P90s cannot be added; keep those only in the role scopes.
-        for key, value in results[0].items():
-            if key.endswith("/ttft_seconds_avg") and key in results[1]:
-                out[key] = value + results[1][key]
         return out
 
     async def _get_client(self) -> httpx.AsyncClient:

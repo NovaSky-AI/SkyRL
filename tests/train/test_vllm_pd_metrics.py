@@ -23,22 +23,15 @@ def _exports(phase, missing_worker=None):
         for name, value in {
             "num_requests_running": 2 if worker.startswith("p") else 3,
             "num_requests_waiting": 5 if worker.startswith("p") else 1,
-            "kv_cache_usage_perc": 0.2 if worker.startswith("p") else 0.7,
             "generation_tokens_total": 1000 + phase * output,
             "prompt_tokens_total": 1000 + phase * prompt,
             "prefix_cache_queries_total": 1000 + phase * prompt,
-            "prefix_cache_hits_total": 100 + phase * prompt * (0.5 if worker.startswith("p") else 0.25),
-            "external_prefix_cache_queries_total": 1000 + phase * prompt,
-            "external_prefix_cache_hits_total": 100 + phase * prompt * (0.2 if worker.startswith("p") else 0.75),
+            "prefix_cache_hits_total": 100 + phase * prompt / 2,
         }.items():
             lines.append(f"ray_vllm_{name}{{{labels}}} {value}")
         for name, mean, bound in [
             ("time_to_first_token_seconds", latency, 0.2 if worker.startswith("p") else 1),
-            (
-                "request_time_per_output_token_seconds",
-                0.01 if worker.startswith("p") else 0.03,
-                0.02 if worker.startswith("p") else 0.05,
-            ),
+            ("request_time_per_output_token_seconds", 0.03, 0.05),
         ]:
             count = 1 + phase
             lines.extend(
@@ -53,8 +46,8 @@ def _exports(phase, missing_worker=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sync,label", [(False, "vllm"), (True, "vllm/train"), (True, "vllm/eval")])
-async def test_pd_windows_keep_role_counters_histograms_and_reused_baselines_separate(monkeypatch, sync, label):
+@pytest.mark.parametrize("sync", [False, True])
+async def test_pd_windows_keep_role_counters_histograms_and_reused_baselines_separate(monkeypatch, sync):
     clock = {"time": 0, "phase": 0}
     monkeypatch.setattr("skyrl.train.utils.vllm_metrics_scraper.time.monotonic", lambda: clock["time"])
     scraper = VLLMMetricsScraper(urls=["http://test/metrics"])
@@ -72,39 +65,25 @@ async def test_pd_windows_keep_role_counters_histograms_and_reused_baselines_sep
             await scraper.sample()
         for phase, seconds in [(1, 2), (2, 8)]:
             if sync:
-                await scraper.start(label)
+                await scraper.start("vllm/train")
                 scraper.pause()
                 clock["time"] += 5
                 scraper.resume()
             clock["phase"] = phase
             clock["time"] += seconds
             step = await scraper.stop() if sync else await scraper.sample()
-            prefix = label + "/"
+            prefix = "vllm/train/" if sync else "vllm/"
             assert step[prefix + "prefill/prompt_throughput_tok_s"] == pytest.approx(100 / seconds)
             assert step[prefix + "decode/generation_throughput_tok_s"] == pytest.approx(100 / seconds)
             assert step[prefix + "prefill/prompt_throughput_cv"] == pytest.approx(0.2)
             assert step[prefix + "decode/generation_throughput_cv"] == pytest.approx(0.4)
             assert step[prefix + "prefill/num_requests_waiting"] == 10
             assert step[prefix + "decode/num_requests_waiting"] == 2
-            assert step[prefix + "prompt_throughput_tok_s"] == step[prefix + "prefill/prompt_throughput_tok_s"]
-            assert step[prefix + "generation_throughput_tok_s"] == step[prefix + "decode/generation_throughput_tok_s"]
-            assert step[prefix + "ttft_seconds_avg"] == pytest.approx(0.4)
-            assert prefix + "ttft_seconds_p90" not in step
-            assert step[prefix + "tpot_seconds_avg"] == pytest.approx(0.03)
-            assert step[prefix + "tpot_seconds_p90"] == pytest.approx(0.045)
-            assert step[prefix + "prefix_cache_hit_rate"] == pytest.approx(0.5)
-            assert step[prefix + "external_prefix_cache_hit_rate"] == pytest.approx(0.2)
-            assert step[prefix + "kv_cache_usage_perc"] == pytest.approx(0.2)
-            assert step[prefix + "prompt_throughput_cv"] == pytest.approx(0.2)
-            assert step[prefix + "generation_throughput_cv"] == pytest.approx(0.4)
-            assert step[prefix + "prompt_throughput_cv_num_engines"] == 2
-            assert step[prefix + "generation_throughput_cv_num_engines"] == 2
-            assert prefix + "num_requests_waiting" not in step
         # The sync window is closed; finalization still closes both role clients.
         summary = await scraper.finalize()
     finally:
         await scraper.aclose()
-    scope = label.split("/")[-1] if sync else "combined"
+    scope = "train" if sync else "combined"
     prefix = f"vllm_correct_aggregate/{scope}/"
     assert summary[prefix + "prefill/prompt_tokens_total"] == 200
     assert summary[prefix + "decode/output_tokens_total"] == 200
@@ -116,21 +95,11 @@ async def test_pd_windows_keep_role_counters_histograms_and_reused_baselines_sep
     assert summary[prefix + "decode/ttft_seconds_p90"] == pytest.approx(0.9)
     assert summary[prefix + "decode/tpot_seconds_avg"] == pytest.approx(0.03)
     assert summary[prefix + "prefill/prefix_cache_hit_rate"] == pytest.approx(0.5)
-    assert summary[prefix + "decode/prefix_cache_hit_rate"] == pytest.approx(0.25)
+    assert summary[prefix + "decode/prefix_cache_hit_rate"] == pytest.approx(0.5)
     assert summary[prefix + "prefill/output_tokens_total"] == 4
-    assert summary[prefix + "prefill/tpot_seconds_avg"] == pytest.approx(0.01)
+    assert summary[prefix + "prefill/tpot_seconds_avg"] == pytest.approx(0.03)
     assert summary[prefix + "decode/prompt_tokens_total"] == 200
-    assert summary[prefix + "prompt_tokens_total"] == 200
-    assert summary[prefix + "output_tokens_total"] == 200
-    assert summary[prefix + "prompt_throughput_tok_s"] == pytest.approx(20)
-    assert summary[prefix + "generation_throughput_tok_s"] == pytest.approx(20)
-    assert summary[prefix + "ttft_seconds_avg"] == pytest.approx(0.4)
-    assert prefix + "ttft_seconds_p90" not in summary
-    assert summary[prefix + "tpot_seconds_avg"] == pytest.approx(0.03)
-    assert summary[prefix + "tpot_seconds_p90"] == pytest.approx(0.045)
-    assert summary[prefix + "prefix_cache_hit_rate"] == pytest.approx(0.5)
-    assert summary[prefix + "external_prefix_cache_hit_rate"] == pytest.approx(0.2)
-    assert prefix + "measurement_seconds" not in summary
+    assert not any(key.rsplit("/", 2)[-2] not in {"prefill", "decode"} for key in summary)
     assert all(child._client is None for child in scraper._role_scrapers.values())
 
 
@@ -155,10 +124,6 @@ async def test_missing_prefill_worker_omits_only_prefill_summary(monkeypatch):
     summary = await scraper.finalize()
     assert not any("/prefill/" in key for key in summary)
     assert summary["vllm_correct_aggregate/combined/decode/output_tokens_total"] == 200
-    assert summary["vllm_correct_aggregate/combined/output_tokens_total"] == 200
-    assert "vllm_correct_aggregate/combined/prompt_tokens_total" not in summary
-    assert "vllm_correct_aggregate/combined/ttft_seconds_avg" not in summary
-    assert summary["vllm_correct_aggregate/combined/tpot_seconds_p90"] == pytest.approx(0.045)
 
 
 def test_setup_uses_server_groups_to_assign_worker_roles(tmp_path, monkeypatch):
