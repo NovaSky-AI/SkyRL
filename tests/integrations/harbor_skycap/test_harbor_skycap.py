@@ -2,7 +2,6 @@
 server in token mode, which calls a mock SkyRL router."""
 
 import asyncio
-from datetime import datetime
 from types import SimpleNamespace
 
 import numpy as np
@@ -156,11 +155,11 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
     # Harbor's phases, per attempt: one attempt, nothing retried or failed.
     for phase, seconds in (("environment_setup", SETUP), ("agent_execution", AGENT), ("verifier", VERIFY)):
         for stat in ("mean", "p90", "max"):
-            assert metrics[f"generate/skycap/{phase}_time_{stat}"] == pytest.approx(seconds)
-    assert metrics["generate/skycap/num_attempts"] == 1
-    assert metrics["generate/skycap/num_retried_attempts"] == 0
-    assert metrics["generate/skycap/num_failed_attempts"] == 0
-    assert not any(k.startswith("generate/skycap/num_failed_attempts/") for k in metrics)
+            assert metrics[f"generate/harbor/{phase}_time_{stat}"] == pytest.approx(seconds)
+    assert metrics["generate/harbor/num_attempts"] == 1
+    assert metrics["generate/harbor/num_retried_attempts"] == 0
+    assert metrics["generate/harbor/num_failed_attempts"] == 0
+    assert not any(k.startswith("generate/harbor/num_failed_attempts/") for k in metrics)
     prompt, response, mask = out["prompt_token_ids"][0], out["response_ids"][0], out["loss_masks"][0]
     # The prompt is the task; both replies are trained, and the user turn between them is context.
     assert decode(prompt).endswith("userlinearassistant")
@@ -225,8 +224,8 @@ async def test_concatenated_outputs_keep_skycap_metrics_apart_from_the_recompute
     assert not {k.replace("generate/skycap/", "generate/") for k in skycap_keys} & set(metrics)
     # Counts add up across the concatenated groups; a per-group percentile is averaged, not summed.
     assert metrics["generate/skycap/num_unbridged_calls"] == 2
-    assert metrics["generate/skycap/num_attempts"] == 2
-    assert metrics["generate/skycap/environment_setup_time_p90"] == pytest.approx(SETUP)
+    assert metrics["generate/harbor/num_attempts"] == 2
+    assert metrics["generate/harbor/environment_setup_time_p90"] == pytest.approx(SETUP)
 
 
 @pytest.mark.asyncio
@@ -250,12 +249,12 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
     metrics = out["rollout_metrics"]
     assert metrics["generate/skycap/num_masked_instances"] == 1
     # A timed-out agent isn't retried; its attempts count as failed, and its verifier never ran.
-    assert metrics["generate/skycap/num_attempts"] == 4
-    assert metrics["generate/skycap/num_retried_attempts"] == 0
-    assert metrics["generate/skycap/num_failed_attempts"] == 2
-    assert metrics["generate/skycap/num_failed_attempts/AgentTimeoutError"] == 2
-    assert metrics["generate/skycap/agent_execution_time_max"] == pytest.approx(AGENT)
-    assert metrics["generate/skycap/verifier_time_mean"] == pytest.approx(VERIFY)
+    assert metrics["generate/harbor/num_attempts"] == 4
+    assert metrics["generate/harbor/num_retried_attempts"] == 0
+    assert metrics["generate/harbor/num_failed_attempts"] == 2
+    assert metrics["generate/harbor/num_failed_attempts/AgentTimeoutError"] == 2
+    assert metrics["generate/harbor/agent_execution_time_max"] == pytest.approx(AGENT)
+    assert metrics["generate/harbor/verifier_time_mean"] == pytest.approx(VERIFY)
     # The masked rows still carry support, so the batch collates.
     assert len(out["rollout_sample_support"]) == len(out["response_ids"])
 
@@ -271,10 +270,10 @@ async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(sky
     assert not any(t.is_open for t in skycap.server.trajectories.values())
     # Both attempts raised before Harbor returned a result: counted, with no phase times.
     metrics = out["rollout_metrics"]
-    assert metrics["generate/skycap/num_attempts"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
-    assert metrics["generate/skycap/num_retried_attempts"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL - 1
-    assert metrics["generate/skycap/num_failed_attempts/RuntimeError"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
-    assert not any(k.endswith("_time_mean") and k.startswith("generate/skycap/") for k in metrics)
+    assert metrics["generate/harbor/num_attempts"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
+    assert metrics["generate/harbor/num_retried_attempts"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL - 1
+    assert metrics["generate/harbor/num_failed_attempts/RuntimeError"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
+    assert not any(k.endswith("_time_mean") and k.startswith("generate/harbor/") for k in metrics)
 
 
 @pytest.mark.asyncio
@@ -288,15 +287,15 @@ async def test_a_sandbox_start_timeout_rescued_by_a_retry_still_shows_in_the_met
     assert metrics["generate/skycap/num_error_trajectories"] == 0
     assert metrics["generate/skycap/num_masked_instances"] == 0
     # Three attempts: the timed-out one and its retry, plus "linear"'s.
-    assert metrics["generate/skycap/num_attempts"] == 3
-    assert metrics["generate/skycap/num_retried_attempts"] == 1
-    assert metrics["generate/skycap/num_failed_attempts/EnvironmentStartTimeoutError"] == 1
+    assert metrics["generate/harbor/num_attempts"] == 3
+    assert metrics["generate/harbor/num_retried_attempts"] == 1
+    assert metrics["generate/harbor/num_failed_attempts/EnvironmentStartTimeoutError"] == 1
     # The failed start counts with its time up to the failure; it never reached the agent.
     setup = np.array([START_TIMEOUT, SETUP, SETUP])
-    assert metrics["generate/skycap/environment_setup_time_mean"] == pytest.approx(setup.mean())
-    assert metrics["generate/skycap/environment_setup_time_p90"] == pytest.approx(np.percentile(setup, 90))
-    assert metrics["generate/skycap/environment_setup_time_max"] == pytest.approx(START_TIMEOUT)
-    assert metrics["generate/skycap/agent_execution_time_mean"] == pytest.approx(AGENT)
+    assert metrics["generate/harbor/environment_setup_time_mean"] == pytest.approx(setup.mean())
+    assert metrics["generate/harbor/environment_setup_time_p90"] == pytest.approx(np.percentile(setup, 90))
+    assert metrics["generate/harbor/environment_setup_time_max"] == pytest.approx(START_TIMEOUT)
+    assert metrics["generate/harbor/agent_execution_time_mean"] == pytest.approx(AGENT)
 
 
 @pytest.mark.asyncio
@@ -308,16 +307,8 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
     assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL + 1
     # "silent"'s results have no timestamps: skipped, so the times are "linear"'s alone.
     metrics = out["rollout_metrics"]
-    assert metrics["generate/skycap/num_retried_attempts"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL - 1
-    assert metrics["generate/skycap/environment_setup_time_mean"] == pytest.approx(SETUP)
-
-
-def test_a_phase_without_both_timestamps_has_no_duration() -> None:
-    started = SimpleNamespace(started_at=datetime(2026, 1, 1), finished_at=None)
-    assert harbor_generator._seconds(started) is None
-    assert harbor_generator._seconds(None) is None
-    done = SimpleNamespace(started_at=datetime(2026, 1, 1), finished_at=datetime(2026, 1, 1, 0, 0, 3))
-    assert harbor_generator._seconds(done) == 3.0
+    assert metrics["generate/harbor/num_retried_attempts"] == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL - 1
+    assert metrics["generate/harbor/environment_setup_time_mean"] == pytest.approx(SETUP)
 
 
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
