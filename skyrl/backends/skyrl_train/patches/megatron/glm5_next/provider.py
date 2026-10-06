@@ -1,7 +1,7 @@
 """Model provider for GLM-5.3-Flash (``glm5_next``)."""
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 from megatron.bridge.models.mla_provider import MLAModelProvider
 from megatron.core.transformer.spec_utils import ModuleSpec
@@ -53,3 +53,51 @@ class Glm5NextModelProvider(MLAModelProvider):
     # config; see ``glm5_next.dsa`` for what the Megatron path currently supports.
     dsa_indexer_kpool: int = 1
     dsa_indexer_kpool_always_select_tail: bool = True
+
+
+@dataclass
+class Glm5NextVLModelProvider(Glm5NextModelProvider):
+    """Provider for the GLM-5.3-Flash vision-language model (:class:`~.vl_model.Glm5NextVLModel`).
+
+    Selected only when the vision tower is trained/used (``language_model_only=false``); the
+    text-only path keeps :class:`Glm5NextModelProvider` and a plain ``GPTModel``.
+    """
+
+    # HF ``Glm5NextVisionConfig``, used as is to build the HF vision tower.
+    vision_config: Any = None
+    # HF attention implementation for the vision tower. ``sdpa`` needs no extra dependency.
+    # TODO(xgui): flash_attention_2 (varlen over cu_seqlens) once its parity is checked.
+    vision_attn_implementation: str = "sdpa"
+    # Vision features replace placeholder embeddings before the sequence-parallel scatter.
+    scatter_embedding_sequence_parallel: bool = False
+    # Read by HF's ``can_return_tuple``-wrapped feature extraction.
+    return_dict: bool = True
+
+    # Multimodal token ids from the top-level HF config, read by ``get_placeholder_mask``.
+    image_token_id: Optional[int] = None
+    video_token_id: Optional[int] = None
+    image_start_token_id: Optional[int] = None
+    image_end_token_id: Optional[int] = None
+    video_start_token_id: Optional[int] = None
+    video_end_token_id: Optional[int] = None
+
+    freeze_language_model: bool = False
+    freeze_vision_model: bool = False
+    freeze_vision_projection: bool = False
+
+    def provide(self, pre_process=None, post_process=None, vp_stage=None):
+        from skyrl.backends.skyrl_train.patches.megatron.glm5_next.vl_model import (
+            Glm5NextVLModel,
+        )
+
+        model = Glm5NextVLModel(self, pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+        if self.freeze_language_model or self.freeze_vision_model or self.freeze_vision_projection:
+            model.freeze(
+                freeze_language_model=self.freeze_language_model,
+                freeze_vision_model=self.freeze_vision_model,
+                freeze_vision_projection=self.freeze_vision_projection,
+            )
+        return model
+
+    def provide_language_model(self, pre_process=None, post_process=None, vp_stage=None):
+        return super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
