@@ -98,28 +98,34 @@ def test_token_match_leaves_empty_tool_content_to_the_renderer() -> None:
 
     Whether they are the same message is decided by rendering, when a request
     is planned: see ``test_empty_tool_call_content_replay_bridges_but_rewrite_forks``
-    and ``test_a_resent_message_the_template_renders_differently_forks``.
+    and ``test_a_replayed_message_the_template_renders_differently_forks``.
     """
     tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
-    # What skycap answered with, and what the client sends back in its next request's history.
+    # What skycap answered with, and what the client replays in its next request's history.
     returned = {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [tool_call]}
-    sent_back = {key: value for key, value in returned.items() if key != "content"}
-    with_metadata = {**sent_back, "provider_specific_fields": {"refusal": None}}
+    replayed = _without_content(returned)
+    with_metadata = {**replayed, "provider_specific_fields": {"refusal": None}}
 
-    assert _token_key(with_metadata) == _token_key(sent_back)
-    assert _token_key(returned) != _token_key(sent_back)
+    assert _token_key(with_metadata) == _token_key(replayed)
+    assert _token_key(returned) != _token_key(replayed)
     assert match_hash(returned, tools="", model="policy") != match_hash(with_metadata, tools="", model="policy")
-    assert _token_key(returned) != _token_key({**sent_back, "content": "Summary so far"})
+    assert _token_key(returned) != _token_key({**replayed, "content": "Summary so far"})
 
 
 def _token_key(message: dict) -> str:
     return token_match_hash(message, tools="", model="policy")
 
 
+def _without_content(message: dict) -> dict:
+    replayed = dict(message)
+    del replayed["content"]
+    return replayed
+
+
 def test_token_match_ignores_unrendered_fields_inside_tool_calls() -> None:
     tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
     returned = {"role": "assistant", "content": "x", "tool_calls": [tool_call]}
-    sent_back = {
+    replayed = {
         **returned,
         "refusal": None,
         "annotations": [],
@@ -135,7 +141,7 @@ def test_token_match_ignores_unrendered_fields_inside_tool_calls() -> None:
     }
     edited = {**returned, "tool_calls": [{**tool_call, "function": {"name": "search", "arguments": '{"q":1}'}}]}
 
-    assert _token_key(returned) == _token_key(sent_back)
+    assert _token_key(returned) == _token_key(replayed)
     assert _token_key(returned) != _token_key(edited)
 
 
@@ -330,25 +336,25 @@ async def _post(stack: TokenStack, created: dict, body: dict) -> None:
         assert response.status == 200
 
 
-async def _tool_call_then_resend_without_content(stack: TokenStack, created: dict) -> dict:
-    """Answer ``q`` with a tool call, then send it back without its empty ``content``, plus the tool result."""
+async def _tool_call_then_replay_without_content(stack: TokenStack, created: dict) -> dict:
+    """Answer ``q`` with a tool call, then replay it without its empty ``content``, plus the tool result."""
     first = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")], tools=TOOLS)
     returned = first.choices[0].message.model_dump(exclude_none=True)
     assert returned["content"] == "" and returned["tool_calls"]
-    sent_back = {key: value for key, value in returned.items() if key != "content"}
+    replayed = _without_content(returned)
     tool_result = {"role": "tool", "tool_call_id": returned["tool_calls"][0]["id"], "content": "found"}
-    body = {"model": "policy", "messages": [user("q"), sent_back, tool_result], "tools": TOOLS}
+    body = {"model": "policy", "messages": [user("q"), replayed, tool_result], "tools": TOOLS}
     await _post(stack, created, body)
     return body
 
 
-async def test_a_resent_message_the_template_renders_differently_forks() -> None:
+async def test_a_replayed_message_the_template_renders_differently_forks() -> None:
     """With a template that renders ``content: ""``, dropping it is an edit, not a respelling."""
     completion = [*encode("THINK:hmm|CALL:search:{}"), END]
     async with token_stack(completion=lambda prompt, sampling: completion) as stack:
         stack.renderer.empty_content = "<empty>"
         created = await stack.create()
-        await _tool_call_then_resend_without_content(stack, created)
+        await _tool_call_then_replay_without_content(stack, created)
 
         graph = stack.server.trajectories[created["id"]].graph
         model_nodes = [node for node in graph if node.author == "model"]
@@ -361,7 +367,7 @@ async def test_a_respelled_message_is_rendered_once_then_matched_by_alias() -> N
     completion = [*encode("THINK:hmm|CALL:search:{}"), END]
     async with token_stack(completion=lambda prompt, sampling: completion) as stack:
         created = await stack.create()
-        body = await _tool_call_then_resend_without_content(stack, created)
+        body = await _tool_call_then_replay_without_content(stack, created)
         # The first call renders once; the second renders the request with each spelling.
         assert stack.renderer.renders == 3
 
@@ -405,11 +411,9 @@ async def test_siblings_with_one_spelling_are_render_checked_once() -> None:
         assert len([node for node in graph if node.author == "model"]) == 2
         renders = stack.renderer.renders
 
-        sent_back = {key: value for key, value in returned.items() if key != "content"}
+        replayed = _without_content(returned)
         tool_result = {"role": "tool", "tool_call_id": returned["tool_calls"][0]["id"], "content": "found"}
-        await _post(
-            stack, created, {"model": "policy", "messages": [user("q"), sent_back, tool_result], "tools": TOOLS}
-        )
+        await _post(stack, created, {"model": "policy", "messages": [user("q"), replayed, tool_result], "tools": TOOLS})
 
         # The request once, and one swapped-in spelling, which renders differently.
         assert stack.renderer.renders == renders + 2

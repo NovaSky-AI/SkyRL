@@ -96,7 +96,10 @@ def plan(
     if not messages:
         raise TokenError("a request needs at least one message")
     matched, rendered = _match(graph, renderer, messages, tools, matches, tools_key, model)
-    resolved = [graph.nodes[node_id].match_hash for node_id in matched] + list(matches[len(matched) :])
+    # A matched message takes its node's hash, which differs from the request's for a respelling.
+    resolved = list(matches)
+    for depth, node_id in enumerate(matched):
+        resolved[depth] = graph.nodes[node_id].match_hash
     bridged = _bridge(graph, renderer, messages, tools, matched, resolved)
     if bridged is not None:
         return bridged
@@ -174,24 +177,31 @@ def _candidates(
     in ``MessageGraph.add``.
     """
     loose = _loose(message)
-    found = [
-        node_id
-        for node_id in graph.children(parent)
-        if _loose(graph.nodes[node_id].message) == loose
-        and hashing.token_match_hash(graph.nodes[node_id].message, tools=tools_key, model=model)
-        == graph.nodes[node_id].match_hash
-    ]
-    found.sort(key=lambda node_id: (graph.nodes[node_id].author == "model", node_id), reverse=True)
+    found: list[int] = []
+    for node_id in graph.children(parent):
+        node = graph.nodes[node_id]
+        if _loose(node.message) != loose:
+            continue
+        if hashing.token_match_hash(node.message, tools=tools_key, model=model) != node.match_hash:
+            continue
+        found.append(node_id)
+
+    def preference(node_id: int) -> tuple[bool, int]:
+        return graph.nodes[node_id].author == "model", node_id
+
     by_spelling: dict[str, int] = {}
-    for node_id in found:
+    for node_id in sorted(found, key=preference, reverse=True):
         by_spelling.setdefault(graph.nodes[node_id].match_hash, node_id)
     return list(by_spelling.values())
 
 
 def _loose(message: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        key: value for key, value in hashing.canonical_message(hashing.rendered_fields(message)).items() if value != ""
-    }
+    """The message's rendered fields, with empty strings dropped as well as empty values."""
+    loose = {}
+    for key, value in hashing.canonical_message(hashing.rendered_fields(message)).items():
+        if value != "":
+            loose[key] = value
+    return loose
 
 
 def _bridge(

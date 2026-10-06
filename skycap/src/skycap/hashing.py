@@ -89,7 +89,7 @@ RENDERED_FUNCTION_FIELDS = frozenset({"name", "arguments"})
 
 def rendered_fields(message: Mapping[str, Any]) -> dict[str, Any]:
     """The part of ``message`` a renderer reads."""
-    kept = {key: value for key, value in message.items() if key in RENDERED_FIELDS}
+    kept = _pick(message, RENDERED_FIELDS)
     calls = kept.get("tool_calls")
     if isinstance(calls, list):
         kept["tool_calls"] = [_rendered_call(call) for call in calls]
@@ -99,11 +99,20 @@ def rendered_fields(message: Mapping[str, Any]) -> dict[str, Any]:
 def _rendered_call(call: Any) -> Any:
     if not isinstance(call, Mapping):
         return call
-    kept = {key: value for key, value in call.items() if key in RENDERED_TOOL_CALL_FIELDS}
+    kept = _pick(call, RENDERED_TOOL_CALL_FIELDS)
     function = kept.get("function")
     if isinstance(function, Mapping):
-        kept["function"] = {key: value for key, value in function.items() if key in RENDERED_FUNCTION_FIELDS}
+        kept["function"] = _pick(function, RENDERED_FUNCTION_FIELDS)
     return kept
+
+
+def _pick(mapping: Mapping[str, Any], fields: frozenset[str]) -> dict[str, Any]:
+    """The entries of ``mapping`` whose keys are in ``fields``."""
+    picked = {}
+    for key, value in mapping.items():
+        if key in fields:
+            picked[key] = value
+    return picked
 
 
 def token_match_hash(message: Mapping[str, Any], *, tools: str, model: str | None) -> str:
