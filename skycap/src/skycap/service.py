@@ -38,6 +38,8 @@ def build_backend(
     tokenizer: str | None = None,
     renderer: TokenRenderer | None = None,
     renderer_pool_size: int = 8,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+    processor_kwargs: Mapping[str, Any] | None = None,
     engine: VLLMEngine | None = None,
     model: str | None = None,
     max_model_len: int | None = None,
@@ -49,7 +51,9 @@ def build_backend(
     """What ``skycap serve`` and ``CaptureService`` run, from the options they share.
 
     Token mode renders with ``tokenizer`` through ``renderers``, or with ``renderer`` when one is given
-    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default.
+    (e.g. a test's). ``chat_template_kwargs`` configure that renderer's template (``enable_thinking``),
+    and ``processor_kwargs`` the image processor of a multimodal model, which must match the engine's
+    (``RenderersRenderer``). ``engine`` is the engine's wire, vLLM's by default.
     """
     if mode == "text":
         return TextBackend(upstream_url, api_key=api_key)
@@ -57,12 +61,21 @@ def build_backend(
         raise ValueError(f"mode must be 'text' or 'tokens', not {mode!r}")
     if (tokenizer is None) == (renderer is None):
         raise ValueError("token mode needs exactly one of tokenizer and renderer")
+    if renderer is not None and (chat_template_kwargs or processor_kwargs):
+        raise ValueError(
+            "chat_template_kwargs and processor_kwargs configure the tokenizer's renderer, not a given one"
+        )
     from skycap.tokens.backend import TokensBackend
 
     if renderer is None:
         from skycap.tokens.renderer import RenderersRenderer
 
-        renderer = RenderersRenderer(tokenizer, size=renderer_pool_size)
+        renderer = RenderersRenderer(
+            tokenizer,
+            size=renderer_pool_size,
+            chat_template_kwargs=chat_template_kwargs,
+            processor_kwargs=processor_kwargs,
+        )
     return TokensBackend(
         upstream_url,
         renderer,
@@ -95,6 +108,8 @@ class CaptureService:
         tokenizer: str | None = None,
         renderer: TokenRenderer | None = None,
         renderer_pool_size: int = 8,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+        processor_kwargs: Mapping[str, Any] | None = None,
         engine: VLLMEngine | None = None,
         model: str | None = None,
         max_model_len: int | None = None,
@@ -116,6 +131,8 @@ class CaptureService:
             tokenizer=tokenizer,
             renderer=renderer,
             renderer_pool_size=renderer_pool_size,
+            chat_template_kwargs=chat_template_kwargs,
+            processor_kwargs=processor_kwargs,
             engine=engine,
             model=model,
             max_model_len=max_model_len,

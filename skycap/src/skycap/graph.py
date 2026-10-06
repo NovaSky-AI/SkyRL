@@ -80,6 +80,10 @@ class NodeTokens:
     and the tokens before it have empty spans, so every span decodes on its own.
     Both are filled when the trajectory is recorded, so a reader never needs the
     tokenizer.
+
+    ``media`` are the multimodal items (``skycap.tokens.renderer.Media``) whose
+    placeholders sit in these tokens, with offsets relative to them. Only a
+    client node has any.
     """
 
     token_ids: list[int]
@@ -89,6 +93,7 @@ class NodeTokens:
     sampling_mask: list[list[int]] | None = None
     text: str | None = None
     text_offsets: list[int] | None = None
+    media: list[Any] = field(default_factory=list)
 
 
 @dataclass(slots=True)

@@ -18,6 +18,12 @@ tokens = [
     "renderers>=0.1.9.dev9",
     "transformers>=4.50",
 ]
+# Images in token mode: the renderer loads and processes them. Encoding them for vLLM's
+# generate also needs `vllm` (and `torch`), which the engine's environment has.
+multimodal = [
+    "renderers[multimodal]>=0.1.9.dev9",
+    "transformers>=4.50",
+]
 
 [project.scripts]
 skycap = "skycap.cli:main"

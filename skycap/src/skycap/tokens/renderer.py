@@ -12,11 +12,36 @@ from __future__ import annotations
 import hashlib
 import json
 import queue
+import threading
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
+
+import numpy as np
+
+
+@dataclass(frozen=True, slots=True)
+class Media:
+    """One multimodal item, such as an image, and where its placeholder tokens sit.
+
+    ``offset`` is relative to the tokens the item is listed with: a ``Rendered``'s
+    ``token_ids``, a node's tokens, or a sample's ``input_ids``. ``hash`` identifies
+    the item's content. ``data`` is the processor's output for the item (for
+    Qwen-VL, ``pixel_values`` and ``image_grid_thw``), or None for an item read
+    back from a record, which keeps placeholders only.
+    """
+
+    modality: str
+    offset: int
+    length: int
+    hash: str
+    data: Mapping[str, np.ndarray] | None = None
+
+    def shifted(self, delta: int) -> Media:
+        return replace(self, offset=self.offset + delta)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,11 +52,16 @@ class Rendered:
     or to ``new_messages`` for a bridge) that ``token_ids[reused + i]`` belongs
     to, or ``-1`` for template scaffold. The first ``reused`` tokens are the
     previous turn's prompt and completion, unchanged.
+
+    ``media`` are the multimodal items whose placeholders the render added, in
+    order, with offsets into ``token_ids``. A bridge lists only the new
+    messages' items; the previous turn's are the caller's.
     """
 
     token_ids: list[int]
     tail_indices: list[int]
     reused: int = 0
+    media: tuple[Media, ...] = ()
 
 
 class TokenRenderer(Protocol):
@@ -45,7 +75,10 @@ class TokenRenderer(Protocol):
         previous_completion: Sequence[int],
         new_messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None,
+        previous_media: Sequence[Media] = (),
     ) -> Rendered | None: ...
+
+    def features(self, media: Sequence[Media]) -> dict[str, Any]: ...
 
     def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]: ...
 
@@ -80,13 +113,55 @@ def tool_call_id(completion_ids: Sequence[int], index: int) -> str:
     return f"call_{digest[:20]}_{index}"
 
 
+def _media(data: Any, start: int = 0) -> tuple[Media, ...]:
+    """A ``renderers`` ``MultiModalData``'s items from position ``start`` on, in stream order."""
+    if data is None:
+        return ()
+    found = []
+    for modality, ranges in data.mm_placeholders.items():
+        hashes = data.mm_hashes.get(modality) or []
+        items = data.mm_items.get(modality) or []
+        if not len(ranges) == len(hashes) == len(items):
+            raise ValueError(f"{modality}: {len(ranges)} placeholders, {len(hashes)} hashes, {len(items)} items")
+        for placeholder, digest, item in zip(ranges, hashes, items, strict=True):
+            if placeholder.offset >= start:
+                found.append(Media(modality, placeholder.offset, placeholder.length, digest, item))
+    return tuple(sorted(found, key=lambda media: media.offset))
+
+
+def _multi_modal_data(media: Sequence[Media]) -> Any:
+    """``media`` as a ``renderers`` ``MultiModalData``, or None without any."""
+    if not media:
+        return None
+    from renderers.base import MultiModalData, PlaceholderRange
+
+    data = MultiModalData()
+    for item in media:
+        if item.data is None:
+            raise ValueError(f"{item.modality} item {item.hash} has no processed data")
+        data.mm_hashes.setdefault(item.modality, []).append(item.hash)
+        data.mm_placeholders.setdefault(item.modality, []).append(PlaceholderRange(item.offset, item.length))
+        data.mm_items.setdefault(item.modality, []).append(dict(item.data))
+    return data
+
+
 class RenderersRenderer:
     """A pool of ``renderers`` renderers, one tokenizer each, used from threads.
 
     ``thinking_retention="all"`` keeps a reasoning model's earlier thinking in
     the history. Dropping it would re-render the previous turn differently from
     what was sampled, and every turn would fork instead of extending.
+
+    A multimodal renderer (Qwen-VL, Qwen3.5, Gemma 4, ...) processes images
+    itself, with the model's Hugging Face processor. ``processor_kwargs`` are
+    passed when loading it, and must be the engine's (vLLM's
+    ``mm_processor_kwargs``, e.g. ``max_pixels``): an image processed
+    differently has a different number of placeholder tokens than the engine
+    expects.
     """
+
+    #: Encoded items kept by content hash, so an image is encoded for the engine once, not every turn.
+    ENCODED_CACHE = 256
 
     def __init__(
         self,
@@ -95,9 +170,10 @@ class RenderersRenderer:
         size: int = 8,
         thinking_retention: str = "all",
         chat_template_kwargs: Mapping[str, Any] | None = None,
+        processor_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         from renderers import AutoRendererConfig, create_renderer
-        from renderers.base import load_tokenizer
+        from renderers.base import is_multimodal, load_tokenizer
 
         self.name = tokenizer
 
@@ -108,6 +184,13 @@ class RenderersRenderer:
                 AutoRendererConfig(thinking_retention=thinking_retention),
                 chat_template_kwargs=chat_template_kwargs,
             )
+            if processor_kwargs and is_multimodal(renderer):
+                from transformers import AutoProcessor
+
+                # A multimodal renderer loads its processor lazily, without kwargs; one given here wins.
+                if not hasattr(renderer, "_processor"):
+                    raise ValueError(f"{type(renderer).__name__} does not take a processor")
+                renderer._processor = AutoProcessor.from_pretrained(tokenizer, **processor_kwargs)
             return renderer, loaded
 
         #: (renderer, its tokenizer) pairs, each used by one thread at a time.
@@ -120,6 +203,9 @@ class RenderersRenderer:
                 self._slots.put(slot)
         with self._checkout() as (renderer, _):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
+            self.multimodal = is_multimodal(renderer)
+        self._encoded: OrderedDict[str, Any] = OrderedDict()
+        self._encoded_lock = threading.Lock()
 
     @contextmanager
     def _checkout(self) -> Iterator[tuple[Any, Any]]:
@@ -132,7 +218,11 @@ class RenderersRenderer:
     def render(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]] | None) -> Rendered:
         with self._checkout() as (renderer, _):
             out = renderer.render(list(messages), tools=normalize_tools(tools), add_generation_prompt=True)
-        return Rendered(token_ids=list(out.token_ids), tail_indices=list(out.message_indices))
+        return Rendered(
+            token_ids=list(out.token_ids),
+            tail_indices=list(out.message_indices),
+            media=_media(getattr(out, "multi_modal_data", None)),
+        )
 
     def bridge(
         self,
@@ -140,13 +230,21 @@ class RenderersRenderer:
         previous_completion: Sequence[int],
         new_messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None,
+        previous_media: Sequence[Media] = (),
     ) -> Rendered | None:
+        """``previous_media`` are the previous prompt's items, which a template that numbers images counts on."""
+        extra: dict[str, Any] = {}
+        if self.multimodal:
+            extra["previous_multi_modal_data"] = _multi_modal_data(previous_media)
+        elif previous_media:
+            raise ValueError(f"{self.name} renders text only, but the previous turn has media")
         with self._checkout() as (renderer, _):
             out = renderer.bridge_to_next_turn(
                 list(previous_prompt),
                 list(previous_completion),
                 list(new_messages),
                 tools=normalize_tools(tools),
+                **extra,
             )
         if out is None:
             return None
@@ -156,7 +254,38 @@ class RenderersRenderer:
         # which moves the boundary; a full render is always correct, so decline.
         if token_ids[:reused] != [*previous_prompt, *previous_completion]:
             return None
-        return Rendered(token_ids=token_ids, tail_indices=list(out.message_indices[reused:]), reused=reused)
+        return Rendered(
+            token_ids=token_ids,
+            tail_indices=list(out.message_indices[reused:]),
+            reused=reused,
+            media=_media(getattr(out, "multi_modal_data", None), start=reused),
+        )
+
+    def features(self, media: Sequence[Media]) -> dict[str, Any]:
+        """vLLM's ``features`` for a prompt with these items: hashes, placeholders and encoded items.
+
+        Encoding is the ``renderers`` library's, per model family, and needs ``vllm`` installed.
+        """
+        from renderers.client import _build_mm_features
+
+        out: dict[str, Any] = {"mm_hashes": {}, "mm_placeholders": {}, "kwargs_data": {}}
+        for item in media:
+            with self._encoded_lock:
+                encoded = self._encoded.get(item.hash)
+                if encoded is not None:
+                    self._encoded.move_to_end(item.hash)
+            if encoded is None:
+                with self._checkout() as (renderer, _):
+                    single = _build_mm_features(renderer, _multi_modal_data([item.shifted(-item.offset)]))
+                encoded = single["kwargs_data"][item.modality][0]
+                with self._encoded_lock:
+                    self._encoded[item.hash] = encoded
+                    if len(self._encoded) > self.ENCODED_CACHE:
+                        self._encoded.popitem(last=False)
+            out["mm_hashes"].setdefault(item.modality, []).append(item.hash)
+            out["mm_placeholders"].setdefault(item.modality, []).append({"offset": item.offset, "length": item.length})
+            out["kwargs_data"].setdefault(item.modality, []).append(encoded)
+        return out
 
     def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
         """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text."""

@@ -63,6 +63,19 @@ def build_parser() -> argparse.ArgumentParser:
         "as vLLM does with no parsers",
     )
     tokens.add_argument("--renderer-pool-size", type=int, default=8)
+    tokens.add_argument(
+        "--chat-template-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON chat-template options for the renderer, e.g. '{\"enable_thinking\": false}'",
+    )
+    tokens.add_argument(
+        "--processor-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON options for a multimodal model's image processor; must match the engine's "
+        "mm_processor_kwargs, e.g. '{\"max_pixels\": 1003520}'",
+    )
     serve.add_argument(
         "--record-dir",
         default=None,
@@ -94,6 +107,8 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         api_key=os.environ.get(args.upstream_api_key_env),
         tokenizer=args.tokenizer,
         renderer_pool_size=args.renderer_pool_size,
+        chat_template_kwargs=args.chat_template_kwargs,
+        processor_kwargs=args.processor_kwargs,
         model=args.model,
         max_model_len=args.max_model_len,
         sampling_overrides=args.sampling_overrides,
