@@ -11,13 +11,16 @@ A record directory holds, per trajectory `{id}`:
 | File | Always Outputted | Holds |
 | --- | --- | --- |
 | `{id}.json.zst` | yes | the document (graph) |
-| `{id}.tokens.zst` | token mode | token ids, logprobs, the text the tokens decode to, and each token's byte offset in it |
+| `{id}.tokens.zst` | token mode, when any node has tokens | token ids, logprobs, the text the tokens decode to, and each token's byte offset in it |
 | `{id}.experts.zst` | when routed experts were captured | routed experts (R3) |
-| `{id}.sampling_mask.zst` | when sampling masks were captured | per sampled token, the ids it could have been drawn from |
+| `{id}.sampling_mask.zst` | when a captured sampling mask has at least one row | per sampled token, the ids it could have been drawn from |
 
-Every file is one zstd frame. A trajectory is not partially written when it is live, it is only written when it ends.
+Every file is exactly one zstd frame. A writer must not append a second frame
+to a file: some decoders, such as Node's, silently drop every frame after the
+first. A trajectory is not partially written when it is live, it is only written when it ends.
 Sidecars are written before the document, and every file is written to a
-temporary name and renamed, so a document that exists always has its sidecars.
+temporary name and renamed, so a document that exists always has the sidecars
+its `sidecars` field lists.
 A reader lists trajectories by listing `*.json.zst`.
 
 ## The document
@@ -31,14 +34,14 @@ The decompressed document is a UTF-8 JSON object:
 | `status` | string | `finished`, `failed`, `abandoned` (idle past the TTL) or `open` (written at shutdown) |
 | `ended` | bool | whether the trajectory was ended (by `finish` or the TTL). False for one written at shutdown, which may be sealed as `failed` and still waiting for its finish |
 | `meta` | object | what the creator passed at create |
-| `capture` | object | how it was captured: `mode` (`text` or `tokens`), and for tokens the `engine`, `tokenizer`, `logprobs_mode` (`processed_logprobs` means logprobs are over the truncated, renormalized distribution) and any `sampling_overrides` |
+| `capture` | object | how it was captured: `mode` (`text` or `tokens`), and for tokens the `engine`, `tokenizer`, `logprobs_mode` (`processed_logprobs` means logprobs are over the truncated, renormalized distribution), any `sampling_overrides`, and `use_raw_content` (whether replies carried the completion's own text as `content`, with no reasoning or tool-call parsing) |
 | `annotations` | object | what the creator passed at finish, e.g. `{"reward": 1.0}` |
 | `created_at`, `finished_at` | float or null | Unix seconds |
 | `tools` | object | tool-set hash → the tool list, as sent |
 | `failures` | array | calls that produced no node: `{t, status, error, input_leaf}` |
 | `retries` | object | SDK retries answered from the original call: `{replayed, coalesced}` counts |
 | `nodes` | array | the graph, in creation order (below) |
-| `sidecars` | object | kind → sidecar manifest (below). Empty in text mode |
+| `sidecars` | object | kind → sidecar manifest (below). Empty in text mode, and in token mode when no node has tokens |
 
 Fields a reader doesn't know are ignored. Adding a field does not change
 `format_version`. Removing or redefining one does.
@@ -57,10 +60,12 @@ Node `i` is `nodes[i]`, and `nodes[i].id == i`. A node is one message:
 | `match_hash`, `delta_hash` | identity hashes (see the graph module) |
 | `created_at` | Unix seconds |
 | `calls` | model-authored nodes: every call that produced this output, `{t_start, t_end, model, sampling, usage, finish_reason, tools, bridged}`, where `tools` is the key of the call's tool set in the document's `tools`, or null, and `bridged` (token mode) is whether the call's prompt extended an earlier call's prompt and completion token for token: `false` when it was rendered from the messages instead, null for a trajectory's first call or text mode |
-| `shadowed_by` | null, or the sibling that later history with the same message continues from |
+| `shadowed_by` | null, or the sibling that a later request's matching message is matched to instead of this node. In text mode, later history continues from that sibling. In token mode, it continues from that sibling only if the turn reuses its tokens (it extends that sibling's call, or the render reproduces them), and otherwise from a sibling whose tokens the render does reproduce, which can be this node |
 | `tokens` | null in text mode, else this node's slices of the sidecars (below) |
 
-Every root-to-leaf path is one conversation as a model call saw it.
+Every root-to-leaf path is one conversation as a model call saw it. Paths are
+ordered by their leaf's id. A model node is a training target in the first
+path that contains it, so a node shared by several paths trains once.
 
 ### A node's `tokens`
 
@@ -71,7 +76,7 @@ Every root-to-leaf path is one conversation as a model call saw it.
 | `has_logprobs` | whether `logprobs` holds real values for this node |
 | `text_offset`, `text_bytes` | the node's text is bytes `[text_offset, text_offset + text_bytes)` of `text`; `text_offset` is null when no text was recorded |
 | `experts_offset`, `experts_rows` | the node's rows of `routed_experts`; offset null when absent |
-| `mask_offset`, `mask_rows` | the node's rows of the sampling mask (one per sampled token); offset null when absent |
+| `mask_offset`, `mask_rows` | the node's rows of the sampling mask (one per sampled token); offset null when absent. A node with `mask_rows` 0 has no rows even when its offset is set, and the sidecar may not exist |
 
 ## Sidecars
 
@@ -89,14 +94,22 @@ entry for a kind is:
 
 `dtype` is one of `uint8`, `uint16`, `int16`, `int32`, `int64`, `float64`. To
 read an array, decompress the file and view `prod(shape)` elements of `dtype`
-starting at `offset`. In JavaScript that's `new Int32Array(buffer, offset, n)`.
+starting at `offset`. Offsets are relative to the start of the decompressed
+bytes. In Node, a decompressed `Buffer` can be a slice of a larger
+`ArrayBuffer`, starting at its `byteOffset`, which need not be aligned for the
+dtype. Copy it into an `ArrayBuffer` of its own before taking views:
+
+```js
+const bytes = new Uint8Array(decompressed); // a copy, at byte offset 0
+const tokenIds = new Int32Array(bytes.buffer, offset, n);
+```
 
 ### `tokens`
 
 | Array | Shape | Meaning |
 | --- | --- | --- |
 | `token_ids` | `[N]` int32 | every token node's tokens, concatenated in node order |
-| `logprobs` | `[N]` float64 | the rollout logprob of each token. NaN where unknown, 0 for scaffold |
+| `logprobs` | `[N]` float64 | the rollout logprob of each token. In a node with `has_logprobs`, 0 for scaffold. NaN for every token of a node without, scaffold included |
 | `text` | `[B]` uint8 | every node's text, UTF-8, concatenated in node order |
 | `text_offsets` | `[N]` int32 | for each token, the byte offset in its node's text where the token starts |
 
