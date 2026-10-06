@@ -19,6 +19,7 @@ these via server-side client_config flags and fall back to JSON):
 """
 
 import base64
+import math
 from collections.abc import Iterable, Sequence
 
 import numpy as np
@@ -190,7 +191,8 @@ def _serialize_forward_backward_output(result_data: dict) -> bytes:
     proto = pb.ForwardBackwardOutput()
     proto.loss_fn_output_type = output.loss_fn_output_type
     for name, value in output.metrics.items():
-        proto.metrics[name] = float(value)
+        # Older futures stored non-finite metrics as null, losing the exact value.
+        proto.metrics[name] = math.nan if value is None else float(value)
 
     if not output.loss_fn_outputs:
         return proto.SerializeToString()

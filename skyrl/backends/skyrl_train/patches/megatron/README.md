@@ -23,6 +23,9 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
+| `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
+| `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -175,6 +178,19 @@ Per-forward DSA index-share carrier under activation recompute.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
 
+### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
+
+Lets the TileLang SparseMLA kernel (`tilelang_dsa.fused_sparse_mla_absorbed`) take NoPE MLA
+(q/k width 512) and top-k widths that aren't a multiple of 64, by zero-padding q/k to 576 and the
+indices with -1. Exact. GLM-5.3-Flash needs both (width 512, k-pool selection 2048 + 3 = 2051).
+Without it the kernel declines and megatron-core falls back to a dense `[heads, sq, sq]` FP32
+softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
+- **Landed?** The patch checks for itself: it's a no-op, and logs a warning telling you to delete
+  it, when `fused_sparse_mla_absorbed`'s source contains `query.size(-1) not in (512, 576)`.
+- **Remove:** the `patch_sparse_mla_nope()` call in `MegatronWorker.make_megatron_module`, the
+  module, and its CPU and GPU tests (`test_sparse_mla_nope.py`, and its line in
+  `ci/gpu_ci_run_h100.sh`).
+
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 
 Shared-expert LoRA forward scaling under shared-expert overlap. It only activates when
@@ -183,6 +199,21 @@ Shared-expert LoRA forward scaling under shared-expert overlap. It only activate
   contains `_external_tp_reduce_scale`.
 - **Remove:** the module-level `apply_shared_expert_lora_tp_patch()` call and import in
   `megatron_worker.py`, the module, and its two-rank GPU test.
+
+### `patch_dsa_hybrid_indexer.py`: SkyRL-only, no upstream counterpart
+
+Opt-in (`SKYRL_DSA_INDEXER_BACKEND=tilelang` with `dsa_kernel_backend="cudnn"`): resolves the
+`run_fused_qk_topk` DSA hook from the TileLang backend while sparse attention stays on
+cuDNN/FlashMLA. On the packed THD path the cudnn backend's indexer top-k is a per-head fp32
+`torch.bmm` fallback; TileLang's is a fused kernel. -32% trainer fwd+bwd for GLM-5.3 on B200.
+Applies to stock `DSAttention` (GLM-5 / GLM-5.3 `glm_moe_dsa`, DeepSeek-V3.2); GLM-5.3-Flash's
+k-pool indexer (`index_kpool > 1`) selects through `fused_qk_topk_kpool` and bypasses the hook.
+- **Landed?** Not an upstream fix: it is obsolete once megatron-core's cudnn backend has a fused
+  varlen indexer top-k (`_indexer_topk_bshd` no longer falls back to `_indexer_topk_from_score_chunks`
+  for packed inputs), or exposes per-hook backend selection.
+- **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
+  `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
+  the module, and its CPU test.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 

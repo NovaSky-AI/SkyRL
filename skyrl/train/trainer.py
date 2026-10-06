@@ -1,3 +1,4 @@
+import asyncio
 import math
 import os
 import shutil
@@ -144,6 +145,9 @@ class RayPPOTrainer:
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
         )
 
+        self._metrics_finalized = False
+        self._resumed_from_checkpoint = False
+
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
         # trajectory logger is installed after construction if needed
@@ -231,6 +235,22 @@ class RayPPOTrainer:
             self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
             if self.cfg.trainer.max_training_steps is not None:
                 self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
+
+    async def finalize_metrics(self, status: str) -> None:
+        """Finalize observations before the tracker closes, including failed runs."""
+        if self._metrics_finalized:
+            return
+        self._metrics_finalized = True
+        self.tracker.run_status = status
+        try:
+            if self._vllm_metrics_scraper is not None:
+                summary = await asyncio.wait_for(self._vllm_metrics_scraper.finalize(), timeout=10)
+                if not self._resumed_from_checkpoint and not self.cfg.generator.inference_engine.enable_pd:
+                    self.tracker.update_summary(summary)
+        except Exception as e:
+            logger.warning(f"Could not finalize vLLM metrics: {e}")
+        finally:
+            self.tracker.update_summary({"run_status": status})
 
     @torch.no_grad()
     async def eval(self, vllm_metrics_scraper: Optional[VLLMMetricsScraper] = None) -> Dict[str, float]:
@@ -598,9 +618,7 @@ class RayPPOTrainer:
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        if self._vllm_metrics_scraper is not None:
-            await self._vllm_metrics_scraper.aclose()
-
+        await self.finalize_metrics("success")
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.stop()
 
@@ -1819,6 +1837,7 @@ class RayPPOTrainer:
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+        self._resumed_from_checkpoint = True
         saved_global_step = trainer_state.get("global_step", global_step)
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:

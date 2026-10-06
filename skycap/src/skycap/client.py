@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+import json
 import random
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ from typing import Any
 
 import aiohttp
 
+from skycap.paths import PATH_RULE_FAILED
 from skycap.samples import Sample
 
 
@@ -36,6 +38,10 @@ class CaptureError(Exception):
         super().__init__(message)
         #: The HTTP status, when the server answered.
         self.status = status
+
+
+class PathRuleError(CaptureError):
+    """``finish``'s path rule raised on the server. The trajectory is ended, without samples."""
 
 
 @dataclass(slots=True)
@@ -49,7 +55,7 @@ class FinishResult:
 
 
 class Trajectory:
-    def __init__(self, pool: CapturePool, server: str, trajectory_id: str, base_url: str) -> None:
+    def __init__(self, pool: CapturePool, server: str, trajectory_id: str, base_url: str, paths: str = "all") -> None:
         self._pool = pool
         self.server = server
         self.id = trajectory_id
@@ -58,11 +64,22 @@ class Trajectory:
         self.result: FinishResult | None = None
         #: What the last ``finish`` sent, so a failed one can be sent again unchanged.
         self.finishing: dict[str, Any] | None = None
+        #: The path rule ``finish`` uses when it names none, including the one a failed block is finished with.
+        self.paths = paths
 
-    async def finish(self, annotations: dict[str, Any] | None = None) -> FinishResult:
-        """Seal the trajectory and get its samples. Safe to call more than once."""
+    async def finish(self, annotations: dict[str, Any] | None = None, *, paths: str | None = None) -> FinishResult:
+        """Seal the trajectory and get its samples. Safe to call more than once.
+
+        ``paths`` names the path rule that picks the samples (``skycap.paths``): ``all``, a sample per
+        root-to-leaf path; ``final``, only the path to the last model call's reply; or a custom rule the
+        server has. It defaults to the trajectory's ``paths``. Raises ``PathRuleError`` if the rule raised.
+        """
         self.finishing = annotations or {}
-        body = await self._pool._post(f"{self.server}/trajectories/{self.id}/finish", {"annotations": self.finishing})
+        if paths is not None:
+            self.paths = paths
+        body = await self._pool._post(
+            f"{self.server}/trajectories/{self.id}/finish", {"annotations": self.finishing, "paths": self.paths}
+        )
         self.result = FinishResult(
             id=body["id"],
             status=body["status"],
@@ -129,8 +146,8 @@ class CapturePool:
     async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
-    async def create(self, meta: dict[str, Any] | None = None) -> Trajectory:
-        """A new trajectory on the next reachable server."""
+    async def create(self, meta: dict[str, Any] | None = None, *, paths: str = "all") -> Trajectory:
+        """A new trajectory on the next reachable server, to be finished with the path rule ``paths``."""
         errors = []
         for _ in range(len(self.urls)):
             server = next(self._next)
@@ -144,18 +161,18 @@ class CapturePool:
                     raise
                 errors.append(str(error))
                 continue
-            return Trajectory(self, server, body["id"], body["base_url"])
+            return Trajectory(self, server, body["id"], body["base_url"], paths)
         raise CaptureError(f"no capture server reachable: {'; '.join(errors)}")
 
     @asynccontextmanager
-    async def trajectory(self, meta: dict[str, Any] | None = None) -> AsyncIterator[Trajectory]:
-        """A trajectory that is always finished.
+    async def trajectory(self, meta: dict[str, Any] | None = None, *, paths: str = "all") -> AsyncIterator[Trajectory]:
+        """A trajectory that is always finished, with the path rule ``paths`` unless its ``finish`` names another.
 
         If the block raised before finishing, the trajectory is finished with
         ``{"error": ...}``. If its own ``finish`` failed, that finish is sent
         again, so the caller's annotations (a reward) aren't replaced.
         """
-        trajectory = await self.create(meta)
+        trajectory = await self.create(meta, paths=paths)
         try:
             yield trajectory
         except BaseException as error:
@@ -186,5 +203,17 @@ async def _body(response: aiohttp.ClientResponse) -> dict[str, Any]:
     if response.status != 200:
         # An error body may not be JSON (a proxy's HTML page, aiohttp's plain 404).
         detail = (await response.text(errors="replace"))[:2000]
-        raise CaptureError(f"{response.method} {response.url}: HTTP {response.status}: {detail}", response.status)
+        message = f"{response.method} {response.url}: HTTP {response.status}: {detail}"
+        if _code(detail) == PATH_RULE_FAILED:
+            raise PathRuleError(message, response.status)
+        raise CaptureError(message, response.status)
     return await response.json(content_type=None)
+
+
+def _code(detail: str) -> str | None:
+    """The ``code`` of a JSON error body, if it has one."""
+    try:
+        body = json.loads(detail)
+    except ValueError:
+        return None
+    return body.get("code") if isinstance(body, dict) else None

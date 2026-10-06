@@ -19,6 +19,7 @@ from typing import Any, Optional
 import ray
 import yaml
 from loguru import logger
+from skycap.paths import BUILTIN_RULES, load_rule
 
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
@@ -53,6 +54,13 @@ class SkycapConfig:
     SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
     ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
     replies every replayed turn would lose its reasoning, edit history and fork the graph."""
+    train_paths: str = "all"
+    """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
+    each sampled message trained once, so a reply the harness discarded and asked again for trains with the
+    rollout's advantage too. ``final``: only the path to the reply of the rollout's last model call, the
+    conversation the harness ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
+    a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
+    train), importable on every node; the skycap servers are started with it."""
 
 
 @dataclass
@@ -65,6 +73,9 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     ie = cfg.generator.inference_engine
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
+    train_paths = cfg.skycap.train_paths
+    # Here first, so a rule that won't import fails on the driver rather than in every server actor.
+    load_rule(train_paths)
     settings = {
         "upstream_url": engine_url,
         "tokenizer": cfg.trainer.policy.model.path,
@@ -81,6 +92,8 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         },
         "sampling_mask": ie.enable_return_sample_support_set,
         "use_raw_content": cfg.skycap.use_raw_content,
+        # A custom rule is imported by each server, under the name the generator finishes with.
+        "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
     }
     return start_servers(
         settings,
@@ -104,6 +117,7 @@ class HarborSkycapExp(HarborExp):
             harbor_cfg=cfg.harbor_trial_config,
             capture_urls=self.skycap.urls,
             inference_engine_client=inference_engine_client,
+            train_paths=cfg.skycap.train_paths,
         )
         return self.generator
 

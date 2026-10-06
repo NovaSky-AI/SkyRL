@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 import torch
 
 from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+    normalize_fp8_kv_scales_after_wake,
     patch_vllm_dummy_weight_boot_detection,
     patch_vllm_fp8_kv_scale_boot_normalization,
     patch_vllm_fp8_kv_scale_completion,
@@ -59,6 +60,19 @@ ensure_ray_rdt_libfabric()
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+# Must run inside EVERY vLLM worker process: post-sync hooks in the receive
+# engines need the process-local model runner, but vLLM only gives engines the
+# model object.
+try:
+    from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
+        apply_model_runner_registry_patch,
+    )
+
+    apply_model_runner_registry_patch()
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm":
+        raise
 
 # Must run inside EVERY vLLM worker process: Worker.load_model builds the
 # weight-transfer engine through the factory. vLLM loads this module before model
@@ -125,6 +139,22 @@ from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E40
 )
 
 apply_kimi_k25_lora_patch()
+
+# Online fp8_per_block quantization hands the torch.compile'd per_block_cast_to_fp8 a vLLM
+# parameter subclass, which dynamo cannot trace (RecursionError on the first weight sync).
+from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import (  # noqa: E402
+    apply_per_block_fp8_param_patch,
+)
+
+apply_per_block_fp8_param_patch()
+
+# R3 on monolithic MoE kernels (FlashInfer TRT-LLM FP8): the routed-experts capture callback is
+# bound once at startup and lost when a weight sync rebuilds the kernel (vllm#59449 / #59455).
+from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import (  # noqa: E402
+    apply_routed_experts_rebind_patch,
+)
+
+apply_routed_experts_rebind_patch()
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
@@ -342,11 +372,11 @@ class NewInferenceWorkerWrap:
             draft = self._skyrl_draft_model()
             if draft is not None:
                 self._skyrl_restore_buffers(draft, "_skyrl_saved_draft_buffers")
-        # Re-init fp8 KV scales after the KV pool remaps (no-op without fp8 KV cache).
+        # Re-assert the serialized-FP8 KV scales after the KV pool remaps (no-op
+        # without fp8 KV cache or on a real-checkpoint boot). This path skips
+        # Worker.wake_up, so the vllm_compat wake patch never sees it.
         if tags is None or "kv_cache" in tags:
-            post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
-            if post_wake is not None:
-                post_wake()
+            normalize_fp8_kv_scales_after_wake(self.model_runner)
 
     def _skyrl_draft_model(self):
         """The spec-decode drafter module, or None when there is no drafter."""

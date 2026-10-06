@@ -1,12 +1,12 @@
 """Smoke tests for the ``freeze_moe_router`` helper.
 
-The helper walks ``model.decoder.layers`` (or ``model.language_model.decoder.layers``
-for multimodal models) and flips ``requires_grad`` on
+The helper walks the subtrees of ``model.decoder.layers`` and ``model.mtp.layers``
+(under ``model.language_model`` for multimodal models) and flips ``requires_grad`` on
 router weights/biases. These tests build minimal mock modules that mimic Megatron-Core's attribute layout
 without importing Megatron.
 
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_freeze_moe_router.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/workers/megatron/test_freeze_moe_router.py
 """
 
 import pytest
@@ -14,7 +14,9 @@ import torch
 import torch.nn as nn
 from loguru import logger
 
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+pytest.importorskip("megatron.core", reason="requires the megatron extra")
+
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (  # noqa: E402
     freeze_moe_router,
 )
 
@@ -55,6 +57,29 @@ class _Model(nn.Module):
     def __init__(self, n_layers: int = 2, **mlp_kwargs):
         super().__init__()
         self.decoder = _Decoder(n_layers=n_layers, **mlp_kwargs)
+
+
+@pytest.mark.megatron
+def test_freeze_moe_router_hyperconnection_wrapped_layers():
+    class HyperConnectionHybridLayer(nn.Module):
+        def __init__(self, layer):
+            super().__init__()
+            self.layer = layer
+            self.mhc_weight = nn.Parameter(torch.ones(4))
+
+    model = _Model()
+    model.decoder.layers = nn.ModuleList([HyperConnectionHybridLayer(layer) for layer in model.decoder.layers])
+    multimodal = nn.Module()
+    multimodal.language_model = model
+
+    freeze_moe_router(multimodal)
+
+    for wrapper in model.decoder.layers:
+        assert not wrapper.layer.mlp.router.weight.requires_grad
+        assert not wrapper.layer.mlp.router.bias.requires_grad
+        assert wrapper.layer.mlp.linear_fc1.weight.requires_grad
+        assert wrapper.layer.mlp.shared_experts.gate_weight.requires_grad
+        assert wrapper.mhc_weight.requires_grad
 
 
 @pytest.mark.megatron
@@ -230,3 +255,28 @@ def test_freeze_moe_router_warns_when_nothing_frozen():
     assert all(p.requires_grad for m in models for p in m.parameters())
     assert any("no transformer decoder found on _EmbeddingOnlyChunk" in msg for msg in messages)
     assert any("froze no router parameters" in msg for msg in messages)
+
+
+@pytest.mark.megatron
+def test_freeze_moe_router_mtp_layers():
+    """MTP depths sit at ``model.mtp.layers[i].mtp_model_layer``, beside the decoder."""
+
+    class _MTPLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.eh_proj = nn.Linear(16, 8)
+            self.mtp_model_layer = _Layer()
+
+    m = _Model()
+    m.mtp = nn.Module()
+    m.mtp.layers = nn.ModuleList([_MTPLayer()])
+
+    freeze_moe_router(m)
+
+    mtp_layer = m.mtp.layers[0]
+    assert mtp_layer.mtp_model_layer.mlp.router.weight.requires_grad is False
+    assert mtp_layer.mtp_model_layer.mlp.router.bias.requires_grad is False
+    assert mtp_layer.mtp_model_layer.mlp.linear_fc1.weight.requires_grad is True
+    assert mtp_layer.eh_proj.weight.requires_grad is True
+    for layer in m.decoder.layers:
+        assert layer.mlp.router.weight.requires_grad is False

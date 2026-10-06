@@ -1469,3 +1469,19 @@ class TestMegatronRouterReplayValidation:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = 2
 
         validate_megatron_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_allows_both_executor_backends(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+
+        validate_inference_engine_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_refuses_inference_pipeline_parallelism(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+        cfg.generator.inference_engine.pipeline_parallel_size = 2
+
+        with pytest.raises(AssertionError, match="pipeline_parallel_size=1"):
+            validate_inference_engine_cfg(cfg)

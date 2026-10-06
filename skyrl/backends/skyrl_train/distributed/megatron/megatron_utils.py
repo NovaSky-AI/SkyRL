@@ -23,7 +23,7 @@
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -171,6 +171,21 @@ def _resolve_transformer_decoder(model: nn.Module) -> Optional[nn.Module]:
     return None
 
 
+def _iter_transformer_layer_modules(model: nn.Module, decoder: nn.Module) -> Iterator[nn.Module]:
+    """Yield every module under the decoder layers and, when present, the MTP layers.
+
+    Walking whole subtrees reaches transformer layers that ``HybridStack`` wraps in
+    ``HyperConnectionHybridLayer.layer`` and the layer each MTP depth holds as
+    ``MultiTokenPredictionLayer.mtp_model_layer``. The MTP block sits beside the
+    decoder, as ``mtp`` on the same text-only model or language tower.
+    """
+    yield from decoder.layers.modules()
+    language_model = model if getattr(model, "decoder", None) is decoder else getattr(model, "language_model", None)
+    mtp = getattr(language_model, "mtp", None)
+    if mtp is not None:
+        yield from mtp.layers.modules()
+
+
 def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     models = model_or_models
     if not isinstance(model_or_models, list):
@@ -185,7 +200,7 @@ def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
                 "skipping this model chunk. Router params on it stay trainable."
             )
             continue
-        for layer in decoder.layers:
+        for layer in _iter_transformer_layer_modules(model, decoder):
             if hasattr(layer, "mlp") and hasattr(layer.mlp, "router"):
                 if getattr(layer.mlp.router, "weight", None) is not None:
                     layer.mlp.router.weight.requires_grad = False
@@ -210,6 +225,55 @@ def _require_num_moe_experts(key: str, num_moe_experts: Optional[int]) -> int:
             "but num_moe_experts was not provided"
         )
     return num_moe_experts
+
+
+def freeze_dsa_indexer(model_or_models: Union[nn.Module, List[nn.Module]]):
+    """Freeze the dynamic-sparse-attention indexer on every attention layer that has one.
+
+    The indexer scores keys and emits the top-k *indices* the sparse attention kernel
+    then gathers. When auxiliary indexer loss is disabled (dsa_indexer_loss_coeff=0),
+    these discrete indices provide no gradient to the indexer. Leaving it trainable
+    in that configuration is not merely wasteful: Megatron's
+    ``DistributedDataParallel`` buckets a parameter by ``requires_grad`` at
+    construction and, with ``overlap_grad_reduce``, asserts that every bucketed
+    parameter's backward hook fired before the bucket reduces.
+
+    Use this option for a fixed pretrained indexer. It removes the indexer from the
+    grad buffer and optimizer state; leave it disabled to train with auxiliary loss.
+    """
+    models = model_or_models
+    if not isinstance(model_or_models, list):
+        models = [model_or_models]
+
+    froze = 0
+    for model in models:
+        decoder = _resolve_transformer_decoder(model)
+        if decoder is None:
+            logger.warning(
+                f"freeze_dsa_indexer: no transformer decoder found on {type(model).__name__}; "
+                "skipping this model chunk. Indexer params on it stay trainable."
+            )
+            continue
+        for layer in _iter_transformer_layer_modules(model, decoder):
+            core_attention = getattr(getattr(layer, "self_attention", None), "core_attention", None)
+            indexer = getattr(core_attention, "indexer", None)
+            if indexer is None:
+                continue
+            for param in indexer.parameters():
+                if param.requires_grad:
+                    param.requires_grad = False
+                    froze += 1
+
+    if froze:
+        logger.info(f"freeze_dsa_indexer: froze {froze} indexer parameters")
+    else:
+        logger.warning(
+            "freeze_dsa_indexer: froze no indexer parameters. Either the model does not use "
+            "dynamic sparse attention, this rank holds only dense-attention pipeline stages, "
+            "or the indexer was already frozen."
+        )
+    # modified in-place
+    return model_or_models
 
 
 def _convert_moe_experts_lora_to_vllm(

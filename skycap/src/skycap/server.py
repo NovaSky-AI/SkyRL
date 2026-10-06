@@ -1,15 +1,17 @@
 """The capture server: a control plane plus one OpenAI-compatible route per trajectory.
 
-    POST /trajectories                    {meta}         -> {id, base_url}
-    POST /trajectories/{id}/finish        {annotations}  -> {status, samples}
-    GET  /trajectories/{id}                               -> the trajectory document
-    POST /t/{id}/v1/chat/completions                      (the harness)
-    GET  /t/{id}/v1/models                                (passed through)
+    POST /trajectories                    {meta}                -> {id, base_url}
+    POST /trajectories/{id}/finish        {annotations, paths}  -> {status, samples}
+    GET  /trajectories/{id}                                      -> the trajectory document
+    POST /t/{id}/v1/chat/completions                             (the harness)
+    GET  /t/{id}/v1/models                                       (passed through)
     GET  /healthz
 
 A trajectory's route is its URL: the harness needs no header and no SDK patch.
 ``finish`` seals the trajectory: in-flight calls are cancelled and never
-committed, so its samples are final the moment they are returned.
+committed, so its samples are final the moment they are returned. ``paths``
+names the path rule that picks them (``skycap.paths``): ``all`` (default),
+``final``, or a custom rule the server was built with.
 
 With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
@@ -23,6 +25,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -31,7 +34,8 @@ from aiohttp import web
 
 from skycap import record
 from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
-from skycap.samples import build_samples
+from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
+from skycap.samples import Sample, build_samples, samples_for
 from skycap.trajectory import Status, Trajectory, new_trajectory_id
 
 logger = logging.getLogger(__name__)
@@ -67,8 +71,12 @@ class CaptureServer:
         record_dir: str | Path | None = None,
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
+        path_rules: Mapping[str, PathRule | str] | None = None,
     ) -> None:
         self.backend = backend
+        #: The rules ``finish`` accepts, by name: the built-in ones plus ``path_rules``, each given as a
+        #: function or as its ``"pkg.module:function"`` import path.
+        self.path_rules = rule_registry(path_rules)
         self.record_dir = Path(record_dir) if record_dir is not None else None
         #: Seconds an open trajectory may go without a request before it is abandoned.
         self.ttl = ttl
@@ -111,19 +119,39 @@ class CaptureServer:
         await self.backend.close()
 
     # -- ending a trajectory -----------------------------------------------------
-    async def end(self, trajectory: Trajectory, status: Status, annotations: dict[str, Any] | None = None) -> None:
+    async def end(
+        self,
+        trajectory: Trajectory,
+        status: Status,
+        annotations: dict[str, Any] | None = None,
+        paths: str | None = None,
+    ) -> list[Sample]:
         """Seal, release the upstream session, write, and drop from memory.
 
         A trajectory that already failed keeps its status; ``annotations`` are
         still recorded on it. It is written when this call ended it (including
         one read back from a shutdown-time record) or when it is still in
         memory, which means an earlier write failed and is retried.
+
+        With ``paths`` (a ``finish``), the sealed graph's samples are built by
+        that rule and recorded, so the record says what trained, and returned.
+        A rule that raises leaves the trajectory ended and written without
+        samples, and its error is raised; a later ``finish`` runs it again, and
+        the trajectory is written again if that one records samples.
         """
         ended_now = not trajectory.ended
+        recorded = trajectory.samples is not None
         if trajectory.is_open:
             trajectory.seal(status, annotations)
         elif not trajectory.ended:
             trajectory.annotations.update(annotations or {})
+        samples: list[Sample] = []
+        error: Exception | None = None
+        if paths is not None:
+            try:
+                samples = self._samples(trajectory, paths)
+            except Exception as caught:  # noqa: BLE001 - raised once the trajectory is written
+                error = caught
         if not trajectory.ended:
             trajectory.ended = True
             try:
@@ -131,8 +159,26 @@ class CaptureServer:
             except Exception:
                 logger.exception("releasing %s failed", trajectory.id)
         unwritten = self.trajectories.get(trajectory.id) is trajectory
-        if (ended_now or unwritten) and await self._persist(trajectory):
+        recorded_now = not recorded and trajectory.samples is not None
+        if (ended_now or unwritten or recorded_now) and await self._persist(trajectory):
             self.trajectories.pop(trajectory.id, None)
+        if error is not None:
+            raise error
+        return samples
+
+    def _samples(self, trajectory: Trajectory, paths: str) -> list[Sample]:
+        """The samples of the rule named ``paths``, recorded on the trajectory the first time."""
+        graph = trajectory.graph
+        if trajectory.samples is not None:
+            # A repeat: the rows the first finish recorded, rather than the rule run again.
+            rows = [Row(graph.path_to(row["leaf"]), row["targets"]) for row in trajectory.samples["rows"]]
+            return samples_for(graph, rows)
+        samples = build_samples(graph, self.path_rules[paths])
+        trajectory.samples = {
+            "paths": paths,
+            "rows": [{"leaf": sample.leaf, "targets": sample.targets} for sample in samples],
+        }
+        return samples
 
     async def _persist(self, trajectory: Trajectory) -> bool:
         """Best-effort write. Returns whether the trajectory is on disk."""
@@ -211,6 +257,9 @@ class CaptureServer:
         annotations = body.get("annotations") if isinstance(body, dict) else None
         if annotations is not None and not isinstance(annotations, dict):
             return _json({"error": "`annotations` must be an object"}, 400)
+        paths = body.get("paths", "all") if isinstance(body, dict) else "all"
+        if not isinstance(paths, str):
+            return _json({"error": "`paths` must be a string"}, 400)
         trajectory = await self._lookup(request.match_info["id"])
         if trajectory is None:
             return _json({"error": "unknown trajectory"}, 404)
@@ -218,12 +267,24 @@ class CaptureServer:
             # A repeat is answered as the first finish was. New annotations on it would be
             # silently lost, so they are refused instead.
             return _json({"error": "trajectory already finished; its annotations can't change"}, 409)
-        await self.end(trajectory, "finished", annotations)
+        if trajectory.samples is not None:
+            # Likewise, the record says which rule trained it, so a repeat can't ask for another. A repeat
+            # naming that rule is answered from the recorded rows, so the server needn't still have it.
+            if trajectory.samples["paths"] != paths:
+                return _json({"error": f"trajectory already finished with paths={trajectory.samples['paths']!r}"}, 409)
+        elif paths not in self.path_rules:
+            return _json({"error": f"`paths` must be one of {sorted(self.path_rules)}"}, 400)
+        try:
+            samples = await self.end(trajectory, "finished", annotations, paths=paths)
+        except Exception as error:  # noqa: BLE001 - a custom rule's failure, reported to the caller
+            logger.exception("path rule %r failed on %s", paths, trajectory.id)
+            message = f"path rule {paths!r} failed: {type(error).__name__}: {error}"
+            return _json({"error": message, "code": PATH_RULE_FAILED}, 500)
         return _json(
             {
                 "id": trajectory.id,
                 "status": trajectory.status,
-                "samples": [s.to_json() for s in build_samples(trajectory.graph)],
+                "samples": [s.to_json() for s in samples],
                 "unbridged_calls": trajectory.graph.unbridged_calls(),
             }
         )

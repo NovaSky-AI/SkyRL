@@ -31,6 +31,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     _clear_mtp_hybrid_pattern,
     _convert_moe_experts_lora_to_vllm,
+    freeze_dsa_indexer,
     freeze_moe_router,
     gdn_in_proj_lora_is_safe,
     get_model_config,
@@ -54,6 +55,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
+    apply_dsa_hybrid_indexer_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
@@ -62,6 +66,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_shared_expert_lora_tp import (
     apply_shared_expert_lora_tp_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_sparse_mla_nope import (
+    patch_sparse_mla_nope,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_vision_attention_backend import (
     patch_vision_attention_backend,
@@ -108,7 +115,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     get_microbatch_iterator,
     reduce_metrics,
 )
-from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -126,6 +133,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 )
 
 apply_shared_expert_lora_tp_patch()
+apply_dsa_hybrid_indexer_patch()
 
 
 class MegatronWorker:
@@ -284,7 +292,11 @@ class MegatronWorker:
                 "DeepSeek-V3 bridge (vision tower + mm projector dropped)"
             )
 
-        provider = bridge.to_megatron_provider()
+        if SKYRL_MEGATRON_RANDOM_INIT:
+            logger.warning("SKYRL_MEGATRON_RANDOM_INIT=1: randomly initializing weights (checkpoint not loaded)")
+        # Random init needs no extra sync: MegatronStrategy.set_seed seeds every TP rank alike and calls
+        # model_parallel_cuda_manual_seed, so TP-replicated parameters come out identical.
+        provider = bridge.to_megatron_provider(load_weights=not SKYRL_MEGATRON_RANDOM_INIT)
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
@@ -520,8 +532,10 @@ class MegatronWorker:
             DistributedDataParallelConfig,
         )
 
-        # TE patch to allow FA2 for head_dim 256 on SM103 (B300)
-        # Delete along with the patch module once the TE pin includes NVIDIA/TransformerEngine#3360.
+        # TE patch to allow FA2 for head_dim 256 on SM103 (B300) and other arches
+        # outside TE's allowlist. Still needed on 2.19.0: NVIDIA/TransformerEngine#3360
+        # is open and unmerged, and the gate it removes is present in every release
+        # through 2.19.0 (renamed from head_dim_qk to fa2_padded_head_dim in 2.17.0).
         patch_fa2_head_dim_allowlist()
 
         # Isolate the DSA index-share holder per checkpointed forward (GLM 5 and
@@ -529,6 +543,12 @@ class MegatronWorker:
         # Delete along with the patch module once the megatron-core pin includes
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
+
+        # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
+        # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
+        # dense O(L^2) softmax. Delete along with the patch module once the megatron-core pin
+        # includes NVIDIA/Megatron-LM#7617.
+        patch_sparse_mla_nope()
 
         # Give the Qwen3-VL ViT the language model's attention backend; megatron-core
         # now asserts NVTE_* attention env vars agree across all models in a process.
@@ -880,6 +900,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 logger.info("freeze_moe_router=True: freezing MoE router params")
             self.provider.register_pre_wrap_hook(freeze_moe_router)
 
+        # Freeze DSA indexer params before DDP buckets them: DDP decides bucket
+        # membership from requires_grad in its constructor, and overlap_grad_reduce
+        # asserts that every bucketed param's backward hook fired.
+        if self.cfg.policy.megatron_config.freeze_dsa_indexer:
+            if self._rank == 0:
+                logger.info("freeze_dsa_indexer=True: freezing DSA indexer params")
+            self.provider.register_pre_wrap_hook(freeze_dsa_indexer)
+
         # wrap with DDP for training
         wrap_with_ddp = not self.cfg.policy.inference_only_init
         self.actor_module = self.make_megatron_module(
@@ -1131,6 +1159,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ``metrics`` (all-reduced across DP).
         """
         self.model.train()
+        torch.cuda.reset_peak_memory_stats()
 
         all_metrics = defaultdict(list)
 
@@ -1285,6 +1314,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if use_token_batching:
             status["num_microbatches"] = float(len(micro_buffer))
             status["num_padding_microbatches"] = float(num_padding_microbatches)
+
+        # Peak CUDA memory over this forward_backward call, max-reduced across ranks.
+        status["peak_mem_allocated_gb_max"] = torch.cuda.max_memory_allocated() / 1024**3
+        status["peak_mem_reserved_gb_max"] = torch.cuda.max_memory_reserved() / 1024**3
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from skycap.paths import PathRule
 from skycap.server import Backend, CaptureServer
 from skycap.text import TextBackend
 
@@ -80,7 +81,9 @@ class CaptureService:
     """The model options are ``build_backend``'s; the rest place and persist the server.
 
     ``port=0`` lets the OS pick a free port. ``advertise_host`` is the address clients use to reach
-    this server, which ``url`` carries once started.
+    this server, which ``url`` carries once started. ``path_rules`` are the custom path rules
+    ``finish`` may name besides ``all`` and ``final``, each a function or its ``"pkg.module:function"``
+    import path (``skycap.paths``).
     """
 
     def __init__(
@@ -101,6 +104,7 @@ class CaptureService:
         use_raw_content: bool = False,
         record_dir: str | None = None,
         ttl: float = 3600.0,
+        path_rules: Mapping[str, PathRule | str] | None = None,
         host: str = "0.0.0.0",
         port: int = 0,
         advertise_host: str = "127.0.0.1",
@@ -120,7 +124,7 @@ class CaptureService:
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
         )
-        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl)
+        self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules)
         self._host, self._port = host, port
         self._advertise_host = advertise_host
         self._thread: threading.Thread | None = None

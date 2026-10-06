@@ -376,6 +376,12 @@ class VLLMServerActor(ServerActorProtocol):
             f"host={self._ip}, port={mooncake_server_port}, engine_id={engine_id}"
         )
 
+    def get_ray_worker_id(self) -> str:
+        """Return the Ray worker ID of the actor process hosting this API server."""
+        import ray
+
+        return ray.get_runtime_context().get_worker_id()
+
     def get_server_info(self) -> ServerInfo:
         """Get the server's IP and port info."""
         return ServerInfo(

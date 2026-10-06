@@ -10,7 +10,7 @@ The difference from the sibling [`harbor`](../harbor) integration: there Harbor
 collects per-turn token ids itself (`collect_rollout_details`), which is why
 summarization is banned. Here a rewritten history is a new branch of the
 graph, so **summarization is allowed**. Each root-to-leaf path becomes one
-training row.
+training row, unless `skycap.train_paths` says otherwise (below).
 
 ## Running
 
@@ -27,7 +27,44 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
 The rest of the configuration is the sibling's: `harbor_trial_config` holds
 Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/default.yaml`.
 `skycap.*` sets the record directory (default `{trainer.export_path}/skycap`),
-the idle TTL, the port and the renderer pool size.
+the idle TTL, the port, the renderer pool size and which paths train.
+
+## Which paths train
+
+`skycap.train_paths` picks the rows of each rollout:
+
+- `all` (default): every root-to-leaf path, each sampled message trained once.
+  A reply the harness discarded and asked again for (mini-swe-agent on a format
+  error) is a dead-end path, and trains with the rollout's advantage too.
+- `final`: only the path to the reply of the rollout's last model call, the
+  conversation the harness ended with. One row per rollout; nothing off it
+  trains.
+- `pkg.module:function`: a custom rule, a function of skycap's context graph to
+  rows, each a path and the model nodes on it to train. skycap builds the
+  tokens, loss masks and routes, and checks the rows. The module must be
+  importable on every node, since each skycap server imports it at start. A
+  rule that raises masks that rollout without retrying the trial.
+
+For example, the final path plus every discarded reply under 64 sampled tokens,
+each as a row of its own (`skycap.train_paths=my_rules:final_and_short_discards`):
+
+```python
+from skycap.graph import MessageGraph
+from skycap.paths import Row, final_path
+
+def final_and_short_discards(graph: MessageGraph) -> list[Row]:
+    rows = final_path(graph)
+    final = set(rows[0].path) if rows else set()
+    for leaf in graph.leaves():
+        tokens = graph.nodes[leaf].tokens
+        if leaf not in final and graph.nodes[leaf].author == "model" and tokens is not None:
+            if len(tokens.token_ids) - tokens.sampled_start < 64:
+                rows.append(Row(graph.path_to(leaf), [leaf]))
+    return rows
+```
+
+Every row of a trial carries its reward. See [skycap's README](../../../skycap/README.md#which-paths-train)
+for what a rule may return.
 
 ## How it fits
 
