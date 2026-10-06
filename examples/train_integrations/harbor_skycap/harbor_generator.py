@@ -226,7 +226,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             "attempt": attempt,
         }
         async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
-            config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt)
+            config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
             async with self._rate_limiter:
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
@@ -286,20 +286,30 @@ class HarborSkycapGenerator(GeneratorInterface):
             self._warned_unexposed = True
         return trajectory.base_url
 
-    def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
+    def _trial_config(
+        self,
+        prompt: ConversationType,
+        base_url: str,
+        cache_salt: Optional[str],
+        api_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``)."""
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
+        key = api_key or PLACEHOLDER_API_KEY
         if self._in_sandbox:
-            # Installed agents read their endpoint from the sandbox's environment, not from agent kwargs.
+            # Installed agents read their endpoint and key from the sandbox's environment, not from agent kwargs.
+            # mini-swe-agent sends MSWEA_API_KEY over a provider's key, so it carries the trajectory's key too.
             env = config["agent"].setdefault("env", {})
             for provider in ("OPENAI", "HOSTED_VLLM"):
                 env[f"{provider}_API_BASE"] = base_url
-                env[f"{provider}_API_KEY"] = PLACEHOLDER_API_KEY
+                env[f"{provider}_API_KEY"] = key
+            env["MSWEA_API_KEY"] = key
         kwargs = config["agent"]["kwargs"]
         kwargs["api_base"] = base_url
         llm_kwargs = kwargs.setdefault("llm_kwargs", {})
         # Terminus-2 takes `api_base` itself but passes a key only through `llm_kwargs`.
-        llm_kwargs["api_key"] = PLACEHOLDER_API_KEY
+        llm_kwargs["api_key"] = key
         if cache_salt is not None:
             # LiteLLM merges `extra_body` into the request body, where skycap reads `cache_salt` and forwards it.
             extra_body = llm_kwargs.setdefault("extra_body", {})

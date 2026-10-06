@@ -169,19 +169,27 @@ class FakeTrial:
 
     @classmethod
     async def create(cls, config: Any) -> "FakeTrial":
-        cls.configs.append(config.model_dump() if hasattr(config, "model_dump") else config)
+        dumped = config.model_dump() if hasattr(config, "model_dump") else config
+        if hasattr(config, "agent"):
+            # Harbor masks secret-looking env values when dumping; the agent itself gets the real ones.
+            dumped["agent"]["env"] = dict(config.agent.env)
+        cls.configs.append(dumped)
         return cls(cls.configs[-1])
 
     async def run(self) -> SimpleNamespace:
         script = str(self.config["task"]["path"])
         kwargs = self.config["agent"]["kwargs"]
         # As the agent finds its endpoint: an installed one in the sandbox's environment, Terminus-2 in its kwargs.
-        base_url = (self.config["agent"].get("env") or {}).get("OPENAI_API_BASE") or kwargs["api_base"]
+        env = self.config["agent"].get("env") or {}
+        base_url = env.get("OPENAI_API_BASE") or kwargs["api_base"]
+        # And its key, as an OpenAI client sends it: from the environment, or Terminus-2's llm_kwargs.
+        api_key = env.get("OPENAI_API_KEY") or kwargs.get("llm_kwargs", {}).get("api_key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         extra = kwargs.get("llm_kwargs", {}).get("extra_body", {})
 
         async def chat(session: aiohttp.ClientSession, messages: list[dict[str, Any]]) -> dict[str, Any]:
             body = {"model": "policy", "messages": messages, **extra}
-            async with session.post(f"{base_url}/chat/completions", json=body) as response:
+            async with session.post(f"{base_url}/chat/completions", json=body, headers=headers) as response:
                 assert response.status == 200, await response.text()
                 return (await response.json())["choices"][0]["message"]
 

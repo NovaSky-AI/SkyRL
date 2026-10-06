@@ -56,9 +56,9 @@ class Trajectory:
     #: What ``finish`` trained: ``{"paths": <rule name>, "rows": [{"leaf", "targets"}]}``, a row per sample,
     #: with the node its path ends at and the model nodes it trains. None until finished.
     samples: dict[str, Any] | None = None
-    #: The key a harness calls this trajectory's routes with, when the server requires one. Minted at
-    #: creation and kept in memory only: it is never written, so it dies with the trajectory.
-    api_key: str = field(default_factory=new_api_key, repr=False)
+    #: The key a harness calls this trajectory's routes with, when the server requires one. Minted by
+    #: ``create`` and kept in memory only: it is never written, so one read back from a record has none.
+    api_key: str | None = field(default=None, repr=False)
 
     @property
     def is_open(self) -> bool:

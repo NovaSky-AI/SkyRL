@@ -81,6 +81,10 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    require_api_key: Optional[bool] = None
+    """Whether a trajectory's harness routes answer only its own key, which the generator hands its agent. ``None``
+    (default): whenever ``skycap.exposure`` is set, so routes reachable from outside the cluster can't be written to
+    by whoever learns a URL."""
     """How agents inside remote sandboxes reach the servers."""
 
 
@@ -113,6 +117,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         },
         "sampling_mask": ie.enable_return_sample_support_set,
         "use_raw_content": cfg.skycap.use_raw_content,
+        "require_api_key": _require_api_key(cfg),
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
     }
@@ -126,6 +131,12 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
     )
+
+
+def _require_api_key(cfg: Any) -> bool:
+    """``skycap.require_api_key``, on by default whenever the servers are exposed."""
+    required = cfg.skycap.require_api_key
+    return cfg.skycap.exposure.type != "none" if required is None else bool(required)
 
 
 def _exposure(cfg: Any) -> Optional[str]:

@@ -47,7 +47,7 @@ from skycap import record
 from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
 from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
 from skycap.samples import Sample, build_samples, samples_for
-from skycap.trajectory import Status, Trajectory, new_trajectory_id
+from skycap.trajectory import Status, Trajectory, new_api_key, new_trajectory_id
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,9 @@ class CaptureServer:
         meta = body.get("meta") if isinstance(body, dict) else None
         if meta is not None and not isinstance(meta, dict):
             return _json({"error": "`meta` must be an object"}, 400)
-        trajectory = Trajectory(id=new_trajectory_id(), meta=meta or {}, capture=self.backend.describe())
+        trajectory = Trajectory(
+            id=new_trajectory_id(), meta=meta or {}, capture=self.backend.describe(), api_key=new_api_key()
+        )
         self.trajectories[trajectory.id] = trajectory
         # The route is on the host the pool reached us at: harnesses reach it the same way.
         base = f"{request.scheme}://{request.host}"
@@ -337,6 +339,9 @@ class CaptureServer:
         trajectory = self.trajectories.get(trajectory_id)
         if trajectory is None:
             return self._ended_or_unknown(trajectory_id)
+        # Ended first: an ended trajectory answers 410 whatever key is sent, and its key opens nothing more.
+        if not trajectory.is_open:
+            return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
         if not self._authorized(trajectory, request):
             return _unauthorized()
         return await self.backend.models(request)
@@ -346,10 +351,10 @@ class CaptureServer:
         trajectory = self.trajectories.get(trajectory_id)
         if trajectory is None:
             return self._ended_or_unknown(trajectory_id)
-        if not self._authorized(trajectory, request):
-            return _unauthorized()
         if not trajectory.is_open:
             return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
+        if not self._authorized(trajectory, request):
+            return _unauthorized()
         # In flight from here on, so a finish that lands during the body read cancels this call.
         task = asyncio.current_task()
         assert task is not None
@@ -372,8 +377,13 @@ class CaptureServer:
         """Whether the call carries this trajectory's key, or no key is required."""
         if not self.require_api_key:
             return True
-        scheme, _, key = request.headers.get("Authorization", "").partition(" ")
-        return scheme.lower() == "bearer" and hmac.compare_digest(key.strip(), trajectory.api_key)
+        if trajectory.api_key is None:
+            return False
+        parts = request.headers.get("Authorization", "").split(maxsplit=1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return False
+        # Bytes: compare_digest refuses str with non-ASCII characters, which a caller controls.
+        return hmac.compare_digest(parts[1].strip().encode(), trajectory.api_key.encode())
 
     def _start(
         self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes

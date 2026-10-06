@@ -13,6 +13,7 @@ from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa
 from examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap import (  # noqa: E402
     HarborSkycapConfig,
     _exposure,
+    _require_api_key,
 )
 from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa: E402
     PLACEHOLDER_API_KEY,
@@ -63,6 +64,7 @@ def exposed(router, tmp_path):
         record_dir=str(tmp_path / "record"),
         host="127.0.0.1",
         exposure=LoopbackExposure(),
+        require_api_key=True,
     )
     service.start()
     yield service
@@ -101,6 +103,16 @@ def test_the_exposure_is_configured_by_name_and_kwargs() -> None:
 def test_a_bad_exposure_is_refused_before_anything_starts(overrides, match) -> None:
     with pytest.raises(ValueError, match=match):
         _exposure(HarborSkycapConfig.from_cli_overrides(overrides))
+
+
+def test_keys_are_required_whenever_the_servers_are_exposed() -> None:
+    def required(*overrides: str) -> bool:
+        return _require_api_key(HarborSkycapConfig.from_cli_overrides(list(overrides)))
+
+    assert not required()
+    assert required("skycap.exposure.type=cloudflare")
+    assert not required("skycap.exposure.type=cloudflare", "skycap.require_api_key=false")
+    assert required("skycap.require_api_key=true")
 
 
 def test_each_server_gets_its_own_exposure() -> None:
@@ -145,9 +157,12 @@ async def test_an_agent_in_the_sandbox_calls_skycap_on_its_exposed_url(exposed, 
         # The trajectory's route on the exposed listener, never the server's own URL.
         assert url.startswith(f"{exposed.exposed_url}/t/") and not url.startswith(exposed.url)
         assert env["HOSTED_VLLM_API_BASE"] == config["agent"]["kwargs"]["api_base"] == url
-        assert env["OPENAI_API_KEY"] == env["HOSTED_VLLM_API_KEY"] == "****"  # set; Harbor masks it when dumped
-    # The agent gets the placeholder key itself, and Harbor's mini-swe-agent, which checks this process's
-    # environment for a key before it starts, finds one.
+        # The server requires keys: each agent got its own trajectory's key, which it called with.
+        key = env["OPENAI_API_KEY"]
+        assert key.startswith("sk-skycap-") and env["HOSTED_VLLM_API_KEY"] == env["MSWEA_API_KEY"] == key
+    assert len({c["agent"]["env"]["OPENAI_API_KEY"] for c in trials.configs}) == len(trials.configs)
+    # Without a key (a server that requires none), the placeholder; Harbor's mini-swe-agent, which checks this
+    # process's environment for a key before it starts, finds one.
     env = gen._trial_config("/tasks/t", "https://edge.example/t/tr_x/v1", None)["agent"]["env"]
     assert env["OPENAI_API_KEY"] == env["HOSTED_VLLM_API_KEY"] == PLACEHOLDER_API_KEY
     assert os.environ["MSWEA_API_KEY"] == PLACEHOLDER_API_KEY
@@ -167,6 +182,8 @@ async def test_terminus_keeps_the_servers_own_url_when_it_is_exposed(exposed, tr
     (config,) = trials.configs
     assert config["agent"]["kwargs"]["api_base"].startswith(f"{exposed.url}/t/")
     assert "OPENAI_API_BASE" not in (config["agent"].get("env") or {})
+    # Its key is the trajectory's, through llm_kwargs, and the keyed server took its calls.
+    assert config["agent"]["kwargs"]["llm_kwargs"]["api_key"].startswith("sk-skycap-")
 
 
 @pytest.mark.asyncio

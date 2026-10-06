@@ -6,6 +6,7 @@ from pathlib import Path
 
 import openai
 import pytest
+import zstandard
 
 from skycap import CapturePool, record
 from skycap.cli import build_parser, build_server
@@ -41,8 +42,12 @@ async def test_a_required_key_must_be_the_trajectorys_own() -> None:
         for headers in (None, bearer("sk-skycap-guess"), bearer(other["api_key"]), {"Authorization": mine["api_key"]}):
             assert await chat(stack, mine, headers) == 401
             assert await models(stack, mine, headers) == 401
+        # A non-ASCII key is refused like any wrong one, not a server error.
+        assert await chat(stack, mine, {"Authorization": "Bearer sk-skycap-\u00e9"}) == 401
         assert await chat(stack, mine, bearer(mine["api_key"])) == 200
         assert await models(stack, mine, bearer(mine["api_key"])) == 200
+        # Any whitespace between the scheme and the key, as HTTP allows.
+        assert await models(stack, mine, {"Authorization": f"bearer\t {mine['api_key']}"}) == 200
         # Refused calls never reached the graph: only the accepted one is in it.
         document = await stack.document(mine["id"])
         assert [n["author"] for n in document["nodes"]] == ["client", "model"]
@@ -74,9 +79,25 @@ async def test_the_pool_hands_out_the_key_and_the_record_never_holds_it(tmp_path
         assert await chat(stack, {"base_url": trajectory.base_url}, bearer(trajectory.api_key)) == 410
 
     assert trajectory.api_key and trajectory.api_key.startswith("sk-skycap-")
-    raw = b"".join(path.read_bytes() for path in tmp_path.iterdir())
-    assert trajectory.api_key.encode() not in raw
-    assert "api_key" not in record.read_document(tmp_path, trajectory.id)
+    # Every record file is a zstd frame: the key is in none of them, decompressed.
+    files = list(tmp_path.iterdir())
+    assert files and all(trajectory.api_key.encode() not in decompress(path) for path in files)
+    # Read back, the trajectory has no key: one is only ever minted by create.
+    assert record.load(tmp_path, trajectory.id).api_key is None
+
+
+async def test_an_ended_trajectory_answers_410_whatever_key_is_sent() -> None:
+    # No record dir: an ended trajectory stays in memory, and still never takes a call.
+    async with running_stack(require_api_key=True) as stack:
+        trajectory = await stack.create()
+        await stack.finish(trajectory["id"], {"reward": 1.0})
+        for headers in (None, bearer("sk-skycap-guess"), bearer(trajectory["api_key"])):
+            assert await chat(stack, trajectory, headers) == 410
+            assert await models(stack, trajectory, headers) == 410
+
+
+def decompress(path: Path) -> bytes:
+    return zstandard.ZstdDecompressor().decompressobj().decompress(path.read_bytes())
 
 
 def test_the_cli_requires_keys_on_request() -> None:
