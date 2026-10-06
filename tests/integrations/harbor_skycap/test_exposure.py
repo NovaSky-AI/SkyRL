@@ -1,7 +1,6 @@
 """Exposing skycap's harness routes to agents inside sandboxes: the config, the built-ins, a custom
-exposure named by import path, the gateway, and the URL the generator hands the agent."""
+exposure named by import path, the server's harness listener, and the URL the generator hands the agent."""
 
-import asyncio
 import signal
 import socket
 import subprocess
@@ -9,9 +8,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import pytest
 
@@ -19,6 +19,7 @@ pytest.importorskip("skycap")
 pytest.importorskip("harbor")
 
 import aiohttp  # noqa: E402
+import yarl  # noqa: E402
 
 from examples.train_integrations.harbor_skycap import tunnel  # noqa: E402
 from examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap import (  # noqa: E402
@@ -26,11 +27,9 @@ from examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap im
     _exposure,
 )
 from examples.train_integrations.harbor_skycap.exposure import (  # noqa: E402
-    HARNESS_ROUTE,
     CloudflareQuickTunnel,
     Exposure,
     ExternalHost,
-    HarnessGateway,
     exposure_factory,
 )
 from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa: E402
@@ -49,20 +48,20 @@ RECORDING = "tests.integrations.harbor_skycap.test_exposure:RecordingExposure"
 
 
 class RecordingExposure(Exposure):
-    """Exposes the gateway at its own loopback URL, and logs each start and stop to ``log`` (one line each),
-    which works across Ray's worker processes."""
+    """Exposes the harness listener at its own loopback URL, and logs each start and stop to ``log`` (one line
+    each), which works across Ray's worker processes."""
 
     def __init__(self, log: str, fail_on: Optional[int] = None) -> None:
         self.log = log
         self.fail_on = fail_on
         self.index: Optional[int] = None
 
-    def start(self, gateway_url: str, index: int) -> str:
+    def start(self, harness_url: str, index: int) -> str:
         self.index = index
-        self._write(f"start {index} {gateway_url}")
+        self._write(f"start {index} {harness_url}")
         if index == self.fail_on:
             raise RuntimeError(f"no way in for server {index}")
-        return gateway_url + "/"
+        return harness_url + "/"
 
     def stop(self) -> None:
         self._write(f"stop {self.index}")
@@ -93,13 +92,23 @@ def get(url: str) -> tuple[int, str]:
         return 0, str(error)
 
 
-@pytest.fixture
-def service(tmp_path):
-    """A skycap server with no engine behind it: enough to tell its 404s and 502s from a gateway's."""
-    service = CaptureService("http://127.0.0.1:9/v1", record_dir=str(tmp_path / "record"), host="127.0.0.1")
+@contextmanager
+def serving(tmp_path: Path, exposure: Exposure, index: int) -> Iterator[CaptureService]:
+    """A skycap server with no engine behind it, its harness listener bound where ``exposure`` says, as the
+    server actor does: enough to tell skycap's own 404s and 502s apart."""
+    host, port = exposure.bind(index)
+    service = CaptureService(
+        "http://127.0.0.1:9/v1",
+        record_dir=str(tmp_path / "record"),
+        host="127.0.0.1",
+        harness_host=host,
+        harness_port=port,
+    )
     service.start()
-    yield service
-    service.stop()
+    try:
+        yield service
+    finally:
+        service.stop()
 
 
 def test_nothing_is_exposed_by_default() -> None:
@@ -156,47 +165,47 @@ def test_external_host_puts_server_i_on_port_plus_i_on_every_interface() -> None
     assert ipv6.start("http://[::1]:11501", 1) == "http://[2001:db8::7]:11501"
 
 
-def test_external_host_serves_only_the_harness_routes_on_its_port(service) -> None:
+def test_external_host_serves_only_the_harness_routes_on_its_port(tmp_path) -> None:
     port = free_port()
     exposure = ExternalHost("127.0.0.1", port)
-    url = exposure.open(service.url, 0)
-    try:
-        assert url == f"http://127.0.0.1:{port}"
-        status, body = get(f"{url}/t/tr_none/v1/models")
-        assert status == 404 and "unknown trajectory" in body  # skycap's own answer, through the gateway
-        assert get(f"{url}/healthz")[0] == 404 and get(f"{service.url}/healthz")[0] == 200
-    finally:
-        exposure.close()
+    with serving(tmp_path, exposure, 0) as service:
+        url = exposure.open(service.harness_url, 0)
+        try:
+            assert url == f"http://127.0.0.1:{port}"
+            status, body = get(f"{url}/t/tr_none/v1/models")
+            assert status == 404 and "unknown trajectory" in body  # skycap's own answer
+            assert get(f"{url}/healthz")[0] == 404 and get(f"{service.url}/healthz")[0] == 200
+        finally:
+            exposure.close()
+    # The listener is the server's: it stops with the server.
     assert get(f"{url}/t/tr_none/v1/models")[0] == 0
 
 
-def test_a_custom_exposure_is_started_on_the_gateway_and_stopped_before_it(service, tmp_path) -> None:
+def test_a_custom_exposure_is_started_on_the_harness_listener_and_stopped_on_close(tmp_path) -> None:
     log = tmp_path / "log"
     exposure = exposure_factory(RECORDING, kwargs={"log": str(log)})()
-    url = exposure.open(service.url, 3)
-    try:
-        assert logged(log) == [f"start 3 {url}"] and url.startswith("http://127.0.0.1:")
+    with serving(tmp_path, exposure, 3) as service:
+        url = exposure.open(service.harness_url, 3)
+        assert url == service.harness_url and url.startswith("http://127.0.0.1:")
+        assert logged(log) == [f"start 3 {url}"]
         status, body = get(f"{url}/t/tr_none/v1/models")
         assert status == 404 and "unknown trajectory" in body
-    finally:
         exposure.close()
-    assert logged(log) == [f"start 3 {url}", "stop 3"]
-    assert get(f"{url}/t/tr_none/v1/models")[0] == 0
-    exposure.close()
-    assert logged(log) == [f"start 3 {url}", "stop 3"]
+        assert logged(log) == [f"start 3 {url}", "stop 3"]
+        exposure.close()
+        assert logged(log) == [f"start 3 {url}", "stop 3"]
 
 
-def test_a_failed_start_stops_the_exposure_and_its_gateway(service, tmp_path) -> None:
+def test_a_failed_start_stops_the_exposure(tmp_path) -> None:
     log = tmp_path / "log"
     exposure = exposure_factory(RECORDING, kwargs={"log": str(log), "fail_on": 0})()
-    with pytest.raises(RuntimeError, match="no way in"):
-        exposure.open(service.url, 0)
-    started, stopped = logged(log)
-    assert stopped == "stop 0"
-    assert get(f"{started.split()[-1]}/t/tr_none/v1/models")[0] == 0
+    with serving(tmp_path, exposure, 0) as service:
+        with pytest.raises(RuntimeError, match="no way in"):
+            exposure.open(service.harness_url, 0)
+    assert logged(log) == [f"start 0 {service.harness_url}", "stop 0"]
 
 
-def test_the_cloudflare_exposure_opens_a_quick_tunnel_to_the_gateway(service, monkeypatch) -> None:
+def test_the_cloudflare_exposure_opens_a_quick_tunnel_to_the_harness_listener(tmp_path, monkeypatch) -> None:
     opened = []
 
     class FakeTunnel:
@@ -213,12 +222,13 @@ def test_the_cloudflare_exposure_opens_a_quick_tunnel_to_the_gateway(service, mo
 
     monkeypatch.setattr(tunnel, "CloudflareTunnel", FakeTunnel)
     exposure = exposure_factory("cloudflare", kwargs={"timeout": 5.0, "attempts": 1})()
-    url = exposure.open(service.url, 0)
-    exposure.close()
+    with serving(tmp_path, exposure, 0) as service:
+        url = exposure.open(service.harness_url, 0)
+        exposure.close()
 
     (fake,) = opened
     assert url == "https://corp-provides-trademark-effective.trycloudflare.com"
-    assert fake.local_url.startswith("http://127.0.0.1:") and fake.started == (5.0, 1) and fake.stopped
+    assert fake.local_url == service.harness_url and fake.started == (5.0, 1) and fake.stopped
 
 
 SLEEPER = [sys.executable, "-c", "import os, time; print(os.getpid(), flush=True); time.sleep(600)"]
@@ -281,32 +291,34 @@ def test_a_failed_tunnel_request_is_not_taken_for_the_tunnel() -> None:
     assert TUNNEL_URL.search(banner).group(0) == "https://corp-provides-trademark-effective.trycloudflare.com"
 
 
-def test_only_the_harness_routes_are_exposed() -> None:
-    assert HARNESS_ROUTE.match("/t/tr_ab12/v1/chat/completions")
-    assert HARNESS_ROUTE.match("/t/tr_ab12/v1/models")
-    for private in ("/trajectories", "/trajectories/tr_ab12/finish", "/trajectories/tr_ab12", "/healthz"):
-        assert not HARNESS_ROUTE.match(private)
-
-
 @pytest.mark.asyncio
-async def test_the_gateway_forwards_harness_calls_and_hides_the_control_plane(service) -> None:
-    gateway = HarnessGateway(service.url)
-    gateway_url = f"http://127.0.0.1:{await asyncio.to_thread(gateway.start)}"
-    try:
+async def test_the_harness_listener_serves_harness_calls_and_hides_the_control_plane(tmp_path) -> None:
+    with serving(tmp_path, Exposure(), 0) as service:
         async with aiohttp.ClientSession() as http:
             async with http.post(f"{service.url}/trajectories", json={"meta": {}}) as response:
                 trajectory_id = (await response.json())["id"]
-            async with http.post(f"{gateway_url}/trajectories", json={"meta": {}}) as response:
-                assert response.status == 404
-            async with http.post(f"{gateway_url}/trajectories/{trajectory_id}/finish", json={}) as response:
-                assert response.status == 404
-            # No engine behind skycap: a forwarded chat call comes back as skycap's own 502.
+            private = [
+                ("POST", "/trajectories"),
+                ("POST", f"/trajectories/{trajectory_id}/finish"),
+                ("GET", f"/trajectories/{trajectory_id}"),
+                ("GET", "/healthz"),
+                # Dot segments are resolved before routing, so they can't climb out of /t/{id}/.
+                ("GET", "/t/%2E%2E/v1/models"),
+                ("GET", f"/t/{trajectory_id}/v1/../../../trajectories/{trajectory_id}"),
+            ]
+            for method, path in private:
+                url = yarl.URL(f"{service.harness_url}{path}", encoded=True)
+                async with http.request(method, url) as response:
+                    assert response.status == 404, path
+            # No engine behind skycap: a chat call on the listener is skycap's own 502.
             chat = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-            async with http.post(f"{gateway_url}/t/{trajectory_id}/v1/chat/completions", json=chat) as response:
+            url = f"{service.harness_url}/t/{trajectory_id}/v1/chat/completions"
+            async with http.post(url, json=chat) as response:
                 assert response.status == 502
                 assert "upstream unavailable" in (await response.json())["error"]["message"]
-    finally:
-        await asyncio.to_thread(gateway.stop)
+            # The control plane still works on the server's own URL.
+            async with http.get(f"{service.url}/trajectories/{trajectory_id}") as response:
+                assert response.status == 200
 
 
 @pytest.mark.asyncio

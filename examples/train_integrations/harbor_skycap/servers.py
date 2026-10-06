@@ -6,8 +6,9 @@ placement group whose strategy is configurable: ``SPREAD`` by default, so one
 node going away takes one server rather than all of them. The generator spreads
 trajectories over the pool's URLs round-robin.
 
-With an exposure (``exposure.py``), each actor also makes its server's harness
-routes reachable from agents inside sandboxes, and stops that before the server.
+With an exposure (``exposure.py``), each server also listens with its harness
+routes alone, where the exposure says, and the actor makes that listener
+reachable from agents inside sandboxes; it closes that before the server stops.
 """
 
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ class SkycapServerActor:
         self.exposure = exposure() if exposure is not None else None
         self.index = index
         node_ip = get_node_ip()
+        harness_host, harness_port = self.exposure.bind(index) if self.exposure is not None else (None, 0)
         self.service = CaptureService(
             mode="tokens",
             engine=SkyRLEngine(),
@@ -51,6 +53,8 @@ class SkycapServerActor:
             host=default_bind_host(node_ip),
             port=0,
             advertise_host=node_ip,
+            harness_host=harness_host,
+            harness_port=harness_port,
             **settings,
         )
 
@@ -59,12 +63,16 @@ class SkycapServerActor:
         url = self.service.start()
         if self.exposure is None:
             return url, None
-        return url, self.exposure.open(url, self.index)
+        assert self.service.harness_url is not None
+        return url, self.exposure.open(self.service.harness_url, self.index)
 
     def stop(self, timeout: float) -> bool:
-        # Close the way in before stopping the server behind it.
+        # Close the way in before stopping the server behind it; the server writes what it holds either way.
         if self.exposure is not None:
-            self.exposure.close()
+            try:
+                self.exposure.close()
+            except Exception:
+                logger.exception(f"closing skycap server {self.index}'s exposure failed")
         return self.service.stop(timeout)
 
 

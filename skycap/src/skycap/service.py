@@ -84,6 +84,10 @@ class CaptureService:
     this server, which ``url`` carries once started. ``path_rules`` are the custom path rules
     ``finish`` may name besides ``all`` and ``final``, each a function or its ``"pkg.module:function"``
     import path (``skycap.paths``).
+
+    With ``harness_host``, the server also listens on ``harness_host:harness_port`` with the harness
+    routes alone (``CaptureServer.harness_app``), for agents outside this network; ``harness_url``
+    carries its address once started. It shares the server, its event loop and its trajectories.
     """
 
     def __init__(
@@ -108,6 +112,8 @@ class CaptureService:
         host: str = "0.0.0.0",
         port: int = 0,
         advertise_host: str = "127.0.0.1",
+        harness_host: str | None = None,
+        harness_port: int = 0,
     ) -> None:
         backend = build_backend(
             upstream_url,
@@ -127,6 +133,7 @@ class CaptureService:
         self.server = CaptureServer(backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules)
         self._host, self._port = host, port
         self._advertise_host = advertise_host
+        self._harness_host, self._harness_port = harness_host, harness_port
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping: asyncio.Event | None = None
@@ -134,6 +141,8 @@ class CaptureService:
         self._error: BaseException | None = None
         #: Where clients reach the server, set by ``start``.
         self.url: str | None = None
+        #: Where this node reaches the harness-only listener, set by ``start`` when there is one.
+        self.harness_url: str | None = None
 
     def start(self, timeout: float = 60.0) -> str:
         """Start serving and return the server's URL. Returns once it accepts connections."""
@@ -176,13 +185,29 @@ class CaptureService:
         self._stopping = asyncio.Event()
         runner = web.AppRunner(self.server.app())
         await runner.setup()
+        harness: web.AppRunner | None = None
         try:
             site = web.TCPSite(runner, self._host, self._port)
             await site.start()
-            port = runner.addresses[0][1]
-            host = f"[{self._advertise_host}]" if ":" in self._advertise_host else self._advertise_host
-            self.url = f"http://{host}:{port}"
+            self.url = _http_url(self._advertise_host, runner.addresses[0][1])
+            if self._harness_host is not None:
+                harness = web.AppRunner(self.server.harness_app())
+                await harness.setup()
+                await web.TCPSite(harness, self._harness_host, self._harness_port).start()
+                local = _LOOPBACK.get(self._harness_host, self._harness_host)
+                self.harness_url = _http_url(local, harness.addresses[0][1])
             self._ready.set()
             await self._stopping.wait()
         finally:
+            # The way in from outside closes first, then the server writes what it holds.
+            if harness is not None:
+                await harness.cleanup()
             await runner.cleanup()
+
+
+#: Where a listener bound on a wildcard address is reached from this node.
+_LOOPBACK = {"0.0.0.0": "127.0.0.1", "": "127.0.0.1", "::": "::1"}
+
+
+def _http_url(host: str, port: int) -> str:
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"

@@ -5,159 +5,73 @@ server's own URL and nothing is exposed. An agent that runs inside its sandbox
 (Daytona, Modal, ...) calls the model from there, so each skycap server's
 harness routes have to be reachable from the sandbox network. Per server:
 
-* ``HarnessGateway`` forwards only the harness routes,
-  ``/t/{trajectory id}/v1/chat/completions`` and ``/models``, to the server.
-  The control plane (create, finish, read) stays private. The random
-  trajectory id in the path is what a caller must know.
-* An ``Exposure`` makes the gateway reachable and returns the URL agents use
-  instead of the server's. Built in, by ``skycap.exposure.type``:
-  ``external_host`` (an address the sandboxes route to: the node's own, or a
-  relay's such as frp on a public VM) and ``cloudflare`` (a Cloudflare quick
-  tunnel, see ``tunnel.py``). Any other way in is an ``Exposure`` subclass
-  named by import path, ``module:Class``.
+* The skycap server listens a second time, with the harness routes alone
+  (``/t/{trajectory id}/v1/chat/completions`` and ``/models``;
+  ``CaptureService(harness_host=...)``). The control plane (create, finish,
+  read) is not routed there, so it stays private. The random trajectory id in
+  the path is what a caller must know.
+* An ``Exposure`` says where that listener binds, makes it reachable, and
+  returns the URL agents use instead of the server's. Built in, by
+  ``skycap.exposure.type``: ``external_host`` (an address the sandboxes route
+  to: the node's own, or a relay's such as frp on a public VM) and
+  ``cloudflare`` (a Cloudflare quick tunnel, see ``tunnel.py``). Any other way
+  in is an ``Exposure`` subclass named by import path, ``module:Class``.
 """
 
-import asyncio
 import importlib
 import inspect
-import re
-import threading
 from functools import partial
 from typing import Any, Callable, Dict, Optional, Tuple, Type
 from urllib.parse import urlsplit
-
-import aiohttp
-from aiohttp import web
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     default_bind_host,
     format_http_url,
 )
 
-#: The routes an agent in a sandbox may reach. Everything else is the control plane.
-HARNESS_ROUTE = re.compile(r"^/t/[^/]+/v1/(chat/completions|models)$")
-_HOP_HEADERS = {
-    "host",
-    "content-length",
-    "transfer-encoding",
-    "connection",
-    "keep-alive",
-    "content-encoding",
-}
-#: Where a gateway bound on a wildcard address is reached from this node.
-_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}
-
-
-class HarnessGateway:
-    """Forwards the harness routes to one skycap server, on its own thread and event loop."""
-
-    def __init__(self, upstream_url: str) -> None:
-        self.upstream_url = upstream_url.rstrip("/")
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._runner: Optional[web.AppRunner] = None
-        self._session: Optional[aiohttp.ClientSession] = None
-
-    def start(self, host: str = "127.0.0.1", port: int = 0, timeout: float = 30.0) -> int:
-        """Start serving on ``host:port`` (``port=0`` picks a free one). Returns the bound port."""
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, name="skycap-gateway", daemon=True)
-        self._thread.start()
-        return asyncio.run_coroutine_threadsafe(self._serve(host, port), self._loop).result(timeout)
-
-    def stop(self, timeout: float = 30.0) -> None:
-        if self._loop is None or self._thread is None:
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop).result(timeout)
-        finally:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout)
-            self._loop.close()
-            self._loop = self._thread = None
-
-    async def _serve(self, host: str, port: int) -> int:
-        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=30))
-        app = web.Application(client_max_size=1024**3)
-        app.router.add_route("*", "/{tail:.*}", self._forward)
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, host, port)
-        await site.start()
-        return self._runner.addresses[0][1]
-
-    async def _shutdown(self) -> None:
-        if self._runner is not None:
-            await self._runner.cleanup()
-        if self._session is not None:
-            await self._session.close()
-
-    async def _forward(self, request: web.Request) -> web.StreamResponse:
-        if not HARNESS_ROUTE.match(request.path):
-            raise web.HTTPNotFound()
-        assert self._session is not None
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
-        async with self._session.request(
-            request.method, f"{self.upstream_url}{request.path_qs}", data=await request.read(), headers=headers
-        ) as upstream:
-            response = web.StreamResponse(
-                status=upstream.status,
-                headers={k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_HEADERS},
-            )
-            await response.prepare(request)
-            async for chunk in upstream.content.iter_any():
-                await response.write(chunk)
-            await response.write_eof()
-            return response
-
 
 class Exposure:
     """Makes one skycap server's harness routes reachable from sandboxes. Subclass it for a new way in.
 
     One instance per server, built in the server's Ray actor as ``cls(**skycap.exposure.kwargs)``, so the
-    class must be importable there and its constructor should only store its arguments. The actor serves
-    the harness routes on a gateway bound at ``bind(index)``, then calls ``start`` with the gateway's
-    local URL, and ``stop`` before the server stops.
+    class must be importable there and its constructor should only store its arguments. The actor starts
+    the server with its harness listener bound at ``bind(index)``, then calls ``start`` with that
+    listener's local URL, and ``stop`` before the server stops.
     """
 
     def bind(self, index: int) -> Tuple[str, int]:
-        """Host and port of server ``index``'s gateway. Default: a free loopback port, for a way in
-        that dials out from this node (a tunnel)."""
+        """Host and port of server ``index``'s harness listener. Default: a free loopback port, for a way
+        in that dials out from this node (a tunnel)."""
         return "127.0.0.1", 0
 
-    def start(self, gateway_url: str, index: int) -> str:
-        """Make ``gateway_url`` reachable from sandboxes. Returns the URL they reach it at, which stands
+    def start(self, harness_url: str, index: int) -> str:
+        """Make ``harness_url`` reachable from sandboxes. Returns the URL they reach it at, which stands
         in for the server's URL: agents get ``{url}/t/{trajectory id}/v1``."""
         raise NotImplementedError
 
     def stop(self) -> None:
         """Release what ``start`` opened. Also called when opening failed, so ``start`` may not have run."""
 
-    def open(self, server_url: str, index: int) -> str:
-        """Start a gateway to ``server_url`` and expose it. Returns the exposed URL."""
-        host, port = self.bind(index)
-        self._gateway = HarnessGateway(server_url)
+    def open(self, harness_url: str, index: int) -> str:
+        """Expose the server's harness listener at ``harness_url``. Returns the exposed URL."""
+        self._opened = True
         try:
-            bound = self._gateway.start(host=host, port=port)
-            return self.start(format_http_url(_LOOPBACK.get(host, host), bound), index).rstrip("/")
+            return self.start(harness_url, index).rstrip("/")
         except BaseException:
             self.close()
             raise
 
     def close(self) -> None:
-        """Close the way in, then the gateway behind it. Does nothing unless opened, and only once."""
-        gateway: Optional[HarnessGateway] = getattr(self, "_gateway", None)
-        if gateway is None:
+        """Close the way in. Does nothing unless opened, and only once."""
+        if not getattr(self, "_opened", False):
             return
-        self._gateway = None
-        try:
-            self.stop()
-        finally:
-            gateway.stop()
+        self._opened = False
+        self.stop()
 
 
 class ExternalHost(Exposure):
-    """Sandboxes reach this node at ``host``, server ``i`` on ``port + i``; the gateways bind all interfaces.
+    """Sandboxes reach this node at ``host``, server ``i`` on ``port + i``; the harness listeners bind all
+    interfaces.
 
     ``host`` is an address the sandboxes route to: the node's public or peered address, or a relay's
     that forwards each port here, such as an frp server on a public VM with one TCP forward per server.
@@ -170,8 +84,8 @@ class ExternalHost(Exposure):
     def bind(self, index: int) -> Tuple[str, int]:
         return default_bind_host(self.host), self.port + index
 
-    def start(self, gateway_url: str, index: int) -> str:
-        return format_http_url(self.host, urlsplit(gateway_url).port)
+    def start(self, harness_url: str, index: int) -> str:
+        return format_http_url(self.host, urlsplit(harness_url).port)
 
 
 class CloudflareQuickTunnel(Exposure):
@@ -186,10 +100,10 @@ class CloudflareQuickTunnel(Exposure):
         self.attempts = attempts
         self._tunnel: Any = None
 
-    def start(self, gateway_url: str, index: int) -> str:
+    def start(self, harness_url: str, index: int) -> str:
         from .tunnel import CloudflareTunnel
 
-        self._tunnel = CloudflareTunnel(gateway_url)
+        self._tunnel = CloudflareTunnel(harness_url)
         return self._tunnel.start(timeout=self.timeout, attempts=self.attempts)
 
     def stop(self) -> None:

@@ -13,6 +13,10 @@ committed, so its samples are final the moment they are returned. ``paths``
 names the path rule that picks them (``skycap.paths``): ``all`` (default),
 ``final``, or a custom rule the server was built with.
 
+``harness_app`` serves the harness routes alone, for a listener reachable from
+outside the trainer's network (an agent in a remote sandbox): the control plane
+is not routed there at all.
+
 With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
 and then dropped from memory; reads of it are served from disk. Without one,
@@ -94,6 +98,16 @@ class CaptureServer:
         app.router.add_get("/t/{id}/v1/models", self.models)
         app.on_startup.append(self._on_startup)
         app.on_cleanup.append(self._on_cleanup)
+        return app
+
+    def harness_app(self) -> web.Application:
+        """The harness routes alone, served alongside ``app`` by the same server.
+
+        It has no control plane to reach and no lifecycle of its own: ``app`` starts and stops the backend.
+        """
+        app = web.Application(client_max_size=1024**3)
+        app.router.add_post("/t/{id}/v1/chat/completions", self.chat)
+        app.router.add_get("/t/{id}/v1/models", self.models)
         return app
 
     async def _on_startup(self, app: web.Application) -> None:

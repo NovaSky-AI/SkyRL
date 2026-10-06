@@ -1,7 +1,7 @@
 """A Cloudflare quick tunnel: a random public ``https://*.trycloudflare.com`` URL to a local one.
 
 It needs no account and is gone when it stops. ``exposure.CloudflareQuickTunnel``
-opens one per skycap server, to the server's harness gateway. The cloudflared
+opens one per skycap server, to the server's harness listener. The cloudflared
 binary is taken from ``PATH``, or downloaded once from Cloudflare's releases.
 
 cloudflared is tied to the process that started it (``spawn_tied``): it is
@@ -115,7 +115,7 @@ class CloudflareTunnel:
             self.stop()
             raise TimeoutError(f"cloudflared gave no tunnel URL within {timeout}s; it printed: {list(recent)[-5:]}")
         # The URL is printed before it resolves, and its DNS can flap for a while after, so wait
-        # until several requests in a row reach the gateway. A made-up trajectory gets skycap's
+        # until several requests in a row reach the listener. A made-up trajectory gets skycap's
         # own 404, where a tunnel not yet up gets an error page or no address.
         probe = f"{self.url}/t/tr_probe/v1/models"
         streak = 0

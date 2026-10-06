@@ -73,7 +73,7 @@ for what a rule may return.
 | --- | --- |
 | `entrypoints/main_harbor_skycap.py` | Starts the skycap servers in token mode, in front of the router, from the run's config. Stops them at the end, which writes every trajectory still in memory. |
 | `servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
-| `exposure.py`, `tunnel.py` | How agents inside sandboxes reach each server's harness routes: the harness-only gateway, the `Exposure` interface and its built-ins. `tunnel.py` runs a Cloudflare quick tunnel. |
+| `exposure.py`, `tunnel.py` | How agents inside sandboxes reach each server's harness routes: the `Exposure` interface and its built-ins, which expose each server's harness-only listener. `tunnel.py` runs a Cloudflare quick tunnel. |
 | `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
 | `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
 | `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
@@ -114,7 +114,8 @@ For hundreds of concurrent agents, use `external_host` (directly, or through
 a relay): a quick tunnel's in-flight cap and response timeout are hit first.
 
 Only the harness routes (`/t/{id}/v1/chat/completions` and `/models`) are
-exposed, through a gateway in front of each server; the control plane (create,
+exposed: each server listens a second time with those routes alone, and that
+listener is what an exposure makes reachable. The control plane (create,
 finish, read) stays private. The random trajectory id in the path is what a
 caller must know. When anything is exposed, every agent, Terminus-2 included,
 is given the exposed URL.
@@ -141,11 +142,11 @@ class NamedTunnels(Exposure):
         self.tunnels, self.hostnames = tunnels, hostnames
         self.process = None
 
-    # bind(index) -> (host, port) of the server's gateway; by default a free loopback port.
+    # bind(index) -> (host, port) of the server's harness listener; by default a free loopback port.
 
-    def start(self, gateway_url: str, index: int) -> str:
-        # gateway_url serves this server's harness routes on this node, e.g. http://127.0.0.1:41234.
-        self.process = subprocess.Popen(["cloudflared", "tunnel", "run", "--url", gateway_url, self.tunnels[index]])
+    def start(self, harness_url: str, index: int) -> str:
+        # harness_url serves this server's harness routes alone on this node, e.g. http://127.0.0.1:41234.
+        self.process = subprocess.Popen(["cloudflared", "tunnel", "run", "--url", harness_url, self.tunnels[index]])
         return f"https://{self.hostnames[index]}"  # agents get {this}/t/{trajectory id}/v1
 
     def stop(self) -> None:  # also runs when opening failed

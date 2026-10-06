@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 
@@ -32,6 +33,45 @@ async def test_a_service_serves_a_trajectory_and_writes_it_when_stopped(tmp_path
     (trajectory_id,) = record.list_ids(tmp_path)
     assert trajectory_id == trajectory.id
     assert len(record.load(tmp_path, trajectory_id).graph) == 2
+
+
+async def test_the_harness_listener_serves_the_harness_routes_alone(tmp_path: Path) -> None:
+    upstream = TestServer(MockOpenAI().app())
+    await upstream.start_server()
+    service = CaptureService(
+        str(upstream.make_url("/v1")),
+        api_key=API_KEY,
+        record_dir=str(tmp_path),
+        host="127.0.0.1",
+        harness_host="0.0.0.0",
+    )
+    url = await asyncio.to_thread(service.start)
+    try:
+        # Bound on every interface, and reached from this node on loopback.
+        assert service.harness_url is not None and service.harness_url.startswith("http://127.0.0.1:")
+        assert service.harness_url != url
+        async with CapturePool([url]) as pool, aiohttp.ClientSession() as http:
+            trajectory = await pool.create({"task": "t"})
+            # The harness calls the same trajectory on the harness listener ...
+            path = trajectory.base_url.removeprefix(url)
+            await converse(client(service.harness_url + path), "q", "r")
+            # ... where nothing of the control plane is routed.
+            for method, route in [
+                ("POST", "/trajectories"),
+                ("GET", f"/trajectories/{trajectory.id}"),
+                ("GET", "/healthz"),
+            ]:
+                async with http.request(method, service.harness_url + route) as response:
+                    assert response.status == 404, route
+            result = await trajectory.finish({"reward": 1.0})
+    finally:
+        assert await asyncio.to_thread(service.stop)
+        await upstream.close()
+    assert result.status == "finished" and len(record.load(tmp_path, trajectory.id).graph) == 4
+    # It stopped with the server.
+    async with aiohttp.ClientSession() as http:
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await http.get(service.harness_url + "/healthz")
 
 
 async def test_token_mode_is_built_from_options(tmp_path: Path) -> None:

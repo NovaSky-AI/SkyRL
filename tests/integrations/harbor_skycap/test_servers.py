@@ -84,7 +84,7 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
     assert len(list(tmp_path.glob("*.json.zst"))) == 4
 
 
-#: Exposes each server's gateway at its loopback URL and logs its starts and stops.
+#: Exposes each server's harness listener at its loopback URL and logs its starts and stops.
 RECORDING = "tests.integrations.harbor_skycap.test_exposure:RecordingExposure"
 
 
@@ -113,7 +113,7 @@ async def test_each_server_exposes_its_harness_routes_and_closes_them_on_stop(lo
     )
     gen = None
     try:
-        # Each actor built its own exposure from the import path and started it on its own gateway.
+        # Each actor built its own exposure from the import path and started it on its own harness listener.
         assert set(servers.harness_urls) == set(servers.urls)
         exposed = set(servers.harness_urls.values())
         assert len(exposed) == 2 and not exposed & set(servers.urls)
