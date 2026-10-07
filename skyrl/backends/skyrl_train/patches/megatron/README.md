@@ -26,6 +26,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -190,6 +191,20 @@ softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
 - **Remove:** the `patch_sparse_mla_nope()` call in `MegatronWorker.make_megatron_module`, the
   module, and its CPU and GPU tests (`test_sparse_mla_nope.py`, and its line in
   `ci/gpu_ci_run_h100.sh`).
+
+### `patch_moe_release_dispatcher_probs.py`: no upstream PR yet
+
+`MoEAlltoAllTokenDispatcher.dispatch_preprocess` stores `self.probs` (the router output, with its
+`grad_fn`) and only the same forward's `combine_preprocess` reads it. Kept until the next forward,
+it pins that forward's autograd graph; under full recompute that is every MoE layer's recomputed
+graph for the rest of backward (~21 GiB/GPU at 64k tokens on GLM-5.3-Flash). Generic MoE + full
+recompute, not GLM- or mHC-specific (NVIDIA/Megatron-LM#7521 makes it reachable for megatron-core's
+own mHC layers). The release wraps `MoELayer.postprocess`, where every MoE forward ends, so
+patches that replace dispatcher methods can't drop it. Applied unconditionally in
+`make_megatron_module`.
+- **Landed?** megatron-core's dispatcher clears `self.probs` after the combine (or stops storing it).
+- **Remove:** the module, its call in `make_megatron_module`, and
+  `patches/megatron/test_moe_release_dispatcher_probs.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

@@ -19,6 +19,10 @@ def new_trajectory_id() -> str:
     return f"tr_{secrets.token_hex(8)}"
 
 
+def new_api_key() -> str:
+    return f"sk-skycap-{secrets.token_urlsafe(24)}"
+
+
 @dataclass(slots=True)
 class Failure:
     """A call that produced no node: an upstream error, an unreadable reply."""
@@ -52,6 +56,9 @@ class Trajectory:
     #: What ``finish`` trained: ``{"paths": <rule name>, "rows": [{"leaf", "targets"}]}``, a row per sample,
     #: with the node its path ends at and the model nodes it trains. None until finished.
     samples: dict[str, Any] | None = None
+    #: The key a harness calls this trajectory's routes with, when the server requires one. Minted by
+    #: ``create`` and kept in memory only: it is never written, so one read back from a record has none.
+    api_key: str | None = field(default=None, repr=False)
 
     @property
     def is_open(self) -> bool:

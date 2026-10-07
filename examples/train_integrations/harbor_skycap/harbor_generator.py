@@ -8,17 +8,28 @@ URL; skycap renders every prompt, calls the engine with token ids, and keeps a
 context graph, so a rewritten history is a branch rather than a hole and
 summarization is allowed.
 
-Per trial: create a trajectory, point the agent at ``trajectory.base_url``, run
-it, and ``finish`` with the reward to get a sample per path the ``train_paths``
-rule picks. ``compose`` turns those into the step-wise ``GeneratorOutput``.
+Per trial: create a trajectory, point the agent at it, run it, and ``finish``
+with the reward to get a sample per path the ``train_paths`` rule picks.
+``compose`` turns those into the step-wise ``GeneratorOutput``.
+
+Terminus-2 calls the model from this process and gets ``trajectory.base_url``.
+An installed agent (mini-swe-agent, Claude Code, ...) calls it from inside its
+sandbox, so it gets the trajectory's route on the server's exposed URL
+(``trajectory.exposed_base_url``, with ``skycap.exposure``), through the
+sandbox environment that LiteLLM- and OpenAI-based agents read.
 """
 
 import asyncio
+import importlib
+import os
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 import litellm
+from harbor.agents.factory import AgentFactory
+from harbor.agents.installed.base import BaseInstalledAgent
+from harbor.models.agent.name import AgentName
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
@@ -91,6 +102,12 @@ class HarborSkycapGenerator(GeneratorInterface):
 
         self._template = deepcopy(harbor_cfg)
         agent = self._template.setdefault("agent", {})
+        self._in_sandbox = runs_in_sandbox(agent)
+        self._warned_unexposed = False
+        if self._in_sandbox:
+            # Harbor's mini-swe-agent refuses to start unless this process's environment holds a key for the
+            # model's provider, and ``hosted_vllm`` has none it knows; skycap checks no key.
+            os.environ.setdefault("MSWEA_API_KEY", PLACEHOLDER_API_KEY)
         agent["model_name"] = f"hosted_vllm/{served}"
         kwargs = agent.setdefault("kwargs", {})
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
@@ -209,7 +226,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             "attempt": attempt,
         }
         async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
-            config = self._trial_config(prompt, trajectory.base_url, cache_salt)
+            config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
             async with self._rate_limiter:
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
@@ -256,14 +273,43 @@ class HarborSkycapGenerator(GeneratorInterface):
             unbridged_calls=finished.unbridged_calls,
         )
 
-    def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
+    def _agent_url(self, trajectory: Any) -> str:
+        """Where the agent calls its trajectory: on the server's exposed URL when it runs in its sandbox."""
+        if self._in_sandbox and trajectory.exposed_base_url is not None:
+            return trajectory.exposed_base_url
+        if self._in_sandbox and not self._warned_unexposed:
+            # Fine for a sandbox on this network (Docker); a remote one can't reach the server's own URL.
+            logger.warning(
+                f"{self._template['agent'].get('name')} runs inside its sandbox, but skycap isn't exposed "
+                "(skycap.exposure.type=none): it gets the server's own URL, which a remote sandbox can't reach"
+            )
+            self._warned_unexposed = True
+        return trajectory.base_url
+
+    def _trial_config(
+        self,
+        prompt: ConversationType,
+        base_url: str,
+        cache_salt: Optional[str],
+        api_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``)."""
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
+        key = api_key or PLACEHOLDER_API_KEY
+        if self._in_sandbox:
+            # Installed agents read their endpoint and key from the sandbox's environment, not from agent kwargs.
+            # mini-swe-agent sends MSWEA_API_KEY over a provider's key, so it carries the trajectory's key too.
+            env = config["agent"].setdefault("env", {})
+            for provider in ("OPENAI", "HOSTED_VLLM"):
+                env[f"{provider}_API_BASE"] = base_url
+                env[f"{provider}_API_KEY"] = key
+            env["MSWEA_API_KEY"] = key
         kwargs = config["agent"]["kwargs"]
         kwargs["api_base"] = base_url
         llm_kwargs = kwargs.setdefault("llm_kwargs", {})
         # Terminus-2 takes `api_base` itself but passes a key only through `llm_kwargs`.
-        llm_kwargs["api_key"] = PLACEHOLDER_API_KEY
+        llm_kwargs["api_key"] = key
         if cache_salt is not None:
             # LiteLLM merges `extra_body` into the request body, where skycap reads `cache_salt` and forwards it.
             extra_body = llm_kwargs.setdefault("extra_body", {})
@@ -271,3 +317,18 @@ class HarborSkycapGenerator(GeneratorInterface):
                 raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
             extra_body["cache_salt"] = cache_salt
         return config
+
+
+def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
+    """Whether Harbor's agent ``agent`` (a ``TrialConfig.agent``) is installed in the sandbox and calls the model
+    from there, as mini-swe-agent and Claude Code do, rather than from this process, as Terminus-2 does."""
+    # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
+    name, import_path = agent.get("name"), agent.get("import_path")
+    if name is not None and name in AgentName.values():
+        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
+    elif import_path:
+        module, _, attribute = import_path.partition(":")
+        cls = getattr(importlib.import_module(module), attribute)
+    else:
+        return False
+    return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)

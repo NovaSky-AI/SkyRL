@@ -2,7 +2,9 @@
 
 The sibling ``main_harbor`` with two changes: a pool of skycap servers (Ray
 actors, see ``servers.py``) starts in front of the inference router, and the
-generator points each trial at its own trajectory on one of them.
+generator points each trial at its own trajectory on one of them. Agents that
+run inside their sandbox (mini-swe-agent, ...) reach it through
+``skycap.exposure``.
 
     uv run --isolated --extra fsdp --extra harbor --extra skycap \\
         -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \\
@@ -14,11 +16,12 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import ray
 import yaml
 from loguru import logger
+from skycap.exposure import load_exposure
 from skycap.paths import BUILTIN_RULES, load_rule
 
 from skyrl.train.utils import validate_cfg
@@ -31,7 +34,23 @@ from ...harbor.entrypoints.main_harbor import (
     _deep_merge,
 )
 from ..harbor_generator import HarborSkycapGenerator
-from ..servers import SkycapServers, start_servers
+from ..servers import SkycapServers, exposure_for, start_servers
+
+
+@dataclass
+class ExposureConfig:
+    type: str = "none"
+    """How agents that run inside a remote sandbox (Harbor's installed agents: mini-swe-agent, Claude Code, ...)
+    reach skycap; Terminus-2 calls from this cluster and never needs it. ``none`` (default); ``cloudflare``, a
+    Cloudflare quick tunnel per server (development: at most 200 calls in flight per tunnel, ~125 s to a
+    response's first byte); ``external_host``, server ``i`` listens on ``kwargs.port + i`` (default 11500) on its
+    node and is reached at ``kwargs.host``: a relay that forwards each port to its server's node (frp), or the
+    node's own address with every server on that node (``skycap.placement_strategy=STRICT_PACK``); or an
+    ``Exposure`` subclass, ``"pkg.module:Class"``.
+    Only the harness routes are exposed; see skycap's README."""
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+    """The exposure's constructor arguments: ``host`` and ``port`` for ``external_host``, ``timeout`` and
+    ``attempts`` for ``cloudflare``, or a custom class's own."""
 
 
 @dataclass
@@ -61,6 +80,12 @@ class SkycapConfig:
     conversation the harness ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
+    exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    require_api_key: Optional[bool] = None
+    """Whether a trajectory's harness routes answer only its own key, which the generator hands its agent. ``None``
+    (default): whenever ``skycap.exposure`` is set, so routes reachable from outside the cluster can't be written to
+    by whoever learns a URL."""
+    """How agents inside remote sandboxes reach the servers."""
 
 
 @dataclass
@@ -92,6 +117,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         },
         "sampling_mask": ie.enable_return_sample_support_set,
         "use_raw_content": cfg.skycap.use_raw_content,
+        "require_api_key": _require_api_key(cfg),
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
     }
@@ -102,7 +128,28 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         placement_strategy=cfg.skycap.placement_strategy,
         record_dir=cfg.skycap.record_dir or os.path.join(cfg.trainer.export_path, "skycap"),
         ttl=cfg.skycap.ttl,
+        exposure=_exposure(cfg),
+        exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
     )
+
+
+def _require_api_key(cfg: Any) -> bool:
+    """``skycap.require_api_key``, on by default whenever the servers are exposed."""
+    required = cfg.skycap.require_api_key
+    return cfg.skycap.exposure.type != "none" if required is None else bool(required)
+
+
+def _exposure(cfg: Any) -> Optional[str]:
+    """``skycap.exposure.type``, or None for ``none``. Raises ``ValueError`` on a config that can't be built."""
+    kind = cfg.skycap.exposure.type
+    if kind == "none":
+        if cfg.skycap.exposure.kwargs:
+            raise ValueError("skycap.exposure.kwargs is set but skycap.exposure.type is none")
+        return None
+    # Built here once, as the first server's would be, so a bad config fails before any actor starts.
+    name, kwargs = exposure_for(kind, dict(cfg.skycap.exposure.kwargs), 0)
+    load_exposure(name, **kwargs)
+    return kind
 
 
 class HarborSkycapExp(HarborExp):
@@ -143,6 +190,7 @@ def main() -> None:
         defaults = yaml.safe_load(f)
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
+    _exposure(cfg)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)

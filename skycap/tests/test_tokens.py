@@ -480,6 +480,59 @@ async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
 
 
+async def test_token_history_continues_from_the_shadowed_sibling_whose_tokens_the_render_reproduces() -> None:
+    # The fake parser drops every END, so this reply re-renders as "ab" END: not the tokens sampled.
+    completion = [*encode("a"), END, *encode("b"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        first = await llm.chat.completions.create(model="policy", messages=[user("q")])
+        reply = first.choices[0].message.model_dump(exclude_none=True)
+        # An assistant message among the new ones makes the fake bridge decline, so each prompt is rendered.
+        history = [user("q"), reply, user("more"), {"role": "assistant", "content": "edited"}, user("go")]
+        await llm.chat.completions.create(model="policy", messages=history)
+        await llm.chat.completions.create(model="policy", messages=[*history, user("again")])
+        graph = stack.server.trajectories[created["id"]].graph
+
+        sample, replay = graph.children(0)
+        assert (graph.nodes[sample].author, graph.nodes[replay].author) == ("model", "client")
+        assert graph.shadowed_by(replay) == sample
+        # Matching picks the sample, but its tokens aren't the render's, so both later calls fork to the replay.
+        later = [node.id for node in graph if node.author == "model" and node.id != sample]
+        assert len(later) == 2 and all(replay in graph.path_to(node) for node in later)
+
+
+async def test_token_history_never_continues_from_a_shadowed_model_sample() -> None:
+    # Both samples parse as "ab". The top_p=0.9 one re-renders exactly; the other doesn't (the fake parser drops END).
+    def completion(prompt: list[int], sampling: dict) -> list[int]:
+        if sampling.get("top_p") == 0.9:
+            return [*encode("ab"), END]
+        return [*encode("a"), END, *encode("b"), END]
+
+    async with token_stack(completion=completion) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        await llm.chat.completions.create(model="policy", messages=[user("q")], top_p=0.9)
+        await llm.chat.completions.create(model="policy", messages=[user("q")], top_p=0.5)
+        graph = stack.server.trajectories[created["id"]].graph
+        older, latest = graph.children(0)
+        assert graph.shadowed_by(older) == latest
+
+        # An assistant message among the new ones makes the fake bridge decline, so the prompt is rendered.
+        history = [user("q"), {"role": "assistant", "content": "ab"}, user("more")]
+        history += [{"role": "assistant", "content": "edited"}, user("go")]
+        await llm.chat.completions.create(model="policy", messages=history)
+
+        # The render reproduces the older sample's tokens, but the turn forks to a new client node instead.
+        fork = graph.children(0)[-1]
+        assert graph.nodes[fork].author == "client"
+        older_tokens = graph.nodes[older].tokens.token_ids
+        assert graph.nodes[fork].tokens.token_ids[: len(older_tokens)] == older_tokens
+        assert graph.shadowed_by(fork) == latest
+        later = next(node.id for node in graph if node.author == "model" and node.id not in (older, latest))
+        assert fork in graph.path_to(later) and older not in graph.path_to(later)
+
+
 async def test_use_raw_content_keeps_reasoning_inline_so_a_verbatim_replay_stays_one_path() -> None:
     thinking = [*encode("THINK:hmm|answer"), END]
     async with token_stack(completion=lambda prompt, sampling: thinking, use_raw_content=True) as stack:

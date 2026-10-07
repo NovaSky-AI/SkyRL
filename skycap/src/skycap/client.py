@@ -2,7 +2,7 @@
 
     pool = CapturePool(["http://capture-0:8080", "http://capture-1:8080"])
     async with pool.trajectory({"task": "t1", "step": 3}) as trajectory:
-        run_harness(base_url=trajectory.base_url)       # an unchanged OpenAI client
+        run_harness(base_url=trajectory.base_url, api_key=trajectory.api_key)  # an unchanged OpenAI client
         result = await trajectory.finish({"reward": 1.0})
     result.status, result.samples
 
@@ -55,12 +55,25 @@ class FinishResult:
 
 
 class Trajectory:
-    def __init__(self, pool: CapturePool, server: str, trajectory_id: str, base_url: str, paths: str = "all") -> None:
+    def __init__(
+        self,
+        pool: CapturePool,
+        server: str,
+        trajectory_id: str,
+        base_url: str,
+        paths: str = "all",
+        exposed_base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         self._pool = pool
         self.server = server
         self.id = trajectory_id
         #: Point the harness's OpenAI client here.
         self.base_url = base_url
+        #: Or here, for a harness outside this network, when the server is exposed (``skycap.exposure``).
+        self.exposed_base_url = exposed_base_url
+        #: And give it this as its ``api_key``: a server started with ``require_api_key`` answers only it.
+        self.api_key = api_key
         self.result: FinishResult | None = None
         #: What the last ``finish`` sent, so a failed one can be sent again unchanged.
         self.finishing: dict[str, Any] | None = None
@@ -161,7 +174,15 @@ class CapturePool:
                     raise
                 errors.append(str(error))
                 continue
-            return Trajectory(self, server, body["id"], body["base_url"], paths)
+            return Trajectory(
+                self,
+                server=server,
+                trajectory_id=body["id"],
+                base_url=body["base_url"],
+                paths=paths,
+                exposed_base_url=body.get("exposed_base_url"),
+                api_key=body.get("api_key"),
+            )
         raise CaptureError(f"no capture server reachable: {'; '.join(errors)}")
 
     @asynccontextmanager

@@ -28,10 +28,14 @@ Identical outputs under the same conditions are one node that records every
 call that produced it. Rarely, several siblings share a match hash but differ
 in delta: the same text sampled under two ``top_p`` values, a harness-written
 message equal to a sample, or (token mode) the same text tokenized two ways.
-History then continues from the latest model-authored one, or the latest
-client-authored one if there is no model sibling. The others are
-``shadowed_by`` it: still valid nodes whose paths train normally, marked so a
-reader can see that later history couldn't be attributed to them.
+A later request's matching message is then matched to the latest
+model-authored one, or the latest client-authored one if there is no model
+sibling. The others are ``shadowed_by`` it: still valid nodes whose paths train
+normally. In text mode, history continues from the chosen sibling. In token
+mode, a turn continues from it only if the turn reuses its tokens, and
+otherwise from a client sibling with exactly the rendered tokens: a shadowed
+one, or a new one. A shadowed model sample never continues (see
+``skycap.tokens.turn``).
 """
 
 from __future__ import annotations
@@ -300,7 +304,11 @@ class MessageGraph:
         return [self.path_to(leaf) for leaf in self.leaves()]
 
     def shadowed_by(self, node: int) -> int | None:
-        """The sibling that history matching this node's message continues from, if not this one."""
+        """The sibling that a request's matching message is matched to, if not this one.
+
+        Token-mode history can still continue from this node if it is client-authored: see the
+        module docstring.
+        """
         n = self.nodes[node]
         chosen = self._by_match[(n.parent, n.match_hash)]
         return None if chosen == node else chosen

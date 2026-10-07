@@ -27,7 +27,8 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
 The rest of the configuration is the sibling's: `harbor_trial_config` holds
 Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/default.yaml`.
 `skycap.*` sets the record directory (default `{trainer.export_path}/skycap`),
-the idle TTL, the port, the renderer pool size and which paths train.
+the idle TTL, the renderer pool size, which paths train and how agents inside
+remote sandboxes reach skycap ([below](#agents-inside-remote-sandboxes)).
 
 ## Which paths train
 
@@ -65,6 +66,28 @@ def final_and_short_discards(graph: MessageGraph) -> list[Row]:
 
 Every row of a trial carries its reward. See [skycap's README](../../../skycap/README.md#which-paths-train)
 for what a rule may return.
+
+## Agents inside remote sandboxes
+
+Terminus-2 calls the model from the trainer's process, so it reaches skycap at
+each server's own URL. Harbor's installed agents (mini-swe-agent, Claude Code,
+...) call it from inside their Daytona or Modal sandbox, which can't reach the
+cluster. `skycap.exposure` serves each server's harness routes to them, through
+skycap's exposure ([skycap's README](../../../skycap/README.md#expose-a-server-to-remote-harnesses)):
+
+```bash
+# A Cloudflare quick tunnel per server: outbound internet only, for development.
+  harbor_trial_config.agent.name=mini-swe-agent skycap.exposure.type=cloudflare
+# An address the sandboxes route to; server i listens on port + i (frp on a public VM, or the node's own).
+  skycap.exposure.type=external_host skycap.exposure.kwargs.host=203.0.113.7 skycap.exposure.kwargs.port=11500
+```
+
+Only the harness routes are reachable that way, never the control plane. An
+installed agent gets its trajectory's route on the exposed URL in its sandbox's
+environment (`OPENAI_API_BASE`, `HOSTED_VLLM_API_BASE`, and placeholder keys);
+Terminus-2 keeps the server's own URL. A quick tunnel takes at most 200 calls in
+flight, and a call whose reply hasn't started after about 125 s fails, so use
+`external_host` for many agents or long replies.
 
 ## How it fits
 
