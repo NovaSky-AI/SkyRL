@@ -158,6 +158,17 @@ class TestPackingCollator:
         assert sorted(row.tolist() for row in batch["sub_seq_lengths"]) == [[3], [101]]
         assert batch["sequences"].shape[1] == 104
 
+    @pytest.mark.parametrize("cp", [1, 2])
+    def test_short_tail_uses_zero_loss_dp_rows(self, cp):
+        collator = _make_collator(num_gpus=4 * cp, batch_size=4, max_length=16, cp=cp)
+        batch = collator([_make_example(3, 2)], batch_size=4)
+
+        assert batch.batch_size == 4
+        assert [row.tolist() for row in batch["sub_seq_lengths"]] == [[3], [1], [1], [1]]
+        assert batch["attention_mask"].sum(dim=1).tolist() == [3, 1, 1, 1]
+        assert batch["loss_mask"][1:].count_nonzero().item() == 0
+        assert batch["loss_mask"][0].sum().item() == pytest.approx(1.0)
+
     def test_all_examples_included(self):
         collator = _make_collator(num_gpus=2, batch_size=4)
         examples = [_make_example(20, 10, base_token=100 + 100 * i) for i in range(4)]
