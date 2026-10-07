@@ -71,6 +71,7 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     reject_unsupported_sample_support_packing,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.workers.megatron.grad_sync import configure_no_sync
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
@@ -238,6 +239,7 @@ class MegatronModelWrapper:
         self._pending_grad_sync: Optional[dict] = None
 
         config = get_model_config(self.actor_module[0])
+        configure_no_sync(self.actor_module, config)
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across
         # parallelism dimensions -- but deferred to optim_step rather than run per
