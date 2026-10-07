@@ -19,6 +19,12 @@ that once per step, as one version of the W&B artifact
   ``checksum=False``: W&B stores the URI and neither reads the store nor
   copies bytes. A local-only record is in the index only.
 
+``pull`` (``python -m examples.train_integrations.harbor_skycap.record_index
+pull <entity>/<project>/<artifact>[:<alias>] <out_dir>``) brings a run back as
+a record directory: each version's record files, fetched by W&B from the
+mirror with the caller's credentials, and its ``step.json`` as
+``index/<phase>/step-<N>.json``, which ``skycap-viewer <out_dir>`` reads.
+
 Nothing here is Harbor's: any skycap generator that adds its trajectories to a
 ``RecordLog`` gets the index.
 
@@ -33,13 +39,17 @@ to ``shutdown_timeout`` before the tracker finishes the run, then drops what is
 left. Every loss is logged and counted in ``stats()``.
 """
 
+import argparse
+import hashlib
 import json
+import os
 import queue
+import sys
 import re
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -461,3 +471,182 @@ def _transient(error: BaseException, wandb: Any) -> bool:
     if isinstance(error, (ConnectionError, TimeoutError)):
         return True
     return isinstance(error, OSError) and not isinstance(error, _PERMANENT)
+
+
+# -- pulling a run back -----------------------------------------------------------
+@dataclass
+class PullSummary:
+    """What ``pull`` brought back, and what it couldn't."""
+
+    #: ``<artifact>:<version>`` per version whose ``step.json`` was written.
+    versions: List[str] = field(default_factory=list)
+    #: Versions that couldn't be read at all, with why.
+    failed_versions: List[str] = field(default_factory=list)
+    #: Records whose files are all in ``out_dir`` now (already there and identical included).
+    records: int = 0
+    #: Files moved in; files left alone because an identical one was already there.
+    files: int = 0
+    unchanged: int = 0
+    #: ``<version>/<id>: why`` per mirrored record whose files couldn't all be fetched. Skipped, not partial.
+    missing: List[str] = field(default_factory=list)
+    #: ``<version>/<id>`` per row whose record has no mirror: indexed, with nothing in W&B to pull.
+    local_only: List[str] = field(default_factory=list)
+
+    @property
+    def pulled_anything(self) -> bool:
+        return bool(self.versions or self.records)
+
+    def report(self) -> str:
+        lines = [
+            f"versions: {len(self.versions)} pulled, {len(self.failed_versions)} failed",
+            f"records: {self.records} pulled ({self.files} files moved in, {self.unchanged} already there), "
+            f"{len(self.missing)} missing, {len(self.local_only)} local-only (indexed, nothing to pull)",
+        ]
+        lines += [f"  failed version {item}" for item in self.failed_versions]
+        lines += [f"  missing {item}" for item in self.missing]
+        lines += [f"  local-only {item}" for item in self.local_only]
+        return "\n".join(lines)
+
+
+def parse_ref(ref: str) -> Tuple[str, Optional[str]]:
+    """``entity/project/artifact[:alias]`` to ``(entity/project/artifact, alias or None)``."""
+    path, _, alias = ref.rpartition(":") if ":" in ref.rsplit("/", 1)[-1] else (ref, "", "")
+    if path.count("/") != 2 or not all(path.split("/")):
+        raise ValueError(f"expected <entity>/<project>/<artifact>[:<alias>], got {ref!r}")
+    return path, alias or None
+
+
+def pull(ref: str, out_dir: Any, *, api: Any = None) -> PullSummary:
+    """Pull a run's records and step index from W&B into ``out_dir``, a record directory.
+
+    With an alias (``...:train-step-3``, ``...:v7``), that version; without one, every version. Each
+    version's records go to ``out_dir`` and its ``step.json`` to ``out_dir/index/<phase>/step-<N>.json``.
+    A record whose files can't all be fetched is reported and skipped; the rest go on.
+
+    Args:
+        ref: ``<entity>/<project>/<artifact>[:<alias>]``.
+        out_dir: the record directory to fill; created if missing.
+        api: a ``wandb.Api``; one is made when None.
+    """
+    path, alias = parse_ref(ref)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    if api is None:
+        import wandb
+
+        api = wandb.Api()
+    summary = PullSummary()
+    try:
+        versions = [api.artifact(f"{path}:{alias}")] if alias else list(api.artifacts(ARTIFACT_TYPE, path))
+    except Exception as error:  # noqa: BLE001 - reported; nothing else to pull
+        summary.failed_versions.append(f"{ref}: {type(error).__name__}: {error}")
+        return summary
+    for artifact in versions:
+        label = f"{path.rsplit('/', 1)[-1]}:{getattr(artifact, 'version', '?')}"
+        try:
+            _pull_version(artifact, label, out, summary)
+        except Exception as error:  # noqa: BLE001 - one version must not stop the others
+            summary.failed_versions.append(f"{label}: {type(error).__name__}: {error}")
+    return summary
+
+
+def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) -> None:
+    # A scratch directory inside out_dir, so each file moves in with an atomic rename.
+    with tempfile.TemporaryDirectory(prefix=".pull-", dir=out) as tmp:
+        root = Path(tmp)
+        try:
+            # A reference W&B can't fetch is left out here and reported per record below.
+            artifact.download(root=str(root), allow_missing_references=True)
+        except Exception as error:  # noqa: BLE001 - fall back to fetching entry by entry
+            logger.warning(f"skycap record pull: downloading {label} failed ({error}); fetching entry by entry")
+            _download_entries(artifact, root)
+        step = json.loads((root / "step.json").read_bytes())
+        if not isinstance(step, dict) or not isinstance(step.get("rows"), list):
+            raise ValueError("step.json is not a run index (no rows)")
+        phase, number = step["phase"], int(step["step"])
+        if phase not in PHASES:
+            raise ValueError(f"step.json has an unknown phase {phase!r}")
+        for row in step["rows"]:
+            _move_record(row, root / "records", out, f"{label}/{row.get('id')}", summary)
+        target = out / "index" / phase / f"step-{number}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _move_in(root / "step.json", target)
+    summary.versions.append(label)
+
+
+def _download_entries(artifact: Any, root: Path) -> None:
+    """Each of the artifact's entries on its own; one that fails is left out."""
+    artifact.get_entry("step.json").download(root=str(root))
+    step = json.loads((root / "step.json").read_bytes())
+    for row in step.get("rows", []) if isinstance(step, dict) else []:
+        for name in _record_files(row):
+            try:
+                artifact.get_entry(f"records/{name}").download(root=str(root))
+            except Exception as error:  # noqa: BLE001 - this record is reported missing
+                logger.warning(f"skycap record pull: fetching records/{name} failed: {error}")
+
+
+def _record_files(row: Dict[str, Any]) -> List[str]:
+    """A mirrored row's file names, as ``record_references`` referenced them; [] for a local-only row."""
+    record = row.get("record")
+    if not record or not record.get("mirror"):
+        return []
+    return list(record.get("files") or [record["mirror"].rsplit("/", 1)[-1]])
+
+
+def _move_record(row: Dict[str, Any], downloaded: Path, out: Path, label: str, summary: PullSummary) -> None:
+    record = row.get("record")
+    if not record:
+        return
+    names = _record_files(row)
+    if not names:
+        summary.local_only.append(label)
+        return
+    absent = [name for name in names if not (downloaded / name).is_file()]
+    if absent:
+        summary.missing.append(f"{label}: could not fetch {', '.join(absent)}")
+        return
+    # Sidecars before the document, as skycap writes them, so a document in out_dir has its sidecars.
+    for name in names:
+        moved = _move_in(downloaded / name, out / name)
+        summary.files += moved
+        summary.unchanged += not moved
+    summary.records += 1
+
+
+def _move_in(source: Path, target: Path) -> bool:
+    """Rename ``source`` onto ``target`` unless an identical file is there. Returns whether it moved."""
+    if target.is_file() and _digest(target) == _digest(source):
+        return False
+    # The scratch directory is inside out_dir, so this is an atomic rename on one filesystem.
+    os.replace(source, target)
+    return True
+
+
+def _digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def main(argv: Optional[List[str]] = None, *, api: Any = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m examples.train_integrations.harbor_skycap.record_index")
+    commands = parser.add_subparsers(dest="command", required=True)
+    pull_parser = commands.add_parser(
+        "pull", help="pull a run's records and step index from W&B into a record directory"
+    )
+    pull_parser.add_argument("ref", help="<entity>/<project>/<artifact>[:<alias>]; every version without an alias")
+    pull_parser.add_argument("out_dir", help="the record directory to fill, e.g. for skycap-viewer")
+    args = parser.parse_args(argv)
+    try:
+        summary = pull(args.ref, args.out_dir, api=api)
+    except ValueError as error:
+        parser.error(str(error))
+    print(summary.report())
+    return 0 if summary.pulled_anything else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

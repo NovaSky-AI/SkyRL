@@ -112,6 +112,29 @@ turns the index off. Logging runs on a background thread and never fails a
 step: W&B errors and timeouts are logged and counted, and at the end of
 training it waits up to two minutes for what is queued.
 
+### Pull a run and view it
+
+`record_index pull` turns a run's artifact back into a record directory: each
+version's record files, which W&B fetches from the mirror with your own
+credentials (`AWS_*` for `s3://`, application default credentials for `gs://`),
+and each `step.json` as `index/<phase>/step-<N>.json`. Give an alias to pull
+one version, or none to pull every version:
+
+```bash
+uv run --isolated --extra skyrl-train --extra harbor --extra skycap \
+  python -m examples.train_integrations.harbor_skycap.record_index \
+  pull my-team/my-project/skycap-records-train-<run id>:train-step-3 ./run-records
+skycap-viewer ./run-records
+```
+
+It fails open per record: a record whose files W&B can't fetch is reported as
+missing and left out whole, and the rest are pulled. Local-only records (no
+mirror) are in the index but have nothing to pull, and are reported as such.
+A file already in the directory and identical is left alone, so pulling again,
+or pulling more versions into the same directory, only adds what is new. The
+command prints a summary (versions, records, missing, local-only) and exits
+non-zero only when it pulled nothing.
+
 ## How it fits
 
 | Piece | What it does |
@@ -120,7 +143,7 @@ training it waits up to two minutes for what is queued.
 | `servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
 | `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
 | `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
-| `record_index.py` | `SkycapRecordIndex`, a trainer callback: the per-step W&B index of the trajectories the generator logged in a `RecordLog`. Nothing in it is Harbor's. |
+| `record_index.py` | `SkycapRecordIndex`, a trainer callback: the per-step W&B index of the trajectories the generator logged in a `RecordLog`; and `pull`, which brings a run's records and index back from W&B. Nothing in it is Harbor's. |
 | `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
 
 What's imposed on every call:
