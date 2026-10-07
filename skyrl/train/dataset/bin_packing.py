@@ -23,13 +23,17 @@ from __future__ import annotations
 import enum
 import heapq
 from abc import ABC, abstractmethod
+from bisect import bisect_left
 from typing import List, Optional, Tuple
+
+import numpy as np
 
 
 class PackingStrategy(enum.Enum):
     """Supported sequence packing algorithms."""
 
     FIRST_FIT_DECREASING = "first_fit_decreasing"
+    MODIFIED_FIRST_FIT_DECREASING = "modified_first_fit_decreasing"
     BALANCED = "balanced"
 
 
@@ -211,8 +215,121 @@ class Balanced(SeqPacker):
         return bins
 
 
+class ModifiedFirstFitDecreasing(SeqPacker):
+    """Modified First-Fit Decreasing adapted for SkyRL.
+
+    Based on Johnson and Garey's `original MFFD paper
+    <https://www.sciencedirect.com/science/article/pii/0885064X85900226>`_
+    and the `NeMo RL implementation
+    <https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/data/packing/algorithms.py>`_.
+    """
+
+    def _classify_items(
+        self, items: List[Tuple[int, int]]
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int, int]]]:
+        large: List[Tuple[int, int]] = []
+        medium: List[Tuple[int, int]] = []
+        small: List[Tuple[int, int]] = []
+        tiny: List[Tuple[int, int]] = []
+        capacity = self.bin_capacity
+        for item in items:
+            size = item[1]
+            if size * 2 > capacity:
+                large.append(item)
+            elif size * 3 > capacity:
+                medium.append(item)
+            elif size * 6 > capacity:
+                small.append(item)
+            else:
+                tiny.append(item)
+        return large, medium, small, tiny
+
+    def _fits(self, bin_length: int, *items: Tuple[int, int]) -> bool:
+        return bin_length + sum(size for _, size in items) <= self.bin_capacity
+
+    def _pack_implementation(self, sequence_lengths: List[int]) -> List[List[int]]:
+        if self.bin_capacity <= 0:
+            raise ValueError("bin_capacity must be positive")
+        if any(length <= 0 for length in sequence_lengths):
+            raise ValueError("sequence lengths must be positive")
+        self._validate_sequence_lengths(sequence_lengths)
+
+        items = list(enumerate(sequence_lengths))
+        large, medium, small, tiny = self._classify_items(items)
+        large.sort(key=lambda item: item[1], reverse=True)
+        medium.sort(key=lambda item: item[1], reverse=True)
+        small.sort(key=lambda item: item[1])
+        tiny.sort(key=lambda item: item[1])
+
+        bins: List[List[Tuple[int, int]]] = [[item] for item in large]
+        bin_lengths = [item[1] for item in large]
+
+        for bin_index, bin_items in enumerate(bins):
+            for index, item in enumerate(medium):
+                if self._fits(bin_lengths[bin_index], item):
+                    bin_items.append(medium.pop(index))
+                    bin_lengths[bin_index] += item[1]
+                    break
+
+        for bin_index in range(len(bins) - 1, -1, -1):
+            bin_items = bins[bin_index]
+            has_medium = any(size * 3 > self.bin_capacity and size * 2 <= self.bin_capacity for _, size in bin_items)
+            if has_medium or len(small) < 2:
+                continue
+            first_small = small[0]
+            second_index = next(
+                (
+                    index
+                    for index in range(len(small) - 1, 0, -1)
+                    if self._fits(bin_lengths[bin_index], first_small, small[index])
+                ),
+                None,
+            )
+            if second_index is not None:
+                first_small = small.pop(0)
+                second_small = small.pop(second_index - 1)
+                bin_items.extend((first_small, second_small))
+                bin_lengths[bin_index] += first_small[1] + second_small[1]
+
+        remaining_items = sorted(medium + small + tiny, key=lambda item: item[1], reverse=True)
+        negative_remaining_sizes = [-item[1] for item in remaining_items]
+        for bin_index, bin_items in enumerate(bins):
+            while remaining_items:
+                max_item_size = self.bin_capacity - bin_lengths[bin_index]
+                chosen_index = bisect_left(negative_remaining_sizes, -max_item_size)
+                if chosen_index == len(remaining_items):
+                    break
+                item = remaining_items.pop(chosen_index)
+                negative_remaining_sizes.pop(chosen_index)
+                bin_items.append(item)
+                bin_lengths[bin_index] += item[1]
+
+        # MFFD requires true first-fit placement in bin creation order.
+        leftover_bins: List[List[Tuple[int, int]]] = []
+        leftover_bin_lengths = np.empty(len(remaining_items), dtype=np.int64)
+        for item in remaining_items:
+            size = item[1]
+            bin_count = len(leftover_bins)
+            if bin_count:
+                fitting_bins = np.flatnonzero(leftover_bin_lengths[:bin_count] <= self.bin_capacity - size)
+            else:
+                fitting_bins = np.empty(0, dtype=np.int64)
+
+            if fitting_bins.size:
+                bin_index = int(fitting_bins[0])
+                leftover_bins[bin_index].append(item)
+                leftover_bin_lengths[bin_index] += size
+            else:
+                leftover_bin_lengths[bin_count] = size
+                leftover_bins.append([item])
+        bins.extend(leftover_bins)
+
+        return [[index for index, _ in bin_items] for bin_items in bins if bin_items]
+
+
 _PACKERS = {
     PackingStrategy.FIRST_FIT_DECREASING: FirstFitDecreasing,
+    PackingStrategy.MODIFIED_FIRST_FIT_DECREASING: ModifiedFirstFitDecreasing,
     PackingStrategy.BALANCED: Balanced,
 }
 
