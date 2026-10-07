@@ -162,7 +162,7 @@ async def test_a_step_is_one_version_however_many_generate_calls_it_took(skycap,
     ((artifact, aliases),) = run.logged
     assert artifact.name == "skycap-records-train-run-1" and artifact.type == "skycap-records"
     assert aliases == ["train-step-3", "latest"]
-    # step.json is the step's run index, as skycap's docs/format.md specifies it.
+    # step.json is the step's run index, as run_index.md specifies it.
     step = artifact.step()
     assert {key: step[key] for key in ("format_version", "run", "phase", "step")} == {
         "format_version": 1,

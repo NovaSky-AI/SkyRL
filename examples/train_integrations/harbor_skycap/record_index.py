@@ -7,8 +7,8 @@ step, in which phase, and which of them trained. ``SkycapRecordIndex`` logs
 that once per step, as one version of the W&B artifact
 ``skycap-records-<phase>-<run id>``, aliased ``<phase>-step-N`` and ``latest``:
 
-- ``step.json``: the step's run index, as skycap's ``docs/format.md`` ("A run
-  index") specifies it: ``format_version``, ``run``, ``phase`` and ``step``,
+- ``step.json``: the step's run index, as ``run_index.md`` (next to this file)
+  specifies it: ``format_version``, ``run``, ``phase`` and ``step``,
   and a row per trajectory the generator opened during the step (every
   attempt, retries included) with its ``instance_id``, ``repetition_id``,
   ``attempt``, ``status``, the annotations it was finished with, whether a
@@ -50,7 +50,7 @@ from skyrl.train.utils.callbacks import CallbackInput, TrainingCallback, Trainin
 ARTIFACT_TYPE = "skycap-records"
 PHASES = ("train", "eval")
 
-#: The run index's ``format_version`` (skycap's ``docs/format.md``, "A run index").
+#: The run index's ``format_version`` (``run_index.md``).
 INDEX_FORMAT_VERSION = 1
 
 #: ``OSError`` subclasses no retry can fix.

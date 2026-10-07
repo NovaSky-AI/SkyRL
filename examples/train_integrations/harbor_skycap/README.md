@@ -100,8 +100,8 @@ routed experts and sampling masks out of the remote copy.
 
 With `trainer.logger=wandb`, each step is indexed as a version of the artifact
 `skycap-records-train-<run id>`, aliased `train-step-N` and `latest`. It holds
-a `step.json`, the step's run index as skycap's
-[`docs/format.md`](../../../skycap/docs/format.md#a-run-index) specifies it:
+a `step.json`, the step's run index as [`run_index.md`](run_index.md)
+specifies it:
 `format_version`, `run`, `phase` and `step`, and a row per trajectory opened in
 the step (every attempt, with `trained`, `superseded` and the record's `path`,
 `mirror` and `files`). For mirrored records it also holds a W&B reference
