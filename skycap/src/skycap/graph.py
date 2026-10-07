@@ -33,8 +33,9 @@ model-authored one, or the latest client-authored one if there is no model
 sibling. The others are ``shadowed_by`` it: still valid nodes whose paths train
 normally. In text mode, history continues from the chosen sibling. In token
 mode, a turn continues from it only if the turn reuses its tokens, and
-otherwise from a sibling whose tokens the render reproduces, which can be a
-shadowed one (see ``skycap.tokens.turn``).
+otherwise from a client sibling with exactly the rendered tokens: a shadowed
+one, or a new one. A shadowed model sample never continues (see
+``skycap.tokens.turn``).
 """
 
 from __future__ import annotations
@@ -289,7 +290,8 @@ class MessageGraph:
     def shadowed_by(self, node: int) -> int | None:
         """The sibling that a request's matching message is matched to, if not this one.
 
-        Token-mode history can still continue from this node: see the module docstring.
+        Token-mode history can still continue from this node if it is client-authored: see the
+        module docstring.
         """
         n = self.nodes[node]
         chosen = self._by_match[(n.parent, n.match_hash)]
