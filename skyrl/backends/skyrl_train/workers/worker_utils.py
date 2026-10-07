@@ -289,9 +289,16 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         super().__init__(data)
         self._max_tokens_per_microbatch = max_tokens_per_microbatch
 
-        # Compute token counts per sample using attention_mask
-        attention_mask = data["attention_mask"]
-        self._token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
+        # Controller-packed rows contain independently aligned segments. The
+        # attention mask omits the gaps, so count their physical footprint.
+        sub_seq_lengths = data.get("sub_seq_lengths")
+        if sub_seq_lengths is None:
+            self._token_counts = data["attention_mask"].sum(dim=1).cpu().tolist()
+        else:
+            self._token_counts = [
+                sum(length + (-length % sequence_length_multiple) for length in row.tolist()) for row in sub_seq_lengths
+            ]
+            sequence_length_multiple = 1  # The segment footprints are already aligned.
 
         # Create microbatches based on token count. The "balanced" packer treats
         # the token budget as a soft cap: a sequence longer than the budget gets
