@@ -15,12 +15,12 @@
 #   * Autotune all reachable kernels with cached, bucketed token-shape keys;
 #     exact token counts remain runtime values to avoid recompilation churn.
 #   * Compile out entropy-only work in SkyRL's log-prob-only adapter path.
-#   * Optionally return entropy from the same LM-head projection and include its
-#     gradient in the fused backward for RL entropy bonuses.
+#   * Optionally return masked entropy from the same LM-head projection and
+#     include its gradient in the fused backward for RL entropy bonuses.
 #   * Made epilogue outputs distinct from inputs so repeated tuning runs cannot
 #     corrupt reductions.
-#   * Added optional loss-mask row-tile skipping without sorting, gathering, or
-#     copying hidden rows; the dense path remains selected when no mask is passed.
+#   * Added optional loss-mask row-tile skipping and ordered-span dHidden GEMMs
+#     without sorting, gathering, or copying hidden rows.
 #   * Use the true row maximum as the epilogue log-sum-exp shift, including
 #     ``-inf`` padding, so strongly negative logits remain finite.
 #   * Release the oversized d-logits staging buffer before final partial-vocab
@@ -940,10 +940,26 @@ def efficient_entropy_forward(
 
 @triton.autotune(
     configs=_backward_autotune_configs(),
-    key=["num_tokens_bucket", "hidden_size", "vocab_size", "HAS_ACTIVE_MASK", "COMPUTE_ENTROPY"],
+    key=[
+        "num_tokens_bucket",
+        "split_width_bucket",
+        "hidden_size",
+        "vocab_size",
+        "HAS_ACTIVE_MASK",
+        "COMPUTE_ENTROPY",
+    ],
     cache_results=True,
 )
-@triton.jit(do_not_specialize=["split_idx", "num_tokens", "num_tokens_bucket", "rank"])
+@triton.jit(
+    do_not_specialize=[
+        "split_idx",
+        "num_tokens",
+        "num_tokens_bucket",
+        "rank",
+        "split_width",
+        "split_width_bucket",
+    ]
+)
 def efficient_entropy_backward_kernel_general_d_logits_split_N(
     split_idx: int,
     num_tokens: int,
@@ -951,6 +967,8 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
     hidden_size: int,
     vocab_size: int,
     vocab_per_split: int,
+    split_width: int,
+    split_width_bucket: int,
     rank: int,
     hidden_ptr,
     stride_hidden_m: tl.int64,
@@ -986,7 +1004,7 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(num_tokens, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(vocab_per_split, BLOCK_SIZE_N)
+    num_pid_n = tl.cdiv(split_width, BLOCK_SIZE_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -1000,18 +1018,12 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
     offs_bn = start_offs_bn + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    maximum = tl.load(maximum_ptr + offs_am * stride_maximum, mask=offs_am < num_tokens, other=0.0)
-    accu = tl.load(accu_ptr + offs_am * stride_accu, mask=offs_am < num_tokens, other=1e-6)
-    accu_rcp = tl.fdiv(1.0, accu)
-    if COMPUTE_ENTROPY:
-        d_entropy = tl.load(d_entropy_ptr + offs_am * stride_d_entropy, mask=offs_am < num_tokens, other=0.0)
-    d_logprobs = tl.load(d_logprobs_ptr + offs_am * stride_d_logprobs, mask=offs_am < num_tokens, other=0.0)
-    d_logprobs = -1 * d_logprobs
-    if COMPUTE_ENTROPY:
-        entropy_b = tl.load(entropy_b_ptr + offs_am * stride_entropy_b, mask=offs_am < num_tokens, other=0.0)
-    labels = tl.load(labels_ptr + offs_am * stride_labels, mask=offs_am < num_tokens, other=0)
-
-    logits = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    if HAS_ACTIVE_MASK:
+        row_active = tl.load(active_mask_ptr + offs_am, mask=offs_am < num_tokens, other=0).to(tl.int1)
+        block_active = tl.reduce_or(row_active, axis=0)
+    else:
+        row_active = offs_am < num_tokens
+        block_active = True
 
     if USE_TMA:
         # using TMA and device-side descriptor creation
@@ -1032,48 +1044,72 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
         weight_ptrs = weight_ptr + (offs_bn[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
         vocab_right_bound = min((split_idx + 1) * vocab_per_split, vocab_size)
 
-    for k in range(0, tl.cdiv(hidden_size, BLOCK_SIZE_K)):
-        if USE_TMA:
-            start_offs_k = k * BLOCK_SIZE_K
-            _hidden = hidden_desc.load([start_offs_am, start_offs_k])
-            _weight = weight_desc.load([start_offs_bn, start_offs_k])
-        else:
-            _hidden = tl.load(
-                hidden_ptrs,
-                mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_am[:, None] < num_tokens),
+    logits = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    d_logits = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    if block_active:
+        maximum = tl.load(maximum_ptr + offs_am * stride_maximum, mask=offs_am < num_tokens, other=0.0)
+        accu = tl.load(accu_ptr + offs_am * stride_accu, mask=offs_am < num_tokens, other=1e-6)
+        accu_rcp = tl.fdiv(1.0, accu)
+        if COMPUTE_ENTROPY:
+            d_entropy = tl.load(
+                d_entropy_ptr + offs_am * stride_d_entropy,
+                mask=offs_am < num_tokens,
                 other=0.0,
             )
-            _weight = tl.load(
-                weight_ptrs,
-                mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_bn[:, None] < vocab_right_bound),
+        d_logprobs = tl.load(
+            d_logprobs_ptr + offs_am * stride_d_logprobs,
+            mask=offs_am < num_tokens,
+            other=0.0,
+        )
+        d_logprobs = -1 * d_logprobs
+        if COMPUTE_ENTROPY:
+            entropy_b = tl.load(
+                entropy_b_ptr + offs_am * stride_entropy_b,
+                mask=offs_am < num_tokens,
                 other=0.0,
             )
-            hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
-            weight_ptrs += BLOCK_SIZE_K * stride_weight_k
-        logits = tl.dot(_hidden, _weight.T, logits, input_precision=INPUT_PRECISION)
+        labels = tl.load(labels_ptr + offs_am * stride_labels, mask=offs_am < num_tokens, other=0)
 
-    logits *= rcp_temperature
-    exp_logits = tl.exp(logits - maximum[:, None])
+        for k in range(0, tl.cdiv(hidden_size, BLOCK_SIZE_K)):
+            if USE_TMA:
+                start_offs_k = k * BLOCK_SIZE_K
+                _hidden = hidden_desc.load([start_offs_am, start_offs_k])
+                _weight = weight_desc.load([start_offs_bn, start_offs_k])
+            else:
+                _hidden = tl.load(
+                    hidden_ptrs,
+                    mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_am[:, None] < num_tokens),
+                    other=0.0,
+                )
+                _weight = tl.load(
+                    weight_ptrs,
+                    mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_bn[:, None] < vocab_right_bound),
+                    other=0.0,
+                )
+                hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
+                weight_ptrs += BLOCK_SIZE_K * stride_weight_k
+            logits = tl.dot(_hidden, _weight.T, logits, input_precision=INPUT_PRECISION)
 
-    mask = (offs_bn + rank * vocab_size)[None, :] == labels[:, None]
-    d_logits = d_logprobs[:, None] * (exp_logits * accu_rcp[:, None] - mask)
-    if COMPUTE_ENTROPY:
-        d_logits += d_entropy[:, None] * (-exp_logits * accu_rcp[:, None]) * (logits - entropy_b[:, None])
+        logits *= rcp_temperature
+        exp_logits = tl.exp(logits - maximum[:, None])
 
-    d_logits *= rcp_temperature
-    if HAS_ACTIVE_MASK:
-        # Forward-only means backward compute stays dense. This select is only
-        # for correctness: custom autograd cannot infer that masked outputs are
-        # constant, and skipped rows' neutral max/accu can also produce NaNs.
-        row_active = tl.load(active_mask_ptr + offs_am, mask=offs_am < num_tokens, other=0).to(tl.int1)
-        d_logits = tl.where(row_active[:, None], d_logits, 0.0)
+        label_mask = (offs_bn + rank * vocab_size)[None, :] == labels[:, None]
+        d_logits = d_logprobs[:, None] * (exp_logits * accu_rcp[:, None] - label_mask)
+        if COMPUTE_ENTROPY:
+            d_logits += d_entropy[:, None] * (-exp_logits * accu_rcp[:, None]) * (logits - entropy_b[:, None])
+
+        d_logits *= rcp_temperature
+        if HAS_ACTIVE_MASK:
+            d_logits = tl.where(row_active[:, None], d_logits, 0.0)
 
     # filter d_logits with mask
     result_offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    mask = (offs_am[:, None] < num_tokens) & (result_offs_n[None, :] < vocab_per_split)
+    mask = (offs_am[:, None] < num_tokens) & (result_offs_n[None, :] < split_width)
 
     tl.store(
-        d_logits_ptr + offs_am[:, None] * stride_d_logits_m + result_offs_n[None, :] * stride_d_logits_n, d_logits, mask
+        d_logits_ptr + offs_am[:, None] * stride_d_logits_m + result_offs_n[None, :] * stride_d_logits_n,
+        d_logits,
+        mask,
     )
 
 
@@ -1090,6 +1126,8 @@ def efficient_entropy_backward(
     temperature: typing.Optional[float] = 1.0,
     dist_process_group: typing.Optional[dist.ProcessGroup] = None,
     active_mask: typing.Optional[torch.Tensor] = None,
+    active_spans: typing.Optional[tuple[tuple[int, int], ...]] = None,
+    narrow_dlogits_tail: bool = True,
     compute_entropy: bool = True,
 ) -> list:
     """Backward host function; returns shard-local ``d_hidden`` without TP all-reduce."""
@@ -1107,6 +1145,14 @@ def efficient_entropy_backward(
     else:
         active_mask_ptr = labels
         has_active_mask = False
+    if active_spans is not None:
+        assert has_active_mask
+        assert all(0 <= start < end <= hidden.shape[0] for start, end in active_spans)
+        spans = active_spans
+        has_active_spans = True
+    else:
+        spans = ()
+        has_active_spans = False
 
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
     num_tokens, hidden_size = hidden.shape
@@ -1123,7 +1169,9 @@ def efficient_entropy_backward(
         assert dentropy.shape == (num_tokens,)
 
     grad_dtype = torch.float32 if should_return_fp32_grad else hidden.dtype
-    d_hidden = torch.empty_like(hidden, dtype=grad_dtype)
+    d_hidden = (
+        torch.zeros_like(hidden, dtype=grad_dtype) if has_active_spans else torch.empty_like(hidden, dtype=grad_dtype)
+    )
     d_weight = torch.empty_like(weight, dtype=grad_dtype)
     assert maximum.shape == labels.shape == acc.shape
     assert maximum.is_contiguous() and acc.is_contiguous()
@@ -1134,12 +1182,24 @@ def efficient_entropy_backward(
 
     vocab_per_split = 9504
     num_splits = (vocab_size + vocab_per_split - 1) // vocab_per_split
-    d_logits = torch.empty((num_tokens, vocab_per_split), device=hidden.device, dtype=hidden.dtype).contiguous()
-
-    def d_logits_grid(meta):
-        return (triton.cdiv(num_tokens, meta["BLOCK_SIZE_M"]) * triton.cdiv(vocab_per_split, meta["BLOCK_SIZE_N"]),)
+    initial_staging_width = min(vocab_size, vocab_per_split) if narrow_dlogits_tail else vocab_per_split
+    d_logits = torch.empty((num_tokens, initial_staging_width), device=hidden.device, dtype=hidden.dtype)
 
     for split_idx in range(num_splits):
+        right_bound = min((split_idx + 1) * vocab_per_split, vocab_size)
+        split_width = right_bound - split_idx * vocab_per_split
+        staging_width = split_width if narrow_dlogits_tail else vocab_per_split
+        if d_logits.shape[1] != staging_width:
+            d_logits = None
+            d_logits = torch.empty(
+                (num_tokens, staging_width),
+                device=hidden.device,
+                dtype=hidden.dtype,
+            )
+
+        def d_logits_grid(meta):
+            return (triton.cdiv(num_tokens, meta["BLOCK_SIZE_M"]) * triton.cdiv(staging_width, meta["BLOCK_SIZE_N"]),)
+
         efficient_entropy_backward_kernel_general_d_logits_split_N[d_logits_grid](
             split_idx,
             num_tokens,
@@ -1147,6 +1207,8 @@ def efficient_entropy_backward(
             hidden_size,
             vocab_size,
             vocab_per_split,
+            staging_width,
+            _autotune_token_bucket(staging_width),
             rank,
             hidden,
             hidden.stride(0),
@@ -1177,9 +1239,7 @@ def efficient_entropy_backward(
             INPUT_PRECISION=_dot_input_precision(hidden),
         )
 
-        right_bound = min((split_idx + 1) * vocab_per_split, vocab_size)
-        split_width = right_bound - split_idx * vocab_per_split
-        if split_width == vocab_per_split:
+        if split_width == staging_width:
             # Whole staging buffer is live vocabulary; slicing would copy nothing.
             split_d_logits = d_logits
         else:
@@ -1192,7 +1252,20 @@ def efficient_entropy_backward(
             split_d_logits = d_logits[:, :split_width].contiguous()
             d_logits = None
         split_weight = weight[split_idx * vocab_per_split : right_bound]
-        if split_idx == 0:
+        if has_active_spans:
+            for start, end in spans:
+                span_d_hidden = d_hidden[start:end]
+                span_d_logits = split_d_logits[start:end]
+                if split_idx == 0:
+                    torch.matmul(span_d_logits, split_weight, out=span_d_hidden)
+                else:
+                    torch.addmm(
+                        span_d_hidden,
+                        span_d_logits,
+                        split_weight,
+                        out=span_d_hidden,
+                    )
+        elif split_idx == 0:
             torch.matmul(split_d_logits, split_weight, out=d_hidden)
         else:
             d_hidden += torch.matmul(split_d_logits, split_weight)
@@ -1201,6 +1274,11 @@ def efficient_entropy_backward(
             hidden,
             out=d_weight[split_idx * vocab_per_split : right_bound],
         )
+        # Do not retain the previous full-width buffer while allocating a narrow
+        # final split on the next iteration.
+        split_d_logits = None
+        if has_active_spans:
+            span_d_logits = None
 
     return d_hidden, d_weight
 
@@ -1229,12 +1307,12 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
     targets are forced to log-prob 0 in forward, but their backward path is left
     unchanged to match the stock and torch fused references.
 
-    ``compute_entropy`` optionally returns entropy from the same projection;
-    ``entropy_requires_grad`` includes its contribution in fused backward.
     ``active_mask`` is an optional TP-replicated ``[B, S]`` bool/integer mask.
     Inactive rows return zero and contribute no gradient. Contiguous all-inactive
-    row tiles bypass the forward projection GEMMs. Backward compute remains
-    dense and only masks its result to preserve skipped-row semantics.
+    row tiles bypass forward and d-logits projection GEMMs; optional ordered spans
+    restrict the d-hidden projection to active regions. ``compute_entropy`` can
+    return the same active rows' entropy without a second LM-head pass;
+    ``entropy_requires_grad`` includes its contribution in the fused backward.
     """
 
     @staticmethod
@@ -1249,6 +1327,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         tp_group: torch.distributed.ProcessGroup,
         inference_only: bool = False,
         active_mask: typing.Optional[torch.Tensor] = None,
+        active_spans: typing.Optional[tuple[tuple[int, int], ...]] = None,
         compute_entropy: bool = False,
         entropy_requires_grad: bool = False,
     ) -> typing.Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
@@ -1276,6 +1355,13 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         else:
             active_mask_flat = None
             has_active_mask = False
+        if active_spans is not None:
+            if not has_active_mask:
+                raise ValueError("active_spans requires active_mask")
+            if any(start < 0 or start >= end or end > B * S for start, end in active_spans):
+                raise ValueError("active_spans must contain ordered in-bounds [start, end) pairs")
+            if any(left[1] > right[0] for left, right in zip(active_spans, active_spans[1:])):
+                raise ValueError("active_spans must be sorted and non-overlapping")
         local_vocab = int(weight.shape[0])
         rank = 0 if tp_group is None else dist.get_rank(tp_group)
 
@@ -1329,8 +1415,9 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             ctx.B, ctx.S, ctx.H = B, S, H
             ctx.tp_group = tp_group
             ctx.hidden_dtype = ctx_hidden_dtype
-            ctx.entropy_requires_grad = entropy_requires_grad
             ctx.has_active_mask = has_active_mask
+            ctx.active_spans = active_spans
+            ctx.entropy_requires_grad = entropy_requires_grad
 
         if not compute_entropy:
             assert entropy_flat is None
@@ -1386,6 +1473,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             1.0,  # temperature (pre-baked into hidden by the caller)
             tp_group,
             active_mask_flat,
+            ctx.active_spans,
             compute_entropy=ctx.entropy_requires_grad,
         )
 
@@ -1394,5 +1482,5 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
 
         # Optional arguments omitted from ``apply`` do not appear in
         # ``needs_input_grad``; match the exact arity used by the caller.
-        grads = (d_hidden, d_weight, None, None, None, None, None, None, None, None, None)
+        grads = (d_hidden, d_weight, None, None, None, None, None, None, None, None, None, None)
         return grads[: len(ctx.needs_input_grad)]
