@@ -57,17 +57,33 @@ class RecordLocation:
     #: as the mirror holds them when there is one (so without the kinds its ``exclude`` leaves out), else as
     #: the record directory does. They sit beside the document, in the mirror and on disk.
     files: tuple[str, ...] = ()
+    #: The machine ``path`` is on: the capture server's node, as an IP address (or hostname). None from a
+    #: server that predates it.
+    host: str | None = None
+
+    @property
+    def local(self) -> str:
+        """``host:path``, the way scp and rsync over ssh name a remote file; an IPv6 host is bracketed."""
+        if self.host is None:
+            return self.path
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"{host}:{self.path}"
 
     @property
     def uri(self) -> str:
-        """The mirror URI when there is one, else the local path."""
-        return self.mirror or self.path
+        """The mirror URI when there is one, else ``local``."""
+        return self.mirror or self.local
 
     @classmethod
     def from_json(cls, body: dict[str, Any] | None) -> RecordLocation | None:
         if body is None:
             return None
-        return cls(path=body["path"], mirror=body.get("mirror"), files=tuple(body.get("files", ())))
+        return cls(
+            path=body["path"],
+            mirror=body.get("mirror"),
+            files=tuple(body.get("files", ())),
+            host=body.get("host"),
+        )
 
 
 @dataclass(slots=True)

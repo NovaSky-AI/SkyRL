@@ -282,10 +282,10 @@ uv run skycap serve ... --record-dir ./record --record-mirror s3://bucket/run-7 
   --record-mirror-config '{"exclude": ["experts", "sampling_mask"], "timeout": 120}'
 ```
 
-The mirrored document then lists only the sidecars it has and names the rest in
-`omitted_sidecars` (see [`docs/format.md`](docs/format.md)); the local record is
-untouched. Excluding `tokens` is allowed, but a viewer of the mirror then shows
-message text only.
+The document is copied unchanged, so in the mirror it lists sidecars the mirror
+doesn't hold; readers treat those as absent (see [`docs/format.md`](docs/format.md)).
+The local record is untouched. Excluding `tokens` is allowed, but a viewer of
+the mirror then shows message text only.
 
 ## Develop
 

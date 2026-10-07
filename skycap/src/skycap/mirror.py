@@ -10,10 +10,11 @@ first, as always, and then queued for the mirror, which copies its files to
 in the mirror has its sidecars beside it, as on disk.
 
 ``exclude`` leaves sidecar kinds out of the mirror, e.g. ``("experts",)`` when
-the remote copy is for reading rather than retraining. The mirrored document
-then lists only the sidecars it has and names the others in
-``omitted_sidecars``; the local record is untouched. Excluding ``tokens`` is
-allowed, but a viewer reading the mirror then has message text only.
+the remote copy is for reading rather than retraining. The document is still
+copied unchanged, so its manifest lists sidecars the mirror doesn't have; a
+reader treats a listed sidecar that's missing as absent. The local record is
+untouched. Excluding ``tokens`` is allowed, but a viewer reading the mirror
+then has message text only.
 
 The mirror fails open. A store that is slow, down or refusing never fails a
 trajectory, it only loses the copy, and every loss is logged and counted in
@@ -36,7 +37,6 @@ from __future__ import annotations
 
 import logging
 import queue
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -213,16 +213,8 @@ class RecordMirror:
 
     def _mirror(self, record_dir: Path, trajectory_id: str) -> str:
         """Copy one record, sidecars first. Returns the counter it lands in."""
-        files = record.record_files(record_dir, trajectory_id)
-        sidecars, document = files[:-1], files[-1]
-        kept = self._kept(sidecars)
-        with tempfile.TemporaryDirectory(prefix="skycap-mirror-") as scratch:
-            source = document
-            if len(kept) < len(sidecars):
-                # The mirrored document lists only the sidecars the mirror has.
-                source = Path(scratch) / document.name
-                source.write_bytes(record.omit_sidecars(document, self.exclude))
-            return self._copy_files([*[(path, path.name) for path in kept], (source, document.name)])
+        files = self._kept(record.record_files(record_dir, trajectory_id))
+        return self._copy_files([(path, path.name) for path in files])
 
     def _kept(self, files: list[Path]) -> list[Path]:
         """``files`` without the sidecars of excluded kinds."""
@@ -235,8 +227,6 @@ class RecordMirror:
             try:
                 self._copy(path, remote)
             except _Abandoned as error:
-                # An abandoned copy may still be reading a rewritten document's scratch file when it is
-                # removed; that copy then fails, which is what abandoning it already counted.
                 logger.warning("record mirror: abandoned %s: %s", self.uri(name), error)
                 return "timed_out"
             except Exception as error:  # noqa: BLE001 - the store's error, logged and counted

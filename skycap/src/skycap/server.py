@@ -41,6 +41,7 @@ import asyncio
 import contextlib
 import hmac
 import logging
+import socket
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -73,6 +74,21 @@ class Backend(Protocol):
     ) -> web.StreamResponse: ...
 
 
+def node_address() -> str:
+    """This machine's primary IP address: the one its default route leaves from. Falls back to its hostname.
+
+    Connecting a UDP socket sends nothing; it only makes the kernel pick the outgoing interface.
+    """
+    for family, probe in ((socket.AF_INET, ("8.8.8.8", 53)), (socket.AF_INET6, ("2001:4860:4860::8888", 53))):
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as probe_socket:
+                probe_socket.connect(probe)
+                return probe_socket.getsockname()[0]
+        except OSError:
+            continue
+    return socket.gethostname()
+
+
 def _json(payload: Any, status: int = 200) -> web.Response:
     return web.Response(body=orjson.dumps(payload), status=status, content_type="application/json")
 
@@ -89,6 +105,7 @@ class CaptureServer:
         record_dir: str | Path | None = None,
         record_mirror: str | RecordMirror | None = None,
         record_mirror_config: Mapping[str, Any] | None = None,
+        record_host: str | None = None,
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
@@ -101,6 +118,9 @@ class CaptureServer:
         #: function or as its ``"pkg.module:function"`` import path.
         self.path_rules = rule_registry(path_rules)
         self.record_dir = Path(record_dir).absolute() if record_dir is not None else None
+        #: The machine ``record_dir`` is on, as ``finish``'s ``record.host``: so another node (a trainer's
+        #: head node, say) knows where to reach a record that only exists here.
+        self.record_host = record_host or (node_address() if self.record_dir is not None else None)
         if record_mirror is not None and self.record_dir is None:
             raise ValueError("record_mirror copies what is written to record_dir, so it needs a record_dir")
         #: The remote copy of the record directory, if any.
@@ -246,7 +266,7 @@ class CaptureServer:
         return True
 
     def location(self, trajectory: Trajectory) -> dict[str, Any] | None:
-        """Where a trajectory's record is: ``{"path", "mirror", "files"}``, or None when it isn't written.
+        """Where a trajectory's record is: ``{"host", "path", "mirror", "files"}``, or None when it isn't written.
 
         ``files`` names the record's files, sidecars then document: as the mirror holds them when there is
         one (without the sidecar kinds it excludes), else as the record directory does.
@@ -259,6 +279,7 @@ class CaptureServer:
         else:
             files = self.mirror.names(self.record_dir, trajectory.id)
         return {
+            "host": self.record_host,
             "path": str(self.record_dir / name),
             "mirror": None if self.mirror is None else self.mirror.uri(name),
             "files": files,

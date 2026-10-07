@@ -17,6 +17,7 @@ route there.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import threading
 from collections.abc import Callable, Mapping
@@ -123,6 +124,7 @@ class CaptureService:
         record_dir: str | None = None,
         record_mirror: str | RecordMirror | None = None,
         record_mirror_config: Mapping[str, Any] | None = None,
+        record_host: str | None = None,
         ttl: float = 3600.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
         require_api_key: bool = False,
@@ -151,6 +153,8 @@ class CaptureService:
             record_dir=record_dir,
             record_mirror=record_mirror,
             record_mirror_config=record_mirror_config,
+            # Where the records are: the address this node is reached at, unless that's only loopback.
+            record_host=record_host or (None if _is_loopback(advertise_host) else advertise_host),
             ttl=ttl,
             path_rules=path_rules,
             require_api_key=require_api_key,
@@ -323,3 +327,10 @@ _LOOPBACK = {"0.0.0.0": "127.0.0.1", "": "127.0.0.1", "::": "::1"}
 
 def _http_url(host: str, port: int) -> str:
     return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return host == "localhost"

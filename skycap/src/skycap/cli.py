@@ -90,6 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
         "Excluding tokens leaves viewers of the mirror with message text only",
     )
     serve.add_argument(
+        "--record-host",
+        default=None,
+        metavar="ADDRESS",
+        help="the address other machines reach this one at, reported as finish's record.host so they can "
+        "fetch a record from this node's --record-dir (default: this machine's primary IP)",
+    )
+    serve.add_argument(
         "--ttl",
         type=float,
         default=3600.0,
@@ -156,6 +163,7 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         record_dir=args.record_dir,
         record_mirror=args.record_mirror,
         record_mirror_config=args.record_mirror_config,
+        record_host=args.record_host,
         ttl=args.ttl,
         path_rules=rules,
         require_api_key=args.require_api_key,

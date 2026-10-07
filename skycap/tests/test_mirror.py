@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 import uuid
@@ -17,7 +18,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 from skycap import CapturePool, CaptureService, FinishResult, RecordLocation, record
 from skycap.cli import build_parser, build_server
 from skycap.mirror import RecordMirror
-from skycap.server import CaptureServer
+from skycap.server import CaptureServer, node_address
 from skycap.text import TextBackend
 from skycap.trajectory import Trajectory
 from tests.conftest import running_stack
@@ -113,7 +114,9 @@ async def test_a_record_is_mirrored_byte_for_byte_sidecars_included(tmp_path: Pa
     name = f"{trajectory.id}.json.zst"
     kinds = ("tokens", "experts", "sampling_mask")
     names = (*[f"{trajectory.id}.{kind}.zst" for kind in kinds], name)
-    assert result.record == RecordLocation(path=str(tmp_path / name), mirror=f"{url}/{name}", files=names)
+    assert result.record == RecordLocation(
+        path=str(tmp_path / name), mirror=f"{url}/{name}", files=names, host=service.server.record_host
+    )
     assert result.record.uri == f"{url}/{name}"
     files = record.record_files(tmp_path, trajectory.id)
     assert tuple(path.name for path in files) == names
@@ -136,11 +139,11 @@ async def test_finish_says_where_the_record_is(tmp_path: Path) -> None:
         trajectory_id = (await stack.create())["id"]
         name = f"{trajectory_id}.json.zst"
         # Text mode has no sidecars, so the document is the record's only file.
-        location = {"path": str(tmp_path / name), "mirror": None, "files": [name]}
+        location = {"host": node_address(), "path": str(tmp_path / name), "mirror": None, "files": [name]}
         assert (await stack.finish(trajectory_id))["record"] == location
         # A repeat finish is answered from the record on disk, with the same location.
         assert (await stack.finish(trajectory_id))["record"] == location
-    assert RecordLocation.from_json(location).uri == location["path"]
+    assert RecordLocation.from_json(location).uri == f"{node_address()}:{location['path']}"
     assert RecordLocation.from_json(location).files == (location["files"][0],)
     # A server from before files existed answers without them.
     assert RecordLocation.from_json({"path": "/r/x.json.zst", "mirror": None}).files == ()
@@ -165,6 +168,8 @@ async def test_finish_lists_the_local_files_without_a_mirror(tmp_path: Path) -> 
         assert await asyncio.to_thread(service.stop)
         await engine.close()
     assert result.record.mirror is None
+    # Served on loopback, so the record's host is this machine's own address, and its uri says where it is.
+    assert result.record.host == node_address() and result.record.uri == result.record.local
     assert result.record.files == tuple(path.name for path in record.record_files(tmp_path, trajectory.id))
     assert len(result.record.files) == 4
     assert all((tmp_path / name).exists() for name in result.record.files)
@@ -332,7 +337,9 @@ async def captured(tmp_path: Path, url: str, config: dict | None) -> tuple[str, 
     return trajectory.id, service, result
 
 
-async def test_excluded_sidecars_stay_out_of_the_mirror_and_its_document_says_so(tmp_path: Path) -> None:
+async def test_excluded_sidecars_stay_out_of_the_mirror_and_the_rest_reads_without_them(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     url = unique("memory")
     trajectory_id, service, result = await captured(tmp_path, url, {"exclude": ["experts", "sampling_mask"]})
     local = tmp_path / "record"
@@ -343,38 +350,33 @@ async def test_excluded_sidecars_stay_out_of_the_mirror_and_its_document_says_so
     # finish lists the files the mirror holds, not the excluded ones the record directory also has.
     assert result.record.files == (f"{trajectory_id}.tokens.zst", f"{trajectory_id}.json.zst")
     assert len(record.record_files(local, trajectory_id)) == 4
-    tokens = f"{trajectory_id}.tokens.zst"
-    assert remote_bytes(f"{url}/{tokens}") == (local / tokens).read_bytes()
+    # Everything the mirror holds is a byte-for-byte copy, the document included.
+    for name in names:
+        assert remote_bytes(f"{url}/{name}") == (local / name).read_bytes()
 
-    # The mirror's copy is a whole record on its own: read it back as a record directory.
+    # Read back as a record directory, the copy lacks the sidecars its manifest lists: they read as absent.
     copy = tmp_path / "copy"
     copy.mkdir()
     for name in names:
         (copy / name).write_bytes(remote_bytes(f"{url}/{name}"))
-    document = record.read_document(copy, trajectory_id)
-    assert set(document["sidecars"]) == {"tokens"}
-    assert document["omitted_sidecars"] == ["experts", "sampling_mask"]
-    mirrored = record.load(copy, trajectory_id)
-    assert all(node.tokens is None or node.tokens.routed_experts is None for node in mirrored.graph)
-    assert any(node.tokens is not None and node.tokens.token_ids for node in mirrored.graph)
-
-    # The local record is untouched.
-    original = record.read_document(local, trajectory_id)
-    assert set(original["sidecars"]) == {"tokens", "experts", "sampling_mask"}
-    assert "omitted_sidecars" not in original
+    assert set(record.read_document(copy, trajectory_id)["sidecars"]) == {"tokens", "experts", "sampling_mask"}
+    with caplog.at_level(logging.WARNING, logger="skycap.record"):
+        mirrored = record.load(copy, trajectory_id)
+    tokens = [node.tokens for node in mirrored.graph if node.tokens is not None]
+    assert tokens and all(t.token_ids and t.routed_experts is None and t.sampling_mask is None for t in tokens)
+    assert "experts sidecar is missing" in caplog.text
     assert service.server.mirror.stats()["mirrored"] == 1
 
 
-def test_a_record_without_the_excluded_kinds_is_mirrored_byte_for_byte(tmp_path: Path) -> None:
-    # A text-mode record has no sidecars, so there is nothing to omit and nothing to rewrite.
-    url = unique("memory")
-    mirror = RecordMirror(url, exclude=["experts", "tokens"])
-    trajectory_id = written(tmp_path)
-    mirror.submit(tmp_path, trajectory_id)
-    wait_for(settled(mirror))
-    mirror.close()
-    name = f"{trajectory_id}.json.zst"
-    assert remote_bytes(f"{url}/{name}") == (tmp_path / name).read_bytes()
+def test_a_record_without_its_tokens_sidecar_reads_as_text_only(tmp_path: Path) -> None:
+    from tests.test_record import _token_trajectory
+
+    trajectory = _token_trajectory()
+    record.write(tmp_path, trajectory)
+    record.sidecar_path(tmp_path, trajectory.id, "tokens").unlink()
+    loaded = record.load(tmp_path, trajectory.id)
+    assert [node.tokens for node in loaded.graph] == [None] * len(loaded.graph)
+    assert [node.message for node in loaded.graph] == [node.message for node in trajectory.graph]
 
 
 def test_exclude_names_known_sidecar_kinds() -> None:
@@ -411,3 +413,31 @@ def test_a_config_goes_with_a_url_not_a_built_mirror(tmp_path: Path) -> None:
             record_mirror=RecordMirror(unique("memory")),
             record_mirror_config={"exclude": ["experts"]},
         )
+
+
+def test_finish_says_which_machine_the_record_is_on(tmp_path: Path) -> None:
+    backend = TextBackend("http://upstream/v1")
+    assert CaptureServer(backend, record_dir=tmp_path, record_host="10.0.0.5").record_host == "10.0.0.5"
+    assert CaptureServer(backend, record_dir=tmp_path).record_host == node_address()
+    assert CaptureServer(backend).record_host is None
+    # A service reports the address it is reached at, unless that is only loopback.
+    assert (
+        CaptureService("http://u/v1", record_dir=str(tmp_path), advertise_host="10.0.0.7").server.record_host
+        == "10.0.0.7"
+    )
+    assert CaptureService("http://u/v1", record_dir=str(tmp_path)).server.record_host == node_address()
+    args = build_parser().parse_args(
+        ["serve", "--upstream-url", "http://u/v1", "--record-dir", str(tmp_path), "--record-host", "10.0.0.9"]
+    )
+    assert build_server(args).record_host == "10.0.0.9"
+
+
+def test_a_record_location_names_its_host_the_way_scp_does() -> None:
+    assert RecordLocation(path="/r/tr.json.zst", host="10.0.0.5").local == "10.0.0.5:/r/tr.json.zst"
+    assert RecordLocation(path="/r/tr.json.zst", host="fe80::1").local == "[fe80::1]:/r/tr.json.zst"
+    assert (
+        RecordLocation(path="/r/tr.json.zst", host="10.0.0.5", mirror="s3://b/tr.json.zst").uri == "s3://b/tr.json.zst"
+    )
+    # A server from before `host` sends none.
+    old = RecordLocation.from_json({"path": "/r/tr.json.zst", "mirror": None})
+    assert old.host is None and old.local == "/r/tr.json.zst" and old.files == ()

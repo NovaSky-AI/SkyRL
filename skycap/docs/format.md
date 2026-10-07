@@ -15,9 +15,9 @@ A record directory holds, per trajectory `{id}`:
 | `{id}.experts.zst` | optional: when routed experts were captured (R3) | routed experts |
 | `{id}.sampling_mask.zst` | optional: when a captured sampling mask has at least one row | per sampled token, the ids it could have been drawn from |
 
-Every sidecar is optional. The document's `sidecars` manifest lists exactly the
-ones the trajectory has, so a reader goes by the manifest, never by which files
-it finds: a kind missing from the manifest is one the trajectory doesn't have.
+Every sidecar is optional. The document's `sidecars` manifest lists the ones
+the trajectory captured, and a kind missing from it is one the trajectory
+doesn't have.
 
 Every file is exactly one zstd frame: compress the whole payload in one call
 and write it once. Never add to a file that already exists, whether by
@@ -31,9 +31,17 @@ A trajectory is not partially written when it is live, it is only written when i
 Each document has a `sidecars` field naming the sidecar files that belong to
 it. The writer writes those sidecars before the document, and writes every file
 under a temporary name and then renames it, so no file is ever seen
-half-written. If a document exists, every sidecar named in its `sidecars` field
-exists too. A crash can leave sidecars with no document, but never a document
-with a missing sidecar.
+half-written. In a record directory, if a document exists, every sidecar named
+in its `sidecars` field exists too. A crash can leave sidecars with no
+document, but never a document with a missing sidecar.
+
+A copy of a record directory, such as a mirror that leaves sidecar kinds out,
+may lack sidecar files its manifest lists. A reader treats a listed sidecar
+whose file is missing as absent, as if the trajectory hadn't captured it, and
+doesn't tell it apart from one that went missing: without `tokens` it has
+message text only and should say so; without `experts` or `sampling_mask` it
+loses nothing a reader shows, since only training uses them, and training
+takes its samples from `finish`.
 A reader lists trajectories by listing `*.json.zst`.
 
 ### A mirror
@@ -50,11 +58,10 @@ directory.
 
 A mirror can leave sidecar kinds out (`--record-mirror-config '{"exclude":
 ["experts"]}'`), e.g. when the remote copy is for reading rather than
-retraining. Its copy of the document then lists only the sidecars it has, and
-names the ones it left out in `omitted_sidecars`, so it still reads as a whole
-record. Its nodes keep their offsets into those kinds; a reader treats a slice
-of an omitted kind as absent, as if the trajectory had never captured it. The record directory's copy is untouched. Leaving out `tokens` is
-allowed, but a reader of the mirror then has message text only.
+retraining. It still copies the document unchanged, so the document lists
+sidecars the mirror doesn't hold, which a reader reads as absent (above). The
+record directory's copy is untouched. Leaving out `tokens` is allowed, but a
+reader of the mirror then has message text only.
 
 ### Where a trajectory's record is
 
@@ -62,12 +69,17 @@ allowed, but a reader of the mirror then has message text only.
 server has no record directory or couldn't write the record:
 
 ```json
-{"record": {"path": "/data/record/tr_ab12.json.zst",
+{"record": {"host": "10.0.0.5",
+            "path": "/data/record/tr_ab12.json.zst",
             "mirror": "s3://bucket/run-7/tr_ab12.json.zst",
             "files": ["tr_ab12.tokens.zst", "tr_ab12.json.zst"]}}
 ```
 
-`path` is on the server's own disk. `mirror` is null without a mirror, and
+`path` is on the server's own disk, and `host` is that machine: its IP address
+(or hostname), so another node can reach a record that exists only there, e.g.
+`scp 10.0.0.5:/data/record/tr_ab12.json.zst .` (an IPv6 host is bracketed
+there, `[fe80::1]:/data/...`). The server reports the address it is reached
+at, or its primary IP when it has none to report; `--record-host` sets it. `mirror` is null without a mirror, and
 otherwise where the copy is going: it may not be there yet, or at all. The
 sidecars are beside the document in both places.
 
@@ -97,8 +109,7 @@ The decompressed document is a UTF-8 JSON object:
 | `retries` | object | SDK retries answered from the original call: `{replayed, coalesced}` counts |
 | `samples` | object or null | what `finish` returned as training samples: `{paths, rows}`. `paths` names the path rule that picked them: `all` (a row per root-to-leaf path, each model node a target in exactly one), `final` (one row, the path to the last model call's reply, every model node on it a target), or a custom rule's name. Each row is `{leaf, targets}`: the node its path ends at (the path is that node and its ancestors) and the model node ids it trains. No node is a target in two rows. Null for a trajectory not ended by `finish`, or one whose `finish` rule raised (a later `finish` that succeeds records it) |
 | `nodes` | array | the graph, in creation order (below) |
-| `sidecars` | object | kind → sidecar manifest (below). Empty in text mode, and in token mode when no node has tokens. Lists exactly the sidecars this copy has |
-| `omitted_sidecars` | list of strings, optional | sidecar kinds the trajectory has but this copy leaves out (a mirror's `exclude`). Absent in a record directory |
+| `sidecars` | object | kind → sidecar manifest (below). Empty in text mode, and in token mode when no node has tokens |
 
 Fields a reader doesn't know are ignored. Adding a field does not change
 `format_version`. Removing or redefining one does.
@@ -263,7 +274,7 @@ A row:
 | `annotations` | object or null | what the trajectory was finished with (e.g. `reward`) |
 | `superseded` | bool | a later attempt of the same `(instance_id, repetition_id)` exists in this step |
 | `trained` | bool or null | the final attempt had trainable tokens in the step's batch. `false` for a superseded attempt and in `eval`; null when the trainer didn't say |
-| `record` | object or null | finish's `record` (above): `path`, `mirror` and `files`; null when no record was written |
+| `record` | object or null | finish's `record` (above): `host`, `path`, `mirror` and `files`; null when no record was written |
 
 `record.files` may be absent in an index written before it existed; such a
 record is still found by its `id`. A row's record may be missing from the
