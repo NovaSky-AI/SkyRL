@@ -16,12 +16,14 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossType
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl.train.config import (
     SkyRLLoraConfig,
     SkyRLTrainConfig,
     TorchProfilerConfig,
 )
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 from skyrl.train.utils.utils import (
     print_mem,
     validate_cfg,
@@ -519,6 +521,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         ("policy", 2, 1, 2, 1, 1, 4, True, True, None, False, None),
         ("policy", 2, 1, 2, 1, 1, 4, True, True, "torch", False, None),
         ("policy", 2, 1, 2, 1, 1, 4, True, True, "triton", False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, True, FusedLmHeadBackend.TRITON_BLOCK_SPARSE, False, None),
         ("policy", 2, 1, 2, 1, 1, 4, True, False, None, False, "a2a"),
         ("policy", 4, 1, 1, 4, 1, 4, True, False, None, False, None),
         ("policy", 4, 1, 1, 4, 1, 4, True, False, None, True, None),
@@ -532,6 +535,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         "tp2_cp2_policy_seq_packing_with_entropy_loss",
         "tp2_cp2_policy_seq_packing_fused_torch_entropy_loss",
         "tp2_cp2_policy_seq_packing_fused_triton_entropy_loss",
+        "tp2_cp2_policy_seq_packing_fused_triton_block_sparse_entropy_loss",
         "tp2_cp2_policy_seq_packing_no_entropy_loss_a2a",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing_lora",
@@ -577,6 +581,9 @@ async def test_megatron_train(
     if fused_lm_head_backend is not None:
         cfg.trainer.fused_lm_head_logprob = True
         cfg.trainer.fused_lm_head_logprob_backend = fused_lm_head_backend
+        if fused_lm_head_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE:
+            cfg.trainer.algorithm.policy_loss_type = PolicyLossType.ROLLOUT_IS
+            batch["action_log_probs"] = None
     if lora:
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 
