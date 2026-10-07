@@ -31,7 +31,6 @@ from tests.backends.skyrl_train.gpu.utils import init_worker_with_type
 SLICE = "eatang/GLM-5.3-Flash-4layer"
 FULL = "zai-org/GLM-5.3-Flash"
 TP, EP, NUM_GPUS = 2, 4, 4
-MICRO_BATCH = 4
 
 # (prompt, image size or None, answer). Mixed sizes so the packed stream holds images of
 # different token counts; one text-only row so an image-free sample sits in a packed microbatch.
@@ -82,12 +81,12 @@ def _config(model_path: str, language_model_only: bool = False) -> SkyRLTrainCon
     return cfg
 
 
-def _build_rows(model_path: str):
+def _build_rows(model_path: str, prompts=PROMPTS, seed: int = 0):
     """Per row: (input_ids, answer_len, pixel_values | None, image_grid_thw | None)."""
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-    gen = torch.Generator().manual_seed(0)
+    gen = torch.Generator().manual_seed(seed)
     rows = []
-    for prompt, size, answer in PROMPTS:
+    for prompt, size, answer in prompts:
         content = [{"type": "text", "text": prompt}]
         images = None
         if size is not None:
@@ -148,7 +147,7 @@ def _batch(processor, rows, keep=None) -> TrainingInputBatch:
     return data
 
 
-def _megatron_logprobs(model_path, batch, micro_batch=MICRO_BATCH, language_model_only=False) -> torch.Tensor:
+def _megatron_logprobs(model_path, batch, micro_batch=4, language_model_only=False) -> torch.Tensor:
     """[B, response_length] logprobs from the policy forward (old/ref-logprob path)."""
     cfg = _config(model_path, language_model_only=language_model_only)
     cfg.trainer.micro_forward_batch_size_per_gpu = micro_batch
@@ -194,30 +193,53 @@ def test_glm5_vlm_forward_matches_hf(glm5_vl_slice):
     diff = (megatron - hf).abs()[scored]
     print(f"\n[glm5 vlm vs hf] mean={diff.mean().item():.4f} max={diff.max().item():.4f}")
     # The truncated slice has a spread next-token distribution: bf16 noise alone is ~0.05 mean
-    # |dlogprob| (see the glm-5.3-flash rows in test_megatron_models.py). Wrong image placement
-    # or a dropped vision weight is far above that.
-    assert diff.mean().item() < 0.1
+    # |dlogprob| (see the glm-5.3-flash rows in test_megatron_models.py), and its MoE routing is
+    # sensitive to microbatch shape (see test_glm5_vlm_no_cross_sample_leak): packed microbatches
+    # land at ~0.10 from HF, each sample alone at ~0.08, on the text-only path too. Wrong image
+    # placement or a dropped vision weight moves answers by ~0.5 (the image-swap control).
+    assert diff.mean().item() < 0.15
+
+
+# A text row and an image row with the same token count; the image is drawn with two seeds.
+LEAK_TEXT = ("Name a planet in the solar system.", None, "Mars is the fourth planet from the Sun.")
+LEAK_IMAGE = ("How many objects are in the image?", (168, 280), "I cannot count any distinct objects.")
 
 
 @pytest.mark.h100
 @pytest.mark.megatron
-def test_glm5_vlm_packed_vs_alone(glm5_vl_slice):
-    """Packed microbatches of 4 (mixed image/text, incl. image-free samples at TP2+SP) must match
-    each sample run alone. A misplaced image (features of sample k in sample j) or a boundary
-    leak would make later slots worse than slot 0."""
-    processor, rows = _build_rows(glm5_vl_slice)
+def test_glm5_vlm_no_cross_sample_leak(glm5_vl_slice):
+    """A sample's logprobs must not depend on the image content of another sample packed with it.
+
+    Packed-vs-alone is not a usable check here: on this truncated slice the MoE forward depends on
+    the microbatch's shape (per-expert token counts), and packing a sample with a long neighbour
+    moves it by ~0.13 mean |dlogprob| on the text-only GPTModel path as well. So the microbatch
+    shape is held fixed and only the neighbour's pixels change: [txt, img] vs [txt, img'] (text
+    first) and [img, txt] vs [img', txt] (text second), all in one run. Measured noise ~0.01.
+    """
+    processor, (txt,) = _build_rows(glm5_vl_slice, [LEAK_TEXT])
+    _, (img,) = _build_rows(glm5_vl_slice, [LEAK_IMAGE], seed=0)
+    _, (img_swapped,) = _build_rows(glm5_vl_slice, [LEAK_IMAGE], seed=1)
+    assert len(img[0]) == len(img_swapped[0])
+    # Micro batch 2: microbatches [0,1] [2,3] on DP rank 0, [4,5] [6,7] on DP rank 1.
+    rows = [txt, img, txt, img_swapped, img, txt, img_swapped, txt]
     batch = _batch(processor, rows)
-    packed = _megatron_logprobs(glm5_vl_slice, batch, micro_batch=MICRO_BATCH)
-    alone = _megatron_logprobs(glm5_vl_slice, batch, micro_batch=1)
+    lp = _megatron_logprobs(glm5_vl_slice, batch, micro_batch=2)
 
     scored = batch["loss_mask"].bool()
-    diff = (packed - alone).abs()
-    slots = torch.arange(len(rows)) % MICRO_BATCH
-    for i in range(len(rows)):
-        print(f"  sample {i} slot {slots[i].item()}: |packed-alone|={diff[i][scored[i]].mean().item():.5f}")
-    assert diff[scored].mean().item() < 2e-2
-    first, later = slots == 0, slots > 0
-    assert diff[later][scored[later]].mean().item() <= 3 * diff[first][scored[first]].mean().item() + 1e-2
+
+    def mean_diff(a, b):
+        return (lp[a] - lp[b]).abs()[scored[a]].mean().item()
+
+    text_first, text_second = mean_diff(0, 2), mean_diff(5, 7)
+    image_control = mean_diff(1, 3)
+    print(
+        f"\n[glm5 vlm leak] text first {text_first:.4f} text second {text_second:.4f} "
+        f"image swap control {image_control:.4f}"
+    )
+    # The swap must reach the image row itself, or the check below proves nothing.
+    assert image_control > 0.1
+    assert text_first < 0.03
+    assert text_second < 0.03
 
 
 @pytest.mark.h100
