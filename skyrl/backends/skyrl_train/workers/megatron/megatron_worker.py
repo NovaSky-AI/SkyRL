@@ -1016,6 +1016,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self._drop_pixel_values_on_non_first_pp_stage(data)
 
+        loss_normalization = MinibatchLossNormalization.from_batch(
+            data,
+            dp_group=mpu.get_data_parallel_group(with_context_parallel=False),
+            device=torch.cuda.current_device(),
+        )
+
         # Build micro-batch dicts expected by forward_backward_mini_batch
         micro_buffer = []
         for experience in BatchIterator(data, micro_batch_size, drop_last=False):
@@ -1038,6 +1044,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "position_ids": position_ids,
                     "num_actions": experience.num_actions,
                     "old_action_log_probs": experience.action_log_probs,
+                    REAL_SAMPLE_MASK: experience.real_sample_mask,
+                    MINIBATCH_LOSS_NORMALIZATION: loss_normalization,
                     "base_action_log_probs": experience.base_action_log_probs,
                     "advantages": experience.advantages,
                     "loss_mask": experience.loss_mask,
