@@ -11,7 +11,11 @@ import pytest
 
 from skyrl.train.config import MegatronConfig
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
-from skyrl.train.dataset.collators import PackedDataCollator
+from skyrl.train.dataset.collators import (
+    PACKED_SFT_REAL_EXAMPLES_KEY,
+    PACKED_SFT_REAL_TOKENS_KEY,
+    PackedDataCollator,
+)
 from skyrl.train.dataset.samplers import (
     DPAlignedPackingBatchSampler,
     StatefulSequentialSampler,
@@ -168,6 +172,16 @@ class TestPackingCollator:
         assert batch["attention_mask"].sum(dim=1).tolist() == [3, 1, 1, 1]
         assert batch["loss_mask"][1:].count_nonzero().item() == 0
         assert batch["loss_mask"][0].sum().item() == pytest.approx(1.0)
+        assert batch.metadata[PACKED_SFT_REAL_EXAMPLES_KEY] == 1
+        assert batch.metadata[PACKED_SFT_REAL_TOKENS_KEY] == 3
+
+    def test_real_one_token_sample_is_distinct_from_padding_rows(self):
+        collator = _make_collator(num_gpus=4, batch_size=4, max_length=16)
+        batch = collator([_make_example(1, 1)], batch_size=4)
+
+        assert [row.tolist() for row in batch["sub_seq_lengths"]] == [[1], [1], [1], [1]]
+        assert batch.metadata[PACKED_SFT_REAL_EXAMPLES_KEY] == 1
+        assert batch.metadata[PACKED_SFT_REAL_TOKENS_KEY] == 1
 
     def test_all_examples_included(self):
         collator = _make_collator(num_gpus=2, batch_size=4)
