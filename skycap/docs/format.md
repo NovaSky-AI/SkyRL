@@ -15,9 +15,15 @@ A record directory holds, per trajectory `{id}`:
 | `{id}.experts.zst` | when routed experts were captured | routed experts (R3) |
 | `{id}.sampling_mask.zst` | when a captured sampling mask has at least one row | per sampled token, the ids it could have been drawn from |
 
-Every file is exactly one zstd frame. A writer must not append a second frame
-to a file: some decoders, such as Node's, silently drop every frame after the
-first. A trajectory is not partially written when it is live, it is only written when it ends.
+Every file is exactly one zstd frame: compress the whole payload in one call
+and write it once. Never add to a file that already exists, whether by
+appending a second compressed chunk or by flushing a frame partway through a
+stream. A file with more than one frame is valid zstd, but many decoders,
+including Node's and the `zstandard` Python reader skycap itself uses, stop
+after the first frame without raising an error. The reader gets only the first
+chunk of the data and has no sign that anything is missing. To change a file,
+rewrite the whole file as a single frame.
+A trajectory is not partially written when it is live, it is only written when it ends.
 Sidecars are written before the document, and every file is written to a
 temporary name and renamed, so a document that exists always has the sidecars
 its `sidecars` field lists.
