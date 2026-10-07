@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from skyrl.train.config.sft_config import (
     SFTConfig,
     SFTPlacementConfig,
@@ -85,3 +87,49 @@ def test_sft_run_eval_opts_out_of_per_token_outputs(mock_dispatch):
     for call in mock_dispatch.forward.call_args_list:
         assert call.kwargs["loss_fn"] == "cross_entropy"
         assert call.kwargs["return_per_token_outputs"] is False
+
+
+@pytest.mark.parametrize("async_collation", [False, True])
+@pytest.mark.parametrize(
+    "packing,alignment,expected_sizes",
+    [(False, False, [20, 20, 4]), (True, False, [20, 20, 4]), (True, True, [22, 18, 4])],
+)
+def test_sft_logs_actual_example_count(mock_dispatch, monkeypatch, packing, alignment, expected_sizes, async_collation):
+    cfg = _build_test_sft_config()
+    cfg.strategy = "megatron" if packing else "fsdp"
+    cfg.placement.num_gpus_per_node = 2
+    cfg.megatron_config.tensor_model_parallel_size = 1
+    cfg.megatron_config.pipeline_model_parallel_size = 1
+    cfg.batch_size = 20
+    cfg.max_length = 1_000
+    cfg.num_steps = 3
+    cfg.sampler = "sequential"
+    cfg.remove_microbatch_padding = packing
+    cfg.use_sequence_packing = packing
+    cfg.align_packing_bins_to_dp = alignment
+    cfg.packing_batch_size_allowed_variation = 0.10
+    cfg.async_batch_collation = async_collation
+    cfg.eval_datasets = None
+    cfg.eval_dataset_splits = None
+    cfg.eval_dataset_names = None
+    cfg.eval_interval = 0
+    cfg.ckpt_path = ""
+    trainer = SFTTrainer(cfg, skyrl_cfg=build_skyrl_config_for_sft(cfg))
+    mock_dispatch.dp_size.return_value = 2
+    attach_mock_sft_deps(trainer, mock_dispatch)
+    trainer.tracker = MagicMock()
+    example = {
+        "input_ids": list(range(300)),
+        "attention_mask": [1] * 300,
+        "num_actions": 4,
+        "loss_mask": [1] * 4,
+    }
+    monkeypatch.setattr(trainer, "_load_and_tokenize", lambda *_args, **_kwargs: [example] * 44)
+    monkeypatch.setattr(trainer, "load_checkpoint", lambda: 0)
+
+    trainer.train()
+
+    logs = trainer.tracker.log.call_args_list
+    assert [call.kwargs["step"] for call in logs] == [1, 2, 3]
+    assert [call.args[0]["train/actual_batch_size"] for call in logs] == expected_sizes
+    assert [call.args[0]["train/actual_num_tokens"] for call in logs] == [size * 300 for size in expected_sizes]
