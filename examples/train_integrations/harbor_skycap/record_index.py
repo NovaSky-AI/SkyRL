@@ -7,14 +7,17 @@ step, in which phase, and which of them trained. ``SkycapRecordIndex`` logs
 that once per step, as one version of the W&B artifact
 ``skycap-records-<phase>-<run id>``, aliased ``<phase>-step-N`` and ``latest``:
 
-- ``step.json``: a row per trajectory the generator opened during the step
-  (every attempt, retries included), with its ``instance_id``,
-  ``repetition_id``, ``attempt``, ``phase``, ``status``, the annotations it was
-  finished with, whether a later attempt ``superseded`` it, whether it
-  ``trained``, and its ``record`` location from ``FinishResult.record``.
-- For a mirrored record, a reference entry ``records/<id>.json.zst`` to its
-  mirror URI, added with ``checksum=False``: W&B stores the URI and neither
-  reads the store nor copies bytes. A local-only record is in the index only.
+- ``step.json``: the step's run index, as skycap's ``docs/format.md`` ("A run
+  index") specifies it: ``format_version``, ``run``, ``phase`` and ``step``,
+  and a row per trajectory the generator opened during the step (every
+  attempt, retries included) with its ``instance_id``, ``repetition_id``,
+  ``attempt``, ``status``, the annotations it was finished with, whether a
+  later attempt ``superseded`` it, whether it ``trained``, and its ``record``
+  location from ``FinishResult.record`` (``path``, ``mirror``, ``files``).
+- For a mirrored record, a reference entry ``records/<name>`` per file in its
+  ``record.files``, to that file beside the mirrored document, added with
+  ``checksum=False``: W&B stores the URI and neither reads the store nor
+  copies bytes. A local-only record is in the index only.
 
 Nothing here is Harbor's: any skycap generator that adds its trajectories to a
 ``RecordLog`` gets the index.
@@ -47,6 +50,9 @@ from skyrl.train.utils.callbacks import CallbackInput, TrainingCallback, Trainin
 ARTIFACT_TYPE = "skycap-records"
 PHASES = ("train", "eval")
 
+#: The run index's ``format_version`` (skycap's ``docs/format.md``, "A run index").
+INDEX_FORMAT_VERSION = 1
+
 #: ``OSError`` subclasses no retry can fix.
 _PERMANENT = (PermissionError, FileNotFoundError, IsADirectoryError, NotADirectoryError, FileExistsError)
 _STOP = object()
@@ -64,8 +70,8 @@ class RecordEntry:
     status: Optional[str] = None
     #: What the trajectory was finished with (e.g. the reward).
     annotations: Optional[Dict[str, Any]] = None
-    #: ``FinishResult.record``: ``{"path", "mirror"}``, or None when skycap wrote no record.
-    record: Optional[Dict[str, Optional[str]]] = None
+    #: ``FinishResult.record``: ``{"path", "mirror", "files"}``, or None when skycap wrote no record.
+    record: Optional[Dict[str, Any]] = None
 
 
 class RecordLog:
@@ -81,7 +87,13 @@ class RecordLog:
     def add(self, phase: str, trajectory_id: Any, attempt: int, trajectory: Any) -> None:
         """Log a ``skycap.Trajectory`` opened for ``trajectory_id``, finished or not."""
         result = trajectory.result
-        location = None if result is None or result.record is None else asdict(result.record)
+        location = None
+        if result is not None and result.record is not None:
+            location = {
+                "path": result.record.path,
+                "mirror": result.record.mirror,
+                "files": list(result.record.files),
+            }
         entry = RecordEntry(
             id=trajectory.id,
             instance_id=str(trajectory_id.instance_id),
@@ -119,7 +131,7 @@ def trained_keys(callback_input: CallbackInput) -> Optional[Set[Tuple[str, int]]
 
 
 def index_rows(entries: List[RecordEntry], phase: str, trained: Optional[Set[Tuple[str, int]]]) -> List[dict]:
-    """``step.json``'s rows. ``trained`` is None when unknown, and then so is each final attempt's."""
+    """The run index's rows. ``trained`` is None when unknown, and then so is each final attempt's."""
     last: Dict[Tuple[str, int], int] = {}
     for entry in entries:
         key = (entry.instance_id, entry.repetition_id)
@@ -132,8 +144,32 @@ def index_rows(entries: List[RecordEntry], phase: str, trained: Optional[Set[Tup
             was_trained: Optional[bool] = False
         else:
             was_trained = None if trained is None else key in trained
-        rows.append({**asdict(entry), "phase": phase, "superseded": superseded, "trained": was_trained})
+        row = asdict(entry)
+        record = row.pop("record")
+        rows.append({**row, "superseded": superseded, "trained": was_trained, "record": record})
     return rows
+
+
+def step_index(run_id: str, phase: str, step: int, rows: List[dict]) -> Dict[str, Any]:
+    """The run index of one step and phase: the object ``index/<phase>/step-<N>.json`` holds."""
+    return {"format_version": INDEX_FORMAT_VERSION, "run": run_id, "phase": phase, "step": step, "rows": rows}
+
+
+def record_references(rows: List[dict]) -> List[Tuple[str, str]]:
+    """``(uri, name in the artifact)`` per file of every mirrored record: ``records/<file name>``.
+
+    The files are beside the mirrored document. A record from a server that doesn't list ``files`` is
+    referenced by its document alone.
+    """
+    references = []
+    for row in rows:
+        record = row["record"]
+        if record is None or record.get("mirror") is None:
+            continue
+        mirror_dir, document = record["mirror"].rsplit("/", 1)
+        for name in record.get("files") or [document]:
+            references.append((f"{mirror_dir}/{name}", f"records/{name}"))
+    return references
 
 
 @dataclass
@@ -144,16 +180,12 @@ class IndexVersion:
     aliases: List[str]
     metadata: Dict[str, Any]
     index: bytes
-    #: ``(uri, name in the artifact)`` per mirrored document.
+    #: ``(uri, name in the artifact)`` per file of each mirrored record.
     references: List[Tuple[str, str]]
 
 
 def build_version(run_id: str, phase: str, step: int, rows: List[dict]) -> IndexVersion:
-    references = [
-        (row["record"]["mirror"], f"records/{Path(row['record']['mirror']).name}")
-        for row in rows
-        if row["record"] is not None and row["record"]["mirror"] is not None
-    ]
+    references = record_references(rows)
     return IndexVersion(
         name=artifact_name(phase, run_id),
         aliases=[f"{phase}-step-{step}", "latest"],
@@ -165,9 +197,10 @@ def build_version(run_id: str, phase: str, step: int, rows: List[dict]) -> Index
             "num_trained": sum(row["trained"] is True for row in rows),
             "num_superseded": sum(row["superseded"] for row in rows),
             "num_recorded": sum(row["record"] is not None for row in rows),
+            "num_mirrored": sum(row["record"] is not None and row["record"]["mirror"] is not None for row in rows),
             "num_referenced": len(references),
         },
-        index=json.dumps(rows).encode(),
+        index=json.dumps(step_index(run_id, phase, step, rows)).encode(),
         references=references,
     )
 

@@ -34,6 +34,7 @@ from examples.train_integrations.harbor_skycap.record_index import (  # noqa: E4
     RecordLog,
     SkycapRecordIndex,
 )
+from skycap import record as skycap_record  # noqa: E402
 from skyrl.train.utils.callbacks import CallbackInput  # noqa: E402
 from tests.integrations.harbor_skycap import (
     test_harbor_skycap as harbor_tests,  # noqa: E402
@@ -65,8 +66,11 @@ class FakeArtifact:
     def add_reference(self, uri, name=None, checksum=True) -> None:
         self.references.append((uri, name, checksum))
 
-    def index(self) -> list:
+    def step(self) -> dict:
         return json.loads(self.files["step.json"])
+
+    def index(self) -> list:
+        return self.step()["rows"]
 
 
 class FakeRun:
@@ -158,6 +162,14 @@ async def test_a_step_is_one_version_however_many_generate_calls_it_took(skycap,
     ((artifact, aliases),) = run.logged
     assert artifact.name == "skycap-records-train-run-1" and artifact.type == "skycap-records"
     assert aliases == ["train-step-3", "latest"]
+    # step.json is the step's run index, as skycap's docs/format.md specifies it.
+    step = artifact.step()
+    assert {key: step[key] for key in ("format_version", "run", "phase", "step")} == {
+        "format_version": 1,
+        "run": "run/1",
+        "phase": "train",
+        "step": 3,
+    }
     rows = {(row["instance_id"], row["attempt"]): row for row in artifact.index()}
     # "crash" failed twice: the first attempt was superseded by the second, which was masked.
     assert {key: (row["superseded"], row["trained"]) for key, row in rows.items()} == {
@@ -167,9 +179,24 @@ async def test_a_step_is_one_version_however_many_generate_calls_it_took(skycap,
     }
     linear = rows[("linear", 0)]
     record_dir = skycap.server.record_dir
-    assert linear["phase"] == "train" and linear["status"] == "finished" and linear["repetition_id"] == 0
+    assert list(linear) == [
+        "id",
+        "instance_id",
+        "repetition_id",
+        "attempt",
+        "status",
+        "annotations",
+        "superseded",
+        "trained",
+        "record",
+    ]
+    assert linear["status"] == "finished" and linear["repetition_id"] == 0
     assert linear["annotations"] == {"reward": 1.0, "stop_reason": "complete"}
-    assert linear["record"] == {"path": str(record_dir / f"{linear['id']}.json.zst"), "mirror": None}
+    name = f"{linear['id']}.json.zst"
+    # Without a mirror, files are the record directory's, sidecars first.
+    on_disk = [path.name for path in skycap_record.record_files(record_dir, linear["id"])]
+    assert f"{linear['id']}.sampling_mask.zst" in on_disk
+    assert linear["record"] == {"path": str(record_dir / name), "mirror": None, "files": on_disk}
     # Local-only records are indexed, never uploaded.
     assert artifact.references == [] and set(artifact.files) == {"step.json"}
     assert artifact.metadata == {
@@ -180,6 +207,7 @@ async def test_a_step_is_one_version_however_many_generate_calls_it_took(skycap,
         "num_trained": 1,
         "num_superseded": 1,
         "num_recorded": 3,
+        "num_mirrored": 0,
         "num_referenced": 0,
     }
     assert records.take("train") == []
@@ -219,9 +247,17 @@ async def test_mirrored_records_are_referenced_not_copied(router, tmp_path, tria
     ((artifact, _),) = run.logged
     (row,) = artifact.index()
     name = f"{row['id']}.json.zst"
-    assert row["record"] == {"path": str(tmp_path / "record" / name), "mirror": f"{mirror}/{name}"}
-    assert artifact.references == [(f"{mirror}/{name}", f"records/{name}", False)]
-    assert set(artifact.files) == {"step.json"} and artifact.metadata["num_referenced"] == 1
+    local = tmp_path / "record"
+    # files are the mirror's: the excluded experts sidecar is on disk but not listed.
+    files = [f"{row['id']}.tokens.zst", name]
+    assert (local / f"{row['id']}.experts.zst").exists()
+    assert row["record"] == {"path": str(local / name), "mirror": f"{mirror}/{name}", "files": files}
+    # One reference per file, each to the file beside the mirrored document.
+    assert artifact.references == [(f"{mirror}/{file}", f"records/{file}", False) for file in files]
+    assert set(artifact.files) == {"step.json"}
+    assert artifact.metadata["num_referenced"] == 2 and artifact.metadata["num_mirrored"] == 1
+    fs = fsspec.filesystem("memory")
+    assert all(fs.exists(uri) for uri, _, _ in artifact.references)
     # The mirror config reached the server: its copy left the routed experts out, and says so.
     with fsspec.open(f"{mirror}/{name}", "rb") as handle:
         mirrored = orjson.loads(zstandard.ZstdDecompressor().decompressobj().decompress(handle.read()))
@@ -244,7 +280,8 @@ async def test_eval_goes_to_its_own_artifact_only_when_asked(skycap, trials, mak
         assert records.take("eval") == []
     ((artifact, aliases),) = run.logged
     assert aliases == ["eval-step-3", "latest"]
-    assert [(row["phase"], row["trained"]) for row in artifact.index()] == [("eval", False)]
+    assert artifact.step()["phase"] == "eval" and artifact.step()["step"] == 3
+    assert [row["trained"] for row in artifact.index()] == [False]
 
 
 @pytest.mark.asyncio
@@ -355,3 +392,12 @@ def test_the_config() -> None:
     assert cfg.record_mirror_config == {}
     with pytest.raises(ValueError, match="unknown phases"):
         SkycapRecordIndex(RecordLog(), ["train", "test"])
+
+
+def test_a_record_from_a_server_without_files_is_referenced_by_its_document() -> None:
+    rows = [
+        {"record": {"path": "/r/tr_a.json.zst", "mirror": "s3://b/run/tr_a.json.zst"}},
+        {"record": {"path": "/r/tr_b.json.zst", "mirror": None, "files": ["tr_b.json.zst"]}},
+        {"record": None},
+    ]
+    assert record_index.record_references(rows) == [("s3://b/run/tr_a.json.zst", "records/tr_a.json.zst")]
