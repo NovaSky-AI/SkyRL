@@ -19,6 +19,8 @@
 #     gradient in the fused backward for RL entropy bonuses.
 #   * Made epilogue outputs distinct from inputs so repeated tuning runs cannot
 #     corrupt reductions.
+#   * Added optional loss-mask row-tile skipping without sorting, gathering, or
+#     copying hidden rows; the dense path remains selected when no mask is passed.
 #   * Use the true row maximum as the epilogue log-sum-exp shift, including
 #     ``-inf`` padding, so strongly negative logits remain finite.
 #   * Release the oversized d-logits staging buffer before final partial-vocab
@@ -262,7 +264,7 @@ def _backward_autotune_configs():
 
 @triton.autotune(
     configs=_matmul_autotune_configs(_FORWARD_MAINLOOP_CONFIG_SPECS),
-    key=["num_tokens_bucket", "hidden_size", "vocab_size", "COMPUTE_ENTROPY"],
+    key=["num_tokens_bucket", "hidden_size", "vocab_size", "HAS_ACTIVE_MASK", "COMPUTE_ENTROPY"],
     cache_results=True,
 )
 @triton.jit(do_not_specialize=["num_tokens", "num_tokens_bucket", "rank"])
@@ -271,6 +273,7 @@ def efficient_entropy_kernel_general_mainloop(
     hidden_ptr,
     weight_ptr,
     labels_ptr,
+    active_mask_ptr,
     num_tokens,
     num_tokens_bucket,
     hidden_size,
@@ -297,6 +300,7 @@ def efficient_entropy_kernel_general_mainloop(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     USE_TMA: tl.constexpr,
+    HAS_ACTIVE_MASK: tl.constexpr,
     COMPUTE_ENTROPY: tl.constexpr,
     # Tests can force IEEE fp32; production uses Triton's fast default precision.
     INPUT_PRECISION: tl.constexpr,
@@ -313,6 +317,13 @@ def efficient_entropy_kernel_general_mainloop(
     start_offs_am = pid_m * BLOCK_SIZE_M
     offs_am = start_offs_am + tl.arange(0, BLOCK_SIZE_M)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+    if HAS_ACTIVE_MASK:
+        row_active = tl.load(active_mask_ptr + offs_am, mask=offs_am < num_tokens, other=0).to(tl.int1)
+        block_active = tl.reduce_or(row_active, axis=0)
+    else:
+        row_active = offs_am < num_tokens
+        block_active = True
 
     if USE_TMA:
         # using TMA and device-side descriptor creation
@@ -334,7 +345,7 @@ def efficient_entropy_kernel_general_mainloop(
         hidden_ptrs = hidden_ptr + (offs_am[:, None] * stride_hidden_m + offs_k[None, :] * stride_hidden_k)
 
     # load labels for this block
-    labels = tl.load(labels_ptr + offs_am, mask=offs_am < num_tokens)
+    labels = tl.load(labels_ptr + offs_am, mask=offs_am < num_tokens, other=0)
 
     # traverse over N dimension
     # _max = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
@@ -343,71 +354,82 @@ def efficient_entropy_kernel_general_mainloop(
     if COMPUTE_ENTROPY:
         _entropy_b = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     _logprobs = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-    vocab_bound = min((pid_n + 1) * vocab_per_split, vocab_size)
-    for n in range(0, num_pid_n):
-        start_offs_bn = pid_n * vocab_per_split + n * BLOCK_SIZE_N
-        offs_bn = start_offs_bn + tl.arange(0, BLOCK_SIZE_N)
 
-        logits = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        if not USE_TMA:
-            # weight_ptrs = weight_ptr + (offs_k[:, None] * stride_weight_k + offs_bn[None, :] * stride_weight_n)
-            weight_ptrs = weight_ptr + (offs_bn[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
+    # Fully inactive M tiles bypass both projection GEMMs and softmax work.
+    if block_active:
+        vocab_bound = min((pid_n + 1) * vocab_per_split, vocab_size)
+        for n in range(0, num_pid_n):
+            start_offs_bn = pid_n * vocab_per_split + n * BLOCK_SIZE_N
+            offs_bn = start_offs_bn + tl.arange(0, BLOCK_SIZE_N)
 
-        # iterate over K dimension
-        for k in range(0, tl.cdiv(hidden_size, BLOCK_SIZE_K)):
-            if USE_TMA:
-                # load the next block of hidden and weight
-                start_offs_k = k * BLOCK_SIZE_K
-                _hidden = hidden_desc.load([start_offs_am, start_offs_k])
-                _weight = weight_desc.load([start_offs_bn, start_offs_k])
-            else:
-                # load the next block of hidden and weight
-                _hidden = tl.load(
-                    hidden_ptrs,
-                    mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_am[:, None] < num_tokens),
-                    other=0.0,
-                )
+            logits = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+            if not USE_TMA:
+                # weight_ptrs = weight_ptr + (offs_k[:, None] * stride_weight_k + offs_bn[None, :] * stride_weight_n)
+                weight_ptrs = weight_ptr + (offs_bn[:, None] * stride_weight_n + offs_k[None, :] * stride_weight_k)
 
-                _weight = tl.load(
-                    weight_ptrs,
-                    mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K)
-                    & (offs_bn[:, None] < (min((pid_n + 1) * vocab_per_split, vocab_size))),
-                    other=0.0,
-                )
+            # iterate over K dimension
+            for k in range(0, tl.cdiv(hidden_size, BLOCK_SIZE_K)):
+                if USE_TMA:
+                    # load the next block of hidden and weight
+                    start_offs_k = k * BLOCK_SIZE_K
+                    _hidden = hidden_desc.load([start_offs_am, start_offs_k])
+                    _weight = weight_desc.load([start_offs_bn, start_offs_k])
+                else:
+                    # load the next block of hidden and weight
+                    _hidden = tl.load(
+                        hidden_ptrs,
+                        mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_am[:, None] < num_tokens),
+                        other=0.0,
+                    )
 
-                # advance the ptrs to the next K block
-                hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
-                weight_ptrs += BLOCK_SIZE_K * stride_weight_k
+                    _weight = tl.load(
+                        weight_ptrs,
+                        mask=(offs_k[None, :] < hidden_size - k * BLOCK_SIZE_K) & (offs_bn[:, None] < vocab_bound),
+                        other=0.0,
+                    )
 
-            # GEMM
-            logits = tl.dot(_hidden, _weight.trans(), logits, input_precision=INPUT_PRECISION)
+                    # advance the ptrs to the next K block
+                    hidden_ptrs += BLOCK_SIZE_K * stride_hidden_k
+                    weight_ptrs += BLOCK_SIZE_K * stride_weight_k
 
-        if not USE_TMA:
-            # reset hidden_ptrs for next iteration
-            hidden_ptrs -= hidden_size * stride_hidden_k
+                # GEMM
+                logits = tl.dot(_hidden, _weight.trans(), logits, input_precision=INPUT_PRECISION)
 
-        # scale logits by temperature
-        logits *= rcp_temperature
+            if not USE_TMA:
+                # reset hidden_ptrs for next iteration
+                hidden_ptrs -= hidden_size * stride_hidden_k
 
-        # #2656 OOB-vocab fix: mask out-of-bounds vocab columns to -inf for the LSE
-        # (max / exp / denominator) only. The unmasked ``logits`` are retained below for
-        # the entropy accumulator and the label-logit gather.
-        logits_for_lse = tl.where(offs_bn[None, :] < vocab_bound, logits, float("-inf"))
+            # scale logits by temperature
+            logits *= rcp_temperature
 
-        # update global maximum
-        _max_old = _max
-        m_pid_n = tl.max(logits_for_lse, axis=1)
-        _max = tl.maximum(_max_old, m_pid_n)
+            # #2656 OOB-vocab fix: mask out-of-bounds vocab columns to -inf for the LSE
+            # (max / exp / denominator) only. The unmasked ``logits`` are retained below for
+            # the entropy accumulator and the label-logit gather.
+            logits_for_lse = tl.where(offs_bn[None, :] < vocab_bound, logits, float("-inf"))
 
-        exp_logits = tl.exp(logits_for_lse - _max[:, None])
-        coeff = tl.exp(_max_old - _max)
-        _accu = coeff * _accu + tl.sum(exp_logits, axis=1)
+            # update global maximum
+            _max_old = _max
+            m_pid_n = tl.max(logits_for_lse, axis=1)
+            _max = tl.maximum(_max_old, m_pid_n)
 
+            exp_logits = tl.exp(logits_for_lse - _max[:, None])
+            coeff = tl.exp(_max_old - _max)
+            _accu = coeff * _accu + tl.sum(exp_logits, axis=1)
+
+            if COMPUTE_ENTROPY:
+                _entropy_b = _entropy_b * coeff + tl.sum(logits * exp_logits, axis=1)
+
+            label_mask = (offs_bn + rank * vocab_size)[None, :] == labels[:, None]
+            _logprobs += tl.sum(logits * label_mask, axis=1)
+
+    if HAS_ACTIVE_MASK:
+        # Partially active tiles still compute every row, so explicitly give
+        # inactive rows neutral reduction values before the shared epilogue.
+        _max = tl.where(row_active, _max, 0.0)
+        _accu = tl.where(row_active, _accu, 1.0)
         if COMPUTE_ENTROPY:
-            _entropy_b = _entropy_b * coeff + tl.sum(logits * exp_logits, axis=1)
-
-        label_mask = (offs_bn + rank * vocab_size)[None, :] == labels[:, None]
-        _logprobs += tl.sum(logits * label_mask, axis=1)
+            _entropy_b = tl.where(row_active, _entropy_b, 0.0)
+        _logprobs = tl.where(row_active, _logprobs, 0.0)
 
     # store maximum
     offs_max_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -426,6 +448,8 @@ def efficient_entropy_kernel_general_mainloop(
     vocab_right_idx = min((pid_n + 1) * vocab_per_split, vocab_size) + rank * vocab_size
     mask = (labels >= vocab_left_idx) & (labels < vocab_right_idx)
     mask &= offs_am < num_tokens
+    if HAS_ACTIVE_MASK:
+        mask &= row_active
     global_logprobs_ptrs = global_logprobs_ptr + offs_am * stride_global_logprobs
     # tl.atomic_add(global_logprobs_ptrs, _logprobs, mask=mask)
     tl.store(global_logprobs_ptrs, _logprobs, mask=mask)
@@ -433,7 +457,7 @@ def efficient_entropy_kernel_general_mainloop(
 
 @triton.autotune(
     configs=_epilogue_autotune_configs(),
-    key=["num_tokens_bucket", "num_splits", "COMPUTE_ENTROPY"],
+    key=["num_tokens_bucket", "num_splits", "HAS_ACTIVE_MASK", "COMPUTE_ENTROPY"],
     cache_results=True,
 )
 @triton.jit(do_not_specialize=["num_tokens", "num_tokens_bucket"])
@@ -460,10 +484,12 @@ def efficient_entropy_triton_kernel_epilogue(
     stride_global_entropy: tl.int64,
     global_logprobs_ptr,
     stride_global_logprobs: tl.int64,
+    active_mask_ptr,
     result_logprobs_ptr,
     stride_result_logprobs: tl.int64,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    HAS_ACTIVE_MASK: tl.constexpr,
     COMPUTE_ENTROPY: tl.constexpr,
 ):
     """foward epilogue"""
@@ -514,10 +540,16 @@ def efficient_entropy_triton_kernel_epilogue(
 
     global_accu_ptrs = global_accu_ptr + offs_m * stride_global_accu
     tl.store(global_accu_ptrs, global_accu, mask=offs_m < num_tokens)
+    if HAS_ACTIVE_MASK:
+        row_active = tl.load(active_mask_ptr + offs_m, mask=offs_m < num_tokens, other=0).to(tl.int1)
     if COMPUTE_ENTROPY:
         global_entropy_b = tl.fdiv(global_entropy_b, global_accu)
+        if HAS_ACTIVE_MASK:
+            global_entropy_b = tl.where(row_active, global_entropy_b, 0.0)
         tl.store(global_entropy_b_ptr + offs_m * stride_global_entropy_b, global_entropy_b, mask=offs_m < num_tokens)
         global_entropy = tl.log(global_accu) + global_max - global_entropy_b
+        if HAS_ACTIVE_MASK:
+            global_entropy = tl.where(row_active, global_entropy, 0.0)
         global_entropy_ptrs = global_entropy_ptr + offs_m * stride_global_entropy
         tl.store(global_entropy_ptrs, global_entropy, mask=offs_m < num_tokens)
     # update logprobs
@@ -526,6 +558,8 @@ def efficient_entropy_triton_kernel_epilogue(
     global_logprobs = global_max + tl.log(global_accu) - global_logprobs
 
     global_logprobs = -1 * global_logprobs
+    if HAS_ACTIVE_MASK:
+        global_logprobs = tl.where(row_active, global_logprobs, 0.0)
     tl.store(result_logprobs_ptr + offs_m * stride_result_logprobs, global_logprobs, mask=offs_m < num_tokens)
 
 
@@ -616,13 +650,14 @@ def efficient_entropy_triton_kernel_epilogue_tp(
 
 @triton.autotune(
     configs=_epilogue_update_autotune_configs(),
-    key=["num_tokens_bucket", "COMPUTE_ENTROPY"],
+    key=["num_tokens_bucket", "HAS_ACTIVE_MASK", "COMPUTE_ENTROPY"],
     cache_results=True,
 )
 @triton.jit(do_not_specialize=["num_tokens", "num_tokens_bucket"])
 def efficient_entropy_triton_epilogue_tp_update(
     num_tokens,
     num_tokens_bucket,
+    active_mask_ptr,
     logprobs_ptr,
     stride_logprobs: tl.int64,
     maximum_ptr,
@@ -638,6 +673,7 @@ def efficient_entropy_triton_epilogue_tp_update(
     result_logprobs_ptr,
     stride_result_logprobs: tl.int64,
     BLOCK_SIZE_M: tl.constexpr,
+    HAS_ACTIVE_MASK: tl.constexpr,
     COMPUTE_ENTROPY: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -647,18 +683,26 @@ def efficient_entropy_triton_epilogue_tp_update(
     maximum = tl.load(maximum_ptr + offs_m * stride_maximum, mask=offs_m < num_tokens)
     accumulate = tl.load(accumulate_ptr + offs_m * stride_accumulate, mask=offs_m < num_tokens)
 
+    if HAS_ACTIVE_MASK:
+        row_active = tl.load(active_mask_ptr + offs_m, mask=offs_m < num_tokens, other=0).to(tl.int1)
     if COMPUTE_ENTROPY:
         entropy_b = tl.load(entropy_b_ptr + offs_m * stride_entropy_b, mask=offs_m < num_tokens)
         entropy_b = tl.fdiv(entropy_b, accumulate)
+        if HAS_ACTIVE_MASK:
+            entropy_b = tl.where(row_active, entropy_b, 0.0)
         tl.store(result_entropy_b_ptr + offs_m * stride_result_entropy_b, entropy_b, mask=offs_m < num_tokens)
 
         entropy = tl.log(accumulate) + maximum - entropy_b
+        if HAS_ACTIVE_MASK:
+            entropy = tl.where(row_active, entropy, 0.0)
         tl.store(entropy_ptr + offs_m * stride_entropy, entropy, mask=offs_m < num_tokens)
 
     logprobs = tl.load(logprobs_ptr + offs_m * stride_logprobs, mask=offs_m < num_tokens)
     logprobs = maximum + tl.log(accumulate) - logprobs
 
     logprobs = -1 * logprobs
+    if HAS_ACTIVE_MASK:
+        logprobs = tl.where(row_active, logprobs, 0.0)
     tl.store(result_logprobs_ptr + offs_m * stride_result_logprobs, logprobs, mask=offs_m < num_tokens)
 
 
@@ -676,12 +720,17 @@ def _dot_input_precision(hidden: torch.Tensor):
     return "tf32"
 
 
+def _is_integer_or_bool(tensor: torch.Tensor) -> bool:
+    return tensor.dtype == torch.bool or (not tensor.dtype.is_floating_point and not tensor.dtype.is_complex)
+
+
 def efficient_entropy_forward(
     hidden: torch.Tensor,
     weight: torch.Tensor,
     labels: torch.Tensor,
     temperature: typing.Optional[float] = 1.0,
     dist_process_group: typing.Optional[dist.ProcessGroup] = None,
+    active_mask: typing.Optional[torch.Tensor] = None,
     compute_entropy: bool = True,
 ) -> list:
     """Forward host function; ``compute_entropy=False`` skips entropy-only work."""
@@ -691,6 +740,15 @@ def efficient_entropy_forward(
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
 
     assert hidden.shape[0] == labels.shape[0] and hidden.shape[1] == weight.shape[1]
+    if active_mask is not None:
+        assert active_mask.is_cuda and active_mask.device == hidden.device
+        assert _is_integer_or_bool(active_mask)
+        assert active_mask.shape == labels.shape and active_mask.is_contiguous()
+        active_mask_ptr = active_mask
+        has_active_mask = True
+    else:
+        active_mask_ptr = labels
+        has_active_mask = False
 
     _rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
     _world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
@@ -751,6 +809,7 @@ def efficient_entropy_forward(
             hidden,
             weight,
             labels,
+            active_mask_ptr,
             num_tokens,
             _autotune_token_bucket(num_tokens),
             hidden_size,
@@ -773,6 +832,7 @@ def efficient_entropy_forward(
             _logprobs.stride(0),
             1.0 / temperature,
             USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
+            HAS_ACTIVE_MASK=has_active_mask,
             COMPUTE_ENTROPY=compute_entropy,
             INPUT_PRECISION=_dot_input_precision(hidden),
         )
@@ -807,8 +867,10 @@ def efficient_entropy_forward(
             entropy_output.stride(0),
             _logprobs,
             _logprobs.stride(0),
+            active_mask_ptr,
             logprobs,
             logprobs.stride(0),
+            HAS_ACTIVE_MASK=has_active_mask,
             COMPUTE_ENTROPY=compute_entropy,
         )
     else:
@@ -854,6 +916,7 @@ def efficient_entropy_forward(
         efficient_entropy_triton_epilogue_tp_update[epilogue_grid](
             num_tokens,
             _autotune_token_bucket(num_tokens),
+            active_mask_ptr,
             _logprobs,
             _logprobs.stride(0),
             maximum,
@@ -868,6 +931,7 @@ def efficient_entropy_forward(
             entropy_output.stride(0),
             logprobs,
             logprobs.stride(0),
+            HAS_ACTIVE_MASK=has_active_mask,
             COMPUTE_ENTROPY=compute_entropy,
         )
 
@@ -876,7 +940,7 @@ def efficient_entropy_forward(
 
 @triton.autotune(
     configs=_backward_autotune_configs(),
-    key=["num_tokens_bucket", "hidden_size", "vocab_size", "COMPUTE_ENTROPY"],
+    key=["num_tokens_bucket", "hidden_size", "vocab_size", "HAS_ACTIVE_MASK", "COMPUTE_ENTROPY"],
     cache_results=True,
 )
 @triton.jit(do_not_specialize=["split_idx", "num_tokens", "num_tokens_bucket", "rank"])
@@ -896,6 +960,7 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
     stride_weight_k: tl.int64,
     labels_ptr,
     stride_labels: tl.int64,
+    active_mask_ptr,
     maximum_ptr,
     stride_maximum: tl.int64,
     accu_ptr,
@@ -915,6 +980,7 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     USE_TMA: tl.constexpr,
+    HAS_ACTIVE_MASK: tl.constexpr,
     COMPUTE_ENTROPY: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
 ):
@@ -995,6 +1061,12 @@ def efficient_entropy_backward_kernel_general_d_logits_split_N(
         d_logits += d_entropy[:, None] * (-exp_logits * accu_rcp[:, None]) * (logits - entropy_b[:, None])
 
     d_logits *= rcp_temperature
+    if HAS_ACTIVE_MASK:
+        # Forward-only means backward compute stays dense. This select is only
+        # for correctness: custom autograd cannot infer that masked outputs are
+        # constant, and skipped rows' neutral max/accu can also produce NaNs.
+        row_active = tl.load(active_mask_ptr + offs_am, mask=offs_am < num_tokens, other=0).to(tl.int1)
+        d_logits = tl.where(row_active[:, None], d_logits, 0.0)
 
     # filter d_logits with mask
     result_offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -1017,6 +1089,7 @@ def efficient_entropy_backward(
     should_return_fp32_grad: bool = False,
     temperature: typing.Optional[float] = 1.0,
     dist_process_group: typing.Optional[dist.ProcessGroup] = None,
+    active_mask: typing.Optional[torch.Tensor] = None,
     compute_entropy: bool = True,
 ) -> list:
     """Backward host function; returns shard-local ``d_hidden`` without TP all-reduce."""
@@ -1025,6 +1098,15 @@ def efficient_entropy_backward(
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
     assert hidden.shape[0] == labels.shape[0] and hidden.shape[1] == weight.shape[1]
+    if active_mask is not None:
+        assert active_mask.is_cuda and active_mask.device == hidden.device
+        assert _is_integer_or_bool(active_mask)
+        assert active_mask.shape == labels.shape and active_mask.is_contiguous()
+        active_mask_ptr = active_mask
+        has_active_mask = True
+    else:
+        active_mask_ptr = labels
+        has_active_mask = False
 
     rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
     num_tokens, hidden_size = hidden.shape
@@ -1074,6 +1156,7 @@ def efficient_entropy_backward(
             weight.stride(1),
             labels,
             labels.stride(0),
+            active_mask_ptr,
             maximum,
             maximum.stride(0),
             acc,
@@ -1089,6 +1172,7 @@ def efficient_entropy_backward(
             d_logits.stride(1),
             1.0 / temperature,
             USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
+            HAS_ACTIVE_MASK=has_active_mask,
             COMPUTE_ENTROPY=compute_entropy,
             INPUT_PRECISION=_dot_input_precision(hidden),
         )
@@ -1147,6 +1231,10 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
 
     ``compute_entropy`` optionally returns entropy from the same projection;
     ``entropy_requires_grad`` includes its contribution in fused backward.
+    ``active_mask`` is an optional TP-replicated ``[B, S]`` bool/integer mask.
+    Inactive rows return zero and contribute no gradient. Contiguous all-inactive
+    row tiles bypass the forward projection GEMMs. Backward compute remains
+    dense and only masks its result to preserve skipped-row semantics.
     """
 
     @staticmethod
@@ -1160,6 +1248,7 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         chunk_size: int,
         tp_group: torch.distributed.ProcessGroup,
         inference_only: bool = False,
+        active_mask: typing.Optional[torch.Tensor] = None,
         compute_entropy: bool = False,
         entropy_requires_grad: bool = False,
     ) -> typing.Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
@@ -1175,6 +1264,18 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             raise ValueError("entropy gradients are unavailable with inference_only=True")
 
         B, S, H = hidden.shape
+        if active_mask is not None:
+            if active_mask.device != hidden.device:
+                raise ValueError("active_mask must be on the same device as hidden")
+            if not _is_integer_or_bool(active_mask):
+                raise TypeError("active_mask must have bool or integer dtype")
+            if active_mask.shape != (B, S):
+                raise ValueError(f"active_mask must have shape {(B, S)}, got {tuple(active_mask.shape)}")
+            active_mask_flat = active_mask.reshape(-1).contiguous()
+            has_active_mask = True
+        else:
+            active_mask_flat = None
+            has_active_mask = False
         local_vocab = int(weight.shape[0])
         rank = 0 if tp_group is None else dist.get_rank(tp_group)
 
@@ -1196,11 +1297,11 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             labels_verl.reshape(-1),
             1.0,
             tp_group,
+            active_mask_flat,
             compute_entropy=compute_entropy,
         )
         assert (_entropy_b is not None) == compute_entropy
         log_probs = logprobs_flat.reshape(B, S).to(torch.float32)
-
         # Fully-OOV targets have no label-logit contribution, so verl returns
         # LSE; match the stock path by forcing those log-probs to 0.
         owned_here = (~target_mask).to(torch.int32)
@@ -1221,11 +1322,15 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             if entropy_requires_grad:
                 assert _entropy_b is not None
                 saved_tensors.append(_entropy_b)
+            if has_active_mask:
+                assert active_mask_flat is not None
+                saved_tensors.append(active_mask_flat)
             ctx.save_for_backward(*saved_tensors)
             ctx.B, ctx.S, ctx.H = B, S, H
             ctx.tp_group = tp_group
             ctx.hidden_dtype = ctx_hidden_dtype
             ctx.entropy_requires_grad = entropy_requires_grad
+            ctx.has_active_mask = has_active_mask
 
         if not compute_entropy:
             assert entropy_flat is None
@@ -1240,8 +1345,14 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
     @staticmethod
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple:
         grad_output = grad_outputs[0]  # [B, S], grad of full-vocab logprob
-        hidden_2d, weight_c, labels_verl, _maximum, _accumulate, *saved_entropy = ctx.saved_tensors
-        _entropy_b = saved_entropy[0] if ctx.entropy_requires_grad else None
+        hidden_2d, weight_c, labels_verl, _maximum, _accumulate, *optional_tensors = ctx.saved_tensors
+        optional_idx = 0
+        if ctx.entropy_requires_grad:
+            _entropy_b = optional_tensors[optional_idx]
+            optional_idx += 1
+        else:
+            _entropy_b = None
+        active_mask_flat = optional_tensors[optional_idx] if ctx.has_active_mask else None
         B, S, H = ctx.B, ctx.S, ctx.H
         tp_group = ctx.tp_group
 
@@ -1274,11 +1385,14 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             False,  # should_return_fp32_grad
             1.0,  # temperature (pre-baked into hidden by the caller)
             tp_group,
+            active_mask_flat,
             compute_entropy=ctx.entropy_requires_grad,
         )
 
         # d_hidden is this rank's partial; SP gather backward performs TP reduction.
         d_hidden = d_hidden_2d.reshape(B, S, H).to(ctx.hidden_dtype)
 
-        grads = (d_hidden, d_weight, None, None, None, None, None, None, None, None)
+        # Optional arguments omitted from ``apply`` do not appear in
+        # ``needs_input_grad``; match the exact arity used by the caller.
+        grads = (d_hidden, d_weight, None, None, None, None, None, None, None, None, None)
         return grads[: len(ctx.needs_input_grad)]
