@@ -48,7 +48,7 @@ class _Worker:
             sock.bind(("", 0))
             return get_node_ip_address(), sock.getsockname()[1]
 
-    def run(self, rank, master_addr, master_port, exchange):
+    def run(self, rank, master_addr, master_port):
         import torch.distributed as dist
         from megatron.core import parallel_state as mpu
         from megatron.core import tensor_parallel
@@ -64,9 +64,6 @@ class _Worker:
         from skyrl.backends.skyrl_train.patches.megatron.glm5_next.layer_specs import (
             get_kda_module_spec,
         )
-        from skyrl.backends.skyrl_train.patches.megatron.mcore_ext import kda
-
-        kda._KDA_CP_EXCHANGE = exchange
 
         torch.cuda.set_device(0)
         dist.init_process_group("nccl", init_method=f"tcp://{master_addr}:{master_port}", rank=rank, world_size=_CP)
@@ -155,16 +152,15 @@ class _Worker:
             dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("exchange", ["a2a", "allgather"])
-def test_kda_context_parallel_matches_cp1(ray_init_fixture, exchange):
+def test_kda_context_parallel_matches_cp1(ray_init_fixture):
     pg = placement_group([{"GPU": _CP, "CPU": _CP}], strategy="PACK")
     get_ray_pg_ready_with_timeout(pg, timeout=30)
     strategy = PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=0)
     workers = [_Worker.options(scheduling_strategy=strategy).remote() for _ in range(_CP)]
     master_addr, master_port = ray.get(workers[0].endpoint.remote())
-    results = ray.get([w.run.remote(r, master_addr, master_port, exchange) for r, w in enumerate(workers)])
+    results = ray.get([w.run.remote(r, master_addr, master_port) for r, w in enumerate(workers)])
     for rank, errs in enumerate(results):
-        print(f"{exchange} rank {rank}: " + ", ".join(f"{k}={v:.2e}" for k, v in errs.items()))
+        print(f"rank {rank}: " + ", ".join(f"{k}={v:.2e}" for k, v in errs.items()))
         # bf16 activations; CP changes only the all-to-all layout and per-shard reduction order.
         bad = {k: v for k, v in errs.items() if v > 2e-2}
         assert not bad, (rank, bad)

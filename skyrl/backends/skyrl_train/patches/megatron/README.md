@@ -27,7 +27,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
-| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1, both exchanges (two ranks) |
+| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1 (two ranks) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -65,10 +65,6 @@ model, `glm5_next/` is deleted too.
   - SkyRL addition: head-wise (Ulysses) context parallelism, reusing megatron-core's
     `GatedDeltaNet` all-to-all helpers (`ssm/gated_delta_net/common.py`). #7054 has its own
     head-/chunk-wise CP (`cp_partition_mode`); compare against it before switching.
-    `SKYRL_KDA_CP_EXCHANGE=allgather` swaps GatedDeltaNet's all-to-all of the projected tensors for
-    an all-gather of the sequence-parallel hidden states (over CP, then TP) and projections of only
-    this rank's head slice: ~5x fewer bytes across the CP group, 1.18x faster fwd+bwd at 1M tokens
-    on TP8 CP2 where CP crosses nodes.
 - **Landed?** megatron-core defines a KDA module or `experimental_attention_variant="kda"`, and
   `TransformerConfig` has `kda_gate_lower_bound`
   (`grep -rn "KimiDeltaAttention\|kda_gate_lower_bound" .venv/.../megatron/core`).
