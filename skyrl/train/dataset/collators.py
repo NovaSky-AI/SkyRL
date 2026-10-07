@@ -57,6 +57,7 @@ def make_sft_sequence_packer(
         bin_count_multiple=dp_size,
         sequence_length_multiple=sequence_align,
         packed_length_multiple=total_align,
+        allow_empty_bins=dp_size is not None,
     )
 
 
@@ -231,7 +232,7 @@ class PackedDataCollator:
         bin_packed_lengths: List[int] = []
         bin_subseq_lengths: List[List[int]] = []  # one list per bin row
         for bin_indices in flat_bins:
-            subseq_lens = [seq_lengths[idx] for idx in bin_indices]
+            subseq_lens = [seq_lengths[idx] for idx in bin_indices] if bin_indices else [1]
             packed_len = packed_segment_layout(
                 subseq_lens,
                 tp_size=tp_size,
@@ -249,13 +250,6 @@ class PackedDataCollator:
             max_packed_len = _round_up(max_packed_len, packing_align_size_total)
         else:
             max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
-
-        # Guard against degenerate rows (e.g. an empty bin from
-        # _adjust_bin_count) — empty bins must not be produced in practice
-        # because the redistribution moves one sub-seq into every empty
-        # bin. If we ever see one, we widen this assertion.
-        for bin_indices in flat_bins:
-            assert bin_indices, "MFFD produced an empty bin; _adjust_bin_count should prevent this"
 
         # ------------------------------------------------------------------
         # 4. Build per-row tensors: sequences, attention_mask, loss_mask
@@ -278,6 +272,11 @@ class PackedDataCollator:
         loss_mask_width = max_packed_len - 1
 
         for row_idx, bin_indices in enumerate(flat_bins):
+            if not bin_indices:
+                # A short epoch tail can have fewer examples than DP ranks.
+                # This valid, zero-loss segment keeps every rank in the step.
+                attention_mask_np[row_idx, 0] = 1
+                continue
             row_offset = 0
             for ex_idx in bin_indices:
                 s = seq_lengths[ex_idx]
