@@ -26,6 +26,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `gpu_ci/patches/megatron/test_moe_combine_bf16_reduce.py` | `patch_moe_combine_bf16_reduce.py` (two ranks + wrapper) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -177,6 +178,23 @@ Per-forward DSA index-share carrier under activation recompute.
   `_dsa_index_share_carrier_scope`, and applying the patch logs a warning telling you to delete it.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
+
+### `patch_moe_combine_bf16_reduce.py`: FP32 upcast in the MoE combine's expert-TP reduce-scatter
+
+`MoEAlltoAllTokenDispatcher.combine_preprocess` reduce-scatters expert outputs across the
+expert-TP group as `reduce_scatter(hidden.to(probs.dtype)).to(hidden.dtype)`; with an FP32 router
+(GLM-5.3-Flash) that is an FP32 copy of every token-expert row (~19 GiB/GPU at 576k tokens, TP8 /
+EP32 x ETP2). For exactly two ranks a bf16 reduce-scatter with NCCL's Ring or PAT kernels (FP32
+accumulate, one rounding) is bit-identical, and Ring is NCCL's default for a 2-rank reduce-scatter
+at every size (NCCL 2.29.7, B200), so the reduce-scatter runs in the activation dtype there. NVLS
+rounds in the switch (<= 1 bf16 ulp off on ~10-20% of elements), so the upcast stays when
+`NCCL_ALGO` asks for NVLS, and for other group sizes. The decision is one method, `_tp_reduce_dtype`, installed with a copy of the pinned
+`combine_preprocess` that differs only in calling it (the test diffs the two). Written to be
+proposed upstream as is. Applied unconditionally in `make_megatron_module`; refuses to install,
+with a warning, if megatron-core's `combine_preprocess` no longer matches the copy.
+- **Landed?** `MoEAlltoAllTokenDispatcher` has `_tp_reduce_dtype` (the patch warns), or its
+  `combine_preprocess` no longer upcasts before a 2-rank reduce-scatter.
+- **Remove:** the module, its call in `make_megatron_module`, and `test_moe_combine_bf16_reduce.py`.
 
 ### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
 

@@ -540,6 +540,13 @@ class MegatronWorker:
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
 
+        # Exact for a 2-rank expert-TP group; saves an FP32 copy of the MoE combine's rows.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_combine_bf16_reduce import (
+            patch_moe_combine_bf16_reduce,
+        )
+
+        patch_moe_combine_bf16_reduce()
+
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
         # dense O(L^2) softmax. Delete along with the patch module once the megatron-core pin
