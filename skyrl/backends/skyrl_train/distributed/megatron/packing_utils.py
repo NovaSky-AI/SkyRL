@@ -56,15 +56,24 @@ def _fp8_token_align(tp_size: int, cp_size: int, fp8_recipe: Any) -> int:
     return 16 * cp_size
 
 
-def get_packed_seq_align_size(
-    tp_size: int, cp_size: int, fp8_enabled: bool = False, fp8_recipe: Optional[str] = None
-) -> int:
-    """Return the global alignment unit for packed TP/CP/FP8 sequences."""
+def get_packing_align_size_sequence(tp_size: int, cp_size: int) -> int:
+    """Return the alignment required independently for each packed sequence."""
     if tp_size < 1 or cp_size < 1:
         raise ValueError(f"tp_size and cp_size must be positive, got tp_size={tp_size}, cp_size={cp_size}")
     if cp_size > 1:
         # 2 * cp zigzag chunks per sequence, each split over TP (and made of whole
         # model-registered token blocks, see ``set_cp_chunk_token_align``).
+        return 2 * cp_size * math.lcm(tp_size, _cp_chunk_token_align)
+    return 1
+
+
+def get_packing_align_size_total(
+    tp_size: int, cp_size: int, fp8_enabled: bool = False, fp8_recipe: Optional[str] = None
+) -> int:
+    """Return the alignment required for the aggregate packed token slab."""
+    if tp_size < 1 or cp_size < 1:
+        raise ValueError(f"tp_size and cp_size must be positive, got tp_size={tp_size}, cp_size={cp_size}")
+    if cp_size > 1:
         layout_align = 2 * cp_size * math.lcm(tp_size, _cp_chunk_token_align)
     else:
         layout_align = tp_size

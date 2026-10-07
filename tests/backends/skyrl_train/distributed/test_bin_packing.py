@@ -1,4 +1,4 @@
-"""Unit tests for the bin-packing module.
+"""Unit tests for sequence-packing algorithms.
 
 Run with:
   uv run --extra dev -- pytest tests/backends/skyrl_train/distributed/test_bin_packing.py
@@ -7,6 +7,7 @@ Run with:
 import pytest
 
 from skyrl.train.dataset.bin_packing import (
+    Balanced,
     FirstFitDecreasing,
     ModifiedFirstFitDecreasing,
     PackingStrategy,
@@ -98,6 +99,41 @@ class TestFirstFitPackers:
         with pytest.raises(ValueError, match="Cannot create"):
             packer_cls(bin_capacity=100, min_bin_count=5).pack([10, 20])
 
+    def test_sequence_length_multiple_uses_aligned_footprints(self, packer_cls):
+        packer = packer_cls(bin_capacity=16, sequence_length_multiple=8)
+
+        assert packer.pack([9, 7]) == [[0], [1]]
+
+    def test_aligned_oversized_sequence_raises(self, packer_cls):
+        with pytest.raises(ValueError, match="exceeds bin capacity"):
+            packer_cls(bin_capacity=15, sequence_length_multiple=8).pack([9])
+
+    def test_packed_length_multiple_is_paid_once_per_bin(self, packer_cls):
+        packer = packer_cls(bin_capacity=16, packed_length_multiple=16)
+
+        assert packer.pack([9, 7]) == [[0, 1]]
+
+    def test_aggregate_padding_can_make_sequence_oversized(self, packer_cls):
+        with pytest.raises(ValueError, match="exceeds bin capacity"):
+            packer_cls(bin_capacity=15, packed_length_multiple=16).pack([9])
+
+
+class TestBalanced:
+    def test_sequence_length_multiple_uses_aligned_footprints(self):
+        packer = Balanced(bin_capacity=16, sequence_length_multiple=8)
+
+        assert packer.pack([9, 7]) == [[0], [1]]
+
+    def test_aligned_oversized_sequence_keeps_soft_cap(self):
+        packer = Balanced(bin_capacity=15, sequence_length_multiple=8)
+
+        assert packer.pack([9]) == [[0]]
+
+    def test_packed_length_multiple_is_paid_once_per_bin(self):
+        packer = Balanced(bin_capacity=16, packed_length_multiple=16)
+
+        assert packer.pack([9, 7]) == [[0, 1]]
+
 
 class TestModifiedFirstFitDecreasing:
     def test_matches_mffd_phases(self):
@@ -108,6 +144,12 @@ class TestModifiedFirstFitDecreasing:
             [1, 2],
             [4, 5, 6, 7, 8],
         ]
+
+    def test_honours_aggregate_alignment_with_unaligned_capacity(self):
+        packer = ModifiedFirstFitDecreasing(bin_capacity=31, packed_length_multiple=8)
+
+        assert packer.pack([17, 7]) == [[0, 1]]
+        assert packer.pack([17, 8]) == [[0], [1]]
 
     def test_leftovers_use_first_fit_not_least_loaded(self):
         packer = ModifiedFirstFitDecreasing(bin_capacity=100)
@@ -130,14 +172,14 @@ class TestMakeSeqPackerFactory:
         packer = make_seq_packer("first_fit_decreasing", bin_capacity=100)
         assert isinstance(packer, FirstFitDecreasing)
 
-    def test_string_case_insensitive(self):
-        packer = make_seq_packer("FIRST_FIT_DECREASING", bin_capacity=100)
-        assert isinstance(packer, FirstFitDecreasing)
-
     def test_modified_first_fit_decreasing(self):
         packer = make_seq_packer(PackingStrategy.MODIFIED_FIRST_FIT_DECREASING, bin_capacity=100)
 
         assert isinstance(packer, ModifiedFirstFitDecreasing)
+
+    def test_string_case_insensitive(self):
+        packer = make_seq_packer("FIRST_FIT_DECREASING", bin_capacity=100)
+        assert isinstance(packer, FirstFitDecreasing)
 
     def test_unknown_algorithm(self):
         with pytest.raises(ValueError, match="Unknown packing algorithm"):
@@ -149,7 +191,19 @@ class TestMakeSeqPackerFactory:
             bin_capacity=100,
             min_bin_count=4,
             bin_count_multiple=2,
+            sequence_length_multiple=8,
+            packed_length_multiple=16,
         )
         assert packer.bin_capacity == 100
         assert packer.min_bin_count == 4
         assert packer.bin_count_multiple == 2
+        assert packer.sequence_length_multiple == 8
+        assert packer.packed_length_multiple == 16
+
+    def test_rejects_nonpositive_sequence_length_multiple(self):
+        with pytest.raises(ValueError, match="sequence_length_multiple must be positive"):
+            make_seq_packer("first_fit_decreasing", bin_capacity=100, sequence_length_multiple=0)
+
+    def test_rejects_nonpositive_packed_length_multiple(self):
+        with pytest.raises(ValueError, match="packed_length_multiple must be positive"):
+            make_seq_packer("first_fit_decreasing", bin_capacity=100, packed_length_multiple=0)
