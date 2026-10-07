@@ -28,14 +28,19 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
+from skycap.env_vars import (
+    SKYCAP_CLOUDFLARED_DOWNLOAD_DEADLINE,
+    SKYCAP_CLOUDFLARED_DOWNLOAD_TIMEOUT,
+)
+
 logger = logging.getLogger(__name__)
 
 #: A quick tunnel's own URL in cloudflared's output. api.trycloudflare.com is where tunnels are
 #: requested from, and shows up in cloudflared's error lines when that request fails.
 TUNNEL_URL = re.compile(r"https://(?!api\.)[-a-z0-9]+\.trycloudflare\.com")
-#: Seconds the cloudflared download may go without receiving data, and may take in all.
-DOWNLOAD_TIMEOUT = 60.0
-DOWNLOAD_DEADLINE = 600.0
+#: Seconds the cloudflared download may go without receiving data, and may take in all (``skycap.env_vars``).
+DOWNLOAD_TIMEOUT = SKYCAP_CLOUDFLARED_DOWNLOAD_TIMEOUT
+DOWNLOAD_DEADLINE = SKYCAP_CLOUDFLARED_DOWNLOAD_DEADLINE
 
 #: Runs "$@" and kills it once stdin reaches EOF: when ``stop_tied`` closes the pipe, or when the process
 #: holding its other end dies, which the kernel does however that process exits. The watcher's output

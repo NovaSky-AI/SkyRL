@@ -24,7 +24,11 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from skycap.env_vars import SKYCAP_START_EXPOSURE_TIMEOUT, SKYCAP_START_TIMEOUT
+from skycap.env_vars import (
+    SKYCAP_EXPOSURE_STOP_GRACE,
+    SKYCAP_START_EXPOSURE_TIMEOUT,
+    SKYCAP_START_TIMEOUT,
+)
 from skycap.exposure import Exposure
 from skycap.paths import PathRule
 from skycap.server import Backend, CaptureServer
@@ -281,8 +285,8 @@ async def serve(
         await runner.cleanup()
 
 
-#: Seconds a stopped exposure's start may take to give up before the server stops without it.
-STOP_GRACE = 30.0
+#: Seconds a stopped exposure's start may take to give up before the server stops without it (``skycap.env_vars``).
+STOP_GRACE = SKYCAP_EXPOSURE_STOP_GRACE
 
 
 async def _close(exposure: Exposure) -> None:

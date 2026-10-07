@@ -158,6 +158,10 @@ class Exposure:
 cloudflared is taken from `PATH` or downloaded once (Linux), and is tied to the
 server's process: it stops when that process exits, however it exits.
 
+The timeouts around it (starting the server with an exposure, the cloudflared
+download, how long a stop waits for an exposure that is still opening) are
+environment variables, listed with their defaults in `skycap/env_vars.py`.
+
 ## Capture a rollout
 
 ```python

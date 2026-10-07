@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import socket
 import subprocess
@@ -340,6 +341,21 @@ async def test_a_start_that_times_out_stops_the_server(tmp_path: Path) -> None:
         await asyncio.to_thread(service.start, 1.0)
     # Not left opening its exposure in the background.
     assert exposure.stops == 1 and service._thread is None
+
+
+def test_the_exposure_timeouts_are_set_from_the_environment() -> None:
+    # A fresh interpreter: the variables are read when skycap is imported.
+    env = {
+        **os.environ,
+        "SKYCAP_EXPOSURE_STOP_GRACE": "7",
+        "SKYCAP_CLOUDFLARED_DOWNLOAD_TIMEOUT": "8",
+        "SKYCAP_CLOUDFLARED_DOWNLOAD_DEADLINE": "9",
+    }
+    check = (
+        "import skycap.service as s, skycap.tunnel as t; print(s.STOP_GRACE, t.DOWNLOAD_TIMEOUT, t.DOWNLOAD_DEADLINE)"
+    )
+    result = subprocess.run([sys.executable, "-c", check], capture_output=True, text=True, env=env)
+    assert result.stdout.split() == ["7.0", "8.0", "9.0"], result.stderr
 
 
 # -- the tunnel's process ------------------------------------------------------------
