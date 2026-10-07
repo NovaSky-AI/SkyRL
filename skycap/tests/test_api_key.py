@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import openai
 import pytest
+import yarl
 import zstandard
 
 from skycap import CapturePool, record
@@ -84,6 +86,23 @@ async def test_the_pool_hands_out_the_key_and_the_record_never_holds_it(tmp_path
     assert files and all(trajectory.api_key.encode() not in decompress(path) for path in files)
     # Read back, the trajectory has no key: one is only ever minted by create.
     assert record.load(tmp_path, trajectory.id).api_key is None
+
+
+async def test_a_header_that_is_not_utf8_is_refused_like_a_wrong_key() -> None:
+    async with running_stack(require_api_key=True) as stack:
+        trajectory = await stack.create()
+        url = yarl.URL(trajectory["base_url"])
+        # Raw bytes, since an HTTP client won't send a header that isn't valid UTF-8.
+        reader, writer = await asyncio.open_connection(url.host, url.port)
+        writer.write(
+            f"GET {url.path}/models HTTP/1.1\r\nHost: {url.host}\r\nConnection: close\r\n".encode()
+            + b"Authorization: Bearer sk-skycap-\xff\xfe\r\n\r\n"
+        )
+        await writer.drain()
+        status_line = await reader.readline()
+        writer.close()
+        await writer.wait_closed()
+    assert status_line.split()[1] == b"401"
 
 
 async def test_an_ended_trajectory_answers_410_whatever_key_is_sent() -> None:

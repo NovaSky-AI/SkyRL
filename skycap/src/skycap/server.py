@@ -382,8 +382,10 @@ class CaptureServer:
         parts = request.headers.get("Authorization", "").split(maxsplit=1)
         if len(parts) != 2 or parts[0].lower() != "bearer":
             return False
-        # Bytes: compare_digest refuses str with non-ASCII characters, which a caller controls.
-        return hmac.compare_digest(parts[1].strip().encode(), trajectory.api_key.encode())
+        # Bytes: compare_digest refuses str with non-ASCII characters, which a caller controls. aiohttp keeps
+        # header bytes that aren't UTF-8 as surrogates; surrogateescape turns them back into those bytes.
+        given = parts[1].strip().encode("utf-8", "surrogateescape")
+        return hmac.compare_digest(given, trajectory.api_key.encode())
 
     def _start(
         self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
