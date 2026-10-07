@@ -1,7 +1,7 @@
 """Full activation recompute on GLM-5.3-Flash's mHC layers must not change the loss or gradients.
 
 megatron-core refuses mHC with ``recompute_granularity="full"``; SkyRL bypasses that one check for
-its own ``HyperConnectionTransformerLayer`` (``patches/megatron/patch_mhc_full_recompute.py``).
+its own ``HyperConnectionTransformerLayer`` (``Glm5NextModelProvider.finalize`` in ``patches/megatron/glm5_next/provider.py``).
 This builds the same random-init GLM-5.3-Flash slice twice through the worker's own
 ``init_configs`` / ``make_megatron_module`` -- once without recompute, once with full recompute
 (uniform, one layer per chunk) -- copies the weights across, and compares one forward/backward.

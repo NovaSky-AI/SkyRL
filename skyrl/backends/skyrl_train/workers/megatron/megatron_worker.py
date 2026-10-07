@@ -57,10 +57,6 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
-from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_full_recompute import (
-    finalize_provider,
-    uses_skyrl_mhc_layer,
-)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -347,8 +343,8 @@ class MegatronWorker:
             setattr(provider, k, v)
 
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute.
-        # SkyRL's own mHC layer (GLM-5.3-Flash) supports it -- finalize_provider() below bypasses
-        # that one check (see patches/megatron/patch_mhc_full_recompute.py). Any other mHC layer
+        # SkyRL's own mHC layer (GLM-5.3-Flash) supports it -- Glm5NextModelProvider.finalize()
+        # bypasses that one check (supports_mhc_full_recompute). Any other mHC layer
         # keeps megatron-core's guard; its suggestion -- selective recompute with "mhc" in
         # recompute_modules -- needs mHC recompute managers, so downgrade to selective recompute
         # of the remaining modules instead of failing. Tied to the vendored mHC layer: see
@@ -356,7 +352,7 @@ class MegatronWorker:
         if (
             getattr(provider, "enable_mhc_connections", False)
             and provider.recompute_granularity == "full"
-            and not uses_skyrl_mhc_layer(provider)
+            and not getattr(provider, "supports_mhc_full_recompute", False)
         ):
             provider.recompute_granularity = "selective"
             provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
@@ -429,7 +425,7 @@ class MegatronWorker:
                 "(native process_mtp_loss disabled)"
             )
 
-        finalize_provider(provider)
+        provider.finalize()
 
         self.provider = provider
         self.bridge = bridge
