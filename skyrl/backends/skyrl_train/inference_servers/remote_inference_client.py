@@ -1290,8 +1290,36 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         Returns:
             Dict mapping server_url to response.
+
+        Raises:
+            RuntimeError: A server did not confirm the reset.
         """
-        return await self._call_all_servers("/reset_prefix_cache", {"reset_running_requests": reset_running_requests})
+        # Settle every reset before raising so none remain in flight on return.
+        results = await asyncio.gather(
+            *[
+                self._call_server(
+                    url,
+                    "/reset_prefix_cache",
+                    params={"reset_running_requests": str(reset_running_requests).lower()},
+                )
+                for url in self.server_urls
+            ],
+            return_exceptions=True,
+        )
+        responses = {}
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            url, response = result
+            responses[url] = response
+        failed_servers = [
+            url
+            for url, response in responses.items()
+            if not isinstance(response["body"], dict) or response["body"].get("success") is not True
+        ]
+        if failed_servers:
+            raise RuntimeError(f"Prefix cache reset failed on {failed_servers}")
+        return responses
 
     # ---------------------------
     # Weight Sync (control plane - fan-out)

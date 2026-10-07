@@ -30,12 +30,24 @@ pays for it.
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
+
+if TYPE_CHECKING:
+    from requests import Response
 
 logger = logging.getLogger(__name__)
 
-# vLLM dev-mode RLHF routes (entrypoints/serve/dev/rlhf/api_router.py), plus
-# /fetch_weights and /reset_prefix_cache, which SkyRL adds in vllm_server_actor.
+# vLLM dev-mode routes, plus /fetch_weights, which SkyRL adds in vllm_server_actor.
 INIT_ENGINE_ENDPOINT = "/init_weight_transfer_engine"
 START_UPDATE_ENDPOINT = "/start_weight_update"
 START_DRAFT_UPDATE_ENDPOINT = "/start_draft_weight_update"
@@ -145,7 +157,16 @@ class SkyrlWeightSyncClient:
         self._fanout_uniform(FETCH_WEIGHTS_ENDPOINT, body)
 
     def reset_prefix_cache(self, reset_running_requests: bool = True) -> None:
-        self._fanout_uniform(RESET_PREFIX_CACHE_ENDPOINT, {"reset_running_requests": reset_running_requests})
+        """Reset every server's cache; raise if any server does not confirm it."""
+        endpoint = f"{RESET_PREFIX_CACHE_ENDPOINT}?reset_running_requests={str(reset_running_requests).lower()}"
+        responses = self._fanout_uniform(endpoint, None)
+        for url, response in zip(self._urls, responses):
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise RuntimeError(f"Prefix cache reset failed on {url}: invalid JSON response") from exc
+            if not isinstance(body, dict) or body.get("success") is not True:
+                raise RuntimeError(f"Prefix cache reset failed on {url}")
 
     def pause_generation(self, clear_cache: bool = False) -> None:
         # /pause takes query params, not a body (mirrors RemoteInferenceClient.pause).
@@ -163,30 +184,33 @@ class SkyrlWeightSyncClient:
 
     # ---- internals ----
 
-    def _fanout_uniform(self, endpoint: str, body: Optional[Dict[str, Any]]) -> None:
-        self._fanout([(url, endpoint, body) for url in self._urls])
+    def _fanout_uniform(self, endpoint: str, body: Optional[Dict[str, Any]]) -> List["Response"]:
+        return self._fanout([(url, endpoint, body) for url in self._urls])
 
-    def _fanout(self, calls: Sequence[Tuple[str, str, Optional[Dict[str, Any]]]]) -> None:
+    def _fanout(self, calls: Sequence[Tuple[str, str, Optional[Dict[str, Any]]]]) -> List["Response"]:
         """POST to every server concurrently; raise the first failure after all
         return.
 
         Every future is drained before raising, so a failure on one server never
         leaves POSTs in flight against the others."""
         futures = [self._pool.submit(self._post, url, endpoint, body) for url, endpoint, body in calls]
+        responses = []
         first_exc: Optional[BaseException] = None
         for fut in futures:
             try:
-                fut.result()
+                responses.append(fut.result())
             except Exception as exc:  # noqa: BLE001
                 first_exc = first_exc or exc
         if first_exc is not None:
             raise first_exc
+        return responses
 
-    def _post(self, url: str, endpoint: str, body: Optional[Dict[str, Any]]) -> None:
+    def _post(self, url: str, endpoint: str, body: Optional[Dict[str, Any]]) -> "Response":
         # No timeout, no retry -- see module docstring.
         resp = self._session.post(f"{url}{endpoint}", json=body, timeout=None)
         if resp.status_code >= 400:
             raise RuntimeError(_error_message(url, endpoint, resp))
+        return resp
 
 
 def _json_safe(update_info: Dict[str, Any]) -> Dict[str, Any]:
