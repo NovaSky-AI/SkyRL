@@ -26,14 +26,10 @@ from loguru import logger
 from torchdata.stateful_dataloader.sampler import RandomSampler
 from torchdata.stateful_dataloader.stateful import Stateful
 
-from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packing_align_size_sequence,
-    get_packing_align_size_total,
-)
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_fp8_enabled,
 )
-from skyrl.train.dataset.bin_packing import PackingStrategy, make_seq_packer
+from skyrl.train.dataset.collators import make_sft_sequence_packer
 
 if TYPE_CHECKING:
     from skyrl.train.config.sft_config import SFTConfig
@@ -72,36 +68,6 @@ def import_sampler_class(class_path: str) -> type:
         )
     module = importlib.import_module(module_path)
     return getattr(module, class_name)
-
-
-def _packing_layout(
-    sequence_lengths: Sequence[int],
-    bin_capacity: int,
-    tp_size: int,
-    cp_size: int,
-    fp8_enabled: bool,
-    fp8_recipe: Optional[str],
-) -> tuple[tuple[int, ...], int, dict[str, int]]:
-    """Mirror the collator's MFFD length accounting without DP padding.
-
-    Candidate prefixes must use the same per-sequence and aggregate alignment
-    as ``PackedDataCollator`` so predicted bin counts match dispatched batches.
-    """
-    sequence_align_size = get_packing_align_size_sequence(tp_size, cp_size)
-    total_align_size = get_packing_align_size_total(
-        tp_size,
-        cp_size,
-        fp8_enabled=fp8_enabled,
-        fp8_recipe=fp8_recipe,
-    )
-    return (
-        tuple(int(length) for length in sequence_lengths),
-        max(bin_capacity, total_align_size),
-        {
-            "sequence_length_multiple": sequence_align_size,
-            "packed_length_multiple": total_align_size,
-        },
-    )
 
 
 class DPAlignedPackingBatchSampler(torch.utils.data.Sampler[List[int]]):
@@ -146,18 +112,13 @@ class DPAlignedPackingBatchSampler(torch.utils.data.Sampler[List[int]]):
         if cardinality_reset_batch is not None and not 1 <= cardinality_reset_batch <= len(self):
             raise ValueError(f"cardinality_reset_batch must be in [1, {len(self)}], got {cardinality_reset_batch}.")
 
-        self.packing_lengths, bin_capacity, packing_options = _packing_layout(
-            sequence_lengths,
+        self.packing_lengths = tuple(int(length) for length in sequence_lengths)
+        self.packer = make_sft_sequence_packer(
             bin_capacity,
             tp_size,
             cp_size,
-            fp8_enabled,
-            fp8_recipe,
-        )
-        self.packer = make_seq_packer(
-            PackingStrategy.MODIFIED_FIRST_FIT_DECREASING,
-            bin_capacity=bin_capacity,
-            **packing_options,
+            fp8_enabled=fp8_enabled,
+            fp8_recipe=fp8_recipe,
         )
 
     def __iter__(self) -> Iterator[List[int]]:
