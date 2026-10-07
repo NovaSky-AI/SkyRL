@@ -4,6 +4,7 @@ Run with:
   uv run --extra dev --extra megatron -- pytest tests/train/test_sft_packing_collate.py
 """
 
+import random
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,6 +12,10 @@ import pytest
 from skyrl.train.config import MegatronConfig
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
 from skyrl.train.dataset.collators import PackedDataCollator
+from skyrl.train.dataset.samplers import (
+    DPAlignedPackingBatchSampler,
+    StatefulSequentialSampler,
+)
 from skyrl.train.sft_trainer import SFTTrainer
 
 
@@ -71,6 +76,40 @@ def _make_example(seq_len: int, num_actions: int, base_token: int = 100) -> dict
 
 
 class TestPackingCollator:
+    @pytest.mark.parametrize("count,batch_size,dp_size", [(264, 128, 8), (44, 20, 4)])
+    @pytest.mark.parametrize("cardinality_reset_batch", [None, 2, 3])
+    def test_dp_aligned_sampling_preserves_packable_epoch_tail(
+        self, count, batch_size, dp_size, cardinality_reset_batch
+    ):
+        rng = random.Random(42)
+        lengths = [rng.randrange(2, 1_001) for _ in range(count)]
+        examples = [_make_example(length, length - 1) for length in lengths]
+        collator = _make_collator(num_gpus=dp_size, batch_size=batch_size, max_length=1_000)
+        sampler = DPAlignedPackingBatchSampler(
+            sampler=StatefulSequentialSampler(examples),
+            sequence_lengths=lengths,
+            batch_size=batch_size,
+            dp_size=dp_size,
+            allowed_variation=0.05,
+            bin_capacity=1_000,
+            tp_size=1,
+            cp_size=1,
+            cardinality_reset_batch=cardinality_reset_batch,
+        )
+
+        # The fixed-size baseline already has a packable tail.
+        for start in range(0, count, batch_size):
+            collator(examples[start : start + batch_size], batch_size=batch_size)
+
+        batches = list(sampler)
+        assert len(batches) == len(sampler)
+        assert [index for batch in batches for index in batch] == list(range(count))
+        for indices in batches:
+            packed = collator([examples[index] for index in indices], batch_size=batch_size)
+            assert packed.batch_size >= dp_size
+            assert packed.batch_size % dp_size == 0
+            assert sum(len(lengths) for lengths in packed["sub_seq_lengths"]) == len(indices)
+
     def test_uses_modified_first_fit_decreasing(self):
         lengths = [14, 91, 25, 37, 33, 22, 34, 99, 30]
         collator = _make_collator(
