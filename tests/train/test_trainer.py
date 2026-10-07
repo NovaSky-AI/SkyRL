@@ -364,40 +364,6 @@ def test_run_flushes_pending_metrics_before_logging_exception():
     assert trainer.tracker.log_exception.call_args.kwargs["step"] == 7
 
 
-def test_micro_batches_accumulated_initialized():
-    """Test that _micro_batches_accumulated is initialized to 0 in worker __init__."""
-
-    # Create minimal worker instances for testing
-    class TestCriticWorker(CriticWorkerBase):
-        def init_model(self, *args, **kwargs):
-            pass
-
-        def offload_to_cpu(self, offload_optimizer=True, offload_model=True):
-            pass
-
-        def backload_to_gpu(self, backload_optimizer=True, backload_model=True):
-            pass
-
-        def _forward_micro_batch(self, micro_batch):
-            pass
-
-    cfg = SkyRLTrainConfig()
-    cfg.trainer.algorithm.policy_loss_type = "regular"
-
-    # CriticWorker has _micro_batches_accumulated initialized at construction
-    critic_worker = TestCriticWorker(
-        cfg=cfg.trainer,
-        world_size=4,
-        rank=0,
-        local_rank=0,
-        master_addr="localhost",
-        master_port=12345,
-        sequence_parallel_size=1,
-    )
-    assert hasattr(critic_worker, "_micro_batches_accumulated")
-    assert critic_worker._micro_batches_accumulated == 0
-
-
 def test_validate_batch_sizes():
     """Test the validate_batch_sizes function with various configurations to trigger all error cases."""
 
@@ -635,7 +601,7 @@ def test_forward_backward_batch_calculations():
     policy_forward_backward_micro_calls = []
 
     def mock_policy_forward_backward_micro(
-        experience, microbatch_weight, loss_fn=None, loss_fn_config=None, return_per_token_outputs=True
+        experience, loss_normalization, loss_fn=None, loss_fn_config=None, return_per_token_outputs=True
     ):
         policy_forward_backward_micro_calls.append(experience)
         return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
@@ -650,7 +616,7 @@ def test_forward_backward_batch_calculations():
     expected_micro_batches = len(dataloader)  # Should be 6
 
     # Run forward_backward
-    with (patch("torch.distributed.barrier"),):
+    with patch("torch.distributed.barrier"), patch("torch.cuda.current_device", return_value="cpu"):
         result = policy_worker.forward_backward(dummy_databatch)
 
     # Verify Policy Worker Results
@@ -664,29 +630,23 @@ def test_forward_backward_batch_calculations():
     # Test CriticWorkerBase with same pattern
     critic_worker = create_test_worker(CriticWorkerBase)
 
-    # Reset _micro_batches_accumulated (initialized in __init__, reset here for test isolation)
-    critic_worker._micro_batches_accumulated = 0
-
     # Mock _forward_backward_micro for critic
     critic_forward_backward_micro_calls = []
 
-    def mock_critic_forward_backward_micro(experience, loss_fn=None, loss_fn_config=None):
+    def mock_critic_forward_backward_micro(experience, loss_normalization):
         critic_forward_backward_micro_calls.append(experience)
         return {"critic_loss": 0.3, "values_mean": 1.0}
 
     critic_worker._forward_backward_micro = mock_critic_forward_backward_micro
 
     # Run forward_backward for critic
-    with (patch("torch.distributed.barrier"),):
+    with patch("torch.distributed.barrier"), patch("torch.cuda.current_device", return_value="cpu"):
         result = critic_worker.forward_backward(dummy_databatch)
 
     # Verify Critic Worker Results
     assert (
         len(critic_forward_backward_micro_calls) == expected_micro_batches
     ), f"CriticWorker: Expected {expected_micro_batches} _forward_backward_micro calls, got {len(critic_forward_backward_micro_calls)}"
-
-    # Verify _micro_batches_accumulated is set correctly
-    assert critic_worker._micro_batches_accumulated == expected_micro_batches
 
     # Verify result structure for critic
     assert "critic_loss" in result.metrics

@@ -73,12 +73,17 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
+    REAL_SAMPLE_MASK,
     TensorList,
     TrainingInputBatch,
     TrainingOutputBatch,
     append_packed_field_padding,
     append_tensor_list_padding,
     packed_dummy_row_segments,
+)
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MINIBATCH_LOSS_NORMALIZATION,
+    MinibatchLossNormalization,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
@@ -745,7 +750,7 @@ class MegatronWorker:
                 )
                 continue
             if isinstance(value, torch.Tensor):
-                if key == "loss_mask":
+                if key in ("loss_mask", REAL_SAMPLE_MASK):
                     # Pad with zeros so padded samples don't contribute to loss
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                 elif key == "attention_mask":
@@ -1124,24 +1129,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
-        if use_token_batching:
-            microbatch_iterator = get_microbatch_iterator(
-                data,
-                micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
-                max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
-            )
-        else:
-            microbatch_iterator = None
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
+        loss_normalization = MinibatchLossNormalization.from_batch(
+            data,
+            dp_group=mpu.get_data_parallel_group(with_context_parallel=False),
+            device=torch.cuda.current_device(),
+        )
 
-        # Build micro-batch dicts expected by forward_backward_mini_batch.
-        # Token-based batching yields TrainingInputBatch microbatches (converted to
-        # Experience here); sample-based BatchIterator yields Experience directly.
+        # Both iterator modes share the same batch-to-experience conversion.
         micro_buffer = []
 
-        if microbatch_iterator is not None:
-            experiences = (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator)
-        else:
-            experiences = BatchIterator(data, self.cfg.micro_train_batch_size_per_gpu, drop_last=False)
+        experiences = (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator)
 
         for experience in experiences:
             attention_mask = experience.attention_mask
@@ -1162,6 +1164,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "position_ids": position_ids,
                     "num_actions": experience.num_actions,
                     "old_action_log_probs": experience.action_log_probs,
+                    REAL_SAMPLE_MASK: experience.real_sample_mask,
+                    MINIBATCH_LOSS_NORMALIZATION: loss_normalization,
                     "base_action_log_probs": experience.base_action_log_probs,
                     "advantages": experience.advantages,
                     "loss_mask": experience.loss_mask,
@@ -1181,13 +1185,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 }
             )
 
-        # Count real (non-padding) microbatches. Token-based batching appends padding
-        # microbatches so every DP rank runs the same number of forward passes; they must
-        # not inflate the KL/entropy denominators. Use the iterator's padding count rather
-        # than loss_mask, since a real microbatch can be all-zero (e.g. DAPO overlong filtering).
-        num_padding_microbatches = (
-            getattr(microbatch_iterator, "num_padding_microbatches", 0) if microbatch_iterator is not None else 0
-        )
+        # Auxiliary losses and diagnostics distinguish scheduling padding from real
+        # microbatches, which can have zero loss after filtering.
+        num_padding_microbatches = microbatch_iterator.num_padding_microbatches
         num_real_microbatches = len(micro_buffer) - num_padding_microbatches
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
@@ -1292,14 +1292,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 for k, v in moe_metrics.items():
                     status[k] = v
 
-        if not any(loss_fn_output_batches):
-            all_loss_fn_outputs = []
-        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
-            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
-        else:
-            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
-
-        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
+        return WorkerOutput(
+            loss_fn_outputs=microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches), metrics=status
+        )
 
     def optim_step(self) -> Optional[float]:
         """
