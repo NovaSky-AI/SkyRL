@@ -6,6 +6,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
 T = TypeVar("T")
 TASK_SHUTDOWN_GRACE_S = 10.0
+FAILURE_CLEANUP_GRACE_S = 10.0
 
 
 class BackgroundFailure:
@@ -69,18 +70,29 @@ async def cancel_background_tasks(tasks: Iterable[asyncio.Task[Any]], grace_s: f
 
 
 @contextlib.asynccontextmanager
-async def cleanup_preserving_primary(cleanup: Callable[[], Awaitable[Any]], description: str):
+async def cleanup_preserving_primary(
+    cleanup: Callable[[], Awaitable[Any]],
+    description: str,
+    *,
+    failure_grace_s: float = FAILURE_CLEANUP_GRACE_S,
+):
     """Always await ``cleanup()`` on exit, without letting a cleanup error replace the body's exception.
 
     If the body raised (including cancellation), a cleanup failure is attached to that primary exception as a
-    note and the primary propagates. On success, a cleanup failure propagates normally.
+    note and the primary propagates. Failure cleanup is bounded so an unresponsive cleanup cannot hide the primary
+    indefinitely. On success, a cleanup failure propagates normally.
     """
     try:
         yield
     except BaseException as primary:
+        cleanup_timeout = asyncio.timeout(failure_grace_s)
         try:
-            await cleanup()
+            async with cleanup_timeout:
+                await cleanup()
         except BaseException as cleanup_exc:
-            primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
+            if cleanup_timeout.expired():
+                primary.add_note(f"{description} did not finish during cleanup within {failure_grace_s:g}s")
+            else:
+                primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
         raise
     await cleanup()
