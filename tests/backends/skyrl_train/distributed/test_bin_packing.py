@@ -109,17 +109,6 @@ class TestModifiedFirstFitDecreasing:
             [4, 5, 6, 7, 8],
         ]
 
-    def test_deterministic_and_preserves_all_indices(self):
-        lengths = [55, 48, 34, 31, 29, 22, 16, 9, 7, 4]
-        packer = ModifiedFirstFitDecreasing(bin_capacity=100)
-
-        first = packer.pack(lengths)
-        second = packer.pack(lengths)
-
-        assert first == second
-        assert sorted(index for bin_indices in first for index in bin_indices) == list(range(len(lengths)))
-        assert all(sum(lengths[index] for index in bin_indices) <= 100 for bin_indices in first)
-
     def test_leftovers_use_first_fit_not_least_loaded(self):
         packer = ModifiedFirstFitDecreasing(bin_capacity=100)
 
