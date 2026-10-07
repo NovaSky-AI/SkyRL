@@ -247,10 +247,6 @@ one, else the path). `result.record.files` names the record's files, sidecars
 then document, all beside the document: the ones the mirror holds when there is
 one (without the kinds its `exclude` leaves out), else the ones on disk.
 
-A producer that knows which trajectories made up a training step may also write
-a run index, `index/<phase>/step-<N>.json`, next to the records; its format is
-in [`docs/format.md`](docs/format.md#a-run-index). Readers work without it.
-
 ### Mirror the record to remote storage
 
 `--record-mirror URL` (`record_mirror=` for `CaptureService`) copies each
