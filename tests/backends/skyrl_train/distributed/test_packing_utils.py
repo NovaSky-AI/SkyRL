@@ -64,10 +64,10 @@ def test_auto_recipe_is_refused_rather_than_packed_on_a_guessed_grid():
     for recipe in ("auto", " AUTO "):
         for tp_size, cp_size in ((1, 1), (2, 1), (1, 2), (4, 2)):
             with pytest.raises(ValueError, match="fp8_recipe"):
-                get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=True, fp8_recipe=recipe)
+                get_packing_align_size_total(tp_size, cp_size, fp8_enabled=True, fp8_recipe=recipe)
         with pytest.raises(ValueError, match="fp8_recipe"):
             get_unpacked_seq_align_size(tp_size=1, fp8_enabled=True, fp8_recipe=recipe)
 
     # Without FP8 the recipe is never consulted, so "auto" stays harmless.
-    assert get_packed_seq_align_size(tp_size=2, cp_size=1, fp8_enabled=False, fp8_recipe="auto") == 2
+    assert get_packing_align_size_total(tp_size=2, cp_size=1, fp8_enabled=False, fp8_recipe="auto") == 2
     assert get_unpacked_seq_align_size(tp_size=2, fp8_enabled=False, fp8_recipe="auto") == 2
