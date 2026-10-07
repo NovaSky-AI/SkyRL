@@ -35,9 +35,6 @@ def _distributed_main():
     from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
         MegatronModelWrapper,
     )
-    from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
-        sync_params_for_export,
-    )
 
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.distributed.init_process_group("nccl", timeout=timedelta(minutes=3))
@@ -67,7 +64,7 @@ def _distributed_main():
             set_defaults_if_not_set_tensor_model_parallel_attributes(p)
         cfg = DistributedDataParallelConfig(
             use_distributed_optimizer=True,
-            overlap_param_gather=True,
+            overlap_param_gather=False,
             overlap_grad_reduce=overlap,
             bucket_size=12000,
             grad_reduce_in_fp32=True,
@@ -86,7 +83,7 @@ def _distributed_main():
             exp_avg_sq_dtype=torch.bfloat16,
             main_params_dtype=torch.float32,
             store_param_remainders=True,
-            overlap_param_gather=True,
+            overlap_param_gather=False,
         )
         optimizer = get_megatron_optimizer(opt_cfg, [model])
         wrapper = MegatronModelWrapper(SimpleNamespace(remove_microbatch_padding=False), [model], optimizer)
@@ -151,13 +148,16 @@ def _distributed_main():
                 success, norm, _ = optimizer.step()
                 assert success and torch.isfinite(torch.as_tensor(norm)) and norm > 0
                 metrics.append([sum(float(row["loss"]) for row in result) / count, float(norm)])
-                sync_params_for_export([model], optimizer)
             values = torch.cat([p.detach().flatten() for p in module.parameters()]).clone()
             assert not torch.equal(initial, values)
+            if overlap:
+                # A second forward_backward before optim_step would accumulate into in-flight buffers.
+                wrapper._defer_finalize_model_grads(None)
+                with pytest.raises(RuntimeError, match="one forward_backward call"):
+                    wrapper._defer_finalize_model_grads(None)
+                wrapper._pending_grad_sync = None
             return torch.tensor(metrics), values
         finally:
-            with torch.no_grad():
-                model.disable_forward_pre_hook()
             torch.distributed.barrier()
 
     assert run_case(False, True) is None

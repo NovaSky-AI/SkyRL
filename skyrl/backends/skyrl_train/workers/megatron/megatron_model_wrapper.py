@@ -239,7 +239,7 @@ class MegatronModelWrapper:
             # _per_token_grad_scaling rescales the grad buffers between calls, which would race
             # with reductions still in flight.
             raise ValueError("calculate_per_token_loss (VLM context parallelism) requires overlap_grad_reduce=false")
-        configure_no_sync(self.actor_module, config)
+        self._overlap_grad_reduce = configure_no_sync(self.actor_module, config)
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across
         # parallelism dimensions -- but deferred to optim_step rather than run per
@@ -281,6 +281,15 @@ class MegatronModelWrapper:
         its own count instead; see :meth:`_per_token_grad_scaling` for details.
         """
         del model, num_tokens, kwargs  # replayed against self.actor_module with default process groups
+        pending = self._pending_grad_sync
+        if self._overlap_grad_reduce and pending is not None:
+            # Overlapped reductions dispatch from the final microbatch's backward
+            # hook, so the previous call's gradients are already in flight.
+            raise RuntimeError(
+                "ddp_config.overlap_grad_reduce=True requires one forward_backward call "
+                "per optimizer step, but a second call was made before optim_step. "
+                "Set overlap_grad_reduce=False to accumulate across calls."
+            )
         self._pending_grad_sync = {"num_tokens": None}
 
     @contextmanager
