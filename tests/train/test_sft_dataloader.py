@@ -20,6 +20,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from skyrl.train.config import SFTConfig
 from skyrl.train.dataset.samplers import (
     DataMixingSampler,
+    DPAlignedPackingBatchSampler,
     StatefulSequentialSampler,
     import_sampler_class,
 )
@@ -329,6 +330,127 @@ class TestSequentialDataloader:
         rest_resumed = [b for b in dl2]
         assert rest_full == rest_resumed
         assert _flatten(rest_resumed) == list(range(5, 20))
+
+
+class TestDPAlignedPackingBatchSampler:
+    @staticmethod
+    def _make(count=200, cardinality_reset_batch=None):
+        sampler = StatefulSequentialSampler(list(range(count)))
+        return DPAlignedPackingBatchSampler(
+            sampler=sampler,
+            sequence_lengths=[300] * count,
+            batch_size=20,
+            dp_size=2,
+            allowed_variation=0.10,
+            bin_capacity=1_000,
+            tp_size=1,
+            cp_size=1,
+            cardinality_reset_batch=cardinality_reset_batch,
+        )
+
+    def test_preserves_order_and_sample_count(self):
+        batch_sampler = self._make()
+        batches = list(batch_sampler)
+        assert [index for batch in batches for index in batch] == list(range(200))
+        assert len(batches) == 10
+        assert {len(batch) for batch in batches[:-1]} <= {18, 19, 20, 21, 22}
+        assert any(len(batch) != 20 for batch in batches)
+
+    def test_each_non_tail_batch_avoids_dp_bin_padding(self):
+        batch_sampler = self._make()
+        for batch in list(batch_sampler)[:-1]:
+            assert batch_sampler.count_unpadded_bins(batch) % 2 == 0
+
+    def test_cumulative_batch_size_error_is_bounded(self):
+        emitted = 0
+        for step, batch in enumerate(self._make(), start=1):
+            emitted += len(batch)
+            if step < 10:
+                assert abs(emitted - step * 20) <= 2
+
+    def test_iterator_state_restores_carry_exactly(self):
+        iterator = iter(self._make())
+        consumed = [next(iterator) for _ in range(3)]
+        state = iterator.state_dict()
+        expected_rest = list(iterator)
+
+        resumed = iter(self._make())
+        resumed.load_state_dict(state)
+        actual_rest = list(resumed)
+        assert actual_rest == expected_rest
+        assert [index for batch in consumed + actual_rest for index in batch] == list(range(200))
+
+    def test_fixed_step_boundary_repays_sample_debt(self):
+        batches = list(self._make(count=400, cardinality_reset_batch=3))
+        assert sum(len(batch) for batch in batches[:3]) == 3 * 20
+
+
+@pytest.mark.parametrize("dataset_kind", ["online", "pretokenized", "multi_source"])
+def test_dp_alignment_uses_all_sft_map_dataset_paths(dataset_kind):
+    from datasets import Dataset
+
+    from skyrl.train.dataset.pretokenized import PretokenizedDataset
+    from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, TextDataset
+
+    rows = [{"id": index, "input_ids": list(range(300))} for index in range(40)]
+    if dataset_kind == "online":
+        data = TextDataset(rows)
+    elif dataset_kind == "pretokenized":
+        data = PretokenizedDataset(Dataset.from_list(rows), sequence_lengths=torch.full((40,), 300).numpy())
+    else:
+        data = ConcatSFTDataset([TextDataset(rows[:20]), TextDataset(rows[20:])])
+
+    trainer = _make_trainer(
+        sampler="sequential",
+        batch_size=20,
+        max_length=1_000,
+        use_sequence_packing=True,
+        align_packing_bins_to_dp=True,
+        packing_batch_size_allowed_variation=0.10,
+    )
+    trainer.sft_cfg.placement.num_nodes = 1
+    trainer.sft_cfg.placement.num_gpus_per_node = 2
+    trainer.sft_cfg.megatron_config.tensor_model_parallel_size = 1
+    trainer.sft_cfg.megatron_config.pipeline_model_parallel_size = 1
+    trainer.sft_cfg.megatron_config.context_parallel_size = 1
+    batches = list(trainer.build_train_dataloader(data))
+    assert [row["id"] for batch in batches for row in batch] == list(range(40))
+
+
+def test_dp_alignment_resumes_through_stateful_dataloader():
+    from skyrl.train.dataset.sft_dataset import TextDataset
+
+    rows = [{"id": index, "input_ids": list(range(300))} for index in range(200)]
+
+    def build():
+        trainer = _make_trainer(
+            sampler="random",
+            seed=7,
+            batch_size=20,
+            max_length=1_000,
+            use_sequence_packing=True,
+            align_packing_bins_to_dp=True,
+            packing_batch_size_allowed_variation=0.10,
+        )
+        trainer.sft_cfg.placement.num_nodes = 1
+        trainer.sft_cfg.placement.num_gpus_per_node = 2
+        trainer.sft_cfg.megatron_config.tensor_model_parallel_size = 1
+        trainer.sft_cfg.megatron_config.pipeline_model_parallel_size = 1
+        trainer.sft_cfg.megatron_config.context_parallel_size = 1
+        return trainer.build_train_dataloader(TextDataset(rows))
+
+    dataloader = build()
+    iterator = iter(dataloader)
+    consumed = [next(iterator) for _ in range(3)]
+    state = dataloader.state_dict()
+    expected_rest = list(iterator)
+
+    resumed = build()
+    resumed.load_state_dict(state)
+    actual_rest = list(resumed)
+    assert actual_rest == expected_rest
+    trained_ids = [row["id"] for batch in consumed + actual_rest for row in batch]
+    assert sorted(trained_ids) == list(range(200))
 
 
 class TestCustomSamplerDataloaderResume:
