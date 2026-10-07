@@ -133,3 +133,41 @@ def test_sft_logs_actual_example_count(mock_dispatch, monkeypatch, packing, alig
     assert [call.kwargs["step"] for call in logs] == [1, 2, 3]
     assert [call.args[0]["train/actual_batch_size"] for call in logs] == expected_sizes
     assert [call.args[0]["train/actual_num_tokens"] for call in logs] == [size * 300 for size in expected_sizes]
+
+
+@pytest.mark.parametrize("async_collation", [False, True])
+def test_sft_logs_real_counts_for_short_packed_tail(mock_dispatch, monkeypatch, async_collation):
+    cfg = _build_test_sft_config()
+    cfg.strategy = "megatron"
+    cfg.placement.num_gpus_per_node = 4
+    cfg.batch_size = 4
+    cfg.num_steps = 3
+    cfg.sampler = "sequential"
+    cfg.remove_microbatch_padding = True
+    cfg.use_sequence_packing = True
+    cfg.async_batch_collation = async_collation
+    cfg.eval_datasets = None
+    cfg.eval_dataset_splits = None
+    cfg.eval_dataset_names = None
+    cfg.eval_interval = 0
+    cfg.ckpt_path = ""
+    trainer = SFTTrainer(cfg, skyrl_cfg=build_skyrl_config_for_sft(cfg))
+    mock_dispatch.dp_size.return_value = 4
+    attach_mock_sft_deps(trainer, mock_dispatch)
+    trainer.tracker = MagicMock()
+    example = {
+        "input_ids": [10, 20, 30],
+        "attention_mask": [1, 1, 1],
+        "num_actions": 2,
+        "loss_mask": [1, 1],
+    }
+    monkeypatch.setattr(trainer, "_load_and_tokenize", lambda *_args, **_kwargs: [example] * 9)
+    monkeypatch.setattr(trainer, "load_checkpoint", lambda: 0)
+
+    trainer.train()
+
+    logs = [call.args[0] for call in trainer.tracker.log.call_args_list]
+    assert [log["train/actual_batch_size"] for log in logs] == [4, 4, 1]
+    assert [log["train/actual_num_tokens"] for log in logs] == [12, 12, 3]
+    assert [log["train/total_tokens_processed"] for log in logs] == [12, 24, 27]
+    assert logs[-1]["train/tokens_per_second"] == pytest.approx(3 / logs[-1]["timing/step"])

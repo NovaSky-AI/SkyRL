@@ -33,6 +33,9 @@ from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputB
 
 from .bin_packing import PackingStrategy, SeqPacker, make_seq_packer
 
+PACKED_SFT_REAL_EXAMPLES_KEY = "packed_sft_real_examples"
+PACKED_SFT_REAL_TOKENS_KEY = "packed_sft_real_tokens"
+
 
 def make_sft_sequence_packer(
     bin_capacity: int,
@@ -332,5 +335,7 @@ class PackedDataCollator:
         )
         batch.metadata = {
             "response_length": max_packed_len - 1,
+            PACKED_SFT_REAL_EXAMPLES_KEY: n_samples,
+            PACKED_SFT_REAL_TOKENS_KEY: sum(seq_lengths),
         }
         return batch
