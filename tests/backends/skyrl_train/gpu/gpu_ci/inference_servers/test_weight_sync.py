@@ -37,9 +37,10 @@ from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
 MODEL = os.environ.get("SKYRL_RDT_TEST_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+# Hybrid Mamba2: MambaMixer2.A loads through a composed loader (A = -exp(A_log)).
+NEMOTRON_H = "nvidia/Nemotron-H-4B-Base-8K"
 
 PROMPT = {
-    "model": MODEL,
     "prompt": "What is the capital of France?",
     "max_tokens": 32,
     "temperature": 0.0,
@@ -131,8 +132,8 @@ RdtTrainer = ray.remote(num_gpus=1, max_concurrency=4)(WeightSyncTrainerBase)
 IpcTrainer = ray.remote(WeightSyncTrainerBase)
 
 
-async def _completion(http_client, router_url):
-    resp = await http_client.post(f"{router_url}/v1/completions", json=PROMPT)
+async def _completion(http_client, router_url, model):
+    resp = await http_client.post(f"{router_url}/v1/completions", json={**PROMPT, "model": model})
     assert resp.status_code == 200
     return resp.json()["choices"][0]["text"]
 
@@ -146,16 +147,17 @@ async def _assert_sync_replaces_dummy_weights(env, timeout_s: float = 120.0):
     """
     router_url = env["router_url"]
     trainer = env["trainer"]
+    model = env["model"]
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as http_client:
-        text_before = await _completion(http_client, router_url)
+        text_before = await _completion(http_client, router_url, model)
         print(f"[step 1] dummy weights output: {text_before!r}")
         assert "Paris" not in text_before, "Dummy weights unexpectedly produced the correct answer"
 
         print("[step 2] trainer.sync_once() -- rendezvous + one full send_weights()")
         await asyncio.to_thread(lambda: ray.get(trainer.sync_once.remote()))
 
-        text_after = await _completion(http_client, router_url)
+        text_after = await _completion(http_client, router_url, model)
         print(f"[step 3] synced weights output: {text_after!r}")
         assert "Paris" in text_after, f"Weight sync failed - expected 'Paris' but got: {text_after!r}"
 
@@ -176,7 +178,7 @@ async def _make_env(cfg, create_kwargs, trainer_cls, weight_sync_backend, *, col
                 ),
             )
         trainer = trainer_cls.options(**options).remote(
-            MODEL,
+            create_kwargs["model"],
             weight_sync_backend,
             # From create_kwargs, not cfg: InferenceEngineState.create deep-copies
             # cfg before applying the override, so the outer cfg still has the
@@ -193,6 +195,7 @@ async def _make_env(cfg, create_kwargs, trainer_cls, weight_sync_backend, *, col
             "trainer": trainer,
             "client": client,
             "router_url": client.proxy_url,
+            "model": create_kwargs["model"],
         }
 
         ray.get(trainer.shutdown.remote())
@@ -316,26 +319,35 @@ class TestColocatedIpcWeightUpdateFlow:
 # -----------------------------------------------------------------
 
 
-@pytest_asyncio.fixture(scope="class")
-async def rdt_weight_update_env(class_scoped_ray_init_fixture):
+@pytest_asyncio.fixture(
+    scope="class",
+    params=[
+        pytest.param((MODEL, {}), id="dense"),
+        # Native config: the checkpoint's remote config has no head_dim, so under
+        # trust_remote_code vLLM builds 96-dim attention heads instead of 128.
+        pytest.param((NEMOTRON_H, {"trust_remote_code": False}), id="mamba2_nemotron_h"),
+    ],
+)
+async def rdt_weight_update_env(class_scoped_ray_init_fixture, request):
     """Non-colocated sharded_rdt (NIXL pull) environment, TP=1.
 
     The trainer actor (1 GPU) drives the engine, which spawns its own producer
     sidecar on that GPU; the vLLM server (TP=1,
     distributed_executor_backend=ray) runs on another GPU. 2 GPUs + the sidecar.
     """
+    model, extra_engine_kwargs = request.param
     cfg = SkyRLTrainConfig()
-    cfg.trainer.policy.model.path = MODEL
+    cfg.trainer.policy.model.path = model
     # Selects the sharded_rdt backend: build_vllm_cli_args reads this and sets
     # WeightTransferConfig(backend="sharded_rdt") + executor=ray.
     cfg.generator.inference_engine.weight_sync_backend = "sharded_rdt"
 
     create_kwargs = dict(
-        model=MODEL,
+        model=model,
         tp_size=1,
         colocate_all=False,
         gpu_memory_utilization=0.5,
-        engine_init_kwargs={"load_format": "dummy"},
+        engine_init_kwargs={"load_format": "dummy", **extra_engine_kwargs},
     )
 
     async for env in _make_env(cfg, create_kwargs, RdtTrainer, "sharded_rdt"):
