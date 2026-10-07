@@ -94,6 +94,9 @@ flight, and a call whose reply hasn't started after about 125 s fails, so use
 Each skycap server writes its trajectories to `skycap.record_dir` on its own
 node. `skycap.record_mirror=s3://bucket/prefix` (any fsspec URL; install `s3fs`
 or `gcsfs`) has every server also copy them there, in the background.
+`skycap.record_mirror_config` takes the mirror's options, e.g.
+`'+skycap.record_mirror_config={exclude: [experts, sampling_mask]}'` to keep
+routed experts and sampling masks out of the remote copy.
 
 With `trainer.logger=wandb`, each step is indexed as a version of the artifact
 `skycap-records-train-<run id>`, aliased `train-step-N` and `latest`. It holds

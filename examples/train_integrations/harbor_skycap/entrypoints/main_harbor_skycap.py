@@ -81,6 +81,10 @@ class SkycapConfig:
     """An fsspec URL (``s3://bucket/prefix``, ``gs://bucket/prefix``) every server also copies its records to,
     in the background, after writing them to ``record_dir``. The copy fails open: a slow or failing store
     never fails a rollout. Needs the store's fsspec implementation (``s3fs``, ``gcsfs``) installed."""
+    record_mirror_config: Dict[str, Any] = field(default_factory=dict)
+    """The mirror's options (``skycap.mirror.RecordMirror``), e.g. ``{exclude: [experts, sampling_mask]}`` to
+    leave sidecars out of the remote copy, or ``timeout``, ``attempts``, ``queue_size``, ``storage_options``.
+    Needs ``record_mirror``."""
     wandb: SkycapWandbConfig = field(default_factory=SkycapWandbConfig)
     """The per-step index of the records in W&B."""
     ttl: float = 3600.0
@@ -140,6 +144,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
         "record_mirror": cfg.skycap.record_mirror,
+        "record_mirror_config": dict(cfg.skycap.record_mirror_config) or None,
     }
     return start_servers(
         settings,

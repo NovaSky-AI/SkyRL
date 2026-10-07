@@ -16,8 +16,11 @@ import pytest
 pytest.importorskip("skycap")
 pytest.importorskip("harbor")
 
+import fsspec  # noqa: E402
+import orjson  # noqa: E402
 import pytest_asyncio  # noqa: E402
 import torch  # noqa: E402
+import zstandard  # noqa: E402
 from loguru import logger  # noqa: E402
 
 from examples.train_integrations.harbor_skycap import record_index  # noqa: E402
@@ -199,7 +202,9 @@ async def test_a_trajectory_dropped_by_dynamic_sampling_is_untrained(skycap, tri
 @pytest.mark.asyncio
 async def test_mirrored_records_are_referenced_not_copied(router, tmp_path, trials, make_generator) -> None:
     mirror = f"memory://skycap-{uuid.uuid4().hex[:8]}"
-    service = service_for(router, tmp_path / "record", record_mirror=mirror)
+    service = service_for(
+        router, tmp_path / "record", record_mirror=mirror, record_mirror_config={"exclude": ["experts"]}
+    )
     service.start()
     try:
         records = RecordLog()
@@ -217,6 +222,10 @@ async def test_mirrored_records_are_referenced_not_copied(router, tmp_path, tria
     assert row["record"] == {"path": str(tmp_path / "record" / name), "mirror": f"{mirror}/{name}"}
     assert artifact.references == [(f"{mirror}/{name}", f"records/{name}", False)]
     assert set(artifact.files) == {"step.json"} and artifact.metadata["num_referenced"] == 1
+    # The mirror config reached the server: its copy left the routed experts out, and says so.
+    with fsspec.open(f"{mirror}/{name}", "rb") as handle:
+        mirrored = orjson.loads(zstandard.ZstdDecompressor().decompressobj().decompress(handle.read()))
+    assert mirrored["omitted_sidecars"] == ["experts"] and "experts" not in mirrored["sidecars"]
     # Without the batch's trajectory ids the trainer said nothing about what trained.
     assert row["trained"] is None
 
@@ -343,5 +352,6 @@ def test_a_bug_in_the_callback_raises_into_the_step(monkeypatch) -> None:
 def test_the_config() -> None:
     cfg = HarborSkycapConfig().skycap
     assert cfg.wandb.enabled and cfg.wandb.phases == ["train"] and cfg.record_mirror is None
+    assert cfg.record_mirror_config == {}
     with pytest.raises(ValueError, match="unknown phases"):
         SkycapRecordIndex(RecordLog(), ["train", "test"])
