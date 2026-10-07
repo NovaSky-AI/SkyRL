@@ -99,6 +99,7 @@ def _loss(
     tp_group,
     active_mask=None,
     mask_in_kernel=True,
+    active_spans=None,
 ):
     """Per-token CE summed to a scalar (so all modes produce identical grads)."""
     from megatron.core.fusions.fused_cross_entropy import (
@@ -132,11 +133,12 @@ def _loss(
             False,
         )
         kernel_mask = active_mask if mask_in_kernel else None
-        lp = (
-            FusedLinearLogprobTriton.apply(*args, kernel_mask)
-            if kernel_mask is not None
-            else FusedLinearLogprobTriton.apply(*args)
-        )
+        if active_spans is not None:
+            lp = FusedLinearLogprobTriton.apply(*args, kernel_mask, active_spans)
+        elif kernel_mask is not None:
+            lp = FusedLinearLogprobTriton.apply(*args, kernel_mask)
+        else:
+            lp = FusedLinearLogprobTriton.apply(*args)
         if active_mask is not None and not mask_in_kernel:
             return -(lp * active_mask).sum()
         return -lp.sum()
@@ -763,6 +765,124 @@ def _load_block_mask_trace(path: Path, dataset: str, num_tokens: int, tp: int, c
     return torch.tensor(window, dtype=torch.bool).unsqueeze(0)
 
 
+def _active_spans(active_mask: torch.Tensor, max_inactive_gap: int) -> tuple[tuple[int, int], ...]:
+    """Return ordered active spans, coalescing short zero gaps without moving rows."""
+    flat_mask = active_mask.detach().to(device="cpu", dtype=torch.bool).reshape(-1).tolist()
+    runs = []
+    start = None
+    for index, active in enumerate(flat_mask + [False]):
+        if active and start is None:
+            start = index
+        elif not active and start is not None:
+            runs.append((start, index))
+            start = None
+
+    spans = []
+    for start, end in runs:
+        if spans and start - spans[-1][1] <= max_inactive_gap:
+            spans[-1] = (spans[-1][0], end)
+        else:
+            spans.append((start, end))
+    return tuple(spans)
+
+
+def _benchmark_narrow_dlogits_tail(
+    args,
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    active_mask: torch.Tensor,
+    tp_group,
+) -> dict[str, Any]:
+    """Compare the incumbent padded final split with direct narrow staging."""
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+        _OOV_LABEL_SENTINEL,
+        efficient_entropy_backward,
+        efficient_entropy_forward,
+    )
+
+    hidden_2d = hidden.detach().reshape(-1, hidden.shape[-1]).contiguous()
+    weight_2d = weight.detach().contiguous()
+    mask_1d = active_mask.reshape(-1).contiguous()
+    target_1d = target.reshape(-1)
+    vocab_start, vocab_end = _vocab_bounds(weight_2d.shape[0], tp_group)
+    rank = dist.get_rank(tp_group)
+    target_mask = (target_1d < vocab_start) | (target_1d >= vocab_end)
+    labels = (target_1d - vocab_start) + rank * weight_2d.shape[0]
+    labels = torch.where(target_mask, _OOV_LABEL_SENTINEL, labels).to(torch.int64).contiguous()
+    _, _, maximum, accumulate, entropy_b = efficient_entropy_forward(
+        hidden_2d,
+        weight_2d,
+        labels,
+        1.0,
+        tp_group,
+        mask_1d,
+    )
+    dlogprobs = torch.ones(hidden_2d.shape[0], dtype=torch.float32, device=hidden.device)
+    dentropy = torch.zeros_like(dlogprobs)
+    spans = _active_spans(mask_1d, 128)
+
+    def launch(narrow: bool):
+        return efficient_entropy_backward(
+            dlogprobs,
+            dentropy,
+            hidden_2d,
+            weight_2d,
+            labels,
+            maximum,
+            accumulate,
+            entropy_b,
+            False,
+            1.0,
+            tp_group,
+            mask_1d,
+            spans,
+            narrow,
+        )
+
+    outputs = {name: launch(narrow) for name, narrow in (("wide-tail", False), ("narrow-tail", True))}
+    torch.cuda.synchronize(hidden.device)
+    torch.testing.assert_close(outputs["narrow-tail"][0], outputs["wide-tail"][0], atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(outputs["narrow-tail"][1], outputs["wide-tail"][1], atol=2e-2, rtol=2e-2)
+    assert torch.count_nonzero(outputs["narrow-tail"][0][~mask_1d]) == 0
+
+    samples = {name: [] for name in outputs}
+    peaks = {name: [] for name in outputs}
+    variants = list(outputs)
+    for repetition in range(args.repetitions):
+        offset = repetition % len(variants)
+        for name in variants[offset:] + variants[:offset]:
+            torch.cuda.reset_peak_memory_stats(hidden.device)
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            launch(name == "narrow-tail")
+            end.record()
+            end.synchronize()
+            samples[name].append(start.elapsed_time(end))
+            peaks[name].append(torch.cuda.max_memory_allocated(hidden.device))
+
+    return {
+        "tail_width": weight_2d.shape[0] % 9504 or 9504,
+        "span_count": len(spans),
+        "metrics": {
+            name: {
+                "ms": statistics.median(values),
+                "peak_bytes": statistics.median(peaks[name]),
+                "dhidden_max_abs_vs_wide": (outputs[name][0].float() - outputs["wide-tail"][0].float())
+                .abs()
+                .max()
+                .item(),
+                "dweight_max_abs_vs_wide": (outputs[name][1].float() - outputs["wide-tail"][1].float())
+                .abs()
+                .max()
+                .item(),
+            }
+            for name, values in samples.items()
+        },
+    }
+
+
 def _run_block_mask_probe(args) -> None:
     """Measure the end-to-end value and dense-call overhead of tile skipping."""
     dist.init_process_group(backend="nccl")
@@ -794,7 +914,8 @@ def _run_block_mask_probe(args) -> None:
 
     check_tokens = 257
     check_hidden = 256
-    check_vocab_local = 2048
+    # Cross the 9,504-column backward split boundary and leave a partial tail.
+    check_vocab_local = 10_000
     shared_generator = torch.Generator(device=device).manual_seed(761)
     weight_generator = torch.Generator(device=device).manual_seed(991 + dist.get_rank(tp_group))
     hidden_base = torch.randn(
@@ -820,10 +941,13 @@ def _run_block_mask_probe(args) -> None:
         generator=shared_generator,
     )
     vocab_start, vocab_end = _vocab_bounds(check_vocab_local, tp_group)
+    blocky66 = torch.arange(check_tokens, device=device).unsqueeze(0) >= 55
+    # Gap-128 deliberately retains this hole inside one dHidden GEMM span.
+    blocky66[:, 128:160] = False
     masks = {
         "all": torch.ones((1, check_tokens), dtype=torch.bool, device=device),
         "blocky95": torch.arange(check_tokens, device=device).unsqueeze(0) >= 13,
-        "blocky66": torch.arange(check_tokens, device=device).unsqueeze(0) >= 87,
+        "blocky66": blocky66,
         "blocky25": torch.arange(check_tokens, device=device).unsqueeze(0) >= 193,
         "none": torch.zeros((1, check_tokens), dtype=torch.bool, device=device),
     }
@@ -836,6 +960,7 @@ def _run_block_mask_probe(args) -> None:
         tp_group,
         False,
     )
+    span_gaps = args.block_sparse_backward_span_gaps or []
     for mask_name, mask in masks.items():
         dense_hidden = hidden_base.clone().requires_grad_(True)
         dense_weight = weight_base.clone().requires_grad_(True)
@@ -867,6 +992,34 @@ def _run_block_mask_probe(args) -> None:
                 "weight_grad_max_abs": weight_delta,
             }
         )
+        for gap in span_gaps:
+            span_hidden = hidden_base.clone().requires_grad_(True)
+            span_weight = weight_base.clone().requires_grad_(True)
+            spans = _active_spans(mask, gap)
+            span_logprobs = FusedLinearLogprobTriton.apply(
+                span_hidden,
+                span_weight,
+                *fused_args,
+                mask,
+                spans,
+            )
+            span_loss = -span_logprobs.sum()
+            span_loss.backward()
+            torch.testing.assert_close(span_logprobs, expected_logprobs, atol=1e-5, rtol=1e-5)
+            torch.testing.assert_close(span_loss, dense_loss, atol=1e-4, rtol=1e-6)
+            torch.testing.assert_close(span_hidden.grad, dense_hidden.grad, atol=2e-2, rtol=2e-2)
+            torch.testing.assert_close(span_weight.grad, dense_weight.grad, atol=2e-2, rtol=2e-2)
+            assert torch.count_nonzero(span_logprobs[~mask]) == 0
+            assert torch.count_nonzero(span_hidden.grad[~mask]) == 0
+            correctness.append(
+                {
+                    "mask": f"{mask_name}-span-gap-{gap}",
+                    "logprob_max_abs": (span_logprobs - expected_logprobs).abs().max().item(),
+                    "loss_max_abs": (span_loss - dense_loss).abs().item(),
+                    "hidden_grad_max_abs": (span_hidden.grad - dense_hidden.grad).abs().max().item(),
+                    "weight_grad_max_abs": (span_weight.grad - dense_weight.grad).abs().max().item(),
+                }
+            )
 
     if rank0:
         print(
@@ -959,9 +1112,12 @@ def _run_block_mask_probe(args) -> None:
 
         for pattern, fraction, active_mask in mask_cases:
 
-            def launch(mask_in_kernel, hidden_input, weight_input, target_input, mask_input):
+            span_variants = {f"span-gap-{gap}": _active_spans(active_mask, gap) for gap in span_gaps}
+
+            def launch(variant, hidden_input, weight_input, target_input, mask_input):
                 hidden_input.grad = None
                 weight_input.grad = None
+                mask_in_kernel = variant != "dense"
                 loss = _loss(
                     "triton",
                     hidden_input,
@@ -972,50 +1128,93 @@ def _run_block_mask_probe(args) -> None:
                     tp_group,
                     mask_input,
                     mask_in_kernel,
+                    span_variants.get(variant),
                 )
                 loss.backward()
 
-            # Compile/autotune both binary modes outside the samples. Alternate
-            # their measured order to avoid clock/temperature drift.
-            launch(False, hidden, weight, target, active_mask)
-            launch(True, hidden, weight, target, active_mask)
+            variants = ["dense", "sparse", *span_variants]
+            for variant in variants:
+                launch(variant, hidden, weight, target, active_mask)
             torch.cuda.synchronize(device)
-            samples = {False: [], True: []}
-            peaks = {False: [], True: []}
+            samples = {variant: [] for variant in variants}
+            peaks = {variant: [] for variant in variants}
             for repetition in range(args.repetitions):
-                order = (False, True) if repetition % 2 == 0 else (True, False)
-                for mask_in_kernel in order:
+                offset = repetition % len(variants)
+                order = variants[offset:] + variants[:offset]
+                for variant in order:
                     torch.cuda.reset_peak_memory_stats(device)
                     start = torch.cuda.Event(enable_timing=True)
                     end = torch.cuda.Event(enable_timing=True)
                     start.record()
-                    launch(mask_in_kernel, hidden, weight, target, active_mask)
+                    launch(variant, hidden, weight, target, active_mask)
                     end.record()
                     end.synchronize()
-                    samples[mask_in_kernel].append(start.elapsed_time(end))
-                    peaks[mask_in_kernel].append(torch.cuda.max_memory_allocated(device))
+                    samples[variant].append(start.elapsed_time(end))
+                    peaks[variant].append(torch.cuda.max_memory_allocated(device))
 
             local_metrics = torch.tensor(
                 [
-                    statistics.median(samples[False]),
-                    statistics.median(samples[True]),
-                    statistics.median(peaks[False]),
-                    statistics.median(peaks[True]),
+                    metric
+                    for variant in variants
+                    for metric in (
+                        statistics.median(samples[variant]),
+                        statistics.median(peaks[variant]),
+                    )
                 ],
                 dtype=torch.float64,
                 device=device,
             )
             # Training step latency is set by the slowest TP/CP rank.
             dist.reduce(local_metrics, dst=0, op=dist.ReduceOp.MAX)
-            dense_ms, masked_ms, dense_peak, masked_peak = local_metrics.tolist()
+            reduced = local_metrics.tolist()
             if rank0:
-                print(
-                    f"tokens={seq_len} pattern={pattern} active={fraction:>5.1%} "
-                    f"dense={dense_ms:.3f}ms masked={masked_ms:.3f}ms "
-                    f"speedup={dense_ms / masked_ms:.3f}x "
-                    f"dense_peak={dense_peak / 1024**2:.0f}MB "
-                    f"masked_peak={masked_peak / 1024**2:.0f}MB"
+                metrics = {
+                    variant: {"ms": reduced[index * 2], "peak": reduced[index * 2 + 1]}
+                    for index, variant in enumerate(variants)
+                }
+                dense_ms = metrics["dense"]["ms"]
+                summary = " ".join(
+                    f"{variant}={values['ms']:.3f}ms/{dense_ms / values['ms']:.3f}x/"
+                    f"{values['peak'] / 1024**2:.0f}MB"
+                    for variant, values in metrics.items()
                 )
+                print(f"tokens={seq_len} pattern={pattern} active={fraction:>5.1%} {summary}")
+
+            if args.narrow_dlogits_tail_probe:
+                tail_result = _benchmark_narrow_dlogits_tail(
+                    args,
+                    hidden,
+                    weight,
+                    target,
+                    active_mask,
+                    tp_group,
+                )
+                tail_variants = tuple(tail_result["metrics"])
+                local_tail_metrics = torch.tensor(
+                    [tail_result["metrics"][variant]["ms"] for variant in tail_variants]
+                    + [tail_result["metrics"][variant]["peak_bytes"] for variant in tail_variants]
+                    + [tail_result["metrics"][variant]["dhidden_max_abs_vs_wide"] for variant in tail_variants]
+                    + [tail_result["metrics"][variant]["dweight_max_abs_vs_wide"] for variant in tail_variants],
+                    dtype=torch.float64,
+                    device=device,
+                )
+                dist.reduce(local_tail_metrics, dst=0, op=dist.ReduceOp.MAX)
+                if rank0:
+                    values = local_tail_metrics.tolist()
+                    variant_count = len(tail_variants)
+                    wide_ms, narrow_ms = values[:variant_count]
+                    wide_peak, narrow_peak = values[variant_count : 2 * variant_count]
+                    print(
+                        f"NARROW_DLOGITS_TAIL tokens={seq_len} pattern={pattern} "
+                        f"active={fraction:>5.1%} width={tail_result['tail_width']} "
+                        f"spans={tail_result['span_count']} "
+                        f"wide={wide_ms:.3f}ms narrow={narrow_ms:.3f}ms "
+                        f"speedup={wide_ms / narrow_ms:.4f}x "
+                        f"peak_delta={(narrow_peak - wide_peak) / 1024**2:.1f}MiB "
+                        f"dhidden_max_abs={max(values[2 * variant_count:3 * variant_count]):.4g} "
+                        f"dweight_max_abs={max(values[3 * variant_count:]):.4g}",
+                        flush=True,
+                    )
 
         del hidden, weight, target
         torch.cuda.empty_cache()
@@ -1262,13 +1461,353 @@ def _run_entropy_specialization_probe(args) -> None:
     dist.destroy_process_group()
 
 
+def _run_rl_entropy_probe(args) -> None:
+    """Compare separate and combined RL entropy, optionally including its gradient."""
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    world = dist.get_world_size()
+    if world != args.tensor_parallel * args.context_parallel:
+        raise ValueError(f"torchrun world size {world} must equal TP*CP={args.tensor_parallel * args.context_parallel}")
+    kernel_path = (
+        Path(__file__).resolve().parents[1] / "backends/skyrl_train/distributed/megatron/fused_linear_logprob_triton.py"
+    )
+    spec = importlib.util.spec_from_file_location("skyrl_fused_linear_logprob_triton", kernel_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load Triton kernel from {kernel_path}")
+    kernel_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kernel_module)
+    FusedLinearLogprobTriton = kernel_module.FusedLinearLogprobTriton
+
+    tp_groups = [
+        dist.new_group(ranks=list(range(cp_rank * args.tensor_parallel, (cp_rank + 1) * args.tensor_parallel)))
+        for cp_rank in range(args.context_parallel)
+    ]
+    tp_group = tp_groups[dist.get_rank() // args.tensor_parallel]
+    tp_rank = dist.get_rank(tp_group)
+    cp_rank = dist.get_rank() // args.tensor_parallel
+    device = torch.device("cuda", local_rank)
+    rank0 = dist.get_rank() == 0
+    vocab_local = (args.vocab or VOCAB_SHARDS[-1]) // args.tensor_parallel
+
+    try:
+        from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+            FusedLinearChunkedDistributedLogprob,
+        )
+    except ModuleNotFoundError:
+        # The standalone Triton probe intentionally runs in a minimal image;
+        # omit the optional Torch/Megatron comparison when its package deps are absent.
+        FusedLinearChunkedDistributedLogprob = None
+
+    class DistributedEntropy(torch.autograd.Function):
+        """Materialized-logits entropy baseline with a TP-correct backward."""
+
+        @staticmethod
+        def forward(ctx, logits, group):
+            maximum = logits.amax(dim=-1, keepdim=True)
+            dist.all_reduce(maximum, op=dist.ReduceOp.MAX, group=group)
+            exponentials = (logits - maximum).exp()
+            denominator = exponentials.sum(dim=-1, keepdim=True)
+            dist.all_reduce(denominator, group=group)
+            probabilities = exponentials / denominator
+            expected_logit = (probabilities * logits).sum(dim=-1, keepdim=True)
+            dist.all_reduce(expected_logit, group=group)
+            ctx.save_for_backward(logits, probabilities, expected_logit)
+            return (maximum + denominator.log() - expected_logit).squeeze(-1)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            logits, probabilities, expected_logit = ctx.saved_tensors
+            return probabilities * (expected_logit - logits) * grad_output.unsqueeze(-1), None
+
+    def legacy_entropy(hidden, weight):
+        output = torch.empty(hidden.shape[:2], dtype=torch.float32, device=hidden.device)
+        for start in range(0, hidden.shape[1], args.chunk_size):
+            end = min(hidden.shape[1], start + args.chunk_size)
+            logits = (hidden[:, start:end].to(weight.dtype) @ weight.T).float()
+            output[:, start:end] = DistributedEntropy.apply(logits, tp_group)
+        return output
+
+    def launch(
+        backend,
+        combined,
+        sparse,
+        legacy_entropy_start,
+        hidden,
+        weight,
+        target,
+        active_mask,
+        active_spans,
+        response_start,
+    ):
+        hidden.grad = None
+        weight.grad = None
+        op_args = (
+            hidden,
+            weight,
+            target,
+            tp_rank * vocab_local,
+            (tp_rank + 1) * vocab_local,
+            args.chunk_size,
+            tp_group,
+            False,
+        )
+        if backend == "triton":
+            if combined:
+                kernel_mask = active_mask if sparse else None
+                logprobs, entropy = FusedLinearLogprobTriton.apply(
+                    *op_args,
+                    kernel_mask,
+                    active_spans if sparse else None,
+                    True,
+                    args.rl_entropy_requires_grad,
+                )
+            else:
+                logprobs = FusedLinearLogprobTriton.apply(*op_args)
+        else:
+            if FusedLinearChunkedDistributedLogprob is None:
+                raise RuntimeError("torch fused backend requires megatron-core in the benchmark environment")
+            if combined:
+                logprobs, entropy = FusedLinearChunkedDistributedLogprob.apply(
+                    *op_args, True, args.rl_entropy_requires_grad
+                )
+            else:
+                logprobs = FusedLinearChunkedDistributedLogprob.apply(*op_args)
+        if not combined:
+            with torch.set_grad_enabled(args.rl_entropy_requires_grad):
+                entropy = legacy_entropy(hidden[:, legacy_entropy_start:], weight)
+            entropy = entropy[:, response_start - legacy_entropy_start :]
+        else:
+            entropy = entropy[:, response_start:]
+        loss = -(logprobs * active_mask).sum()
+        # Force the no-grad metric reduction into the measured stream.
+        response_mask = active_mask[:, response_start:]
+        metric = (entropy * response_mask).sum() / response_mask.sum().clamp(min=1)
+        if args.rl_entropy_requires_grad:
+            loss = loss - metric
+        loss.backward()
+        return logprobs.masked_fill(~active_mask, 0.0), entropy.masked_fill(~response_mask, 0.0), metric
+
+    @torch.no_grad()
+    def fp64_forward_preflight():
+        num_tokens, hidden_size, full_vocab = 257, 128, 2048
+        local_vocab = full_vocab // args.tensor_parallel
+        common_generator = torch.Generator(device=device).manual_seed(122)
+        hidden = torch.randn(
+            1, num_tokens, hidden_size, dtype=torch.bfloat16, device=device, generator=common_generator
+        )
+        target = torch.randint(0, full_vocab, (1, num_tokens), device=device, generator=common_generator)
+        shard_generator = torch.Generator(device=device).manual_seed(123 + tp_rank)
+        weight = (
+            torch.randn(local_vocab, hidden_size, dtype=torch.bfloat16, device=device, generator=shard_generator)
+            * hidden_size**-0.5
+        )
+        active_mask = torch.zeros((1, num_tokens), dtype=torch.bool, device=device)
+        active_mask[:, 37:151] = True
+        active_mask[:, 219:] = True
+        actual_logprobs, actual_entropy = FusedLinearLogprobTriton.apply(
+            hidden,
+            weight,
+            target,
+            tp_rank * local_vocab,
+            (tp_rank + 1) * local_vocab,
+            num_tokens,
+            tp_group,
+            True,
+            active_mask,
+            None,
+            True,
+        )
+
+        logits = hidden.double() @ weight.double().T
+        maximum = logits.amax(dim=-1, keepdim=True)
+        dist.all_reduce(maximum, op=dist.ReduceOp.MAX, group=tp_group)
+        exponentials = (logits - maximum).exp()
+        denominator = exponentials.sum(dim=-1, keepdim=True)
+        dist.all_reduce(denominator, group=tp_group)
+        local_log_probs = logits - maximum - denominator.log()
+        local_probabilities = exponentials / denominator
+        expected_entropy = -(local_probabilities * local_log_probs).sum(dim=-1)
+        dist.all_reduce(expected_entropy, group=tp_group)
+
+        local_target = target - tp_rank * local_vocab
+        owned = (local_target >= 0) & (local_target < local_vocab)
+        expected_logprobs = local_log_probs.gather(-1, local_target.clamp(0, local_vocab - 1).unsqueeze(-1)).squeeze(-1)
+        expected_logprobs.masked_fill_(~owned, 0.0)
+        dist.all_reduce(expected_logprobs, group=tp_group)
+        expected_logprobs.masked_fill_(~active_mask, 0.0)
+        expected_entropy.masked_fill_(~active_mask, 0.0)
+
+        torch.testing.assert_close(actual_logprobs.double(), expected_logprobs, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(actual_entropy.double(), expected_entropy, atol=2e-2, rtol=2e-2)
+        assert torch.count_nonzero(actual_logprobs[~active_mask]) == 0
+        assert torch.count_nonzero(actual_entropy[~active_mask]) == 0
+        return {
+            "logprob_max_abs": (actual_logprobs.double() - expected_logprobs).abs().max().item(),
+            "entropy_max_abs": (actual_entropy.double() - expected_entropy).abs().max().item(),
+        }
+
+    fp64_errors = fp64_forward_preflight()
+
+    if rank0:
+        print(
+            f"RL entropy probe | {torch.cuda.get_device_name(device)} | TP={args.tensor_parallel} "
+            f"CP={args.context_parallel} | H={args.hidden} | V/rank={vocab_local} | "
+            f"entropy_grad={args.rl_entropy_requires_grad}",
+            flush=True,
+        )
+        print("RL_ENTROPY_FP64=" + json.dumps(fp64_errors, sort_keys=True), flush=True)
+
+    for total_tokens in args.seq_lens:
+        if total_tokens % args.context_parallel:
+            raise ValueError(f"seq_len={total_tokens} must be divisible by CP={args.context_parallel}")
+        local_tokens = total_tokens // args.context_parallel
+        generator = torch.Generator(device=device).manual_seed(1220 + total_tokens)
+        hidden = torch.randn(
+            1,
+            local_tokens,
+            args.hidden,
+            dtype=torch.bfloat16,
+            device=device,
+            generator=generator,
+            requires_grad=True,
+        )
+        weight = (
+            torch.randn(
+                vocab_local,
+                args.hidden,
+                dtype=torch.bfloat16,
+                device=device,
+                generator=generator,
+            )
+            * (args.hidden**-0.5)
+        ).requires_grad_(True)
+        target = torch.randint(
+            0,
+            vocab_local * args.tensor_parallel,
+            (1, local_tokens),
+            device=device,
+            generator=generator,
+        )
+
+        for fraction in BLOCK_MASK_ACTIVE_FRACTIONS:
+            global_active_mask = torch.zeros((1, total_tokens), dtype=torch.bool, device=device)
+            active_rows = math.ceil(total_tokens * fraction)
+            global_active_mask[:, total_tokens - active_rows :] = True
+            # Split one response-like suffix into turns without sorting or shuffling.
+            if fraction <= 0.75 and active_rows >= 1024:
+                global_active_mask[:, total_tokens - active_rows // 2 - 256 : total_tokens - active_rows // 2] = False
+            if args.context_parallel > 1:
+                cp_chunk = total_tokens // (2 * args.context_parallel)
+                mirror_rank = 2 * args.context_parallel - cp_rank - 1
+                active_mask = torch.cat(
+                    (
+                        global_active_mask[:, cp_rank * cp_chunk : (cp_rank + 1) * cp_chunk],
+                        global_active_mask[:, mirror_rank * cp_chunk : (mirror_rank + 1) * cp_chunk],
+                    ),
+                    dim=1,
+                )
+                response_start = 0
+            else:
+                active_mask = global_active_mask
+                response_start = total_tokens - active_rows
+            active_spans = _active_spans(active_mask, 128)
+            variants = {
+                "legacy-triton-packed": ("triton", False, False, 0),
+                "combined-triton": ("triton", True, False, 0),
+                "sparse-triton": ("triton", True, True, 0),
+            }
+            if args.context_parallel == 1:
+                variants["legacy-triton-unpacked"] = ("triton", False, False, response_start)
+            if FusedLinearChunkedDistributedLogprob is not None:
+                variants["legacy-torch-packed"] = ("torch", False, False, 0)
+                variants["combined-torch"] = ("torch", True, False, 0)
+                if args.context_parallel == 1:
+                    variants["legacy-torch-unpacked"] = ("torch", False, False, response_start)
+
+            launch_args = (hidden, weight, target, active_mask, active_spans, response_start)
+            reference = launch(*variants["legacy-triton-packed"], *launch_args)
+            reference_hidden_grad = hidden.grad.detach().clone()
+            reference_weight_grad = weight.grad.detach().clone()
+            reference_hidden_grad_max = reference_hidden_grad.abs().max().item()
+            reference_weight_grad_max = reference_weight_grad.abs().max().item()
+            correctness = {}
+            for name, variant in variants.items():
+                result = launch(*variant, *launch_args)
+                torch.testing.assert_close(result[0], reference[0], atol=2e-2, rtol=2e-2)
+                torch.testing.assert_close(result[1], reference[1], atol=2e-2, rtol=2e-2)
+                torch.testing.assert_close(hidden.grad, reference_hidden_grad, atol=2e-2, rtol=2e-2)
+                torch.testing.assert_close(weight.grad, reference_weight_grad, atol=2e-2, rtol=2e-2)
+                correctness[name] = {
+                    "logprob_max_abs": (result[0] - reference[0]).abs().max().item(),
+                    "entropy_max_abs": (result[1] - reference[1]).abs().max().item(),
+                    "dhidden_max_abs": (hidden.grad - reference_hidden_grad).abs().max().item(),
+                    "dweight_max_abs": (weight.grad - reference_weight_grad).abs().max().item(),
+                    "dhidden_reference_max_abs": reference_hidden_grad_max,
+                    "dweight_reference_max_abs": reference_weight_grad_max,
+                }
+            if rank0:
+                print("RL_ENTROPY_CORRECTNESS=" + json.dumps(correctness, sort_keys=True), flush=True)
+
+            for variant in variants.values():
+                launch(*variant, *launch_args)
+            torch.cuda.synchronize(device)
+            samples = {name: [] for name in variants}
+            ordered = list(variants)
+            for repetition in range(args.repetitions):
+                offset = repetition % len(ordered)
+                for name in ordered[offset:] + ordered[:offset]:
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    launch(*variants[name], *launch_args)
+                    end.record()
+                    end.synchronize()
+                    samples[name].append(start.elapsed_time(end))
+
+            local_metrics = torch.tensor(
+                [statistics.median(samples[name]) for name in ordered],
+                dtype=torch.float64,
+                device=device,
+            )
+            dist.reduce(local_metrics, dst=0, op=dist.ReduceOp.MAX)
+            if rank0:
+                timings = dict(zip(ordered, local_metrics.tolist()))
+                result = {
+                    "tokens": total_tokens,
+                    "active_fraction": float(global_active_mask.float().mean()),
+                    "tp": args.tensor_parallel,
+                    "cp": args.context_parallel,
+                    "entropy_requires_grad": args.rl_entropy_requires_grad,
+                    "timings_ms": timings,
+                    "packed_dense_triton_speedup": timings["legacy-triton-packed"] / timings["combined-triton"],
+                    "packed_sparse_triton_speedup": timings["legacy-triton-packed"] / timings["sparse-triton"],
+                }
+                if "legacy-triton-unpacked" in timings:
+                    result["unpacked_dense_triton_speedup"] = (
+                        timings["legacy-triton-unpacked"] / timings["combined-triton"]
+                    )
+                    result["unpacked_sparse_triton_speedup"] = (
+                        timings["legacy-triton-unpacked"] / timings["sparse-triton"]
+                    )
+                if "legacy-torch-packed" in timings:
+                    result["packed_torch_speedup"] = timings["legacy-torch-packed"] / timings["combined-torch"]
+                    if "legacy-torch-unpacked" in timings:
+                        result["unpacked_torch_speedup"] = timings["legacy-torch-unpacked"] / timings["combined-torch"]
+                print("RL_ENTROPY_RESULT=" + json.dumps(result, sort_keys=True), flush=True)
+        del hidden, weight, target
+        torch.cuda.empty_cache()
+
+    dist.destroy_process_group()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--vocab",
         type=int,
         default=None,
-        help="full vocab; per-rank shard = vocab // world_size",
+        help="full vocab; per-rank shard = vocab // tensor-parallel size",
     )
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--hidden", type=int, default=HIDDEN)
@@ -1292,6 +1831,27 @@ def main() -> None:
         help="compare general entropy with SkyRL's logprob-only specialization",
     )
     parser.add_argument(
+        "--rl-entropy-probe",
+        action="store_true",
+        help="compare separate and combined fused log-prob/entropy for RL masks",
+    )
+    parser.add_argument(
+        "--rl-entropy-requires-grad",
+        action="store_true",
+        help="include the entropy bonus in backward for --rl-entropy-probe",
+    )
+    parser.add_argument(
+        "--narrow-dlogits-tail-probe",
+        action="store_true",
+        help="compare padded and direct-width final d-logits staging",
+    )
+    parser.add_argument(
+        "--block-sparse-backward-span-gaps",
+        type=int,
+        nargs="+",
+        help="benchmark ordered contiguous-span dHidden with these maximum inactive gaps",
+    )
+    parser.add_argument(
         "--block-mask-trace-only",
         action="store_true",
         help="omit synthetic suffix masks from the block-mask probe",
@@ -1308,9 +1868,13 @@ def main() -> None:
         args.tensor_parallel = int(os.environ.get("WORLD_SIZE", "1")) // args.context_parallel
     if (args.mask_trace is None) != (args.mask_trace_datasets is None):
         parser.error("--mask-trace and --mask-trace-datasets must be provided together")
-    probes = (args.autotune_sweep, args.block_mask_probe, args.entropy_specialization_probe)
+    if args.rl_entropy_requires_grad and not args.rl_entropy_probe:
+        parser.error("--rl-entropy-requires-grad requires --rl-entropy-probe")
+    probes = (args.autotune_sweep, args.block_mask_probe, args.entropy_specialization_probe, args.rl_entropy_probe)
     if sum(probes) > 1:
         parser.error("choose only one benchmark probe mode")
+    if args.narrow_dlogits_tail_probe and not args.block_mask_probe:
+        parser.error("--narrow-dlogits-tail-probe requires --block-mask-probe")
     if args.autotune_sweep:
         if args.output_dir is None:
             parser.error("--autotune-sweep requires --output-dir")
@@ -1319,6 +1883,8 @@ def main() -> None:
         _run_block_mask_probe(args)
     elif args.entropy_specialization_probe:
         _run_entropy_specialization_probe(args)
+    elif args.rl_entropy_probe:
+        _run_rl_entropy_probe(args)
     else:
         _run_backend_comparison(args)
 

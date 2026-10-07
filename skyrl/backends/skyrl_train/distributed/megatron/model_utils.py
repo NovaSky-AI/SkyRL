@@ -24,6 +24,7 @@ import megatron.core.parallel_state as mpu
 import torch
 import torch.distributed as dist
 
+from skyrl.backends.skyrl_train.distributed.megatron.active_spans import ActiveSpans
 from skyrl.backends.skyrl_train.utils.packed_tensor import lengths_from_offsets
 from skyrl.train.fused_lm_head import FusedLmHeadBackend
 
@@ -465,6 +466,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             # still happens in fp32.
             grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
 
+        # forward args: hidden, weight, target, vocab_start, vocab_end,
+        # chunk_size, tp_group, inference_only, compute_entropy, entropy_requires_grad
         grads = (grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None, None, None)
         return grads[: len(ctx.needs_input_grad)]
 
@@ -480,6 +483,7 @@ def _fused_lm_head_logprob_apply(
     tp_group: torch.distributed.ProcessGroup,
     inference_only: bool,
     active_mask: Optional[torch.Tensor] = None,
+    active_spans: Optional[ActiveSpans] = None,
     compute_entropy: bool = False,
     entropy_requires_grad: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -488,7 +492,8 @@ def _fused_lm_head_logprob_apply(
     ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; both Triton
     backends use ``FusedLinearLogprobTriton`` when CUDA + triton are available
     and otherwise warn and fall back to torch. Both return TP-combined ``[B, S]``
-    log-probs and, when requested, entropy.
+    log-probs and, when requested, entropy. ``entropy_requires_grad`` keeps the
+    entropy output in the fused backward graph for an RL entropy bonus.
     """
     if entropy_requires_grad and not compute_entropy:
         raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
@@ -502,7 +507,7 @@ def _fused_lm_head_logprob_apply(
 
             if not (TRITON_AVAILABLE and is_cuda_available):
                 raise ImportError("triton is not installed or no CUDA device is available")
-            return FusedLinearLogprobTriton.apply(  # type: ignore[no-any-return]
+            args = (
                 hidden,
                 weight,
                 target,
@@ -511,9 +516,9 @@ def _fused_lm_head_logprob_apply(
                 chunk_size,
                 tp_group,
                 inference_only,
-                active_mask,
-                compute_entropy,
-                entropy_requires_grad,
+            )
+            return FusedLinearLogprobTriton.apply(  # type: ignore[no-any-return]
+                *args, active_mask, active_spans, compute_entropy, entropy_requires_grad
             )
         except (ImportError, RuntimeError) as e:
             warnings.warn(
@@ -787,6 +792,7 @@ def from_parallel_hidden_to_logprobs(
     temperature: float = 1.0,
     fused_backend: str = "torch",
     active_mask: Optional[torch.Tensor] = None,
+    active_spans: Optional[ActiveSpans] = None,
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -801,8 +807,9 @@ def from_parallel_hidden_to_logprobs(
     ``temperature`` scaling is applied by dividing the weight (``hidden @
     (W/T)ᵀ == logits/T``); autograd then chains the ``1/T`` factor onto both
     ``grad_hidden`` and ``grad_weight`` exactly, so the op itself stays
-    temperature-agnostic. ``return_entropy`` reuses the same projection; set
-    ``entropy_requires_grad`` when entropy contributes to the RL loss.
+    temperature-agnostic. ``return_entropy`` reuses that projection and returns
+    entropy alongside the log-probs. Set ``entropy_requires_grad`` for an RL
+    entropy bonus; metric-only callers retain the cheaper no-grad backward.
     """
     if entropy_requires_grad and not return_entropy:
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
@@ -840,6 +847,7 @@ def from_parallel_hidden_to_logprobs(
         tp_group,
         inference_only,
         active_mask,
+        active_spans,
         return_entropy,
         entropy_requires_grad,
     )
@@ -923,6 +931,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     temperature: float = 1.0,
     fused_backend: str = "torch",
     active_mask: Optional[torch.Tensor] = None,
+    active_spans: Optional[ActiveSpans] = None,
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -934,7 +943,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     ``lm_head_weight`` [V//TP, H] instead of logits [1, T//CP, V//TP]).
     ``temperature`` is applied by dividing the weight (see
     ``from_parallel_hidden_to_logprobs``). Optional entropy uses the same packed
-    CP gather and scatter-back layout as log-probs.
+    CP gather and scatter-back layout as log-probs. Set
+    ``entropy_requires_grad`` when entropy contributes to the RL loss.
     """
     if entropy_requires_grad and not return_entropy:
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
@@ -993,6 +1003,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         group,
         inference_only,
         active_mask,
+        active_spans,
         return_entropy,
         entropy_requires_grad,
     )
