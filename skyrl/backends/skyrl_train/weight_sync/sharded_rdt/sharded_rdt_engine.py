@@ -52,6 +52,7 @@ NOTE: vLLM natively has the same RDT engine in >=0.29. However, we retain this
 in SkyRL for faster iteration on improvements.
 """
 
+import functools
 import time
 from dataclasses import dataclass, field
 from math import prod
@@ -339,6 +340,9 @@ class SkyRLShardedRDTWeightTransferEngine(
         # fused module share one entry; replay dedups. A live name absent here
         # fails the plan build.
         self._name_to_plan: dict[str, list[_Scatter]] = {}
+        # leaf module -> [(param_name, fn)]: the post-load transforms of params
+        # whose loader is a ``composed_weight_loader`` (see _composed_post_fn).
+        self._post_load_fns: dict[Any, list[tuple[str, Any]]] = {}
         # name -> (dtype_name, shape) for every init name; the bake builds its
         # lazies from this.
         self._name_meta: dict[str, tuple[str, list[int]]] = {}
@@ -887,6 +891,13 @@ class SkyRLShardedRDTWeightTransferEngine(
         self._live_names = set(recorder.copied_names)
 
         n_groups = len({id(g) for g in self._name_to_plan.values()})
+        if self._post_load_fns:
+            logger.info(
+                "Sharded RDT: %d param(s) carry a composed post-load transform, re-applied after "
+                "each sync's scatter (e.g. %s)",
+                sum(len(v) for v in self._post_load_fns.values()),
+                next(f"{type(m).__name__}.{n}" for m, v in self._post_load_fns.items() for n, _ in v),
+            )
         logger.info(
             "Sharded RDT dry-run baked %d/%d names into %d leaf modules " "(%d live) in %.3fs",
             len(self._name_to_plan),
@@ -941,6 +952,9 @@ class SkyRLShardedRDTWeightTransferEngine(
                     continue
                 # Bypass online_process_loader: stamp the *original* loader.
                 original = _get_original_loader(tensor)
+                post_fn = _composed_post_fn(original)
+                if post_fn is not None:
+                    self._post_load_fns.setdefault(module, []).append((name, post_fn))
                 tensor.weight_loader = _make_stamp(module, name, original)
 
     def _restore_after_dry_run(self, model: torch.nn.Module) -> None:
@@ -1389,6 +1403,13 @@ class SkyRLShardedRDTWeightTransferEngine(
             for layer in layers:
                 info = LAYERWISE_INFO.get(layer)
                 assert info is not None  # completed leaf module is set up for reload
+                # The replay copies checkpoint bytes and never runs the loader, so
+                # a composed loader's post-step must be re-run here, once the
+                # module's last scatter has landed -- exactly what
+                # ``composed_loader`` does after its inner copy.
+                for pname, fn in self._post_load_fns.get(layer, ()):
+                    param = getattr(layer, pname)
+                    param.data.copy_(fn(param))
                 quant_method = getattr(layer, "quant_method", None)
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(layer, "_already_called_process_weights_after_loading"):
@@ -1450,6 +1471,60 @@ class SkyRLShardedRDTWeightTransferEngine(
         # Release the receive buffers (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_buffers = [{} for _ in range(self._ring_depth)]
+
+
+def _composed_post_fn(loader: Any) -> Any:
+    """The post-load transform of a vLLM ``composed_weight_loader``, or None.
+
+    ``composed_weight_loader(loader, fn)`` runs ``loader`` and then
+    ``param.data.copy_(fn(param))`` -- Mamba2 loads ``A`` this way, as
+    ``-exp(A_log)``. During the bake ``param`` is a meta tensor, not a
+    ``FakeRDTTensor``, so ``fn`` records nothing: only the inner copy of the raw
+    checkpoint slice is baked. Replaying that alone lands ``A_log`` in ``A``,
+    which silently breaks every SSM layer (positive ``A``: the state grows instead
+    of decaying, and generations stop terminating). ``fn`` is recovered from the
+    closure so the replay can re-apply it.
+
+    Recognition is by identity against a probe built from the installed vLLM (see
+    ``_composed_loader_probe``), not by function or variable name, so a rename
+    upstream cannot quietly bring the bug back.
+    """
+    code, fn_cell = _composed_loader_probe()
+    if getattr(loader, "__code__", None) is not code:
+        return None
+    return loader.__closure__[fn_cell].cell_contents
+
+
+@functools.lru_cache(maxsize=None)
+def _composed_loader_probe() -> "tuple[Any, int]":
+    """``(code object, closure index of fn)`` of the installed vLLM's composed loaders.
+
+    Found by composing two sentinels and locating the sentinel ``fn`` in the
+    result's closure. Raises if vLLM no longer builds composed loaders as a
+    closure over ``fn``: this engine could then no longer see their post-load
+    transforms, and baking anyway would silently corrupt every param loaded that
+    way. Fail loudly instead.
+    """
+    from vllm.model_executor.model_loader.weight_utils import composed_weight_loader
+
+    def sentinel_loader(param, loaded_weight):  # pragma: no cover - never called
+        return None
+
+    def sentinel_fn(x):  # pragma: no cover - never called
+        return x
+
+    probe = composed_weight_loader(sentinel_loader, sentinel_fn)
+    code = getattr(probe, "__code__", None)
+    cells = [c.cell_contents for c in (getattr(probe, "__closure__", None) or ())]
+    fn_cell = next((i for i, c in enumerate(cells) if c is sentinel_fn), None)
+    if code is None or fn_cell is None:
+        raise RuntimeError(
+            "Sharded RDT: vLLM's composed_weight_loader no longer returns a closure over its "
+            f"post-load fn (got {type(probe).__name__}), so the bake cannot recover the transforms "
+            "it applies after loading (e.g. Mamba2's A = -exp(A_log)). Update _composed_post_fn "
+            "for this vLLM before using sharded_rdt."
+        )
+    return code, fn_cell
 
 
 def _plan_digest(keys_per_chunk: list) -> str:

@@ -1401,3 +1401,119 @@ class TestRequiresTheRayExecutor:
             pass
 
         self._construct(_CustomExecutor)
+
+
+class TestComposedPostLoadTransform:
+    """A ``composed_weight_loader(loader, fn)`` runs ``loader`` and then
+    ``param.data.copy_(fn(param))``. Mamba2 loads ``A`` this way, as
+    ``-exp(A_log)``. The bake records only the inner copy (``param`` is a meta
+    tensor, not a fake, so ``fn`` is invisible to it), so the replay must
+    re-apply ``fn`` itself -- or ``A_log`` lands in ``A`` and every SSM layer
+    silently diverges (Nemotron-H stops terminating its generations)."""
+
+    @staticmethod
+    def _mamba_a_loader():
+        from vllm.model_executor.model_loader.weight_utils import (
+            composed_weight_loader,
+            sharded_weight_loader,
+        )
+
+        # Verbatim from vllm/model_executor/layers/mamba/mamba_mixer2.py.
+        return composed_weight_loader(sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
+
+    def test_the_post_fn_is_recovered_from_a_composed_loader(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
+            _composed_post_fn,
+        )
+
+        fn = _composed_post_fn(self._mamba_a_loader())
+        a_log = torch.tensor([0.0, 1.0, 2.0])
+        assert fn is not None
+        assert torch.allclose(fn(a_log), -torch.exp(a_log))
+
+    def test_plain_loaders_carry_no_post_fn(self):
+        from vllm.model_executor.model_loader.weight_utils import (
+            default_weight_loader,
+            sharded_weight_loader,
+        )
+
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
+            _composed_post_fn,
+        )
+
+        assert _composed_post_fn(default_weight_loader) is None
+        assert _composed_post_fn(sharded_weight_loader(0)) is None
+        assert _composed_post_fn(None) is None
+
+    def test_recognition_survives_a_rename_of_the_loader(self):
+        """Matched by code identity, not ``__name__``: a renamed composed loader
+        still has its transform recovered."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_engine import (
+            _composed_post_fn,
+        )
+
+        loader = self._mamba_a_loader()
+        loader.__name__ = "renamed_upstream"
+        assert _composed_post_fn(loader) is not None
+
+    def test_an_unrecognizable_composed_loader_fails_the_bake_loudly(self, monkeypatch):
+        """If vLLM stops building composed loaders as a closure over ``fn``, the
+        transforms become invisible: refuse rather than silently corrupt."""
+        import functools
+
+        import vllm.model_executor.model_loader.weight_utils as weight_utils
+
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
+            sharded_rdt_engine,
+        )
+
+        def partial_composed(loader, fn):
+            return functools.partial(lambda loader, fn, param, w: None, loader, fn)
+
+        monkeypatch.setattr(weight_utils, "composed_weight_loader", partial_composed)
+        sharded_rdt_engine._composed_loader_probe.cache_clear()
+        try:
+            with pytest.raises(RuntimeError, match="no longer returns a closure"):
+                sharded_rdt_engine._composed_post_fn(lambda param, w: None)
+        finally:
+            monkeypatch.undo()
+            sharded_rdt_engine._composed_loader_probe.cache_clear()
+
+    def test_the_bake_records_only_the_raw_copy(self):
+        """The reason the replay must re-apply ``fn``: driving the composed loader
+        against a meta param records one scatter of the RAW source slice."""
+        rec = BakeSink()
+        fake = FakeRDTTensor(name="A_log", shape=torch.Size((4,)), dtype=torch.float32, device=META, sink=rec)
+        layer = _FakeLayer("mixer")
+        param = torch.empty((4,), dtype=torch.float32, device=META)
+        rec.current = (layer, "A")
+        from vllm.model_executor.model_loader.weight_utils import (
+            composed_weight_loader,
+            default_weight_loader,
+        )
+
+        # default_weight_loader for the inner copy: sharded_weight_loader reads
+        # the TP group, which a CPU test has none of. The composition is the same.
+        composed_weight_loader(default_weight_loader, lambda x: -torch.exp(x.float()))(param, fake)
+
+        (recorded,) = rec.copies_by_layer[layer]
+        assert recorded.src == ("A_log", ())  # no trace of -exp in the chain
+
+    def test_stamping_captures_the_post_fn_per_module_param(self):
+        eng = object.__new__(SkyRLShardedRDTWeightTransferEngine)
+        eng._post_load_fns = {}
+
+        mixer = torch.nn.Module()
+        mixer.A = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+        mixer.D = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+        mixer.A.weight_loader = self._mamba_a_loader()
+        root = torch.nn.Module()
+        root.mixer = mixer
+
+        eng._install_recording_stamps(root, BakeSink())
+        try:
+            (captured,) = eng._post_load_fns[mixer]
+            assert captured[0] == "A"
+            assert torch.allclose(captured[1](torch.ones(2)), -torch.exp(torch.ones(2)))
+        finally:
+            eng._restore_after_dry_run(root)
