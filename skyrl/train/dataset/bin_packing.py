@@ -267,8 +267,6 @@ class ModifiedFirstFitDecreasing(SeqPacker):
             raise ValueError("bin_capacity must be positive")
         if any(length <= 0 for length in sequence_lengths):
             raise ValueError("sequence lengths must be positive")
-        self._validate_sequence_lengths(sequence_lengths)
-
         items = list(enumerate(sequence_lengths))
         large, medium, small, tiny = self._classify_items(items)
         large.sort(key=lambda item: item[1], reverse=True)

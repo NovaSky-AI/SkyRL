@@ -112,6 +112,13 @@ class TestPackingCollator:
         wide = _make_collator(num_gpus=1, batch_size=4, max_length=128, max_tokens_per_microbatch=256)
         assert wide(examples, batch_size=4).batch_size == 2
 
+    def test_aligned_singleton_can_exceed_token_budget(self):
+        collator = _make_collator(num_gpus=2, batch_size=2, max_length=101, cp=2, max_tokens_per_microbatch=101)
+        batch = collator([_make_example(101, 10), _make_example(3, 2)], batch_size=2)
+
+        assert sorted(row.tolist() for row in batch["sub_seq_lengths"]) == [[3], [101]]
+        assert batch["sequences"].shape[1] == 104
+
     def test_all_examples_included(self):
         collator = _make_collator(num_gpus=2, batch_size=4)
         examples = [_make_example(20, 10, base_token=100 + 100 * i) for i in range(4)]
