@@ -1517,3 +1517,57 @@ class TestComposedPostLoadTransform:
             assert torch.allclose(captured[1](torch.ones(2)), -torch.exp(torch.ones(2)))
         finally:
             eng._restore_after_dry_run(root)
+
+    def test_rebaking_applies_the_transform_once(self):
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            record_metadata_for_reloading,
+        )
+        from vllm.model_executor.model_loader.weight_utils import (
+            composed_weight_loader,
+            default_weight_loader,
+        )
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.A = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+                self.A.weight_loader = composed_weight_loader(default_weight_loader, lambda x: -torch.exp(x.float()))
+
+            def load_weights(self, weights):
+                for _, weight in weights:
+                    self.A.weight_loader(self.A, weight)
+
+        model = _Model()
+        record_metadata_for_reloading(model)
+        eng = object.__new__(SkyRLShardedRDTWeightTransferEngine)
+        eng.model = model
+        eng.device = torch.device("cpu")
+        eng._name_to_plan = {}
+        eng._post_load_fns = {}
+        init_info = SkyRLShardedRDTWeightTransferInitInfo(names=["A_log"], dtype_names=["float32"], shapes=[[4]])
+        a_log = torch.arange(4, dtype=torch.float32)
+
+        for _ in range(2):
+            eng._bake(init_info)
+            model.A.data.copy_(a_log)
+            for name, fn in eng._post_load_fns[model]:
+                param = model.get_parameter(name)
+                param.data.copy_(fn(param))
+            torch.testing.assert_close(model.A, -torch.exp(a_log))
+
+    def test_shutdown_releases_modules_with_post_load_transforms(self):
+        import gc
+        import weakref
+
+        cfg = SimpleNamespace(parallel_config=SimpleNamespace(distributed_executor_backend="ray"), model_config=None)
+        eng = SkyRLShardedRDTWeightTransferEngine(None, cfg, torch.device("cpu"), None)
+        mixer = torch.nn.Module()
+        mixer_ref = weakref.ref(mixer)
+        eng._name_to_plan["A_log"] = [_copy("A_log", layer=mixer)]
+        eng._post_load_fns[mixer] = [("A", lambda x: -torch.exp(x.float()))]
+        del mixer
+
+        eng.shutdown()
+        gc.collect()
+
+        assert mixer_ref() is None
