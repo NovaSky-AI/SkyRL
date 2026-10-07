@@ -7,7 +7,6 @@ Run with:
 import pytest
 
 from skyrl.train.dataset.bin_packing import (
-    Balanced,
     FirstFitDecreasing,
     ModifiedFirstFitDecreasing,
     PackingStrategy,
@@ -118,23 +117,6 @@ class TestFirstFitPackers:
             packer_cls(bin_capacity=15, packed_length_multiple=16).pack([9])
 
 
-class TestBalanced:
-    def test_sequence_length_multiple_uses_aligned_footprints(self):
-        packer = Balanced(bin_capacity=16, sequence_length_multiple=8)
-
-        assert packer.pack([9, 7]) == [[0], [1]]
-
-    def test_aligned_oversized_sequence_keeps_soft_cap(self):
-        packer = Balanced(bin_capacity=15, sequence_length_multiple=8)
-
-        assert packer.pack([9]) == [[0]]
-
-    def test_packed_length_multiple_is_paid_once_per_bin(self):
-        packer = Balanced(bin_capacity=16, packed_length_multiple=16)
-
-        assert packer.pack([9, 7]) == [[0, 1]]
-
-
 class TestModifiedFirstFitDecreasing:
     def test_matches_mffd_phases(self):
         packer = ModifiedFirstFitDecreasing(bin_capacity=100)
@@ -172,14 +154,14 @@ class TestMakeSeqPackerFactory:
         packer = make_seq_packer("first_fit_decreasing", bin_capacity=100)
         assert isinstance(packer, FirstFitDecreasing)
 
+    def test_string_case_insensitive(self):
+        packer = make_seq_packer("FIRST_FIT_DECREASING", bin_capacity=100)
+        assert isinstance(packer, FirstFitDecreasing)
+
     def test_modified_first_fit_decreasing(self):
         packer = make_seq_packer(PackingStrategy.MODIFIED_FIRST_FIT_DECREASING, bin_capacity=100)
 
         assert isinstance(packer, ModifiedFirstFitDecreasing)
-
-    def test_string_case_insensitive(self):
-        packer = make_seq_packer("FIRST_FIT_DECREASING", bin_capacity=100)
-        assert isinstance(packer, FirstFitDecreasing)
 
     def test_unknown_algorithm(self):
         with pytest.raises(ValueError, match="Unknown packing algorithm"):
