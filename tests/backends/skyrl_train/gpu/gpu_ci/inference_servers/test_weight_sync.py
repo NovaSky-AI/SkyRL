@@ -67,6 +67,7 @@ class WeightSyncTrainerBase:
             weight_sync_backend=weight_sync_backend,
             model_dtype="bfloat16",
             weight_transfer_threshold_cuda_ipc_GB=1.0,
+            speculative_config=None,
         )
         self._colocate_all = colocate_all
         self._server_urls = list(server_urls)
