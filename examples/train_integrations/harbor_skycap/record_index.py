@@ -600,7 +600,10 @@ def _move_record(row: Dict[str, Any], downloaded: Path, out: Path, label: str, s
         return
     names = _record_files(row)
     if not names:
-        summary.local_only.append(label)
+        from skycap import RecordLocation
+
+        # Not in the mirror: say where it is, `host:path`, for whoever wants to fetch it from that node.
+        summary.local_only.append(f"{label} at {RecordLocation.from_json(record).local}")
         return
     absent = [name for name in names if not (downloaded / name).is_file()]
     if absent:

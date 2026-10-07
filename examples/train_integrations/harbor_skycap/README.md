@@ -129,7 +129,8 @@ skycap-viewer ./run-records
 
 It fails open per record: a record whose files W&B can't fetch is reported as
 missing and left out whole, and the rest are pulled. Local-only records (no
-mirror) are in the index but have nothing to pull, and are reported as such.
+mirror) are in the index but have nothing to pull; the summary names where each
+is, `host:path` on the node that wrote it, for fetching it from there.
 A file already in the directory and identical is left alone, so pulling again,
 or pulling more versions into the same directory, only adds what is new. The
 command prints a summary (versions, records, missing, local-only) and exits

@@ -33,6 +33,7 @@ def row(trajectory_id, *, files=("tokens", "json"), mirror=True, attempt=0):
         "superseded": False,
         "trained": True,
         "record": {
+            "host": "10.0.0.5",
             "path": f"/data/record/{document}",
             "mirror": f"{MIRROR}/{document}" if mirror else None,
             "files": names,
@@ -122,7 +123,8 @@ def test_an_alias_pulls_that_version_as_a_record_directory(tmp_path: Path) -> No
     # A local-only record is indexed, with nothing to pull.
     assert summary.versions == ["skycap-records-train-run-1:v1"]
     assert (summary.records, summary.files, summary.unchanged) == (2, 5, 0)
-    assert summary.local_only == ["skycap-records-train-run-1:v1/tr_c"] and summary.missing == []
+    assert summary.local_only == ["skycap-records-train-run-1:v1/tr_c at 10.0.0.5:/data/record/tr_c.json.zst"]
+    assert summary.missing == []
     # Nothing of the scratch directory is left.
     assert sorted(path.name for path in out.iterdir() if path.is_dir()) == ["index"]
 
