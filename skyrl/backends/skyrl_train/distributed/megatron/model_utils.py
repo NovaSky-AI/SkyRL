@@ -824,6 +824,8 @@ def from_parallel_hidden_to_logprobs(
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     pad_len = hidden.shape[1] * cp_size - target.shape[1]
+    if active_spans is not None and (pad_len != 0 or cp_size != 1):
+        raise ValueError("Unpacked active_spans require an unpadded sequence and CP size 1")
     if pad_len > 0:
         target = torch.nn.functional.pad(target, (0, pad_len), value=0)
 
