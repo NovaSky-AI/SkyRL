@@ -24,9 +24,12 @@ after the first frame without raising an error. The reader gets only the first
 chunk of the data and has no sign that anything is missing. To change a file,
 rewrite the whole file as a single frame.
 A trajectory is not partially written when it is live, it is only written when it ends.
-Sidecars are written before the document, and every file is written to a
-temporary name and renamed, so a document that exists always has the sidecars
-its `sidecars` field lists.
+Each document has a `sidecars` field naming the sidecar files that belong to
+it. The writer writes those sidecars before the document, and writes every file
+under a temporary name and then renames it, so no file is ever seen
+half-written. If a document exists, every sidecar named in its `sidecars` field
+exists too. A crash can leave sidecars with no document, but never a document
+with a missing sidecar.
 A reader lists trajectories by listing `*.json.zst`.
 
 ## The document
