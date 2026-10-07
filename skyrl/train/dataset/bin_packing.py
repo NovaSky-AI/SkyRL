@@ -263,11 +263,14 @@ class ModifiedFirstFitDecreasing(SeqPacker):
         bin_lengths = [item[1] for item in large]
 
         for bin_index, bin_items in enumerate(bins):
-            for index, item in enumerate(medium):
-                if self._fits(bin_lengths[bin_index], item):
-                    bin_items.append(medium.pop(index))
-                    bin_lengths[bin_index] += item[1]
-                    break
+            medium_index = next(
+                (index for index, item in enumerate(medium) if self._fits(bin_lengths[bin_index], item)),
+                None,
+            )
+            if medium_index is not None:
+                item = medium.pop(medium_index)
+                bin_items.append(item)
+                bin_lengths[bin_index] += item[1]
 
         for bin_index in range(len(bins) - 1, -1, -1):
             bin_items = bins[bin_index]
@@ -284,8 +287,8 @@ class ModifiedFirstFitDecreasing(SeqPacker):
                 None,
             )
             if second_index is not None:
+                second_small = small.pop(second_index)
                 first_small = small.pop(0)
-                second_small = small.pop(second_index - 1)
                 bin_items.extend((first_small, second_small))
                 bin_lengths[bin_index] += first_small[1] + second_small[1]
 
