@@ -49,9 +49,13 @@ class TestFirstFitPackers:
         bins = packer.pack(lengths)
         assert len(bins) == 3
 
-    def test_overflow_raises(self, packer_cls):
-        with pytest.raises(ValueError, match="exceeds bin capacity"):
-            packer_cls(bin_capacity=100).pack([150])
+    def test_oversized_singleton(self, packer_cls):
+        packer = packer_cls(bin_capacity=100)
+        if packer_cls is ModifiedFirstFitDecreasing:
+            assert packer.pack([150]) == [[0]]
+        else:
+            with pytest.raises(ValueError, match="exceeds bin capacity"):
+                packer.pack([150])
 
     def test_min_bin_count(self, packer_cls):
         # min_bin_count forces extra empty (then redistributed) bins.
@@ -103,9 +107,13 @@ class TestFirstFitPackers:
 
         assert packer.pack([9, 7]) == [[0], [1]]
 
-    def test_aligned_oversized_sequence_raises(self, packer_cls):
-        with pytest.raises(ValueError, match="exceeds bin capacity"):
-            packer_cls(bin_capacity=15, sequence_length_multiple=8).pack([9])
+    def test_aligned_oversized_singleton(self, packer_cls):
+        packer = packer_cls(bin_capacity=15, sequence_length_multiple=8)
+        if packer_cls is ModifiedFirstFitDecreasing:
+            assert packer.pack([9]) == [[0]]
+        else:
+            with pytest.raises(ValueError, match="exceeds bin capacity"):
+                packer.pack([9])
 
     def test_packed_length_multiple_is_paid_once_per_bin(self, packer_cls):
         packer = packer_cls(bin_capacity=16, packed_length_multiple=16)
@@ -113,8 +121,12 @@ class TestFirstFitPackers:
         assert packer.pack([9, 7]) == [[0, 1]]
 
     def test_aggregate_padding_can_make_sequence_oversized(self, packer_cls):
-        with pytest.raises(ValueError, match="exceeds bin capacity"):
-            packer_cls(bin_capacity=15, packed_length_multiple=16).pack([9])
+        packer = packer_cls(bin_capacity=15, packed_length_multiple=16)
+        if packer_cls is ModifiedFirstFitDecreasing:
+            assert packer.pack([9]) == [[0]]
+        else:
+            with pytest.raises(ValueError, match="exceeds bin capacity"):
+                packer.pack([9])
 
 
 class TestModifiedFirstFitDecreasing:
