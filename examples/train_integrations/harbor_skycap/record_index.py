@@ -70,7 +70,7 @@ class RecordEntry:
     status: Optional[str] = None
     #: What the trajectory was finished with (e.g. the reward).
     annotations: Optional[Dict[str, Any]] = None
-    #: ``FinishResult.record``: ``{"path", "mirror", "files"}``, or None when skycap wrote no record.
+    #: ``FinishResult.record``: ``{"host", "path", "mirror", "files"}``, or None when skycap wrote no record.
     record: Optional[Dict[str, Any]] = None
 
 
@@ -90,6 +90,7 @@ class RecordLog:
         location = None
         if result is not None and result.record is not None:
             location = {
+                "host": result.record.host,
                 "path": result.record.path,
                 "mirror": result.record.mirror,
                 "files": list(result.record.files),

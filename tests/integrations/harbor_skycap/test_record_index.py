@@ -17,10 +17,8 @@ pytest.importorskip("skycap")
 pytest.importorskip("harbor")
 
 import fsspec  # noqa: E402
-import orjson  # noqa: E402
 import pytest_asyncio  # noqa: E402
 import torch  # noqa: E402
-import zstandard  # noqa: E402
 from loguru import logger  # noqa: E402
 
 from examples.train_integrations.harbor_skycap import record_index  # noqa: E402
@@ -136,7 +134,9 @@ async def make_generator(skycap):
     def make(records, service=None) -> HarborSkycapGenerator:
         url = (service or skycap).url
         made.append(
-            HarborSkycapGenerator(generator_cfg(), harbor_cfg(), [url], SimpleNamespace(weight_version=7), records)
+            HarborSkycapGenerator(
+                generator_cfg(), harbor_cfg(), [url], SimpleNamespace(weight_version=7), records=records
+            )
         )
         return made[-1]
 
@@ -196,7 +196,14 @@ async def test_a_step_is_one_version_however_many_generate_calls_it_took(skycap,
     # Without a mirror, files are the record directory's, sidecars first.
     on_disk = [path.name for path in skycap_record.record_files(record_dir, linear["id"])]
     assert f"{linear['id']}.sampling_mask.zst" in on_disk
-    assert linear["record"] == {"path": str(record_dir / name), "mirror": None, "files": on_disk}
+    assert linear["record"] == {
+        "host": linear["record"]["host"],
+        "path": str(record_dir / name),
+        "mirror": None,
+        "files": on_disk,
+    }
+    # A local-only record names the machine it is on, so a head node can reach it.
+    assert linear["record"]["host"]
     # Local-only records are indexed, never uploaded.
     assert artifact.references == [] and set(artifact.files) == {"step.json"}
     assert artifact.metadata == {
@@ -251,17 +258,23 @@ async def test_mirrored_records_are_referenced_not_copied(router, tmp_path, tria
     # files are the mirror's: the excluded experts sidecar is on disk but not listed.
     files = [f"{row['id']}.tokens.zst", name]
     assert (local / f"{row['id']}.experts.zst").exists()
-    assert row["record"] == {"path": str(local / name), "mirror": f"{mirror}/{name}", "files": files}
+    assert row["record"] == {
+        "host": service.server.record_host,
+        "path": str(local / name),
+        "mirror": f"{mirror}/{name}",
+        "files": files,
+    }
+    assert row["record"]["host"]  # the node the record is on, so a head node can reach it
     # One reference per file, each to the file beside the mirrored document.
     assert artifact.references == [(f"{mirror}/{file}", f"records/{file}", False) for file in files]
     assert set(artifact.files) == {"step.json"}
     assert artifact.metadata["num_referenced"] == 2 and artifact.metadata["num_mirrored"] == 1
     fs = fsspec.filesystem("memory")
     assert all(fs.exists(uri) for uri, _, _ in artifact.references)
-    # The mirror config reached the server: its copy left the routed experts out, and says so.
+    # The mirror config reached the server: the mirror holds no experts sidecar, and the document is unchanged.
+    assert not fs.exists(f"{mirror}/{row['id']}.experts.zst")
     with fsspec.open(f"{mirror}/{name}", "rb") as handle:
-        mirrored = orjson.loads(zstandard.ZstdDecompressor().decompressobj().decompress(handle.read()))
-    assert mirrored["omitted_sidecars"] == ["experts"] and "experts" not in mirrored["sidecars"]
+        assert handle.read() == (local / name).read_bytes()
     # Without the batch's trajectory ids the trainer said nothing about what trained.
     assert row["trained"] is None
 
