@@ -400,6 +400,7 @@ def _raw_launch(module, shape: AutotuneLocalShape, buffers, spec):
         BLOCK_SIZE_N=block_n,
         BLOCK_SIZE_K=block_k,
         USE_TMA=module.SUPPORT_CUDA_TMA,
+        COMPUTE_ENTROPY=True,
         INPUT_PRECISION="tf32",
         num_stages=num_stages,
         num_warps=num_warps,
@@ -415,6 +416,7 @@ def _autotuned_launch(module, shape: AutotuneLocalShape, buffers):
     module.efficient_entropy_kernel_general_mainloop[grid](
         *_kernel_args(module, shape, buffers),
         USE_TMA=module.SUPPORT_CUDA_TMA,
+        COMPUTE_ENTROPY=True,
         INPUT_PRECISION="tf32",
     )
 
