@@ -17,6 +17,7 @@ import torch
 from megatron.core.transformer.hyper_connection import HyperConnectionModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 
 class RMSNormInputHyperConnectionModule(HyperConnectionModule):
@@ -61,45 +62,22 @@ def _proj_rms_fp32(x: Tensor, weight: Tensor, eps: float, eps_inside_sqrt: bool)
     return proj, r
 
 
+def _proj_rms_from_input_dtype(x: Tensor, weight: Tensor, eps: float, eps_inside_sqrt: bool) -> Tuple[Tensor, Tensor]:
+    return _proj_rms_fp32(x.to(torch.float32), weight.to(torch.float32), eps, eps_inside_sqrt)
+
+
 def proj_rms_saving_input_dtype(
     x: Tensor, weight: Tensor, eps: float = 1e-6, eps_inside_sqrt: bool = False
 ) -> Tuple[Tensor, Tensor]:
     """``native_proj_rms(x.float(), weight.float(), eps, eps_inside_sqrt)`` without keeping ``x.float()``.
 
     Same signature as #7521's ``native_proj_rms`` (its ``_proj_rms_op``), but takes ``x`` in the
-    activation dtype and upcasts inside. Plain autograd keeps the ``[tokens, n * hidden]`` FP32
-    upcast of every mHC site's input for the layer's lifetime (2 GiB per site at 32k tokens per
-    rank for GLM-5.3-Flash); this saves only ``x`` itself -- a view of the residual stream, alive
-    anyway -- and redoes the FP32 math under autograd in backward, so outputs and gradients are
+    activation dtype. Plain autograd keeps the ``[tokens, n * hidden]`` FP32 upcast of every mHC
+    site's input for backward (2 GiB per site at 32k tokens per rank for GLM-5.3-Flash).
+    Checkpointing the upcast together with the math saves only ``x`` itself -- a view of the
+    residual stream, alive anyway -- and reruns both in backward, so outputs and gradients are
     bitwise those of the plain version, for one extra (n^2 + 2n)-column projection per site.
     """
-    return _ProjectionAndRMSNorm.apply(x, weight, eps, eps_inside_sqrt)
-
-
-class _ProjectionAndRMSNorm(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: Tensor, weight: Tensor, eps: float, eps_inside_sqrt: bool) -> Tuple[Tensor, Tensor]:
-        ctx.save_for_backward(x, weight)
-        ctx.eps, ctx.eps_inside_sqrt = eps, eps_inside_sqrt
-        ctx.set_materialize_grads(False)  # an unused output's grad stays None, as in plain autograd
-        return _proj_rms_fp32(x.to(torch.float32), weight.to(torch.float32), eps, eps_inside_sqrt)
-
-    @staticmethod
-    def backward(ctx, grad_proj: Tensor, grad_r: Tensor):
-        x, weight = ctx.saved_tensors
-        need_x, need_w = ctx.needs_input_grad[:2]
-        with torch.enable_grad():
-            x_in = x.detach().requires_grad_(need_x)
-            w_in = weight.detach().requires_grad_(need_w)
-            outs = _proj_rms_fp32(x_in.to(torch.float32), w_in.to(torch.float32), ctx.eps, ctx.eps_inside_sqrt)
-            pairs = [(o, g) for o, g in zip(outs, (grad_proj, grad_r)) if g is not None]
-            inputs = [t for t in (x_in, w_in) if t.requires_grad]
-            grads = (
-                torch.autograd.grad([o for o, _ in pairs], inputs, [g for _, g in pairs], allow_unused=True)
-                if pairs and inputs
-                else [None] * len(inputs)
-            )
-        grads = iter(grads)
-        grad_x = next(grads) if need_x else None
-        grad_w = next(grads) if need_w else None
-        return grad_x, grad_w, None, None
+    return checkpoint(
+        _proj_rms_from_input_dtype, x, weight, eps, eps_inside_sqrt, use_reentrant=False, preserve_rng_state=False
+    )
