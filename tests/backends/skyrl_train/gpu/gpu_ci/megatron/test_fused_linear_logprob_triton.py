@@ -137,6 +137,10 @@ def test_all_triton_entrypoints_use_bucketed_cached_autotune() -> None:
     for name in autotune_decorators:
         keywords = {keyword.arg: keyword.value for keyword in jit_decorators[name].keywords}
         assert "num_tokens" in ast.literal_eval(keywords["do_not_specialize"])
+    backward_jit = jit_decorators["efficient_entropy_backward_kernel_general_d_logits_split_N"]
+    backward_keywords = {keyword.arg: keyword.value for keyword in backward_jit.keywords}
+    backward_runtime_values = ast.literal_eval(backward_keywords["do_not_specialize"])
+    assert {"split_width", "split_width_bucket"} <= set(backward_runtime_values)
 
 
 def test_skyrl_adapter_gates_entropy_work() -> None:
@@ -209,6 +213,7 @@ def _direct_fused_logprobs(
     chunk_size,
     grad_seed,
     active_mask=None,
+    active_spans=None,
 ):
     """Run the Triton Function on already-shifted targets."""
     leaf_h = hidden.detach().clone().requires_grad_(True)
@@ -223,48 +228,14 @@ def _direct_fused_logprobs(
         dist.group.WORLD,
         False,
     )
-    lp = (
-        FusedLinearLogprobTriton.apply(*args, active_mask)
-        if active_mask is not None
-        else FusedLinearLogprobTriton.apply(*args)
-    )
+    if active_spans is not None:
+        lp = FusedLinearLogprobTriton.apply(*args, active_mask, active_spans)
+    elif active_mask is not None:
+        lp = FusedLinearLogprobTriton.apply(*args, active_mask)
+    else:
+        lp = FusedLinearLogprobTriton.apply(*args)
     lp.backward(grad_seed.clone())
     return lp.detach(), leaf_h.grad.detach(), leaf_w.grad.detach()
-
-
-def test_adapter_entropy_loss_gradients_match_materialized_reference() -> None:
-    device = torch.device("cuda")
-    num_tokens, hidden_size, vocab_size = 257, 128, 2048
-    generator = torch.Generator(device=device).manual_seed(123)
-    hidden = torch.randn(1, num_tokens, hidden_size, dtype=torch.float32, device=device, generator=generator)
-    weight = (
-        torch.randn(vocab_size, hidden_size, dtype=torch.float32, device=device, generator=generator)
-        * hidden_size**-0.5
-    )
-    target = torch.randint(0, vocab_size, (1, num_tokens), device=device, generator=generator)
-
-    leaf_hidden = hidden.clone().requires_grad_(True)
-    leaf_weight = weight.clone().requires_grad_(True)
-    logprobs, entropy = FusedLinearLogprobTriton.apply(
-        leaf_hidden, leaf_weight, target, 0, vocab_size, num_tokens, None, False, None, True, True
-    )
-    logprob_seed = torch.linspace(0.5, 1.5, num_tokens, device=device).unsqueeze(0)
-    entropy_seed = torch.linspace(-0.25, 0.75, num_tokens, device=device).unsqueeze(0)
-    ((logprobs * logprob_seed).sum() + (entropy * entropy_seed).sum()).backward()
-
-    reference_hidden = hidden.clone().requires_grad_(True)
-    reference_weight = weight.clone().requires_grad_(True)
-    reference_logits = reference_hidden @ reference_weight.T
-    reference_log_probs = torch.log_softmax(reference_logits, dim=-1)
-    reference_selected = reference_log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
-    reference_entropy = -(reference_log_probs.exp() * reference_log_probs).sum(dim=-1)
-    ((reference_selected * logprob_seed).sum() + (reference_entropy * entropy_seed).sum()).backward()
-
-    assert entropy.requires_grad
-    torch.testing.assert_close(logprobs, reference_selected, atol=2e-3, rtol=2e-3)
-    torch.testing.assert_close(entropy, reference_entropy, atol=2e-3, rtol=2e-3)
-    torch.testing.assert_close(leaf_hidden.grad, reference_hidden.grad, atol=3e-3, rtol=3e-3)
-    torch.testing.assert_close(leaf_weight.grad, reference_weight.grad, atol=3e-3, rtol=3e-3)
 
 
 def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_size, active_mask=None):
@@ -344,12 +315,16 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, with_active
         # Keep target shifting out of the kernel-under-test.
         target_shifted = target.roll(shifts=-1, dims=-1)
         active_mask = None
+        active_spans = None
         if with_active_mask:
             # Covers two fully inactive BLOCK_M=128 tiles, a partial tile, and
             # dense active tiles for every production forward schedule.
             active_mask = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
             active_mask.reshape(-1)[:256] = False
             active_mask.reshape(-1)[300:332] = False
+            # The 32-row inactive gap is deliberately retained inside the
+            # production gap-128 span; its dlogits must keep dHidden at zero.
+            active_spans = ((256, batch_size * seq_len),)
 
         lp_ref, gh_ref, gw_ref, grad_seed = _stock_shifted(
             hidden, weight_shard, target_shifted, vstart, vend, chunk_size, active_mask
@@ -363,6 +338,7 @@ def _worker(rank, world_size, port, chunk_size, with_oov, dtype_str, with_active
             chunk_size,
             grad_seed,
             active_mask,
+            active_spans,
         )
 
         tol = _tol_for_dtype(dtype)
@@ -446,6 +422,133 @@ def test_active_mask_matches_explicit_masked_reference(world_size, dtype_str, wi
         assert result["gw_ok"], f"grad-weight mismatch rank={rank}: {result}"
         assert result["inactive_lp_zero"], result
         assert result["inactive_gh_zero"], result
+
+
+@pytest.mark.parametrize("with_active_mask", [False, True])
+def test_adapter_reuses_projection_for_no_grad_entropy(with_active_mask) -> None:
+    device = torch.device("cuda")
+    num_tokens, hidden_size, vocab_size = 257, 128, 2048
+    generator = torch.Generator(device=device).manual_seed(122)
+    hidden = torch.randn(1, num_tokens, hidden_size, dtype=torch.bfloat16, device=device, generator=generator)
+    weight = (
+        torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device, generator=generator)
+        * hidden_size**-0.5
+    )
+    target = torch.randint(0, vocab_size, (1, num_tokens), device=device, generator=generator)
+    active_mask = None
+    if with_active_mask:
+        rows = torch.arange(num_tokens, device=device)
+        active_mask = ((rows >= 37) & (rows < 151) | (rows >= 219)).unsqueeze(0)
+
+    baseline_hidden = hidden.clone().requires_grad_(True)
+    baseline_weight = weight.clone().requires_grad_(True)
+    baseline_logprobs = FusedLinearLogprobTriton.apply(
+        baseline_hidden,
+        baseline_weight,
+        target,
+        0,
+        vocab_size,
+        num_tokens,
+        None,
+        False,
+        active_mask,
+    )
+    (-baseline_logprobs.sum()).backward()
+
+    leaf_hidden = hidden.clone().requires_grad_(True)
+    leaf_weight = weight.clone().requires_grad_(True)
+    logprobs, entropy = FusedLinearLogprobTriton.apply(
+        leaf_hidden,
+        leaf_weight,
+        target,
+        0,
+        vocab_size,
+        num_tokens,
+        None,
+        False,
+        active_mask,
+        None,
+        True,
+    )
+    # Use an independent fp64 materialization so this catches shared precision
+    # or reduction mistakes in the fused log-prob and entropy outputs.
+    logits = hidden.double() @ weight.double().T
+    reference_log_probs = torch.log_softmax(logits, dim=-1)
+    expected_logprobs = reference_log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1).float()
+    expected_entropy = (-(reference_log_probs.exp() * reference_log_probs).sum(dim=-1)).float()
+    if active_mask is not None:
+        expected_logprobs = expected_logprobs.masked_fill(~active_mask, 0.0)
+        expected_entropy = expected_entropy.masked_fill(~active_mask, 0.0)
+
+    assert not entropy.requires_grad
+    torch.testing.assert_close(logprobs, baseline_logprobs, atol=0, rtol=0)
+    torch.testing.assert_close(logprobs, expected_logprobs, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(entropy, expected_entropy, atol=2e-2, rtol=2e-2)
+    (-logprobs.sum()).backward()
+    torch.testing.assert_close(leaf_hidden.grad, baseline_hidden.grad, atol=0, rtol=0)
+    torch.testing.assert_close(leaf_weight.grad, baseline_weight.grad, atol=0, rtol=0)
+    if active_mask is not None:
+        assert torch.count_nonzero(logprobs[~active_mask]) == 0
+        assert torch.count_nonzero(entropy[~active_mask]) == 0
+        assert torch.count_nonzero(leaf_hidden.grad[~active_mask]) == 0
+
+
+@pytest.mark.parametrize("with_active_mask", [False, True])
+def test_adapter_entropy_loss_gradients_match_materialized_reference(with_active_mask) -> None:
+    device = torch.device("cuda")
+    num_tokens, hidden_size, vocab_size = 257, 128, 2048
+    generator = torch.Generator(device=device).manual_seed(123)
+    hidden = torch.randn(1, num_tokens, hidden_size, dtype=torch.float32, device=device, generator=generator)
+    weight = (
+        torch.randn(vocab_size, hidden_size, dtype=torch.float32, device=device, generator=generator)
+        * hidden_size**-0.5
+    )
+    target = torch.randint(0, vocab_size, (1, num_tokens), device=device, generator=generator)
+    active_mask = None
+    active_spans = None
+    if with_active_mask:
+        rows = torch.arange(num_tokens, device=device)
+        active_mask = ((rows >= 37) & (rows < 151) | (rows >= 219)).unsqueeze(0)
+        active_spans = ((37, 151), (219, num_tokens))
+
+    leaf_hidden = hidden.clone().requires_grad_(True)
+    leaf_weight = weight.clone().requires_grad_(True)
+    logprobs, entropy = FusedLinearLogprobTriton.apply(
+        leaf_hidden,
+        leaf_weight,
+        target,
+        0,
+        vocab_size,
+        num_tokens,
+        None,
+        False,
+        active_mask,
+        active_spans,
+        True,
+        True,
+    )
+    logprob_seed = torch.linspace(0.5, 1.5, num_tokens, device=device).unsqueeze(0)
+    entropy_seed = torch.linspace(-0.25, 0.75, num_tokens, device=device).unsqueeze(0)
+    ((logprobs * logprob_seed).sum() + (entropy * entropy_seed).sum()).backward()
+
+    reference_hidden = hidden.clone().requires_grad_(True)
+    reference_weight = weight.clone().requires_grad_(True)
+    reference_logits = reference_hidden @ reference_weight.T
+    reference_log_probs = torch.log_softmax(reference_logits, dim=-1)
+    reference_selected = reference_log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    reference_entropy = -(reference_log_probs.exp() * reference_log_probs).sum(dim=-1)
+    if active_mask is not None:
+        reference_selected = reference_selected.masked_fill(~active_mask, 0.0)
+        reference_entropy = reference_entropy.masked_fill(~active_mask, 0.0)
+    ((reference_selected * logprob_seed).sum() + (reference_entropy * entropy_seed).sum()).backward()
+
+    assert entropy.requires_grad
+    torch.testing.assert_close(logprobs, reference_selected, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(entropy, reference_entropy, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(leaf_hidden.grad, reference_hidden.grad, atol=3e-3, rtol=3e-3)
+    torch.testing.assert_close(leaf_weight.grad, reference_weight.grad, atol=3e-3, rtol=3e-3)
+    if active_mask is not None:
+        assert torch.count_nonzero(leaf_hidden.grad[~active_mask]) == 0
 
 
 @pytest.mark.parametrize("logit_offset", [-20.0, -120.0])
