@@ -12,7 +12,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-import ray
 from loguru import logger
 from ray import ObjectRef
 
@@ -478,12 +477,18 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         self.ensure_active_adapter(model, model_id)
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate),
+            "set_lr",
+        )
 
     def set_algorithm_config(self, model: str, **kwargs) -> None:
         """Update algorithm config fields on all workers for a model."""
         self._ensure_on_gpu(model, need_optimizer=False, need_model=False)
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs),
+            "set_algorithm_config",
+        )
 
     # ------------------------------------------------------------------
     # torch.profiler control. Avoid _ensure_on_gpu so profiling does not perturb
@@ -506,7 +511,12 @@ class WorkerDispatch:
                 raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile", config))
+            deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "start_profile", config),
+                "start_profile",
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             if raise_on_error:
                 raise
@@ -517,7 +527,11 @@ class WorkerDispatch:
         if model not in self._actor_groups:
             return None
         try:
-            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
+            return deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"), "profile_step"
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             logger.warning(f"[profiler] profile_step dispatch for {model} failed: {e}")
             return None
@@ -529,7 +543,11 @@ class WorkerDispatch:
                 raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"))
+            deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"), "stop_profile"
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             if raise_on_error:
                 raise
@@ -540,7 +558,12 @@ class WorkerDispatch:
         if model not in self._actor_groups:
             return None
         try:
-            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "dump_profiler_summary"))
+            return deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "dump_profiler_summary"),
+                "dump_profiler_summary",
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             logger.warning(f"[profiler] dump_profiler_summary dispatch for {model} failed: {e}")
             return None
@@ -620,7 +643,7 @@ class WorkerDispatch:
         if num_training_steps is not None:
             kwargs["num_training_steps"] = num_training_steps
 
-        ray.get(self._actor_groups[model].async_init_model(**kwargs))
+        deadline.ray_get(self._actor_groups[model].async_init_model(**kwargs), "init_model")
 
         # After init, model is on GPU
         self._gpu_state[model].model_on_gpu = True

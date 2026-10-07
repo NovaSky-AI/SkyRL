@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
@@ -288,7 +287,7 @@ class RayPPOTrainer:
             self._ray_gpu_monitor.start()
 
         # Initialize weight sync state between policy model and inference engines.
-        with Timer("init_weight_sync_state"):
+        async with self._weight_sync_deadline(), Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
         # Load checkpoint state if resumption is enabled.
@@ -842,26 +841,34 @@ class RayPPOTrainer:
                         num_training_steps=critic_num_training_steps,
                     )
                 )
-            ray.get(refs)
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            deadline.ray_get(refs, "init_models")
+            deadline.ray_get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                "set_pad_token_id",
+            )
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
+                deadline.ray_get(ref_model.async_init_model(cfg.trainer.ref.model.path), "init_ref_model")
                 ref_model.offload_to_cpu()
-            ray.get(
+            deadline.ray_get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
                     num_training_steps=policy_num_training_steps,
-                )
+                ),
+                "init_policy_model",
             )
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            deadline.ray_get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                "set_pad_token_id",
+            )
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
-                ray.get(
+                deadline.ray_get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
                         num_training_steps=critic_num_training_steps,
-                    )
+                    ),
+                    "init_critic_model",
                 )
                 critic_model.offload_to_cpu()
 

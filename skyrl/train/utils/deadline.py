@@ -12,7 +12,7 @@ import contextlib
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Iterator, Optional, Type
+from typing import Any, AsyncIterator, Callable, Iterator, Optional, Type
 
 import ray
 
@@ -140,12 +140,31 @@ def operation(name: str) -> Iterator[None]:
         _OPERATION.reset(token)
 
 
+def ray_get_with_timeout(
+    refs: Any,
+    timeout_s: Optional[float],
+    timeout_error: Callable[[], BaseException],
+) -> Any:
+    """Wait for Ray refs, raising ``timeout_error()`` when ``timeout_s`` expires.
+
+    ``timeout_error`` may be an exception class with a zero-argument constructor or a
+    factory when the exception needs contextual fields.
+    """
+    if timeout_s is None:
+        return ray.get(refs)
+    try:
+        return ray.get(refs, timeout=timeout_s)
+    except ray.exceptions.GetTimeoutError:
+        raise timeout_error() from None
+
+
 def ray_get(refs: Any, operation: str) -> Any:
     """``ray.get`` bounded by the active deadline; identical to ``ray.get(refs)`` when there is none."""
     d = _ACTIVE.get()
     if d is None:
-        return ray.get(refs)
-    try:
-        return ray.get(refs, timeout=remaining())
-    except ray.exceptions.GetTimeoutError:
-        raise d.error(_STAGE.get(), operation) from None
+        return ray_get_with_timeout(refs, None, TimeoutError)
+    return ray_get_with_timeout(
+        refs,
+        remaining(),
+        lambda: d.error(_STAGE.get(), operation),
+    )

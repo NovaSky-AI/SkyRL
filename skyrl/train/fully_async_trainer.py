@@ -470,7 +470,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
 
         # Initialize weight sync state
-        with Timer("init_weight_sync_state"):
+        async with self._weight_sync_deadline(), Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
         # sync weights to inference engines

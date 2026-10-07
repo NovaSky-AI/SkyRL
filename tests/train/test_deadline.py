@@ -17,6 +17,59 @@ from skyrl.train.utils.deadline import StepTimeoutError, WeightSyncTimeoutError
 from skyrl.train.utils.trainer_utils import ResumeMode
 
 
+def test_ray_get_with_timeout_raises_requested_exception(monkeypatch):
+    class RequestedTimeout(RuntimeError):
+        pass
+
+    calls = []
+
+    def fake_get(refs, **kwargs):
+        calls.append((refs, kwargs))
+        raise ray.exceptions.GetTimeoutError()
+
+    monkeypatch.setattr(deadline.ray, "get", fake_get)
+
+    with pytest.raises(RequestedTimeout):
+        deadline.ray_get_with_timeout(["ref"], 2.5, RequestedTimeout)
+
+    assert calls == [(["ref"], {"timeout": 2.5})]
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"),
+    [
+        ("skyrl.train.trainer", "RayPPOTrainer"),
+        ("skyrl.train.fully_async_trainer", "FullyAsyncRayPPOTrainer"),
+        ("examples.train.async.async_trainer", "AsyncRayPPOTrainer"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_trainers_bound_initial_weight_sync(monkeypatch, module_name, class_name):
+    trainer_cls = getattr(import_module(module_name), class_name)
+    trainer = trainer_cls.__new__(trainer_cls)
+    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(weight_sync_timeout_s=2.5))
+    trainer.global_step = 0
+    trainer.resume_mode = ResumeMode.NONE
+    trainer.colocate_all = False
+    trainer._ray_gpu_monitor = None
+
+    def fake_get(refs, **kwargs):
+        assert refs == ["ref"]
+        assert 0 < kwargs["timeout"] <= 2.5
+        raise ray.exceptions.GetTimeoutError()
+
+    monkeypatch.setattr(deadline.ray, "get", fake_get)
+    trainer.init_weight_sync_state = lambda: deadline.ray_get(["ref"], "init_weight_sync_state")
+
+    with pytest.raises(WeightSyncTimeoutError) as exc_info:
+        await trainer.train()
+
+    assert (exc_info.value.stage, exc_info.value.operation) == (
+        "init_weight_sync_state",
+        "init_weight_sync_state",
+    )
+
+
 @pytest.mark.asyncio
 async def test_ray_get_uses_binding_deadline_and_timer_stage(monkeypatch):
     calls = []
@@ -200,6 +253,4 @@ async def test_hung_cleanup_is_bounded_and_primary_survives():
             async with cleanup_preserving_primary(hung_resume, "resume_generation"):
                 raise primary
     assert exc_info.value is primary
-    assert primary.__notes__ == [
-        "resume_generation did not finish during cleanup before the step deadline expired"
-    ]
+    assert primary.__notes__ == ["resume_generation did not finish during cleanup before the step deadline expired"]
