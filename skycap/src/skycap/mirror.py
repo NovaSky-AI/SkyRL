@@ -113,6 +113,8 @@ class RecordMirror:
         self._closed = False
         self._counts = {"mirrored": 0, "failed": 0, "timed_out": 0, "dropped": 0, "retried": 0}
         self._in_flight = 0
+        #: Records queued and not yet settled (mirrored, failed or dropped), whether in the queue or copying.
+        self._pending = 0
 
     def uri(self, name: str) -> str:
         """Where the mirror puts the record file ``name``, e.g. ``tr_ab12.json.zst``."""
@@ -128,23 +130,27 @@ class RecordMirror:
     def stats(self) -> dict[str, int]:
         """Records ``mirrored``, ``failed`` (``timed_out`` included), ``dropped`` and ``pending``, and ``retried`` copies."""
         with self._lock:
-            return {**self._counts, "pending": self._queue.qsize() + self._in_flight}
+            return {**self._counts, "pending": self._pending}
 
     def submit(self, record_dir: Path, trajectory_id: str) -> bool:
         """Queue a written record. Returns False, and drops it, when the queue is full or the mirror closed."""
+        # Checking `_closed` and queueing under the lock `close` takes to set it: a record is either queued
+        # before close, and so handled or counted by it, or refused here.
         with self._lock:
-            closed = self._closed
-            if not closed and not self._threads:
-                self._start()
-        if closed:
-            self._drop(f"the mirror is closed; not mirroring {trajectory_id}")
-            return False
-        try:
-            self._queue.put_nowait((record_dir, trajectory_id))
-        except queue.Full:
-            self._drop(f"the mirror queue is full ({self._queue.maxsize}); dropping {trajectory_id}")
-            return False
-        return True
+            if self._closed:
+                reason = "the mirror is closed"
+            else:
+                if not self._threads:
+                    self._start()
+                try:
+                    self._queue.put_nowait((record_dir, trajectory_id))
+                except queue.Full:
+                    reason = f"the mirror queue is full ({self._queue.maxsize})"
+                else:
+                    self._pending += 1
+                    return True
+        self._drop(f"{reason}; not mirroring {trajectory_id}")
+        return False
 
     def close(self, timeout: float | None = None) -> bool:
         """Wait up to ``timeout`` (default ``shutdown_timeout``) for queued records, then drop the rest.
@@ -172,6 +178,7 @@ class RecordMirror:
                 left += 1
         with self._lock:
             self._counts["dropped"] += left
+            self._pending -= left
             in_flight = self._in_flight
         if left or in_flight:
             logger.warning(
@@ -194,22 +201,38 @@ class RecordMirror:
 
     def _work(self) -> None:
         while True:
-            item = self._queue.get()
+            try:
+                # Waking up now and then: a worker still copying at close's deadline missed its _STOP, which
+                # close then drained, so it exits on `_stopping` instead of waiting on an empty queue forever.
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._stopping.is_set():
+                    return
+                continue
             if item is _STOP:
                 return
             if self._stopping.is_set():
-                self._count("dropped")
+                self._settle("dropped")
                 continue
             with self._lock:
                 self._in_flight += 1
+            outcome = "failed"
             try:
-                self._count(self._mirror(*item))
+                outcome = self._mirror(*item)
             except Exception:  # noqa: BLE001 - a bug here must not stop the worker
                 logger.exception("record mirror: mirroring %s failed", item[1])
-                self._count("failed")
             finally:
                 with self._lock:
                     self._in_flight -= 1
+                self._settle(outcome)
+
+    def _settle(self, outcome: str) -> None:
+        """Count a queued record's outcome, in the same step that stops counting it as pending."""
+        with self._lock:
+            self._counts[outcome] += 1
+            if outcome == "timed_out":
+                self._counts["failed"] += 1
+            self._pending -= 1
 
     def _mirror(self, record_dir: Path, trajectory_id: str) -> str:
         """Copy one record, sidecars first. Returns the counter it lands in."""

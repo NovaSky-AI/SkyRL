@@ -272,8 +272,10 @@ def test_a_record_that_finds_the_queue_full_is_dropped(tmp_path: Path, flaky: ty
     assert mirror.submit(tmp_path, written(tmp_path))
     wait_for(lambda: len(flaky.calls) == 1)  # the worker holds the first; the queue is empty
     assert mirror.submit(tmp_path, written(tmp_path))
+    # One copying and one queued are both pending, with no gap as the worker takes the next.
+    assert mirror.stats()["pending"] == 2
     assert not mirror.submit(tmp_path, written(tmp_path))
-    assert mirror.stats()["dropped"] == 1
+    assert mirror.stats()["dropped"] == 1 and mirror.stats()["pending"] == 2
     hang.set()
     assert mirror.close()
     assert mirror.stats()["mirrored"] == 2
@@ -294,7 +296,36 @@ def test_shutdown_drops_what_is_left_at_its_deadline(tmp_path: Path, flaky: type
     # Closed: a later record is dropped too.
     assert not mirror.submit(tmp_path, written(tmp_path))
     assert mirror.stats()["dropped"] == 2
+    # The copy still running at the deadline finishes, and its worker then exits instead of waiting forever
+    # on a queue close() drained of its stop signal.
     hang.set()
+    wait_for(lambda: mirror.stats()["pending"] == 0)
+    assert mirror.stats()["mirrored"] == 1
+    wait_for(lambda: not any(thread.is_alive() for thread in mirror._threads))
+
+
+def test_every_record_submitted_while_closing_is_counted_once(tmp_path: Path) -> None:
+    mirror = RecordMirror(unique("memory"), workers=2, queue_size=4)
+    ids = [written(tmp_path) for _ in range(200)]
+    accepted: list[bool] = []
+    start = threading.Barrier(9)
+
+    def submit_all(chunk: list[str]) -> None:
+        start.wait()
+        accepted.extend(mirror.submit(tmp_path, trajectory_id) for trajectory_id in chunk)
+
+    threads = [threading.Thread(target=submit_all, args=(ids[i::8],)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    mirror.close(timeout=5.0)
+    for thread in threads:
+        thread.join()
+    wait_for(lambda: mirror.stats()["pending"] == 0)
+    stats = mirror.stats()
+    # Queued before close, or refused by it: never accepted and then lost.
+    assert stats["mirrored"] + stats["failed"] + stats["dropped"] == len(ids)
+    assert stats["mirrored"] + stats["failed"] <= sum(accepted)
 
 
 def test_a_mirror_needs_a_record_dir() -> None:
