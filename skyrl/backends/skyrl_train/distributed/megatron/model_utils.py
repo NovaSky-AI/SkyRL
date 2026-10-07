@@ -839,6 +839,46 @@ def from_parallel_hidden_to_logprobs(
     return logprobs
 
 
+def _unpack_prediction_values(
+    values: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    unpacked_seqlen: int,
+    seq_indices: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    seq_lens_padded: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    sub_seq_lengths: Optional[list[list[int]]],
+) -> torch.Tensor:
+    """Scatter packed prediction values into the original batch layout."""
+    batch_size = len(sub_seq_lengths) if sub_seq_lengths is not None else cu_seqlens_padded.shape[0] - 1
+    output = torch.zeros((batch_size, unpacked_seqlen - 1), dtype=values.dtype, device=values.device)
+    if sub_seq_lengths is not None:
+        row_indices, row_offsets, seq_lens = _packed_subseq_row_indices_offsets_and_lens(
+            cu_seqlens_padded, sub_seq_lengths, values.device
+        )
+        valid_counts = torch.clamp(seq_lens - 1, min=0)
+        packed_mask = seq_offsets < valid_counts[seq_indices]
+        output_cols = row_offsets[seq_indices[packed_mask]] + seq_offsets[packed_mask]
+        output_rows = row_indices[seq_indices[packed_mask]]
+        output_in_bounds = output_cols < unpacked_seqlen - 1
+        output[output_rows[output_in_bounds], output_cols[output_in_bounds]] = values[packed_mask][output_in_bounds]
+        return output
+
+    if attention_mask is not None:
+        seq_lens = attention_mask.sum(dim=1, dtype=torch.long)
+        token_ordinals = attention_mask.to(torch.long).cumsum(dim=1)
+        output_mask = attention_mask[:, :-1] & (token_ordinals[:, :-1] < seq_lens.unsqueeze(1))
+        valid_counts = torch.clamp(seq_lens - 1, min=0)
+        packed_mask = seq_offsets < valid_counts[seq_indices]
+        output[output_mask] = values[packed_mask]
+        return output
+
+    valid_counts = torch.clamp(seq_lens_padded - 1, min=0)
+    packed_mask = (seq_offsets < valid_counts[seq_indices]) & (seq_offsets < unpacked_seqlen - 1)
+    output[seq_indices[packed_mask], seq_offsets[packed_mask]] = values[packed_mask]
+    return output
+
+
 def from_parallel_hidden_to_logprobs_packed_sequences(
     hidden: torch.Tensor,
     lm_head_weight: torch.Tensor,
@@ -875,7 +915,6 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     hidden = hidden.squeeze(0)
     target = target.squeeze(0)
 
-    batch_size = len(sub_seq_lengths) if sub_seq_lengths is not None else cu_seqlens_padded.shape[0] - 1
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     cp_rank = 0 if cp_group is None else torch.distributed.get_rank(cp_group)
     if attention_mask is not None:
@@ -940,37 +979,28 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         cu_seqlens_padded, probs.shape[0], probs.device
     )
 
-    def unpack_prediction_values(values: torch.Tensor) -> torch.Tensor:
-        output = torch.zeros((batch_size, unpacked_seqlen - 1), dtype=values.dtype, device=values.device)
-        if sub_seq_lengths is not None:
-            row_indices, row_offsets, seq_lens = _packed_subseq_row_indices_offsets_and_lens(
-                cu_seqlens_padded, sub_seq_lengths, values.device
-            )
-            valid_counts = torch.clamp(seq_lens - 1, min=0)
-            packed_mask = seq_offsets < valid_counts[seq_indices]
-            output_cols = row_offsets[seq_indices[packed_mask]] + seq_offsets[packed_mask]
-            output_rows = row_indices[seq_indices[packed_mask]]
-            output_in_bounds = output_cols < unpacked_seqlen - 1
-            output[output_rows[output_in_bounds], output_cols[output_in_bounds]] = values[packed_mask][output_in_bounds]
-            return output
-
-        if attention_mask is not None:
-            seq_lens = attention_mask.sum(dim=1, dtype=torch.long)
-            token_ordinals = attention_mask.to(torch.long).cumsum(dim=1)
-            output_mask = attention_mask[:, :-1] & (token_ordinals[:, :-1] < seq_lens.unsqueeze(1))
-            valid_counts = torch.clamp(seq_lens - 1, min=0)
-            packed_mask = seq_offsets < valid_counts[seq_indices]
-            output[output_mask] = values[packed_mask]
-            return output
-
-        valid_counts = torch.clamp(seq_lens_padded - 1, min=0)
-        packed_mask = (seq_offsets < valid_counts[seq_indices]) & (seq_offsets < unpacked_seqlen - 1)
-        output[seq_indices[packed_mask], seq_offsets[packed_mask]] = values[packed_mask]
-        return output
-
-    logprobs = unpack_prediction_values(probs)
+    logprobs = _unpack_prediction_values(
+        probs,
+        cu_seqlens_padded,
+        unpacked_seqlen,
+        seq_indices,
+        seq_offsets,
+        seq_lens_padded,
+        attention_mask,
+        sub_seq_lengths,
+    )
     if return_entropy:
-        return logprobs, unpack_prediction_values(entropy_probs)
+        entropy = _unpack_prediction_values(
+            entropy_probs,
+            cu_seqlens_padded,
+            unpacked_seqlen,
+            seq_indices,
+            seq_offsets,
+            seq_lens_padded,
+            attention_mask,
+            sub_seq_lengths,
+        )
+        return logprobs, entropy
     return logprobs
 
 
