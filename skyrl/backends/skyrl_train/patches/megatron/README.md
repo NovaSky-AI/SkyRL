@@ -77,9 +77,8 @@ model, `glm5_next/` is deleted too.
 Two pieces, which may land separately.
 
 **a) Standard-RMSNorm input norm**
-- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`, and
-  `proj_rms_saving_input_dtype`, a drop-in for #7521's `native_proj_rms` / `_proj_rms_op` that
-  takes the activation-dtype input and redoes the FP32 upcast in backward instead of saving it:
+- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`; its FP32
+  projection is checkpointed so backward keeps the activation-dtype input, not the FP32 upcast:
   2 GiB per mHC site at 32k tokens per rank. #7521 still saves the upcast; worth proposing there).
 - **Landed?** `TransformerConfig` has `mhc_norm_eps` / `mhc_norm_eps_inside_sqrt`, and
   `HyperConnectionModule` reads them.
