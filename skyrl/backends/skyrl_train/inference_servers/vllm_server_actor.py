@@ -47,6 +47,9 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_routed_experts,
     pack_sample_support,
 )
+from skyrl.backends.skyrl_train.inference_servers.lora_cache_salt import (
+    LoraCacheSaltMiddleware,
+)
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
@@ -479,6 +482,11 @@ class VLLMServerActor(ServerActorProtocol):
                 """Identify the Ray frontend exporting this server's engine metrics."""
                 return Response(content=orjson.dumps(metrics_info), media_type="application/json")
 
+        # build_app has already built the middleware stack, so the server wraps the app with
+        # LoraCacheSaltMiddleware around these counts instead of registering it here.
+        lora_loads: dict[str, int] = {}
+        app.state.lora_loads = lora_loads
+
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
             """Reset the prefix cache, optionally resetting in-flight requests too."""
@@ -547,6 +555,7 @@ class VLLMServerActor(ServerActorProtocol):
                 await models.engine_client.add_lora(lora_request)
                 lora_request.load_inplace = False
                 models.lora_requests[lora_name] = lora_request
+                lora_loads[lora_name] = lora_loads.get(lora_name, 0) + 1
 
             return {
                 "status": "ok",
@@ -746,7 +755,7 @@ async def _build_and_serve_vllm_server(
 
     # Use uvicorn directly (serve_http tries to add signal handlers which fails in Ray actors)
     config = uvicorn.Config(
-        app,
+        LoraCacheSaltMiddleware(app, app.state.lora_loads),
         host=cli_args.host,
         port=cli_args.port,
         log_level=cli_args.uvicorn_log_level,

@@ -1742,7 +1742,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # before we get here; sync that adapter to vLLM under its own name
             # so sample(model=<model_id>) routes correctly. Single-tenant
             # (model_id=None) keeps the legacy shared path + name.
-            cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
+            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+                RemoteInferenceClient,
+            )
+
+            # SkyRL-launched vLLM servers salt each adapter's prefix cache by its load count
+            # (lora_cache_salt.py), so an in-place reload there needs no engine-wide reset that would also
+            # drop every other adapter's cache. External servers and in-process engines are not salted.
+            salted = (
+                isinstance(inference_engine_client, RemoteInferenceClient) and inference_engine_cfg.run_engines_locally
+            )
+            cache_reset_task = (
+                None if salted else self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
+            )
             torch.cuda.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             if self._lora_sync_mode_is_memory():
