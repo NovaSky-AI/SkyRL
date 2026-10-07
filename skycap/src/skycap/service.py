@@ -35,6 +35,7 @@ from skycap.server import Backend, CaptureServer
 from skycap.text import TextBackend
 
 if TYPE_CHECKING:
+    from skycap.mirror import RecordMirror
     from skycap.tokens.engine import VLLMEngine
     from skycap.tokens.renderer import TokenRenderer
 
@@ -91,6 +92,10 @@ def build_backend(
 class CaptureService:
     """The model options are ``build_backend``'s; the rest place and persist the server.
 
+    ``record_mirror`` (an fsspec URL, or a ``RecordMirror``) copies each record written to ``record_dir``
+    to a remote store in the background; see ``skycap.mirror``. ``record_mirror_config`` holds the
+    mirror's options for a URL, e.g. ``{"exclude": ["experts"], "timeout": 120}``.
+
     ``port=0`` lets the OS pick a free port. ``advertise_host`` is the address clients use to reach
     this server, which ``url`` carries once started. ``path_rules`` are the custom path rules
     ``finish`` may name besides ``all`` and ``final``, each a function or its ``"pkg.module:function"``
@@ -116,6 +121,8 @@ class CaptureService:
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
         record_dir: str | None = None,
+        record_mirror: str | RecordMirror | None = None,
+        record_mirror_config: Mapping[str, Any] | None = None,
         ttl: float = 3600.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
         require_api_key: bool = False,
@@ -140,7 +147,13 @@ class CaptureService:
             use_raw_content=use_raw_content,
         )
         self.server = CaptureServer(
-            backend, record_dir=record_dir, ttl=ttl, path_rules=path_rules, require_api_key=require_api_key
+            backend,
+            record_dir=record_dir,
+            record_mirror=record_mirror,
+            record_mirror_config=record_mirror_config,
+            ttl=ttl,
+            path_rules=path_rules,
+            require_api_key=require_api_key,
         )
         self._host, self._port = host, port
         self._advertise_host = advertise_host
@@ -178,7 +191,11 @@ class CaptureService:
         return self.url
 
     def stop(self, timeout: float = 120.0) -> bool:
-        """Stop serving, writing what is still in memory. Returns whether that finished in time."""
+        """Stop serving, writing what is still in memory. Returns whether that finished in time.
+
+        With a record mirror, stopping also waits up to the mirror's ``shutdown_timeout`` for its queue,
+        so ``timeout`` should exceed that.
+        """
         thread = self._thread
         if thread is None:
             return True

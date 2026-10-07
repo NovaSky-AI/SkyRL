@@ -74,6 +74,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="where ended trajectories are written; without it they stay in memory (development only)",
     )
     serve.add_argument(
+        "--record-mirror",
+        default=None,
+        metavar="URL",
+        help="also copy each written record to this fsspec URL (s3://, gs://, ...) in the background; "
+        "needs --record-dir and skycap[remote], plus the store's fsspec implementation (s3fs, gcsfs)",
+    )
+    serve.add_argument(
+        "--record-mirror-config",
+        type=json.loads,
+        default=None,
+        metavar="JSON",
+        help='the mirror\'s options as a JSON object, e.g. \'{"exclude": ["experts", "sampling_mask"]}\'; '
+        "keys: exclude, workers, queue_size, timeout, attempts, backoff, shutdown_timeout, storage_options. "
+        "Excluding tokens leaves viewers of the mirror with message text only",
+    )
+    serve.add_argument(
         "--ttl",
         type=float,
         default=3600.0,
@@ -112,6 +128,12 @@ def build_parser() -> argparse.ArgumentParser:
 def build_server(args: argparse.Namespace) -> CaptureServer:
     if args.mode == "tokens" and not args.tokenizer:
         raise SystemExit("--mode tokens needs --tokenizer")
+    if args.record_mirror and not args.record_dir:
+        raise SystemExit("--record-mirror needs --record-dir")
+    if args.record_mirror_config is not None and not args.record_mirror:
+        raise SystemExit("--record-mirror-config needs --record-mirror")
+    if args.record_mirror_config is not None and not isinstance(args.record_mirror_config, dict):
+        raise SystemExit("--record-mirror-config must be a JSON object")
     backend = build_backend(
         args.upstream_url,
         mode=args.mode,
@@ -130,7 +152,13 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         name, _, rule = spec.rpartition("=")
         rules[name or rule] = rule
     return CaptureServer(
-        backend, record_dir=args.record_dir, ttl=args.ttl, path_rules=rules, require_api_key=args.require_api_key
+        backend,
+        record_dir=args.record_dir,
+        record_mirror=args.record_mirror,
+        record_mirror_config=args.record_mirror_config,
+        ttl=args.ttl,
+        path_rules=rules,
+        require_api_key=args.require_api_key,
     )
 
 

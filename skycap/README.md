@@ -241,11 +241,57 @@ and each token's offset in it), routed experts and sampling masks. The format
 is specified in [`docs/format.md`](docs/format.md), which is what any reader,
 such as the viewer, implements.
 
+`result.record` says where it is: `path` on the server's disk and, with a
+mirror, its `mirror` URI (`result.record.uri` is the mirror URI when there is
+one, else the path). `result.record.files` names the record's files, sidecars
+then document, all beside the document: the ones the mirror holds when there is
+one (without the kinds its `exclude` leaves out), else the ones on disk.
+
+A producer that knows which trajectories made up a training step may also write
+a run index, `index/<phase>/step-<N>.json`, next to the records; its format is
+in [`docs/format.md`](docs/format.md#a-run-index). Readers work without it.
+
+### Mirror the record to remote storage
+
+`--record-mirror URL` (`record_mirror=` for `CaptureService`) copies each
+record, once written to `--record-dir`, to an fsspec URL in the background.
+Install the `remote` extra and the store's fsspec implementation yourself:
+
+```bash
+uv sync --extra remote && uv pip install s3fs     # or gcsfs for gs://
+uv run skycap serve ... --record-dir ./record --record-mirror s3://bucket/run-7
+```
+
+The mirror never fails a trajectory. Its queue is bounded (a record that finds
+it full is dropped), each file's copy is abandoned after a timeout rather than
+retried, errors that may pass (connection resets, timeouts) are retried up to
+3 times with backoff, and a graceful shutdown waits up to a deadline for the
+queue and drops the rest. Each loss is logged and counted: `/healthz` reports
+`record_mirror` with `mirrored`, `failed`, `timed_out`, `dropped`, `retried`
+and `pending`. Credentials come from the store's usual environment (e.g.
+`AWS_*` for s3fs).
+
+`--record-mirror-config JSON` (`record_mirror_config=` for `CaptureService`)
+sets the mirror's options: `exclude`, `workers`, `queue_size`, `timeout`,
+`attempts`, `backoff`, `shutdown_timeout` and `storage_options`. `exclude`
+leaves sidecar kinds out of the remote copy, e.g. routed experts when the
+mirror is for reading rather than retraining:
+
+```bash
+uv run skycap serve ... --record-dir ./record --record-mirror s3://bucket/run-7 \
+  --record-mirror-config '{"exclude": ["experts", "sampling_mask"], "timeout": 120}'
+```
+
+The mirrored document then lists only the sidecars it has and names the rest in
+`omitted_sidecars` (see [`docs/format.md`](docs/format.md)); the local record is
+untouched. Excluding `tokens` is allowed, but a viewer of the mirror then shows
+message text only.
+
 ## Develop
 
 ```bash
 cd skycap
-uv sync --extra tokens
+uv sync --extra tokens --extra remote
 uv run pytest
 ```
 

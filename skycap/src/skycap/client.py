@@ -44,6 +44,32 @@ class PathRuleError(CaptureError):
     """``finish``'s path rule raised on the server. The trajectory is ended, without samples."""
 
 
+@dataclass(frozen=True, slots=True)
+class RecordLocation:
+    """Where a finished trajectory's record is. See ``docs/format.md``."""
+
+    #: The document's path on the capture server's own disk, in its ``record_dir``.
+    path: str
+    #: The document's URI in the server's record mirror, or None without one. The copy is made in the
+    #: background and fails open, so it may not be there yet, or at all.
+    mirror: str | None = None
+    #: The record's file names, sidecars then the document (e.g. ``tr_ab12.tokens.zst``, ``tr_ab12.json.zst``):
+    #: as the mirror holds them when there is one (so without the kinds its ``exclude`` leaves out), else as
+    #: the record directory does. They sit beside the document, in the mirror and on disk.
+    files: tuple[str, ...] = ()
+
+    @property
+    def uri(self) -> str:
+        """The mirror URI when there is one, else the local path."""
+        return self.mirror or self.path
+
+    @classmethod
+    def from_json(cls, body: dict[str, Any] | None) -> RecordLocation | None:
+        if body is None:
+            return None
+        return cls(path=body["path"], mirror=body.get("mirror"), files=tuple(body.get("files", ())))
+
+
 @dataclass(slots=True)
 class FinishResult:
     id: str
@@ -52,6 +78,8 @@ class FinishResult:
     #: Token-mode calls whose prompt had to be rendered rather than extended (``CallInfo.bridged``).
     #: Zero for a harness that keeps its history append-only.
     unbridged_calls: int = 0
+    #: Where the record is, or None when the server has no ``record_dir`` (or couldn't write it).
+    record: RecordLocation | None = None
 
 
 class Trajectory:
@@ -98,6 +126,7 @@ class Trajectory:
             status=body["status"],
             samples=[Sample.from_json(s) for s in body["samples"]],
             unbridged_calls=body.get("unbridged_calls", 0),
+            record=RecordLocation.from_json(body.get("record")),
         )
         return self.result
 

@@ -24,7 +24,7 @@ trajectory runs, and a crash loses the trajectories that were open.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,24 @@ def document_path(record_dir: Path, trajectory_id: str) -> Path:
 
 def sidecar_path(record_dir: Path, trajectory_id: str, kind: str) -> Path:
     return record_dir / f"{trajectory_id}.{kind}.zst"
+
+
+#: The sidecar kinds, in the order they are written.
+SIDECAR_KINDS = ("tokens", "experts", "sampling_mask")
+
+
+def sidecar_kind(path: Path) -> str | None:
+    """The sidecar kind a record file holds, or None for the document."""
+    for kind in SIDECAR_KINDS:
+        if path.name.endswith(f".{kind}.zst"):
+            return kind
+    return None
+
+
+def record_files(record_dir: Path, trajectory_id: str) -> list[Path]:
+    """A written trajectory's files as they are on disk: its sidecars, then its document."""
+    sidecars = [sidecar_path(record_dir, trajectory_id, kind) for kind in SIDECAR_KINDS]
+    return [path for path in sidecars if path.exists()] + [document_path(record_dir, trajectory_id)]
 
 
 # -- writing ------------------------------------------------------------------
@@ -175,6 +193,21 @@ def _write_bytes(path: Path, data: bytes) -> None:
     os.replace(temporary, path)
 
 
+def omit_sidecars(document_file: Path, kinds: Iterable[str]) -> bytes:
+    """The document at ``document_file``, compressed, without ``kinds`` in its sidecars manifest.
+
+    The kinds it drops are named in ``omitted_sidecars``, so a copy without those files still reads
+    as a whole record: a reader treats an omitted kind as one the trajectory doesn't have.
+    """
+    document = orjson.loads(zstandard.ZstdDecompressor().decompressobj().decompress(document_file.read_bytes()))
+    sidecars = document.get("sidecars", {})
+    omitted = sorted(kind for kind in kinds if kind in sidecars)
+    for kind in omitted:
+        del sidecars[kind]
+    document["omitted_sidecars"] = sorted({*document.get("omitted_sidecars", ()), *omitted})
+    return zstandard.ZstdCompressor(level=_LEVEL).compress(orjson.dumps(document))
+
+
 # -- reading ------------------------------------------------------------------
 def list_ids(record_dir: Path) -> Iterator[str]:
     for path in sorted(record_dir.glob("*.json.zst")):
@@ -203,7 +236,9 @@ def read_sidecar(record_dir: Path, document: dict[str, Any], kind: str) -> dict[
 def load(record_dir: Path, trajectory_id: str) -> Trajectory:
     """Rebuild a written trajectory, graph and arrays included."""
     document = read_document(record_dir, trajectory_id)
-    arrays = {kind: read_sidecar(record_dir, document, kind) for kind in ("tokens", "experts", "sampling_mask")}
+    arrays = {kind: read_sidecar(record_dir, document, kind) for kind in SIDECAR_KINDS}
+    # Kinds a mirror left out on purpose: absent here, unlike a sidecar that is missing.
+    omitted = frozenset(document.get("omitted_sidecars", ()))
     trajectory = Trajectory(
         id=document["id"],
         meta=document["meta"],
@@ -230,17 +265,24 @@ def load(record_dir: Path, trajectory_id: str) -> Trajectory:
             match_hash=entry["match_hash"],
             delta_hash=entry["delta_hash"],
             created_at=entry["created_at"],
-            tokens=_node_tokens(entry.get("tokens"), arrays),
+            tokens=_node_tokens(entry.get("tokens"), arrays, omitted),
         )
         assert node.id == entry["id"], "record nodes are stored in creation order"
         node.calls.extend(CallInfo(**call) for call in entry["calls"])
     return trajectory
 
 
-def _node_tokens(meta: dict[str, Any] | None, arrays: dict[str, dict[str, np.ndarray] | None]) -> NodeTokens | None:
+def _node_tokens(
+    meta: dict[str, Any] | None,
+    arrays: dict[str, dict[str, np.ndarray] | None],
+    omitted: frozenset[str] = frozenset(),
+) -> NodeTokens | None:
+    """A node's tokens from its slices of the sidecars. A slice of an omitted kind reads as absent."""
     if meta is None:
         return None
     tokens = arrays["tokens"]
+    if tokens is None and "tokens" in omitted:
+        return None
     assert tokens is not None, "a node with tokens needs the tokens sidecar"
     span = slice(meta["offset"], meta["offset"] + meta["length"])
     text = offsets = None
@@ -249,15 +291,17 @@ def _node_tokens(meta: dict[str, Any] | None, arrays: dict[str, dict[str, np.nda
         text = tokens["text"][start : start + meta["text_bytes"]].tobytes().decode("utf-8")
         offsets = tokens["text_offsets"][span].tolist()
     routed = None
-    if meta["experts_offset"] is not None:
+    if meta["experts_offset"] is not None and not (arrays["experts"] is None and "experts" in omitted):
         experts = arrays["experts"]
         assert experts is not None
         start = meta["experts_offset"]
         routed = experts["routed_experts"][start : start + meta["experts_rows"]].copy()
     rows = None
-    if meta["mask_offset"] is not None and meta["mask_rows"] == 0:
+    if meta["mask_offset"] is None or (arrays["sampling_mask"] is None and "sampling_mask" in omitted):
+        pass
+    elif meta["mask_rows"] == 0:
         rows = []
-    elif meta["mask_offset"] is not None:
+    else:
         mask = arrays["sampling_mask"]
         assert mask is not None
         ids, bounds = mask["ids"], mask["offsets"]
