@@ -851,6 +851,7 @@ class SkyRLShardedRDTWeightTransferEngine(
             init_info.dtype_names,
             init_info.shapes,
         )
+        self._post_load_fns.clear()
         self._name_meta = {n: (d, s) for n, d, s in zip(names, dtype_names, shapes)}
         if not names:
             return
@@ -952,6 +953,9 @@ class SkyRLShardedRDTWeightTransferEngine(
                     continue
                 # Bypass online_process_loader: stamp the *original* loader.
                 original = _get_original_loader(tensor)
+                # Reload metadata can retain a prior bake's recording stamp.
+                while hasattr(original, "_rdt_stamp_inner"):
+                    original = original._rdt_stamp_inner
                 post_fn = _composed_post_fn(original)
                 if post_fn is not None:
                     self._post_load_fns.setdefault(module, []).append((name, post_fn))
@@ -1464,6 +1468,7 @@ class SkyRLShardedRDTWeightTransferEngine(
         self._router = None
         # Drop strong references to baked modules so the model can be freed.
         self._name_to_plan.clear()
+        self._post_load_fns.clear()
         self._name_meta.clear()
         self._live_names.clear()
         # Drop the cached plan (holds _Scatter refs to the baked layers).
