@@ -14,14 +14,11 @@ import torch
 
 
 def _distributed_main():
-    from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
-        sync_params_for_export,
-    )
-
     """Check complete exported BF16 weights after a real precision-aware Adam step."""
     import json
     import os
     from datetime import timedelta
+    from types import SimpleNamespace
 
     import torch
     from megatron.core import parallel_state
@@ -35,6 +32,10 @@ def _distributed_main():
         set_defaults_if_not_set_tensor_model_parallel_attributes,
     )
     from megatron.core.transformer import TransformerConfig
+
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+        MegatronWorker,
+    )
 
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.distributed.init_process_group("nccl", timeout=timedelta(minutes=3))
@@ -106,8 +107,20 @@ def _distributed_main():
             flush=True,
         )
         assert (stale > 0) == overlap
-        sync_params_for_export([model], optimizer)
-        after = weights(model)
+        # Export through the worker; the stub strategy snapshots what the exporter reads.
+        exported = []
+        worker = SimpleNamespace(
+            actor_module=[model],
+            optimizer=optimizer,
+            model=model,
+            bridge=None,
+            megatron_config=SimpleNamespace(
+                hf_export_config=SimpleNamespace(distributed_save=False, save_every_n_ranks=1)
+            ),
+            strategy=SimpleNamespace(save_hf_model=lambda bridge, m, *args, **kwargs: exported.append(weights(m))),
+        )
+        MegatronWorker.save_hf_model(worker, "unused", tokenizer=None)
+        (after,) = exported
         torch.testing.assert_close(after, expected, rtol=0, atol=0)
         assert all(g.param_gather_handle is None for g in model.bucket_groups)
         with torch.no_grad():
