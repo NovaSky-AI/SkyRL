@@ -1,5 +1,6 @@
 """Role-specific collection for prefill/decode inference servers."""
 
+import asyncio
 from unittest.mock import Mock
 
 import httpx
@@ -156,18 +157,31 @@ def test_setup_uses_server_groups_to_assign_worker_roles(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "enable_pd,server_pd,status", [(False, False, 200), (False, True, 200), (True, True, 200), (True, True, 404)]
+    "enable_pd,server_roles,failure",
+    [
+        (False, (None, None), None),
+        (False, ("prefill", "decode"), None),
+        (True, ("prefill", "decode"), None),
+        (True, (None, None), None),
+        (True, ("unknown", "decode"), None),
+        (False, ("prefill", None), None),
+        (False, ("prefill", "decode"), "404"),
+        (False, ("prefill", "decode"), "timeout"),
+        (False, ("prefill", "decode"), "missing_id"),
+        (False, (None, None), "proxy_only"),
+    ],
 )
-def test_external_setup_resolves_http_workers_and_preserves_legacy_collection(
-    tmp_path, monkeypatch, enable_pd, server_pd, status
-):
+def test_external_setup_collects_only_identified_workers(tmp_path, monkeypatch, enable_pd, server_roles, failure):
     from skyrl.train.config import SkyRLTrainConfig
     from skyrl.train.entrypoints.main_base import BasePPOExp
 
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.enable_pd = enable_pd
     cfg.generator.inference_engine.run_engines_locally = False
-    cfg.generator.inference_engine.external_server_urls = ["http://prefill/", "http://decode"]
+    cfg.generator.inference_engine.external_server_urls = (
+        None if failure == "proxy_only" else ["http://prefill/", "http://decode"]
+    )
+    cfg.generator.inference_engine.external_proxy_url = "http://proxy"
     cfg.trainer.fully_async.simulate_training = True
     cfg.trainer.export_path = str(tmp_path / "export")
     cfg.trainer.ckpt_path = str(tmp_path / "checkpoints")
@@ -184,12 +198,20 @@ def test_external_setup_resolves_http_workers_and_preserves_legacy_collection(
         setattr(exp, method, Mock())
     lookup = Mock()
     monkeypatch.setattr("skyrl.train.entrypoints.main_base.ray.get", lookup)
+    phase = {"value": 0}
+    metrics_requests = []
 
     def respond(request):
+        if request.url.path == "/metrics":
+            metrics_requests.append(request)
+            return httpx.Response(200, text=_exports(phase["value"]))
         assert request.url.path == "/get_metrics_worker_info"
-        role = request.url.host
+        if failure == "timeout":
+            raise httpx.ReadTimeout("metadata unavailable", request=request)
+        index = 0 if request.url.host == "prefill" else 1
         return httpx.Response(
-            status, json={"worker_id": {"prefill": "p0", "decode": "d0"}[role], "role": role if server_pd else None}
+            404 if failure == "404" else 200,
+            json={"worker_id": None if failure == "missing_id" else ("p0", "d0")[index], "role": server_roles[index]},
         )
 
     client_type = httpx.AsyncClient
@@ -199,8 +221,53 @@ def test_external_setup_resolves_http_workers_and_preserves_legacy_collection(
     )
     assert exp._setup_trainer() is trainer
     lookup.assert_not_called()
-    assert scraper._worker_ids == (frozenset({"p0", "d0"}) if status == 200 else None)
-    assert scraper.has_worker_roles == (server_pd and status == 200)
+    server_pd = server_roles == ("prefill", "decode")
+    identified = failure is None and (server_pd or (not enable_pd and server_roles == (None, None)))
+    assert scraper._worker_ids == (frozenset({"p0", "d0"}) if identified else frozenset())
+    assert scraper.has_worker_roles == (server_pd and identified)
     if scraper.has_worker_roles:
         assert scraper._role_scrapers["prefill"]._worker_ids == frozenset({"p0"})
         assert scraper._role_scrapers["decode"]._worker_ids == frozenset({"d0"})
+
+    async def collect():
+        await scraper.sample()
+        phase["value"] = 1
+        step = await scraper.sample(generation_time_s=2)
+        return step, await scraper.finalize()
+
+    step, summary = asyncio.run(collect())
+    if identified:
+        assert step
+        scope = "combined/decode" if server_pd else "combined"
+        assert summary[f"vllm_correct_aggregate/{scope}/output_tokens_total"] == (30 if server_pd else 31)
+    else:
+        assert step == summary == {}
+        assert not metrics_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enable_pd", [False, True])
+@pytest.mark.parametrize("sync", [False, True])
+async def test_external_workers_absent_locally_omit_metrics_and_summaries(monkeypatch, enable_pd, sync):
+    def respond(request):
+        if request.url.path == "/get_metrics_worker_info":
+            role = request.url.host
+            return httpx.Response(200, json={"worker_id": f"external-{role}", "role": role if enable_pd else None})
+        return httpx.Response(200, text=_exports(1))
+
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(
+        "skyrl.train.utils.vllm_metrics_scraper.httpx.AsyncClient",
+        lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    scraper = VLLMMetricsScraper(urls=["http://agent/metrics"])
+    await scraper.set_external_servers(["http://prefill", "http://decode"], enable_pd)
+    if sync:
+        await scraper.start("vllm/train")
+        scraper.pause()
+        scraper.resume()
+        assert await scraper.stop() == {}
+    else:
+        assert await scraper.sample() == {}
+        assert await scraper.sample() == {}
+    assert await scraper.finalize() == {}

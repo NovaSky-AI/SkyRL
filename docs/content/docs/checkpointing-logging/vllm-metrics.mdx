@@ -56,8 +56,8 @@ Compare engines with similar capacity.
 SkyRL filters metrics to the Ray WorkerIds of the inference server actors it
 launches. Those IDs belong to the API server processes, where vLLM records
 the metrics. The filter does not follow replacement actors. If SkyRL cannot
-obtain these IDs, it disables collection. External deployments have no such
-filter unless their SkyRL servers expose worker metadata, as described below.
+obtain these IDs, it disables collection. External deployments require their
+SkyRL servers to expose worker metadata, as described below.
 
 Missing counters and ratios with zero denominators are omitted. A failed
 scrape clears the step baseline, and a decreasing counter invalidates that
@@ -124,8 +124,7 @@ client instrumentation.
 
 Both roles retain the fresh-run, baseline and finalization rules above. A
 missing worker or reset omits the affected role's summary. External PD
-deployments without known prefill/decode worker membership keep raw/step
-collection but omit run summaries.
+deployments without known prefill/decode worker membership disable collection.
 
 ### External servers in the same Ray cluster
 
@@ -140,7 +139,9 @@ generation through the existing router. SkyRL queries each backend's
 `/get_metrics_worker_info` endpoint for its Ray frontend WorkerId and PD role.
 Collection then uses the same worker filters, role scopes and fresh-run
 summaries as internally launched servers. The servers and client must use the
-same Ray cluster so its metrics agents expose those WorkerIds.
+same Ray cluster so its metrics agents expose those WorkerIds. If an expected
+WorkerId is absent from the local exports, the affected collector skips the
+snapshot and omits its run summary; it never substitutes unrelated engines.
 Known roles come from the servers, so an external client does not need to
 repeat the serving configuration's `enable_pd` setting for role collection.
 
@@ -150,11 +151,10 @@ engines during the measured run; their counters are shared. Engine replacement
 and checkpoint-resume rules remain the same.
 
 Older or non-SkyRL servers, disabled server stats, and proxy-only configurations
-may not expose worker metadata. SkyRL keeps the existing cluster-wide step
-collection in that case; keep unrelated engines off the cluster. Regular
-serving can still publish fresh-run summaries with an observed baseline.
-For external PD without metadata, set `enable_pd=true` on the client so
-unknown roles suppress run summaries instead of publishing blended counters.
+may not expose worker metadata. SkyRL disables collection in that case, and
+also when backend metadata requests fail or PD roles are invalid or incomplete.
+It does not fall back to cluster-wide collection. Generation continues without
+engine step metrics or run summaries.
 
 ## Mark runs in Grafana
 

@@ -324,11 +324,13 @@ class BasePPOExp:
                         )
                     )
                 except Exception as error:
+                    trainer._vllm_metrics_scraper.set_worker_ids([])
                     logger.warning(
-                        "Could not identify external vLLM metrics workers "
-                        f"({type(error).__name__}); using cluster-wide collection. "
-                        "PD run summaries require known worker roles."
+                        f"vLLM metrics disabled: could not identify external workers ({type(error).__name__})"
                     )
+            else:
+                trainer._vllm_metrics_scraper.set_worker_ids([])
+                logger.warning("vLLM metrics disabled: no inference frontend workers identified")
         # Install the trajectory logger after construction
         trainer.trajectory_logger = self.get_trajectory_logger()
         # Expose the trainer on self so callers can log exceptions raised

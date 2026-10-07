@@ -331,9 +331,9 @@ class VLLMMetricsScraper:
     async def _read_snapshot(self) -> Optional[Dict[str, float]]:
         """Scrape every agent and reduce to one cumulative value per metric.
 
-        Returns ``None`` when no endpoints are configured.
+        Returns ``None`` when no endpoints are configured or collection is disabled.
         """
-        if not self._urls:
+        if not self._urls or (self._worker_ids is not None and not self._worker_ids):
             return None
 
         parsed = await self._fetch_all()
