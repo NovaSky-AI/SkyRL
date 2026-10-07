@@ -128,6 +128,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def control_json_array_error():
         return JSONResponse(["engine is dead"], status_code=502)
 
+    @app.post("/test/control_malformed_json_error")
+    async def control_malformed_json_error():
+        return Response(content="<html>bad gateway</html>", media_type="application/json", status_code=502)
+
     @app.post("/finish_session")
     async def finish_session(session_id: str = Query(...)):
         app.state.finished_sessions.append(session_id)
@@ -519,9 +523,7 @@ class TestInferenceServerHTTPError:
     def test_survives_a_ray_task(self):
         @ray.remote
         def fail():
-            exc = InferenceServerHTTPError(
-                "POST", "http://127.0.0.1:1/pause", 503, "overloaded", [("X-A", "1")]
-            )
+            exc = InferenceServerHTTPError("POST", "http://127.0.0.1:1/pause", 503, "overloaded", [("X-A", "1")])
             exc.add_note("while pausing")
             raise exc
 
@@ -535,7 +537,11 @@ class TestInferenceServerHTTPError:
 
     @pytest.mark.parametrize(
         "endpoint,message",
-        [("/test/control_plain_error", "engine is dead"), ("/test/control_json_array_error", "Bad Gateway")],
+        [
+            ("/test/control_plain_error", "engine is dead"),
+            ("/test/control_json_array_error", "Bad Gateway"),
+            ("/test/control_malformed_json_error", "<html>bad gateway</html>"),
+        ],
     )
     @pytest.mark.asyncio
     async def test_control_plane_error_body(self, client, mock_servers, endpoint, message):

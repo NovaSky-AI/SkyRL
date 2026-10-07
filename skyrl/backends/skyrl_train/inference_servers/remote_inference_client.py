@@ -47,6 +47,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -143,11 +144,13 @@ class InferenceServerHTTPError(aiohttp.ClientResponseError):
 
 
 async def _read_json_body(resp: aiohttp.ClientResponse) -> Any:
-    """``resp.json()``, raising a picklable :class:`InferenceServerHTTPError` on a non-JSON body."""
+    """Read JSON, preserving the HTTP error when an error response is not valid JSON."""
     try:
         return await resp.json()
-    except aiohttp.ContentTypeError:
-        raise InferenceServerHTTPError.from_response(resp, await resp.text() or resp.reason) from None
+    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+        if resp.status >= 400:
+            raise InferenceServerHTTPError.from_response(resp, await resp.text() or resp.reason) from None
+        raise
 
 
 def _extract_session_id_and_body(
