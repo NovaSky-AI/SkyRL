@@ -52,6 +52,7 @@ from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
+    TokenBasedBatchIterator,
     all_reduce_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
@@ -63,6 +64,7 @@ from skyrl.env_vars import (
 )
 from skyrl.train.config import TorchProfilerConfig, TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
+from skyrl.train.utils import deadline
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     configure_ray_worker_logging,
@@ -538,6 +540,7 @@ class Worker(DistributedTorchRayActor):
             rank=torch.distributed.get_rank(),
             inference_world_size=inference_world_size,
             source_factory=self._build_weight_source,
+            draft_source_factory=self._build_draft_weight_source,
             server_urls=list(inference_engine_client.server_urls),
             data_parallel_size=int(inference_engine_client.data_parallel_size),
             base_model_path=self.cfg.policy.model.path,
@@ -561,6 +564,13 @@ class Worker(DistributedTorchRayActor):
         source and sharded RDT's ownership-aware subclass.
         """
         raise NotImplementedError()
+
+    def _build_draft_weight_source(self, dtype: "torch.dtype") -> Any:
+        """Build the ``WeightSource`` for vLLM's MTP drafter, synced in its own session.
+
+        Only backends whose model carries the MTP head implement it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot sync the spec-decode drafter's weights.")
 
     def _weight_sync_thread(self, fn, *args, **kwargs):
         """Run ``fn`` off the event loop with **this rank's** CUDA device selected.
@@ -921,7 +931,7 @@ class PPORayActorGroup:
         ]
         if nonblocking:
             return refs
-        return ray.get(refs)
+        return deadline.ray_get(refs, "offload_to_cpu")
 
     def backload_to_gpu(self, nonblocking: bool = False, backload_optimizer: bool = True, backload_model: bool = True):
         """Backload worker state to GPU
@@ -938,7 +948,7 @@ class PPORayActorGroup:
         ]
         if nonblocking:
             return refs
-        return ray.get(refs)
+        return deadline.ray_get(refs, "backload_to_gpu")
 
     def async_run_ray_method(self, dispatch_type: str, method_name: str, *args: Any, **kwargs: Any) -> List[ObjectRef]:
         """Run a method on all actors using specified dispatch type asynchronously.
@@ -1005,7 +1015,7 @@ class PolicyWorkerBase(Worker):
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
         )
         all_metrics = defaultdict(list)
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        loss_fn_output_batches = []  # per-microbatch; restored to input order below
 
         for microbatch in microbatch_iterator:
             experience = BaseBatchIterator.batch_to_experience(microbatch)
@@ -1019,11 +1029,20 @@ class PolicyWorkerBase(Worker):
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
 
             for k, v in metrics.items():
                 all_metrics[k].append(v)
+
+        # Token-based batching packs samples into microbatches out of input order and
+        # appends padding microbatches, so per-sample outputs must be mapped back to
+        # their input positions (and padding entries dropped) before returning.
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         # Reduce across microbatches and all-reduce metrics across DP ranks.
         # Loss metrics are pre-scaled sums, so keep the same sum-reduction

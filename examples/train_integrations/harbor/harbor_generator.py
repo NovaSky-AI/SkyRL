@@ -15,15 +15,20 @@ from tqdm import tqdm
 from harbor.models.agent.rollout_detail import RolloutDetail
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
-from skyrl.backends.skyrl_train.inference_servers.base import ConversationType, InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_servers.base import (
+    ConversationType,
+    InferenceEngineInterface,
+)
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
     TrajectoryID,
 )
-from skyrl.train.generators.utils import get_rollout_metrics
+from skyrl.train.generators.utils import build_vllm_cache_salt, get_rollout_metrics
 from skyrl.train.utils.rate_limiter import create_rate_limiter
+
+from .trial_metrics import TrialAttempts, trial_metrics
 
 litellm.suppress_debug_info = True  # Suppress the "Provider List" output
 litellm.set_verbose = False
@@ -300,8 +305,7 @@ class HarborGenerator(GeneratorInterface):
         weight_version = getattr(self.inference_engine_client, "weight_version", None)
         if weight_version is None:
             return None
-        version = f"{self._served_model_name}@" if self._served_model_name is not None else ""
-        return f"{version}{weight_version}"
+        return build_vllm_cache_salt(weight_version, self._served_model_name)
 
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         prompts = input_batch["prompts"]
@@ -318,6 +322,7 @@ class HarborGenerator(GeneratorInterface):
         cache_salt = self._compute_cache_salt()
 
         all_outputs: List[HarborTrajectoryOutput] = [None] * len(prompts)  # type: ignore[list-item]
+        all_attempts = [TrialAttempts() for _ in prompts]
         progress = tqdm(
             disable=disable_tqdm,  # disable for fully async training
             total=len(prompts),
@@ -327,7 +332,9 @@ class HarborGenerator(GeneratorInterface):
         )
 
         async def _worker(idx, prompt, trajectory_id):
-            result = await self._harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id, cache_salt=cache_salt)
+            result = await self._harbor_agent_loop(
+                prompt=prompt, trajectory_id=trajectory_id, cache_salt=cache_salt, attempts=all_attempts[idx]
+            )
             all_outputs[idx] = result
             progress.update(1)
 
@@ -338,20 +345,24 @@ class HarborGenerator(GeneratorInterface):
         finally:
             progress.close()
 
-        return build_step_wise_generator_output(
+        output = build_step_wise_generator_output(
             all_outputs, overlong_filtering=self.generator_cfg.apply_overlong_filtering
         )
+        output["rollout_metrics"].update(trial_metrics(all_attempts))
+        return output
 
     async def _harbor_agent_loop(
         self,
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str] = None,
+        attempts: Optional[TrialAttempts] = None,
     ) -> HarborTrajectoryOutput:
         """Run a single Harbor trial and return the rollout details plus a trajectory-level reward.
         Retries on unknown errors; context length errors train with reward=0; agent timeouts mask the trajectory.
         """
         agent_loop_start_time = time.monotonic()
+        attempts = attempts if attempts is not None else TrialAttempts()
         reward = None
         results = None
         rollout_details = None
@@ -366,6 +377,7 @@ class HarborGenerator(GeneratorInterface):
             # Each attempt is a distinct router session; track it so it can be
             # released on completion/error/cancellation.
             session_id = uuid4().hex
+            attempts.start()
             try:
                 # Create a fresh Trial each attempt so agent state is clean on retry.
                 config = deepcopy(self._harbor_trial_config_template)
@@ -384,6 +396,7 @@ class HarborGenerator(GeneratorInterface):
 
                 async with self._rate_limiter:
                     results = await trial.run()
+                attempts.record(results)
 
                 # Parse exception type
                 exc_type = results.exception_info.exception_type if results.exception_info else None
@@ -422,6 +435,7 @@ class HarborGenerator(GeneratorInterface):
                     logger.warning(f"{prefix} failed: empty/missing rollout_details. Results: {results}")
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
+                attempts.fail(e)
                 continue
             finally:
                 await self.inference_engine_client.finish_session(session_id)

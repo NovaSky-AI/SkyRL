@@ -10,6 +10,7 @@ import mmap
 import os
 import queue
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -398,6 +399,14 @@ def _copy_file_reflink(src: Path, dst: Path) -> None:
     )
     if result.returncode != 0:
         shutil.copy2(src, dst)
+    _ensure_owner_writable(dst)
+
+
+def _ensure_owner_writable(path: Path) -> None:
+    mode = path.stat().st_mode
+    if mode & stat.S_IWUSR:
+        return
+    path.chmod(mode | stat.S_IWUSR)
 
 
 class PayloadReader:
@@ -731,6 +740,7 @@ class LocalCheckpointStore:
             for _, resolved_name, _ in payloads:
                 path = locations[resolved_name].path
                 if path not in mmaps:
+                    _ensure_owner_writable(path)
                     fh = path.open("r+b")
                     try:
                         mm = mmap.mmap(fh.fileno(), 0)

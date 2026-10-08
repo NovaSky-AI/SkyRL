@@ -1260,13 +1260,70 @@ def test_validate_generator_output_rejects_none_sample_support_entry():
         validate_generator_output(num_prompts=2, generator_output=output)
 
 
-def test_validate_generator_output_refuses_routes_under_step_wise():
-    """Trajectory-aligned routes cannot be replayed against per-turn samples."""
+@pytest.mark.parametrize("missing_last", [False, True])
+def test_validate_generator_output_accepts_step_wise_routes_that_cover_each_row(missing_last):
+    """Each step-wise row carries routes for its own prompt and response, as a path-per-row generator writes."""
     output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
-    output["rollout_expert_indices"] = [_routes(len(prompt) + 3) for prompt in output["prompt_token_ids"]]
+    output["rollout_expert_indices"] = [
+        _routes(len(prompt) + len(response) - int(missing_last))
+        for prompt, response in zip(output["prompt_token_ids"], output["response_ids"])
+    ]
 
-    with pytest.raises(AssertionError, match="not supported with step-wise training"):
+    validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def test_validate_generator_output_rejects_step_wise_routes_for_generated_tokens_only():
+    """Routes recorded for a step's generated tokens would replay onto the row's first prompt tokens."""
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
+    output["loss_masks"] = [[0, 0, 1] for _ in output["response_ids"]]
+    output["rollout_expert_indices"] = [_routes(len(prompt) + 1) for prompt in output["prompt_token_ids"]]
+
+    with pytest.raises(AssertionError, match="step-wise routes must cover the row's whole prompt and response"):
         validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def test_validate_generator_output_accepts_a_short_dummy_route_on_a_step_wise_row_that_trains_nothing():
+    """A masked or overlong-filtered row carries one dummy route; the trainer pads the rest."""
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
+    output["loss_masks"] = [[0, 0, 0], [1, 1, 1]]
+    output["rollout_expert_indices"] = [
+        _routes(1),
+        _routes(len(output["prompt_token_ids"][1]) + len(output["response_ids"][1])),
+    ]
+
+    validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def test_validate_generator_output_rejects_trajectory_routes_on_an_earlier_step():
+    """A whole trajectory's routes on an earlier, shorter step row."""
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(2,))
+    last = len(output["prompt_token_ids"][-1]) + len(output["response_ids"][-1])
+    output["rollout_expert_indices"] = [_routes(last) for _ in output["response_ids"]]
+
+    with pytest.raises(AssertionError, match=r"rollout_expert_indices\[0\] has 7 route rows for a 6-token"):
+        validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def test_validate_generator_output_refuses_a_trainable_batch_without_routes_when_r3_is_on():
+    """A generator that returns no routes would otherwise train with replay silently skipped."""
+    output = _make_side_channel_output()
+
+    with pytest.raises(AssertionError, match="returned no rollout_expert_indices"):
+        validate_generator_output(num_prompts=2, generator_output=output, routes_expected=True)
+    validate_generator_output(num_prompts=2, generator_output=output, routes_expected=False)
+
+
+def test_validate_generator_output_accepts_an_untrainable_batch_without_routes_when_r3_is_on():
+    """Every rollout failed and was masked: nothing to train, so nothing to replay."""
+    output = _make_side_channel_output(loss_masks=[[0, 0], [0, 0]])
+
+    validate_generator_output(num_prompts=2, generator_output=output, routes_expected=True)
+
+
+def test_validate_generator_output_accepts_routes_when_r3_is_on():
+    output = _make_side_channel_output(rollout_expert_indices=[_routes(5), _routes(4)])
+
+    validate_generator_output(num_prompts=2, generator_output=output, routes_expected=True)
 
 
 def test_validate_generator_output_allows_sample_support_under_step_wise():

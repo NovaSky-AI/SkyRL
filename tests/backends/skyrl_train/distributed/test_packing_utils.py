@@ -48,3 +48,20 @@ def test_packed_alignment_rejects_nonpositive_parallel_sizes(tp_size, cp_size):
 def test_unpacked_alignment_rejects_nonpositive_tp_size():
     with pytest.raises(ValueError, match="must be positive"):
         get_unpacked_seq_align_size(0, fp8_enabled=True)
+
+
+def test_auto_recipe_is_refused_rather_than_packed_on_a_guessed_grid():
+    # A GPU-less driver ships fp8_recipe="auto" through unresolved while every
+    # Megatron worker resolves it locally, so a guess here would pack the
+    # controller on a grid the workers do not share -- silent loss/grad
+    # corruption rather than a crash. Both entry points must refuse.
+    for recipe in ("auto", " AUTO "):
+        for tp_size, cp_size in ((1, 1), (2, 1), (1, 2), (4, 2)):
+            with pytest.raises(ValueError, match="fp8_recipe"):
+                get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=True, fp8_recipe=recipe)
+        with pytest.raises(ValueError, match="fp8_recipe"):
+            get_unpacked_seq_align_size(tp_size=1, fp8_enabled=True, fp8_recipe=recipe)
+
+    # Without FP8 the recipe is never consulted, so "auto" stays harmless.
+    assert get_packed_seq_align_size(tp_size=2, cp_size=1, fp8_enabled=False, fp8_recipe="auto") == 2
+    assert get_unpacked_seq_align_size(tp_size=2, fp8_enabled=False, fp8_recipe="auto") == 2

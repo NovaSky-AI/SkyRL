@@ -44,6 +44,11 @@ def _sample_input(seq_id: int) -> types.SampleInput:
     )
 
 
+async def _still_connected() -> bool:
+    """Stand-in for ``Request.is_disconnected`` on a client that is still waiting."""
+    return False
+
+
 class _CompletingForwarder:
     def __init__(self, store: ExternalFutureStore):
         self.store = store
@@ -142,6 +147,7 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
             )
         ),
         headers={},
+        is_disconnected=_still_connected,
     )
 
     async with AsyncSession(engine) as session:
@@ -276,6 +282,12 @@ async def test_retrieve_future_bounds_protobuf_serialization_off_event_loop(monk
         def mark_retrieved(self, request_id):
             pass
 
+        def proto_result(self, request_id):
+            return None
+
+        def cache_proto(self, request_id, proto):
+            pass
+
     def serialize_result_in_thread(request_type, result_data):
         nonlocal active_serializations, max_active_serializations
         serialization_thread_ids.append(threading.get_ident())
@@ -299,6 +311,7 @@ async def test_retrieve_future_bounds_protobuf_serialization_off_event_loop(monk
             )
         ),
         headers={"accept": api.PROTO_CONTENT_TYPE},
+        is_disconnected=_still_connected,
     )
 
     responses = await asyncio.gather(
@@ -648,6 +661,7 @@ async def test_retrieve_future_serializes_in_memory_result_as_proto(future_store
             )
         ),
         headers={"accept": "application/x-protobuf, application/json"},
+        is_disconnected=_still_connected,
     )
     response = await api.retrieve_future(api.RetrieveFutureRequest(request_id=str(request_id)), request)
 

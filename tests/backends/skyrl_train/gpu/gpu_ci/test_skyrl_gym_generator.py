@@ -5,6 +5,7 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 import os
 from typing import Any, Dict
 
+import numpy as np
 import pytest
 from loguru import logger
 from transformers import AutoTokenizer
@@ -409,6 +410,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(ray_init_fixt
     for i, resp_ids in enumerate(generator_output["response_ids"]):
         loss_mask = generator_output["loss_masks"][i]
         prompt_token_ids = generator_output["prompt_token_ids"][i]
+        stop_reason = generator_output["stop_reasons"][i]
         masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
         masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
 
@@ -434,9 +436,12 @@ async def test_generator_formatting_no_use_conversation_multi_turn(ray_init_fixt
         ), "the single generation prompt should be included in the prompt"
 
         # count number of eos tokens in masked_in_resp_ids
-        assert (
-            sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
-        )  # 1 eos for each assistant response
+        if stop_reason == "stop":
+            assert (
+                sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
+            )  # 1 eos for the final assistant response
+        else:
+            logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
         if model_name == "Qwen/Qwen3-0.6B":
             assert (
                 sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
@@ -549,6 +554,7 @@ async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
     ):
         assert len(support_rows) == len(response_ids) == len(loss_mask)
         for token_id, is_loss_active, support_row in zip(response_ids, loss_mask, support_rows):
+            support_row = np.asarray(support_row).tolist()
             assert len(support_row) == SAMPLE_SUPPORT_TOP_K
             assert all(candidate_id >= -1 for candidate_id in support_row)
             first_padding = next(

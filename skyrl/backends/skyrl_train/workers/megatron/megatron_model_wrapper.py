@@ -5,7 +5,10 @@ from typing import Any, Callable, Dict, List, Optional
 import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
-from megatron.core.distributed import finalize_model_grads
+from megatron.bridge.peft.utils import (
+    enable_expert_parallel_grad_sync_in_finalize,
+    finalize_model_grads_with_expert_adapter_sync,
+)
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
@@ -40,7 +43,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     build_token_metadata_layout,
 )
 from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
-from skyrl.backends.skyrl_train.mtp.hidden_capture import maybe_capture_mtp_hidden
+from skyrl.backends.skyrl_train.mtp.hidden_capture import (
+    maybe_capture_mtp_hidden,
+    native_mtp_disabled,
+)
 from skyrl.backends.skyrl_train.mtp.soft_ce import (
     build_teacher_logits,
     draft_soft_ce,
@@ -237,6 +243,10 @@ class MegatronModelWrapper:
         # parallelism dimensions -- but deferred to optim_step rather than run per
         # forward_backward. See `_defer_finalize_model_grads`.
         config.finalize_model_grads_func = self._defer_finalize_model_grads
+        # Shared expert LoRA weights are replicated across EP; `run_pending_grad_sync`
+        # sums their grads over EP once per step, so drop Bridge's per-microbatch
+        # fallback hooks (which also miss grads under gradient_accumulation_fusion).
+        enable_expert_parallel_grad_sync_in_finalize(self.actor_module)
         # Wire up the optimizer's loss scaler so Megatron's pipeline schedule can scale
         # the loss before backward (critical for fp16 dynamic loss scaling, MoE aux loss
         # scaling, and any explicit loss_scale configuration).
@@ -277,7 +287,7 @@ class MegatronModelWrapper:
         """
         pending = self._pending_grad_sync
         self._pending_grad_sync = None
-        finalize_model_grads(self.actor_module, pending["num_tokens"] if pending else None)
+        finalize_model_grads_with_expert_adapter_sync(self.actor_module, pending["num_tokens"] if pending else None)
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -503,35 +513,36 @@ class MegatronModelWrapper:
                     remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
-            if self._fused_lm_head:
-                # Fused LM-head inference: the output_processor returns decoder
-                # hidden states (not logits) and stashes the LM-head weight, so
-                # collection_func can fold the projection into the chunked
-                # log-prob op. Without this, a forward-only ref/old-logprob pass
-                # (e.g. PPO reference logprobs) at long context would still
-                # materialize the full [B, S, vocab//TP] logits and OOM.
-                _op_ctx: dict = {}
-                outputs = call_model_with_fused_lm_head(
-                    model,
-                    new_sequences,
-                    new_position_ids,
-                    to_te_attention_mask(new_attention_mask),
-                    packed_seq_params=packed_seq_params,
-                    output_processor=fused_lm_head_output_processor,
-                    output_processor_context=_op_ctx,
-                    **model_replay_kwargs,
-                    **vlm_inputs,
-                )
-                batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
-            else:
-                outputs = model(
-                    new_sequences,
-                    new_position_ids,
-                    to_te_attention_mask(new_attention_mask),
-                    packed_seq_params=packed_seq_params,
-                    **model_replay_kwargs,
-                    **vlm_inputs,
-                )
+            with native_mtp_disabled(model):
+                if self._fused_lm_head:
+                    # Fused LM-head inference: the output_processor returns decoder
+                    # hidden states (not logits) and stashes the LM-head weight, so
+                    # collection_func can fold the projection into the chunked
+                    # log-prob op. Without this, a forward-only ref/old-logprob pass
+                    # (e.g. PPO reference logprobs) at long context would still
+                    # materialize the full [B, S, vocab//TP] logits and OOM.
+                    _op_ctx: dict = {}
+                    outputs = call_model_with_fused_lm_head(
+                        model,
+                        new_sequences,
+                        new_position_ids,
+                        to_te_attention_mask(new_attention_mask),
+                        packed_seq_params=packed_seq_params,
+                        output_processor=fused_lm_head_output_processor,
+                        output_processor_context=_op_ctx,
+                        **model_replay_kwargs,
+                        **vlm_inputs,
+                    )
+                    batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
+                else:
+                    outputs = model(
+                        new_sequences,
+                        new_position_ids,
+                        to_te_attention_mask(new_attention_mask),
+                        packed_seq_params=packed_seq_params,
+                        **model_replay_kwargs,
+                        **vlm_inputs,
+                    )
 
             if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(

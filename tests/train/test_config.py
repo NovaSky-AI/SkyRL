@@ -234,6 +234,64 @@ def test_serialized_fp8_pow2_scales_reject_disabled_e8m0_on_blackwell(monkeypatc
         prepare_runtime_environment(cfg)
 
 
+def test_mxfp8_runtime_takes_no_blockwise_scale_pins(monkeypatch):
+    # Both scale-contract vars belong to the blockwise wire; the MXFP8 wire
+    # (compressed-tensors, native E8M0) must neither stage them nor validate
+    # them — VLLM_USE_DEEP_GEMM_E8M0=0 is exactly what the blockwise-Hopper
+    # contract exports, and it must not fail an mxfp8 launch on SM100.
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "mxfp8"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert "NVTE_FP8_BLOCK_SCALING_FP32_SCALES" not in env_vars
+
+
+@pytest.mark.parametrize("wire", ["blockwise", "mxfp8", "auto"])
+def test_config_construction_accepts_every_fp8_wire_including_auto(wire):
+    """``__post_init__`` runs long before ``fp8_recipe`` is resolved.
+
+    It sees whatever the launch script passed, so it has to admit both concrete
+    wires *and* the unresolved ``"auto"`` -- which validate_megatron_cfg turns
+    into a concrete wire later, from the policy's recipe. A gate here that
+    knows only one wire rejects a valid launch before training ever starts, and
+    the tests that set the attribute on an already-built config never see it.
+    """
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            f"generator.inference_engine.fp8_weight_sync_mode={wire}",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.fp8_weight_sync_mode == wire
+
+
+def test_config_construction_rejects_an_unknown_fp8_wire():
+    with pytest.raises(ValueError, match="Unsupported fp8_weight_sync_mode"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "generator.inference_engine.fp8_weight_sync_mode=int4",
+            ]
+        )
+
+
+def test_inference_engine_cfg_rejects_unresolved_auto_sync_mode():
+    # "auto" resolves from the trainer recipe on the megatron training path;
+    # a path that never runs that resolution must reject it with the way out
+    # rather than listing "auto" as an accepted value.
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "auto"
+
+    with pytest.raises(ValueError, match="megatron"):
+        train_utils.validate_inference_engine_cfg(cfg)
+
+
 def test_serialized_fp8_requires_an_explicit_scale_mode_without_a_driver_gpu(monkeypatch):
     """The contract is baked into the runtime env before ray.init, so a GPU-less
     head cannot infer it from the workers; guessing Hopper would hand FP32 block
@@ -1183,6 +1241,28 @@ class TestMaxSeqLenValidation:
         validate_cfg(cfg)
 
 
+class TestStepWiseRoutedExpertsValidation:
+    @staticmethod
+    def _cfg():
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = "megatron"
+        cfg.generator.inference_engine.distributed_executor_backend = "mp"
+        cfg.generator.step_wise_trajectories = True
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        return cfg
+
+    def test_step_wise_rows_may_carry_routes(self):
+        validate_cfg(self._cfg())
+
+    def test_merged_step_wise_output_refuses_routes(self):
+        cfg = self._cfg()
+        cfg.generator.merge_stepwise_output = True
+
+        with pytest.raises(ValueError, match="prefix-aware merging does not merge routed experts"):
+            validate_cfg(cfg)
+
+
 class TestTorchProfilerConfigValidation:
     """TorchProfilerConfig validation coverage."""
 
@@ -1304,6 +1384,59 @@ class TestDeltaWeightSyncConfig:
         assert "my_sync_dir" in cfg.local_checkpoint_dir
 
 
+def _memory_lora_megatron_cfg():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.sync_mode = "memory"
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    return cfg
+
+
+def test_lora_memory_sync_mode_accepts_megatron_adapter_only_nccl():
+    validate_inference_engine_cfg(_memory_lora_megatron_cfg())
+
+
+def test_lora_sync_mode_rejects_unknown_value():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.sync_mode = "tmpfs"
+    with pytest.raises(ValueError, match="sync_mode must be 'disk' or 'memory'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_megatron():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.strategy = "fsdp"
+    with pytest.raises(ValueError, match="only implemented for trainer.strategy='megatron'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_adapter_only_lora():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
+    with pytest.raises(ValueError, match="merge_lora=false"):
+        validate_inference_engine_cfg(cfg)
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.rank = 0
+    with pytest.raises(ValueError, match="lora.rank > 0"):
+        validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("backend", ["delta", "sharded_rdt"])
+def test_lora_memory_sync_mode_requires_nccl_transport(backend):
+    cfg = _memory_lora_megatron_cfg()
+    cfg.generator.inference_engine.weight_sync_backend = backend
+    with pytest.raises(ValueError, match="weight_sync_backend='nccl'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_disk_sync_mode_is_default_and_unconstrained():
+    cfg = _make_validated_test_config()
+    assert cfg.trainer.policy.model.lora.sync_mode == "disk"
+    validate_inference_engine_cfg(cfg)
+
+
 class TestMegatronRouterReplayValidation:
     @staticmethod
     def _cfg():
@@ -1336,3 +1469,51 @@ class TestMegatronRouterReplayValidation:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = 2
 
         validate_megatron_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_allows_both_executor_backends(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+
+        validate_inference_engine_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_refuses_inference_pipeline_parallelism(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+        cfg.generator.inference_engine.pipeline_parallel_size = 2
+
+        with pytest.raises(AssertionError, match="pipeline_parallel_size=1"):
+            validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "step_timeout_s,weight_sync_timeout_s,match",
+    [
+        (0, None, "step_timeout_s must be > 0"),
+        (None, -1.0, "weight_sync_timeout_s must be > 0"),
+        (900.0, 1200.0, "weight_sync_timeout_s .* must be <= trainer.step_timeout_s"),
+    ],
+)
+def test_validate_cfg_rejects_invalid_step_timeouts(step_timeout_s, weight_sync_timeout_s, match):
+    cfg = _make_validated_test_config()
+    cfg.trainer.step_timeout_s = step_timeout_s
+    cfg.trainer.weight_sync_timeout_s = weight_sync_timeout_s
+    with pytest.raises(ValueError, match=match):
+        validate_cfg(cfg)
+
+
+def test_validate_step_timeouts_warns_below_nccl_timeout():
+    from loguru import logger
+
+    messages = []
+    handler_id = logger.add(messages.append, level="WARNING")
+    try:
+        nccl_timeout_s = train_utils.SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+        train_utils.validate_step_timeouts(nccl_timeout_s * 2, nccl_timeout_s * 2)
+        assert messages == []
+        train_utils.validate_step_timeouts(nccl_timeout_s * 2, nccl_timeout_s / 2)
+    finally:
+        logger.remove(handler_id)
+    (message,) = messages
+    assert "trainer.weight_sync_timeout_s" in message and "NCCL watchdog" in message
