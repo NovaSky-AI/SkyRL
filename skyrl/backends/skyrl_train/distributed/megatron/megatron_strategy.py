@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import os
 import random
@@ -16,14 +17,13 @@ from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
 )
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncCallsQueue
 from torch import distributed as dist
 from torch import optim
 from transformers import PreTrainedTokenizer
@@ -45,6 +45,12 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
 
 # Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
 _PP_SEED_OFFSET = 100
+
+# Process-wide queue of in-flight async checkpoint writes. Megatron-core has no
+# global for this; It has to be
+# module-level rather than an instance attribute because `_finalize_async_calls`
+# is a staticmethod, invoked from a finalization callback with no strategy handle.
+_async_calls: Optional[AsyncCallsQueue] = None
 
 
 def _stage_async_request_to_host(async_request):
@@ -70,8 +76,8 @@ def _stage_async_request_to_host(async_request):
     permission. Reference:
     https://github.com/NVIDIA/Megatron-LM/blob/b78cfd5279be41ced082d344e9380a09a146c458/megatron/core/dist_checkpointing/strategies/async_utils.py#L578-L584
 
-    Takes and returns an ``AsyncRequest``; both the ``mcore`` and ``nvrx`` request types
-    are named tuples with the same ``async_fn_args``/``preload_fn`` fields. The attribute
+    Takes and returns NVRx's ``AsyncRequest``, a named tuple with
+    ``async_fn_args``/``preload_fn`` fields. The attribute
     access is deliberately unguarded so a future upstream change to that contract fails
     loudly here rather than silently restoring the hang.
     """
@@ -100,6 +106,27 @@ def _patched_update_fp32_params_by_new_state(self):
             continue
         fp32_param = self.param_to_fp32_param[param]
         fp32_param.data.copy_(v["master_param"])
+
+
+@contextlib.contextmanager
+def _without_stub_optimizers(optimizer):
+    """Temporarily drop stub sub-optimizers from a ChainedOptimizer for checkpoint save/load.
+
+    A stub DistributedOptimizer owns no params (e.g. the dense group when LoRA only targets
+    expert linears) and megatron-core cannot build its ``sharded_state_dict`` (``state_dict``
+    dereferences its ``None`` inner optimizer). Stubs hold no state, and the same groups are
+    stubs on every rank, so save and load see a consistent chain without them.
+    """
+    chained = getattr(optimizer, "chained_optimizers", None)
+    kept = [o for o in chained or [] if not getattr(o, "is_stub_optimizer", False)]
+    if not chained or len(kept) == len(chained):
+        yield
+        return
+    optimizer.chained_optimizers = kept
+    try:
+        yield
+    finally:
+        optimizer.chained_optimizers = chained
 
 
 _orig_load_parameter_state_from_dp_reshardable = DistributedOptimizer.load_parameter_state_from_dp_reshardable
@@ -181,7 +208,8 @@ class MegatronStrategy(DistributedStrategy):
 
         # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
         # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+        global _async_calls
+        _async_calls = AsyncCallsQueue(persistent=True)
 
     def set_seed(self, seed: int) -> None:
         # Vary seed by pipeline parallel rank so that different PP stages get
@@ -223,7 +251,7 @@ class MegatronStrategy(DistributedStrategy):
         ``optimizer is None`` (e.g. ``policy.inference_only_init=True`` flows).
         """
         if offload_model:
-            offload_megatron_model_to_cpu(model)
+            offload_megatron_model_to_cpu(model, is_lora=self.is_lora)
         if offload_optimizer:
             offload_megatron_grads_to_cpu(model)
             if optimizer is not None:
@@ -238,7 +266,7 @@ class MegatronStrategy(DistributedStrategy):
         from optimizer existence.
         """
         if backload_model:
-            load_megatron_model_to_gpu(model)
+            load_megatron_model_to_gpu(model, is_lora=self.is_lora)
         if backload_optimizer:
             load_megatron_grads_to_gpu(model)
             if optimizer is not None:
@@ -299,6 +327,8 @@ class MegatronStrategy(DistributedStrategy):
         scheduler: Optional[OptimizerParamScheduler] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
     ):
+        global _async_calls
+
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
@@ -320,11 +350,12 @@ class MegatronStrategy(DistributedStrategy):
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
             self._ensure_optimizer_state_initialized(optimizer)
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict,
-                is_loading=False,
-                metadata=self._dist_ckpt_optim_metadata,
-            )
+            with _without_stub_optimizers(optimizer):
+                sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                    model_sharded_state_dict,
+                    is_loading=False,
+                    metadata=self._dist_ckpt_optim_metadata,
+                )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -354,7 +385,6 @@ class MegatronStrategy(DistributedStrategy):
                 checkpoint_dir=work_dir,
                 sharded_strategy=save_strategy,
                 async_sharded_save=async_save,
-                async_strategy=self.megatron_config.async_dist_ckpt_strategy,
                 validate_access_integrity=True,
             )
             if async_save:
@@ -363,7 +393,7 @@ class MegatronStrategy(DistributedStrategy):
                     # Keeps GPU tensors from crossing the process boundary, which the writer
                     # cannot always do -- see `_stage_async_request_to_host`.
                     async_save_request = _stage_async_request_to_host(async_save_request)
-                ckpt_base.async_calls.schedule_async_request(async_save_request)
+                _async_calls.schedule_async_request(async_save_request)
             else:
                 assert async_save_request is None, "save() must not return a request when sync"
 
@@ -379,8 +409,8 @@ class MegatronStrategy(DistributedStrategy):
         if not async_save:
             # Async path keeps the pending request alive in the queue until its finalize;
             # tearing it down here would orphan that write.
-            ckpt_base.async_calls.close()
-            ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
+            _async_calls.close()
+            _async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
 
     @staticmethod
@@ -389,7 +419,8 @@ class MegatronStrategy(DistributedStrategy):
         local_rank = os.environ.get("LOCAL_RANK")
         if local_rank is not None and torch.cuda.is_available():
             torch.cuda.set_device(int(local_rank))
-        ckpt_base.async_calls.maybe_finalize_async_calls(blocking=True)
+        if _async_calls is not None:
+            _async_calls.maybe_finalize_async_calls(blocking=True)
 
     def finalize_pending_saves(self) -> None:
         """Block until any in-flight async checkpoint write completes.
@@ -456,11 +487,12 @@ class MegatronStrategy(DistributedStrategy):
         if not self.is_lora:
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict,
-                is_loading=True,
-                metadata=self._dist_ckpt_optim_metadata,
-            )
+            with _without_stub_optimizers(optimizer):
+                sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                    model_sharded_state_dict,
+                    is_loading=True,
+                    metadata=self._dist_ckpt_optim_metadata,
+                )
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -490,7 +522,8 @@ class MegatronStrategy(DistributedStrategy):
             assert (
                 "optimizer" in state_dict
             ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
-            optimizer.load_state_dict(state_dict["optimizer"])
+            with _without_stub_optimizers(optimizer):
+                optimizer.load_state_dict(state_dict["optimizer"])
             self.print("Loaded optimizer state dict.")
 
         if scheduler and load_lr_scheduler_states:
