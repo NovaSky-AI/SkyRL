@@ -342,17 +342,26 @@ class AdapterStore:
         self._signature = signature
         self._pristine = self._allocate_empty_slot(model_chunks, optimizer)
         self._snapshot(self._pristine, model_chunks, optimizer)
+        # _snapshot issues non_blocking D2H copies into pinned memory; the
+        # pristine slot is read on the *CPU* by create()'s _copy_slot, so the
+        # DMA must have landed before this returns.
+        torch.cuda.current_stream().synchronize()
 
     @torch.no_grad()
     def create(self, model_id: str, model_chunks, optimizer, signature: LoraSignature) -> None:
         """Register a new adapter slot.
 
-        - First registration: this is also the live adapter; allocate a slot
-          but skip the pristine→slot copy because the live state already
-          equals pristine. `current_id` becomes `model_id`.
+        - First registration (live state still pristine): this is also the
+          live adapter; allocate a slot but skip the pristine→slot copy
+          because the live state already equals pristine. `current_id`
+          becomes `model_id`.
         - Subsequent registrations: allocate slot and copy pristine → slot.
           Live state is unchanged (no swap). The new adapter only becomes
           live when the next `swap_to(model_id)` is issued.
+        - After a delete of the current adapter (`current_id is None` but
+          live state is dirty), the new adapter is seeded from pristine like
+          any other registration: adopting the live state here would silently
+          inherit the deleted tenant's weights, fp32 masters and Adam state.
         """
         if self._signature is None:
             raise RuntimeError("AdapterStore.create called before register_pristine")
@@ -502,9 +511,8 @@ class AdapterStore:
         if self._current_id == model_id:
             return  # no-op fast path
 
-        dp_group = mpu.get_data_parallel_group()
         if dist.is_available() and dist.is_initialized():
-            dist.barrier(group=dp_group)
+            dist.barrier(group=mpu.get_data_parallel_group())
 
         if self._current_id is not None:
             current_slot = self._slots[self._current_id]
@@ -519,4 +527,4 @@ class AdapterStore:
         self._live_stale = False
 
         if dist.is_available() and dist.is_initialized():
-            dist.barrier(group=dp_group)
+            dist.barrier(group=mpu.get_data_parallel_group())

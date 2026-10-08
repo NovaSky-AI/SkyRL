@@ -277,6 +277,7 @@ class BasePPOExp:
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
+        self.tracker = tracker
 
         inference_engine_client = self.get_inference_client()
 
@@ -292,6 +293,18 @@ class BasePPOExp:
             generator=generator,
             colocate_pg=self.colocate_pg,
         )
+        if trainer._vllm_metrics_scraper is not None:
+            groups = self._server_groups or ((self._prefill_server_groups or []) + (self._decode_server_groups or []))
+            actors = [actor for group in (groups or []) for actor in group.get_actors()]
+            if actors and self.cfg.generator.inference_engine.backend == "vllm":
+                try:
+                    worker_ids = ray.get([actor.get_ray_worker_id.remote() for actor in actors], timeout=10)
+                    trainer._vllm_metrics_scraper.set_worker_ids(worker_ids)
+                except Exception as error:
+                    trainer._vllm_metrics_scraper.set_worker_ids([])
+                    logger.warning(
+                        f"vLLM metrics disabled: could not identify launched workers ({type(error).__name__})"
+                    )
         # Install the trajectory logger after construction
         trainer.trajectory_logger = self.get_trajectory_logger()
         # Expose the trainer on self so callers can log exceptions raised
@@ -315,10 +328,33 @@ class BasePPOExp:
 
     def run(self):
         self.trainer = None
+        self.tracker = None
+        status = "failed"
+        annotation = None
+        trainer_cfg = getattr(getattr(self, "cfg", None), "trainer", None)
+        annotation_cfg = getattr(trainer_cfg, "grafana_annotations", None)
+        if annotation_cfg is not None and annotation_cfg.enabled:
+            from skyrl.train.utils.grafana_annotations import GrafanaRunAnnotation
+
+            annotation = GrafanaRunAnnotation(annotation_cfg, trainer_cfg.run_name)
+            annotation.start()
         try:
             trainer = self._setup_trainer()
+
             # Start the training loop
-            asyncio.run(trainer.train())
+            async def train_and_finalize():
+                run_status = "failed"
+                try:
+                    await trainer.train()
+                    run_status = "success"
+                finally:
+                    try:
+                        await trainer.finalize_metrics(run_status)
+                    except Exception as finalization_error:
+                        logger.warning(f"Could not finalize run metrics: {finalization_error}")
+
+            asyncio.run(train_and_finalize())
+            status = "success"
         except Exception as e:
             # OOMs raised inside actor init (e.g. FSDPPolicyWorkerBase.init_model)
             # surface here as RayTaskError. Without this they only land in Ray
@@ -333,6 +369,16 @@ class BasePPOExp:
             else:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")
             raise
+        finally:
+            if annotation is not None:
+                annotation.finish()
+            if self.tracker is not None:
+                try:
+                    self.tracker.run_status = status
+                    self.tracker.update_summary({"run_status": status})
+                    self.tracker.finish(exit_code=0 if status == "success" else 1)
+                except Exception as finalization_error:
+                    logger.warning(f"Could not finish run tracking: {finalization_error}")
 
 
 @ray.remote(num_cpus=1)

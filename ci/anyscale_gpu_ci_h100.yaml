@@ -1,4 +1,4 @@
-name: skyrl-train-gpu-ci-h100
+name: skyrl-gpu-ci-h100
 entrypoint: bash ci/gpu_ci_run_h100.sh
 image_uri: anyscale/image/skyrl-train-ray-2.57.0-py312-cu13.0-megatron-efa-1.47:1
 ray_version: "2.57.0"

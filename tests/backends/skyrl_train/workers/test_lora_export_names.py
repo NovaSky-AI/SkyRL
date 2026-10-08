@@ -23,10 +23,10 @@ from skyrl.backends.skyrl_train.distributed import fsdp_utils  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (  # noqa: E402
     RemoteInferenceClient,
 )
+from skyrl.backends.skyrl_train.weight_sync import sources as sources_mod  # noqa: E402
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (  # noqa: E402
     FSDPPolicyWorkerBase,
 )
-from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -97,27 +97,17 @@ def test_full_weight_sync_uses_inference_namespace(monkeypatch, is_multimodal_lm
     source_name = "model.layers.0.self_attn.q_proj.weight"
     source_tensor = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     model = SimpleNamespace(state_dict=lambda: {source_name: source_tensor})
-    # Exercise the real setup method without initializing distributed workers.
+    # Exercise the current source factory without initializing distributed workers.
     worker = object.__new__(FSDPPolicyWorkerBase)
     worker.model = SimpleNamespace(model=model)
-    worker.cfg = SimpleNamespace(placement=SimpleNamespace(colocate_all=False))
     worker._is_multimodal_lm_only = is_multimodal_lm_only
-    engine_config = SimpleNamespace(weight_sync_backend="nccl")
-    from skyrl.backends.skyrl_train import weight_sync
+    monkeypatch.setattr(sources_mod, "materialize_full_tensor", lambda tensor: tensor)
 
-    monkeypatch.setattr(weight_sync, "get_transfer_strategy_cls", lambda **kwargs: object)
-    parent_init = AsyncMock()
-    monkeypatch.setattr(PolicyWorkerBase, "init_weight_sync_state", parent_init)
-
-    asyncio.run(worker.init_weight_sync_state(None, engine_config))
-    parent_init.assert_awaited_once_with(None, engine_config)
-    extractor = worker.weight_extractor
-    monkeypatch.setattr(extractor, "_gather_tensor", lambda tensor: tensor)
-    chunks = list(extractor.extract_weights(torch.float32))
-    assert len(chunks) == 1
-    assert chunks[0].names == [expected_prefix + source_name]
-    assert torch.equal(chunks[0].tensors[0], source_tensor)
-    assert extractor.get_weight_metadata(torch.float32)["names"] == chunks[0].names
+    source = worker._build_weight_source(torch.float32, backend="nccl")
+    assert [meta.name for meta in source.metadata()] == [expected_prefix + source_name]
+    exported = list(source)
+    assert [name for name, _ in exported] == [expected_prefix + source_name]
+    assert torch.equal(exported[0][1], source_tensor)
 
 
 @pytest.mark.parametrize("unrecognized_prefix", ["", "base_model", "base_model.model_extra."])

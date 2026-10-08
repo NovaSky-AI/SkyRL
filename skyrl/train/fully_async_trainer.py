@@ -482,6 +482,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
 
+        if self._vllm_metrics_scraper is not None:
+            await self._vllm_metrics_scraper.sample()
+
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with self._phase_gauge.timed_phase("eval", self.all_timings):
@@ -731,8 +734,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        if self._vllm_metrics_scraper is not None:
-            await self._vllm_metrics_scraper.aclose()
+        await self.finalize_metrics("success")
         self.tracker.finish()
         logger.info("Training done!")
 
@@ -1034,7 +1036,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 staleness_violation_count += 1
 
         generator_output = concatenate_generator_outputs(
-            generator_outputs, step_wise=self.cfg.generator.step_wise_trajectories
+            generator_outputs,
+            step_wise=self.cfg.generator.step_wise_trajectories,
+            routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
         )
         kept_rollout_metrics = generator_output["rollout_metrics"]
         assert kept_rollout_metrics is not None, "Rollout metrics should be non-null."

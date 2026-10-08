@@ -26,6 +26,7 @@ from skyrl.train.utils.utils import (
     prepare_runtime_environment,
     validate_cfg,
     validate_inference_engine_cfg,
+    validate_megatron_cfg,
 )
 from tests.train.util import example_dummy_config
 
@@ -233,6 +234,64 @@ def test_serialized_fp8_pow2_scales_reject_disabled_e8m0_on_blackwell(monkeypatc
         prepare_runtime_environment(cfg)
 
 
+def test_mxfp8_runtime_takes_no_blockwise_scale_pins(monkeypatch):
+    # Both scale-contract vars belong to the blockwise wire; the MXFP8 wire
+    # (compressed-tensors, native E8M0) must neither stage them nor validate
+    # them — VLLM_USE_DEEP_GEMM_E8M0=0 is exactly what the blockwise-Hopper
+    # contract exports, and it must not fail an mxfp8 launch on SM100.
+    monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "mxfp8"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert "NVTE_FP8_BLOCK_SCALING_FP32_SCALES" not in env_vars
+
+
+@pytest.mark.parametrize("wire", ["blockwise", "mxfp8", "auto"])
+def test_config_construction_accepts_every_fp8_wire_including_auto(wire):
+    """``__post_init__`` runs long before ``fp8_recipe`` is resolved.
+
+    It sees whatever the launch script passed, so it has to admit both concrete
+    wires *and* the unresolved ``"auto"`` -- which validate_megatron_cfg turns
+    into a concrete wire later, from the policy's recipe. A gate here that
+    knows only one wire rejects a valid launch before training ever starts, and
+    the tests that set the attribute on an already-built config never see it.
+    """
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            f"generator.inference_engine.fp8_weight_sync_mode={wire}",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.fp8_weight_sync_mode == wire
+
+
+def test_config_construction_rejects_an_unknown_fp8_wire():
+    with pytest.raises(ValueError, match="Unsupported fp8_weight_sync_mode"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                "generator.inference_engine.fp8_weight_sync_mode=int4",
+            ]
+        )
+
+
+def test_inference_engine_cfg_rejects_unresolved_auto_sync_mode():
+    # "auto" resolves from the trainer recipe on the megatron training path;
+    # a path that never runs that resolution must reject it with the way out
+    # rather than listing "auto" as an accepted value.
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "auto"
+
+    with pytest.raises(ValueError, match="megatron"):
+        train_utils.validate_inference_engine_cfg(cfg)
+
+
 def test_serialized_fp8_requires_an_explicit_scale_mode_without_a_driver_gpu(monkeypatch):
     """The contract is baked into the runtime env before ray.init, so a GPU-less
     head cannot infer it from the workers; guessing Hopper would hand FP32 block
@@ -411,6 +470,113 @@ def test_serialized_fp8_fp32_scales_reject_vllm_e8m0(monkeypatch):
 
     with pytest.raises(ValueError, match="VLLM_USE_DEEP_GEMM_E8M0=0"):
         prepare_runtime_environment(cfg)
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("generator.sampling_params.temperature=0", "temperature > 0"),
+        ("generator.sampling_params.top_k=1", "top_k > 1"),
+        ("generator.sampling_params.repetition_penalty=1.1", "repetition_penalty=1.0"),
+        ("generator.sampling_params.additional_kwargs.foo=bar", "additional_kwargs"),
+        ("generator.vision_language_generator=true", "vision_language_generator"),
+    ],
+)
+def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                override,
+            ]
+        )
+
+
+def test_routed_expert_capture_rejects_the_vision_language_generator():
+    with pytest.raises(ValueError, match="vision_language_generator"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_routed_experts=true",
+                "generator.vision_language_generator=true",
+            ]
+        )
+
+
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_requires_capture(strategy):
+    with pytest.raises(ValueError, match="enable_return_sample_support_set"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                f"trainer.strategy={strategy}",
+            ]
+        )
+
+
+def test_sample_support_replay_rejects_a_backend_without_a_scorer():
+    with pytest.raises(ValueError, match="requires trainer.strategy=megatron or fsdp"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "trainer.strategy=jax",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+            ]
+        )
+
+
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_sample_support_replay_accepts_capture_on_either_backend(strategy):
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            f"trainer.strategy={strategy}",
+            "generator.use_conversation_multi_turn=true",
+        ]
+    )
+
+    assert cfg.trainer.algorithm.enable_sample_support_replay
+
+
+def test_sample_support_replay_rejects_single_assistant_message_generation():
+    with pytest.raises(ValueError, match="generator.use_conversation_multi_turn=True"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+                "trainer.strategy=megatron",
+                "generator.use_conversation_multi_turn=false",
+            ]
+        )
+
+
+def test_sample_support_capture_accepts_top_k_top_p_and_min_p():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "generator.sampling_params.top_p=0.9",
+            "generator.sampling_params.min_p=0.05",
+        ]
+    )
+
+    assert cfg.generator.inference_engine.enable_return_sample_support_set
+
+
+def test_sample_support_capture_leaves_greedy_eval_sampling_params_alone():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+        ]
+    )
+
+    assert cfg.generator.eval_sampling_params.temperature == 0.0
+    assert cfg.generator.eval_sampling_params.top_k == -1
 
 
 def test_cli_overrides_plus_prefix_rejected():
@@ -1075,6 +1241,28 @@ class TestMaxSeqLenValidation:
         validate_cfg(cfg)
 
 
+class TestStepWiseRoutedExpertsValidation:
+    @staticmethod
+    def _cfg():
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = "megatron"
+        cfg.generator.inference_engine.distributed_executor_backend = "mp"
+        cfg.generator.step_wise_trajectories = True
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        return cfg
+
+    def test_step_wise_rows_may_carry_routes(self):
+        validate_cfg(self._cfg())
+
+    def test_merged_step_wise_output_refuses_routes(self):
+        cfg = self._cfg()
+        cfg.generator.merge_stepwise_output = True
+
+        with pytest.raises(ValueError, match="prefix-aware merging does not merge routed experts"):
+            validate_cfg(cfg)
+
+
 class TestTorchProfilerConfigValidation:
     """TorchProfilerConfig validation coverage."""
 
@@ -1194,3 +1382,106 @@ class TestDeltaWeightSyncConfig:
         # `publish_staging_dir` and `local_checkpoint_dir` should be constructed based on `sync_dir`
         assert "my_sync_dir" in cfg.publish_staging_dir
         assert "my_sync_dir" in cfg.local_checkpoint_dir
+
+
+def _memory_lora_megatron_cfg():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.model.lora.rank = 32
+    cfg.trainer.policy.model.lora.sync_mode = "memory"
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    return cfg
+
+
+def test_lora_memory_sync_mode_accepts_megatron_adapter_only_nccl():
+    validate_inference_engine_cfg(_memory_lora_megatron_cfg())
+
+
+def test_lora_sync_mode_rejects_unknown_value():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.sync_mode = "tmpfs"
+    with pytest.raises(ValueError, match="sync_mode must be 'disk' or 'memory'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_megatron():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.strategy = "fsdp"
+    with pytest.raises(ValueError, match="only implemented for trainer.strategy='megatron'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_memory_sync_mode_requires_adapter_only_lora():
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
+    with pytest.raises(ValueError, match="merge_lora=false"):
+        validate_inference_engine_cfg(cfg)
+    cfg = _memory_lora_megatron_cfg()
+    cfg.trainer.policy.model.lora.rank = 0
+    with pytest.raises(ValueError, match="lora.rank > 0"):
+        validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("backend", ["delta", "sharded_rdt"])
+def test_lora_memory_sync_mode_requires_nccl_transport(backend):
+    cfg = _memory_lora_megatron_cfg()
+    cfg.generator.inference_engine.weight_sync_backend = backend
+    with pytest.raises(ValueError, match="weight_sync_backend='nccl'"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_lora_disk_sync_mode_is_default_and_unconstrained():
+    cfg = _make_validated_test_config()
+    assert cfg.trainer.policy.model.lora.sync_mode == "disk"
+    validate_inference_engine_cfg(cfg)
+
+
+class TestMegatronRouterReplayValidation:
+    @staticmethod
+    def _cfg():
+        cfg = _make_validated_test_config()
+        cfg.trainer.strategy = "megatron"
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = True
+        return cfg
+
+    @pytest.mark.parametrize("vpp_size", [2])
+    def test_routing_replay_refuses_virtual_pipeline_parallelism(self, vpp_size):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
+
+        with pytest.raises(AssertionError, match="virtual_pipeline_model_parallel_size"):
+            validate_megatron_cfg(cfg)
+
+    # Only sizes above one build interleaved chunks; 1 is a plain non-interleaved schedule,
+    # which megatron_worker.py also permits.
+    @pytest.mark.parametrize("vpp_size", [None, 0, 1])
+    def test_routing_replay_allows_unset_virtual_pipeline_parallelism(self, vpp_size):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = vpp_size
+
+        validate_megatron_cfg(cfg)
+
+    def test_virtual_pipeline_parallelism_allowed_without_routing_replay(self):
+        cfg = self._cfg()
+        cfg.trainer.policy.megatron_config.moe_enable_routing_replay = False
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = 2
+
+        validate_megatron_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_allows_both_executor_backends(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+
+        validate_inference_engine_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_refuses_inference_pipeline_parallelism(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+        cfg.generator.inference_engine.pipeline_parallel_size = 2
+
+        with pytest.raises(AssertionError, match="pipeline_parallel_size=1"):
+            validate_inference_engine_cfg(cfg)
