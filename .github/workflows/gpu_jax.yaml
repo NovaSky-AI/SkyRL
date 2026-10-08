@@ -1,0 +1,84 @@
+name: SkyRL-JAX-GPU
+
+# Same scoping rationale as SkyRL-JAX-CPU (see cpu_jax.yaml), minus
+# `pyproject.toml`/`uv.lock`: this workflow submits a paid Anyscale GPU job, and
+# dependency bumps are already covered on the free CPU runner. Use
+# `workflow_dispatch` if you want a GPU run for a resolution change.
+#
+# Keep the two `paths:` lists below in sync -- GitHub Actions does not support
+# YAML anchors.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'skyrl/tx/**'
+      - 'skyrl/backends/backend.py'
+      - 'skyrl/backends/jax.py'
+      - 'skyrl/backends/ray_jax.py'
+      - 'skyrl/utils/**'
+      - 'skyrl/tinker/types.py'
+      - 'tests/tx/**'
+      - 'tests/backends/test_jax_backend.py'
+      - 'ci/anyscale_gpu_ci_jax.yaml'
+      - 'ci/gpu_ci_run_jax.sh'
+      - 'ci/submit_anyscale_job.sh'
+      - '.github/workflows/gpu_jax.yaml'
+  pull_request:
+    paths:
+      - 'skyrl/tx/**'
+      - 'skyrl/backends/backend.py'
+      - 'skyrl/backends/jax.py'
+      - 'skyrl/backends/ray_jax.py'
+      - 'skyrl/utils/**'
+      - 'skyrl/tinker/types.py'
+      - 'tests/tx/**'
+      - 'tests/backends/test_jax_backend.py'
+      - 'ci/anyscale_gpu_ci_jax.yaml'
+      - 'ci/gpu_ci_run_jax.sh'
+      - 'ci/submit_anyscale_job.sh'
+      - '.github/workflows/gpu_jax.yaml'
+  workflow_dispatch:
+
+permissions:
+  checks: write
+  contents: read
+
+concurrency:
+  group: skyrl-gpu-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  skyrl_jax_gpu_tests:
+    # Forks inherit these workflows but not the secrets they need -- only run upstream.
+    if: github.repository == 'NovaSky-AI/SkyRL'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Install dependencies
+        run: uv pip install anyscale==0.26.103 typer==0.9.0
+      - name: Install envsubst
+        run: sudo apt-get update && sudo apt-get install -y gettext-base
+      - name: GPU tests
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          envsubst < ci/anyscale_gpu_ci_jax.yaml > ci/anyscale_gpu_ci_jax_envsubst.yaml
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          JOB_NAME="skyrl-jax-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_jax_envsubst.yaml "$JOB_NAME" 10000
+          rm -f ci/anyscale_gpu_ci_jax_envsubst.yaml

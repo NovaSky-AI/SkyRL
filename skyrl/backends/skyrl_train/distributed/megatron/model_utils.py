@@ -24,6 +24,8 @@ import megatron.core.parallel_state as mpu
 import torch
 import torch.distributed as dist
 
+from skyrl.backends.skyrl_train.utils.packed_tensor import lengths_from_offsets
+
 
 @torch.no_grad()
 def _compute_distributed_log_softmax(
@@ -924,7 +926,7 @@ def _packed_sequence_indices(
     token_indices = torch.arange(total_tokens, device=device)
     seq_indices = torch.searchsorted(cu_seqlens_padded[1:], token_indices, right=True)
     seq_offsets = token_indices - cu_seqlens_padded[seq_indices]
-    seq_lens_padded = cu_seqlens_padded[1:] - cu_seqlens_padded[:-1]
+    seq_lens_padded = lengths_from_offsets(cu_seqlens_padded)
     return cu_seqlens_padded, token_indices, seq_indices, seq_offsets, seq_lens_padded
 
 

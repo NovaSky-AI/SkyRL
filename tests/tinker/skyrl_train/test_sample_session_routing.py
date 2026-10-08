@@ -4,11 +4,12 @@
 request body as ``session_id``, which ``RemoteInferenceClient.sample`` lifts
 into the ``X-Session-ID`` header. No inference engines are brought up, so this
 runs on CPU. Requires the SkyRL-Train backend deps (ray/vllm). Run:
-  uv run --extra dev --extra fsdp pytest tests/tinker/skyrl_train/test_sample_session_routing.py
+  uv run --extra dev --extra fsdp --extra tinker pytest tests/tinker/skyrl_train/test_sample_session_routing.py
 """
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,7 @@ skyrl_train_backend = pytest.importorskip("skyrl.backends.skyrl_train_backend")
 
 from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
+from skyrl.train.config import SkyRLTrainConfig  # noqa: E402
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
@@ -54,23 +56,24 @@ def test_sample_with_remote_client_sets_session_id(monkeypatch):
 
     spy = _SpyClient()
     fake_self = SimpleNamespace(
-        _cfg=None,
+        _cfg=SkyRLTrainConfig(),
         _base_lora_signature=None,
         _model_ids_to_role={},
         _inference_engine_client=spy,
         _aggregate_sample_results=lambda prepared_batch, outputs: {},
     )
-    sample = skyrl_train_backend.SkyRLTrainBackend._sample_with_remote_client
+    # We test the helper function `_sample_with_remote_client_async` used internally by `SkyRLTrainBackend.sample`
+    sample_async = skyrl_train_backend.SkyRLTrainBackend._sample_with_remote_client_async
 
     batch_with_session = prepare_sample_batch(
         {"req": ("", _sample_input(sampling_session_id="sampling_abcd", seq_id=7))}
     )
-    sample(fake_self, batch_with_session)
+    asyncio.run(sample_async(fake_self, batch_with_session, close_client=True))
     assert len(spy.payloads) == 1
     assert spy.payloads[0]["json"]["session_id"] == "sampling_abcd:7"
 
     spy.payloads.clear()
     batch_without_session = prepare_sample_batch({"req": ("", _sample_input())})
-    sample(fake_self, batch_without_session)
+    asyncio.run(sample_async(fake_self, batch_without_session, close_client=True))
     assert len(spy.payloads) == 1
     assert "session_id" not in spy.payloads[0]["json"]

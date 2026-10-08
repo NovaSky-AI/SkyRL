@@ -5,8 +5,14 @@ import torch
 import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.replay_utils import make_replay_padding_indices
+from skyrl.backends.skyrl_train.training_batch import (
+    PACKED_FIELD_PADDING,
+    TensorBatch,
+    TrainingInputBatch,
+    make_packed_field_padding,
+    packed_dummy_row_segments,
+)
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
@@ -28,6 +34,16 @@ MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_P
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_max"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_min"
 MINIBATCH_ROLLOUT_LOGPROB_DIFF_STD_KEY = f"{MINIBATCH_ROLLOUT_LOGPROB_DIFF_PREFIX}_std"
+
+
+def get_inference_weight_prefix(is_multimodal_lm_only: bool) -> str:
+    """Return the enclosing inference-model prefix omitted by language-only loading.
+
+    Shared by full-weight and LoRA exports. This preserves the existing assumption
+    that the inference VLM exposes its text model under ``language_model``; it is
+    not a universal naming convention for all VLM architectures.
+    """
+    return "language_model." if is_multimodal_lm_only else ""
 
 
 @torch.no_grad()
@@ -164,6 +180,7 @@ class BaseBatchIterator:
             rollout_logprobs=batch.get("rollout_logprobs"),
             rollout_expert_indices=batch.get("rollout_expert_indices"),
             router_padding_mask=batch.get("router_padding_mask"),
+            rollout_sample_support=batch.get(SAMPLE_SUPPORT_FIELD),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},
@@ -321,17 +338,18 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                 "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
             }
         )
-        # Add optional fields such as `rollout_logprobs` and `rollout_expert_indices` to padding batch
+        # Add optional fields to the padding batch.
         if self.data.get("rollout_logprobs") is not None:
             ref_tensor = self.data["rollout_logprobs"]
             data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
-        if self.data.get("rollout_expert_indices") is not None:
-            ref_tensor = self.data["rollout_expert_indices"]
-            data["rollout_expert_indices"] = make_replay_padding_indices(
-                (batch_size, *ref_tensor.shape[1:]),
-                dtype=ref_tensor.dtype,
-                device=device,
-            )
+        for key in PACKED_FIELD_PADDING:
+            # Per-token fields cover the dummy attended token; response fields do not.
+            if self.data.get(key) is not None:
+                data[key] = make_packed_field_padding(
+                    key,
+                    self.data[key],
+                    segment_lengths=packed_dummy_row_segments(key, batch_size),
+                )
         if self.data.get("router_padding_mask") is not None:
             data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
         data.metadata = {}
