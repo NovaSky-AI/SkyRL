@@ -561,15 +561,16 @@ class MegatronWorker:
             patch_moe_release_dispatcher_probs,
         )
 
-        patch_moe_release_dispatcher_probs()
+        if os.environ.get("SKYRL_BLOG_NO_PROBS_RELEASE", "0") != "1":  # blog ablation only
+            patch_moe_release_dispatcher_probs()
 
         # Exact for a 2-rank expert-TP group; saves an FP32 copy of the MoE combine's rows.
         from skyrl.backends.skyrl_train.patches.megatron.patch_moe_combine_bf16_reduce import (
             patch_moe_combine_bf16_reduce,
         )
 
-        patch_moe_combine_bf16_reduce()
-
+        if os.environ.get("SKYRL_BLOG_NO_MOE_BF16_COMBINE", "0") != "1":  # blog ablation only
+            patch_moe_combine_bf16_reduce()
 
         # Opt-in (SKYRL_MOE_NODE_DEDUP=1): one inter-node copy per (token, node) in the MoE all-to-all.
         from skyrl.backends.skyrl_train.patches.megatron.patch_moe_node_dedup_dispatch import (
@@ -582,7 +583,8 @@ class MegatronWorker:
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
         # dense O(L^2) softmax. Delete along with the patch module once the megatron-core pin
         # includes NVIDIA/Megatron-LM#7617.
-        patch_sparse_mla_nope()
+        if os.environ.get("SKYRL_BLOG_NO_SPARSE_MLA_NOPE", "0") != "1":  # blog ablation only
+            patch_sparse_mla_nope()
 
         # Give the Qwen3-VL ViT the language model's attention backend; megatron-core
         # now asserts NVTE_* attention env vars agree across all models in a process.
