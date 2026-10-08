@@ -237,3 +237,45 @@ def test_a_record_that_cant_move_in_doesnt_stop_the_others(tmp_path: Path) -> No
     assert not (out / "train" / "tr_a.tokens.zst").exists()
     assert (out / "train" / "tr_b.tokens.zst").is_file() and (out / "train" / "tr_b.json.zst").is_file()
     assert (out / "train" / "index" / "step-1.json").is_file()
+
+
+def test_a_mirror_on_this_machine_is_refused_unless_allowed(tmp_path: Path) -> None:
+    """The mirror's location comes from the artifact: a file:// one could copy any local file out."""
+    source = tmp_path / "private"
+    source.mkdir()
+    (source / "tr_l.json.zst").write_bytes(b"local bytes")
+    local = row("tr_l", files=("json",))
+    local["record"]["mirror"] = f"file://{source}/tr_l.json.zst"
+    artifact = FakeArtifact("v0", "train", 1, [local])
+
+    summary = pull(f"{REF}:v0", tmp_path / "out", api=FakeApi(artifact))
+    assert summary.records == 0 and len(summary.missing) == 1
+    assert not (tmp_path / "out" / "train" / "tr_l.json.zst").exists()
+    summary = pull(f"{REF}:v0", tmp_path / "out", api=FakeApi(artifact), allow_local=True)
+    assert summary.records == 1
+    assert (tmp_path / "out" / "train" / "tr_l.json.zst").read_bytes() == b"local bytes"
+
+
+def test_a_partial_download_is_never_moved_in(tmp_path: Path, monkeypatch) -> None:
+    class Partial:
+        protocol = "memory"
+
+        def get_file(self, path, local):
+            Path(local).write_bytes(b"half a fi")
+            raise ConnectionError("reset mid-download")
+
+    monkeypatch.setattr(fsspec.core, "url_to_fs", lambda uri: (Partial(), uri))
+    out = tmp_path / "out"
+    summary = pull(f"{REF}:v0", out, api=FakeApi(FakeArtifact("v0", "train", 1, [row("tr_a")])))
+    assert summary.records == 0 and "could not fetch" in summary.missing[0]
+    assert not list((out / "train").glob("*.zst"))
+
+
+def test_a_record_that_fails_midway_puts_back_what_it_replaced(tmp_path: Path) -> None:
+    out = tmp_path / "out" / "train"
+    out.mkdir(parents=True)
+    (out / "tr_a.tokens.zst").write_bytes(b"an older copy")  # replaced first, by the new sidecar
+    (out / "tr_a.json.zst").mkdir()  # then the document can't go in
+    summary = pull(f"{REF}:v0", tmp_path / "out", api=FakeApi(FakeArtifact("v0", "train", 1, [row("tr_a")])))
+    assert summary.records == 0 and len(summary.missing) == 1
+    assert (out / "tr_a.tokens.zst").read_bytes() == b"an older copy"

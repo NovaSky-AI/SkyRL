@@ -378,6 +378,26 @@ def test_a_batch_dropped_unfinished_is_not_indexed_with_the_next_step() -> None:
     assert callback.stats()["discarded"] == 1
 
 
+def test_hanging_wandb_calls_are_capped_and_new_ones_refused(warnings) -> None:
+    """An abandoned call keeps a thread and a temp directory: past MAX_ABANDONED, new ones aren't started."""
+    hang = threading.Event()
+    trainer, run = wandb_trainer(FakeRun(hang=hang))
+    records = RecordLog()
+    callback = index(records, timeout=0.1)
+    for step in range(1, record_index.MAX_ABANDONED + 3):
+        entries(records, f"s{step}")
+        callback.on_step_end(trainer, step_end(step=step), None)
+    deadline = time.monotonic() + 10
+    while callback.stats()["pending"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    # MAX_ABANDONED calls reached W&B and hang; the rest were refused without a call.
+    assert run.calls == record_index.MAX_ABANDONED
+    assert callback.stats()["timed_out"] == record_index.MAX_ABANDONED + 2
+    hang.set()
+    assert callback.close()
+
+
 def test_a_full_queue_drops_and_shutdown_stops_at_its_deadline(warnings) -> None:
     hang = threading.Event()
     trainer, run = wandb_trainer(FakeRun(hang=hang))

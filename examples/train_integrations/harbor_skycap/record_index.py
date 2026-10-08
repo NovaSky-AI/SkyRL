@@ -60,6 +60,10 @@ INDEX_FORMAT_VERSION = 1
 #: ``OSError`` subclasses no retry can fix.
 _PERMANENT = (PermissionError, FileNotFoundError, IsADirectoryError, NotADirectoryError, FileExistsError)
 _STOP = object()
+#: fsspec protocols that read this machine's own files.
+LOCAL_PROTOCOLS = frozenset({"file", "local"})
+#: Abandoned W&B calls still running, beyond which new calls are refused (``SkycapRecordIndex._bounded``).
+MAX_ABANDONED = 2
 
 
 @dataclass
@@ -255,6 +259,8 @@ class SkycapRecordIndex(TrainingCallback):
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         self._worker: Optional[threading.Thread] = None
+        #: W&B calls abandoned at their timeout and still running: each holds a thread and a temp directory.
+        self._abandoned: List[threading.Thread] = []
         self._closed = False
         self._in_flight = 0
         #: Versions queued and not yet settled (logged, failed or dropped), whether in the queue or logging.
@@ -416,7 +422,14 @@ class SkycapRecordIndex(TrainingCallback):
         return "failed"
 
     def _bounded(self, call: Callable[..., Any], *args: Any) -> None:
-        """Run ``call`` on a thread of its own and give up waiting after ``timeout``."""
+        """Run ``call`` on a thread of its own and give up waiting after ``timeout``.
+
+        An abandoned call can't be cancelled, so while ``MAX_ABANDONED`` of them are still running, new calls
+        are refused outright: a W&B that keeps hanging can't pile up threads and temp directories.
+        """
+        self._abandoned = [thread for thread in self._abandoned if thread.is_alive()]
+        if len(self._abandoned) >= MAX_ABANDONED:
+            raise _Abandoned(f"{len(self._abandoned)} earlier W&B calls are still hanging")
         outcome: Dict[str, BaseException] = {}
 
         def run() -> None:
@@ -429,6 +442,7 @@ class SkycapRecordIndex(TrainingCallback):
         thread.start()
         thread.join(self.timeout)
         if thread.is_alive():
+            self._abandoned.append(thread)
             raise _Abandoned(f"no answer from W&B within {self.timeout}s")
         if "error" in outcome:
             raise outcome["error"]
@@ -510,7 +524,7 @@ def parse_ref(ref: str) -> Tuple[str, Optional[str]]:
     return path, alias or None
 
 
-def pull(ref: str, out_dir: Any, *, api: Any = None) -> PullSummary:
+def pull(ref: str, out_dir: Any, *, api: Any = None, allow_local: bool = False) -> PullSummary:
     """Pull a run's records and step index from W&B into ``out_dir``, a record directory.
 
     With an alias (``...:train-step-3``, ``...:v7``), that version; without one, every version. Each phase
@@ -522,6 +536,8 @@ def pull(ref: str, out_dir: Any, *, api: Any = None) -> PullSummary:
         ref: ``<entity>/<project>/<artifact>[:<alias>]``.
         out_dir: the record directory to fill; created if missing.
         api: a ``wandb.Api``; one is made when None.
+        allow_local: read records from a mirror on this machine's own filesystem; refused otherwise, since
+            the mirror's location comes from the artifact.
     """
     path, alias = parse_ref(ref)
     out = Path(out_dir)
@@ -539,13 +555,13 @@ def pull(ref: str, out_dir: Any, *, api: Any = None) -> PullSummary:
     for artifact in versions:
         label = f"{path.rsplit('/', 1)[-1]}:{getattr(artifact, 'version', '?')}"
         try:
-            _pull_version(artifact, label, out, summary)
+            _pull_version(artifact, label, out, summary, allow_local)
         except Exception as error:  # noqa: BLE001 - one version must not stop the others
             summary.failed_versions.append(f"{label}: {type(error).__name__}: {error}")
     return summary
 
 
-def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) -> None:
+def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary, allow_local: bool = False) -> None:
     # A scratch directory inside out_dir, so each file moves in with an atomic rename.
     with tempfile.TemporaryDirectory(prefix=".pull-", dir=out) as tmp:
         root = Path(tmp)
@@ -562,7 +578,7 @@ def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) ->
         phase_dir = out / phase
         phase_dir.mkdir(exist_ok=True)
         for row in step["rows"]:
-            _fetch_record(row, root / "records")
+            _fetch_record(row, root / "records", allow_local)
             _move_record(row, root / "records", phase_dir, f"{label}/{row.get('id')}", summary)
         target = phase_dir / "index" / f"step-{number}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -570,10 +586,13 @@ def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) ->
     summary.versions.append(label)
 
 
-def _fetch_record(row: Dict[str, Any], dest: Path) -> None:
+def _fetch_record(row: Dict[str, Any], dest: Path, allow_local: bool = False) -> None:
     """A mirrored record's files, read from the mirror into ``dest`` with the caller's own credentials.
 
-    A file that can't be read is left out, and ``_move_record`` reports the record missing, naming it.
+    A file that can't be read is left out (a partial download is removed), and ``_move_record`` reports the
+    record missing, naming it. The mirror's location comes from the downloaded ``step.json``, so one on this
+    machine's own filesystem (``file://``, a bare path) is refused unless ``allow_local``: otherwise an
+    artifact could copy a private local file into the output directory.
     """
     try:
         names = _record_files(row)
@@ -589,8 +608,12 @@ def _fetch_record(row: Dict[str, Any], dest: Path) -> None:
         uri = f"{mirror_dir}/{name}"
         try:
             fs, path = fsspec.core.url_to_fs(uri)
+            protocols = {fs.protocol} if isinstance(fs.protocol, str) else set(fs.protocol)
+            if protocols & LOCAL_PROTOCOLS and not allow_local:
+                raise PermissionError("a mirror on this machine's filesystem needs --allow-local-mirror")
             fs.get_file(path, str(dest / name))
         except Exception as error:  # noqa: BLE001 - this record is reported missing
+            (dest / name).unlink(missing_ok=True)
             logger.warning(f"skycap record pull: fetching {uri} failed: {type(error).__name__}: {error}")
 
 
@@ -640,25 +663,38 @@ def _move_record(row: Dict[str, Any], downloaded: Path, out: Path, label: str, s
         summary.missing.append(f"{label}: could not fetch {', '.join(absent)}")
         return
     # Sidecars before the document, as skycap writes them, so a document in out_dir has its sidecars.
-    placed: List[Path] = []
+    # A record goes in whole or not at all: a file it replaces is kept aside until the whole record is in.
+    backups = downloaded.parent / "replaced"
+    placed: List[str] = []
+    replaced: List[str] = []
     moved = unchanged = 0
     try:
         for name in names:
-            target = out / name
-            existed = target.exists()
-            if _move_in(downloaded / name, target):
-                moved += 1
-                if not existed:
-                    placed.append(target)
-            else:
+            source, target = downloaded / name, out / name
+            if target.is_file() and _same(target, source):
                 unchanged += 1
+                continue
+            if target.exists():
+                if not target.is_file():
+                    raise IsADirectoryError(f"{target} is not a file")
+                backups.mkdir(exist_ok=True)
+                os.replace(target, backups / name)
+                replaced.append(name)
+            # The scratch directory is inside out_dir, so this is an atomic rename on one filesystem.
+            os.replace(source, target)
+            placed.append(name)
+            moved += 1
     except OSError as error:
-        # One record that can't move in (say, a directory where a file goes) mustn't stop the others:
-        # take back what it newly placed, report it, and go on.
-        for path in placed:
-            path.unlink(missing_ok=True)
+        # One record that can't move in (say, a directory where a file goes) mustn't stop the others, and
+        # mustn't change out_dir: take back what it placed, put back what it replaced, report it, go on.
+        for name in placed:
+            (out / name).unlink(missing_ok=True)
+        for name in replaced:
+            os.replace(backups / name, out / name)
         summary.missing.append(f"{label}: could not move into {out}: {type(error).__name__}: {error}")
         return
+    for name in replaced:
+        (backups / name).unlink(missing_ok=True)
     summary.files += moved
     summary.unchanged += unchanged
     summary.records += 1
@@ -666,11 +702,16 @@ def _move_record(row: Dict[str, Any], downloaded: Path, out: Path, label: str, s
 
 def _move_in(source: Path, target: Path) -> bool:
     """Rename ``source`` onto ``target`` unless an identical file is there. Returns whether it moved."""
-    if target.is_file() and target.stat().st_size == source.stat().st_size and _digest(target) == _digest(source):
+    if target.is_file() and _same(target, source):
         return False
     # The scratch directory is inside out_dir, so this is an atomic rename on one filesystem.
     os.replace(source, target)
     return True
+
+
+def _same(a: Path, b: Path) -> bool:
+    """Whether two files hold the same bytes; sizes first, so most differences need no hashing."""
+    return a.stat().st_size == b.stat().st_size and _digest(a) == _digest(b)
 
 
 def _digest(path: Path) -> str:
@@ -689,9 +730,14 @@ def main(argv: Optional[List[str]] = None, *, api: Any = None) -> int:
     )
     pull_parser.add_argument("ref", help="<entity>/<project>/<artifact>[:<alias>]; every version without an alias")
     pull_parser.add_argument("out_dir", help="the record directory to fill")
+    pull_parser.add_argument(
+        "--allow-local-mirror",
+        action="store_true",
+        help="read records from a mirror on this machine's own filesystem (file://, a path); refused by default",
+    )
     args = parser.parse_args(argv)
     try:
-        summary = pull(args.ref, args.out_dir, api=api)
+        summary = pull(args.ref, args.out_dir, api=api, allow_local=args.allow_local_mirror)
     except ValueError as error:
         parser.error(str(error))
     print(summary.report())

@@ -57,11 +57,12 @@ class ExposureConfig:
 @dataclass
 class SkycapWandbConfig:
     enabled: bool = True
-    """Index each step's skycap records in W&B, when ``trainer.logger`` is wandb: one version per step of the
-    artifact ``skycap-records-<phase>-<run id>``, aliased ``<phase>-step-N`` and ``latest``, holding a
-    ``step.json`` (every attempt, trained or superseded, and where its record is) and, for records in
-    ``record_mirror``, a reference to each document. No record bytes are uploaded. Logging runs off the
-    step and fails open."""
+    """Index each step's skycap records in W&B when ``trainer.logger`` is wandb.
+
+    One version per step of the artifact ``skycap-records-<phase>-<run id>``, aliased ``<phase>-step-N`` and
+    ``latest``, holding a ``step.json`` (every attempt, trained or superseded, and where its record is) and,
+    for records in ``record_mirror``, a reference to each record file. No record bytes are uploaded.
+    Logging runs off the step and fails open."""
     phases: List[str] = field(default_factory=lambda: ["train"])
     """The training phases to index: ``train``, ``eval``. Each gets its own artifact."""
 
@@ -78,9 +79,10 @@ class SkycapConfig:
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""
     record_mirror: Optional[str] = None
-    """An fsspec URL (``s3://bucket/prefix``, ``gs://bucket/prefix``) every server also copies its records to,
-    in the background, after writing them to ``record_dir``. The copy fails open: a slow or failing store
-    never fails a rollout. Needs the store's fsspec implementation (``s3fs``, ``gcsfs``) installed."""
+    """Where every server also copies its records, as an fsspec URL (``s3://bucket/prefix``).
+
+    The copy is made in the background after the record is written to ``record_dir``, and fails open: a slow
+    or failing store never fails a rollout. Needs the store's fsspec implementation (``s3fs``, ``gcsfs``)."""
     record_mirror_config: Dict[str, Any] = field(default_factory=dict)
     """The mirror's options (``skycap.mirror.RecordMirror``), e.g. ``{exclude: [experts, sampling_mask]}`` to
     leave sidecars out of the remote copy, or ``timeout``, ``attempts``, ``queue_size``, ``storage_options``.
@@ -144,7 +146,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
         "record_mirror": cfg.skycap.record_mirror,
-        "record_mirror_config": dict(cfg.skycap.record_mirror_config) or None,
+        "record_mirror_config": dict(cfg.skycap.record_mirror_config or {}) or None,
     }
     return start_servers(
         settings,
