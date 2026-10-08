@@ -54,12 +54,15 @@ def strategy_module(monkeypatch):
         get_default_save_sharded_strategy=Mock(),
     )
     stub("megatron.core.dist_checkpointing.strategies")
-    stub("megatron.core.dist_checkpointing.strategies.async_utils", AsyncCallsQueue=Mock())
     stub(
         "megatron.core.dist_checkpointing.strategies.fully_parallel",
         FullyParallelLoadStrategyWrapper=Mock(),
         FullyParallelSaveStrategyWrapper=Mock(),
     )
+    stub("nvidia_resiliency_ext")
+    stub("nvidia_resiliency_ext.checkpointing")
+    stub("nvidia_resiliency_ext.checkpointing.async_ckpt")
+    stub("nvidia_resiliency_ext.checkpointing.async_ckpt.core", AsyncCallsQueue=Mock())
     stub("megatron.core.optimizer", DistributedOptimizer=DistributedOptimizer)
     stub("megatron.core.optimizer_param_scheduler", OptimizerParamScheduler=object)
     stub(
