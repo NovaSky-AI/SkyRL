@@ -1,8 +1,9 @@
 """Model provider for GLM-5.3-Flash (``glm5_next``)."""
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Union
+from typing import Callable, ClassVar, Optional, Union
 
+from loguru import logger
 from megatron.bridge.models.mla_provider import MLAModelProvider
 from megatron.core.transformer.spec_utils import ModuleSpec
 
@@ -27,6 +28,11 @@ class Glm5NextModelProvider(MLAModelProvider):
     """
 
     transformer_layer_spec: Union[ModuleSpec, Callable] = build_glm5_next_layer_spec
+
+    # SkyRL's mHC layer (mcore_ext/mhc_transformer_layer.py) supports full activation recompute;
+    # see ``finalize``. MegatronWorker.init_configs downgrades full recompute only for mHC
+    # providers without this flag.
+    supports_mhc_full_recompute: ClassVar[bool] = True
 
     # Manifold-Constrained Hyper-Connections.
     enable_mhc_connections: bool = True
@@ -53,3 +59,42 @@ class Glm5NextModelProvider(MLAModelProvider):
     # config; see ``glm5_next.dsa`` for what the Megatron path currently supports.
     dsa_indexer_kpool: int = 1
     dsa_indexer_kpool_always_select_tail: bool = True
+
+    def finalize(self) -> None:
+        """``MLAModelProvider.finalize()``, accepting full activation recompute with mHC.
+
+        megatron-core's ``TransformerConfig.__post_init__`` raises for ``enable_mhc_connections``
+        with ``recompute_granularity="full"``. The guard protects megatron-core's own mHC layer,
+        which threads recompute managers through every mHC site; SkyRL's
+        ``HyperConnectionTransformerLayer`` uses none, so megatron-core's generic
+        ``checkpointed_forward`` checkpoints it like any layer. Only that one check is bypassed:
+        finalize runs twice (Megatron-Bridge documents repeated finalize as safe), once with mHC
+        hidden so every full-recompute validation runs, then once with full recompute hidden so
+        every mHC validation runs and derives the final state. ``__post_init__`` derives nothing
+        from the recompute mode, so the result matches a single pass. Delete once the
+        megatron-core pin includes NVIDIA/Megatron-LM#7521, which removes the guard.
+        """
+        if not (self.enable_mhc_connections and self.recompute_granularity == "full"):
+            super().finalize()
+            return
+        recompute_fields = ("recompute_granularity", "recompute_method", "recompute_num_layers")
+        recompute = {k: getattr(self, k) for k in recompute_fields}
+
+        self.enable_mhc_connections = False  # pass 1: full-recompute validations
+        try:
+            super().finalize()
+        finally:
+            self.enable_mhc_connections = True
+
+        for k in recompute_fields:  # pass 2: mHC validations, the one guard out of the way
+            setattr(self, k, None)
+        try:
+            super().finalize()
+        finally:
+            for k, v in recompute.items():
+                setattr(self, k, v)
+        logger.info(
+            "mHC + full activation recompute enabled for SkyRL's HyperConnectionTransformerLayer "
+            f"(recompute_method={recompute['recompute_method']}, "
+            f"recompute_num_layers={recompute['recompute_num_layers']})"
+        )
