@@ -42,9 +42,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from skycap import hashing
+
+if TYPE_CHECKING:
+    from skycap.tokens.renderer import Media
 
 Author = Literal["client", "model"]
 
@@ -85,8 +88,7 @@ class NodeTokens:
     Both are filled when the trajectory is recorded, so a reader never needs the
     tokenizer.
 
-    ``media`` are the multimodal items (``skycap.tokens.renderer.Media``) whose
-    placeholders sit in these tokens, with offsets relative to them. Only a
+    ``media`` are the multimodal items whose placeholders sit in these tokens, with offsets relative to them. Only a
     client node has any.
     """
 
@@ -97,7 +99,7 @@ class NodeTokens:
     sampling_mask: list[list[int]] | None = None
     text: str | None = None
     text_offsets: list[int] | None = None
-    media: list[Any] = field(default_factory=list)
+    media: list[Media] = field(default_factory=list)
 
 
 @dataclass(slots=True)
