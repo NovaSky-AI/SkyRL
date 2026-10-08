@@ -59,4 +59,7 @@ class RMSNormInputHyperConnectionModule(HyperConnectionModule):
 def _proj_rms(x: Tensor, weight: Tensor, eps: float) -> Tuple[Tensor, Tensor]:
     """FP32 projection and standard RMS factor ``rsqrt(mean(x^2) + eps)`` of the activation-dtype ``x``."""
     x = x.to(torch.float32)
-    return torch.matmul(x, weight.to(torch.float32).t()), torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
+    weight = weight.to(torch.float32)
+    proj = torch.matmul(x, weight.t())
+    r = torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
+    return proj, r
