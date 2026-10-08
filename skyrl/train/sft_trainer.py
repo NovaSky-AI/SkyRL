@@ -1742,9 +1742,7 @@ class SFTTrainer:
                 )
             return
         if self.sft_cfg.strategy == "megatron":
-            tp = self.sft_cfg.megatron_config.tensor_model_parallel_size
-            pp = self.sft_cfg.megatron_config.pipeline_model_parallel_size
-            dp_size = total_gpus // (tp * pp)
+            dp_size = self._dp_size()
         else:
             # FSDP: all GPUs are data-parallel
             dp_size = total_gpus

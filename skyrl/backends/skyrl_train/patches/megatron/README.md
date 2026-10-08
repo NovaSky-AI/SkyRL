@@ -21,6 +21,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
 | `patches/megatron/mcore_ext/test_hyper_connection_proj_rms.py` (CPU) | `mcore_ext/hyper_connection.py` projection: bitwise vs plain autograd, no saved FP32 copy |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection |
+
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection, query chunking |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
@@ -33,6 +35,9 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_offload_checkpoint_inputs.py` (CPU) | `patch_offload_checkpoint_inputs.py` wraps every importer, fake functions |
 
 | `gpu_ci/patches/megatron/test_mhc_full_recompute.py` | `glm5_next/provider.py` `finalize` (mHC + full recompute), `patch_moe_release_dispatcher_probs.py` (loss/grads vs no recompute on a GLM-5.3-Flash slice) |
+
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1, both exchanges (two ranks) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -67,6 +72,13 @@ model, `glm5_next/` is deleted too.
 ### NVIDIA/Megatron-LM#7054: KDA (Kimi Delta Attention)
 
 - **Carried as:** `mcore_ext/kda.py` (`KimiDeltaAttention`, `get_kda_module_spec`).
+  - SkyRL addition: head-wise (Ulysses) context parallelism, reusing megatron-core's
+    `GatedDeltaNet` all-to-all helpers (`ssm/gated_delta_net/common.py`). #7054 has its own
+    head-/chunk-wise CP (`cp_partition_mode`); compare against it before switching.
+    `SKYRL_KDA_CP_EXCHANGE=allgather` swaps GatedDeltaNet's all-to-all of the projected tensors for
+    an all-gather of the sequence-parallel hidden states (over CP, then TP) and projections of only
+    this rank's head slice: ~5x fewer bytes across the CP group, 1.18x faster fwd+bwd at 1M tokens
+    on TP8 CP2 where CP crosses nodes.
 - **Landed?** megatron-core defines a KDA module or `experimental_attention_variant="kda"`, and
   `TransformerConfig` has `kda_gate_lower_bound`
   (`grep -rn "KimiDeltaAttention\|kda_gate_lower_bound" .venv/.../megatron/core`).
@@ -76,7 +88,8 @@ model, `glm5_next/` is deleted too.
   - `glm5_next/bridge.py`: re-check the KDA parameter names (`q/k/v_conv1d`, `A_log`, `dt_bias`,
     `f_a/f_b/g_a/g_b_proj`) against upstream's module.
   - Delete `mcore_ext/kda.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`,
+  `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py`; the GLM roundtrip rows.
 
 ### NVIDIA/Megatron-LM#7521: mHC (manifold-constrained hyper-connections)
 
@@ -121,13 +134,32 @@ This is the riskiest entry. A wrong k-pool selection doesn't raise. It silently 
 different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (2048).
 
 - **Carried as:**
-  - `mcore_ext/dsa_kpool.py`: the six k-pool kernels, copied verbatim from #7522.
+  - `mcore_ext/dsa_kpool.py`: the six k-pool kernels, copied from #7522. One deliberate
+    deviation: `fused_qk_topk_kpool` scores and selects in query chunks. Verbatim, it
+    materializes FP32 `[sq, b, heads, sq / kpool]` per-head scores (32 GiB/GPU at 32k), so
+    GLM-5.3-Flash can't train past ~16k. Top-k is per query row, so chunking is exact
+    (`test_kpool_query_chunking_is_exact`); `SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS` sets the chunk
+    cap (default 2 GiB of FP32 scores). Past one chunk the loop follows #7522 @ `b27efd8`, which
+    now chunks too: no-grad, in-place ReLU and head weighting, one FP32 cast of the pooled keys, a
+    preallocated selection. Upstream's cap is a fixed 256 MiB; at 512k (65,536 query rows per TP8
+    rank x 131,072 pools, one B200) one selection takes 3.31 s there vs 2.64 s at 2 GiB and
+    2.60 s at 8 GiB, with peak extra memory 0.6 / 2.4 / 8.6 GiB. When removing, carry the
+    configurable cap over unless upstream's default has grown.
+    Second deviation, opt-in with `SKYRL_DSA_INDEXER_TP_SHARD=1` (wired in `glm5_next/dsa.py`):
+    `query_shard_group` splits the query rows across the tensor-parallel group, whose ranks all
+    score the same gathered sequence with the same frozen indexer weights, and all-gathers the
+    pool selections. The scoring is O(sq^2) (every query scores every pool) and was redundant on
+    every TP rank: at 512k tokens, TP8, 64 B200 (TCP NCCL) sharding cut warm fwd+bwd 1545 -> 1094 s,
+    i.e. ~1/3 of the step was replicated indexer scoring. Bitwise-identical selections
+    (`test_dsa_kpool_tp_shard.py`).
   - `glm5_next/dsa.py`:
     - `Glm5NextDSAIndexer`: k-pool gate/ape parameters and the gate score, hand-merged onto the
       pinned `DSAIndexer`;
     - `Glm5NextDSAttention._forward_with_kpool_topk`: swaps the pinned `DSAttention.forward`'s
       token-level top-k for `fused_qk_topk_kpool`, and raises if the pooled selection doesn't run
-      exactly once;
+      exactly once; under context parallelism (`cp_comm_type=allgather`, which the pinned
+      `DSAttention` already supports for keys) `_gate_score_like_keys` all-gathers and reorders
+      the k-pool gate score the same way, so pools form over the whole sequence;
     - the `kpool <= 1` long-sequence guard.
   - `glm5_next/layer_specs.py`: the `core_attention.module` / `submodules.indexer.module` swaps.
   - `glm5_next/provider.py`: `dsa_indexer_kpool`, `dsa_indexer_kpool_always_select_tail`.
