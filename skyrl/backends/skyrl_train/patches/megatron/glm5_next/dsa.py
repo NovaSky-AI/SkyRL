@@ -9,6 +9,7 @@ itself, so ``Glm5NextDSAttention`` swaps that selection for the vendored k-pool 
 (``mcore_ext/dsa_kpool.py``, NVIDIA/Megatron-LM#7522) whenever ``dsa_indexer_kpool > 1``.
 """
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -25,6 +26,9 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
 from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.dsa_kpool import (
     fused_qk_topk_kpool,
 )
+
+# Opt-in: split the k-pool indexer's query rows across the tensor-parallel group (exact).
+_DSA_INDEXER_TP_SHARD = os.environ.get("SKYRL_DSA_INDEXER_TP_SHARD", "0").lower() in ("1", "true")
 
 
 class Glm5NextDSAttention(DSAttention):
@@ -88,6 +92,15 @@ class Glm5NextDSAttention(DSAttention):
         if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
             _, cu_seqlens_kv = dsa_layout.get_packed_qk_cu_seqlens(packed_seq_params)
         kpool_calls = 0
+        # Every TP rank runs the indexer on the same gathered sequence with the same (replicated,
+        # never-trained) indexer weights, so its query rows can be split across the group.
+        indexer_shard_group = None
+        if _DSA_INDEXER_TP_SHARD:
+            from megatron.core import parallel_state as mpu
+
+            tp_group = mpu.get_tensor_model_parallel_group()
+            if tp_group.size() > 1:
+                indexer_shard_group = tp_group
 
         def kpool_topk(
             q,
@@ -119,6 +132,7 @@ class Glm5NextDSAttention(DSAttention):
                 cu_seqlens_kv=cu_seqlens_kv,
                 use_relu=use_relu,
                 always_select_tail=indexer.index_kpool_always_select_tail,
+                query_shard_group=indexer_shard_group,
             )
 
         def decline(*_args, **_kwargs):

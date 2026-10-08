@@ -2,7 +2,7 @@
 
     pool = CapturePool(["http://capture-0:8080", "http://capture-1:8080"])
     async with pool.trajectory({"task": "t1", "step": 3}) as trajectory:
-        run_harness(base_url=trajectory.base_url)       # an unchanged OpenAI client
+        run_harness(base_url=trajectory.base_url, api_key=trajectory.api_key)  # an unchanged OpenAI client
         result = await trajectory.finish({"reward": 1.0})
     result.status, result.samples
 
@@ -44,6 +44,48 @@ class PathRuleError(CaptureError):
     """``finish``'s path rule raised on the server. The trajectory is ended, without samples."""
 
 
+@dataclass(frozen=True, slots=True)
+class RecordLocation:
+    """Where a finished trajectory's record is. See ``docs/format.md``."""
+
+    #: The document's path on the capture server's own disk, in its ``record_dir``.
+    path: str
+    #: The document's URI in the server's record mirror, or None without one. The copy is made in the
+    #: background and fails open, so it may not be there yet, or at all.
+    mirror: str | None = None
+    #: The record's file names, sidecars then the document (e.g. ``tr_ab12.tokens.zst``, ``tr_ab12.json.zst``):
+    #: as the mirror holds them when there is one (so without the kinds its ``exclude`` leaves out), else as
+    #: the record directory does. They sit beside the document, in the mirror and on disk.
+    files: tuple[str, ...] = ()
+    #: The machine ``path`` is on: the capture server's node, as an IP address (or hostname). None from a
+    #: server that predates it.
+    host: str | None = None
+
+    @property
+    def local(self) -> str:
+        """``host:path``, the way scp and rsync over ssh name a remote file; an IPv6 host is bracketed."""
+        if self.host is None:
+            return self.path
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"{host}:{self.path}"
+
+    @property
+    def uri(self) -> str:
+        """The mirror URI when there is one, else ``local``."""
+        return self.mirror or self.local
+
+    @classmethod
+    def from_json(cls, body: dict[str, Any] | None) -> RecordLocation | None:
+        if body is None:
+            return None
+        return cls(
+            path=body["path"],
+            mirror=body.get("mirror"),
+            files=tuple(body.get("files", ())),
+            host=body.get("host"),
+        )
+
+
 @dataclass(slots=True)
 class FinishResult:
     id: str
@@ -52,15 +94,30 @@ class FinishResult:
     #: Token-mode calls whose prompt had to be rendered rather than extended (``CallInfo.bridged``).
     #: Zero for a harness that keeps its history append-only.
     unbridged_calls: int = 0
+    #: Where the record is, or None when the server has no ``record_dir`` (or couldn't write it).
+    record: RecordLocation | None = None
 
 
 class Trajectory:
-    def __init__(self, pool: CapturePool, server: str, trajectory_id: str, base_url: str, paths: str = "all") -> None:
+    def __init__(
+        self,
+        pool: CapturePool,
+        server: str,
+        trajectory_id: str,
+        base_url: str,
+        paths: str = "all",
+        exposed_base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         self._pool = pool
         self.server = server
         self.id = trajectory_id
         #: Point the harness's OpenAI client here.
         self.base_url = base_url
+        #: Or here, for a harness outside this network, when the server is exposed (``skycap.exposure``).
+        self.exposed_base_url = exposed_base_url
+        #: And give it this as its ``api_key``: a server started with ``require_api_key`` answers only it.
+        self.api_key = api_key
         self.result: FinishResult | None = None
         #: What the last ``finish`` sent, so a failed one can be sent again unchanged.
         self.finishing: dict[str, Any] | None = None
@@ -85,6 +142,7 @@ class Trajectory:
             status=body["status"],
             samples=[Sample.from_json(s) for s in body["samples"]],
             unbridged_calls=body.get("unbridged_calls", 0),
+            record=RecordLocation.from_json(body.get("record")),
         )
         return self.result
 
@@ -161,7 +219,15 @@ class CapturePool:
                     raise
                 errors.append(str(error))
                 continue
-            return Trajectory(self, server, body["id"], body["base_url"], paths)
+            return Trajectory(
+                self,
+                server=server,
+                trajectory_id=body["id"],
+                base_url=body["base_url"],
+                paths=paths,
+                exposed_base_url=body.get("exposed_base_url"),
+                api_key=body.get("api_key"),
+            )
         raise CaptureError(f"no capture server reachable: {'; '.join(errors)}")
 
     @asynccontextmanager

@@ -8,17 +8,28 @@ URL; skycap renders every prompt, calls the engine with token ids, and keeps a
 context graph, so a rewritten history is a branch rather than a hole and
 summarization is allowed.
 
-Per trial: create a trajectory, point the agent at ``trajectory.base_url``, run
-it, and ``finish`` with the reward to get a sample per path the ``train_paths``
-rule picks. ``compose`` turns those into the step-wise ``GeneratorOutput``.
+Per trial: create a trajectory, point the agent at it, run it, and ``finish``
+with the reward to get a sample per path the ``train_paths`` rule picks.
+``compose`` turns those into the step-wise ``GeneratorOutput``.
+
+Terminus-2 calls the model from this process and gets ``trajectory.base_url``.
+An installed agent (mini-swe-agent, Claude Code, ...) calls it from inside its
+sandbox, so it gets the trajectory's route on the server's exposed URL
+(``trajectory.exposed_base_url``, with ``skycap.exposure``), through the
+sandbox environment that LiteLLM- and OpenAI-based agents read.
 """
 
 import asyncio
+import importlib
+import os
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 import litellm
+from harbor.agents.factory import AgentFactory
+from harbor.agents.installed.base import BaseInstalledAgent
+from harbor.models.agent.name import AgentName
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
@@ -38,6 +49,7 @@ from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
 from .compose import TrialOutcome, compose, split
+from .record_index import RecordLog
 
 litellm.suppress_debug_info = True
 
@@ -56,6 +68,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         capture_urls: List[str],
         inference_engine_client: Any = None,
         train_paths: str = "all",
+        records: Optional[RecordLog] = None,
     ) -> None:
         """
         Args:
@@ -65,6 +78,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
             train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
+            records: where every trajectory opened is logged, per phase, for the W&B record index.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -84,6 +98,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.capture_urls = list(capture_urls)
         self.pool = CapturePool(self.capture_urls)
         self.inference_engine_client = inference_engine_client
+        self.records = records
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
             raise ValueError("generator.inference_engine.served_model_name must be set, without '/'")
@@ -91,6 +106,12 @@ class HarborSkycapGenerator(GeneratorInterface):
 
         self._template = deepcopy(harbor_cfg)
         agent = self._template.setdefault("agent", {})
+        self._in_sandbox = runs_in_sandbox(agent)
+        self._warned_unexposed = False
+        if self._in_sandbox:
+            # Harbor's mini-swe-agent refuses to start unless this process's environment holds a key for the
+            # model's provider, and ``hosted_vllm`` has none it knows; skycap checks no key.
+            os.environ.setdefault("MSWEA_API_KEY", PLACEHOLDER_API_KEY)
         agent["model_name"] = f"hosted_vllm/{served}"
         kwargs = agent.setdefault("kwargs", {})
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
@@ -118,6 +139,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             raise ValueError(f"Prompt count ({len(prompts)}) doesn't match trajectory_ids ({len(trajectory_ids)})")
         metadata = input_batch.get("batch_metadata")
         step = getattr(metadata, "global_step", None)
+        phase = getattr(metadata, "training_phase", "train")
         cache_salt = self._cache_salt()
 
         outcomes: List[Optional[TrialOutcome]] = [None] * len(prompts)
@@ -131,7 +153,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         )
 
         async def worker(index: int, prompt: ConversationType, trajectory_id: TrajectoryID) -> None:
-            outcomes[index] = await self._trial(prompt, trajectory_id, cache_salt, step, attempts[index])
+            outcomes[index] = await self._trial(prompt, trajectory_id, cache_salt, step, phase, attempts[index])
             progress.update(1)
 
         try:
@@ -157,6 +179,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
         step: Optional[int],
+        phase: str,
         attempts: TrialAttempts,
     ) -> TrialOutcome:
         """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch.
@@ -170,7 +193,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             attempts.start()
             try:
-                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, attempt, attempts)
+                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, phase, attempt, attempts)
             except PathRuleError as error:
                 logger.error(f"{prefix}: path rule {self.train_paths!r} failed, not retrying: {error}")
                 attempts.fail(error)
@@ -197,6 +220,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
         step: Optional[int],
+        phase: str,
         attempt: int,
         attempts: TrialAttempts,
     ) -> TrialOutcome:
@@ -208,25 +232,31 @@ class HarborSkycapGenerator(GeneratorInterface):
             "step": step,
             "attempt": attempt,
         }
-        async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
-            config = self._trial_config(prompt, trajectory.base_url, cache_salt)
-            async with self._rate_limiter:
-                results = await (await Trial.create(TrialConfig.model_validate(config))).run()
+        trajectory = None
+        try:
+            async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
+                config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
+                async with self._rate_limiter:
+                    results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
-            attempts.record(results)
-            exception = results.exception_info.exception_type if results.exception_info else None
-            if exception == "AgentTimeoutError":
-                # Masked, not retried, as the sibling does.
-                reward, stop_reason = 0.0, "agent_timeout"
-            elif exception == "ContextLengthExceededError":
-                # Trains with reward 0, as the sibling does.
-                reward, stop_reason = 0.0, "context_length"
-            elif not results.verifier_result:
-                reward, stop_reason = 0.0, "error"
-                logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
-            else:
-                reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
-            finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
+                attempts.record(results)
+                exception = results.exception_info.exception_type if results.exception_info else None
+                if exception == "AgentTimeoutError":
+                    # Masked, not retried, as the sibling does.
+                    reward, stop_reason = 0.0, "agent_timeout"
+                elif exception == "ContextLengthExceededError":
+                    # Trains with reward 0, as the sibling does.
+                    reward, stop_reason = 0.0, "context_length"
+                elif not results.verifier_result:
+                    reward, stop_reason = 0.0, "error"
+                    logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
+                else:
+                    reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
+                finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
+        finally:
+            # Every attempt that got a trajectory, including one that raised: the pool finished it.
+            if self.records is not None and trajectory is not None:
+                self.records.add(phase, trajectory_id, attempt, trajectory)
 
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
@@ -256,14 +286,43 @@ class HarborSkycapGenerator(GeneratorInterface):
             unbridged_calls=finished.unbridged_calls,
         )
 
-    def _trial_config(self, prompt: ConversationType, base_url: str, cache_salt: Optional[str]) -> Dict[str, Any]:
+    def _agent_url(self, trajectory: Any) -> str:
+        """Where the agent calls its trajectory: on the server's exposed URL when it runs in its sandbox."""
+        if self._in_sandbox and trajectory.exposed_base_url is not None:
+            return trajectory.exposed_base_url
+        if self._in_sandbox and not self._warned_unexposed:
+            # Fine for a sandbox on this network (Docker); a remote one can't reach the server's own URL.
+            logger.warning(
+                f"{self._template['agent'].get('name')} runs inside its sandbox, but skycap isn't exposed "
+                "(skycap.exposure.type=none): it gets the server's own URL, which a remote sandbox can't reach"
+            )
+            self._warned_unexposed = True
+        return trajectory.base_url
+
+    def _trial_config(
+        self,
+        prompt: ConversationType,
+        base_url: str,
+        cache_salt: Optional[str],
+        api_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``)."""
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
+        key = api_key or PLACEHOLDER_API_KEY
+        if self._in_sandbox:
+            # Installed agents read their endpoint and key from the sandbox's environment, not from agent kwargs.
+            # mini-swe-agent sends MSWEA_API_KEY over a provider's key, so it carries the trajectory's key too.
+            env = config["agent"].setdefault("env", {})
+            for provider in ("OPENAI", "HOSTED_VLLM"):
+                env[f"{provider}_API_BASE"] = base_url
+                env[f"{provider}_API_KEY"] = key
+            env["MSWEA_API_KEY"] = key
         kwargs = config["agent"]["kwargs"]
         kwargs["api_base"] = base_url
         llm_kwargs = kwargs.setdefault("llm_kwargs", {})
         # Terminus-2 takes `api_base` itself but passes a key only through `llm_kwargs`.
-        llm_kwargs["api_key"] = PLACEHOLDER_API_KEY
+        llm_kwargs["api_key"] = key
         if cache_salt is not None:
             # LiteLLM merges `extra_body` into the request body, where skycap reads `cache_salt` and forwards it.
             extra_body = llm_kwargs.setdefault("extra_body", {})
@@ -271,3 +330,18 @@ class HarborSkycapGenerator(GeneratorInterface):
                 raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
             extra_body["cache_salt"] = cache_salt
         return config
+
+
+def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
+    """Whether Harbor's agent ``agent`` (a ``TrialConfig.agent``) is installed in the sandbox and calls the model
+    from there, as mini-swe-agent and Claude Code do, rather than from this process, as Terminus-2 does."""
+    # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
+    name, import_path = agent.get("name"), agent.get("import_path")
+    if name is not None and name in AgentName.values():
+        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
+    elif import_path:
+        module, _, attribute = import_path.partition(":")
+        cls = getattr(importlib.import_module(module), attribute)
+    else:
+        return False
+    return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)

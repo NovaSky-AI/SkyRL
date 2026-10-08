@@ -1521,6 +1521,15 @@ class TrainerConfig(BaseConfig):
     max_training_steps: Optional[int] = None
     """If set, stop training after this many steps regardless of epochs or dataset size.
     Useful for CI smoke tests and quick validation runs."""
+    step_timeout_s: Optional[float] = None
+    """If set, the driver raises ``StepTimeoutError`` when one training step (generation through weight sync)
+    takes longer than this many seconds. Checkpoint and HF saves made outside a step each get their own budget of
+    this size. Eval is not covered. Only the driver's wait is interrupted; a hung worker keeps running until
+    teardown. See the "Step timeouts" troubleshooting section."""
+    weight_sync_timeout_s: Optional[float] = None
+    """If set, the driver raises ``WeightSyncTimeoutError`` when one weight sync (including the initial sync before
+    training) takes longer than this many seconds. Must not exceed ``step_timeout_s``. Only the driver's wait is
+    interrupted; a hung worker keeps running until teardown."""
     update_epochs_per_batch: int = 1
     """Number of gradient update passes over each training batch.
     Equivalent to the concept of "PPO epochs", where the same experience is iterated over multiple times."""

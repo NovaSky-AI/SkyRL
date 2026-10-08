@@ -1,29 +1,47 @@
 """The capture server: a control plane plus one OpenAI-compatible route per trajectory.
 
-    POST /trajectories                    {meta}                -> {id, base_url}
-    POST /trajectories/{id}/finish        {annotations, paths}  -> {status, samples}
+    POST /trajectories                    {meta}                -> {id, base_url, api_key[, exposed_base_url]}
+    POST /trajectories/{id}/finish        {annotations, paths}  -> {status, samples, record}
     GET  /trajectories/{id}                                      -> the trajectory document
     POST /t/{id}/v1/chat/completions                             (the harness)
     GET  /t/{id}/v1/models                                       (passed through)
     GET  /healthz
 
 A trajectory's route is its URL: the harness needs no header and no SDK patch.
+Each trajectory also gets an API key of its own, minted at ``create``. With
+``require_api_key``, its harness routes answer only a caller that sends it the
+way any OpenAI client sends its key (``Authorization: Bearer <api_key>``), so a
+route reachable from outside (a sandbox, a tunnel) can't be written to by anyone
+who merely learns the URL. The key is never recorded.
 ``finish`` seals the trajectory: in-flight calls are cancelled and never
 committed, so its samples are final the moment they are returned. ``paths``
 names the path rule that picks them (``skycap.paths``): ``all`` (default),
 ``final``, or a custom rule the server was built with.
 
+``harness_app`` serves the harness routes alone. A server with an exposure
+(``skycap.exposure``) listens a second time with it, for harnesses outside this
+network, and ``create`` adds the trajectory's route on the exposed URL,
+``exposed_base_url``. The control plane is never routed there.
+
 With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
 and then dropped from memory; reads of it are served from disk. Without one,
 ended trajectories stay in memory, which is only for tests and development.
+
+With a ``record_mirror`` as well, each written record is then copied to that
+URL in the background (``skycap.mirror``). The copy fails open: a slow or
+failing store never fails a trajectory, and its losses are counted on
+``/healthz``. ``finish`` answers with where the record is: its path on this
+server's disk, its mirror URI, and its file names.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
+import socket
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -33,10 +51,11 @@ import orjson
 from aiohttp import web
 
 from skycap import record
+from skycap.mirror import RecordMirror
 from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
 from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
 from skycap.samples import Sample, build_samples, samples_for
-from skycap.trajectory import Status, Trajectory, new_trajectory_id
+from skycap.trajectory import Status, Trajectory, new_api_key, new_trajectory_id
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +74,21 @@ class Backend(Protocol):
     ) -> web.StreamResponse: ...
 
 
+def node_address() -> str:
+    """This machine's primary IP address: the one its default route leaves from. Falls back to its hostname.
+
+    Connecting a UDP socket sends nothing; it only makes the kernel pick the outgoing interface.
+    """
+    for family, probe in ((socket.AF_INET, ("8.8.8.8", 53)), (socket.AF_INET6, ("2001:4860:4860::8888", 53))):
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as probe_socket:
+                probe_socket.connect(probe)
+                return probe_socket.getsockname()[0]
+        except OSError:
+            continue
+    return socket.gethostname()
+
+
 def _json(payload: Any, status: int = 200) -> web.Response:
     return web.Response(body=orjson.dumps(payload), status=status, content_type="application/json")
 
@@ -69,20 +103,41 @@ class CaptureServer:
         backend: Backend,
         *,
         record_dir: str | Path | None = None,
+        record_mirror: str | RecordMirror | None = None,
+        record_mirror_config: Mapping[str, Any] | None = None,
+        record_host: str | None = None,
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
+        require_api_key: bool = False,
     ) -> None:
         self.backend = backend
+        #: Whether the harness routes check the trajectory's own key.
+        self.require_api_key = require_api_key
         #: The rules ``finish`` accepts, by name: the built-in ones plus ``path_rules``, each given as a
         #: function or as its ``"pkg.module:function"`` import path.
         self.path_rules = rule_registry(path_rules)
-        self.record_dir = Path(record_dir) if record_dir is not None else None
+        self.record_dir = Path(record_dir).absolute() if record_dir is not None else None
+        #: The machine ``record_dir`` is on, as ``finish``'s ``record.host``: so another node (a trainer's
+        #: head node, say) knows where to reach a record that only exists here.
+        self.record_host = record_host or (node_address() if self.record_dir is not None else None)
+        if record_mirror is not None and self.record_dir is None:
+            raise ValueError("record_mirror copies what is written to record_dir, so it needs a record_dir")
+        #: The remote copy of the record directory, if any.
+        if record_mirror_config and not isinstance(record_mirror, str):
+            raise ValueError("record_mirror_config configures a mirror given by URL; set it on a RecordMirror directly")
+        self.mirror = (
+            RecordMirror.from_config(record_mirror, record_mirror_config)
+            if isinstance(record_mirror, str)
+            else record_mirror
+        )
         #: Seconds an open trajectory may go without a request before it is abandoned.
         self.ttl = ttl
         self.sweep_interval = sweep_interval
         self.trajectories: dict[str, Trajectory] = {}
         self._sweeper: asyncio.Task[None] | None = None
+        #: Where the harness listener is reached from outside, once an exposure has opened it.
+        self.exposed_url: str | None = None
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=1024**3)
@@ -94,6 +149,16 @@ class CaptureServer:
         app.router.add_get("/t/{id}/v1/models", self.models)
         app.on_startup.append(self._on_startup)
         app.on_cleanup.append(self._on_cleanup)
+        return app
+
+    def harness_app(self) -> web.Application:
+        """The harness routes alone, served alongside ``app`` by the same server.
+
+        It has no control plane to reach and no lifecycle of its own: ``app`` starts and stops the backend.
+        """
+        app = web.Application(client_max_size=1024**3)
+        app.router.add_post("/t/{id}/v1/chat/completions", self.chat)
+        app.router.add_get("/t/{id}/v1/models", self.models)
         return app
 
     async def _on_startup(self, app: web.Application) -> None:
@@ -117,6 +182,9 @@ class CaptureServer:
                 except Exception:
                     logger.exception("releasing %s failed", trajectory.id)
         await self.backend.close()
+        if self.mirror is not None:
+            # Bounded by the mirror's shutdown deadline; what is left is dropped with a warning.
+            await asyncio.to_thread(self.mirror.close)
 
     # -- ending a trajectory -----------------------------------------------------
     async def end(
@@ -193,7 +261,29 @@ class CaptureServer:
         except Exception:
             logger.exception("writing %s failed", trajectory.id)
             return False
+        if self.mirror is not None:
+            self.mirror.submit(self.record_dir, trajectory.id)
         return True
+
+    def location(self, trajectory: Trajectory) -> dict[str, Any] | None:
+        """Where a trajectory's record is: ``{"host", "path", "mirror", "files"}``, or None when it isn't written.
+
+        ``files`` names the record's files, sidecars then document: as the mirror holds them when there is
+        one (without the sidecar kinds it excludes), else as the record directory does.
+        """
+        if self.record_dir is None or self.trajectories.get(trajectory.id) is trajectory:
+            return None
+        name = record.document_path(self.record_dir, trajectory.id).name
+        if self.mirror is None:
+            files = [path.name for path in record.record_files(self.record_dir, trajectory.id)]
+        else:
+            files = self.mirror.names(self.record_dir, trajectory.id)
+        return {
+            "host": self.record_host,
+            "path": str(self.record_dir / name),
+            "mirror": None if self.mirror is None else self.mirror.uri(name),
+            "files": files,
+        }
 
     async def sweep(self) -> list[str]:
         """End trajectories nobody finished within the TTL; open ones as abandoned. Returns their ids."""
@@ -239,18 +329,26 @@ class CaptureServer:
     # -- control plane --------------------------------------------------------
     async def healthz(self, request: web.Request) -> web.Response:
         open_count = sum(1 for t in self.trajectories.values() if t.is_open)
-        return _json({"ok": True, "open_trajectories": open_count, "capture": self.backend.describe()})
+        health = {"ok": True, "open_trajectories": open_count, "capture": self.backend.describe()}
+        if self.mirror is not None:
+            health["record_mirror"] = {"url": self.mirror.url, **self.mirror.stats()}
+        return _json(health)
 
     async def create(self, request: web.Request) -> web.Response:
         body = await _read_json(request, default={})
         meta = body.get("meta") if isinstance(body, dict) else None
         if meta is not None and not isinstance(meta, dict):
             return _json({"error": "`meta` must be an object"}, 400)
-        trajectory = Trajectory(id=new_trajectory_id(), meta=meta or {}, capture=self.backend.describe())
+        trajectory = Trajectory(
+            id=new_trajectory_id(), meta=meta or {}, capture=self.backend.describe(), api_key=new_api_key()
+        )
         self.trajectories[trajectory.id] = trajectory
         # The route is on the host the pool reached us at: harnesses reach it the same way.
         base = f"{request.scheme}://{request.host}"
-        return _json({"id": trajectory.id, "base_url": f"{base}/t/{trajectory.id}/v1"})
+        created = {"id": trajectory.id, "base_url": f"{base}/t/{trajectory.id}/v1", "api_key": trajectory.api_key}
+        if self.exposed_url is not None:
+            created["exposed_base_url"] = f"{self.exposed_url}/t/{trajectory.id}/v1"
+        return _json(created)
 
     async def finish(self, request: web.Request) -> web.Response:
         body = await _read_json(request, default={})
@@ -286,6 +384,7 @@ class CaptureServer:
                 "status": trajectory.status,
                 "samples": [s.to_json() for s in samples],
                 "unbridged_calls": trajectory.graph.unbridged_calls(),
+                "record": self.location(trajectory),
             }
         )
 
@@ -305,8 +404,14 @@ class CaptureServer:
     # -- data plane -------------------------------------------------------------
     async def models(self, request: web.Request) -> web.Response:
         trajectory_id = request.match_info["id"]
-        if trajectory_id not in self.trajectories:
+        trajectory = self.trajectories.get(trajectory_id)
+        if trajectory is None:
             return self._ended_or_unknown(trajectory_id)
+        # Ended first: an ended trajectory answers 410 whatever key is sent, and its key opens nothing more.
+        if not trajectory.is_open:
+            return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
+        if not self._authorized(trajectory, request):
+            return _unauthorized()
         return await self.backend.models(request)
 
     async def chat(self, request: web.Request) -> web.StreamResponse:
@@ -316,6 +421,8 @@ class CaptureServer:
             return self._ended_or_unknown(trajectory_id)
         if not trajectory.is_open:
             return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
+        if not self._authorized(trajectory, request):
+            return _unauthorized()
         # In flight from here on, so a finish that lands during the body read cancels this call.
         task = asyncio.current_task()
         assert task is not None
@@ -334,6 +441,20 @@ class CaptureServer:
             trajectory.inflight.discard(task)
             trajectory.touch()
 
+    def _authorized(self, trajectory: Trajectory, request: web.Request) -> bool:
+        """Whether the call carries this trajectory's key, or no key is required."""
+        if not self.require_api_key:
+            return True
+        if trajectory.api_key is None:
+            return False
+        parts = request.headers.get("Authorization", "").split(maxsplit=1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return False
+        # Bytes: compare_digest refuses str with non-ASCII characters, which a caller controls. aiohttp keeps
+        # header bytes that aren't UTF-8 as surrogates; surrogateescape turns them back into those bytes.
+        given = parts[1].strip().encode("utf-8", "surrogateescape")
+        return hmac.compare_digest(given, trajectory.api_key.encode())
+
     def _start(
         self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
     ) -> asyncio.Future[web.StreamResponse]:
@@ -342,6 +463,10 @@ class CaptureServer:
         trajectory.inflight.add(work)
         work.add_done_callback(trajectory.inflight.discard)  # type: ignore[arg-type]
         return work
+
+
+def _unauthorized() -> web.Response:
+    return _openai_error("this trajectory's api_key is required", 401, code="invalid_api_key")
 
 
 def _changes(current: dict[str, Any], update: dict[str, Any] | None) -> bool:

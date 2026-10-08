@@ -7,6 +7,7 @@ from skycap.client import (  # noqa: E402
     CapturePool,
     FinishResult,
     PathRuleError,
+    RecordLocation,
     Trajectory,
 )
 from skycap.samples import Sample  # noqa: E402
@@ -18,6 +19,7 @@ __all__ = [
     "CaptureService",
     "FinishResult",
     "PathRuleError",
+    "RecordLocation",
     "Sample",
     "Trajectory",
     "__version__",
