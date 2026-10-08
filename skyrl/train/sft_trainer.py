@@ -863,7 +863,7 @@ class SFTTrainer:
         from skyrl.train.dataset.collators import DefaultCollator, PackedDataCollator
 
         if self.sft_cfg.use_sequence_packing:
-            from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+            from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
                 is_fp8_enabled,
             )
 
@@ -879,6 +879,7 @@ class SFTTrainer:
                 batch_size=self.sft_cfg.batch_size,
                 micro_train_batch_size_per_gpu=self.sft_cfg.micro_train_batch_size_per_gpu,
                 fp8_enabled=is_fp8_enabled(transformer_config_kwargs.get("fp8")),
+                fp8_recipe=transformer_config_kwargs.get("fp8_recipe"),
             )
         return DefaultCollator(
             tokenizer=tokenizer,
@@ -926,7 +927,11 @@ class SFTTrainer:
             "padding_side": "left",
         }
 
-        self.is_vlm = check_is_vlm(self.cfg.trainer.policy.model.path)
+        # ``language_model_only`` trains only the text stack of a VL checkpoint (e.g. GLM-5.3-Flash),
+        # which the Megatron worker already treats as a plain LM; don't disable packing for it.
+        self.is_vlm = (
+            check_is_vlm(self.cfg.trainer.policy.model.path) and not self.cfg.trainer.policy.language_model_only
+        )
         if self.is_vlm:
             self.processor = get_processor(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
             # Sequence packing / microbatch padding removal are unsupported for
@@ -1712,6 +1717,7 @@ class SFTTrainer:
             "loss": loss_val,
             "grad_norm": grad_norm,
             "timings": timings,
+            "peak_mem": {k: v for k, v in metrics.items() if k.startswith("peak_mem_")},
         }
 
     def _validate_batch_parallelism(self):
@@ -1816,14 +1822,17 @@ class SFTTrainer:
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+                log_dict.update({f"memory/{k}": v for k, v in step_result["peak_mem"].items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())
 
                 self.tracker.log(log_dict, step=step, commit=True)
+                peak_mem_str = ", ".join(f"{k}={v:.1f}" for k, v in step_result["peak_mem"].items())
                 logger.info(
                     f"Step {step}: loss={step_result['loss']:.4f}, "
                     f"grad_norm={step_result['grad_norm']}, "
-                    f"tokens_per_second={tokens_per_second:.0f}"
+                    f"tokens_per_second={tokens_per_second:.0f}, "
+                    f"step_time={all_timings['step']:.2f}s, {peak_mem_str}"
                 )
         finally:
             if self._torch_profiler_enabled:

@@ -16,8 +16,10 @@ dependencies = [
     "pillow>=11.3.0",
     "rich>=14.1.0",
     "safetensors>=0.6.2",
-    "tokenizers>=0.21.2",
-    "transformers>=5.6.1,<=5.8.0",
+    # Floor tracks the transformers pin below: transformers 5.16.1 requires
+    # tokenizers>=0.23.1.
+    "tokenizers>=0.23.1",
+    "transformers>=5.6.1,<=5.16.1",
     "typer>=0.17.4",
     "peft==0.18.1",
     "hf_transfer",

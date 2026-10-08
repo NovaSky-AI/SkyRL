@@ -155,10 +155,34 @@ class MTPHiddenCapture:
 
 
 @contextmanager
+def native_mtp_disabled(model):
+    """Skip Megatron's in-forward MTP block for a forward that does not consume it.
+
+    Megatron runs the block in every non-inference forward, gated only on ``mtp_process``.
+    """
+    from skyrl.backends.skyrl_train.mtp.native_loss_patch import mtp_block_skipped
+
+    host = _resolve_mtp_host(_unwrap_model(model))
+    if not getattr(host, "mtp_process", False):
+        yield
+        return
+    with mtp_block_skipped():
+        host.mtp_process = False
+        try:
+            yield
+        finally:
+            host.mtp_process = True
+
+
+@contextmanager
 def maybe_capture_mtp_hidden(model, enabled: bool):
-    """Context manager returning an ``MTPHiddenCapture`` when ``enabled``, else ``None``."""
+    """Context manager returning an ``MTPHiddenCapture`` when ``enabled``, else ``None``.
+
+    When disabled, the native MTP block is skipped: nothing would consume its output.
+    """
     if not enabled:
-        yield None
+        with native_mtp_disabled(model):
+            yield None
         return
     capture = MTPHiddenCapture(model)
     with capture.capture():

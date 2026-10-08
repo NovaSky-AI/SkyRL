@@ -5,11 +5,16 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 # Run Megatron tests:
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron"
 
+# Only the adapter-only rows (merge_lora=false), disk and in-memory sync:
+uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron_adapter"
+
 Multi-LoRA serving tests live separately in
 ``tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_multi_lora_serving.py``
 since they exercise the inference-server LoRA control plane, not the
 trainer + weight-sync path covered here.
 """
+
+import os
 
 import pytest
 import ray
@@ -36,6 +41,8 @@ def get_test_actor_config(
     weight_sync_backend: str = "nccl",
     tp_size: int = 2,
     merge_lora: bool = True,
+    lora_sync_mode: str = "disk",
+    lora_sync_path: str | None = None,
 ) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
     cfg = SkyRLTrainConfig()
@@ -61,20 +68,27 @@ def get_test_actor_config(
             alpha=32,
             dropout=0.1,
             target_modules="all-linear",
+            sync_mode=lora_sync_mode,
         )
+        if lora_sync_path is not None:
+            cfg.trainer.policy.model.lora.lora_sync_path = lora_sync_path
 
     return cfg
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "tp_size", "merge_lora"),
+    ("colocate_all", "weight_sync_backend", "strategy", "tp_size", "merge_lora", "lora_sync_mode"),
     [
-        pytest.param(False, "nccl", "fsdp", 2, True),
-        pytest.param(True, "nccl", "fsdp", 2, True),
-        pytest.param(False, "nccl", "megatron", 2, True, marks=pytest.mark.megatron),
-        pytest.param(True, "nccl", "megatron", 2, True, marks=pytest.mark.megatron),
-        pytest.param(False, "nccl", "megatron", 2, False, marks=pytest.mark.megatron),
-        pytest.param(True, "nccl", "megatron", 2, False, marks=pytest.mark.megatron),
+        pytest.param(False, "nccl", "fsdp", 2, True, "disk"),
+        pytest.param(True, "nccl", "fsdp", 2, True, "disk"),
+        pytest.param(False, "nccl", "megatron", 2, True, "disk", marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, True, "disk", marks=pytest.mark.megatron),
+        pytest.param(False, "nccl", "megatron", 2, False, "disk", marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, False, "disk", marks=pytest.mark.megatron),
+        # Adapter-only sync over the transport itself (NCCL broadcast when
+        # non-colocated, CUDA IPC when colocated): no PEFT files are written.
+        pytest.param(False, "nccl", "megatron", 2, False, "memory", marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, False, "memory", marks=pytest.mark.megatron),
     ],
     ids=[
         "no_colocate_nccl_fsdp",
@@ -83,15 +97,21 @@ def get_test_actor_config(
         "colocate_nccl_megatron_merged",
         "no_colocate_nccl_megatron_adapter",
         "colocate_nccl_megatron_adapter",
+        "no_colocate_nccl_megatron_adapter_memory",
+        "colocate_nccl_megatron_adapter_memory",
     ],
 )
 @pytest.mark.asyncio
 async def test_policy_local_engines_e2e(
-    ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size, merge_lora
+    ray_init_fixture, tmp_path, colocate_all, weight_sync_backend, strategy, tp_size, merge_lora, lora_sync_mode
 ):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
+
+    ``lora_sync_path`` is a fresh temporary directory so the assertions at the
+    end can tell the disk and in-memory adapter syncs apart by what they wrote.
     """
+    lora_sync_path = str(tmp_path / "lora_sync")
     cfg = get_test_actor_config(
         strategy=strategy,
         enable_lora=True,
@@ -99,6 +119,8 @@ async def test_policy_local_engines_e2e(
         weight_sync_backend=weight_sync_backend,
         tp_size=tp_size,
         merge_lora=merge_lora,
+        lora_sync_mode=lora_sync_mode,
+        lora_sync_path=lora_sync_path,
     )
 
     # Only enable LoRA on the vLLM side when adapters are loaded separately.
@@ -153,3 +175,14 @@ async def test_policy_local_engines_e2e(
             client, get_test_prompts(MODEL), sampling_params, model=resolve_policy_model_name(cfg)
         )
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+
+    # The adapter-only paths differ only in how the adapter reaches vLLM, so the
+    # generation above passing is the same evidence for both; what tells them
+    # apart is the filesystem. The disk sync writes PEFT files that vLLM reads
+    # back; the in-memory sync must leave the directory untouched.
+    adapter_file = os.path.join(lora_sync_path, "adapter_model.safetensors")
+    if needs_vllm_lora and lora_sync_mode == "disk":
+        assert os.path.isfile(adapter_file), f"disk LoRA sync did not write {adapter_file}"
+    elif needs_vllm_lora and lora_sync_mode == "memory":
+        assert not os.path.exists(lora_sync_path), f"in-memory LoRA sync wrote to {lora_sync_path}"
+    # megatron + merge_lora syncs merged full weights and never touches lora_sync_path.
