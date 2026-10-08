@@ -12,12 +12,11 @@ from __future__ import annotations
 import hashlib
 import json
 import queue
-import threading
-from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import Any, Protocol
 
 import numpy as np
@@ -31,14 +30,15 @@ class Media:
     ``token_ids``, a node's tokens, or a sample's ``input_ids``. ``hash`` identifies
     the item's content. ``data`` is the processor's output for the item (for
     Qwen-VL, ``pixel_values`` and ``image_grid_thw``), or None for an item read
-    back from a record, which keeps placeholders only.
+    back from a record, which keeps placeholders only. Two items are equal, and
+    hash alike, by everything but ``data``, which ``hash`` already identifies.
     """
 
     modality: str
     offset: int
     length: int
     hash: str
-    data: Mapping[str, np.ndarray] | None = None
+    data: Mapping[str, np.ndarray] | None = field(default=None, compare=False)
 
     def shifted(self, delta: int) -> Media:
         return replace(self, offset=self.offset + delta)
@@ -160,7 +160,7 @@ class RenderersRenderer:
     expects.
     """
 
-    #: Encoded items kept by content hash, so an image is encoded for the engine once, not every turn.
+    #: How many encoded items ``features`` keeps.
     ENCODED_CACHE = 256
 
     def __init__(
@@ -211,8 +211,8 @@ class RenderersRenderer:
         with self._checkout() as (renderer, _):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
             self.multimodal = is_multimodal(renderer)
-        self._encoded: OrderedDict[str, Any] = OrderedDict()
-        self._encoded_lock = threading.Lock()
+        # Keyed by the item at offset 0, so by content: an image is encoded once, not every turn.
+        self._encode = lru_cache(maxsize=self.ENCODED_CACHE)(self._encode_item)
 
     @contextmanager
     def _checkout(self) -> Iterator[tuple[Any, Any]]:
@@ -273,26 +273,21 @@ class RenderersRenderer:
 
         Encoding is the ``renderers`` library's, per model family, and needs ``vllm`` installed.
         """
-        from renderers.client import _build_mm_features
-
         out: dict[str, Any] = {"mm_hashes": {}, "mm_placeholders": {}, "kwargs_data": {}}
         for item in media:
-            with self._encoded_lock:
-                encoded = self._encoded.get(item.hash)
-                if encoded is not None:
-                    self._encoded.move_to_end(item.hash)
-            if encoded is None:
-                with self._checkout() as (renderer, _):
-                    single = _build_mm_features(renderer, _multi_modal_data([item.shifted(-item.offset)]))
-                encoded = single["kwargs_data"][item.modality][0]
-                with self._encoded_lock:
-                    self._encoded[item.hash] = encoded
-                    if len(self._encoded) > self.ENCODED_CACHE:
-                        self._encoded.popitem(last=False)
+            encoded = self._encode(item.shifted(-item.offset))
             out["mm_hashes"].setdefault(item.modality, []).append(item.hash)
             out["mm_placeholders"].setdefault(item.modality, []).append({"offset": item.offset, "length": item.length})
             out["kwargs_data"].setdefault(item.modality, []).append(encoded)
         return out
+
+    def _encode_item(self, item: Media) -> Any:
+        """One item's vLLM ``kwargs_data`` entry."""
+        from renderers.client import _build_mm_features
+
+        with self._checkout() as (renderer, _):
+            single = _build_mm_features(renderer, _multi_modal_data([item]))
+        return single["kwargs_data"][item.modality][0]
 
     def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
         """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text."""
