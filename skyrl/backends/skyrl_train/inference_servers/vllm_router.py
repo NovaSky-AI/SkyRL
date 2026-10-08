@@ -89,6 +89,20 @@ class VLLMRouter:
 
         logger.info(f"VLLMRouter: port={self._router_args.port}, prometheus_port={self._router_args.prometheus_port}")
 
+    @property
+    def url(self) -> str:
+        """Router URL, e.g. ``"http://10.0.0.1:30000"``.
+
+        The port is reserved in ``__init__``, so the URL is known before
+        :meth:`start` and can be handed to clients while the backends are
+        still coming up.
+        """
+        return format_http_url(get_node_ip(), self._router_args.port)
+
+    @property
+    def is_started(self) -> bool:
+        return self._process is not None
+
     def _release_port_reservations(self) -> None:
         """Close any held port reservation sockets."""
         for attr in ("_port_reservation", "_prometheus_port_reservation"):
@@ -121,8 +135,7 @@ class VLLMRouter:
         )
         self._process.start()
 
-        ip = get_node_ip()
-        router_url = format_http_url(ip, self._router_args.port)
+        router_url = self.url
         self._wait_until_healthy(router_url)
 
         is_pd = self._router_args.vllm_pd_disaggregation or self._router_args.pd_disaggregation
