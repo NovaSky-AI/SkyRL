@@ -5,58 +5,84 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
-from datetime import datetime, timezone
 
-import httpx
+import aiohttp
+import orjson
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
+from skyrl.tinker.db_models import EngineStateDB, RequestStatus
 from skyrl.tinker.external_future_store import ExternalFutureStore
+from skyrl.tinker.proto_serialization import serialize_sample_output
 from skyrl.utils.log import logger
+
+
+class TransientInferenceError(RuntimeError):
+    """A 5xx from vllm-router/vLLM: the request was rejected, not executed, so it is safe to retry."""
+
+
+_ROUTER_CONNECT_TIMEOUT_SECONDS = 60.0
 
 
 class SkyRLTrainInferenceForwardingClient:
     """Forwards EXTERNAL sample requests to the SkyRL-Train-managed vLLM."""
 
-    # TODO: make `external_future_store` required and remove the FutureDB
-    # write-back path in `call_and_store_result` — every production
-    # construction (api.py lifespan) already passes a store.
     def __init__(
         self,
         engine_config: EngineConfig,
         db_engine,
-        external_future_store: ExternalFutureStore | None = None,
+        external_future_store: ExternalFutureStore,
     ):
         self.engine_config = engine_config
         self.db_engine = db_engine
         self.external_future_store = external_future_store
         self._cached_proxy_url: str | None = None
         self._cache_lock = asyncio.Lock()
-        # Backpressure layered: httpx pool -> vllm-router -> vLLM max_num_seqs.
-        # Default `forwarding_inference_max_connections=None` is unlimited;
-        # the only cost is file descriptors (raise `ulimit -n` accordingly).
-        max_conn = engine_config.forwarding_inference_max_connections
-        max_keepalive = max(max_conn // 4, 32) if max_conn is not None else None
-        self._http_client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=engine_config.forwarding_inference_timeout_sec,
-                write=300.0,
-                pool=300.0,
-            ),
-            limits=httpx.Limits(
-                max_connections=max_conn,
-                max_keepalive_connections=max_keepalive,
-            ),
-        )
+        # Created on first use so it binds to the serving event loop.
+        self._session: aiohttp.ClientSession | None = None
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        """Return the shared aiohttp session, creating it on first use.
+
+        Backpressure is layered: connector limit -> vllm-router -> vLLM
+        max_num_seqs. Default `forwarding_inference_max_connections=None` is
+        unlimited; the only cost is file descriptors (raise `ulimit -n`
+        accordingly). Requests beyond the limit wait in the connector's FIFO
+        queue with no deadline, so a backlog of many thousands of samples
+        drains at the engine's pace instead of failing.
+
+        aiohttp rather than httpx: httpcore's pool rescans every connection
+        for every request, so its per-request CPU grows with the number of
+        in-flight samples (~28ms each at 512 in flight); aiohttp stays flat.
+        """
+        if self._session is None or self._session.closed:
+            max_conn = self.engine_config.forwarding_inference_max_connections
+            # keepalive_timeout must stay under the router's idle timeout so a
+            # pooled connection is never reused after the server closed it.
+            # Happy Eyeballs is off: a burst of connect timeouts cancels its
+            # sock_connect calls mid-flight, and under uvloop the closed sockets'
+            # descriptors get reused before the loop forgets them ("File
+            # descriptor N is used by transport"), failing unrelated forwards.
+            connector = aiohttp.TCPConnector(limit=max_conn or 0, keepalive_timeout=2, happy_eyeballs_delay=None)
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(
+                    total=None,
+                    # A saturated router can take tens of seconds to accept;
+                    # that is queueing, not failure.
+                    sock_connect=_ROUTER_CONNECT_TIMEOUT_SECONDS,
+                    sock_read=self.engine_config.forwarding_inference_timeout_sec,
+                ),
+            )
+        return self._session
 
     async def aclose(self) -> None:
-        """Close the persistent httpx client. Called from api.py lifespan shutdown."""
-        await self._http_client.aclose()
+        """Close the shared aiohttp session. Called from api.py lifespan shutdown."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
 
     async def _read_proxy_url_from_db(self) -> str | None:
         async with AsyncSession(self.db_engine) as session:
@@ -86,11 +112,7 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and resolve its future.
-
-        With an ExternalFutureStore the result stays in memory; without one it
-        is written back to the request's FutureDB row.
-        """
+        """Forward a sample request to vLLM and resolve its in-memory future."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
@@ -99,59 +121,41 @@ class SkyRLTrainInferenceForwardingClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
-        if self.external_future_store is not None:
-            await self.external_future_store.complete(request_id, result, status)
-            return
+        await self.external_future_store.complete(request_id, result, status)
 
-        # TODO: remove this FutureDB write-back once `external_future_store`
-        # is required (see __init__).
-        async with AsyncSession(self.db_engine) as session:
-            future = await session.get(FutureDB, request_id)
-            if future is None:
-                # Row was deleted between scheduling and completion (cancelled
-                # request, stale-session GC). Nothing to write back.
-                logger.warning("FutureDB row %s missing on completion write — skipping", request_id)
-                return
-            # `result_data` is a text column holding pre-serialized JSON.
-            future.result_data = result.model_dump_json()
-            future.status = status
-            future.completed_at = datetime.now(timezone.utc)
-            await session.commit()
-
-    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
-        # Retry only failures that occur before a request can reach vLLM. Read
-        # and write failures are ambiguous: vLLM may still be executing the
+    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> bytes:
+        # Retry only failures where the request demonstrably did not execute:
+        # connect-phase errors and 5xx rejections from the router. Read and
+        # write failures are ambiguous: vLLM may still be executing the
         # request, so retrying would duplicate generation load.
         try:
             try:
                 proxy_url = await self._resolve_proxy_url()
                 return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError, TransientInferenceError) as e:
                 logger.warning(
-                    "Connection error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
+                    "Transient error talking to %s (%s: %s) — refreshing proxy URL and retrying once",
                     self._cached_proxy_url,
                     type(e).__name__,
                     e,
                 )
                 proxy_url = await self._resolve_proxy_url(force_refresh=True)
                 return await self._forward(proxy_url, sample_req, model_id, base_model=base_model)
-        except httpx.ReadTimeout as e:
+        except aiohttp.SocketTimeoutError as e:
             # Not retried (see above). Long-context requests routinely exceed the
             # default read deadline, so tell the caller how to raise it. The
-            # message is stored in the FutureDB ErrorResponse and shown to clients.
+            # message is stored in the ErrorResponse and shown to clients.
             timeout_sec = self.engine_config.forwarding_inference_timeout_sec
             raise RuntimeError(
                 f"Inference request to {self._cached_proxy_url} timed out after {timeout_sec:g}s waiting for "
-                "a response (httpx.ReadTimeout). The request was not retried because vLLM may still be "
+                "a response (read timeout). The request was not retried because vLLM may still be "
                 "executing it. If requests are expected to take this long (long prompts, large max_tokens, "
                 "or queueing behind other requests), increase the deadline with "
                 "`--forwarding-inference-timeout-sec` (EngineConfig.forwarding_inference_timeout_sec) or "
                 "the SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC environment variable."
             ) from e
 
-    async def _forward(
-        self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
-    ) -> types.SampleOutput:
+    async def _forward(self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None) -> bytes:
         # model_id matches the LoRA name registered with vLLM during
         # save_weights_for_sampler; base_model is used for non-LoRA sampling.
         model_name = base_model if base_model else model_id
@@ -195,17 +199,22 @@ class SkyRLTrainInferenceForwardingClient:
             headers["X-Session-ID"] = session_id
 
         url = f"{proxy_url}/v1/completions"
-        response = await self._http_client.post(url, json=payload, headers=headers)
-        if response.status_code >= 400:
-            raise RuntimeError(f"vLLM /v1/completions returned {response.status_code}: {response.text}")
-        try:
-            result = response.json()
-        except ValueError as e:
-            # vllm-router can return HTML on transient errors even with 2xx status.
-            raise RuntimeError(
-                f"vLLM /v1/completions returned non-JSON ({response.status_code}, "
-                f"content-type={response.headers.get('content-type')!r}): {response.text[:512]}"
-            ) from e
+        async with self._get_session().post(url, json=payload, headers=headers) as response:
+            body = await response.read()
+            if response.status >= 500:
+                raise TransientInferenceError(
+                    f"vLLM /v1/completions returned {response.status}: {body.decode(errors='replace')}"
+                )
+            if response.status >= 400:
+                raise RuntimeError(f"vLLM /v1/completions returned {response.status}: {body.decode(errors='replace')}")
+            try:
+                result = orjson.loads(body)
+            except orjson.JSONDecodeError as e:
+                # vllm-router can return HTML on transient errors even with 2xx status.
+                raise RuntimeError(
+                    f"vLLM /v1/completions returned non-JSON ({response.status}, "
+                    f"content-type={response.headers.get('content-type')!r}): {body[:512].decode(errors='replace')}"
+                ) from e
 
         prompt_logprobs = None
         topk = None
@@ -231,16 +240,8 @@ class SkyRLTrainInferenceForwardingClient:
             # Tinker's stop_reason is Literal["stop", "length"]; vLLM emits a wider set.
             finish_reason = choice.get("finish_reason")
             stop_reason = "stop" if finish_reason in ("stop", "stop_token") else "length"
-            sequences.append(
-                types.GeneratedSequence(
-                    tokens=tokens,
-                    logprobs=logprobs,
-                    stop_reason=stop_reason,
-                )
-            )
+            sequences.append((stop_reason, tokens, logprobs))
 
-        return types.SampleOutput(
-            sequences=sequences,
-            prompt_logprobs=prompt_logprobs,
-            topk_prompt_logprobs=topk,
-        )
+        # Encode straight to the proto wire form the SDK retrieves; no pydantic
+        # model or JSON text is built for the result.
+        return serialize_sample_output(sequences, prompt_logprobs, topk)

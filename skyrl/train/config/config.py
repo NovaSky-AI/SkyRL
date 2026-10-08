@@ -106,7 +106,15 @@ class SkyRLLoraConfig(BaseConfig):
     """Dropout probability applied to LoRA layers, to help prevent overfitting."""
     lora_sync_path: str = "/tmp/skyrl_lora_sync"
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
-    Must be accessible to all workers in distributed setups."""
+    Must be accessible to all workers in distributed setups. Unused when ``sync_mode="memory"``."""
+    sync_mode: str = "disk"
+    """How adapter-only weight sync (Megatron ``merge_lora=false``) reaches the inference engines.
+    ``"disk"`` writes PEFT files to ``lora_sync_path`` and vLLM reads them back.
+    ``"memory"`` ships the adapter tensors through the configured
+    ``generator.inference_engine.weight_sync_backend`` transport (``nccl``: NCCL broadcast when
+    non-colocated, CUDA IPC when colocated) and vLLM builds the adapter from the received GPU
+    tensors; nothing is written. Shared expert adapters are sent once and aliased on the receiver.
+    Megatron only."""
     target_modules: Union[str, List[str]] = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
@@ -440,6 +448,11 @@ class MegatronLoraConfig(BaseConfig):
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
     """Merge LoRA weights into the base weights during weight sync."""
+    experts_shared_outer_loras: bool = False
+    """Shared-outer grouped-expert LoRA for MoE models: the fc1 (gate_up) lora_A and
+    fc2 (down) lora_B matrices are shared across all experts, while the inner matrices
+    (fc1 lora_B, fc2 lora_A) are trained per expert. Maps to Megatron-Bridge
+    ``LoRA(experts_shared_outer_loras=True)``; only supported with ``lora_type="lora"``."""
     normalize_moe_lora: bool = False
     """When True, grouped MoE expert linears use ``rank // moe_router_topk`` as
     their LoRA rank (non-expert layers keep the full rank), normalizing total
@@ -583,6 +596,12 @@ class MegatronConfig(BaseConfig):
     freeze_moe_router: bool = False
     """If True, freeze MoE router parameters so they are not updated during training. No-op on
     non-MoE models."""
+    freeze_dsa_indexer: bool = False
+    """If True, freeze the dynamic-sparse-attention indexer parameters. The indexer emits top-k
+    *indices*, which are not differentiable. With auxiliary indexer loss disabled, these parameters
+    cannot receive a gradient; leaving them trainable trips Megatron's
+    ``overlap_grad_reduce`` assert that every bucketed parameter's backward hook fired. No-op on
+    models without a DSA indexer. Leave False when training the indexer with auxiliary loss."""
     mtp_num_layers: Optional[int] = None
     """Number of Multi-Token Prediction (MTP) heads to build. ``None`` honors the model's HF config
     (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are
@@ -606,9 +625,6 @@ class MegatronConfig(BaseConfig):
     The on-disk format is identical to a synchronous save. Only the sharded
     model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
     Falls back to synchronous for cloud paths."""
-    async_dist_ckpt_strategy: str = "mcore"
-    """Backend for the async write. ``mcore`` needs no extra deps; megatron-core's own
-    default ``nvrx`` requires nvidia-resiliency-ext. Only used when async saves are on."""
     async_save_prestage_to_cpu: bool = False
     """Copy shards to host memory on the training rank before handing them to the async
     checkpoint writer, instead of letting the writer pull them over CUDA IPC.
@@ -1190,12 +1206,21 @@ class InferenceEngineConfig(BaseConfig):
     Also used during full-weight sync, where policy weights are cast to this dtype before being sent
     to the inference engine. The LoRA-adapter sync path exports fp32 instead."""
     fp8_weight_sync_mode: Optional[str] = None
-    """Optional rollout weight format. ``"blockwise"`` sends FP8 checkpoint weights and
-    scales (one FP32 scale per 128x128 block) instead of ``model_dtype`` tensors, halving transfer
-    volume and letting vLLM serve FP8. Requires ``trainer.strategy="megatron"`` and a model with a
-    registered FP8 spec (see ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The
-    vLLM engine settings this needs (``quantization="fp8"``, ``load_format="dummy"``, and the
-    matching ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
+    """Optional rollout weight format: ``"blockwise"``, ``"mxfp8"``, or ``"auto"``.
+
+    Sends FP8 checkpoint weights and scales instead of ``model_dtype`` tensors, halving transfer
+    volume and letting vLLM serve FP8. ``"blockwise"`` ships one FP32 scale per 128x128 block;
+    ``"mxfp8"`` ships one E8M0 exponent per 32-element group, matching the recipe Transformer
+    Engine trains with on Blackwell.
+
+    ``"auto"`` selects the format matching the policy's resolved ``fp8_recipe`` -- so trainer and
+    rollout quantize identically. It follows the *recipe*, not the architecture: an explicit
+    ``fp8_recipe="blockwise"`` on Blackwell keeps a blockwise wire.
+
+    Requires ``trainer.strategy="megatron"`` and a model with a registered FP8 spec (see
+    ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
+    this needs (``quantization``, ``load_format="dummy"``, and the matching
+    ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
     automatically; the first weight sync supplies real weights before any generation."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
@@ -1438,6 +1463,20 @@ class MTPConfig(BaseConfig):
 
 
 @dataclass
+class GrafanaAnnotationsConfig(BaseConfig):
+    """Configure optional organization-scoped Grafana run annotations."""
+
+    enabled: bool = False
+    """Publish a run-name start marker and close it as a region when training ends."""
+    token_env_var: str = "GRAFANA_API_TOKEN"
+    """Environment variable containing the annotation API token; never stored in run config."""
+    organization_id: Optional[int] = None
+    """Organization override; otherwise use the head's RAY_GRAFANA_ORG_ID (default 1)."""
+    tags: List[str] = field(default_factory=list)
+    """Additional annotation tags, such as a cluster name."""
+
+
+@dataclass
 class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     use_expandable_segments: bool = True
@@ -1495,6 +1534,15 @@ class TrainerConfig(BaseConfig):
     max_training_steps: Optional[int] = None
     """If set, stop training after this many steps regardless of epochs or dataset size.
     Useful for CI smoke tests and quick validation runs."""
+    step_timeout_s: Optional[float] = None
+    """If set, the driver raises ``StepTimeoutError`` when one training step (generation through weight sync)
+    takes longer than this many seconds. Checkpoint and HF saves made outside a step each get their own budget of
+    this size. Eval is not covered. Only the driver's wait is interrupted; a hung worker keeps running until
+    teardown. See the "Step timeouts" troubleshooting section."""
+    weight_sync_timeout_s: Optional[float] = None
+    """If set, the driver raises ``WeightSyncTimeoutError`` when one weight sync (including the initial sync before
+    training) takes longer than this many seconds. Must not exceed ``step_timeout_s``. Only the driver's wait is
+    interrupted; a hung worker keeps running until teardown."""
     update_epochs_per_batch: int = 1
     """Number of gradient update passes over each training batch.
     Equivalent to the concept of "PPO epochs", where the same experience is iterated over multiple times."""
@@ -1609,6 +1657,9 @@ class TrainerConfig(BaseConfig):
     """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
     The Triton backend requires CUDA + triton and falls back to ``"torch"``
     when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
+
+    grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
+    """Optional Grafana run annotation publishing, disabled by default."""
 
     def __post_init__(self):
         # ref model defaults to the policy model
@@ -1913,12 +1964,20 @@ class SkyRLTrainConfig(BaseConfig):
         ie_cfg = self.generator.inference_engine
         if ie_cfg.fp8_weight_sync_mode is not None:
             from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-            from skyrl.backends.skyrl_train.weight_sync.fp8 import BLOCKWISE_FP8
+            from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+                AUTO_FP8,
+                WIRE_FORMATS,
+            )
 
-            if ie_cfg.fp8_weight_sync_mode != BLOCKWISE_FP8:
+            # "auto" is still unresolved here -- validate_megatron_cfg turns it
+            # into a concrete wire from the policy's fp8_recipe, long after the
+            # config object is built. Accept it and let the entrypoint-specific
+            # validation (validate_inference_engine_cfg) reject it where there
+            # is no recipe to resolve from.
+            if ie_cfg.fp8_weight_sync_mode not in (*WIRE_FORMATS, AUTO_FP8):
                 raise ValueError(
                     f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}. "
-                    f"Supported value: {BLOCKWISE_FP8!r}."
+                    f"Supported values: {(*WIRE_FORMATS, AUTO_FP8)!r}."
                 )
             if self.trainer.strategy != "megatron":
                 raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")

@@ -159,6 +159,24 @@ class TestTopLevelOverrides:
         with pytest.raises(ValueError, match="remove_microbatch_padding=True requires flash_attn=True"):
             validate_sft_cfg(cfg)
 
+    def test_language_model_only_bridges_to_policy(self):
+        skyrl_cfg = build_skyrl_config_for_sft(_sft_cfg_from_overrides([]))
+        assert skyrl_cfg.trainer.policy.language_model_only is False
+
+        cfg = _sft_cfg_from_overrides(["language_model_only=true"])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.language_model_only is True
+
+    def test_fused_lm_head_logprob_bridges_to_trainer(self):
+        skyrl_cfg = build_skyrl_config_for_sft(_sft_cfg_from_overrides([]))
+        assert skyrl_cfg.trainer.fused_lm_head_logprob is False
+        assert skyrl_cfg.trainer.logprobs_chunk_size == 1024
+
+        cfg = _sft_cfg_from_overrides(["fused_lm_head_logprob=true", "logprobs_chunk_size=2048"])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.fused_lm_head_logprob is True
+        assert skyrl_cfg.trainer.logprobs_chunk_size == 2048
+
 
 class TestQLoRAConfig:
     def test_4bit_config_bridges_to_policy_model(self):

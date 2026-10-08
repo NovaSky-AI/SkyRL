@@ -29,7 +29,8 @@ pays for it.
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 # /fetch_weights and /reset_prefix_cache, which SkyRL adds in vllm_server_actor.
 INIT_ENGINE_ENDPOINT = "/init_weight_transfer_engine"
 START_UPDATE_ENDPOINT = "/start_weight_update"
+START_DRAFT_UPDATE_ENDPOINT = "/start_draft_weight_update"
 UPDATE_WEIGHTS_ENDPOINT = "/update_weights"
 FINISH_UPDATE_ENDPOINT = "/finish_weight_update"
 FETCH_WEIGHTS_ENDPOINT = "/fetch_weights"
@@ -73,6 +75,7 @@ class SkyrlWeightSyncClient:
         self._urls = list(server_urls)
         self._dp = max(1, int(data_parallel_size))
         self._init_payload_fn = init_payload_fn
+        self._start_endpoint = START_UPDATE_ENDPOINT
         if not self._urls:
             raise ValueError("SkyrlWeightSyncClient requires at least one server_url.")
 
@@ -97,7 +100,7 @@ class SkyrlWeightSyncClient:
         self._fanout([(url, INIT_ENGINE_ENDPOINT, {"init_info": info}) for url, info in zip(self._urls, per_server)])
 
     def start_weight_update(self) -> None:
-        self._fanout_uniform(START_UPDATE_ENDPOINT, None)
+        self._fanout_uniform(self._start_endpoint, None)
 
     def update_weights(self, update_info: Dict[str, Any]) -> None:
         self._fanout_uniform(UPDATE_WEIGHTS_ENDPOINT, {"update_info": _json_safe(update_info)})
@@ -106,6 +109,20 @@ class SkyrlWeightSyncClient:
         # Omit the key entirely when unset so the route's default applies.
         body = {"weight_version": weight_version} if weight_version is not None else None
         self._fanout_uniform(FINISH_UPDATE_ENDPOINT, body)
+
+    @contextmanager
+    def draft_session(self) -> Iterator[None]:
+        """Open the sessions started inside this block on vLLM's spec-decode drafter.
+
+        vLLM's trainer engines only call ``start_weight_update``. The draft route
+        retargets the worker's receive engine at the drafter for one session, and
+        ``/finish_weight_update`` restores the main model.
+        """
+        self._start_endpoint = START_DRAFT_UPDATE_ENDPOINT
+        try:
+            yield
+        finally:
+            self._start_endpoint = START_UPDATE_ENDPOINT
 
     # ---- extras: the checkpoint-delta lifecycle ----
     #

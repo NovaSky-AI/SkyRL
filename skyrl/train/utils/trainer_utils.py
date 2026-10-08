@@ -30,6 +30,7 @@ from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
     slice_generator_output,
 )
+from skyrl.train.utils import deadline
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -76,13 +77,19 @@ def get_node_ids(
         critic_model: Critic model actor group (Optional)
         ref_model: Ref model actor group (Optional)
     """
-    policy_node_ids: List[str] = ray.get(policy_model.async_run_ray_method("pass_through", "get_ray_node_id"))
+    policy_node_ids: List[str] = deadline.ray_get(
+        policy_model.async_run_ray_method("pass_through", "get_ray_node_id"), "get_policy_ray_node_id"
+    )
     if critic_model is not None:
-        critic_node_ids: List[str] = ray.get(critic_model.async_run_ray_method("pass_through", "get_ray_node_id"))
+        critic_node_ids: List[str] = deadline.ray_get(
+            critic_model.async_run_ray_method("pass_through", "get_ray_node_id"), "get_critic_ray_node_id"
+        )
     else:
         critic_node_ids = []
     if ref_model is not None:
-        ref_node_ids: List[str] = ray.get(ref_model.async_run_ray_method("pass_through", "get_ray_node_id"))
+        ref_node_ids: List[str] = deadline.ray_get(
+            ref_model.async_run_ray_method("pass_through", "get_ray_node_id"), "get_ref_ray_node_id"
+        )
     else:
         ref_node_ids = []
 
@@ -112,7 +119,7 @@ def run_on_each_node(node_ids: List[str], fn: Callable, *args, **kwargs):
         )
         refs.append(node_task.remote(*args, **kwargs))
 
-    return ray.get(refs)
+    return deadline.ray_get(refs, "run_on_each_node")
 
 
 def extract_step_from_path(path: str) -> int:
@@ -670,7 +677,9 @@ def zero_variance_filter(
     return [i for i, uid in enumerate(uids) if uid in kept_uids_set]
 
 
-def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput, step_wise: bool = False):
+def validate_generator_output(
+    num_prompts: int, generator_output: GeneratorOutput, step_wise: bool = False, routes_expected: bool = False
+):
     """Validate the generator output.
 
     Args:
@@ -679,6 +688,8 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         step_wise: If True, validate step-wise specific fields (is_last_step, trajectory_ids,
             contiguous ordering). In step-wise mode, num_responses may exceed num_prompts
             because each trajectory is expanded into multiple per-turn samples.
+        routes_expected: R3 is on for this batch, so a batch that trains anything must carry
+            routed experts. Without them the trainer would silently skip replay.
     """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
@@ -751,6 +762,14 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
 
     _validate_per_token_side_channels(generator_output, step_wise)
 
+    if routes_expected and generator_output.get("rollout_expert_indices") is None:
+        # A batch with nothing to train (every rollout failed) has nothing to replay either.
+        assert not any(any(mask) for mask in generator_output["loss_masks"]), (
+            "generator.inference_engine.enable_return_routed_experts=True, but the generator returned no "
+            "rollout_expert_indices for a batch with trainable tokens, so routing replay would silently be "
+            "skipped. Use a generator that returns routed experts, or disable R3."
+        )
+
     if step_wise:
         _validate_step_wise_fields(generator_output, num_responses)
 
@@ -761,13 +780,6 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
     rollout_sample_support = generator_output.get(SAMPLE_SUPPORT_FIELD)
     prompt_token_ids = generator_output["prompt_token_ids"]
     response_ids = generator_output["response_ids"]
-
-    # Trajectory-aligned routes cannot be replayed against per-turn samples.
-    assert not (step_wise and rollout_expert_indices is not None), (
-        "rollout router replay (r3) is not supported with step-wise training: a route trace is "
-        "accumulated over one contiguous prompt+response token sequence, so replaying it against "
-        "per-turn samples would silently route trained tokens by another token's rollout routes"
-    )
 
     if rollout_expert_indices is not None:
         loss_masks = generator_output["loss_masks"]
@@ -782,6 +794,15 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
             )
             # Row t covers target t + 1, so every trained target needs a captured row.
             trained_positions = np.flatnonzero(np.asarray(loss_masks[i]))
+            # A step-wise row's prompt is the history so far, so its routes must be the row's own:
+            # one per token, less at most the last, which the engine never forwards. Routes for the
+            # step's generated tokens alone, or for the whole trajectory on an earlier step, would
+            # replay onto the wrong tokens. A row that trains nothing (masked, or overlong-filtered)
+            # may carry a short dummy route: the trainer pads the rest, and no loss depends on it.
+            assert not (step_wise and trained_positions.size) or captured_rows >= sequence_length - 1, (
+                f"rollout_expert_indices[{i}] has {captured_rows} route rows for a {sequence_length}-token "
+                "step-wise row: step-wise routes must cover the row's whole prompt and response"
+            )
             if trained_positions.size:
                 last_trained_token = prompt_length + int(trained_positions[-1])
                 assert captured_rows >= last_trained_token, (

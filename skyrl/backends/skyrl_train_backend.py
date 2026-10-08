@@ -6,7 +6,7 @@ import math
 import os
 import tarfile
 import tempfile
-from typing import Callable
+from typing import Callable, Literal
 
 import ray
 import torch
@@ -45,6 +45,10 @@ from skyrl.train.utils.utils import (
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
+# Prefix the policy workers put on every loss-function metric (see
+# `worker.py`, which writes `status["loss_metrics/" + k]`).
+LOSS_METRICS_PREFIX = "loss_metrics/"
+
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     """Configuration overrides for the SkyRL-Train backend.
@@ -64,6 +68,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
+    runtime_role: Literal["trainer", "inference", "combined"] = "combined"
 
 
 class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
@@ -89,6 +94,8 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    if overrides.runtime_role != "combined":
+        user_overrides["trainer.placement.colocate_all"] = False
     # The Tinker path drives profiling through /start_profiling, which builds the
     # profiler at request time. A static config here would fight it over the single
     # `worker.profiler` slot, so reject it rather than letting both sources win
@@ -116,11 +123,14 @@ def _build_skyrl_train_config(
     # LoRA rank/alpha must also be on the override dict so post_init validation
     # sees them — e.g. fake_int4_qat.enabled requires lora.rank > 0, which
     # would spuriously fail for LoRA clients if the rank were applied after
-    # from_cli_overrides. The client-requested LoRA config wins over any
-    # backend_config value (matching the previous post-assignment behaviour).
+    # from_cli_overrides. The client-requested rank wins over any backend_config
+    # value. The Tinker SDK cannot express alpha (the API server fills in 32), so
+    # an explicit `trainer.policy.model.lora.alpha` in backend_config takes
+    # precedence over that placeholder; otherwise the API's value is used.
     if lora_config is not None and lora_config.rank > 0:
         user_overrides["trainer.policy.model.lora.rank"] = lora_config.rank
-        user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
+        if "trainer.policy.model.lora.alpha" not in user_overrides:
+            user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -227,6 +237,7 @@ class SkyRLTrainBackend(AbstractBackend):
             "all_advantages",
             "all_values",
             "all_returns",
+            "all_rollout_logprobs",
             "all_model_ids",
             "all_loss_fns",
             "all_loss_fn_configs",
@@ -474,8 +485,16 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
+        if self.config.runtime_role == "trainer":
+            raise RuntimeError("Sampling is unavailable in a trainer-only runtime")
         if self._inference_engines_initialized:
             return
+        if self.config.runtime_role == "inference" and getattr(self, "_cfg", None) is None:
+            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config=None)
+            if not ray.is_initialized():
+                initialize_ray(self._cfg)
+        elif hasattr(self, "_cfg") and self._cfg is None:
+            raise RuntimeError("Create a model before sampling from a combined runtime")
 
         # A preceding training op (another tenant's forward/forward_backward)
         # may have left the trainer GPU-resident; under colocate_all the
@@ -487,8 +506,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
         self._create_new_inference_client()
 
-        self._dispatch.set_inference_engine_client(self._inference_engine_client)
-        self.init_weight_sync_state()
+        if self._dispatch is not None:
+            self._dispatch.set_inference_engine_client(self._inference_engine_client)
+            self.init_weight_sync_state()
         self._inference_engines_initialized = True
 
         # The engines' API servers also expose the render endpoint, fanning
@@ -513,6 +533,8 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{model_id}' already exists")
 
         is_lora = lora_config is not None and lora_config.rank > 0
+        if self.config.runtime_role == "inference" and (is_lora or model_role == "critic"):
+            raise ValueError("Training models are unavailable in an inference-only runtime")
 
         # Multi-LoRA path: register additional policy adapters against the
         # already-built shared runtime. Gate on the runtime being alive rather
@@ -556,7 +578,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
             self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self._cfg.trainer.strategy == "fsdp":
+            if self.config.runtime_role == "inference":
+                PolicyWorker = None
+            elif self._cfg.trainer.strategy == "fsdp":
                 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
                     PolicyWorker,
                 )
@@ -566,9 +590,9 @@ class SkyRLTrainBackend(AbstractBackend):
                 )
             else:
                 raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-
-            logger.info("Building models.")
-            self._build_policy(PolicyWorker, model_id=model_id)
+            if PolicyWorker is not None:
+                logger.info("Building models.")
+                self._build_policy(PolicyWorker, model_id=model_id)
             if is_lora:
                 self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
@@ -590,6 +614,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         self._model_ids_to_role[model_id] = model_role
         self._model_metadata[model_id] = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
+        if self.config.runtime_role == "inference":
+            self._ensure_inference_engines()
         logger.info(f"Created {model_role} model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
@@ -625,6 +651,14 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
+
+        # Inference-only model IDs are aliases for the same base-model runtime.
+        # Keep that runtime alive while another alias is still registered.
+        if self.config.runtime_role == "inference" and len(self._model_ids_to_role) > 1:
+            del self._model_ids_to_role[model_id]
+            self._model_metadata.pop(model_id, None)
+            logger.info(f"Removed inference-only model alias '{model_id}'; shared runtime stays up")
+            return
 
         # Multi-LoRA: if more than one model is currently registered — or the
         # last one is unloading with keep_runtime_warm_on_last_unload set —
@@ -719,14 +753,30 @@ class SkyRLTrainBackend(AbstractBackend):
         sequences, attention_masks, loss_masks, response_masks = [], [], [], []
         action_log_probs_list, advantages_list = [], []
         values_list, returns_list = [], []
+        rollout_logprobs_list = []
+        # `all_rollout_logprobs` defaults to [] for batches built before the field existed.
+        all_rollout_logprobs = prepared_batch.all_rollout_logprobs or [[] for _ in full_sequences]
+        # The optional `rollout_logprobs` is all-or-nothing per batch: if any datum provides it, every
+        # datum must, with one entry per response token. Batches are already split per model_id, so a
+        # mix can only come from one client sending inconsistent datums; fail loudly rather than
+        # silently disabling off-policy correction for part of the batch.
+        has_rollout_logprobs = any(len(lp) > 0 for lp in all_rollout_logprobs)
+        if has_rollout_logprobs:
+            for rollout_lps, weights in zip(all_rollout_logprobs, prepared_batch.all_token_weights):
+                if len(rollout_lps) != len(weights):
+                    raise ValueError(
+                        "`rollout_logprobs` must be provided for every datum in the batch, with one entry per "
+                        f"response token (got {len(rollout_lps)} for {len(weights)} tokens)"
+                    )
 
-        for seq, weights, logprobs, advs, values, returns in zip(
+        for seq, weights, logprobs, advs, values, returns, rollout_lps in zip(
             full_sequences,
             prepared_batch.all_token_weights,
             prepared_batch.all_sampling_logprobs,
             prepared_batch.all_advantages,
             prepared_batch.all_values,
             prepared_batch.all_returns,
+            all_rollout_logprobs,
         ):
             pad_len = max_seq_len - len(seq)
             sequences.append([self._tokenizer.pad_token_id] * pad_len + list(seq))
@@ -738,6 +788,7 @@ class SkyRLTrainBackend(AbstractBackend):
             advantages_list.append([0.0] * action_pad + [float(a) for a in advs])
             values_list.append([0.0] * action_pad + [float(v) for v in values])
             returns_list.append([0.0] * action_pad + [float(r) for r in returns])
+            rollout_logprobs_list.append([0.0] * action_pad + [float(lp) for lp in rollout_lps])
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
@@ -759,14 +810,22 @@ class SkyRLTrainBackend(AbstractBackend):
         if has_logprobs:
             action_log_probs_tensor = torch.tensor(action_log_probs_list, dtype=torch.float32)
             batch_dict["action_log_probs"] = action_log_probs_tensor
-            # Tinker datums carry the *sampling* (rollout-engine) logprobs.
-            # Mirror them into `rollout_logprobs` so the policy workers emit
-            # the train-vs-rollout logprob-gap metrics
-            # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
-            # `_extract_metrics` below.  Loss behaviour only changes when
-            # `trainer.algorithm.off_policy_correction` is explicitly
-            # configured (rollout logprobs are its intended input).
-            batch_dict["rollout_logprobs"] = action_log_probs_tensor
+            if has_rollout_logprobs:
+                # SkyRL extension: the client sent the rollout-engine logprobs separately
+                # (`loss_fn_inputs["rollout_logprobs"]`) and `logprobs` holds the training
+                # policy's logprobs at sampling time. This matches the native trainer, where
+                # `action_log_probs` come from a forward pass and `rollout_logprobs` from the
+                # engine, so `off_policy_correction` (geometric/product sequence masking, TIS)
+                # measures the real train/inference mismatch.
+                batch_dict["rollout_logprobs"] = torch.tensor(rollout_logprobs_list, dtype=torch.float32)
+            else:
+                # Tinker datums carry the *sampling* (rollout-engine) logprobs.
+                # Mirror them into `rollout_logprobs` so the policy workers emit
+                # the train-vs-rollout logprob-gap metrics
+                # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
+                # `_extract_metrics` below. With identical tensors every
+                # `off_policy_correction` ratio is exactly 1, so masking/TIS are no-ops.
+                batch_dict["rollout_logprobs"] = action_log_probs_tensor
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":
@@ -862,26 +921,43 @@ class SkyRLTrainBackend(AbstractBackend):
         # micro-batch (masked |logp_train - logp_rollout| over action tokens)
         # and reduced across micro-batches / DP ranks.  Reconstruct the std
         # from the reduced first/second moments (std itself cannot be
-        # mean-reduced; same as finalize_minibatch_rollout_logprob_diff_std)
-        # and surface the family under skyrl-train's familiar
-        # `policy/rollout_train_logprobs_abs_diff_*` names.  The `:mean` /
-        # `:max` / `:min` suffixes drive the Tinker SDK's cross-chunk
-        # reduction when a request is split into multiple chunks.
+        # mean-reduced; same as finalize_minibatch_rollout_logprob_diff_std).
+        # Names are unprefixed like every other metric here; clients add their
+        # own namespace (e.g. `policy/`). The `:mean` / `:max` / `:min`
+        # suffixes drive the Tinker SDK's cross-chunk reduction when a request
+        # is split into multiple chunks.
         if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY in data:
             mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY])
-            metrics["policy/rollout_train_logprobs_abs_diff_mean:mean"] = mean
+            metrics["rollout_train_logprobs_abs_diff_mean:mean"] = mean
             if MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY in data:
                 sq_mean = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_SQ_MEAN_KEY])
                 # max(0, ...) guards tiny negatives from float round-off.
-                metrics["policy/rollout_train_logprobs_abs_diff_std:mean"] = math.sqrt(max(0.0, sq_mean - mean**2))
+                metrics["rollout_train_logprobs_abs_diff_std:mean"] = math.sqrt(max(0.0, sq_mean - mean**2))
             if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY in data:
-                metrics["policy/rollout_train_logprobs_abs_diff_max:max"] = float(
-                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY]
-                )
+                metrics["rollout_train_logprobs_abs_diff_max:max"] = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MAX_KEY])
             if MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY in data:
-                metrics["policy/rollout_train_logprobs_abs_diff_min:min"] = float(
-                    data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY]
-                )
+                metrics["rollout_train_logprobs_abs_diff_min:min"] = float(data[MINIBATCH_ROLLOUT_LOGPROB_DIFF_MIN_KEY])
+
+        # Loss-function metrics, which the workers prefix with `loss_metrics/`:
+        # `clip_ratio` plus the whole off-policy-correction family (sequence
+        # masking, token/outlier masks, TIS ratios). Forward them as a family
+        # rather than by name so a correction enabled through
+        # `trainer.algorithm.off_policy_correction` is observable from a Tinker
+        # client instead of being silently dropped here -- without
+        # `geo_sequence_mask_masked_ratio`, say, a masking config that never
+        # fires is indistinguishable from one that is working. `_max` / `_min`
+        # suffixes pick the matching Tinker cross-chunk reduction.
+        for key, value in data.items():
+            if not key.startswith(LOSS_METRICS_PREFIX):
+                continue
+            name = key[len(LOSS_METRICS_PREFIX) :]
+            if name.endswith("_max"):
+                reduction = "max"
+            elif name.endswith("_min"):
+                reduction = "min"
+            else:
+                reduction = "mean"
+            metrics[f"{name}:{reduction}"] = float(value)
 
         return metrics
 
@@ -974,6 +1050,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training is unavailable in an inference-only runtime")
         if not prepared_batch.all_model_inputs:
             return {}
 
@@ -1066,6 +1144,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training is unavailable in an inference-only runtime")
         if not prepared_batch.all_model_inputs:
             return {}
 
@@ -1152,6 +1232,8 @@ class SkyRLTrainBackend(AbstractBackend):
         return next((e for e in errors if e), None)
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training is unavailable in an inference-only runtime")
         role = self._get_role(model_id)
 
         # Apply learning rate from AdamParams before optimizer step
@@ -1426,6 +1508,8 @@ class SkyRLTrainBackend(AbstractBackend):
     def _validate_model_state(self, model_id: str) -> None:
         """Validate that model exists and is initialized."""
         self._get_role(model_id)
+        if self.config.runtime_role == "inference":
+            raise RuntimeError("Training and weight synchronization are unavailable in an inference-only runtime")
         if self._dispatch is None:
             raise RuntimeError("Model not initialized")
 

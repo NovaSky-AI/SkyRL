@@ -104,6 +104,7 @@ class WeightSyncTrainerBase:
                 rank=0,
                 inference_world_size=self._inference_world_size,
                 source_factory=self._build_source,
+                draft_source_factory=None,
                 server_urls=self._server_urls,
                 data_parallel_size=self._data_parallel_size,
                 base_model_path=self._model_name,
