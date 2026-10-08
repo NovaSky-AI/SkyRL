@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 import importlib
 import os
 import time
@@ -147,6 +148,53 @@ def import_worker(strategy: str, worker_type: str):
     return getattr(module, f"{worker_type.capitalize()}Worker")
 
 
+@torch.no_grad()
+def perturb_lora_b(named_parameters, multiplier: float = 10.0, seed: int = 0, noise_std: float = 1e-3) -> dict:
+    """Add name-seeded Gaussian noise to every trainable, zero-valued LoRA B tensor.
+
+    Each B tensor receives ``noise_std * multiplier * randn`` from a generator
+    seeded by its parameter name, so every rank (and every run) produces the
+    same values for the same tensor. A tensors are left as initialized.
+    Megatron-Bridge names the adapter tensors ``adapter.linear_in`` (A) and
+    ``adapter.linear_out`` (B); PEFT names them ``lora_A`` and ``lora_B``.
+    Sharded (``DTensor``) parameters take their shard of the full-shape noise.
+
+    Returns the number of tensors and elements changed.
+    """
+    from torch.distributed.tensor import DTensor, distribute_tensor
+
+    changed_tensors = 0
+    changed_elements = 0
+    for name, param in named_parameters:
+        if not param.requires_grad:
+            continue
+        if "linear_in" in name or "lora_A" in name:
+            continue
+        if "linear_out" not in name and "lora_B" not in name:
+            raise AssertionError(f"unexpected trainable parameter under LoRA: {name}")
+        data = param.data
+        local = data.to_local() if isinstance(data, DTensor) else data
+        if torch.count_nonzero(local).item() != 0:
+            raise AssertionError(f"expected a zero-initialized LoRA B tensor: {name}")
+        name_seed = (seed + int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little")) % (2**63)
+        generator = torch.Generator(device=local.device).manual_seed(name_seed)
+        noise = torch.randn(tuple(data.shape), generator=generator, device=local.device, dtype=local.dtype)
+        if isinstance(data, DTensor):
+            noise = distribute_tensor(noise, data.device_mesh, data.placements)
+        data.add_(noise, alpha=noise_std * multiplier)
+        changed_tensors += 1
+        changed_elements += local.numel()
+    if changed_tensors == 0:
+        raise AssertionError("no trainable LoRA B tensors found")
+    return {
+        "changed_tensors": changed_tensors,
+        "changed_elements": changed_elements,
+        "seed": seed,
+        "noise_std": noise_std,
+        "multiplier": multiplier,
+    }
+
+
 def init_worker_with_type(
     worker_type: str,
     shared_pg=None,
@@ -155,7 +203,14 @@ def init_worker_with_type(
     num_nodes=1,
     cfg=None,
     num_gpus_per_actor=None,
+    worker_cls=None,
 ) -> PPORayActorGroup:
+    """Build and initialize a ``PPORayActorGroup`` for ``worker_type``.
+
+    ``worker_cls`` replaces the backend's default Ray actor class (a
+    ``ray.remote``-decorated worker subclass) so tests can expose extra methods
+    on the worker.
+    """
     if cfg is None:
         cfg = get_test_actor_config()
 
@@ -171,7 +226,8 @@ def init_worker_with_type(
         if num_gpus_per_actor is None:
             num_gpus_per_actor = 0.75
 
-    worker_cls = import_worker(cfg.trainer.strategy, worker_type)
+    if worker_cls is None:
+        worker_cls = import_worker(cfg.trainer.strategy, worker_type)
     model = PPORayActorGroup(
         cfg.trainer,
         num_nodes=num_nodes,

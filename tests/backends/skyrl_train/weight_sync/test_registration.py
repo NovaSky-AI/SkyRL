@@ -111,13 +111,13 @@ class TestReceiveFactory:
         )
 
         from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
-            SkyrlDrafterReloadMixin,
+            SkyrlCheckpointLoadMixin,
             get_skyrl_ipc_engine,
             get_skyrl_nccl_engine,
         )
 
-        assert issubclass(get_skyrl_nccl_engine(), (NCCLWeightTransferEngine, SkyrlDrafterReloadMixin))
-        assert issubclass(get_skyrl_ipc_engine(), (IPCWeightTransferEngine, SkyrlDrafterReloadMixin))
+        assert issubclass(get_skyrl_nccl_engine(), (NCCLWeightTransferEngine, SkyrlCheckpointLoadMixin))
+        assert issubclass(get_skyrl_ipc_engine(), (IPCWeightTransferEngine, SkyrlCheckpointLoadMixin))
 
 
 @pytest.mark.parametrize(

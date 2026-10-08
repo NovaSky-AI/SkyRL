@@ -15,7 +15,7 @@ Needs no GPU, but does need the ``megatron`` extra, so it lives with the rest of
 the Megatron GPU CI suite.
 
 Run with:
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_dsa_index_share_recompute.py
+uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_dsa_index_share_recompute.py
 """
 
 from types import SimpleNamespace

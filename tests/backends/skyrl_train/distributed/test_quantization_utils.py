@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
@@ -5,7 +7,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_fp8_enabled,
     is_mxfp8_recipe,
     resolve_auto_fp8_recipe,
+    resolve_auto_wire_format,
+    resolve_text_config,
     validate_concrete_fp8_recipe,
+    validate_mxfp8_gdn_tp_alignment,
+    wire_to_engine_quantization,
 )
 
 
@@ -109,3 +115,107 @@ def test_resolve_auto_fp8_recipe_warns_for_emulated_blockwise_on_blackwell(monke
     warnings.clear()
     assert resolve_auto_fp8_recipe({"fp8_recipe": "mxfp8"}) == "mxfp8"
     assert not warnings
+
+
+@pytest.mark.parametrize(
+    ("recipe", "expected"),
+    [
+        ("mxfp8", "mxfp8"),
+        ("MXFP8 ", "mxfp8"),
+        ("blockwise", "blockwise"),
+        # Wire routing keys off the recipe, never the architecture: anything
+        # that is not the mxfp8 recipe -- including no recipe at all -- ships
+        # the blockwise wire.
+        (None, "blockwise"),
+        ("delayed", "blockwise"),
+    ],
+)
+def test_resolve_auto_wire_format(recipe, expected):
+    assert resolve_auto_wire_format(recipe) == expected
+
+
+def test_resolve_auto_wire_format_refuses_unresolved_recipe():
+    # A GPU-less driver ships fp8_recipe="auto" through unresolved. The wire
+    # cannot defer to the workers (it shapes every engine's boot config), so
+    # guessing blockwise here would silently mismatch an mxfp8 trainer.
+    with pytest.raises(ValueError, match="fp8_weight_sync_mode"):
+        resolve_auto_wire_format("auto")
+    with pytest.raises(ValueError, match="fp8_weight_sync_mode"):
+        resolve_auto_wire_format(" AUTO ")
+
+
+def test_wire_to_engine_quantization():
+    assert wire_to_engine_quantization("mxfp8") == "compressed-tensors"
+    assert wire_to_engine_quantization("blockwise") == "fp8"
+    # Only concrete wire formats map to an engine method; "auto" must be
+    # resolved before an engine boots.
+    with pytest.raises(ValueError, match="auto"):
+        wire_to_engine_quantization("auto")
+
+
+# --- validate_mxfp8_gdn_tp_alignment -------------------------------------------------
+# Fixture = Qwen3.5-35B-A3B's real GDN geometry: in_proj_dim = 2*128*16 + 2*128*32
+# + 2*32 = 12352 = 32*386, so the shard is 32-aligned only when TP divides 386.
+
+_MXFP8_KWARGS = {"fp8": "e4m3", "fp8_recipe": "mxfp8"}
+
+
+def _gdn_hf_config(nested=True, text_attr="text_config"):
+    text = SimpleNamespace(
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    return SimpleNamespace(**{text_attr: text}) if nested else text
+
+
+@pytest.mark.parametrize("tp", [1, 2])
+def test_mxfp8_gdn_tp_alignment_accepts_aligned_shards(tp):
+    validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, _gdn_hf_config(), tp)
+
+
+@pytest.mark.parametrize("tp", [4, 8])
+def test_mxfp8_gdn_tp_alignment_rejects_misaligned_shards(tp):
+    with pytest.raises(ValueError, match="12352"):
+        validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, _gdn_hf_config(), tp)
+
+
+def test_mxfp8_gdn_tp_alignment_reads_flat_text_configs():
+    with pytest.raises(ValueError, match="in_proj"):
+        validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, _gdn_hf_config(nested=False), 4)
+
+
+def test_mxfp8_gdn_tp_alignment_reads_language_config_nesting():
+    # Conditional-generation checkpoints nest the text dims under
+    # ``language_config``; reading only ``text_config`` made this guard a no-op
+    # and let the misaligned shard die in TE's C++ assert instead.
+    with pytest.raises(ValueError, match="12352"):
+        validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, _gdn_hf_config(text_attr="language_config"), 4)
+
+
+def test_resolve_text_config_unwraps_both_spellings_and_flat_configs():
+    text = SimpleNamespace(hidden_size=4096)
+    assert resolve_text_config(SimpleNamespace(text_config=text)) is text
+    assert resolve_text_config(SimpleNamespace(language_config=text)) is text
+    # ``text_config`` wins when a config carries both.
+    other = SimpleNamespace(hidden_size=8192)
+    assert resolve_text_config(SimpleNamespace(text_config=text, language_config=other)) is text
+    flat = SimpleNamespace(hidden_size=2048)
+    assert resolve_text_config(flat) is flat
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"fp8": "e4m3", "fp8_recipe": "blockwise"},
+        {"fp8": None, "fp8_recipe": "mxfp8"},
+        None,
+    ],
+)
+def test_mxfp8_gdn_tp_alignment_ignores_non_mxfp8_configs(kwargs):
+    validate_mxfp8_gdn_tp_alignment(kwargs, _gdn_hf_config(), 8)
+
+
+def test_mxfp8_gdn_tp_alignment_ignores_models_without_gdn():
+    validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, SimpleNamespace(hidden_size=4096), 8)

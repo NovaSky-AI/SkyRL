@@ -87,6 +87,7 @@ class AsyncRateLimiter(RateLimiterInterface):
     - Tokens refill at rate N per second
     - Each acquire() call consumes 1 token
     - If no tokens available, caller waits until refill
+    - Rate tokens are granted in the order callers start waiting
 
     Concurrency limiting (semaphore):
     - Limits how many operations can run simultaneously
@@ -157,17 +158,17 @@ class AsyncRateLimiter(RateLimiterInterface):
             self._semaphore.release()
 
     async def _acquire_rate_token(self) -> None:
-        """Acquire a rate limit token, waiting if necessary."""
-        while True:
-            async with self._rate_lock:
+        """Acquire a rate token in FIFO order, waiting if necessary."""
+        async with self._rate_lock:
+            while True:
                 self._refill()
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
                     return
                 # Calculate wait time for next token
                 wait_time = (1.0 - self._tokens) / self._rate
-            # Sleep outside lock so other coroutines can check/update state
-            await asyncio.sleep(wait_time)
+                # Keep later callers queued while the first caller waits for a token.
+                await asyncio.sleep(wait_time)
 
     def _refill(self) -> None:
         """Refill tokens based on elapsed time."""
