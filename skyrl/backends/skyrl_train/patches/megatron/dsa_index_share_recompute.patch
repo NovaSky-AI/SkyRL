@@ -20,7 +20,7 @@ diff --git a/megatron/core/recompute.py b/megatron/core/recompute.py
 +
 +        dsa_index_share_carrier = _DSAIndexShareCarrier()
 +        dsa_index_share_carrier_scope = _dsa_index_share_carrier_scope
- 
+
      # Wrap non-dual RoPE to tuple to unify custom_forward interface.
      is_dual_rope = isinstance(rotary_pos_emb, (tuple, list))
 @@ -119,7 +134,14 @@

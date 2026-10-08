@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from skyrl.env_vars import SKYRL_HTTP_CONNECTION_LIMIT
 from skyrl.tinker import types
 from skyrl.tinker.config import (
     EngineConfig,
@@ -92,6 +93,11 @@ _MISSING_PROFILER_ROW = "profiler control row is missing; the server did not ini
 PROFILER_START_ACK_TIMEOUT_SEC = 30.0
 PROFILER_STOP_ACK_TIMEOUT_SEC = 600.0
 
+# Idle keep-alive for client connections. Under a burst of completions the
+# event loop can be busy for many seconds; with uvicorn's 5s default every
+# idle SDK connection is closed during such a burst and all clients reconnect
+# at once, overflowing the accept backlog. Hold connections across bursts.
+HTTP_KEEP_ALIVE_TIMEOUT_SECONDS = 75
 
 # How often poll_futures looks for newly finished requests. A single query
 # covers every waiter, so this can stay tight without the load scaling up with
@@ -222,6 +228,14 @@ async def _close_external_inference(app: FastAPI) -> None:
             await aclose()
 
 
+def _should_forward_sample_requests(config: EngineConfig) -> bool:
+    """Return whether samples can bypass the engine for managed inference."""
+    if config.backend not in ("megatron", "fsdp") or config.runtime_role != "combined":
+        return False
+    backend_config = config.backend_config or {}
+    return not bool(backend_config.get("trainer.placement.colocate_all", True))
+
+
 async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
     try:
         await _close_external_inference(app)
@@ -330,29 +344,29 @@ async def lifespan(app: FastAPI):
     # Three cases:
     #   1. external_inference_url set: forward sample requests to a fully
     #      external vLLM (existing behavior).
-    #   2. backend in (megatron, fsdp) and colocate_all=False: install
+    #   2. combined SkyRL-Train runtime with colocate_all=False: install
     #      SkyRLTrainInferenceForwardingClient so sample requests go directly
-    #      to the SkyRL-Train-managed vLLM, bypassing the engine's serial loop.
-    #   3. otherwise (JAX, colocated SkyRL-Train, etc.): route everything
-    #      through the engine subprocess.
+    #      to the managed vLLM, bypassing the engine's serial loop.
+    #   3. otherwise (JAX, dedicated roles, colocated SkyRL-Train, etc.):
+    #      route everything through the engine subprocess.
     #
-    # The colocated path stays on the engine because vLLM is asleep during
-    # training and only the engine's synchronous sample path knows how to
-    # wake it (save_weights_for_sampler → broadcast → sample).
+    # Colocated sampling stays on the engine because only that path can wake
+    # vLLM. Dedicated roles stay there for trainer-only rejection and
+    # inference-only lazy startup.
     backend_name = app.state.engine_config.backend
-    backend_cfg = app.state.engine_config.backend_config or {}
-    # SkyRL-Train default is colocate_all=True; only opt into forwarding
-    # when the operator explicitly sets it to False.
-    is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    store_ttls = dict(
+        retrieved_ttl_sec=app.state.engine_config.external_future_retrieved_ttl_sec,
+        completed_ttl_sec=app.state.engine_config.external_future_completed_ttl_sec,
+    )
     if app.state.engine_config.external_inference_url:
-        app.state.external_future_store = ExternalFutureStore()
+        app.state.external_future_store = ExternalFutureStore(**store_ttls)
         await app.state.external_future_store.start()
         app.state.external_inference_client = ExternalInferenceClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
         )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
-    elif backend_name in ("megatron", "fsdp") and not is_colocated:
-        app.state.external_future_store = ExternalFutureStore()
+    elif _should_forward_sample_requests(app.state.engine_config):
+        app.state.external_future_store = ExternalFutureStore(**store_ttls)
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
@@ -673,6 +687,9 @@ class Datum(BaseModel):
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
                 values=inp["values"].to_types() if "values" in inp else types.TensorData(data=[]),
                 returns=inp["returns"].to_types() if "returns" in inp else types.TensorData(data=[]),
+                rollout_logprobs=(
+                    inp["rollout_logprobs"].to_types() if "rollout_logprobs" in inp else types.TensorData(data=[])
+                ),
             ),
             model_input=self.model_input.to_types(),
         )
@@ -723,12 +740,6 @@ class ForwardBackwardInput(BaseModel):
 class ForwardBackwardRequest(BaseModel):
     model_id: str
     forward_backward_input: ForwardBackwardInput
-    seq_id: int | None = None
-
-
-class ForwardRequest(BaseModel):
-    model_id: str
-    forward_input: ForwardBackwardInput
     seq_id: int | None = None
 
 
@@ -1426,31 +1437,31 @@ _MAX_FWDBWD_BODY_BYTES = 1 << 30  # 1 GiB
 
 
 async def _read_forward_backward_request(request: Request) -> tuple[ForwardBackwardRequest, bool]:
-    """Read a forward_backward body in either wire format.
+    """Read a protobuf forward_backward body.
 
-    tinker SDK >= 0.25.0 submits the body as protobuf and routes forward-only
-    passes here via the proto's ``forward_only`` flag instead of calling
-    ``/api/v1/forward``; older SDKs keep sending JSON with forward_only False.
-    Large proto bodies may arrive zstd-compressed (``Content-Encoding: zstd``);
-    ASGI servers do not decode request bodies, so decompress here.
+    The tinker SDK submits the body as protobuf and routes forward-only passes
+    here via the proto's ``forward_only`` flag. Large bodies may arrive
+    zstd-compressed (``Content-Encoding: zstd``); ASGI servers do not decode
+    request bodies, so decompress here.
     """
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != PROTO_CONTENT_TYPE:
+        raise HTTPException(
+            status_code=415,
+            detail=f"forward_backward requires a {PROTO_CONTENT_TYPE} body (tinker SDK >= 0.25.0)",
+        )
     body = await request.body()
     if request.headers.get("content-encoding", "").strip().lower() == "zstd":
         try:
             body = zstandard.ZstdDecompressor().decompress(body, max_output_size=_MAX_FWDBWD_BODY_BYTES)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"failed to zstd-decompress request body: {exc}") from exc
-    if PROTO_CONTENT_TYPE in request.headers.get("content-type", "").lower():
-        try:
-            request_dict, forward_only = parse_forward_backward_request(body)
-        except (DecodeError, ValueError) as e:
-            raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
-    else:
-        request_dict, forward_only = None, False
     try:
-        if request_dict is not None:
-            return ForwardBackwardRequest.model_validate(request_dict), forward_only
-        return ForwardBackwardRequest.model_validate_json(body), forward_only
+        request_dict, forward_only = parse_forward_backward_request(body)
+    except (DecodeError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid proto forward_backward body: {e}")
+    try:
+        return ForwardBackwardRequest.model_validate(request_dict), forward_only
     except ValidationError as e:
         # Match FastAPI's native body validation error shape (422).
         raise FastAPIRequestValidationError(e.errors())
@@ -1469,28 +1480,6 @@ async def forward_backward(request: Request, session: AsyncSession = Depends(get
             request_data=req.forward_backward_input.to_types(),
             seq_id=req.seq_id,
         )
-        await session.commit()
-
-    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
-
-
-@app.post("/api/v1/forward", response_model=FutureResponse)
-async def forward(request: ForwardRequest, raw_request: Request, session: AsyncSession = Depends(get_session)):
-    """Forward pass to obtain logprobs without accumulating gradients"""
-    # Serialize before the first SQL statement: AsyncSession checks out its
-    # pool connection lazily, so waiters queue on the lock holding nothing and
-    # a burst of forwards cannot exhaust the connection pool.
-    async with raw_request.app.state.db_write_lock:
-        await get_model(session, request.model_id)
-
-        request_id = await create_future(
-            session=session,
-            request_type=types.RequestType.FORWARD,
-            model_id=request.model_id,
-            request_data=request.forward_input.to_types(),
-            seq_id=request.seq_id,
-        )
-
         await session.commit()
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
@@ -1790,25 +1779,34 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
 
     status, request_type, result_data = row
     if status == RequestStatus.COMPLETED:
-        # The SDK retrieves sample/forward/forward_backward results in proto
-        # wire format when it advertises support; SDK >= 0.25.0 rejects JSON
-        # for these types. Errors and other result types stay JSON.
-        if (
-            types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES
-            and PROTO_CONTENT_TYPE in req.headers.get("accept", "").lower()
-        ):
-            async with req.app.state.proto_serialization_lock:
-                content = await asyncio.to_thread(
-                    _serialize_proto_result,
-                    types.RequestType(request_type),
-                    result_data,
-                )
+        # The SDK only accepts sample/forward/forward_backward results in proto
+        # wire format. Errors and other result types stay JSON.
+        if types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES:
+            # Forwarded samples are stored as proto already and go out as-is;
+            # anything stored as JSON is encoded once here and cached.
+            content = external_future_store.proto_result(request_id) if found_in_memory else None
+            if content is None:
+                async with req.app.state.proto_serialization_lock:
+                    content = external_future_store.proto_result(request_id) if found_in_memory else None
+                    if content is None:
+                        content = await asyncio.to_thread(
+                            _serialize_proto_result,
+                            types.RequestType(request_type),
+                            result_data,
+                        )
+                        if found_in_memory:
+                            external_future_store.cache_proto(request_id, content)
             response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
         else:
             response = raw_json_response(result_data)
         # Start the retry-grace clock now that the response is built and about to
-        # be sent, so a large result is never evicted mid-delivery.
-        if found_in_memory:
+        # be sent, so a large result is never evicted mid-delivery -- but only if
+        # this client is still there to receive it. The SDK abandons a poll after
+        # 45s and retries the same request_id; if the result lands after that,
+        # this handler wakes on a dead connection (uvicorn drops the send
+        # silently) and starting the short clock here would let the sweeper
+        # evict a result nobody received, turning the retry into a 404.
+        if found_in_memory and not await req.is_disconnected():
             external_future_store.mark_retrieved(request_id)
         return response
 
@@ -2141,4 +2139,13 @@ if __name__ == "__main__":
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config
 
-    uvicorn.run(app, host=args.host, port=args.port, log_config=get_uvicorn_log_config())
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_config=get_uvicorn_log_config(),
+        # Pending connections queue in the kernel while the loop is busy instead
+        # of being refused (effective value is capped by net.core.somaxconn).
+        backlog=SKYRL_HTTP_CONNECTION_LIMIT,
+        timeout_keep_alive=HTTP_KEEP_ALIVE_TIMEOUT_SECONDS,
+    )

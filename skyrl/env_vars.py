@@ -39,6 +39,13 @@ SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S = int(
 Timeout for waiting until the inference server is healthy.
 """
 
+SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S = float(os.environ.get("SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S", 600))
+"""
+Per-request timeout for control-plane calls from `RemoteInferenceClient` to the inference servers (pause, resume,
+sleep, wake_up, weight updates, LoRA load/unload, ...). Defaults to `SKYRL_WORKER_NCCL_TIMEOUT_IN_S`'s default.
+``<= 0`` disables it. Data-plane requests (generate, chat completions, ...) are not bounded.
+"""
+
 SKYRL_HTTP_CONNECTION_LIMIT = int(os.environ.get("SKYRL_HTTP_CONNECTION_LIMIT", 50_000))
 """
 Maximum number of concurrent HTTP connections for the inference client, router,
@@ -61,6 +68,26 @@ We ensure that at most this many tasks per engine are in-flight at
 once; the rest queue locally and proceed as slots free up.
 
 Set to 0 to disable throttling (all tasks fire immediately).
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tinker
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_TINKER_CONTINUOUS_SAMPLING = str(os.environ.get("SKYRL_TINKER_CONTINUOUS_SAMPLING", "True")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+Whether the Tinker engine completes each sample future as soon as its own
+generation finishes (continuous sampling) instead of batching pending sample
+requests and completing them together once the whole batch is done.
+
+Only takes effect with backends that expose the per-request async sample path
+(the skyrl-train backends); other backends always use the batched loop.
+
+Default: True. Set ``SKYRL_TINKER_CONTINUOUS_SAMPLING=0`` to use the batched loop.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,3 +164,9 @@ The timeout must cover time spent queued behind other requests as well as genera
 Equivalent to the ``--forwarding-inference-timeout-sec`` flag of the Tinker API server
 (``EngineConfig.forwarding_inference_timeout_sec``); the flag takes precedence when both are set.
 """
+
+SKYRL_MEGATRON_RANDOM_INIT = str(os.environ.get("SKYRL_MEGATRON_RANDOM_INIT", "0")).lower() in ("1", "true")
+"""Build the Megatron model from the HF config with random weights instead of loading the checkpoint.
+
+For throughput/memory benchmarking (e.g. dummy SFT with random tokens), where only the architecture
+matters: ``model.path`` then needs just ``config.json`` and tokenizer files, no safetensors."""

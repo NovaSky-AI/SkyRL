@@ -4,6 +4,9 @@ import logging
 from argparse import Namespace
 from typing import Any, Dict, List, Optional
 
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    wire_to_engine_quantization,
+)
 from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
     VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
 )
@@ -11,20 +14,21 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     SKYRL_LORA_ADAPTER_NAME,
 )
 
-# Importing the weight_sync package registers the sharded_rdt engine into vLLM's
-# factory and relaxes WeightTransferConfig.backend so backend="sharded_rdt"
-# validates below. This must run on the driver before the WeightTransferConfig
-# is constructed; the import above already triggers it, this is just explicit.
-from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+# The receive-side engines must be registered in vLLM's factory before the
+# WeightTransferConfig below is built: `backend` is validated against the
+# registry. Needed on the driver (here) and in every worker process (the
+# worker-extension module imported above).
+from skyrl.backends.skyrl_train.weight_sync import (
+    get_transfer_strategy,
+    get_vllm_receive_backend,
+)
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
     get_serialized_fp8_quantization_config,
     registered_fp8_spec_names,
     resolve_fp8_spec,
 )
-from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import (
-    rdt_vllm_register,  # noqa: F401,E402
-)
+from skyrl.backends.skyrl_train.weight_sync.register import register_receive_engines
 from skyrl.train.config import (
     InferenceEngineConfig,
     SkyRLTrainConfig,
@@ -34,7 +38,7 @@ from skyrl.train.config import (
 logger = logging.getLogger(__name__)
 
 
-def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
+def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str = BLOCKWISE_FP8) -> list[str]:
     if not model_path:
         raise ValueError("A model path is required when FP8 weight sync is enabled")
     try:
@@ -51,14 +55,12 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str]) -> list[str]:
             "FP8 weight sync has no registered model spec for this checkpoint layout "
             f"(registered specs: {', '.join(registered_fp8_spec_names())}); model_path={model_path!r}"
         )
-    return spec.ignored_layers(hf_config)
+    return spec.ignored_layers(hf_config, wire_format)
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
     if key in mapping and mapping[key] != expected:
-        raise ValueError(
-            f"{context}.{key} must be {expected!r} when FP8 weight sync is enabled, " f"got {mapping[key]!r}"
-        )
+        raise ValueError(f"{context}.{key} must be {expected!r} when FP8 weight sync is enabled, got {mapping[key]!r}")
     mapping[key] = copy.deepcopy(expected)
 
 
@@ -67,15 +69,18 @@ def _apply_serialized_fp8_weight_sync_defaults(
     engine_kwargs: Dict[str, Any],
     model_path: Optional[str] = None,
 ) -> None:
-    """Configure vLLM for checkpoint-format blockwise FP8 weight reloads."""
+    """Configure vLLM for checkpoint-format serialized FP8 weight reloads.
+
+    Wire-format-agnostic apart from ``wire_to_engine_quantization`` and the
+    injected quantization config, both of which key off the concrete wire.
+    """
 
     mode = ie_cfg.fp8_weight_sync_mode
     if mode is None:
         return
-    if mode != BLOCKWISE_FP8:
-        raise ValueError(f"Unsupported fp8_weight_sync_mode={mode!r}. " f"Supported value: {BLOCKWISE_FP8!r}.")
-
-    _set_or_validate(engine_kwargs, "quantization", "fp8", context="engine_init_kwargs")
+    # wire_to_engine_quantization raises on anything outside WIRE_FORMATS.
+    quant_method = wire_to_engine_quantization(mode)
+    _set_or_validate(engine_kwargs, "quantization", quant_method, context="engine_init_kwargs")
     # Build FP8 modules without a bootstrap checkpoint; the first full-weight
     # sync replaces the dummy values.
     _set_or_validate(engine_kwargs, "load_format", "dummy", context="engine_init_kwargs")
@@ -89,18 +94,21 @@ def _apply_serialized_fp8_weight_sync_defaults(
     qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
     if not isinstance(qcfg, dict):
         raise ValueError(
-            "engine_init_kwargs.hf_overrides.quantization_config must be a dict " "when FP8 weight sync is enabled"
+            "engine_init_kwargs.hf_overrides.quantization_config must be a dict when FP8 weight sync is enabled"
         )
 
-    ignored_layers = _serialized_fp8_ignored_layers(model_path)
+    ignored_layers = _serialized_fp8_ignored_layers(model_path, mode)
     if ignored_layers:
         logger.info(
-            "FP8 weight sync will leave %d vLLM modules unquantized " "to match the model's FP8 quantization spec.",
+            "FP8 weight sync (%s) will leave %d vLLM modules unquantized "
+            "to match the model's FP8 quantization spec.",
+            mode,
             len(ignored_layers),
         )
 
     for key, value in get_serialized_fp8_quantization_config(
         ignored_layers=ignored_layers,
+        wire_format=mode,
     ).items():
         _set_or_validate(
             qcfg,
@@ -152,9 +160,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm import AsyncEngineArgs
     from vllm.config import WeightTransferConfig
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    register_receive_engines()
 
     # This function may run a GPU-less Ray head
     # node, where ``current_platform`` resolves to ``UnspecifiedPlatform`` with
@@ -194,7 +204,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         enable_sleep_mode=cfg.trainer.placement.colocate_all or ie_cfg.offload_kv_for_weight_sync,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         weight_transfer_config=WeightTransferConfig(
-            backend=get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
+            backend=get_vllm_receive_backend(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
         ),
         worker_extension_cls=VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
         # NOTE (sumanthrh): We set generation config to be vLLM so that the generation behaviour of the server is same as using the vLLM Engine APIs directly
@@ -212,6 +222,11 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         # Overridable via generator.inference_engine.engine_init_kwargs.trust_remote_code below.
         trust_remote_code=True,
     )
+    # Sample-support capture asks for one logprob per top-k candidate, post-filter, so the
+    # -inf entries that mark filtered candidates survive to the capture path.
+    if ie_cfg.enable_return_sample_support_set:
+        overrides["max_logprobs"] = cfg.generator.sampling_params.top_k
+        overrides["logprobs_mode"] = "processed_logprobs"
     for key, value in overrides.items():
         setattr(args, key, value)
 
@@ -220,9 +235,8 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     if get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "sharded_rdt":
         if cfg.trainer.placement.colocate_all:
             raise ValueError(
-                "weight_sync_backend='sharded_rdt' requires non-colocated training/"
-                "inference (placement.colocate_all=false); workers pull from a "
-                "separate named trainer actor over NIXL."
+                "weight_sync_backend='sharded_rdt' requires non-colocated training/inference "
+                "(placement.colocate_all=false)."
             )
         args.distributed_executor_backend = "ray"
 
@@ -237,8 +251,16 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         if lora_cfg.max_cpu_loras is not None:
             args.max_cpu_loras = lora_cfg.max_cpu_loras
         args.fully_sharded_loras = ie_cfg.fully_sharded_loras
+        # Megatron-Bridge exports MoE expert adapters per expert
+        # (``experts.<i>.<proj>``). vLLM only accepts that layout on models whose
+        # checkpoint is also per-expert; for fused-expert checkpoints
+        # (``is_3d_moe_weight``, e.g. Qwen3.5-MoE) it expects the stacked PEFT
+        # layout and rejects the adapter at load. This flag makes vLLM serve
+        # both layouts through its universal 2D MoE LoRA wrapper; it is a
+        # no-op for dense models and for 2D-checkpoint MoE models.
+        args.enable_mixed_moe_lora_format = True
 
-        if not cfg.trainer.placement.colocate_all:
+        if not cfg.trainer.placement.colocate_all and lora_cfg.sync_mode != "memory":
             lora_path = cfg.trainer.policy.model.lora.lora_sync_path
             logger.warning(
                 "LoRA weight sync is enabled but training and inference are not "

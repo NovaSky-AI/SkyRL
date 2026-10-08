@@ -48,19 +48,11 @@ blob into the queue would keep both alive for the scatter's lifetime.
 See docs/training/weight_transfer/sharded_rdt.md for the design and the measured
 results behind the choices here.
 
-VENDORED from the ``vllm-rdt-weight-sync`` fork's
-``vllm/distributed/weight_transfer/sharded_rdt_engine.py``. Keep the two in sync;
-the only intended differences are the import paths, the LIBFABRIC shim below, and
-the no-op ``trainer_send_weights`` the pinned wheel's ABC still requires (the
-fork's ABC dropped it).
-
-REMOVAL: delete this module once SkyRL's pinned vLLM registers the ``sharded_rdt``
-engine itself, and repoint the factory registration at
-``vllm.distributed.weight_transfer.sharded_rdt_engine``.
+NOTE: vLLM natively has the same RDT engine in >=0.29. However, we retain this
+in SkyRL for faster iteration on improvements.
 """
 
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from math import prod
 from typing import TYPE_CHECKING, Any, cast
@@ -173,7 +165,7 @@ class _ProcItem:
 
 
 @dataclass
-class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
+class SkyRLShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """Initialization info for the sharded RDT backend."""
 
     trainer_actor_names: list[str] = field(default_factory=list)
@@ -269,21 +261,21 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
 
 
 @dataclass
-class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
+class SkyRLShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Update info for the sharded RDT backend: intentionally EMPTY.
 
     The chunk/free plan is a pure function of the baked plan and the driver's
     gather-group partition, both fixed for the engine's lifetime, so it is built
-    once at ``init_transfer_engine`` from ``ShardedRDTWeightTransferInitInfo``'s
+    once at ``init_transfer_engine`` from ``SkyRLShardedRDTWeightTransferInitInfo``'s
     ``names`` + ``group_lens``. ONE ``update_weights`` per sync then just re-runs
     that plan; there is nothing per-sync to carry.
     """
 
 
-class ShardedRDTWeightTransferEngine(
+class SkyRLShardedRDTWeightTransferEngine(
     WeightTransferEngine[
-        ShardedRDTWeightTransferInitInfo,
-        ShardedRDTWeightTransferUpdateInfo,
+        SkyRLShardedRDTWeightTransferInitInfo,
+        SkyRLShardedRDTWeightTransferUpdateInfo,
     ]
 ):
     """Pull-based RDT/NIXL backend that transports only the slice each worker
@@ -300,12 +292,12 @@ class ShardedRDTWeightTransferEngine(
     ``update_weights`` replays the modules its gathered names cover.
     """
 
-    init_info_cls = ShardedRDTWeightTransferInitInfo
-    update_info_cls = ShardedRDTWeightTransferUpdateInfo
+    init_info_cls = SkyRLShardedRDTWeightTransferInitInfo
+    update_info_cls = SkyRLShardedRDTWeightTransferUpdateInfo
     # receive_weights pulls synchronously but defers GPU post-processing to a
-    # background thread so it overlaps the next chunk's pull, so ``update_weights``
-    # skips the base's device sync and ``finish_weight_update`` drains the
-    # deferred work before finalize.
+    # background thread so it overlaps the next chunk's pull. So ``update_weights``
+    # skips the base's device sync, and ``finish_weight_update`` drains the
+    # deferred work before finalize. Declarative: nothing reads the flag.
     defers_processing = True
     # The baked replay plan is a function of one concrete model's parameter
     # layout, so a separate draft model cannot reuse it.
@@ -400,7 +392,21 @@ class ShardedRDTWeightTransferEngine(
         self._quant_stream: Any | None = None
         self._proc_error: BaseException | None = None
 
-    def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+    def init_transfer_engine(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> None:
+        """Resolve producers and run the one-time bake.
+
+        Opens ``set_current_vllm_config`` + ``torch.device`` itself:
+        ``Worker.init_weight_transfer_engine`` is the one lifecycle method vLLM
+        does not wrap, and the bake drives ``model.load_weights`` against meta
+        params, so ``process_weights_after_loading`` on MoE models reads
+        ``get_current_vllm_config()`` to build its kernels.
+        """
+        from vllm.config import set_current_vllm_config
+
+        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+            self._init_transfer_engine(init_info)
+
+    def _init_transfer_engine(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> None:
         """Configure the ring, bind the producers, bake the replay plan, and
         pre-register every NIXL buffer -- in that order, because each step depends
         on the previous one.
@@ -439,7 +445,7 @@ class ShardedRDTWeightTransferEngine(
         # Start the background post-processing worker (pull/process pipelining).
         self._ensure_proc_worker()
 
-    def _configure_ring(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+    def _configure_ring(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> None:
         """Ring depth K.
 
         Must run before ``_ensure_proc_worker`` creates the per-slot events and
@@ -458,7 +464,7 @@ class ShardedRDTWeightTransferEngine(
             self._buffer_presize / (1 << 30),
         )
 
-    def _resolve_producers(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+    def _resolve_producers(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> None:
         """Work out this worker's consumer identity, build the router, and bind
         EVERY producer actor.
 
@@ -546,7 +552,7 @@ class ShardedRDTWeightTransferEngine(
             len(init_info.owner_sets) or 1,
         )
 
-    def _workers_per_replica(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
+    def _workers_per_replica(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> int:
         """Consumers per inference deployment, assuming a uniform fleet.
 
         Read by this worker's consumer id and by the router's block carve, which
@@ -554,7 +560,7 @@ class ShardedRDTWeightTransferEngine(
         """
         return max(1, self._num_consumers() // max(1, int(init_info.num_replicas or 1)))
 
-    def _resolve_consumer_id(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
+    def _resolve_consumer_id(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> int:
         """This worker's DISTINCT index in 0..C-1 across the whole fleet.
 
         Within one engine that is ``_global_worker_index()``. But a fleet of
@@ -567,7 +573,7 @@ class ShardedRDTWeightTransferEngine(
         replica_rank = max(0, int(init_info.replica_rank or 0))
         return replica_rank * self._workers_per_replica(init_info) + self._global_worker_index()
 
-    def _build_static_plan(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+    def _build_static_plan(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> None:
         """Build the chunk/free plan once. It never changes across syncs, so
         ``update_weights`` needs no per-sync names."""
         if not init_info.group_lens:
@@ -658,7 +664,8 @@ class ShardedRDTWeightTransferEngine(
             initialize_layerwise_reload,
         )
 
-        initialize_layerwise_reload(self.model)
+        with torch.device(self.device):
+            initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
         """Drain the deferred pull/process pipeline (so every layer is fully
@@ -668,7 +675,8 @@ class ShardedRDTWeightTransferEngine(
         )
 
         self.drain_pending()
-        finalize_layerwise_reload(self.model, self.model_config)
+        with torch.device(self.device):
+            finalize_layerwise_reload(self.model, self.model_config)
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Receive one update. Unlike the base, does NOT issue a per-update
@@ -676,11 +684,12 @@ class ShardedRDTWeightTransferEngine(
         sync here would block on them and serialize the pull/process pipeline.
         Completion is guaranteed by ``drain_pending`` in
         ``finish_weight_update``."""
-        self.receive_weights(self.parse_update_info(update_info))
+        with torch.device(self.device):
+            self.receive_weights(self.parse_update_info(update_info))
 
     def receive_weights(
         self,
-        update_info: ShardedRDTWeightTransferUpdateInfo,
+        update_info: SkyRLShardedRDTWeightTransferUpdateInfo,
     ) -> None:
         """Pull + replay the baked leaf modules the sync covers.
 
@@ -811,7 +820,7 @@ class ShardedRDTWeightTransferEngine(
 
     # ---------------- Bake (dry run, at init) / replay ----------------
 
-    def _bake(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
+    def _bake(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> None:
         """Bake the replay plan once, as a self-driven meta dry run.
 
         Puts the params on meta, then drives ``model.load_weights`` over
@@ -1441,22 +1450,6 @@ class ShardedRDTWeightTransferEngine(
         # Release the receive buffers (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_buffers = [{} for _ in range(self._ring_depth)]
-
-    @staticmethod
-    def trainer_send_weights(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        trainer_args: dict[str, Any] | Any,
-    ) -> None:
-        """No-op for the pull-based sharded RDT backend.
-
-        Workers initiate the transfer themselves via the trainer's
-        ``@ray.method(tensor_transport="nixl")`` batched accessor.
-
-        SkyRL-only: the pinned vLLM's worker-side ``WeightTransferEngine``
-        declares this abstract, so the class cannot be instantiated without it.
-        The fork's ABC dropped it, which is why the fork's copy has no stub.
-        """
-        del iterator, trainer_args
 
 
 def _plan_digest(keys_per_chunk: list) -> str:
