@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import fsspec
 import pytest
 
 from examples.train_integrations.harbor_skycap import record_index
@@ -16,7 +17,8 @@ from examples.train_integrations.harbor_skycap.record_index import (
 
 pytestmark = pytest.mark.integrations
 
-MIRROR = "s3://bucket/run-7"
+# The mirror is fsspec's memory store: pull reads records from it, as it reads s3:// with s3fs.
+MIRROR = "memory://skycap-pull-test/run-7"
 REF = "team/proj/skycap-records-train-run-1"
 
 
@@ -55,32 +57,32 @@ class FakeEntry:
 
 
 class FakeArtifact:
-    """A logged version as the public API hands it back: step.json and a reference per record file.
+    """A logged version as the public API hands it back: step.json, whose records are in the mirror.
 
-    ``unreachable`` names entries W&B can't fetch; ``broken`` makes the whole-artifact download raise.
+    Each referenced file is written to the (memory) mirror, but those named in ``unreachable``
+    (``records/<name>``, or ``step.json``) are left out of it.
     """
 
-    def __init__(self, version, phase, step, rows, unreachable=(), broken=False) -> None:
+    def __init__(self, version, phase, step, rows, unreachable=()) -> None:
         built = build_version("run-1", phase, step, rows)
         self.version = version
         self.aliases = built.aliases
         self.contents = {"step.json": built.index}
+        self.unreachable = set(unreachable)
+        fs = fsspec.filesystem("memory")
         for uri, name in built.references:
-            self.contents[name] = f"bytes of {uri}".encode()
-        self.unreachable, self.broken = set(unreachable), broken
+            path = uri.removeprefix("memory://")
+            if name in self.unreachable:
+                if fs.exists(path):
+                    fs.rm(path)
+            else:
+                fs.pipe(path, f"bytes of {uri}".encode())
         self.downloads = 0
 
     def download(self, root=None, allow_missing_references=False):
+        # pull reads records from the mirror itself; W&B's own download of references is never used.
         self.downloads += 1
-        if self.broken:
-            raise RuntimeError("the download failed")
-        for name in self.contents:
-            if name in self.unreachable:
-                if not allow_missing_references:
-                    raise OSError(f"cannot fetch {name}")
-                continue
-            FakeEntry(self, name).download(root)
-        return root
+        raise AssertionError("pull must not download the whole artifact")
 
     def get_entry(self, name):
         if name not in self.contents:
@@ -164,13 +166,11 @@ def test_a_record_that_cannot_be_fetched_is_skipped_whole_and_the_rest_go_on(tmp
     assert "1 missing" in summary.report() and "tr_b.tokens.zst" in summary.report()
 
 
-def test_a_failed_download_falls_back_to_one_entry_at_a_time(tmp_path: Path) -> None:
-    artifact = FakeArtifact("v0", "train", 3, [row("tr_a"), row("tr_b")], broken=True)
-    artifact.unreachable = {"records/tr_a.json.zst"}
+def test_records_are_read_from_the_mirror_not_downloaded_through_wandb(tmp_path: Path) -> None:
+    artifact = FakeArtifact("v0", "train", 3, [row("tr_a")])
     summary = pull(REF, tmp_path, api=FakeApi(artifact))
-    assert artifact.downloads == 1
-    assert sorted(path.name for path in tmp_path.glob("*.zst")) == ["tr_b.json.zst", "tr_b.tokens.zst"]
-    assert summary.records == 1 and len(summary.missing) == 1
+    assert artifact.downloads == 0 and summary.records == 1
+    assert (tmp_path / "tr_a.json.zst").read_bytes() == f"bytes of {MIRROR}/tr_a.json.zst".encode()
 
 
 def test_a_bad_version_is_reported_and_the_others_still_pull(tmp_path: Path) -> None:

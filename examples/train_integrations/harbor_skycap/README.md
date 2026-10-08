@@ -115,9 +115,10 @@ training it waits up to two minutes for what is queued.
 ### Pull a run
 
 `record_index pull` turns a run's artifact back into a record directory: each
-version's record files, which W&B fetches from the mirror with your own
-credentials (`AWS_*` for `s3://`, application default credentials for `gs://`),
-and each `step.json` as `index/<phase>/step-<N>.json`. Give an alias to pull
+version's `step.json` from W&B, written as `index/<phase>/step-<N>.json`, and
+its record files, read straight from the mirror with your own credentials
+(through fsspec: `s3fs` for `s3://`, `gcsfs` for `gs://`; read access is
+enough). Give an alias to pull
 one version, or none to pull every version:
 
 ```bash

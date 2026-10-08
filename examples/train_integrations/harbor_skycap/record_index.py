@@ -548,12 +548,9 @@ def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) ->
     # A scratch directory inside out_dir, so each file moves in with an atomic rename.
     with tempfile.TemporaryDirectory(prefix=".pull-", dir=out) as tmp:
         root = Path(tmp)
-        try:
-            # A reference W&B can't fetch is left out here and reported per record below.
-            artifact.download(root=str(root), allow_missing_references=True)
-        except Exception as error:  # noqa: BLE001 - fall back to fetching entry by entry
-            logger.warning(f"skycap record pull: downloading {label} failed ({error}); fetching entry by entry")
-            _download_entries(artifact, root)
+        # Only the index comes from W&B. The records come from the mirror, read directly (below): W&B's own
+        # download of an s3:// reference needs s3:ListBucketVersions, which a reader of the bucket may lack.
+        artifact.get_entry("step.json").download(root=str(root))
         step = json.loads((root / "step.json").read_bytes())
         if not isinstance(step, dict) or not isinstance(step.get("rows"), list):
             raise ValueError("step.json is not a run index (no rows)")
@@ -561,6 +558,7 @@ def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) ->
         if phase not in PHASES:
             raise ValueError(f"step.json has an unknown phase {phase!r}")
         for row in step["rows"]:
+            _fetch_record(row, root / "records")
             _move_record(row, root / "records", out, f"{label}/{row.get('id')}", summary)
         target = out / "index" / phase / f"step-{number}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -568,20 +566,28 @@ def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) ->
     summary.versions.append(label)
 
 
-def _download_entries(artifact: Any, root: Path) -> None:
-    """Each of the artifact's entries on its own; one that fails is left out."""
-    artifact.get_entry("step.json").download(root=str(root))
-    step = json.loads((root / "step.json").read_bytes())
-    for row in step.get("rows", []) if isinstance(step, dict) else []:
+def _fetch_record(row: Dict[str, Any], dest: Path) -> None:
+    """A mirrored record's files, read from the mirror into ``dest`` with the caller's own credentials.
+
+    A file that can't be read is left out, and ``_move_record`` reports the record missing, naming it.
+    """
+    try:
+        names = _record_files(row)
+    except ValueError:
+        return  # reported by _move_record
+    if not names:
+        return
+    import fsspec
+
+    mirror_dir = row["record"]["mirror"].rsplit("/", 1)[0]
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        uri = f"{mirror_dir}/{name}"
         try:
-            names = _record_files(row)
-        except ValueError:
-            continue  # reported per record when moving in
-        for name in names:
-            try:
-                artifact.get_entry(f"records/{name}").download(root=str(root))
-            except Exception as error:  # noqa: BLE001 - this record is reported missing
-                logger.warning(f"skycap record pull: fetching records/{name} failed: {error}")
+            fs, path = fsspec.core.url_to_fs(uri)
+            fs.get_file(path, str(dest / name))
+        except Exception as error:  # noqa: BLE001 - this record is reported missing
+            logger.warning(f"skycap record pull: fetching {uri} failed: {type(error).__name__}: {error}")
 
 
 def _record_files(row: Dict[str, Any]) -> List[str]:
