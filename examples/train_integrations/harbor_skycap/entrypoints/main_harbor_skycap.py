@@ -16,7 +16,7 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 import yaml
@@ -34,6 +34,7 @@ from ...harbor.entrypoints.main_harbor import (
     _deep_merge,
 )
 from ..harbor_generator import HarborSkycapGenerator
+from ..record_index import RecordLog, SkycapRecordIndex
 from ..servers import SkycapServers, exposure_for, start_servers
 
 
@@ -54,6 +55,18 @@ class ExposureConfig:
 
 
 @dataclass
+class SkycapWandbConfig:
+    enabled: bool = True
+    """Index each step's skycap records in W&B, when ``trainer.logger`` is wandb: one version per step of the
+    artifact ``skycap-records-<phase>-<run id>``, aliased ``<phase>-step-N`` and ``latest``, holding a
+    ``step.json`` (every attempt, trained or superseded, and where its record is) and, for records in
+    ``record_mirror``, a reference to each document. No record bytes are uploaded. Logging runs off the
+    step and fails open."""
+    phases: List[str] = field(default_factory=lambda: ["train"])
+    """The training phases to index: ``train``, ``eval``. Each gets its own artifact."""
+
+
+@dataclass
 class SkycapConfig:
     num_servers: int = 1
     """skycap servers, one Ray actor each. The generator spreads trajectories over them round-robin."""
@@ -64,6 +77,16 @@ class SkycapConfig:
     record_dir: Optional[str] = None
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""
+    record_mirror: Optional[str] = None
+    """An fsspec URL (``s3://bucket/prefix``, ``gs://bucket/prefix``) every server also copies its records to,
+    in the background, after writing them to ``record_dir``. The copy fails open: a slow or failing store
+    never fails a rollout. Needs the store's fsspec implementation (``s3fs``, ``gcsfs``) installed."""
+    record_mirror_config: Dict[str, Any] = field(default_factory=dict)
+    """The mirror's options (``skycap.mirror.RecordMirror``), e.g. ``{exclude: [experts, sampling_mask]}`` to
+    leave sidecars out of the remote copy, or ``timeout``, ``attempts``, ``queue_size``, ``storage_options``.
+    Needs ``record_mirror``."""
+    wandb: SkycapWandbConfig = field(default_factory=SkycapWandbConfig)
+    """The per-step index of the records in W&B."""
     ttl: float = 3600.0
     """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
     renderer_pool_size: int = 8
@@ -120,6 +143,8 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         "require_api_key": _require_api_key(cfg),
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
+        "record_mirror": cfg.skycap.record_mirror,
+        "record_mirror_config": dict(cfg.skycap.record_mirror_config) or None,
     }
     return start_servers(
         settings,
@@ -155,18 +180,28 @@ def _exposure(cfg: Any) -> Optional[str]:
 class HarborSkycapExp(HarborExp):
     skycap: Optional[SkycapServers] = None
     generator: Optional[HarborSkycapGenerator] = None
+    records: Optional[RecordLog] = None
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         if self.skycap is None:
             self.skycap = start_skycap(cfg, inference_engine_client.get_endpoint_url())
+        if self.records is None and cfg.skycap.wandb.enabled and cfg.trainer.logger == "wandb":
+            self.records = RecordLog()
         self.generator = HarborSkycapGenerator(
             generator_cfg=cfg.generator,
             harbor_cfg=cfg.harbor_trial_config,
             capture_urls=self.skycap.urls,
             inference_engine_client=inference_engine_client,
             train_paths=cfg.skycap.train_paths,
+            records=self.records,
         )
         return self.generator
+
+    def get_trainer(self, *args, **kwargs):
+        trainer = super().get_trainer(*args, **kwargs)
+        if self.records is not None:
+            trainer.add_callback(SkycapRecordIndex(self.records, self.cfg.skycap.wandb.phases))
+        return trainer
 
     def run(self):
         try:
