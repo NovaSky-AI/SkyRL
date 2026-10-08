@@ -14,6 +14,9 @@ from loguru import logger
 # (skyrl/tx/utils/models.py), so both backends agree on what "attention" and
 # "MLP" mean for Tinker's train_attn / train_mlp flags.
 LORA_ATTN_PARENT_MODULES = frozenset({"self_attn", "linear_attn"})
+# `experts` matches only architectures exposing expert projections as nn.Linear;
+# current transformers fuses them into 3-D nn.Parameter tensors that PEFT cannot
+# target, so on those models the MLP group is empty and narrowing to it raises.
 LORA_MLP_PARENT_MODULES = frozenset({"mlp", "experts"})
 LORA_UNEMBED_MODULES = frozenset({"lm_head", "embed_tokens"})
 
@@ -54,7 +57,8 @@ def resolve_lora_target_modules(
         target_modules: The configured value. Must be ``"all-linear"`` when narrowing, since
             intersecting an explicit list is ambiguous.
         train_attn: Whether to adapt attention projections.
-        train_mlp: Whether to adapt MLP / expert projections.
+        train_mlp: Whether to adapt MLP projections (and expert projections, where the
+            architecture exposes them as ``nn.Linear``).
 
     Returns:
         ``target_modules`` unchanged, or the sorted leaf names of the selected group.

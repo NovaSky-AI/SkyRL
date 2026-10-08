@@ -55,6 +55,42 @@ class _CausalLM(nn.Module):
         self.lm_head = nn.Linear(4, 16, bias=False)
 
 
+class _LinearExperts(nn.Module):
+    """A sparse block exposing expert projections as ``nn.Linear``.
+
+    Mirrors Mixtral's pre-transformers-5 layout (``block_sparse_moe.experts.N``).
+    This is the only shape in which the ``experts`` entry of
+    ``LORA_MLP_PARENT_MODULES`` decides anything -- everywhere else an ``mlp``
+    ancestor already classifies the path.
+    """
+
+    def __init__(self, num_experts: int = 2) -> None:
+        super().__init__()
+        self.gate = nn.Linear(4, num_experts, bias=False)  # router
+        self.experts = nn.ModuleList(_Mlp() for _ in range(num_experts))
+
+
+class _MoELayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.self_attn = _Attn()
+        self.block_sparse_moe = _LinearExperts()
+
+
+class _MoEInner(nn.Module):
+    def __init__(self, num_layers: int = 2) -> None:
+        super().__init__()
+        self.embed_tokens = nn.Embedding(16, 4)
+        self.layers = nn.ModuleList(_MoELayer() for _ in range(num_layers))
+
+
+class _MoECausalLM(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _MoEInner()
+        self.lm_head = nn.Linear(4, 16, bias=False)
+
+
 ATTN_NAMES = ["k_proj", "o_proj", "q_proj", "v_proj"]
 MLP_NAMES = ["down_proj", "gate_proj", "up_proj"]
 
@@ -67,6 +103,10 @@ MLP_NAMES = ["down_proj", "gate_proj", "up_proj"]
         ("model.layers.0.linear_attn.in_proj_k", "attn"),
         ("model.layers.0.mlp.gate_proj", "mlp"),
         ("model.layers.0.mlp.experts.0.w1", "mlp"),
+        # `experts` only decides the group when it is not under an `mlp` parent:
+        # the case above passes on "mlp" alone, so it cannot catch a regression here.
+        ("model.layers.0.block_sparse_moe.experts.0.w1", "mlp"),
+        ("model.layers.0.block_sparse_moe.gate", None),
         ("lm_head", "unembed"),
         ("model.embed_tokens", "unembed"),
         ("model.layers.0.input_layernorm", None),
@@ -132,3 +172,55 @@ def test_model_without_the_requested_group_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="No mlp linear layers found"):
         resolve_lora_target_modules(_NoMlp(), "all-linear", train_attn=False, train_mlp=True)
+
+
+def test_linear_experts_are_selected_as_mlp() -> None:
+    """Expert projections join the MLP group when they are ``nn.Linear``.
+
+    Dropping ``experts`` from LORA_MLP_PARENT_MODULES would leave this model with
+    an empty MLP group, so this is the test that holds the entry in place.
+    """
+    resolved = resolve_lora_target_modules(_MoECausalLM(), "all-linear", train_attn=False, train_mlp=True)
+    assert resolved == MLP_NAMES
+
+
+def test_moe_router_is_never_adapted() -> None:
+    """The router selects experts; adapting it would perturb routing, not representations."""
+    model = _MoECausalLM()
+    attn = resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=False)
+    mlp = resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)
+    assert "gate" not in set(attn) | set(mlp)
+
+
+def test_fused_moe_experts_cannot_be_adapted() -> None:
+    """Current transformers stores expert projections as fused 3-D ``nn.Parameter``.
+
+    PEFT adapts ``nn.Linear`` modules, so those experts cannot carry an adapter at
+    all. Narrowing to the MLP group then fails loudly rather than silently handing
+    back an attention-only adapter. Pins the assumption against a layout change.
+    """
+    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    model = Qwen3MoeForCausalLM(
+        Qwen3MoeConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            moe_intermediate_size=16,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_experts=4,
+            num_experts_per_tok=2,
+            vocab_size=64,
+        )
+    )
+
+    assert not [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear) and lora_module_group(name) == "mlp"
+    ]
+    assert any("experts" in name for name, _ in model.named_parameters())
+
+    with pytest.raises(ValueError, match="No mlp linear layers found"):
+        resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)

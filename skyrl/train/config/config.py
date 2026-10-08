@@ -129,9 +129,11 @@ class SkyRLLoraConfig(BaseConfig):
     either way requires ``target_modules="all-linear"``; with an explicit module list, select the
     modules there instead. FSDP only -- Megatron raises for a non-default value."""
     train_mlp: bool = True
-    """Whether to apply LoRA to the MLP (and MoE expert) projections.
+    """Whether to apply LoRA to the MLP projections.
     The counterpart to ``train_attn``; see its docstring for the constraints. At least one of the
-    two must be ``True``, since a LoRA model with no adapted modules has nothing to train."""
+    two must be ``True``, since a LoRA model with no adapted modules has nothing to train.
+    MoE expert projections are covered only where the architecture exposes them as ``nn.Linear``;
+    current ``transformers`` fuses them into ``nn.Parameter`` tensors that PEFT cannot target."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""

@@ -536,14 +536,9 @@ class SkyRLTrainBackend(AbstractBackend):
             self._render_server = None
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
-        # Every field that changes an adapter's *shape*, since adapters sharing a
-        # runtime are byte-copies of one pristine template and must match
-        # structurally. train_attn/train_mlp decide which modules get an adapter,
-        # so they belong here; `seed` does not -- it changes initial values, not
-        # structure, and including it would reject compatible adapters.
-        # target_modules is fixed server-side, hence absent. The worker-side
-        # AdapterStore additionally verifies parallel-state equality via its own
-        # LoraSignature.
+        # Shape-affecting fields only: adapters sharing a runtime are byte-copies of
+        # one template. `seed` stays out -- it changes initial values, not structure.
+        # The worker-side AdapterStore additionally verifies parallel-state equality.
         return (
             int(lora_config.rank),
             int(lora_config.alpha),

@@ -525,19 +525,12 @@ async def create_checkpoint(
 
 
 class LoRAConfig(BaseModel):
-    """Mirrors ``tinker.types.LoraConfig`` on the wire.
-
-    Every field the Tinker SDK sends is declared here: Pydantic's default
-    ``extra="ignore"`` means an undeclared field is dropped silently, so a
-    missing one is invisible to the client rather than an error.
-    """
-
     rank: int
     seed: int | None = Field(
         default=None, description="Seed for LoRA weight initialization. If None, a random seed is used."
     )
     train_attn: bool = Field(default=True, description="Whether to add LoRA to the attention layers.")
-    train_mlp: bool = Field(default=True, description="Whether to add LoRA to the MLP (and MoE) layers.")
+    train_mlp: bool = Field(default=True, description="Whether to add LoRA to the MLP layers.")
     # Defaults mirror tinker.types.LoraConfig, including train_unembed=True --
     # the SDK sends it on every request, so a server-side default of False would
     # never apply and would misrepresent what clients actually ask for.
