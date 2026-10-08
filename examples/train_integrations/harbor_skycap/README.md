@@ -114,12 +114,13 @@ training it waits up to two minutes for what is queued.
 
 ### Pull a run
 
-`record_index pull` turns a run's artifact back into a record directory: each
-version's `step.json` from W&B, written as `index/<phase>/step-<N>.json`, and
-its record files, read straight from the mirror with your own credentials
-(through fsspec: `s3fs` for `s3://`, `gcsfs` for `gs://`; read access is
-enough). Give an alias to pull
-one version, or none to pull every version:
+`record_index pull` turns a run's artifact back into record directories, one
+per phase: `<out_dir>/train/` and `<out_dir>/eval/`. Each holds that phase's
+record files, read straight from the mirror with your own credentials (through
+fsspec: `s3fs` for `s3://`, `gcsfs` for `gs://`; read access is enough), and
+each step's `step.json` from W&B as `index/step-<N>.json`. Each is a plain
+skycap record directory, readable by anything that reads one. Give an alias to
+pull one version, or none to pull every version:
 
 ```bash
 uv run --isolated --extra skyrl-train --extra harbor --extra skycap \

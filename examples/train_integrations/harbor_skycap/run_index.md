@@ -3,17 +3,18 @@
 The Harbor integration knows more about a run than skycap does: which
 trajectories made up each training step, and what became of them. It writes
 that as a run index: each step's `step.json` in the W&B index artifact, and,
-once pulled, `index/<phase>/step-<N>.json` beside the records. It is an
+once pulled, `<phase>/index/step-<N>.json` beside that phase's records. It is an
 optional companion to skycap's records (their format is skycap's
 [`docs/format.md`](../../../skycap/docs/format.md)). A reader must
 work without it, from the records alone, and must not assume it lists every
 record in the directory, or that every record it lists is there.
 
-The index is one file per step and phase, `index/<phase>/step-<N>.json` in the
-record directory, where `<phase>` is `train` or `eval` and `<N>` is the global
-step, without zero-padding (`index/train/step-12.json`). It is plain JSON, not
-compressed. Records are only the top-level `*.json.zst` files, so the `index/`
-directory never reads as a trajectory.
+The index is one file per step and phase. A pulled run keeps each phase in a
+record directory of its own, `<phase>/`, with the phase's index files in
+`<phase>/index/step-<N>.json`, where `<phase>` is `train` or `eval` and `<N>` is
+the global step, without zero-padding (`train/index/step-12.json`). It is plain
+JSON, not compressed. Records are only the top-level `*.json.zst` files, so the
+`index/` directory never reads as a trajectory.
 
 ```json
 {"format_version": 1, "run": "9bp7pkra", "phase": "train", "step": 12,

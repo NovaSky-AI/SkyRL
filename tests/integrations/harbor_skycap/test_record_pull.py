@@ -114,12 +114,14 @@ def test_an_alias_pulls_that_version_as_a_record_directory(tmp_path: Path) -> No
     summary = pull(f"{REF}:train-step-3", tmp_path / "out", api=api)
 
     assert api.calls == [("artifact", f"{REF}:train-step-3")]
-    out = tmp_path / "out"
+    # The phase is a record directory of its own: out/train/.
+    assert [path.name for path in (tmp_path / "out").iterdir()] == ["train"]
+    out = tmp_path / "out" / "train"
     names = ["tr_a.tokens.zst", "tr_a.json.zst", "tr_b.tokens.zst", "tr_b.experts.zst", "tr_b.json.zst"]
     assert sorted(path.name for path in out.iterdir() if path.is_file()) == sorted(names)
     assert (out / "tr_b.experts.zst").read_bytes() == f"bytes of {MIRROR}/tr_b.experts.zst".encode()
-    # step.json is the run index, at index/<phase>/step-<N>.json.
-    step = json.loads((out / "index" / "train" / "step-3.json").read_bytes())
+    # step.json is the run index, beside the phase's records at index/step-<N>.json.
+    step = json.loads((out / "index" / "step-3.json").read_bytes())
     assert (step["format_version"], step["run"], step["phase"], step["step"]) == (1, "run-1", "train", 3)
     assert [r["id"] for r in step["rows"]] == ["tr_a", "tr_b", "tr_c"]
     # A local-only record is indexed, with nothing to pull.
@@ -140,11 +142,12 @@ def test_no_alias_pulls_every_version_and_leaves_identical_files_alone(tmp_path:
     summary = pull(REF, out, api=FakeApi(train, again, evaluation))
 
     assert summary.versions == [f"skycap-records-train-run-1:{v}" for v in ("v0", "v1", "v2")]
-    assert sorted(str(path.relative_to(out)) for path in (out / "index").rglob("*.json")) == [
-        "index/eval/step-2.json",
-        "index/train/step-1.json",
-        "index/train/step-2.json",
+    assert sorted(str(path.relative_to(out)) for path in out.rglob("*.json")) == [
+        "eval/index/step-2.json",
+        "train/index/step-1.json",
+        "train/index/step-2.json",
     ]
+    assert sorted(path.name for path in (out / "eval").glob("*.zst")) == ["tr_e.json.zst", "tr_e.tokens.zst"]
     assert (summary.records, summary.files, summary.unchanged) == (4, 6, 2)
     # A second pull changes nothing.
     before = {path: path.stat().st_mtime_ns for path in out.rglob("*") if path.is_file()}
@@ -159,10 +162,10 @@ def test_a_record_that_cannot_be_fetched_is_skipped_whole_and_the_rest_go_on(tmp
     out = tmp_path / "out"
     summary = pull(REF, out, api=FakeApi(artifact))
     # tr_b's document was fetched, but without its sidecar it isn't moved in.
-    assert sorted(path.name for path in out.glob("*.zst")) == ["tr_a.json.zst", "tr_a.tokens.zst"]
+    assert sorted(path.name for path in (out / "train").glob("*.zst")) == ["tr_a.json.zst", "tr_a.tokens.zst"]
     assert summary.records == 1
     assert summary.missing == ["skycap-records-train-run-1:v0/tr_b: could not fetch tr_b.tokens.zst"]
-    assert (out / "index" / "train" / "step-3.json").exists()
+    assert (out / "train" / "index" / "step-3.json").exists()
     assert "1 missing" in summary.report() and "tr_b.tokens.zst" in summary.report()
 
 
@@ -170,7 +173,7 @@ def test_records_are_read_from_the_mirror_not_downloaded_through_wandb(tmp_path:
     artifact = FakeArtifact("v0", "train", 3, [row("tr_a")])
     summary = pull(REF, tmp_path, api=FakeApi(artifact))
     assert artifact.downloads == 0 and summary.records == 1
-    assert (tmp_path / "tr_a.json.zst").read_bytes() == f"bytes of {MIRROR}/tr_a.json.zst".encode()
+    assert (tmp_path / "train" / "tr_a.json.zst").read_bytes() == f"bytes of {MIRROR}/tr_a.json.zst".encode()
 
 
 def test_a_bad_version_is_reported_and_the_others_still_pull(tmp_path: Path) -> None:
@@ -220,17 +223,17 @@ def test_a_file_name_that_isnt_a_plain_name_is_refused(tmp_path: Path) -> None:
 
     assert victim.read_bytes() == b"original"
     assert summary.records == 1 and len(summary.missing) == 1 and "not pulled" in summary.missing[0]
-    assert (tmp_path / "out" / "tr_a.json.zst").is_file()
+    assert (tmp_path / "out" / "train" / "tr_a.json.zst").is_file()
 
 
 def test_a_record_that_cant_move_in_doesnt_stop_the_others(tmp_path: Path) -> None:
     out = tmp_path / "out"
-    (out / "tr_a.json.zst").mkdir(parents=True)  # a directory where tr_a's document goes
+    (out / "train" / "tr_a.json.zst").mkdir(parents=True)  # a directory where tr_a's document goes
     rows = [row("tr_a"), row("tr_b")]
     summary = pull(f"{REF}:v0", out, api=FakeApi(FakeArtifact("v0", "train", 1, rows)))
 
     assert summary.records == 1 and len(summary.missing) == 1 and "tr_a" in summary.missing[0]
     # tr_a's sidecar, moved in before its document failed, is taken back out; tr_b and the index are in.
-    assert not (out / "tr_a.tokens.zst").exists()
-    assert (out / "tr_b.tokens.zst").is_file() and (out / "tr_b.json.zst").is_file()
-    assert (out / "index" / "train" / "step-1.json").is_file()
+    assert not (out / "train" / "tr_a.tokens.zst").exists()
+    assert (out / "train" / "tr_b.tokens.zst").is_file() and (out / "train" / "tr_b.json.zst").is_file()
+    assert (out / "train" / "index" / "step-1.json").is_file()

@@ -156,7 +156,7 @@ def index_rows(entries: List[RecordEntry], phase: str, trained: Optional[Set[Tup
 
 
 def step_index(run_id: str, phase: str, step: int, rows: List[dict]) -> Dict[str, Any]:
-    """The run index of one step and phase: the object ``index/<phase>/step-<N>.json`` holds."""
+    """The run index of one step and phase: the object ``<phase>/index/step-<N>.json`` holds once pulled."""
     return {"format_version": INDEX_FORMAT_VERSION, "run": run_id, "phase": phase, "step": step, "rows": rows}
 
 
@@ -513,8 +513,9 @@ def parse_ref(ref: str) -> Tuple[str, Optional[str]]:
 def pull(ref: str, out_dir: Any, *, api: Any = None) -> PullSummary:
     """Pull a run's records and step index from W&B into ``out_dir``, a record directory.
 
-    With an alias (``...:train-step-3``, ``...:v7``), that version; without one, every version. Each
-    version's records go to ``out_dir`` and its ``step.json`` to ``out_dir/index/<phase>/step-<N>.json``.
+    With an alias (``...:train-step-3``, ``...:v7``), that version; without one, every version. Each phase
+    is a record directory of its own: a version's records go to ``out_dir/<phase>/`` and its ``step.json``
+    to ``out_dir/<phase>/index/step-<N>.json``.
     A record whose files can't all be fetched is reported and skipped; the rest go on.
 
     Args:
@@ -557,10 +558,13 @@ def _pull_version(artifact: Any, label: str, out: Path, summary: PullSummary) ->
         phase, number = step["phase"], int(step["step"])
         if phase not in PHASES:
             raise ValueError(f"step.json has an unknown phase {phase!r}")
+        # Each phase is a record directory of its own, its step indexes beside the records.
+        phase_dir = out / phase
+        phase_dir.mkdir(exist_ok=True)
         for row in step["rows"]:
             _fetch_record(row, root / "records")
-            _move_record(row, root / "records", out, f"{label}/{row.get('id')}", summary)
-        target = out / "index" / phase / f"step-{number}.json"
+            _move_record(row, root / "records", phase_dir, f"{label}/{row.get('id')}", summary)
+        target = phase_dir / "index" / f"step-{number}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         _move_in(root / "step.json", target)
     summary.versions.append(label)
