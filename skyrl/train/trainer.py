@@ -466,7 +466,12 @@ class RayPPOTrainer:
                             # One profiler step per RL global step.
                             self._profiler_step()
 
-                        self._fire("on_step_end", batch=training_input, metrics=status)
+                        self._fire(
+                            "on_step_end",
+                            batch=training_input,
+                            metrics=status,
+                            trajectory_ids=generator_output.get("trajectory_ids"),
+                        )
                         step_started = False
 
                         # Capture callback-driven triggers, then reset.
