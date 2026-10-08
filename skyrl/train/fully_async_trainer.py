@@ -436,6 +436,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step = 0
         self.epoch = 0
         resumed_start_epoch = None
+        # Steps whose checkpoint and HF model were last saved. A later save for the same step is
+        # skipped instead of rewriting files that the latest-checkpoint marker may already name.
+        last_ckpt_step: Optional[int] = None
+        last_hf_step: Optional[int] = None
 
         # Load checkpoint state if resumption is enabled. Also load the data UIDs that are already trained on.
         if self.resume_mode != ResumeMode.NONE:
@@ -449,6 +453,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 ) = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
                 if self.global_step > 0:
+                    # The checkpoint just loaded already holds this step.
+                    last_ckpt_step = self.global_step
                     # Set async dataloader manager and staleness manager to the loaded state.
                     self.async_train_dataloader.load_state_from_checkpoint(
                         loaded_consumed_data_uids_set, loaded_filtered_data_uids_set
@@ -563,13 +569,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                     f"{len(cur_generation_group_mini_batch)} group(s); discarding and ending the epoch."
                                 )
                             # Save the end-of-epoch checkpoint the normal is_epoch_end path would have, since
-                            # we break before reaching it.
-                            if self.cfg.trainer.ckpt_interval > 0:
+                            # we break before reaching it. `global_step` already names the next, untrained
+                            # step, so save under the last trained one.
+                            self.global_step -= 1
+                            if self.cfg.trainer.ckpt_interval > 0 and last_ckpt_step != self.global_step:
                                 with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
                                     await asyncio.to_thread(self.save_checkpoints)
-                            if self.cfg.trainer.hf_save_interval > 0:
+                                last_ckpt_step = self.global_step
+                            if self.cfg.trainer.hf_save_interval > 0 and last_hf_step != self.global_step:
                                 with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
                                     await asyncio.to_thread(self.save_models)
+                                last_hf_step = self.global_step
+                            self.global_step += 1
                             break
 
                         if self.sample_full_batch:
@@ -641,11 +652,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             async with self._step_deadline():
                                 with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
                                     await asyncio.to_thread(self.save_checkpoints)
+                            last_ckpt_step = self.global_step
                     if self.cfg.trainer.hf_save_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
                             async with self._step_deadline():
                                 with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
                                     await asyncio.to_thread(self.save_models)
+                            last_hf_step = self.global_step
 
                     timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
                     if self._ray_gpu_monitor is not None:
@@ -723,19 +736,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self._ray_gpu_monitor.stop()
 
         pbar.close()
+        # The loop counter names the next step; the final saves name the last trained one.
+        self.global_step -= 1
 
         if not stop_training:
             # All epochs completed: advance past the last epoch so resuming from the final checkpoint
             # does not redo the last epoch (whose consumed UIDs were cleared at its epoch end).
             self.epoch = self.cfg.trainer.epochs
 
-        # safety net: always save final checkpoint at end of training.
-        if self.cfg.trainer.ckpt_interval > 0:
+        # Safety net: save the final checkpoint unless the last trained step already has one.
+        if self.cfg.trainer.ckpt_interval > 0 and last_ckpt_step != self.global_step:
             async with self._step_deadline():
                 with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
                     await asyncio.to_thread(self.save_checkpoints)
                     logger.info("Saved final checkpoint.")
-        if self.cfg.trainer.hf_save_interval > 0:
+        if self.cfg.trainer.hf_save_interval > 0 and last_hf_step != self.global_step:
             async with self._step_deadline():
                 with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
                     await asyncio.to_thread(self.save_models)
