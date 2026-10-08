@@ -60,7 +60,10 @@ INDEX_FORMAT_VERSION = 1
 #: ``OSError`` subclasses no retry can fix.
 _PERMANENT = (PermissionError, FileNotFoundError, IsADirectoryError, NotADirectoryError, FileExistsError)
 _STOP = object()
-#: fsspec protocols that read this machine's own files.
+#: The mirror protocols ``pull`` reads by default: remote object stores, and fsspec's in-process memory.
+#: The mirror's location comes from the artifact, so anything else, chained URLs included, is refused.
+REMOTE_PROTOCOLS = frozenset({"s3", "s3a", "gs", "gcs", "az", "abfs", "abfss", "memory"})
+#: Protocols that read this machine's own files: allowed only with ``allow_local``.
 LOCAL_PROTOCOLS = frozenset({"file", "local"})
 #: Abandoned W&B calls still running, beyond which new calls are refused (``SkycapRecordIndex._bounded``).
 MAX_ABANDONED = 2
@@ -607,14 +610,30 @@ def _fetch_record(row: Dict[str, Any], dest: Path, allow_local: bool = False) ->
     for name in names:
         uri = f"{mirror_dir}/{name}"
         try:
+            _check_mirror_uri(uri, allow_local)
             fs, path = fsspec.core.url_to_fs(uri)
-            protocols = {fs.protocol} if isinstance(fs.protocol, str) else set(fs.protocol)
-            if protocols & LOCAL_PROTOCOLS and not allow_local:
-                raise PermissionError("a mirror on this machine's filesystem needs --allow-local-mirror")
             fs.get_file(path, str(dest / name))
         except Exception as error:  # noqa: BLE001 - this record is reported missing
             (dest / name).unlink(missing_ok=True)
             logger.warning(f"skycap record pull: fetching {uri} failed: {type(error).__name__}: {error}")
+
+
+def _check_mirror_uri(uri: str, allow_local: bool) -> None:
+    """Refuse a mirror location ``pull`` mustn't read: a chained URL, or a protocol not known to be remote.
+
+    An allowlist, not a denylist: fsspec chains (``simplecache::file://...``) and wrapper filesystems can
+    reach local files through an outer protocol that looks harmless.
+    """
+    from fsspec.core import split_protocol
+
+    if "::" in uri:
+        raise PermissionError("a chained fsspec URL isn't a mirror location pull reads")
+    protocol = split_protocol(uri)[0] or "file"
+    if protocol in LOCAL_PROTOCOLS:
+        if not allow_local:
+            raise PermissionError("a mirror on this machine's filesystem needs --allow-local-mirror")
+    elif protocol not in REMOTE_PROTOCOLS:
+        raise PermissionError(f"pull reads mirrors on {sorted(REMOTE_PROTOCOLS)}, not {protocol!r}")
 
 
 def _record_files(row: Dict[str, Any]) -> List[str]:

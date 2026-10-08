@@ -279,3 +279,24 @@ def test_a_record_that_fails_midway_puts_back_what_it_replaced(tmp_path: Path) -
     summary = pull(f"{REF}:v0", tmp_path / "out", api=FakeApi(FakeArtifact("v0", "train", 1, [row("tr_a")])))
     assert summary.records == 0 and len(summary.missing) == 1
     assert (out / "tr_a.tokens.zst").read_bytes() == b"an older copy"
+
+
+@pytest.mark.parametrize(
+    "mirror",
+    [
+        "simplecache::file://{source}/tr_l.json.zst",  # a chained URL reaching local files
+        "filecache::file://{source}/tr_l.json.zst",
+        "http://169.254.169.254/latest/tr_l.json.zst",  # not an object store
+    ],
+)
+def test_a_mirror_location_outside_the_allowlist_is_refused_even_with_allow_local(tmp_path: Path, mirror) -> None:
+    source = tmp_path / "private"
+    source.mkdir()
+    (source / "tr_l.json.zst").write_bytes(b"local bytes")
+    local = row("tr_l", files=("json",))
+    local["record"]["mirror"] = mirror.format(source=source)
+    artifact = FakeArtifact("v0", "train", 1, [local])
+
+    summary = pull(f"{REF}:v0", tmp_path / "out", api=FakeApi(artifact), allow_local=True)
+    assert summary.records == 0 and len(summary.missing) == 1
+    assert not (tmp_path / "out" / "train" / "tr_l.json.zst").exists()
