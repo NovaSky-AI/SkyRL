@@ -149,7 +149,7 @@ def download_directory(cloud_path: str, local_path: str) -> None:
     # When `local_path` already exists, fsspec copies a source without a trailing slash into
     # `local_path/<source name>`. The trailing slash copies the contents of the source directly
     # into `local_path`, mirroring `upload_directory`.
-    source = os.path.join(fs._strip_protocol(cloud_path), "")
+    source = fs._strip_protocol(cloud_path).rstrip("/") + "/"
     if cloud_path.startswith("s3://"):
         call_with_s3_retry(fs, fs.get, source, local_path, recursive=True)
     else:
