@@ -570,13 +570,6 @@ class MegatronWorker:
 
         patch_moe_combine_bf16_reduce()
 
-        # Drop the MoE dispatcher's router-probs reference after each MoE forward; under full
-        # recompute it otherwise pins every MoE layer's recomputed graph through backward.
-        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_release_dispatcher_probs import (
-            patch_moe_release_dispatcher_probs,
-        )
-
-        patch_moe_release_dispatcher_probs()
 
         # Opt-in (SKYRL_MOE_NODE_DEDUP=1): one inter-node copy per (token, node) in the MoE all-to-all.
         from skyrl.backends.skyrl_train.patches.megatron.patch_moe_node_dedup_dispatch import (
