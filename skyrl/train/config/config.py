@@ -147,6 +147,28 @@ class SkyRLLoraConfig(BaseConfig):
     ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
     >= ``max_loras`` if explicitly set."""
 
+    def validate_base_dtype(self, strategy: str, field_prefix: str, strategy_field: str) -> None:
+        """``base_dtype="bfloat16"`` stores a frozen base model in bf16: only defined for an FSDP LoRA policy.
+
+        Shared by the RL (``validate_cfg``) and SFT (``validate_sft_cfg``) entrypoints, which name the fields
+        differently: ``field_prefix`` is this config's path and ``strategy_field`` the strategy's path.
+        """
+        if self.base_dtype not in (None, "float32", "bfloat16"):
+            raise ValueError(
+                f"`{field_prefix}.base_dtype` must be 'float32', 'bfloat16' or unset, got {self.base_dtype!r}"
+            )
+        if self.base_dtype != "bfloat16":
+            return
+        if strategy != "fsdp":
+            raise ValueError(
+                f"`{field_prefix}.base_dtype='bfloat16'` requires {strategy_field}='fsdp', got {strategy!r}"
+            )
+        if self.rank <= 0:
+            raise ValueError(
+                f"`{field_prefix}.base_dtype='bfloat16'` requires LoRA (`{field_prefix}.rank > 0`): "
+                "full fine-tuning keeps fp32 master weights"
+            )
+
 
 @dataclass
 class FakeInt4QatConfig(BaseConfig):

@@ -105,9 +105,11 @@ def _fsdp2_lora_step(rank: int, world_size: int, init_file: str, checkpoint: str
             apply_fsdp2(model, fsdp_kwargs, FSDPConfig())
             model(input_ids=input_ids, labels=input_ids).loss.backward()
             grads = {name: p.grad.full_tensor().float() for name, p in model.named_parameters() if p.grad is not None}
+            before = {name: p.full_tensor().clone() for name, p in model.named_parameters()}
             torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-3).step()
-            _, base = _dtypes_of(model)
-            results[bf16] = {"grads": grads, "base_dtypes": base}
+            changed = {name for name, p in model.named_parameters() if not torch.equal(p.full_tensor(), before[name])}
+            lora, base = _dtypes_of(model)
+            results[bf16] = {"grads": grads, "base_dtypes": base, "lora_dtypes": lora, "changed": changed}
         if rank == 0:
             torch.save(results, out_path)
     finally:
@@ -126,6 +128,10 @@ def test_fsdp2_gradients_match_fp32_base(tiny_bf16_checkpoint, tmp_path):
     fp32_grads, bf16_grads = results[False]["grads"], results[True]["grads"]
 
     assert results[True]["base_dtypes"] == {torch.bfloat16}
+    for result in results.values():
+        # The optimizer step keeps fp32 adapters, updates every one of them and leaves the frozen base as is.
+        assert result["lora_dtypes"] == {torch.float32}
+        assert result["changed"] == result["grads"].keys()
     assert fp32_grads and fp32_grads.keys() == bf16_grads.keys()
     assert all("lora_" in name for name in fp32_grads)
     for name, grad in fp32_grads.items():

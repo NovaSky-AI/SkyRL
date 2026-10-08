@@ -213,6 +213,35 @@ class TestLoraConfigOverrides:
         assert skyrl_cfg.trainer.policy.model.lora.rank == 0
 
 
+class TestLoraBaseDtype:
+    """``model.lora.base_dtype`` is validated on the SFT entrypoint too, not only by the RL ``validate_cfg``."""
+
+    def test_fsdp_lora_propagates(self):
+        cfg = _sft_cfg_from_overrides(
+            ["model.path=test/my-model", "strategy=fsdp", "model.lora.rank=16", "model.lora.base_dtype=bfloat16"]
+        )
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.model.lora.base_dtype == "bfloat16"
+
+    def test_rejects_full_fine_tuning(self):
+        # rank=0 is the SFT default: without validation this would train on bf16 master weights.
+        cfg = _sft_cfg_from_overrides(["model.path=test/my-model", "strategy=fsdp", "model.lora.base_dtype=bfloat16"])
+        with pytest.raises(ValueError, match=r"`model\.lora\.base_dtype='bfloat16'` requires LoRA"):
+            validate_sft_cfg(cfg)
+
+    def test_rejects_megatron(self):
+        cfg = _sft_cfg_from_overrides(
+            ["model.path=test/my-model", "strategy=megatron", "model.lora.rank=16", "model.lora.base_dtype=bfloat16"]
+        )
+        with pytest.raises(ValueError, match=r"requires strategy='fsdp'"):
+            validate_sft_cfg(cfg)
+
+    def test_rejects_unknown_values(self):
+        cfg = _sft_cfg_from_overrides(["model.path=test/my-model", "model.lora.rank=16", "model.lora.base_dtype=bf16"])
+        with pytest.raises(ValueError, match=r"must be 'float32', 'bfloat16' or unset"):
+            validate_sft_cfg(cfg)
+
+
 class TestTorchProfilerConfigOverrides:
     """SFT profiler config bridge coverage."""
 
