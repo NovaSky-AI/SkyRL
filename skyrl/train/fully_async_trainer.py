@@ -572,15 +572,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             # we break before reaching it. `global_step` already names the next, untrained
                             # step, so save under the last trained one.
                             self.global_step -= 1
-                            if self.cfg.trainer.ckpt_interval > 0 and last_ckpt_step != self.global_step:
-                                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                                    await asyncio.to_thread(self.save_checkpoints)
-                                last_ckpt_step = self.global_step
-                            if self.cfg.trainer.hf_save_interval > 0 and last_hf_step != self.global_step:
-                                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                                    await asyncio.to_thread(self.save_models)
-                                last_hf_step = self.global_step
-                            self.global_step += 1
+                            try:
+                                if self.cfg.trainer.ckpt_interval > 0 and last_ckpt_step != self.global_step:
+                                    with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                                        await asyncio.to_thread(self.save_checkpoints)
+                                    last_ckpt_step = self.global_step
+                                if self.cfg.trainer.hf_save_interval > 0 and last_hf_step != self.global_step:
+                                    with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                                        await asyncio.to_thread(self.save_models)
+                                    last_hf_step = self.global_step
+                            finally:
+                                self.global_step += 1
                             break
 
                         if self.sample_full_batch:

@@ -438,6 +438,21 @@ async def test_early_epoch_end_saves_the_last_trained_step():
 
 
 @pytest.mark.asyncio
+async def test_failed_early_epoch_end_save_keeps_the_next_step():
+    """If the early epoch-end save fails, ``global_step`` still names the next step, as for any other failure."""
+    trainer = _make_train_loop_trainer(epochs=2, ckpt_interval=5, exhaust_after_steps=1)
+
+    def failing_save():
+        raise OSError("disk full")
+
+    trainer.save_checkpoints = failing_save
+
+    with pytest.raises(OSError, match="disk full"):
+        await trainer.train()
+    assert trainer.global_step == 2
+
+
+@pytest.mark.asyncio
 async def test_resume_with_no_steps_left_keeps_the_resumed_checkpoint():
     """The step being resumed already has a checkpoint, so it is not rewritten in place."""
     trainer = _make_train_loop_trainer(resume=(2, "ckpt/global_step_2", set(), set(), 1))
