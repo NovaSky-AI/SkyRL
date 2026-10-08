@@ -390,10 +390,11 @@ class CaptureServer:
             message = f"path rule {paths!r} failed: {type(error).__name__}: {error}"
             return _json({"error": message, "code": PATH_RULE_FAILED}, 500)
         if recorded and any(item.data is None for sample in samples for item in sample.media):
-            # A record keeps images' placeholders, not their processed arrays, so a repeated finish of a
-            # written trajectory with images has no complete samples to give: it answers with none.
+            # Answered from the record: a repeat, or the first finish of one the TTL or a shutdown wrote. A
+            # record keeps images' placeholders, not their processed arrays, so there are no complete samples
+            # to give, and the finish answers with none; the caller drops the trajectory.
             logger.warning(
-                "%s: a repeated finish of a recorded trajectory with images returns no samples", trajectory.id
+                "%s: a finish answered from the record of a trajectory with images has no samples", trajectory.id
             )
             samples = []
         return _json(
