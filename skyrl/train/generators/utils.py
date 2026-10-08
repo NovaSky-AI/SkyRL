@@ -24,7 +24,7 @@ from skyrl.train.generators.base import (
     TrainingPhase,
     TrajectoryID,
 )
-from skyrl.utils.chat_template import apply_chat_template
+from skyrl.train.utils.chat_template import apply_chat_template
 from skyrl_gym.metrics import aggregate_for_environment
 
 _CACHE_SALT_MODEL_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
