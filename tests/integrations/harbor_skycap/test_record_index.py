@@ -361,6 +361,23 @@ def test_a_slow_wandb_is_abandoned_not_retried_and_never_holds_up_the_step(warni
     assert any("abandoned" in message for message in warnings)
 
 
+def test_a_batch_dropped_unfinished_is_not_indexed_with_the_next_step() -> None:
+    """Dynamic sampling at an epoch's end drops a partial batch; the next epoch retries the same global step."""
+    trainer, run = wandb_trainer()
+    records = RecordLog()
+    callback = index(records)
+    callback.on_step_start(trainer, step_end(step=4), None)
+    entries(records, "dropped")  # generated, then dropped: no on_step_end for it
+    callback.on_step_start(trainer, step_end(step=4), None)
+    entries(records, "kept")
+    callback.on_step_end(trainer, step_end(step=4), None)
+    assert callback.close()
+
+    ((artifact, _),) = run.logged
+    assert {row["instance_id"] for row in artifact.index()} == {"kept"}
+    assert callback.stats()["discarded"] == 1
+
+
 def test_a_full_queue_drops_and_shutdown_stops_at_its_deadline(warnings) -> None:
     hang = threading.Event()
     trainer, run = wandb_trainer(FakeRun(hang=hang))
@@ -376,13 +393,21 @@ def test_a_full_queue_drops_and_shutdown_stops_at_its_deadline(warnings) -> None
         entries(records, "a")
         callback.on_step_end(trainer, step_end(step=step), None)
     assert callback.stats()["dropped"] == 1  # step 3
+    # Step 1 logging and step 2 queued are both pending, with no gap as the worker takes the next.
+    assert callback.stats()["pending"] == 2
 
     started = time.monotonic()
     assert not callback.close(timeout=0.2)
     assert time.monotonic() - started < 5.0
     # Step 2 was still queued at the deadline; step 1 is left to finish on its own.
     assert callback.stats()["dropped"] == 2 and callback.stats()["pending"] == 1
+    # The version still logging at the deadline finishes, and the worker then exits instead of waiting forever.
     hang.set()
+    deadline = time.monotonic() + 10
+    while callback.stats()["pending"] or callback._worker.is_alive():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert callback.stats()["logged"] == 1
     assert any("queue full" in message for message in warnings)
     assert any("shutdown deadline" in message for message in warnings)
 

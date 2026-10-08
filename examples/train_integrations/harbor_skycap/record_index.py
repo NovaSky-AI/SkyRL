@@ -253,9 +253,20 @@ class SkycapRecordIndex(TrainingCallback):
         self._worker: Optional[threading.Thread] = None
         self._closed = False
         self._in_flight = 0
-        self._counts = {"logged": 0, "failed": 0, "timed_out": 0, "dropped": 0, "retried": 0}
+        #: Versions queued and not yet settled (logged, failed or dropped), whether in the queue or logging.
+        self._pending = 0
+        self._counts = {"logged": 0, "failed": 0, "timed_out": 0, "dropped": 0, "retried": 0, "discarded": 0}
 
     # -- events -----------------------------------------------------------------
+    def on_step_start(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
+        # Each step's train trajectories are taken at its end, so any still here are from a batch the trainer
+        # dropped unfinished (dynamic sampling at an epoch's end), under the same global step as this one.
+        stale = self.records.take("train")
+        if stale:
+            logger.info(f"skycap record index: {len(stale)} trajectories of an unfinished step aren't indexed")
+            with self._lock:
+                self._counts["discarded"] += len(stale)
+
     def on_step_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
         self._index(trainer, "train", callback_input.global_step, trained_keys(callback_input))
 
@@ -267,9 +278,10 @@ class SkycapRecordIndex(TrainingCallback):
         self.close()
 
     def stats(self) -> Dict[str, int]:
-        """Versions ``logged``, ``failed`` (``timed_out`` included), ``dropped`` and ``pending``; ``retried`` calls."""
+        """Versions ``logged``, ``failed`` (``timed_out`` included), ``dropped`` and ``pending``; ``retried`` calls;
+        ``discarded`` trajectories, of a step the trainer dropped unfinished."""
         with self._lock:
-            return {**self._counts, "pending": self._queue.qsize() + self._in_flight}
+            return {**self._counts, "pending": self._pending}
 
     def close(self, timeout: Optional[float] = None) -> bool:
         """Wait up to ``timeout`` (default ``shutdown_timeout``) for queued versions, then drop the rest."""
@@ -293,6 +305,7 @@ class SkycapRecordIndex(TrainingCallback):
             left += item is not _STOP
         with self._lock:
             self._counts["dropped"] += left
+            self._pending -= left
             in_flight = self._in_flight
         if left or in_flight:
             logger.warning(
@@ -319,38 +332,61 @@ class SkycapRecordIndex(TrainingCallback):
         self._submit((wandb, run, version))
 
     def _submit(self, item: Tuple[Any, Any, IndexVersion]) -> None:
-        with self._lock:
-            closed = self._closed
-            if not closed and self._worker is None:
-                self._worker = threading.Thread(target=self._work, name="skycap-record-index", daemon=True)
-                self._worker.start()
         name = f"{item[2].name}:{item[2].aliases[0]}"
-        if closed:
-            logger.warning(f"skycap record index: closed; dropping {name}")
-            self._count("dropped")
-            return
-        try:
-            self._queue.put_nowait(item)
-        except queue.Full:
-            logger.warning(f"skycap record index: queue full ({self._queue.maxsize}); dropping {name}")
-            self._count("dropped")
+        # Checking `_closed` and queueing under the lock `close` sets it with: a version is either queued
+        # before close, and so logged or counted by it, or refused here.
+        with self._lock:
+            if self._closed:
+                reason = "closed"
+            else:
+                if self._worker is None:
+                    self._worker = threading.Thread(target=self._work, name="skycap-record-index", daemon=True)
+                    self._worker.start()
+                try:
+                    self._queue.put_nowait(item)
+                except queue.Full:
+                    reason = f"queue full ({self._queue.maxsize})"
+                else:
+                    self._pending += 1
+                    return
+        logger.warning(f"skycap record index: {reason}; dropping {name}")
+        self._count("dropped")
 
     # -- logging, on the worker ---------------------------------------------------
     def _work(self) -> None:
         while True:
-            item = self._queue.get()
+            try:
+                # Waking up now and then: if close() couldn't queue _STOP (a full queue) or drained it past
+                # its deadline, the worker exits on `_stopping` instead of waiting on an empty queue forever.
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._stopping.is_set():
+                    return
+                continue
             if item is _STOP:
                 return
             if self._stopping.is_set():
-                self._count("dropped")
+                self._settle("dropped")
                 continue
             with self._lock:
                 self._in_flight += 1
+            outcome = "failed"
             try:
-                self._count(self._log_with_retries(*item))
+                outcome = self._log_with_retries(*item)
+            except Exception:  # noqa: BLE001 - a bug here must not stop the worker, or the run
+                logger.exception(f"skycap record index: logging {item[2].name} failed")
             finally:
                 with self._lock:
                     self._in_flight -= 1
+                self._settle(outcome)
+
+    def _settle(self, outcome: str) -> None:
+        """Count a queued version's outcome, in the same step that stops counting it as pending."""
+        with self._lock:
+            self._counts[outcome] += 1
+            if outcome == "timed_out":
+                self._counts["failed"] += 1
+            self._pending -= 1
 
     def _log_with_retries(self, wandb: Any, run: Any, version: IndexVersion) -> str:
         """Log one version. Returns the counter it lands in; never raises."""
