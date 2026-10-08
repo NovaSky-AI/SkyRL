@@ -241,10 +241,7 @@ def _bridge(
         previous_prompt = [t for i in matched[:depth] for t in _tokens(graph, i)] + node.tokens.token_ids[:ss]
         previous_completion = node.tokens.token_ids[ss:]
         previous_media = path_media(graph, matched[: depth + 1])
-        if previous_media:
-            rendered = renderer.bridge(previous_prompt, previous_completion, new_messages, tools, previous_media)
-        else:
-            rendered = renderer.bridge(previous_prompt, previous_completion, new_messages, tools)
+        rendered = renderer.bridge(previous_prompt, previous_completion, new_messages, tools, previous_media)
         if rendered is None:
             return None
         chunks, scaffold = attribute(rendered.token_ids[rendered.reused :], rendered.tail_indices, len(new_messages))

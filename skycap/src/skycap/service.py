@@ -76,11 +76,6 @@ def build_backend(
         raise ValueError(f"mode must be 'text' or 'tokens', not {mode!r}")
     if (tokenizer is None) == (renderer is None):
         raise ValueError("token mode needs exactly one of tokenizer and renderer")
-    if renderer is not None and (renderer_name or chat_template_kwargs or processor_kwargs):
-        raise ValueError(
-            "renderer_name, chat_template_kwargs and processor_kwargs configure the tokenizer's renderer, "
-            "not a given one"
-        )
     for name, value in (("chat_template_kwargs", chat_template_kwargs), ("processor_kwargs", processor_kwargs)):
         if value is not None and not isinstance(value, Mapping):
             raise ValueError(f"{name} must be a mapping (a JSON object), got {type(value).__name__}")
