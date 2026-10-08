@@ -30,6 +30,7 @@ Config fields (shared with ``GatedDeltaNet``): ``linear_num_value_heads`` /
 ``-exp(A_log) * softplus(f + dt_bias)`` gate of the original Kimi Linear).
 """
 
+import os
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -37,10 +38,13 @@ import torch
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.ssm.gated_delta_net.common import (
+    _build_thd_cp_a2a_perm,
     a2a_cp_to_hp,
     a2a_hp_to_cp,
     get_parameter_local_cp,
 )
+from megatron.core.ssm.mamba_context_parallel import _undo_attention_load_balancing
+from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -50,6 +54,13 @@ from megatron.core.transformer.utils import (
     sharded_state_dict_default,
 )
 from torch import nn
+
+# How KDA moves to head parallelism under CP: "a2a" (all-to-all the projected q/k/v/f/g/beta, as
+# megatron-core's GatedDeltaNet does) or "allgather" (all-gather the sequence-parallel hidden-state
+# shards over CP, then over TP, and project only this rank's head slice). The projected tensors are
+# ~1.25x wider than the hidden state and the all-to-all runs on TP-gathered rows, so "allgather"
+# moves ~5x fewer bytes across the CP group -- which matters when CP spans nodes.
+_KDA_CP_EXCHANGE = os.environ.get("SKYRL_KDA_CP_EXCHANGE", "a2a").lower()
 
 try:
     from fla.modules import FusedRMSNormGated
@@ -247,6 +258,60 @@ class KimiDeltaAttention(MegatronModule):
             return param
         return get_parameter_local_cp(param, dim=0, cp_group=self.cp_group)
 
+    def _use_cp_allgather(self) -> bool:
+        # The all-gather path replaces the column-parallel layers' own sequence-parallel gather,
+        # so it needs the input sharded over TP (sequence parallel) or no TP at all.
+        return _KDA_CP_EXCHANGE == "allgather" and (self.tp_size == 1 or self.config.sequence_parallel)
+
+    def _project_cp_allgather(self, hidden_states, cu_seqlens, packed_seq_params):
+        """Head-parallel q/k/v/f/gate/beta via an all-gather of the hidden states.
+
+        ``hidden_states`` is this rank's sequence-parallel shard of its CP chunk. Gathering over CP
+        first (the only cross-node hop when CP spans nodes) then over TP gives every rank the whole
+        sequence in [tp][cp][rows] order; each rank then projects only its 1/cp slice of the local
+        heads (the same channels the all-to-all would hand it), and one permutation of the narrow
+        projected tensors puts tokens into natural order. Backward reduce-scatters in reverse.
+        """
+        x = gather_from_sequence_parallel_region(hidden_states, group=self.cp_group)
+        if self.tp_size > 1:
+            x = gather_from_sequence_parallel_region(x, group=self.tp_group)
+        rows = hidden_states.size(0)  # per (tp, cp) rank
+        total = x.size(0)
+
+        def local(module):
+            return self._local_cp(module.weight)
+
+        f_low = self.f_a_proj(x)[0]
+        g_low = self.g_a_proj(x)[0]
+        projected = torch.cat(
+            (
+                torch.nn.functional.linear(x, local(self.q_proj)),
+                torch.nn.functional.linear(x, local(self.k_proj)),
+                torch.nn.functional.linear(x, local(self.v_proj)),
+                torch.nn.functional.linear(f_low, local(self.f_b_proj)),
+                torch.nn.functional.linear(g_low, local(self.g_b_proj)),
+                torch.nn.functional.linear(x, local(self.b_proj)),
+            ),
+            dim=-1,
+        )
+        del x, f_low, g_low
+
+        # natural token -> rank-major (cp-major, then tp) row, as a2a_cp_to_hp lays it out.
+        thd_cp_a2a_inv = None
+        if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
+            rank_major, thd_cp_a2a_inv = _build_thd_cp_a2a_perm(cu_seqlens, self.cp_size, total)
+        else:
+            positions = torch.arange(total, device=projected.device).view(total, 1, 1)
+            rank_major = _undo_attention_load_balancing(positions, self.cp_size).view(-1)
+        # rank-major row r sits in gathered chunk (tp, cp) = (chunk % tp, chunk // tp).
+        chunk, offset = rank_major // rows, rank_major % rows
+        gathered = ((chunk % self.tp_size) * self.cp_size + chunk // self.tp_size) * rows + offset
+        projected = projected.index_select(0, gathered)
+
+        heads = self.local_num_heads // self.cp_size
+        width = heads * self.head_dim
+        return torch.split(projected, [width] * 5 + [heads], dim=-1), thd_cp_a2a_inv
+
     def _conv(self, module: nn.Conv1d, x: torch.Tensor, cu_seqlens: Optional[torch.Tensor]) -> torch.Tensor:
         # fla expects [b, s, d] activations and a [d, kernel] weight.
         out, _ = causal_conv1d(
@@ -277,18 +342,25 @@ class KimiDeltaAttention(MegatronModule):
             raise NotImplementedError("KimiDeltaAttention does not support inference caches.")
         cu_seqlens = self._resolve_cu_seqlens(packed_seq_params)
 
-        # Column-parallel projections gather the sequence-parallel shard internally, so every
-        # per-token/per-sequence op below sees this CP rank's whole shard ([s, b, local]).
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
-        f, _ = self.f_b_proj(self.f_a_proj(hidden_states)[0])
-        gate, _ = self.g_b_proj(self.g_a_proj(hidden_states)[0])
-        beta, _ = self.b_proj(hidden_states)
+        cp_allgather = self.cp_size > 1 and self._use_cp_allgather()
+        if not cp_allgather:
+            # Column-parallel projections gather the sequence-parallel shard internally, so every
+            # per-token/per-sequence op below sees this CP rank's whole shard ([s, b, local]).
+            q, _ = self.q_proj(hidden_states)
+            k, _ = self.k_proj(hidden_states)
+            v, _ = self.v_proj(hidden_states)
+            f, _ = self.f_b_proj(self.f_a_proj(hidden_states)[0])
+            gate, _ = self.g_b_proj(self.g_a_proj(hidden_states)[0])
+            beta, _ = self.b_proj(hidden_states)
 
         num_heads = self.local_num_heads
         thd_cp_a2a_inv = None
-        if self.cp_size > 1:
+        if cp_allgather:
+            (q, k, v, f, gate, beta), thd_cp_a2a_inv = self._project_cp_allgather(
+                hidden_states, cu_seqlens, packed_seq_params
+            )
+            num_heads //= self.cp_size
+        elif self.cp_size > 1:
             # CP -> head-parallel: [s/cp, b, heads] -> [s, b, heads/cp] in natural token order,
             # all six tensors in one all-to-all.
             sections = [self.local_projection_size] * 5 + [self.local_num_heads]
