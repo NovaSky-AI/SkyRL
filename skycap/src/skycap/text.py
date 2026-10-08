@@ -54,9 +54,6 @@ class TextBackend:
     async def finalize(self, trajectory: Trajectory) -> None:
         """Text mode records no tokens, so there is nothing to add before writing."""
 
-    async def restore(self, trajectory: Trajectory) -> None:
-        """A text-mode record holds everything its samples need."""
-
     @property
     def session(self) -> aiohttp.ClientSession:
         assert self._session is not None, "backend not started"

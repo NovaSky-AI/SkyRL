@@ -16,7 +16,6 @@ import asyncio
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import replace
 from typing import Any
 
 import aiohttp
@@ -119,29 +118,6 @@ class TokensBackend:
                     logger.warning("releasing session %s: HTTP %d", trajectory.id, released.status)
         except (aiohttp.ClientError, TimeoutError) as error:
             logger.warning("releasing session %s failed: %s", trajectory.id, error)
-
-    async def restore(self, trajectory: Trajectory) -> None:
-        """Rebuild the image arrays a record leaves out, for a repeated ``finish`` of a written trajectory.
-
-        The record keeps each message, images included, and each node's image hashes. Rendering a node's
-        message again processes its images; each is matched to the node's by hash, so an image that
-        processes to other content now (a URL that changed) is an error rather than a wrong array.
-        """
-        await asyncio.to_thread(self._restore_media, trajectory)
-
-    def _restore_media(self, trajectory: Trajectory) -> None:
-        for node in trajectory.graph:
-            tokens = node.tokens
-            if tokens is None or all(item.data is not None for item in tokens.media):
-                continue
-            rendered = {item.hash: item.data for item in self.renderer.render([node.message], None).media}
-            restored = []
-            for item in tokens.media:
-                data = item.data if item.data is not None else rendered.get(item.hash)
-                if data is None:
-                    raise turn.TokenError(f"node {node.id}: its message no longer renders image {item.hash}")
-                restored.append(replace(item, data=data))
-            tokens.media = restored
 
     async def finalize(self, trajectory: Trajectory) -> None:
         """Record each token node's text and per-token byte offsets, so the record reads without a tokenizer."""
