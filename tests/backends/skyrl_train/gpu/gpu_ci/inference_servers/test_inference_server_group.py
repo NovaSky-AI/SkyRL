@@ -36,11 +36,13 @@ def make_vllm_cli_args(
     load_format: str = "auto",
 ) -> argparse.Namespace:
     """Create CLI args for vLLM server using official parser."""
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    from vllm import AsyncEngineArgs
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     parser = FlexibleArgumentParser(description="vLLM server")
-    parser = make_arg_parser(parser)
+    parser = FrontendArgs.add_cli_args(parser)
+    parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args(
         [
             "--model",

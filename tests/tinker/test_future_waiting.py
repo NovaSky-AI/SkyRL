@@ -50,12 +50,14 @@ async def async_engine(db_url):
     await engine.dispose()
 
 
-def insert_pending(sync_engine, count: int = 1) -> list[int]:
+def insert_pending(
+    sync_engine, count: int = 1, request_type: types.RequestType = types.RequestType.SAMPLE
+) -> list[int]:
     """Insert ``count`` pending futures, returning their request_ids."""
     with Session(sync_engine) as session:
         rows = [
             FutureDB(
-                request_type=types.RequestType.SAMPLE,
+                request_type=request_type,
                 model_id="model_a",
                 request_data={"checkpoint_id": ""},
                 status=RequestStatus.PENDING,
@@ -105,11 +107,15 @@ async def test_resolves_once_the_request_completes(waiters, sync_engine):
         mark_completed(sync_engine, request_id, SAMPLE_RESULT)
 
     asyncio.create_task(complete_soon())
-    status, result_data = await wait_for_future(waiters, request_id, timeout=5)
+    status, request_type, result_data = await wait_for_future(waiters, request_id, timeout=5)
 
     # result_data is the stored JSON text, not a decoded object, so it takes a
     # parse to compare against the result that was stored.
-    assert (status, types.SampleOutput.model_validate_json(result_data)) == (RequestStatus.COMPLETED, SAMPLE_RESULT)
+    assert (status, request_type, types.SampleOutput.model_validate_json(result_data)) == (
+        RequestStatus.COMPLETED,
+        types.RequestType.SAMPLE,
+        SAMPLE_RESULT,
+    )
 
 
 @pytest.mark.asyncio
@@ -118,9 +124,13 @@ async def test_surfaces_failed_status(waiters, sync_engine):
     error = types.ErrorResponse(error="boom", status="failed")
     mark_completed(sync_engine, request_id, error, status=RequestStatus.FAILED)
 
-    status, result_data = await wait_for_future(waiters, request_id, timeout=5)
+    status, request_type, result_data = await wait_for_future(waiters, request_id, timeout=5)
 
-    assert (status, types.ErrorResponse.model_validate_json(result_data)) == (RequestStatus.FAILED, error)
+    assert (status, request_type, types.ErrorResponse.model_validate_json(result_data)) == (
+        RequestStatus.FAILED,
+        types.RequestType.SAMPLE,
+        error,
+    )
 
 
 @pytest.mark.asyncio
@@ -150,7 +160,7 @@ async def test_one_waiter_giving_up_does_not_strand_the_others(waiters, sync_eng
     result = types.OptimStepOutput(metrics={"loss": 1.5})
     mark_completed(sync_engine, request_id, result)
 
-    status, result_data = await patient
+    status, _, result_data = await patient
     assert (status, types.OptimStepOutput.model_validate_json(result_data)) == (RequestStatus.COMPLETED, result)
 
 
@@ -179,10 +189,20 @@ async def test_query_count_does_not_scale_with_waiters(waiters, sync_engine, asy
     assert 0 < len(statements) < 50
 
 
-def _stub_request(async_engine, waiters):
+def _stub_request(async_engine, waiters, headers: dict | None = None):
     from types import SimpleNamespace
 
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db_engine=async_engine, future_waiters=waiters)))
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                db_engine=async_engine,
+                external_future_store=None,
+                future_waiters=waiters,
+                proto_serialization_lock=asyncio.Lock(),
+            )
+        ),
+        headers=headers or {},
+    )
 
 
 @pytest.mark.asyncio
@@ -193,11 +213,13 @@ async def test_wait_raises_for_unknown_request(waiters):
 
 
 @pytest.mark.asyncio
-async def test_retrieve_future_returns_completed_result(waiters, async_engine, sync_engine):
+async def test_retrieve_future_returns_completed_result_as_json(waiters, async_engine, sync_engine):
+    """Result types without a proto wire format are served as the stored JSON text."""
     from skyrl.tinker import api
 
-    request_id = insert_pending(sync_engine)[0]
-    mark_completed(sync_engine, request_id, SAMPLE_RESULT)
+    request_id = insert_pending(sync_engine, request_type=types.RequestType.OPTIM_STEP)[0]
+    result = types.OptimStepOutput()
+    mark_completed(sync_engine, request_id, result)
 
     response = await api.retrieve_future(
         api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
@@ -205,7 +227,7 @@ async def test_retrieve_future_returns_completed_result(waiters, async_engine, s
 
     # The stored JSON text is returned as-is rather than re-encoded by FastAPI.
     assert response.media_type == "application/json"
-    assert response.body == SAMPLE_RESULT.model_dump_json().encode()
+    assert response.body == result.model_dump_json().encode()
 
 
 @pytest.mark.asyncio
@@ -226,6 +248,33 @@ async def test_retrieve_future_400s_with_the_stored_error(waiters, async_engine,
 
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "boom"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_future_serves_sample_result_as_proto(waiters, async_engine, sync_engine):
+    """A completed sample future is served as proto bytes regardless of the
+    Accept header: the SDK rejects JSON for sample and forward_backward results."""
+    from tinker import SampleResponse
+    from tinker.proto.response_conv import deserialize_proto_response
+
+    from skyrl.tinker import api
+
+    request_id = insert_pending(sync_engine)[0]
+    mark_completed(
+        sync_engine,
+        request_id,
+        types.SampleOutput(
+            sequences=[types.GeneratedSequence(stop_reason="stop", tokens=[1, 2], logprobs=[-0.5, -1.0])]
+        ),
+    )
+
+    result = await api.retrieve_future(
+        api.RetrieveFutureRequest(request_id=str(request_id)), _stub_request(async_engine, waiters)
+    )
+
+    assert result.media_type == "application/x-protobuf"
+    response = deserialize_proto_response(result.body, SampleResponse)
+    assert response.sequences[0].tokens == [1, 2]
 
 
 @pytest.mark.asyncio
