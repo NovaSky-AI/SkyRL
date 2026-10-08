@@ -1891,11 +1891,15 @@ class RayPPOTrainer:
 
         # 2. Load dataloader state if requested and available
         self._dataloader_state_restored = False
-        if self.train_dataloader is None:
-            logger.info("No train dataloader initialized; skipping dataloader state restore")
-        elif not self.cfg.trainer.resume_load_dataloader_state:
+        if not self.cfg.trainer.resume_load_dataloader_state:
             logger.info("Skipping dataloader state restore; dataloader will start from beginning")
-        elif io.exists(dataloader_state_path):
+        elif not io.exists(dataloader_state_path):
+            logger.warning(
+                f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
+            )
+        elif self.train_dataloader is None:
+            logger.info("No train dataloader initialized; skipping dataloader state restore")
+        else:
             try:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
@@ -1904,10 +1908,6 @@ class RayPPOTrainer:
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
-        else:
-            logger.warning(
-                f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
-            )
 
         # 3. Load policy checkpoint (dispatch handles offload/backload)
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
