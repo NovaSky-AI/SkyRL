@@ -146,11 +146,14 @@ class _UidPrompts(list):
         return batch[0]
 
 
-def _make_fully_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
-    """Build an _AsyncDataloader over the shuffled train loader that fully async training uses."""
+def _make_fully_async_dataloader(num_prompts: int, mini_batch_size: int, num_workers: int = 0) -> _AsyncDataloader:
+    """Build an _AsyncDataloader over the shuffled train loader that fully async training uses.
+
+    With ``num_workers > 0`` the workers are persistent, so later epochs reuse the first iterator.
+    """
     cfg = SimpleNamespace(
         trainer=SimpleNamespace(train_batch_size=mini_batch_size, eval_batch_size=1, seed=42, epochs=3),
-        data=SimpleNamespace(dataloader=SimpleNamespace(num_workers=0, persistent_workers=False)),
+        data=SimpleNamespace(dataloader=SimpleNamespace(num_workers=num_workers, persistent_workers=num_workers > 0)),
     )
     dataset = _UidPrompts([{"uid": str(i)}] for i in range(num_prompts))
     loader = build_dataloader(cfg, dataset, is_train=True, is_fully_async=True)
@@ -179,14 +182,16 @@ async def test_async_dataloader_reshuffles_each_epoch():
 
 
 @pytest.mark.asyncio
-async def test_async_dataloader_resume_replays_the_epoch_order():
+@pytest.mark.parametrize("num_workers", [0, 1], ids=["in_process", "persistent_worker"])
+async def test_async_dataloader_resume_replays_the_epoch_order(num_workers):
     """A resumed epoch draws the live epoch's remaining prompts in the same order, whatever loader
-    position the checkpoint holds."""
+    position the checkpoint holds. The persistent-worker case restores the loader and sets the
+    sampler epoch while the worker is alive."""
     live = _make_fully_async_dataloader(num_prompts=16, mini_batch_size=2)
     live.start_epoch(1)
     epoch_order = await _drain_uids(live)
 
-    resumed = _make_fully_async_dataloader(num_prompts=16, mini_batch_size=2)
+    resumed = _make_fully_async_dataloader(num_prompts=16, mini_batch_size=2, num_workers=num_workers)
     # Simulate a checkpointed loader position that ran ahead of the trained prompts.
     ahead = iter(resumed._train_dataloader)
     for _ in range(6):
