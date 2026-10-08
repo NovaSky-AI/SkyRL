@@ -17,9 +17,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from renderers.base import MultiModalData
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +116,7 @@ def tool_call_id(completion_ids: Sequence[int], index: int) -> str:
     return f"call_{digest[:20]}_{index}"
 
 
-def _media(data: Any, start: int = 0) -> tuple[Media, ...]:
+def _media(data: MultiModalData | None, start: int = 0) -> tuple[Media, ...]:
     """A ``renderers`` ``MultiModalData``'s items from position ``start`` on, in stream order."""
     if data is None:
         return ()
@@ -129,7 +132,7 @@ def _media(data: Any, start: int = 0) -> tuple[Media, ...]:
     return tuple(sorted(found, key=lambda media: media.offset))
 
 
-def _multi_modal_data(media: Sequence[Media]) -> Any:
+def _multi_modal_data(media: Sequence[Media]) -> MultiModalData | None:
     """``media`` as a ``renderers`` ``MultiModalData``, or None without any."""
     if not media:
         return None
