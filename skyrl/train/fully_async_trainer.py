@@ -440,9 +440,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step = 0
         self.epoch = 0
         resumed_start_epoch = None
-        # Step and folder of the last checkpoint, and step of the last HF model. A later save for the same
-        # step is skipped instead of rewriting model files that the latest-checkpoint marker may already
-        # name; only that checkpoint's fully-async state may be updated (at an early epoch end).
+        # Steps whose checkpoint and HF model were last saved. A later save for the same step is skipped
+        # instead of rewriting model files that the latest-checkpoint marker may already name. Only a
+        # checkpoint this run saved (`last_ckpt_dir`) may have its fully-async state updated, at an early
+        # epoch end; a checkpoint loaded on resume is never modified.
         last_ckpt_step: Optional[int] = None
         last_ckpt_dir: Optional[str] = None
         last_hf_step: Optional[int] = None
@@ -452,7 +453,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("load_checkpoints"):
                 (
                     self.global_step,
-                    checkpoint_path,
+                    _,
                     loaded_consumed_data_uids_set,
                     loaded_filtered_data_uids_set,
                     loaded_epoch,
@@ -460,7 +461,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 logger.info(f"Resumed training from global_step {self.global_step}")
                 if self.global_step > 0:
                     # The checkpoint just loaded already holds this step.
-                    last_ckpt_step, last_ckpt_dir = self.global_step, str(checkpoint_path)
+                    last_ckpt_step = self.global_step
                     # Set async dataloader manager and staleness manager to the loaded state.
                     self.async_train_dataloader.load_state_from_checkpoint(
                         loaded_consumed_data_uids_set, loaded_filtered_data_uids_set
@@ -592,11 +593,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                         with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
                                             last_ckpt_dir = await asyncio.to_thread(self.save_checkpoints)
                                         last_ckpt_step = self.global_step
-                                    elif cur_generation_group_mini_batch or cur_dropped_groups:
-                                        # Prompts were filtered after this step's checkpoint. Record them by
-                                        # rewriting only its fully-async state. That file is a single object whose
-                                        # new contents are a superset of the old ones (same epoch, more consumed
-                                        # and filtered UIDs), so resuming from either version retrains nothing.
+                                    elif last_ckpt_dir is not None and (
+                                        cur_generation_group_mini_batch or cur_dropped_groups
+                                    ):
+                                        # Prompts were filtered after this step's checkpoint, which this run saved.
+                                        # Record them by rewriting only its fully-async state. That file is a single
+                                        # object whose new contents are a superset of the old ones (same epoch, more
+                                        # consumed and filtered UIDs), so resuming from either version retrains
+                                        # nothing. A resumed-from checkpoint is left alone; its prompts are redrawn.
                                         await asyncio.to_thread(
                                             self._write_fully_async_state, last_ckpt_dir, self._fully_async_state()
                                         )

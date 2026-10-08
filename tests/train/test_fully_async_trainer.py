@@ -495,6 +495,29 @@ async def test_early_epoch_end_records_prompts_filtered_after_the_last_checkpoin
 
 
 @pytest.mark.asyncio
+async def test_early_epoch_end_leaves_the_resumed_from_checkpoint_untouched(tmp_path):
+    """Prompts filtered right after resuming are not written into the checkpoint the run resumed from."""
+    checkpoint_dir = tmp_path / "global_step_1"
+    checkpoint_dir.mkdir()
+    state_path = checkpoint_dir / "fully_async_state.pt"
+    torch.save({"consumed_uids": ["0", "1"], "filtered_uids": [], "epoch": 0}, state_path)
+    original = state_path.read_bytes()
+    trainer = _make_train_loop_trainer(
+        num_prompts=6,
+        ckpt_interval=1,
+        exhaust_after_steps=0,
+        partial_at_exhaustion=1,
+        resume=(1, str(checkpoint_dir), {"0", "1"}, set(), 0),
+        ckpt_root=str(tmp_path),
+    )
+
+    await trainer.train()
+
+    assert trainer.saved_checkpoints == []
+    assert state_path.read_bytes() == original
+
+
+@pytest.mark.asyncio
 async def test_failed_early_epoch_end_save_keeps_the_next_step():
     """If the early epoch-end save fails, ``global_step`` still names the next step, as for any other failure."""
     trainer = _make_train_loop_trainer(epochs=2, ckpt_interval=5, exhaust_after_steps=1)
