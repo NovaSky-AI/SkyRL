@@ -42,11 +42,83 @@ def test_process_load_weights_forwards_optimizer_choice(load_optimizer):
     assert result.type == "load_weights"
 
 
+def test_engine_loads_alternate_base_weights(monkeypatch):
+    captured = {}
+
+    class BackendConfig:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs
+
+    class Backend:
+        def __init__(self, model, _config):
+            captured["model"] = model
+
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_args, **_kwargs: (Backend, BackendConfig))
+    TinkerEngine(
+        EngineConfig(
+            base_model=BASE_MODEL,
+            base_model_checkpoint_path="/models/custom",
+            database_url="sqlite:///:memory:",
+        )
+    )
+
+    assert captured == {
+        "model": "/models/custom",
+        "config": {"generator.inference_engine.served_model_name": BASE_MODEL, "runtime_role": "combined"},
+    }
+
+
+def test_engine_forwards_runtime_role(monkeypatch):
+    captured = {}
+
+    class BackendConfig:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs
+
+    class Backend:
+        def __init__(self, model, _config):
+            captured["model"] = model
+
+        def has_model(self, _model_id):
+            return False
+
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_args, **_kwargs: (Backend, BackendConfig))
+
+    TinkerEngine(
+        EngineConfig(
+            base_model=BASE_MODEL,
+            runtime_role="trainer",
+            backend="fsdp",
+            database_url="sqlite:///:memory:",
+        )
+    )
+
+    assert captured == {
+        "model": BASE_MODEL,
+        "config": {"runtime_role": "trainer"},
+    }
+
+
+def test_engine_rejects_single_role_jax_backend():
+    with pytest.raises(ValueError, match="fsdp or megatron"):
+        TinkerEngine(
+            EngineConfig(
+                base_model=BASE_MODEL,
+                backend="jax",
+                runtime_role="trainer",
+                database_url="sqlite:///:memory:",
+            )
+        )
+
+
 def test_process_unload_model():
     """Test that process_unload_model removes model from backend."""
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
+        # CPU-only test: build the jax backend explicitly instead of whatever
+        # EngineConfig currently defaults to.
+        backend="jax",
         backend_config={"max_lora_adapters": 4, "max_lora_rank": 32},
     )
     engine = TinkerEngine(config)
@@ -68,6 +140,9 @@ def test_cleanup_stale_sessions():
     config = EngineConfig(
         base_model=BASE_MODEL,
         checkpoints_base=AnyPath(""),
+        # CPU-only test: build the jax backend explicitly instead of whatever
+        # EngineConfig currently defaults to.
+        backend="jax",
         backend_config={"max_lora_adapters": 4, "max_lora_rank": 32},
         session_timeout_sec=60,
         database_url="sqlite:///:memory:",  # Use in-memory DB for test isolation
@@ -185,6 +260,36 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     assert batch.all_model_inputs == [datum.model_input]
     assert batch.all_values == [values]
     assert batch.all_returns == [returns]
+
+
+def test_prepare_model_pass_batch_rollout_logprobs():
+    """`rollout_logprobs` is optional; it is carried per example and defaults to []."""
+
+    def _datum(rollout_logprobs: list[float] | None) -> types.Datum:
+        kwargs = {}
+        if rollout_logprobs is not None:
+            kwargs["rollout_logprobs"] = types.TensorData(data=rollout_logprobs)
+        return types.Datum(
+            model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
+            loss_fn_inputs=types.LossFnInputs(
+                target_tokens=types.TensorData(data=[2, 3, 4]),
+                weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+                advantages=types.TensorData(data=[0.1, 0.1, 0.1]),
+                logprobs=types.TensorData(data=[-1.0, -1.0, -1.0]),
+                **kwargs,
+            ),
+        )
+
+    requests = {
+        "req1": (
+            "model1",
+            types.ForwardBackwardInput(data=[_datum([-1.1, -0.9, -1.0]), _datum(None)], loss_fn="ppo"),
+        ),
+    }
+
+    batch = prepare_model_pass_batch(requests)
+    assert batch.all_sampling_logprobs == [[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]]
+    assert batch.all_rollout_logprobs == [[-1.1, -0.9, -1.0], []]
 
 
 def test_prepare_sample_batch_session_ids():

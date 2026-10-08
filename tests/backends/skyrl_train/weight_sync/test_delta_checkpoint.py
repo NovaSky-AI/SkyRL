@@ -87,6 +87,30 @@ def test_delta_checkpoint_publish_fetch_and_reload_roundtrip(tmp_path):
     assert _read_state(receiver_dir)["version"] == 1
 
 
+def test_delta_checkpoint_fetch_makes_copied_weights_writable(tmp_path):
+    base_tensors = {"a.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4)}
+    updated_tensors = {"a.weight": base_tensors["a.weight"] + torch.tensor(1, dtype=torch.bfloat16)}
+    base_dir = tmp_path / "base"
+    receiver_dir = tmp_path / "receiver"
+    _write_checkpoint(base_dir, base_tensors)
+    (base_dir / "model.safetensors").chmod(0o444)
+
+    publisher = DeltaCheckpointPublisher(
+        base_model_path=str(base_dir),
+        sync_dir=str(tmp_path / "sync"),
+        publish_staging_dir=str(tmp_path / "staging_dir"),
+    )
+    result = publisher.create_delta_files(_source(updated_tensors))
+    update_info = publisher.publish(result)
+
+    store = LocalCheckpointStore(base_model_path=str(base_dir), local_checkpoint_dir=str(receiver_dir))
+    store.fetch(target_version=update_info["target_version"], sync_dir=update_info["sync_dir"])
+
+    copied_weights = _weights_dir(receiver_dir) / "model.safetensors"
+    assert copied_weights.stat().st_mode & 0o200
+    assert torch.equal(_load_tensor(_weights_dir(receiver_dir), "a.weight"), updated_tensors["a.weight"])
+
+
 def test_delta_checkpoint_payload_stores_xor_patch(tmp_path):
     base_tensors = {"a.weight": torch.arange(16, dtype=torch.bfloat16).view(4, 4)}
     updated = base_tensors["a.weight"].clone()

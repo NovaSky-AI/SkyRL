@@ -2,11 +2,10 @@
 
 Weight transfer itself does not route through here: the receive path is an engine
 subclass (``weight_sync/weight_receivers.py``, ``weight_sync/delta/engine.py``,
-``weight_sync/sharded_rdt/sharded_rdt_engine.py``) driven over vLLM's native RLHF
-routes, which wrap ``set_current_vllm_config`` themselves and give each engine
-its own layerwise-reload lifecycle.
+``weight_sync/sharded_rdt/sharded_rdt_engine.py``) driven over vLLM's native
+RLHF routes.
 
-What remains are two limits of *dispatch*:
+What remains are limits of *dispatch*:
 
 ``fetch_weights``
     ``/collective_rpc`` dispatches to worker methods by name and refuses
@@ -15,6 +14,13 @@ What remains are two limits of *dispatch*:
     (``vllm_server_actor``) collective-RPCs into this method. It is called
     *before* ``pause_generation`` so the checkpoint-delta download overlaps live
     generation.
+
+the LoRA receive target
+    ``lora.sync_mode=memory`` sends a PEFT adapter down the ordinary transport,
+    and the receiving engine needs the adapter's name, config and alias map to
+    apply it. The native round trip carries only names, dtypes and shapes, so
+    the target is armed out of band, one round at a time, through
+    ``skyrl_set_lora_receive_target`` (see ``weight_sync/lora_target.py``).
 
 sleep / wake
     ``EngineCore.sleep`` hardcodes ``clear_prefix_cache = level >= 1``
@@ -31,32 +37,65 @@ Usage:
 """
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 import torch
 
+from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+    normalize_fp8_kv_scales_after_wake,
+    patch_vllm_dummy_weight_boot_detection,
+    patch_vllm_fp8_kv_scale_boot_normalization,
+    patch_vllm_fp8_kv_scale_completion,
+)
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     batched_moe_wire_targets,
 )
+from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_libfabric_shim import (
+    ensure_ray_rdt_libfabric,
+)
+
+ensure_ray_rdt_libfabric()
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-# Everything below must run inside EVERY vLLM worker process: Worker.load_model
-# builds the weight-transfer engine through the factory, and the model-runner
-# recorder must be installed before load_model runs. vLLM loads this module
-# before model init, which is what guarantees it. Each is guarded because this
-# module is also imported from processes without the optional deps.
+# Must run inside EVERY vLLM worker process: post-sync hooks in the receive
+# engines need the process-local model runner, but vLLM only gives engines the
+# model object.
 try:
     from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
         apply_model_runner_registry_patch,
     )
 
     apply_model_runner_registry_patch()
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm":
+        raise
+
+# Must run inside EVERY vLLM worker process: Worker.load_model builds the
+# weight-transfer engine through the factory. vLLM loads this module before model
+# init, which is what guarantees it. Guarded because this module is also imported
+# from processes without the optional deps.
+try:
+    # Lets WorkerLoRAManager build an adapter from tensors staged by the
+    # receive engine (lora.sync_mode=memory) instead of from a directory.
+    from skyrl.backends.skyrl_train.patches.vllm.patch_lora_in_memory import (
+        apply_lora_in_memory_patch,
+    )
+
+    apply_lora_in_memory_patch()
 except ModuleNotFoundError:
     pass
+
+# Apply the compatibility patches before vLLM constructs each worker.
+# Must be installed before the two KV-scale patches run: it is what tells them
+# whether this engine booted from dummy weights (serialized FP8 weight sync) or
+# from a real checkpoint whose calibrated scales they must not touch.
+patch_vllm_dummy_weight_boot_detection()
+patch_vllm_fp8_kv_scale_boot_normalization()
+patch_vllm_fp8_kv_scale_completion()
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.register import (
@@ -71,7 +110,28 @@ except ModuleNotFoundError:
         exc_info=True,
     )
 
+# vLLM's AOT compile artifact directory carries no device, so engines on
+# different GPUs can overwrite each other's artifact and die with "CUDA driver
+# error: invalid argument". Scope it to the running device. Installed here for
+# the same reason as the registrations above: this module is loaded in every
+# worker process before model init, and the device is read lazily at compile
+# time, once it is live.
+# TODO (sumanthrh): Remove the patch after https://github.com/vllm-project/vllm/pull/53312 lands.
+from skyrl.backends.skyrl_train.patches.vllm.patch_compile_cache_device_path import (  # noqa: E402
+    apply_compile_cache_device_path_patch,
+)
 
+apply_compile_cache_device_path_patch()
+
+# GLM-5.3-Flash LoRA: the pinned vLLM has no packed_modules_mapping for the model's fused
+# projections, and its merged-LoRA loader ignores the replicated_shard_ids that KDA's
+# in_proj_qkvbfg_a declares. Installed here for the same reason as the patch above: this
+# module is loaded in every worker process before model init.
+from skyrl.backends.skyrl_train.patches.vllm.patch_glm5next_lora_packing import (  # noqa: E402
+    apply_glm5next_lora_packing_patch,
+)
+
+apply_glm5next_lora_packing_patch()
 # Runs in every vLLM worker process before the model is loaded, so the
 # LoRA-capability declaration is in place for the supports_lora() gate.
 from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E402
@@ -79,6 +139,22 @@ from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E40
 )
 
 apply_kimi_k25_lora_patch()
+
+# Online fp8_per_block quantization hands the torch.compile'd per_block_cast_to_fp8 a vLLM
+# parameter subclass, which dynamo cannot trace (RecursionError on the first weight sync).
+from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import (  # noqa: E402
+    apply_per_block_fp8_param_patch,
+)
+
+apply_per_block_fp8_param_patch()
+
+# R3 on monolithic MoE kernels (FlashInfer TRT-LLM FP8): the routed-experts capture callback is
+# bound once at startup and lost when a weight sync rebuilds the kernel (vllm#59449 / #59455).
+from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import (  # noqa: E402
+    apply_routed_experts_rebind_patch,
+)
+
+apply_routed_experts_rebind_patch()
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
@@ -174,7 +250,7 @@ def _load_batched_moe_fp8_tensor(
 
 def _load_checkpoint_weights(
     model: torch.nn.Module,
-    weights: list[tuple[str, torch.Tensor]],
+    weights: Iterable[tuple[str, torch.Tensor]],
     **kwargs: Any,
 ) -> Any:
     """Load ordinary checkpoint tensors and compact batched-MoE FP8 tensors."""
@@ -212,6 +288,38 @@ class NewInferenceWorkerWrap:
         if fetch is None:
             raise RuntimeError(f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights")
         return fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
+
+    def skyrl_set_lora_receive_target(self, receive_target: dict) -> None:
+        """Arm the next weight update to build a LoRA adapter, not the base model.
+
+        Called on every worker over ``/collective_rpc`` just before the trainer
+        runs ``send_weights()``. The arming lasts exactly one round; the engine
+        disarms itself at ``finish_weight_update``.
+        """
+        engine = self.weight_transfer_engine
+        if engine is None:
+            raise RuntimeError("Weight transfer not configured: set weight_transfer_config on the engine.")
+        arm = getattr(engine, "skyrl_set_lora_receive_target", None)
+        if arm is None:
+            raise RuntimeError(
+                f"{type(engine).__name__} cannot receive a LoRA adapter. "
+                "lora.sync_mode='memory' requires the skyrl_nccl or skyrl_ipc backend."
+            )
+        arm(receive_target)
+
+    def skyrl_discard_in_memory_lora(self, lora_name: str) -> bool:
+        """Free the staged tensors of an unloaded in-memory adapter.
+
+        Not routed through the engine: the staging registry is per worker
+        *process* (it outlives any one update round, so vLLM can rebuild the
+        adapter after an LRU eviction), and an unload can arrive when no weight
+        transfer is configured at all.
+        """
+        from skyrl.backends.skyrl_train.patches.vllm.patch_lora_in_memory import (
+            discard_in_memory_adapter,
+        )
+
+        return discard_in_memory_adapter(lora_name)
 
     # Suspend / resume for non-colocated weight sync.
     #
@@ -264,11 +372,11 @@ class NewInferenceWorkerWrap:
             draft = self._skyrl_draft_model()
             if draft is not None:
                 self._skyrl_restore_buffers(draft, "_skyrl_saved_draft_buffers")
-        # Re-init fp8 KV scales after the KV pool remaps (no-op without fp8 KV cache).
+        # Re-assert the serialized-FP8 KV scales after the KV pool remaps (no-op
+        # without fp8 KV cache or on a real-checkpoint boot). This path skips
+        # Worker.wake_up, so the vllm_compat wake patch never sees it.
         if tags is None or "kv_cache" in tags:
-            post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
-            if post_wake is not None:
-                post_wake()
+            normalize_fp8_kv_scales_after_wake(self.model_runner)
 
     def _skyrl_draft_model(self):
         """The spec-decode drafter module, or None when there is no drafter."""

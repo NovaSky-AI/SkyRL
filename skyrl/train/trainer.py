@@ -1,3 +1,4 @@
+import asyncio
 import math
 import os
 import shutil
@@ -7,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
@@ -45,6 +45,10 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     get_kl_controller,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SAMPLE_SUPPORT_PADDING,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -58,7 +62,7 @@ from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
-from skyrl.train.evaluate import evaluate, evaluate_step_wise
+from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -71,6 +75,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.utils import (
     Timer,
+    deadline,
     get_ray_pg_ready_with_timeout,
     trainer_utils,
 )
@@ -140,6 +145,9 @@ class RayPPOTrainer:
         self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
         )
+
+        self._metrics_finalized = False
+        self._resumed_from_checkpoint = False
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
@@ -236,6 +244,24 @@ class RayPPOTrainer:
             if self.cfg.trainer.max_training_steps is not None:
                 self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
 
+    async def finalize_metrics(self, status: str) -> None:
+        """Finalize observations before the tracker closes, including failed runs."""
+        if self._metrics_finalized:
+            return
+        self._metrics_finalized = True
+        self.tracker.run_status = status
+        try:
+            if self._vllm_metrics_scraper is not None:
+                summary = await asyncio.wait_for(self._vllm_metrics_scraper.finalize(), timeout=10)
+                if not self._resumed_from_checkpoint and (
+                    not self.cfg.generator.inference_engine.enable_pd or self._vllm_metrics_scraper.has_worker_roles
+                ):
+                    self.tracker.update_summary(summary)
+        except Exception as e:
+            logger.warning(f"Could not finalize vLLM metrics: {e}")
+        finally:
+            self.tracker.update_summary({"run_status": status})
+
     @torch.no_grad()
     async def eval(self, vllm_metrics_scraper: Optional[VLLMMetricsScraper] = None) -> Dict[str, float]:
         """
@@ -252,29 +278,16 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
-        if self.cfg.generator.step_wise_trajectories:
-            eval_metrics = await evaluate_step_wise(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_logger=self.trajectory_logger,
-                tracker=self.tracker,
-                vllm_metrics_scraper=vllm_metrics_scraper,
-            )
-        else:
-            eval_metrics = await evaluate(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_logger=self.trajectory_logger,
-                tracker=self.tracker,
-                vllm_metrics_scraper=vllm_metrics_scraper,
-            )
-        return eval_metrics
+        return await evaluate(
+            eval_dataloader=self.eval_dataloader,
+            generator=self.generator,
+            cfg=self.cfg,
+            global_step=self.global_step,
+            tokenizer=self.tokenizer,
+            trajectory_logger=self.trajectory_logger,
+            tracker=self.tracker,
+            vllm_metrics_scraper=vllm_metrics_scraper,
+        )
 
     async def train(self):
         """
@@ -284,7 +297,7 @@ class RayPPOTrainer:
             self._ray_gpu_monitor.start()
 
         # Initialize weight sync state between policy model and inference engines.
-        with Timer("init_weight_sync_state"):
+        async with self._weight_sync_deadline(), Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
         # Load checkpoint state if resumption is enabled.
@@ -293,7 +306,7 @@ class RayPPOTrainer:
                 self.global_step, _ = self.load_checkpoints()
 
         # Prepare weights for sampling
-        with Timer("sync_weights"):
+        async with self._weight_sync_deadline(), Timer("sync_weights"):
             await self.dispatch.save_weights_for_sampler()
 
         # Compute start_epoch up-front so callback metadata is ready before
@@ -348,7 +361,7 @@ class RayPPOTrainer:
                         if self._vllm_metrics_scraper is not None:
                             await self._vllm_metrics_scraper.start("vllm/train")
                             self._vllm_metrics_scraper.pause()
-                    with Timer("step", self.all_timings):
+                    async with self._step_deadline(), Timer("step", self.all_timings):
                         # for colocate_all=true, inference engine is always on GPU when starting the training step
 
                         # 0. truncate data to have even shards
@@ -367,7 +380,7 @@ class RayPPOTrainer:
                         # 1.1. generation phase
                         if self._vllm_metrics_scraper is not None:
                             self._vllm_metrics_scraper.resume()
-                        with Timer("generate", self.all_timings):
+                        with Timer("generate", self.all_timings), deadline.operation("generate"):
                             generator_output: GeneratorOutput = await self.generate(generator_input)
                         if self._vllm_metrics_scraper is not None:
                             self._vllm_metrics_scraper.pause()
@@ -462,7 +475,12 @@ class RayPPOTrainer:
                             # One profiler step per RL global step.
                             self._profiler_step()
 
-                        self._fire("on_step_end", batch=training_input, metrics=status)
+                        self._fire(
+                            "on_step_end",
+                            batch=training_input,
+                            metrics=status,
+                            trajectory_ids=generator_output.get("trajectory_ids"),
+                        )
                         step_started = False
 
                         # Capture callback-driven triggers, then reset.
@@ -499,7 +517,7 @@ class RayPPOTrainer:
                                 self.update_ref_with_policy()
 
                         # 10. Prepare weights for sampling
-                        with Timer("sync_weights", self.all_timings):
+                        async with self._weight_sync_deadline(), Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
                         # `sync_weights` above is the full bracket: it also pauses and
                         # resumes generation, which under vLLM DP costs seconds of
@@ -607,12 +625,12 @@ class RayPPOTrainer:
         # Safety net: always save final checkpoint at end of training.
         # Skip if we already saved at the last step
         if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
-            with Timer("save_checkpoints", self.all_timings):
+            async with self._step_deadline(), Timer("save_checkpoints", self.all_timings):
                 ckpt_path = self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
             self._fire("on_save", ckpt_path=ckpt_path)
         if self.cfg.trainer.hf_save_interval > 0 and not hf_model_save:
-            with Timer("save_hf_model", self.all_timings):
+            async with self._step_deadline(), Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
 
@@ -622,9 +640,7 @@ class RayPPOTrainer:
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        if self._vllm_metrics_scraper is not None:
-            await self._vllm_metrics_scraper.aclose()
-
+        await self.finalize_metrics("success")
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.stop()
 
@@ -650,6 +666,16 @@ class RayPPOTrainer:
             logger.warning(f"Failed to flush pending metrics at step {self.global_step}: {e}")
         self.all_metrics = {}
         self.all_timings = {}
+
+    def _step_deadline(self):
+        """Budget for one training step, or one save made outside a step (``trainer.step_timeout_s``)."""
+        return deadline.step_deadline(self.global_step, self.cfg.trainer.step_timeout_s)
+
+    def _weight_sync_deadline(self):
+        """Budget for one weight sync (``trainer.weight_sync_timeout_s``), nested within the step's."""
+        return deadline.step_deadline(
+            self.global_step, self.cfg.trainer.weight_sync_timeout_s, deadline.WeightSyncTimeoutError
+        )
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
         """Remove tail data to have even shards in terms of *effective* samples.
@@ -837,26 +863,34 @@ class RayPPOTrainer:
                         num_training_steps=critic_num_training_steps,
                     )
                 )
-            ray.get(refs)
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            deadline.ray_get(refs, "init_models")
+            deadline.ray_get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                "set_pad_token_id",
+            )
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
+                deadline.ray_get(ref_model.async_init_model(cfg.trainer.ref.model.path), "init_ref_model")
                 ref_model.offload_to_cpu()
-            ray.get(
+            deadline.ray_get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
                     num_training_steps=policy_num_training_steps,
-                )
+                ),
+                "init_policy_model",
             )
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            deadline.ray_get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                "set_pad_token_id",
+            )
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
-                ray.get(
+                deadline.ray_get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
                         num_training_steps=critic_num_training_steps,
-                    )
+                    ),
+                    "init_critic_model",
                 )
                 critic_model.offload_to_cpu()
 
@@ -905,6 +939,7 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
         rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
+        rollout_sample_support = generator_output.get("rollout_sample_support", None)
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)
@@ -927,6 +962,7 @@ class RayPPOTrainer:
             loss_masks_tensor,
             rollout_logprobs_tensor,
             rollout_expert_indices_tensor,
+            rollout_sample_support_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer.pad_token_id,
             prompt_ids,
@@ -935,6 +971,7 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
             rollout_expert_indices,
+            rollout_sample_support,
             max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
         router_padding_mask = None
@@ -965,6 +1002,7 @@ class RayPPOTrainer:
                 "rollout_logprobs": rollout_logprobs_tensor,
                 "rollout_expert_indices": rollout_expert_indices_tensor,
                 "router_padding_mask": router_padding_mask,
+                SAMPLE_SUPPORT_FIELD: rollout_sample_support_tensor,
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             },
@@ -993,12 +1031,26 @@ class RayPPOTrainer:
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
         logger.info(f"batch_num_seq: {batch_num_seq}, batch_padded_seq_len: {batch_padded_seq_len}")
-        self.all_metrics.update(
-            {
-                "generate/batch_num_seq": batch_num_seq,
-                "generate/batch_padded_seq_len": batch_padded_seq_len,
-            }
-        )
+        batch_metrics = {
+            "generate/batch_num_seq": batch_num_seq,
+            "generate/batch_padded_seq_len": batch_padded_seq_len,
+        }
+        # Add metrics for sample support replay if enabled
+        if rollout_sample_support_tensor is not None:
+            sample_support = rollout_sample_support_tensor.values
+            valid_per_token = (sample_support != SAMPLE_SUPPORT_PADDING).sum(dim=1)
+            valid_per_token = valid_per_token[valid_per_token > 0]
+            if valid_per_token.numel() > 0:
+                batch_metrics.update(
+                    {
+                        "generate/sample_support_size_mean": valid_per_token.float().mean().item(),
+                        "generate/sample_support_full_fraction": (valid_per_token == sample_support.shape[1])
+                        .float()
+                        .mean()
+                        .item(),
+                    }
+                )
+        self.all_metrics.update(batch_metrics)
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
@@ -1037,6 +1089,7 @@ class RayPPOTrainer:
             len(input_batch["prompts"]),
             generator_output,
             step_wise=self.cfg.generator.step_wise_trajectories,
+            routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
         )
 
         return generator_output
@@ -1360,6 +1413,9 @@ class RayPPOTrainer:
             fwd_keys.append("rollout_expert_indices")
         if training_input.get("router_padding_mask") is not None:
             fwd_keys.append("router_padding_mask")
+        if training_input.get(SAMPLE_SUPPORT_FIELD) is not None:
+            # The scorer validates that captured support backs every loss-active target.
+            fwd_keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
         if training_input.get("image_grid_thw") is not None:
@@ -1825,6 +1881,7 @@ class RayPPOTrainer:
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+        self._resumed_from_checkpoint = True
         saved_global_step = trainer_state.get("global_step", checkpoint_global_step)
         logger.info("Successfully loaded trainer metadata")
         if saved_global_step != checkpoint_global_step:

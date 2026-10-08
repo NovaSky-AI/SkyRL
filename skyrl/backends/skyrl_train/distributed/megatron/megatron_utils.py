@@ -22,7 +22,8 @@
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+import re
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -152,24 +153,132 @@ def get_moe_metrics(
     return metrics
 
 
+def _resolve_transformer_decoder(model: nn.Module) -> Optional[nn.Module]:
+    """Return the ``TransformerBlock`` holding the decoder layers, or None.
+
+    Text-only Megatron-Core models expose it as ``model.decoder``. Multimodal
+    models (``LLaVAModel`` and the per-architecture VLM classes derived from it)
+    nest the language tower one level down, as ``model.language_model.decoder``,
+    and have no ``decoder`` attribute of their own. Vision-only or embedding-only
+    stages have neither.
+    """
+    decoder = getattr(model, "decoder", None)
+    if decoder is not None:
+        return decoder
+    language_model = getattr(model, "language_model", None)
+    if language_model is not None:
+        return getattr(language_model, "decoder", None)
+    return None
+
+
+def _iter_transformer_layer_modules(model: nn.Module, decoder: nn.Module) -> Iterator[nn.Module]:
+    """Yield every module under the decoder layers and, when present, the MTP layers.
+
+    Walking whole subtrees reaches transformer layers that ``HybridStack`` wraps in
+    ``HyperConnectionHybridLayer.layer`` and the layer each MTP depth holds as
+    ``MultiTokenPredictionLayer.mtp_model_layer``. The MTP block sits beside the
+    decoder, as ``mtp`` on the same text-only model or language tower.
+    """
+    yield from decoder.layers.modules()
+    language_model = model if getattr(model, "decoder", None) is decoder else getattr(model, "language_model", None)
+    mtp = getattr(language_model, "mtp", None)
+    if mtp is not None:
+        yield from mtp.layers.modules()
+
+
 def freeze_moe_router(model_or_models: Union[nn.Module, List[nn.Module]]):
     models = model_or_models
     if not isinstance(model_or_models, list):
         models = [model_or_models]
 
+    froze_any = False
     for model in models:
-        for layer in model.decoder.layers:
+        decoder = _resolve_transformer_decoder(model)
+        if decoder is None:
+            logger.warning(
+                f"freeze_moe_router: no transformer decoder found on {type(model).__name__}; "
+                "skipping this model chunk. Router params on it stay trainable."
+            )
+            continue
+        for layer in _iter_transformer_layer_modules(model, decoder):
             if hasattr(layer, "mlp") and hasattr(layer.mlp, "router"):
                 if getattr(layer.mlp.router, "weight", None) is not None:
                     layer.mlp.router.weight.requires_grad = False
+                    froze_any = True
                 if getattr(layer.mlp.router, "bias", None) is not None:
                     layer.mlp.router.bias.requires_grad = False
+                    froze_any = True
+
+    if not froze_any:
+        logger.warning(
+            "freeze_moe_router: froze no router parameters. Either the model has no MoE "
+            "layers, or this rank holds only non-MoE pipeline stages."
+        )
+    # modified in-place
+    return model_or_models
+
+
+def _require_num_moe_experts(key: str, num_moe_experts: Optional[int]) -> int:
+    if num_moe_experts is None:
+        raise ValueError(
+            f"Shared-outer expert LoRA tensor {key!r} must be expanded to every expert, "
+            "but num_moe_experts was not provided"
+        )
+    return num_moe_experts
+
+
+def freeze_dsa_indexer(model_or_models: Union[nn.Module, List[nn.Module]]):
+    """Freeze the dynamic-sparse-attention indexer on every attention layer that has one.
+
+    The indexer scores keys and emits the top-k *indices* the sparse attention kernel
+    then gathers. When auxiliary indexer loss is disabled (dsa_indexer_loss_coeff=0),
+    these discrete indices provide no gradient to the indexer. Leaving it trainable
+    in that configuration is not merely wasteful: Megatron's
+    ``DistributedDataParallel`` buckets a parameter by ``requires_grad`` at
+    construction and, with ``overlap_grad_reduce``, asserts that every bucketed
+    parameter's backward hook fired before the bucket reduces.
+
+    Use this option for a fixed pretrained indexer. It removes the indexer from the
+    grad buffer and optimizer state; leave it disabled to train with auxiliary loss.
+    """
+    models = model_or_models
+    if not isinstance(model_or_models, list):
+        models = [model_or_models]
+
+    froze = 0
+    for model in models:
+        decoder = _resolve_transformer_decoder(model)
+        if decoder is None:
+            logger.warning(
+                f"freeze_dsa_indexer: no transformer decoder found on {type(model).__name__}; "
+                "skipping this model chunk. Indexer params on it stay trainable."
+            )
+            continue
+        for layer in _iter_transformer_layer_modules(model, decoder):
+            core_attention = getattr(getattr(layer, "self_attention", None), "core_attention", None)
+            indexer = getattr(core_attention, "indexer", None)
+            if indexer is None:
+                continue
+            for param in indexer.parameters():
+                if param.requires_grad:
+                    param.requires_grad = False
+                    froze += 1
+
+    if froze:
+        logger.info(f"freeze_dsa_indexer: froze {froze} indexer parameters")
+    else:
+        logger.warning(
+            "freeze_dsa_indexer: froze no indexer parameters. Either the model does not use "
+            "dynamic sparse attention, this rank holds only dense-attention pipeline stages, "
+            "or the indexer was already frozen."
+        )
     # modified in-place
     return model_or_models
 
 
 def _convert_moe_experts_lora_to_vllm(
     adapter_state: Dict[str, "torch.Tensor"],
+    num_moe_experts: Optional[int] = None,
 ) -> Dict[str, "torch.Tensor"]:
     """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
 
@@ -180,12 +289,24 @@ def _convert_moe_experts_lora_to_vllm(
     the flat PEFT layout keyed ``...experts.base_layer`` (w13) / ``...experts``
     (w2), with ``lora_A=(rank*E, in)`` and ``lora_B=(out, rank*E)``. This is the
     exact inverse of vLLM's per-expert reshape. Non-expert tensors pass through.
+
+    Shared-outer grouped-expert LoRA (``experts_shared_outer_loras=True``) exports
+    the shared side (gate_up lora_A / down lora_B) as a ``(1, ...)`` tensor under
+    an expert-agnostic name. vLLM has no shared-expert LoRA contract, so the
+    shared side is expanded to all ``num_moe_experts`` experts (mathematically
+    identical since every expert applies the same matrix): for packed-HF models
+    it joins the flat-layout rewrite above; for per-expert-HF models (keys like
+    ``...experts.<idx>.gate_proj``) it is replicated into per-expert indexed keys.
     """
+    uses_indexed_expert_keys = any(re.search(r"\.mlp\.experts\.\d+\.", key) for key in adapter_state)
+
     converted: Dict[str, "torch.Tensor"] = {}
     for key, tensor in adapter_state.items():
         is_gate_up = ".mlp.experts.gate_up_proj." in key
         is_down = ".mlp.experts.down_proj." in key
-        if (is_gate_up or is_down) and tensor.ndim == 3:
+        if (is_gate_up or is_down) and tensor.ndim == 3 and not uses_indexed_expert_keys:
+            if tensor.shape[0] == 1:
+                tensor = tensor.expand(_require_num_moe_experts(key, num_moe_experts), -1, -1)
             if key.endswith(".lora_A.weight"):
                 # (E, rank, in) -> (rank*E [expert-major], in)
                 tensor = tensor.reshape(-1, tensor.shape[-1]).contiguous()
@@ -196,6 +317,22 @@ def _convert_moe_experts_lora_to_vllm(
                 key = key.replace(".mlp.experts.gate_up_proj.", ".mlp.experts.base_layer.")
             else:
                 key = key.replace(".mlp.experts.down_proj.", ".mlp.experts.")
+            converted[key] = tensor
+            continue
+
+        shared_match = (
+            re.search(r"\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.(lora_[AB])\.weight$", key)
+            if uses_indexed_expert_keys
+            else None
+        )
+        if shared_match is not None and tensor.ndim == 3 and tensor.shape[0] == 1:
+            # Per-expert-HF model: replicate the shared side into the indexed
+            # per-expert keys vLLM's PEFT loader parses.
+            insert_pos = key.rindex(".mlp.experts.") + len(".mlp.experts.")
+            for expert_idx in range(_require_num_moe_experts(key, num_moe_experts)):
+                converted[f"{key[:insert_pos]}{expert_idx}.{key[insert_pos:]}"] = tensor[0].clone()
+            continue
+
         converted[key] = tensor
     return converted
 
@@ -495,6 +632,10 @@ def offload_megatron_optimizer(optimizers):
         return [opt]
 
     for _opt in _iter_opts(optimizers):
+        if _opt.optimizer is None:
+            # Stub sub-optimizer with no params on this rank, e.g. the dense group when
+            # LoRA only targets expert linears.
+            continue
         offload_megatron_copy_params(_opt)
         opt_state_dict_values = _opt.optimizer.state.values()
         for v in opt_state_dict_values:
@@ -512,6 +653,8 @@ def load_megatron_optimizer(optimizers):
         return [opt]
 
     for _opt in _iter_opts(optimizers):
+        if _opt.optimizer is None:
+            continue
         load_megatron_copy_params(_opt)
         # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu
         if hasattr(_opt.optimizer, "_move_new_state_to_right_device"):

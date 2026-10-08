@@ -6,6 +6,7 @@ so the wire conventions (byte layouts, NaN/sentinel fills) are checked
 against the exact code the client runs.
 """
 
+import json
 import math
 
 import numpy as np
@@ -122,6 +123,35 @@ def test_forward_backward_empty_outputs():
     output = roundtrip_forward_backward(result_data)
     assert output.loss_fn_outputs == []
     assert output.metrics == {"loss:sum": 0.0}
+
+
+def test_forward_backward_preserves_nonfinite_metrics_from_stored_future():
+    stored = types.ForwardBackwardOutput(
+        loss_fn_output_type="scalar",
+        loss_fn_outputs=[],
+        metrics={
+            "total_loss:sum": 1.0,
+            "importance_ratio:mean": math.nan,
+            "overflow:mean": math.inf,
+            "underflow:mean": -math.inf,
+        },
+    ).model_dump_json()
+    result_data = json.loads(stored)
+    assert result_data["metrics"]["importance_ratio:mean"] == "NaN"
+    assert result_data["metrics"]["overflow:mean"] == "Infinity"
+    assert result_data["metrics"]["underflow:mean"] == "-Infinity"
+
+    output = roundtrip_forward_backward(result_data)
+    assert output.metrics["total_loss:sum"] == 1.0
+    assert math.isnan(output.metrics["importance_ratio:mean"])
+    assert output.metrics["overflow:mean"] == math.inf
+    assert output.metrics["underflow:mean"] == -math.inf
+
+
+def test_forward_backward_legacy_null_metric_is_nan():
+    result_data = {"loss_fn_output_type": "scalar", "loss_fn_outputs": [], "metrics": {"importance_ratio:mean": None}}
+    output = roundtrip_forward_backward(result_data)
+    assert math.isnan(output.metrics["importance_ratio:mean"])
 
 
 def test_forward_backward_field_missing_in_one_datum():
@@ -246,8 +276,8 @@ async def test_read_forward_backward_request_zstd_proto_body():
 
 
 @pytest.mark.asyncio
-async def test_read_forward_backward_request_zstd_json_body():
-    """Content-Encoding applies to the raw body regardless of wire format."""
+async def test_read_forward_backward_request_json_body_raises_415():
+    """The JSON wire format of pre-0.25 SDKs is no longer accepted."""
     req = api.ForwardBackwardRequest(
         model_id="model_json",
         forward_backward_input=api.ForwardBackwardInput(
@@ -263,17 +293,25 @@ async def test_read_forward_backward_request_zstd_json_body():
             loss_fn="cross_entropy",
         ),
     )
-    compressed = zstandard.ZstdCompressor().compress(req.model_dump_json().encode())
-    parsed, forward_only = await api._read_forward_backward_request(
-        _StubRequest(compressed, {"content-encoding": "zstd"})
-    )
+    for content_type in (None, "application/json", "application/x-protobuf-v2", "fooapplication/x-protobuf"):
+        headers = {} if content_type is None else {"content-type": content_type}
+        with pytest.raises(HTTPException) as exc_info:
+            await api._read_forward_backward_request(_StubRequest(req.model_dump_json().encode(), headers))
+        assert exc_info.value.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_read_forward_backward_request_accepts_content_type_parameters():
+    """Media type parameters (and case) do not affect the content-type match."""
+    request = _StubRequest(encode_sdk_fwd_bwd_request(), {"content-type": "Application/X-Protobuf; charset=binary"})
+    parsed, forward_only = await api._read_forward_backward_request(request)
     assert not forward_only
-    assert parsed.model_id == "model_json"
+    assert parsed.model_id == "model_abc"
 
 
 @pytest.mark.asyncio
 async def test_read_forward_backward_request_bad_zstd_raises_422():
-    request = _StubRequest(b"\x00\x01 not zstd", {"content-encoding": "zstd"})
+    request = _StubRequest(b"\x00\x01 not zstd", {"content-type": PROTO_CONTENT_TYPE, "content-encoding": "zstd"})
     with pytest.raises(HTTPException) as exc_info:
         await api._read_forward_backward_request(request)
     assert exc_info.value.status_code == 422
