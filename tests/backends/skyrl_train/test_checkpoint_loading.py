@@ -4,7 +4,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from skyrl.backends.skyrl_train.workers.worker import Worker
-from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend
+from skyrl.backends.skyrl_train_backend import (
+    SkyRLTrainBackend,
+    SkyRLTrainBackendOverrides,
+)
 
 
 @pytest.mark.parametrize("load_optimizer", [False, True])
@@ -14,8 +17,10 @@ def test_load_checkpoint_restores_requested_training_state(tmp_path, load_optimi
         pass
 
     backend = object.__new__(SkyRLTrainBackend)
+    backend.config = SkyRLTrainBackendOverrides()
     backend._model_ids_to_role = {"model_test": "policy"}
     backend._dispatch = MagicMock()
+    backend._inference_engines_initialized = False
 
     backend.load_checkpoint(str(checkpoint_path), "model_test", load_optimizer=load_optimizer)
 

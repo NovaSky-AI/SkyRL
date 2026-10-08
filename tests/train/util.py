@@ -2,6 +2,8 @@
 
 from skyrl.train.config import (
     AlgorithmConfig,
+    DataConfig,
+    DataLoaderConfig,
     GeneratorConfig,
     InferenceEngineConfig,
     SamplingParams,
@@ -41,6 +43,14 @@ def example_dummy_config():
         max_turns=1,
         inference_engine=InferenceEngineConfig(),
     )
-    cfg = SkyRLTrainConfig(trainer=trainer_cfg, generator=generator_cfg)
+    # No dataloader worker processes for CPU tests. The default (8, derived in
+    # SkyRLTrainConfig.__post_init__) spawns eight fresh interpreters -- ~0.5 GB each once they
+    # import torch and skyrl -- the moment a test iterates a dataloader over a handful of dummy rows.
+    # StatefulDataLoader keeps that iterator alive with the trainer, so a test that leaves the loop
+    # early (a crash mid-step, an early stop) pins several GB until the cyclic GC runs. On a 16 GB CI
+    # runner that pushed the node past Ray's 95% memory threshold and its monitor killed the registry
+    # actors, failing unrelated tests in test_ppo_utils.py.
+    data_cfg = DataConfig(dataloader=DataLoaderConfig(num_workers=0))
+    cfg = SkyRLTrainConfig(trainer=trainer_cfg, generator=generator_cfg, data=data_cfg)
 
     return cfg

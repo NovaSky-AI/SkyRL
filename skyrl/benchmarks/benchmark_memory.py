@@ -262,6 +262,10 @@ class ServerManager:
             str(self.config.port),
             "--base-model",
             self.config.base_model,
+            # This benchmark installs the `gpu` extra (jax-cuda), so pin the
+            # backend rather than inheriting EngineConfig's default.
+            "--backend",
+            "jax",
             "--database-url",
             f"sqlite:///{self.config.db_path!s}",
             "--backend-config",

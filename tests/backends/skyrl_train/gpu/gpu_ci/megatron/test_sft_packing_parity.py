@@ -22,6 +22,8 @@ import torch
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_fp8_enabled,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
