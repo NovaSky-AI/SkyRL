@@ -180,3 +180,22 @@ def test_an_image_in_no_message_or_across_two_is_refused() -> None:
         attribute_media([Media("image", 13, 3, "a")], 10, chunks)
     with pytest.raises(TokenError, match="in no message"):
         attribute_media([Media("image", 19, 1, "a")], 10, chunks)
+
+
+async def test_a_message_whose_image_changed_is_a_new_node_with_the_new_image() -> None:
+    async with token_stack() as stack:
+        stack.renderer.no_bridge = True
+        created = await stack.create()
+        llm = client(created["base_url"])
+        messages: list[dict[str, Any]] = []
+        await ask(llm, messages, look("what is this?", image("cat", 3)))
+        # The same message, the same placeholder tokens, but the image now processes to other content.
+        stack.renderer.image_salt = "-v2"
+        await ask(llm, messages, user("sure?"))
+        graph = stack.server.trajectories[created["id"]].graph
+
+        assert stack.engine.requests[-1]["features"]["mm_hashes"] == {"image": ["cat-v2"]}
+        assert len(graph.roots()) == 2
+        assert [[m.hash for m in graph.nodes[root].tokens.media] for root in graph.roots()] == [["cat"], ["cat-v2"]]
+        (_, second) = build_samples(graph)
+        assert [item.hash for item in second.media] == ["cat-v2"]

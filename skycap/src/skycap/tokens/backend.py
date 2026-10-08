@@ -176,6 +176,10 @@ class TokensBackend:
 
         # A caller's own bound on the prompt, checked before inference: the trajectory stays open.
         max_prompt_tokens = chat.body.get("max_prompt_tokens")
+        if max_prompt_tokens is not None and (
+            isinstance(max_prompt_tokens, bool) or not isinstance(max_prompt_tokens, int) or max_prompt_tokens < 0
+        ):
+            return _error(f"max_prompt_tokens must be a non-negative integer, got {max_prompt_tokens!r}", 400)
         if max_prompt_tokens is not None and len(planned.prompt_ids) > max_prompt_tokens:
             return _error(
                 f"prompt of {len(planned.prompt_ids)} tokens exceeds max_prompt_tokens={max_prompt_tokens}",

@@ -74,6 +74,8 @@ class FakeRenderer:
         self.no_bridge = False
         #: The ``previous_media`` of each bridge that received some.
         self.bridged_media: list[list[Media]] = []
+        #: Appended to every image's hash: the same message's image, processed to different content.
+        self.image_salt = ""
 
     def _message(self, message: Mapping[str, Any], start: int) -> tuple[list[int], list[Media]]:
         tokens = [START, *encode(str(message.get("role"))), NL]
@@ -85,7 +87,8 @@ class FakeRenderer:
             elif part.get("type") == "image_url":
                 name, _, count = part["image_url"]["url"].removeprefix("fake://").partition("/")
                 tokens.append(IMG_START)
-                media.append(Media("image", start + len(tokens), int(count), name, image_data(name, int(count))))
+                digest = name + self.image_salt
+                media.append(Media("image", start + len(tokens), int(count), digest, image_data(name, int(count))))
                 tokens += [IMG] * int(count) + [IMG_END]
         tokens += [*encode(_body(message, self.empty_content)), END, NL]
         return tokens, media

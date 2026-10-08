@@ -188,3 +188,8 @@ def test_an_image_turn_bridges_to_exactly_the_full_render(vl_renderer: Renderers
     assert [(m.offset, m.length) for m in [*first.media, *bridged.media]] == [(m.offset, m.length) for m in full.media]
     for item in full.media:
         assert full.token_ids[item.offset : item.offset + item.length] == [pad] * item.length
+
+
+def test_processor_kwargs_for_a_text_only_model_are_refused(renderer: RenderersRenderer) -> None:
+    with pytest.raises(ValueError, match="processor_kwargs are for a multimodal model"):
+        RenderersRenderer(TOKENIZER, size=1, processor_kwargs={"max_pixels": 200704})

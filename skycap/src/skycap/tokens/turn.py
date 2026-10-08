@@ -375,7 +375,7 @@ def commit(
             author="client",
             message=messages[index],
             match_hash=turn.matches[index],
-            delta_hash=hashing.client_token_delta_hash(turn.matches[index], chunk),
+            delta_hash=hashing.client_token_delta_hash(turn.matches[index], chunk, turn.chunk_media[offset]),
             created_at=call.t_start,
             tokens=NodeTokens(
                 token_ids=list(chunk),

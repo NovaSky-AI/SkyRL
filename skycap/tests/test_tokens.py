@@ -820,3 +820,27 @@ async def test_without_a_record_an_ended_trajectory_can_be_dropped() -> None:
 def test_dropping_unrecorded_trajectories_needs_no_record_dir(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no record_dir"):
         CaptureServer(TokensBackend("http://engine", FakeRenderer()), record_dir=tmp_path, keep_unrecorded=False)
+
+
+@pytest.mark.parametrize("bound", ["20", -1, True, 2.5, {}])
+async def test_a_prompt_bound_that_is_not_a_non_negative_integer_is_refused(bound: Any) -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        with pytest.raises(openai.BadRequestError, match="max_prompt_tokens must be a non-negative integer"):
+            await llm.chat.completions.create(
+                model="policy", messages=[user("hi")], extra_body={"max_prompt_tokens": bound}
+            )
+
+        assert stack.engine.requests == []
+        assert stack.server.trajectories[created["id"]].is_open
+
+
+def test_a_client_node_without_images_keeps_its_delta_hash() -> None:
+    from skycap.hashing import client_token_delta_hash
+    from skycap.tokens.renderer import Media
+
+    assert client_token_delta_hash("m", [1, 2]) == client_token_delta_hash("m", [1, 2], [])
+    assert client_token_delta_hash("m", [1, 2], [Media("image", 0, 2, "a")]) != client_token_delta_hash(
+        "m", [1, 2], [Media("image", 0, 2, "b")]
+    )

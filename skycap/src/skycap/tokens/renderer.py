@@ -194,7 +194,9 @@ class RenderersRenderer:
         def build() -> tuple[Any, Any]:
             loaded = load_tokenizer(tokenizer)
             renderer = create_renderer(loaded, config, chat_template_kwargs=chat_template_kwargs)
-            if processor_kwargs and is_multimodal(renderer):
+            if processor_kwargs:
+                if not is_multimodal(renderer):
+                    raise ValueError(f"processor_kwargs are for a multimodal model; {tokenizer} renders text only")
                 from transformers import AutoProcessor
 
                 # A multimodal renderer loads its processor lazily, without kwargs; one given here wins.
@@ -214,7 +216,9 @@ class RenderersRenderer:
         with self._checkout() as (renderer, _):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
             self.multimodal = is_multimodal(renderer)
-        # Keyed by the item at offset 0, so by content: an image is encoded once, not every turn.
+        # An item's encoded vLLM features (its processed arrays) don't depend on where its placeholders
+        # sit; the offset is sent separately, in ``mm_placeholders``. So ``features`` keys this cache by the
+        # item moved to offset 0, which is its content, and an image is encoded once, not every turn.
         self._encode = lru_cache(maxsize=self.ENCODED_CACHE)(self._encode_item)
 
     @contextmanager
