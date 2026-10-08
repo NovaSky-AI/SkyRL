@@ -27,11 +27,10 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 import pytest
 import torch
 
-# The vendored engine/trainer import vllm at module scope, so this module cannot be
-# imported without the wheel. Both guards are needed: the importorskip lets collection
-# survive (a marker cannot -- pytest must import the module to read it), and the marker
-# is what the `-m "vllm"` CI job selects on.
-pytest.importorskip("vllm", reason="the vendored sharded_rdt engine imports vllm at module scope")
+# The native vLLM trainer imports at module scope, so this module cannot be
+# imported without the wheel. The import guard lets collection survive, and the
+# marker is what the ``-m vllm`` CI job selects.
+pytest.importorskip("vllm", reason="the SkyRL sharded_rdt trainer imports vllm at module scope")
 
 pytestmark = pytest.mark.vllm
 
@@ -41,8 +40,8 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_common impor
 )
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (  # noqa: E402
     DEFAULT_GATHER_LOOKAHEAD,
-    ShardedRDTTrainerInitInfo,
-    ShardedRDTTrainerWeightTransferEngine,
+    SkyRLShardedRDTTrainerInitInfo,
+    SkyRLShardedRDTTrainerWeightTransferEngine,
     _RDTProducerServer,
 )
 
@@ -270,8 +269,8 @@ def _loop_engine(server, n_groups, *, lookahead):
     state `_run_gather_loop` reads. The `_rpc` seam dispatches inline;
     `_publish_async` sees no `.remote` and runs inline too."""
     groups = [(f"model.layers.{gi}.w",) for gi in range(n_groups)]
-    e = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
-    e._init_info = ShardedRDTTrainerInitInfo(rank=0, num_consumers=1, gather_lookahead=lookahead)
+    e = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
+    e._init_info = SkyRLShardedRDTTrainerInitInfo(rank=0, num_consumers=1, gather_lookahead=lookahead)
     e.source = _CountingSource(groups)
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
@@ -713,7 +712,7 @@ class TestExportRing:
 
     @staticmethod
     def _engine():
-        eng = ShardedRDTTrainerWeightTransferEngine.__new__(ShardedRDTTrainerWeightTransferEngine)
+        eng = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
         eng._export_ring = [None, None]
         eng._export_ring_args = [None, None]
         return eng

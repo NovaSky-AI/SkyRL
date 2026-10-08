@@ -8,8 +8,14 @@ trunk and corrupts the RL policy.
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator
 
 import torch
+
+# Set while the MTP block is skipped, so no MTP chunks were appended to the hidden states.
+_MTP_BLOCK_SKIPPED: ContextVar[bool] = ContextVar("skyrl_mtp_block_skipped", default=False)
 
 
 def _skyrl_skip_native_mtp_loss(hidden_states, *args, **kwargs):
@@ -27,9 +33,27 @@ def _skyrl_skip_native_mtp_loss(hidden_states, *args, **kwargs):
     if config is None:
         config = next((a for a in args if hasattr(a, "mtp_num_layers")), None)
     num_layers = getattr(config, "mtp_num_layers", None) if config is not None else None
-    if not num_layers:
+    if not num_layers or _MTP_BLOCK_SKIPPED.get():
         return hidden_states
     return torch.chunk(hidden_states, 1 + num_layers, dim=0)[0]
+
+
+@contextmanager
+def mtp_block_skipped() -> Iterator[None]:
+    """Mark forwards in this block as having skipped the MTP block.
+
+    ``GPTModel`` still calls ``process_mtp_loss`` then, so the no-op must return the hidden states
+    whole rather than splitting off chunks that were never appended.
+    """
+    from megatron.core.transformer import multi_token_prediction as mtp_mod
+
+    if mtp_mod.process_mtp_loss is not _skyrl_skip_native_mtp_loss:
+        raise RuntimeError("Skipping the MTP block requires disable_native_mtp_loss() to have run.")
+    token = _MTP_BLOCK_SKIPPED.set(True)
+    try:
+        yield
+    finally:
+        _MTP_BLOCK_SKIPPED.reset(token)
 
 
 def _forbid_native_mtp_loss_autoscaler(*args, **kwargs):

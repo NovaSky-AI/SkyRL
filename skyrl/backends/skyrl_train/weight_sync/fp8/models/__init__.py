@@ -11,9 +11,11 @@ from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import (
 )
 
 # Importing a model module registers its spec.
+from skyrl.backends.skyrl_train.weight_sync.fp8.models.glm5 import GLM5_FP8_SPEC
 from skyrl.backends.skyrl_train.weight_sync.fp8.models.qwen35 import QWEN35_FP8_SPEC
 
 __all__ = [
+    "GLM5_FP8_SPEC",
     "ModelFp8Spec",
     "MoeExpertSpec",
     "MoeProjection",

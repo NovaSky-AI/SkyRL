@@ -8,11 +8,15 @@ import pytest
 from skyrl.backends.skyrl_train.inference_servers.common import (
     DP_TCPSTORE_WINDOW,
     SERVER_PORT_STRIDE,
+    ServerInfo,
     compute_dp_master_port,
+    default_bind_host,
     dp_tcpstore_probe_window,
     find_and_reserve_port,
+    format_http_url,
     get_node_ip,
     get_open_port,
+    is_ipv6_address,
 )
 
 
@@ -26,6 +30,50 @@ class TestGetIp:
         assert len(ip) > 0
         assert ip != ""
         assert "." in ip or ":" in ip
+
+
+class TestIPv6SafeAddressing:
+    """
+    On IPv6-only clusters ``ray.util.get_node_ip_address()`` returns a bare
+    IPv6 literal, which must be bracketed in URLs (RFC 3986) and bound with a
+    matching wildcard address.
+    """
+
+    @pytest.mark.parametrize(
+        "host, expected",
+        [
+            ("127.0.0.1", False),
+            ("10.0.0.1", False),
+            ("localhost", False),
+            ("worker-1.internal", False),
+            ("::1", True),
+            ("2602:fb33::5", True),
+            ("fe80::1%eth0", True),
+        ],
+    )
+    def test_is_ipv6_address(self, host, expected):
+        assert is_ipv6_address(host) is expected
+
+    def test_format_http_url_ipv4_unchanged(self):
+        assert format_http_url("10.0.0.1", 8100) == "http://10.0.0.1:8100"
+        assert format_http_url("10.0.0.1", 8100, "/health") == "http://10.0.0.1:8100/health"
+
+    def test_format_http_url_hostname_unchanged(self):
+        assert format_http_url("worker-1", 8000, "/metrics") == "http://worker-1:8000/metrics"
+
+    def test_format_http_url_brackets_ipv6(self):
+        assert format_http_url("2602:fb33::5", 8100) == "http://[2602:fb33::5]:8100"
+        assert format_http_url("::1", 8100, "/health") == "http://[::1]:8100/health"
+
+    def test_server_info_url_brackets_ipv6(self):
+        assert ServerInfo(ip="10.0.0.1", port=8000).url == "http://10.0.0.1:8000"
+        assert ServerInfo(ip="2602:fb33::5", port=8000).url == "http://[2602:fb33::5]:8000"
+
+    def test_default_bind_host_matches_address_family(self):
+        assert default_bind_host("10.0.0.1") == "0.0.0.0"
+        assert default_bind_host("worker-1") == "0.0.0.0"
+        assert default_bind_host("2602:fb33::5") == "::"
+        assert default_bind_host("::1") == "::"
 
 
 class TestGetOpenPort:
