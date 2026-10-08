@@ -3,7 +3,7 @@
 Run with:
 
     uv run --isolated --extra dev --extra megatron pytest -q -s \
-      tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_shared_expert_lora_tp.py
+      tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_shared_expert_lora_tp.py
 """
 
 from __future__ import annotations

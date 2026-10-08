@@ -193,6 +193,30 @@ def test_time_splits_concatenation():
     assert concat_metrics["generate/trajectory_time_other_mean"] == pytest.approx(2.5)
 
 
+def test_generator_specific_metrics_concatenate_by_the_words_of_their_key():
+    def make_output(metrics) -> GeneratorOutput:
+        return {
+            "prompt_token_ids": [[1]],
+            "response_ids": [[1, 2]],
+            "rewards": [1.0],
+            "loss_masks": [[1, 1]],
+            "stop_reasons": ["stop"],
+            "rollout_logprobs": None,
+            "rollout_metrics": metrics,
+        }
+
+    keys = ("x/setup_time_p95", "x/setup_time_max", "x/num_failed/TerminatedError", "x/step1_count")
+    out1 = make_output(dict(zip(keys, (2.0, 2.0, 1, 1))))
+    out2 = make_output(dict(zip(keys, (4.0, 5.0, 2, 3))))
+    metrics = concatenate_generator_outputs([out1, out2])["rollout_metrics"]
+
+    assert metrics["x/setup_time_p95"] == pytest.approx(3.0)
+    assert metrics["x/setup_time_max"] == 5.0
+    # Neither "min" inside "Terminated" nor "p1" inside "step1" is a word of the key: both are counts.
+    assert metrics["x/num_failed/TerminatedError"] == 3
+    assert metrics["x/step1_count"] == 4
+
+
 def test_time_splits_concatenation_partial_is_none():
     """A batch that recorded no splits drops the whole time-split aggregate to None."""
 
@@ -856,11 +880,13 @@ class TestMergeStepwiseOutput:
 
     @patch("skyrl.train.utils.utils.validate_batch_sizes", new=lambda cfg: None)
     @patch("skyrl.train.utils.utils.validate_generator_cfg", new=lambda cfg: None)
-    def test_validate_cfg_refuses_step_wise_with_routed_expert_capture(self):
+    def test_validate_cfg_refuses_merged_step_wise_with_routed_expert_capture(self):
+        # Step-wise rows may carry their own routes; merging them doesn't merge routes.
         cfg = example_dummy_config()
         cfg.generator.step_wise_trajectories = True
+        cfg.generator.merge_stepwise_output = True
         cfg.generator.inference_engine.enable_return_routed_experts = True
-        with pytest.raises(ValueError, match="first N prompt tokens"):
+        with pytest.raises(ValueError, match="prefix-aware merging does not merge routed experts"):
             validate_cfg(cfg)
 
 

@@ -43,7 +43,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     build_token_metadata_layout,
 )
 from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
-from skyrl.backends.skyrl_train.mtp.hidden_capture import maybe_capture_mtp_hidden
+from skyrl.backends.skyrl_train.mtp.hidden_capture import (
+    maybe_capture_mtp_hidden,
+    native_mtp_disabled,
+)
 from skyrl.backends.skyrl_train.mtp.soft_ce import (
     build_teacher_logits,
     draft_soft_ce,
@@ -510,35 +513,36 @@ class MegatronModelWrapper:
                     remove_microbatch_padding=self.remove_microbatch_padding,
                 )
 
-            if self._fused_lm_head:
-                # Fused LM-head inference: the output_processor returns decoder
-                # hidden states (not logits) and stashes the LM-head weight, so
-                # collection_func can fold the projection into the chunked
-                # log-prob op. Without this, a forward-only ref/old-logprob pass
-                # (e.g. PPO reference logprobs) at long context would still
-                # materialize the full [B, S, vocab//TP] logits and OOM.
-                _op_ctx: dict = {}
-                outputs = call_model_with_fused_lm_head(
-                    model,
-                    new_sequences,
-                    new_position_ids,
-                    to_te_attention_mask(new_attention_mask),
-                    packed_seq_params=packed_seq_params,
-                    output_processor=fused_lm_head_output_processor,
-                    output_processor_context=_op_ctx,
-                    **model_replay_kwargs,
-                    **vlm_inputs,
-                )
-                batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
-            else:
-                outputs = model(
-                    new_sequences,
-                    new_position_ids,
-                    to_te_attention_mask(new_attention_mask),
-                    packed_seq_params=packed_seq_params,
-                    **model_replay_kwargs,
-                    **vlm_inputs,
-                )
+            with native_mtp_disabled(model):
+                if self._fused_lm_head:
+                    # Fused LM-head inference: the output_processor returns decoder
+                    # hidden states (not logits) and stashes the LM-head weight, so
+                    # collection_func can fold the projection into the chunked
+                    # log-prob op. Without this, a forward-only ref/old-logprob pass
+                    # (e.g. PPO reference logprobs) at long context would still
+                    # materialize the full [B, S, vocab//TP] logits and OOM.
+                    _op_ctx: dict = {}
+                    outputs = call_model_with_fused_lm_head(
+                        model,
+                        new_sequences,
+                        new_position_ids,
+                        to_te_attention_mask(new_attention_mask),
+                        packed_seq_params=packed_seq_params,
+                        output_processor=fused_lm_head_output_processor,
+                        output_processor_context=_op_ctx,
+                        **model_replay_kwargs,
+                        **vlm_inputs,
+                    )
+                    batch["lm_head_weight"] = _op_ctx.get("lm_head_weight")
+                else:
+                    outputs = model(
+                        new_sequences,
+                        new_position_ids,
+                        to_te_attention_mask(new_attention_mask),
+                        packed_seq_params=packed_seq_params,
+                        **model_replay_kwargs,
+                        **vlm_inputs,
+                    )
 
             if not self.remove_microbatch_padding:
                 outputs = recover_left_padding(

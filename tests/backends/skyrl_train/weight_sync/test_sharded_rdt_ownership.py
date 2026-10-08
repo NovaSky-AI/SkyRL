@@ -451,6 +451,7 @@ class TestStampedYieldValidation:
         e._validate_held_yields(0, ["anything"], [None])
 
 
+@pytest.mark.megatron
 class TestQkvIndexDeviceCtx:
     """``_qkv_index_device_ctx`` keeps the QKV split's index tensors on the weight's
     device instead of the host, which is worth ~0.65s/sync at 235B (a CPU index
@@ -476,8 +477,6 @@ class TestQkvIndexDeviceCtx:
         return pm, seen
 
     def test_index_tensors_follow_the_weight_device(self, monkeypatch):
-        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
-
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
         pm, seen = self._fake_modules(monkeypatch)
@@ -489,8 +488,6 @@ class TestQkvIndexDeviceCtx:
     def test_cpu_weights_are_left_alone(self, monkeypatch):
         """The redirect must not fire for a host weight — there is nothing to fix and
         forcing a device would be a behaviour change."""
-        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
-
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
         pm, seen = self._fake_modules(monkeypatch)
@@ -501,8 +498,6 @@ class TestQkvIndexDeviceCtx:
     def test_originals_and_torch_arange_are_restored(self, monkeypatch):
         """torch.arange is patched process-wide for the duration of ONE call, so a
         leak would silently put every later index tensor on a device."""
-        pytest.importorskip("megatron.bridge.models.conversion.param_mapping")
-
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
         pm, _seen = self._fake_modules(monkeypatch)

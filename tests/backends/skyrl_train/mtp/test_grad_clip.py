@@ -36,13 +36,21 @@ def _clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm, use_decouple
 
 _fake_clip_grads.get_grad_norm_fp32 = _get_grad_norm_fp32
 _fake_clip_grads.clip_grad_by_total_norm_fp32 = _clip_grad_by_total_norm_fp32
-for _m in ("megatron", "megatron.core", "megatron.core.optimizer"):
-    sys.modules.setdefault(_m, types.ModuleType(_m))
-sys.modules["megatron.core.optimizer.clip_grads"] = _fake_clip_grads
+_MEGATRON_MODULES = {name: types.ModuleType(name) for name in ("megatron", "megatron.core", "megatron.core.optimizer")}
+_MEGATRON_MODULES["megatron.core.optimizer.clip_grads"] = _fake_clip_grads
 
-from skyrl.backends.skyrl_train.mtp.grad_clip import (  # noqa: E402
-    install_mtp_separate_grad_clip,
-)
+_saved_modules = {name: sys.modules.get(name) for name in _MEGATRON_MODULES}
+sys.modules.update(_MEGATRON_MODULES)
+try:
+    from skyrl.backends.skyrl_train.mtp.grad_clip import (  # noqa: E402
+        install_mtp_separate_grad_clip,
+    )
+finally:
+    for _name, _module in _saved_modules.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
 
 CLIP = 1.0
 

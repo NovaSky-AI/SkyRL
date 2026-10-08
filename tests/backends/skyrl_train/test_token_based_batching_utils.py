@@ -7,6 +7,7 @@ Run with:
 uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_train/test_token_based_batching_utils.py
 """
 
+from types import SimpleNamespace
 from typing import List
 
 import torch
@@ -21,6 +22,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
 )
+from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     TokenBasedBatchIterator,
     get_microbatch_iterator,
@@ -287,6 +289,83 @@ class TestTokenBasedBatchIterator:
         routes = microbatch["rollout_expert_indices"]
         assert routes.sequence_lengths.tolist() == [2]
         assert torch.equal(routes.segment(0), torch.full((2, 2, 3), 2, dtype=torch.int16))
+
+    def test_worker_forward_backward_restores_input_order(self, monkeypatch):
+        """Regression for the base (FSDP) Worker.forward_backward: with token-based
+        batching, per-sample ``loss_fn_outputs`` must come back in input order with
+        padding-microbatch entries dropped. Before the fix they were returned in
+        packed microbatch order, attributing one sample's logprobs/elementwise loss
+        to another (the megatron worker had the same bug, fixed in #2043)."""
+        marker_base = 1000
+        seq_lens = [8, 2, 6, 3, 5]
+        batch = self._make_batch(seq_lens)
+        # Tag each sample with a unique first-token marker so outputs are traceable.
+        for i in range(len(seq_lens)):
+            batch["sequences"][i, : seq_lens[i]] = marker_base + i
+
+        max_tokens = 8
+        # The test is only meaningful if packing actually permutes the samples.
+        reference = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=max_tokens)
+        packed_order = [i for mb in reference._microbatches for i in mb]
+        assert packed_order != list(range(len(seq_lens))), "packing no longer permutes; pick new seq_lens"
+
+        # Force one padding microbatch (normally added only under torch.distributed
+        # to equalize microbatch counts across DP ranks).
+        monkeypatch.setattr(
+            TokenBasedBatchIterator,
+            "_sync_num_microbatches",
+            lambda self: len(self._microbatches) + 1,
+        )
+        # Metric all-reduce needs a process group; it is not under test here.
+        monkeypatch.setattr(
+            "skyrl.backends.skyrl_train.workers.worker.all_reduce_metrics",
+            lambda metrics, strategy, group=None, sum_loss_metrics=False: metrics,
+        )
+
+        class _StubWorker(PolicyWorkerBase):
+            def __init__(self, cfg):
+                self.cfg = cfg
+                self.strategy = None
+                self.device_mesh = SimpleNamespace(get_group=lambda name: None)
+
+            def _forward_backward_micro(self, experience, microbatch_weight, **kwargs):
+                # One output per sample, identified by its first-token marker.
+                markers = experience.sequences[:, 0].tolist()
+                return {"loss": 1.0, "loss_fn_outputs": [{"logprobs": [float(m)]} for m in markers]}
+
+        worker = _StubWorker(SimpleNamespace(micro_train_batch_size_per_gpu=2, max_tokens_per_microbatch=max_tokens))
+        output = worker.forward_backward(batch, loss_fn="cross_entropy")
+
+        got = [o["logprobs"][0] for o in output.loss_fn_outputs]
+        assert got == [float(marker_base + i) for i in range(len(seq_lens))]
+
+        # Sample-based batching (max_tokens_per_microbatch <= 0) already preserves
+        # order; the flatten path must keep doing so.
+        worker = _StubWorker(SimpleNamespace(micro_train_batch_size_per_gpu=2, max_tokens_per_microbatch=-1))
+        output = worker.forward_backward(batch, loss_fn="cross_entropy")
+        got = [o["logprobs"][0] for o in output.loss_fn_outputs]
+        assert got == [float(marker_base + i) for i in range(len(seq_lens))]
+
+    def test_worker_forward_backward_no_per_token_outputs(self, monkeypatch):
+        """Callers that skip per-token outputs (metrics-only) still get an empty list."""
+        batch = self._make_batch([8, 2, 6])
+        monkeypatch.setattr(
+            "skyrl.backends.skyrl_train.workers.worker.all_reduce_metrics",
+            lambda metrics, strategy, group=None, sum_loss_metrics=False: metrics,
+        )
+
+        class _StubWorker(PolicyWorkerBase):
+            def __init__(self, cfg):
+                self.cfg = cfg
+                self.strategy = None
+                self.device_mesh = SimpleNamespace(get_group=lambda name: None)
+
+            def _forward_backward_micro(self, experience, microbatch_weight, **kwargs):
+                return {"loss": 1.0}
+
+        worker = _StubWorker(SimpleNamespace(micro_train_batch_size_per_gpu=2, max_tokens_per_microbatch=8))
+        output = worker.forward_backward(batch, loss_fn="cross_entropy")
+        assert output.loss_fn_outputs == []
 
     def test_multimodal_tensorlist_microbatching(self):
         """Token-based microbatching must gather TensorList fields (multi-modal pixel_values /

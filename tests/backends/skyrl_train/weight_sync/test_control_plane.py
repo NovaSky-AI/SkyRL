@@ -16,6 +16,7 @@ import pytest
 from skyrl.backends.skyrl_train.weight_sync.control_plane import (
     FINISH_UPDATE_ENDPOINT,
     INIT_ENGINE_ENDPOINT,
+    START_DRAFT_UPDATE_ENDPOINT,
     START_UPDATE_ENDPOINT,
     UPDATE_WEIGHTS_ENDPOINT,
     SkyrlWeightSyncClient,
@@ -71,6 +72,7 @@ def make_client(monkeypatch):
         client._urls = list(urls)
         client._dp = max(1, dp)
         client._init_payload_fn = init_payload_fn
+        client._start_endpoint = START_UPDATE_ENDPOINT
         client._session = _FakeSession(fail_url=fail_url, fail_body=fail_body)
         client._pool = ThreadPoolExecutor(max_workers=len(urls))
         return client
@@ -170,6 +172,30 @@ class TestClientFanout:
         assert bodies[1] == {"update_info": {"names": ["w"]}}
         # weight_version is omitted entirely when unset, so the route's default applies.
         assert bodies[2] is None
+
+    def test_draft_session_routes_only_the_start_to_the_drafter(self, make_client):
+        """vLLM's trainer engines only call start_weight_update; the draft route is
+        what retargets the receive engine, and /finish_weight_update restores it."""
+        client = make_client(["http://a"])
+        with client.draft_session():
+            client.start_weight_update()
+            client.update_weights({"names": ["w"]})
+            client.finish_weight_update()
+        client.start_weight_update()
+        assert [url for url, _ in client._session.calls] == [
+            f"http://a{START_DRAFT_UPDATE_ENDPOINT}",
+            f"http://a{UPDATE_WEIGHTS_ENDPOINT}",
+            f"http://a{FINISH_UPDATE_ENDPOINT}",
+            f"http://a{START_UPDATE_ENDPOINT}",
+        ]
+
+    def test_draft_session_restores_the_main_start_on_error(self, make_client):
+        client = make_client(["http://a"])
+        with pytest.raises(RuntimeError):
+            with client.draft_session():
+                raise RuntimeError("send failed")
+        client.start_weight_update()
+        assert client._session.calls[-1][0] == f"http://a{START_UPDATE_ENDPOINT}"
 
     def test_fanout_posts_concurrently(self, make_client):
         """RDT needs every worker's update RPC in flight together to make progress."""
