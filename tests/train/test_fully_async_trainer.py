@@ -18,6 +18,7 @@ from skyrl.train.fully_async_trainer import (
     _AsyncStalenessManager,
 )
 from skyrl.train.utils.async_utils import BackgroundFailure
+from skyrl.train.utils.trainer_utils import build_dataloader
 
 
 def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
@@ -135,6 +136,66 @@ async def test_async_dataloader_load_state_without_filtered_is_backward_compatib
     adl.load_state_from_checkpoint({"0", "1"})
     assert adl.num_trained() == 2
     assert adl.get_filtered_uids_list() == []
+
+
+class _UidPrompts(list):
+    """Single-prompt items with the ``collate_fn`` that ``build_dataloader`` expects."""
+
+    @staticmethod
+    def collate_fn(batch):
+        return batch[0]
+
+
+def _make_fully_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
+    """Build an _AsyncDataloader over the shuffled train loader that fully async training uses."""
+    cfg = SimpleNamespace(
+        trainer=SimpleNamespace(train_batch_size=mini_batch_size, eval_batch_size=1, seed=42, epochs=3),
+        data=SimpleNamespace(dataloader=SimpleNamespace(num_workers=0, persistent_workers=False)),
+    )
+    dataset = _UidPrompts([{"uid": str(i)}] for i in range(num_prompts))
+    loader = build_dataloader(cfg, dataset, is_train=True, is_fully_async=True)
+    return _AsyncDataloader(loader, mini_batch_size)
+
+
+async def _drain_uids(adl: _AsyncDataloader) -> list:
+    uids = []
+    while (prompts := await adl.get_next_non_consumed_data()) is not None:
+        uids.append(prompts[0]["uid"])
+    return uids
+
+
+@pytest.mark.asyncio
+async def test_async_dataloader_reshuffles_each_epoch():
+    adl = _make_fully_async_dataloader(num_prompts=16, mini_batch_size=2)
+
+    orders = []
+    for epoch in range(3):
+        adl.start_epoch(epoch)
+        orders.append(await _drain_uids(adl))
+        await adl.reset_at_epoch_end()
+
+    assert all(sorted(order, key=int) == [str(i) for i in range(16)] for order in orders)
+    assert len({tuple(order) for order in orders}) == 3
+
+
+@pytest.mark.asyncio
+async def test_async_dataloader_resume_replays_the_epoch_order():
+    """A resumed epoch draws the live epoch's remaining prompts in the same order, whatever loader
+    position the checkpoint holds."""
+    live = _make_fully_async_dataloader(num_prompts=16, mini_batch_size=2)
+    live.start_epoch(1)
+    epoch_order = await _drain_uids(live)
+
+    resumed = _make_fully_async_dataloader(num_prompts=16, mini_batch_size=2)
+    # Simulate a checkpointed loader position that ran ahead of the trained prompts.
+    ahead = iter(resumed._train_dataloader)
+    for _ in range(6):
+        next(ahead)
+    resumed._train_dataloader.load_state_dict(resumed._train_dataloader.state_dict())
+    resumed.load_state_from_checkpoint(set(epoch_order[:4]), {epoch_order[3]})
+    resumed.start_epoch(1)
+
+    assert await _drain_uids(resumed) == epoch_order[4:]
 
 
 # --------------------------------------------------------------------------------------

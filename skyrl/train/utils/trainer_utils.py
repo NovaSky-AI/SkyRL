@@ -11,6 +11,7 @@ import ray
 import torch
 from loguru import logger
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
@@ -918,10 +919,18 @@ def build_dataloader(
     num_workers = cfg.data.dataloader.num_workers
     assert num_workers is not None, "dataloader `num_workers` should be non-null"
 
+    # Fully async training rewinds the loader to its initial state at every epoch, which also
+    # rewinds the shuffle generator. A sampler seeded by `trainer.seed` and the epoch number
+    # gives each epoch its own order.
+    sampler = None
+    if is_train and is_fully_async:
+        sampler = DistributedSampler(dataset, num_replicas=1, rank=0, shuffle=True, seed=cfg.trainer.seed)
+
     dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size if not is_fully_async else 1,
-        shuffle=True if is_train else False,
+        shuffle=is_train and sampler is None,
+        sampler=sampler,
         collate_fn=dataset.collate_fn,
         num_workers=num_workers,
         # Unlike `shuffle`/`drop_last`, not branched on `is_train`: both dataloaders are
