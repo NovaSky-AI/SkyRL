@@ -39,6 +39,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
 | `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
 | `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
+| `gpu_ci/patches/megatron/test_mhc_full_recompute.py` | `glm5_next/provider.py` `finalize` (mHC + full recompute), `patch_moe_release_dispatcher_probs.py` (loss/grads vs no recompute on a GLM-5.3-Flash slice) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -116,6 +117,8 @@ Two pieces, which may land separately.
   - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
     `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
     `TransformerLayer._forward_mlp`.
+  - Its full recompute relies on `patch_moe_release_dispatcher_probs.py` (below), which is not
+    mHC-specific.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
   no `NotImplementedError` for MoE. Check that it honors `mlp_chunks_for_training` before switching.
   - Status at megatron-core `ed9c2c8c`: upstream's layer accepts MoE (it only rejects MoE CUDA-graph
@@ -124,15 +127,17 @@ Two pieces, which may land separately.
 - **Remove:**
   - `glm5_next/layer_specs.py`: build the specs on megatron-core's layer.
   - `workers/megatron/megatron_worker.py`: the `enable_mhc_connections` block in `init_configs`
-    downgrades `recompute_granularity="full"` to selective and drops `'mhc'`. It exists because
-    megatron-core rejects mHC under full recompute, and our layer doesn't implement the mHC
-    recompute managers that megatron-core's suggested alternative (`'mhc'` in
-    `recompute_modules`) needs. With upstream's layer, keep a downgrade from full to selective
-    **with** `'mhc'` in `recompute_modules`, or delete the block entirely if upstream now allows
-    full recompute with mHC. SkyRL's default config is full recompute, and the GLM roundtrip
-    tests run on defaults.
+    downgrades `recompute_granularity="full"` to selective and drops `'mhc'` for any mHC layer
+    *other than* ours (`supports_mhc_full_recompute`); ours keeps full recompute through
+    `Glm5NextModelProvider.finalize`, which bypasses megatron-core's mHC + full-recompute guard
+    (removed upstream by #7521: delete the override then). Moving GLM onto upstream's layer takes
+    it off that bypass: then keep a
+    downgrade from full to selective **with** `'mhc'` in `recompute_modules`, or delete the block
+    entirely if upstream now allows full recompute with mHC. SkyRL's default config is full
+    recompute, and the GLM roundtrip tests run on defaults.
   - Delete `mcore_ext/mhc_transformer_layer.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`,
+- **Verify:** `gpu_ci/patches/megatron/test_mhc_full_recompute.py`,
+  `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`,
   `patches/megatron/mcore_ext/test_mhc_moe_chunking.py`; the GLM roundtrip rows.
   These run with the default full recompute, so they exercise the worker block above.
 
