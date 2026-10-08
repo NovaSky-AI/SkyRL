@@ -56,8 +56,8 @@ Compare engines with similar capacity.
 SkyRL filters metrics to the Ray WorkerIds of the inference server actors it
 launches. Those IDs belong to the API server processes, where vLLM records
 the metrics. The filter does not follow replacement actors. If SkyRL cannot
-obtain these IDs, it disables collection. External deployments have no such
-filter; keep other workloads off the cluster when collecting their metrics.
+obtain these IDs, it disables collection. External deployments require their
+SkyRL servers to expose worker metadata, as described below.
 
 Missing counters and ratios with zero denominators are omitted. A failed
 scrape clears the step baseline, and a decreasing counter invalidates that
@@ -97,10 +97,64 @@ Loading a checkpoint disables run aggregates while preserving step metrics.
 `LATEST` with no checkpoint still counts as a fresh run. A hard kill cannot
 publish final summaries or status.
 
-Prefill/decode deployments keep step collection and raw Ray metrics. Generic
-run summaries are omitted: both roles can report the same prompt and request,
-and prefill can emit a placeholder output token. These need separate accounting
-before their totals can be used for run comparisons.
+### Prefill/decode metrics
+
+For SkyRL-managed prefill/decode deployments, metrics are collected separately
+from each role's server actors. Summary keys add a role after the scope:
+`vllm_correct_aggregate/eval/prefill/prompt_tokens_total` and
+`vllm_correct_aggregate/eval/decode/output_tokens_total`, for example. Step keys
+use the same role segment, such as `vllm/eval/prefill/ttft_seconds_avg`.
+
+Each role uses the same metrics and reductions as a regular deployment,
+including running/waiting requests, KV usage, throughput and latency. Engine
+imbalance is computed within each role. Separate queue charts can show whether
+requests are waiting at prefill or decode. Fully async step keys use
+`vllm/prefill/...` and `vllm/decode/...`; sync keys also include `train` or `eval`.
+Scheduler gauges remain step snapshots and are not added to run summaries.
+
+These are engine observations: both roles can count the same prompt, and
+prefill can report a placeholder output token. SkyRL keeps those observations
+in their role scopes without adding the two roles' totals or merging their
+latency histograms. Missing series and undefined ratios remain omitted.
+
+Role TTFT measures time within that engine's request. Prefill and decode TTFT
+describe different parts of serving and cannot be added to obtain client TTFT.
+End-to-end latency includes the proxy and transfer path and needs separate
+client instrumentation.
+
+Both roles retain the fresh-run, baseline and finalization rules above. A
+missing worker or reset omits the affected role's summary. External PD
+deployments without known prefill/decode worker membership disable collection.
+
+### External servers in the same Ray cluster
+
+Launch the servers with `skyrl.train.entrypoints.serve` and enable
+`generator.inference_engine.enable_ray_prometheus_stats=true` on the serving
+config. Enable the same setting in the client config. The client setting
+controls collection; it does not change an already running server's logger.
+
+Set `generator.inference_engine.external_server_urls` to the individual backend
+URLs and `run_engines_locally=false`. You can also set `external_proxy_url` for
+generation through the existing router. SkyRL queries each backend's
+`/get_metrics_worker_info` endpoint for its Ray frontend WorkerId and PD role.
+Collection then uses the same worker filters, role scopes and fresh-run
+summaries as internally launched servers. The servers and client must use the
+same Ray cluster so its metrics agents expose those WorkerIds. If an expected
+WorkerId is absent from the local exports, the affected collector skips the
+snapshot and omits its run summary; it never substitutes unrelated engines.
+Known roles come from the servers, so an external client does not need to
+repeat the serving configuration's `enable_pd` setting for role collection.
+
+Each client run takes its own baseline before generation, excluding earlier
+work served by those engines. Other clients must not send requests to the same
+engines during the measured run; their counters are shared. Engine replacement
+and checkpoint-resume rules remain the same.
+
+Older or non-SkyRL servers, disabled server stats, and proxy-only configurations
+may not expose worker metadata. SkyRL disables collection in that case, and
+also when backend metadata requests fail or PD roles are invalid or incomplete.
+It does not fall back to cluster-wide collection. Generation continues without
+engine step metrics or run summaries.
 
 ## Mark runs in Grafana
 

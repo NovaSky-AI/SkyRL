@@ -19,6 +19,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | test | covers |
 |---|---|
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
+| `patches/megatron/mcore_ext/test_hyper_connection_proj_rms.py` (CPU) | `mcore_ext/hyper_connection.py` projection: bitwise vs plain autograd, no saved FP32 copy |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection, query chunking |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
@@ -26,6 +27,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -76,7 +78,9 @@ model, `glm5_next/` is deleted too.
 Two pieces, which may land separately.
 
 **a) Standard-RMSNorm input norm**
-- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`).
+- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`; its FP32
+  projection is checkpointed so backward keeps the activation-dtype input, not the FP32 upcast:
+  2 GiB per mHC site at 32k tokens per rank. #7521 still saves the upcast; worth proposing there).
 - **Landed?** `TransformerConfig` has `mhc_norm_eps` / `mhc_norm_eps_inside_sqrt`, and
   `HyperConnectionModule` reads them.
 - **Remove:**
@@ -200,6 +204,20 @@ softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
 - **Remove:** the `patch_sparse_mla_nope()` call in `MegatronWorker.make_megatron_module`, the
   module, and its CPU and GPU tests (`test_sparse_mla_nope.py`, and its line in
   `ci/gpu_ci_run_h100.sh`).
+
+### `patch_moe_release_dispatcher_probs.py`: no upstream PR yet
+
+`MoEAlltoAllTokenDispatcher.dispatch_preprocess` stores `self.probs` (the router output, with its
+`grad_fn`) and only the same forward's `combine_preprocess` reads it. Kept until the next forward,
+it pins that forward's autograd graph; under full recompute that is every MoE layer's recomputed
+graph for the rest of backward (~21 GiB/GPU at 64k tokens on GLM-5.3-Flash). Generic MoE + full
+recompute, not GLM- or mHC-specific (NVIDIA/Megatron-LM#7521 makes it reachable for megatron-core's
+own mHC layers). The release wraps `MoELayer.postprocess`, where every MoE forward ends, so
+patches that replace dispatcher methods can't drop it. Applied unconditionally in
+`make_megatron_module`.
+- **Landed?** megatron-core's dispatcher clears `self.probs` after the combine (or stops storing it).
+- **Remove:** the module, its call in `make_megatron_module`, and
+  `patches/megatron/test_moe_release_dispatcher_probs.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 
