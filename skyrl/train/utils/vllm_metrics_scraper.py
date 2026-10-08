@@ -214,6 +214,7 @@ class VLLMMetricsScraper:
         self._urls = urls if urls is not None else discover_ray_metrics_urls()
         self._timeout = request_timeout_s
         self._worker_ids = None if worker_ids is None else frozenset(worker_ids)
+        self._role_scrapers: Dict[str, VLLMMetricsScraper] = {}
         self.run_statistics = RunStatistics()
         self._prev_aggregated: Optional[Dict[str, float]] = None
         self._prev_timestamp: Optional[float] = None
@@ -237,8 +238,61 @@ class VLLMMetricsScraper:
             )
 
     def set_worker_ids(self, worker_ids: Iterable[str]) -> None:
-        """Restrict snapshots to the fixed set of servers launched for this run."""
+        """Restrict snapshots to a fixed set of inference frontend workers."""
         self._worker_ids = frozenset(worker_ids)
+        self._role_scrapers = {}
+
+    @property
+    def has_worker_roles(self) -> bool:
+        """Whether both PD roles have known, separate worker membership."""
+        return bool(self._role_scrapers)
+
+    def set_worker_roles(self, worker_ids_by_role: Dict[str, Iterable[str]]) -> None:
+        """Collect prefill and decode independently using their launched workers."""
+        groups = {role: frozenset(ids) for role, ids in worker_ids_by_role.items()}
+        if set(groups) != {"prefill", "decode"} or not all(groups.values()):
+            raise ValueError("PD metrics require nonempty prefill and decode worker groups")
+        if not groups["prefill"].isdisjoint(groups["decode"]):
+            raise ValueError("Prefill and decode metric workers must be disjoint")
+        self._worker_ids = groups["prefill"] | groups["decode"]
+        self._role_scrapers = {
+            role: VLLMMetricsScraper(urls=self._urls, request_timeout_s=self._timeout, worker_ids=ids)
+            for role, ids in groups.items()
+        }
+
+    async def set_external_servers(self, server_urls: Iterable[str], enable_pd: bool) -> None:
+        """Resolve frontend worker identities from external SkyRL servers."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            responses = await asyncio.gather(
+                *(client.get(url.rstrip("/") + "/get_metrics_worker_info") for url in server_urls)
+            )
+        workers = []
+        groups = {"prefill": [], "decode": []}
+        for response in responses:
+            response.raise_for_status()
+            info = response.json()
+            worker = info.get("worker_id")
+            if not isinstance(worker, str) or not worker:
+                raise ValueError("External server did not identify its Ray metrics worker")
+            workers.append(worker)
+            role = info.get("role")
+            if role is not None:
+                groups[role].append(worker)
+        if enable_pd or any(groups.values()):
+            if sum(len(ids) for ids in groups.values()) != len(workers):
+                raise ValueError("External PD servers must all report a prefill or decode role")
+            self.set_worker_roles(groups)
+        else:
+            self.set_worker_ids(workers)
+
+    def _role_metrics(self, results: List[Dict[str, float]]) -> Dict[str, float]:
+        """Keep the existing metrics under separate prefill and decode scopes."""
+        out = {}
+        for role, metrics in zip(self._role_scrapers, results):
+            for key, value in metrics.items():
+                prefix, name = key.rsplit("/", 1)
+                out[f"{prefix}/{role}/{name}"] = value
+        return out
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -246,6 +300,7 @@ class VLLMMetricsScraper:
         return self._client
 
     async def aclose(self) -> None:
+        await asyncio.gather(*(scraper.aclose() for scraper in self._role_scrapers.values()))
         if self._client is not None:
             await self._client.aclose()
             self._client = None
@@ -276,9 +331,9 @@ class VLLMMetricsScraper:
     async def _read_snapshot(self) -> Optional[Dict[str, float]]:
         """Scrape every agent and reduce to one cumulative value per metric.
 
-        Returns ``None`` when no endpoints are configured.
+        Returns ``None`` when no endpoints are configured or collection is disabled.
         """
-        if not self._urls:
+        if not self._urls or (self._worker_ids is not None and not self._worker_ids):
             return None
 
         parsed = await self._fetch_all()
@@ -349,6 +404,10 @@ class VLLMMetricsScraper:
     async def finalize(self) -> Dict[str, float]:
         """Attempt one final collection and close the HTTP client."""
         try:
+            if self._role_scrapers:
+                return self._role_metrics(
+                    await asyncio.gather(*(scraper.finalize() for scraper in self._role_scrapers.values()))
+                )
             if self._label is not None:
                 await self.stop()
             else:
@@ -364,6 +423,10 @@ class VLLMMetricsScraper:
         time since the previous call); ``None`` falls back to the wall-clock
         interval (fully-async overlap).
         """
+        if self._role_scrapers:
+            return self._role_metrics(
+                await asyncio.gather(*(scraper.sample(generation_time_s) for scraper in self._role_scrapers.values()))
+            )
         snapshot = await self._read_snapshot()
         if snapshot is None:
             self.run_statistics.incomplete.add("combined")
@@ -398,6 +461,14 @@ class VLLMMetricsScraper:
         """
         if self._label is not None:
             raise ValueError(f"`start({label!r})` called while window {self._label!r} is still open")
+        if self._role_scrapers:
+            await asyncio.gather(*(scraper.start(label) for scraper in self._role_scrapers.values()))
+            # Both roles begin timing after their baselines are ready.
+            started = time.monotonic()
+            for scraper in self._role_scrapers.values():
+                scraper._active_since = started
+            self._label = label
+            return
         self._window_prev = await self._read_snapshot()
         self._window_engines = self._engine_snapshot
         self._label = label
@@ -407,6 +478,10 @@ class VLLMMetricsScraper:
 
     def pause(self) -> None:
         """Stop accumulating active time until the next :meth:`resume`."""
+        if self._role_scrapers:
+            for scraper in self._role_scrapers.values():
+                scraper.pause()
+            return
         if self._label is None:
             raise ValueError("`pause` called without an open window")
         if self._paused:
@@ -417,6 +492,10 @@ class VLLMMetricsScraper:
 
     def resume(self) -> None:
         """Resume accumulating active time after a :meth:`pause`."""
+        if self._role_scrapers:
+            for scraper in self._role_scrapers.values():
+                scraper.resume()
+            return
         if self._label is None:
             raise ValueError("`resume` called without an open window")
         if not self._paused:
@@ -433,6 +512,10 @@ class VLLMMetricsScraper:
         """
         if self._label is None:
             raise ValueError("`stop` called without an open window")
+        if self._role_scrapers:
+            result = self._role_metrics(await asyncio.gather(*(s.stop() for s in self._role_scrapers.values())))
+            self._label = None
+            return result
         new_snapshot = await self._read_snapshot()
         if not self._paused:
             self._window_time_s += time.monotonic() - self._active_since

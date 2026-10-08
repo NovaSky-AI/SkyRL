@@ -16,7 +16,6 @@ import inspect
 import os
 import sys
 import time
-import traceback
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Set, Tuple
 
@@ -42,6 +41,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
+from skyrl.train.utils.async_utils import BackgroundFailure, cancel_background_tasks
 from skyrl.train.utils.metrics import ScalarGauges, TrainingPhaseGauge
 from skyrl.train.utils.trainer_utils import (
     ResumeMode,
@@ -470,11 +470,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
 
         # Initialize weight sync state
-        with Timer("init_weight_sync_state"):
+        async with self._weight_sync_deadline(), Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
         # sync weights to inference engines
-        with Timer("sync_weights_to_inference_engines"):
+        async with self._weight_sync_deadline(), Timer("sync_weights_to_inference_engines"):
             await self.dispatch.save_weights_for_sampler()
 
         # Per-step GPU utilization to the tracker. The base loop starts, flushes, and stops the
@@ -497,6 +497,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step += 1  # start training at global_step 1
         stop_training = False
         self._profiler_start()
+        generator_tasks: List[asyncio.Task] = []
+        generators_done_watcher: Optional[asyncio.Task] = None
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
                 self.epoch = epoch
@@ -504,10 +506,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
                 generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize)
+                # First generation-worker exception; consumers waiting on the buffer raise it.
+                generation_failure = BackgroundFailure()
 
                 # Maintain self.num_parallel_generation_workers concurrent group-generation workers
                 generator_tasks = [
-                    asyncio.create_task(self._run_generate_for_a_group_loop(generation_output_group_buffer))
+                    asyncio.create_task(
+                        self._run_generate_for_a_group_loop(generation_output_group_buffer, generation_failure)
+                    )
                     for _ in range(self.num_parallel_generation_workers)
                 ]
 
@@ -517,19 +523,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 all_generators_done = asyncio.Event()
                 generators_done_watcher = None
                 if self.sample_full_batch:
-
-                    async def _watch_generators_done(tasks=generator_tasks, event=all_generators_done):
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                        event.set()
-
-                    generators_done_watcher = asyncio.create_task(_watch_generators_done())
+                    generators_done_watcher = asyncio.create_task(
+                        self._watch_generators_done(generator_tasks, all_generators_done, generation_failure)
+                    )
 
                 # Steps trained in THIS epoch (not global_step % num_steps_per_epoch: sample_full_batch can
                 # end an epoch early, drifting global_step out of epoch alignment). On resume the dataloader
                 # already reflects this epoch's trained steps. The range below is just an upper bound.
                 trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
                 for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                    with Timer("step", self.all_timings):
+                    async with self._step_deadline(), Timer("step", self.all_timings):
                         self._loop_gauges.set(
                             "skyrl_gen_buffer_qsize",
                             generation_output_group_buffer.qsize(),
@@ -543,7 +546,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             cur_dropped_groups,
                             epoch_exhausted,
                         ) = await self._collect_generation_mini_batch(
-                            generation_output_group_buffer, all_generators_done
+                            generation_output_group_buffer, all_generators_done, generation_failure
                         )
 
                         if epoch_exhausted:
@@ -597,8 +600,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             )
 
                         # 4. After training: pause generation, sync weights, resume.
-                        with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
-                            await self.dispatch.save_weights_for_sampler()
+                        async with self._weight_sync_deadline():
+                            with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
+                                await self.dispatch.save_weights_for_sampler()
                         # `sync_weights` above is the full bracket: it also pauses and
                         # resumes generation, which under vLLM DP costs seconds of
                         # coordinator quiesce that is not weight-sync work. The
@@ -634,12 +638,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
                     if self.cfg.trainer.ckpt_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                            with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                                await asyncio.to_thread(self.save_checkpoints)
+                            async with self._step_deadline():
+                                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                                    await asyncio.to_thread(self.save_checkpoints)
                     if self.cfg.trainer.hf_save_interval > 0:
                         if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                            with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                                await asyncio.to_thread(self.save_models)
+                            async with self._step_deadline():
+                                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                                    await asyncio.to_thread(self.save_models)
 
                     timing_payload = {"timing/" + k: v for k, v in self.all_timings.items()}
                     if self._ray_gpu_monitor is not None:
@@ -663,6 +669,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         if generators_done_watcher is not None:
                             generators_done_watcher.cancel()
                             await asyncio.gather(generators_done_watcher, return_exceptions=True)
+                        generation_failure.raise_if_failed()
                         stop_training = True
                         break
 
@@ -687,13 +694,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # Cancel generator tasks for this epoch
                 for t in generator_tasks:
                     t.cancel()
-                try:
-                    await asyncio.gather(*generator_tasks, return_exceptions=True)
-                except Exception:
-                    pass
+                await asyncio.gather(*generator_tasks, return_exceptions=True)
                 if generators_done_watcher is not None:
                     generators_done_watcher.cancel()
                     await asyncio.gather(generators_done_watcher, return_exceptions=True)
+                generation_failure.raise_if_failed()
 
                 # Per-epoch reset/validation for data loading and staleness management
                 assert all(
@@ -706,6 +711,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
                 # End of an epoch.
+        except BaseException:
+            tasks_to_stop = [*generator_tasks]
+            if generators_done_watcher is not None:
+                tasks_to_stop.append(generators_done_watcher)
+            await cancel_background_tasks(tasks_to_stop)
+            raise
         finally:
             self._profiler_stop()
             if self._ray_gpu_monitor is not None:
@@ -720,13 +731,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
-            with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint.")
+            async with self._step_deadline():
+                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                    await asyncio.to_thread(self.save_checkpoints)
+                    logger.info("Saved final checkpoint.")
         if self.cfg.trainer.hf_save_interval > 0:
-            with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                await asyncio.to_thread(self.save_models)
-                logger.info("Saved final model.")
+            async with self._step_deadline():
+                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                    await asyncio.to_thread(self.save_models)
+                    logger.info("Saved final model.")
 
         # Drain any in-flight async checkpoint write before teardown. Unconditional:
         # a save may have happened outside the periodic path. No-op when nothing is pending.
@@ -738,23 +751,41 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.tracker.finish()
         logger.info("Training done!")
 
+    @staticmethod
+    async def _watch_generators_done(
+        tasks: List[asyncio.Task], all_generators_done: asyncio.Event, failure: BackgroundFailure
+    ) -> None:
+        """Set ``all_generators_done`` once every worker exits, unless one failed: consumers are woken by
+        the failure instead, so it can't read as epoch exhaustion."""
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if not failure.failed:
+            all_generators_done.set()
+
     async def _drain_next_group(
-        self, buffer: asyncio.Queue, all_generators_done: asyncio.Event
+        self, buffer: asyncio.Queue, all_generators_done: asyncio.Event, failure: BackgroundFailure
     ) -> Optional[GeneratedOutputGroup]:
         """Return the next generated group, or None if generation is exhausted (all workers finished
-        and the buffer is empty).
+        and the buffer is empty). Raises the recorded worker failure, if any, instead of blocking.
 
         Only used under ``sample_full_batch``, where dropping groups can exhaust the epoch mid
         mini-batch and a plain blocking ``buffer.get()`` would hang forever.
         """
         while True:
+            failure.raise_if_failed()
             if not buffer.empty():
                 return buffer.get_nowait()
             if all_generators_done.is_set():
                 return None
             get_task = asyncio.ensure_future(buffer.get())
             done_task = asyncio.ensure_future(all_generators_done.wait())
-            done, pending = await asyncio.wait({get_task, done_task}, return_when=asyncio.FIRST_COMPLETED)
+            try:
+                done, pending = await failure.guard(
+                    asyncio.wait({get_task, done_task}, return_when=asyncio.FIRST_COMPLETED)
+                )
+            except BaseException:
+                get_task.cancel()
+                done_task.cancel()
+                raise
             if get_task in done:
                 for t in pending:
                     t.cancel()
@@ -793,6 +824,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self,
         generation_output_group_buffer: asyncio.Queue,
         all_generators_done: asyncio.Event,
+        failure: BackgroundFailure,
     ) -> Tuple[List[GeneratedOutputGroup], List[GeneratedOutputGroup], bool]:
         """Pull a full mini-batch of generated groups from the buffer.
 
@@ -813,12 +845,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             while len(kept_groups) < self.mini_batch_size:
                 # We do finish-time FIFO here (not schedule-time FIFO).
                 if not self.sample_full_batch:
-                    kept_groups.append(await generation_output_group_buffer.get())
+                    kept_groups.append(await failure.guard(generation_output_group_buffer.get()))
                     buffer_pbar.update(1)
                     buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                     continue
 
-                group = await self._drain_next_group(generation_output_group_buffer, all_generators_done)
+                group = await self._drain_next_group(generation_output_group_buffer, all_generators_done, failure)
                 if group is None:
                     epoch_exhausted = True
                     break
@@ -842,7 +874,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     @staticmethod
     def _log_group_processing_error(group: GeneratedOutputGroup, kept_so_far: int, dropped_so_far: int) -> None:
         """Log the offending group's reward / loss-mask shape before a drain-loop error propagates,
-        flushing stderr (generator ``os._exit`` on teardown can otherwise drop buffered output)."""
+        flushing stderr so the log isn't lost if the process dies during teardown."""
         go = group.generator_output
         rewards = go.get("rewards") if isinstance(go, dict) else None
         loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
@@ -887,10 +919,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return status
 
-    async def _run_generate_for_a_group_loop(self, generation_output_group_buffer: asyncio.Queue):
+    async def _run_generate_for_a_group_loop(
+        self, generation_output_group_buffer: asyncio.Queue, failure: BackgroundFailure
+    ):
         """
         Generator worker: repeatedly pulls the next prompt (possibly blocked by staleness control),
         generates one single generation group, respecting a pause/resume event, and enqueues the result.
+        An exception is recorded in ``failure`` (waking the consumer) and re-raised.
         """
         try:
             while True:
@@ -949,8 +984,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 slot_acquired = False
         except asyncio.CancelledError:
             # Expected on epoch end / shutdown: release any held slot so staleness accounting stays
-            # consistent, then exit cleanly. (Previously os._exit(1) here, which crashed the process and
-            # masked the real traceback when the cancel was triggered by a training-loop error.)
+            # consistent, then exit cleanly.
             if "slot_acquired" in locals() and slot_acquired:
                 try:
                     await self._staleness_manager.on_rollout_rejected()
@@ -958,10 +992,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     pass
             return
         except Exception as e:
-            logger.error(f"Generator worker errored out with exception: {e}")
-            logger.error(f"Traceback: \n{traceback.format_exc()}")
-            sys.stderr.flush()  # flush before os._exit, which otherwise drops buffered output
-            os._exit(1)
+            # Logged here too: the consumer only raises it at its next buffer wait.
+            logger.error(f"Generator worker errored out with exception: {e!r}")
+            failure.record(e, "generation worker")
+            raise
 
     @staticmethod
     def _reprefix_metrics(metrics: dict, suffix: str) -> dict:

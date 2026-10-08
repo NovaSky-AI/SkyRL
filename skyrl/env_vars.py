@@ -39,6 +39,13 @@ SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S = int(
 Timeout for waiting until the inference server is healthy.
 """
 
+SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S = float(os.environ.get("SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S", 600))
+"""
+Per-request timeout for control-plane calls from `RemoteInferenceClient` to the inference servers (pause, resume,
+sleep, wake_up, weight updates, LoRA load/unload, ...). Defaults to `SKYRL_WORKER_NCCL_TIMEOUT_IN_S`'s default.
+``<= 0`` disables it. Data-plane requests (generate, chat completions, ...) are not bounded.
+"""
+
 SKYRL_HTTP_CONNECTION_LIMIT = int(os.environ.get("SKYRL_HTTP_CONNECTION_LIMIT", 50_000))
 """
 Maximum number of concurrent HTTP connections for the inference client, router,
