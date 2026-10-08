@@ -199,8 +199,25 @@ class TestLoRAConfigFieldRoundTrip:
         }
 
     def test_defaults_match_the_tinker_sdk(self):
+        """Pinned against `tinker.LoraConfig`'s own defaults.
+
+        train_unembed is True there, not False: the SDK sends it on every
+        request, so treating it as opt-in would misread what clients ask for.
+        """
         cfg = api.LoRAConfig(rank=8)
-        assert (cfg.seed, cfg.train_attn, cfg.train_mlp, cfg.train_unembed) == (None, True, True, False)
+        assert (cfg.seed, cfg.train_attn, cfg.train_mlp, cfg.train_unembed) == (None, True, True, True)
+
+    def test_defaults_are_checked_against_the_installed_sdk(self):
+        """Fails if a future SDK release changes a default out from under us."""
+        import tinker
+
+        sdk_defaults = {
+            name: field.default
+            for name, field in tinker.LoraConfig.model_fields.items()
+            if name in {"seed", "train_attn", "train_mlp", "train_unembed"}
+        }
+        ours = {name: api.LoRAConfig.model_fields[name].default for name in sdk_defaults}
+        assert ours == sdk_defaults
 
     @pytest.mark.parametrize("train_attn", [True, False])
     @pytest.mark.parametrize("train_mlp", [True, False])

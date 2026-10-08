@@ -538,7 +538,10 @@ class LoRAConfig(BaseModel):
     )
     train_attn: bool = Field(default=True, description="Whether to add LoRA to the attention layers.")
     train_mlp: bool = Field(default=True, description="Whether to add LoRA to the MLP (and MoE) layers.")
-    train_unembed: bool = Field(default=False, description="Whether to add LoRA to the unembedding layer.")
+    # Defaults mirror tinker.types.LoraConfig, including train_unembed=True --
+    # the SDK sends it on every request, so a server-side default of False would
+    # never apply and would misrepresent what clients actually ask for.
+    train_unembed: bool = Field(default=True, description="Whether to add LoRA to the unembedding layer.")
 
     def to_types(self, *, seed: int, alpha: float) -> types.LoraConfig:
         """Convert to the internal type, resolving the server-chosen values.

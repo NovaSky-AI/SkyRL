@@ -16,10 +16,8 @@ All adapters registered against one server must share the same `(rank, alpha, tr
 
 `train_attn` and `train_mlp` are honoured on the **FSDP** backend, where they narrow PEFT's `"all-linear"` to the attention or MLP projections. See the [`lora_flags` example](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/lora_flags).
 
-Two cases are rejected rather than silently ignored:
-
-- **`train_unembed=True`** on the skyrl-train backend. PEFT's `"all-linear"` already excludes the output layer, so there is nothing to narrow; honouring the flag would mean targeting `lm_head` separately, which is architecture-sensitive (tied embeddings). Use `--backend jax`, which supports it, or leave it `False` (Tinker's default).
-- **A non-default `train_attn` / `train_mlp` on Megatron.** Megatron builds its LoRA target list from fixed module names rather than by inspecting the model. Use `trainer.strategy=fsdp`, or name the modules directly in `trainer.policy.model.lora.target_modules`.
+- **`train_unembed` is not honoured on the skyrl-train backend**, and a request with `train_unembed=True` logs a warning. PEFT's `"all-linear"` already excludes the output layer, so there is nothing to narrow; honouring the flag would mean targeting `lm_head` separately, which is architecture-sensitive (tied embeddings). It is a warning rather than an error because the Tinker SDK **defaults `train_unembed` to `True`** — every client sends it, so rejecting would break all of them. Use `--backend jax` for unembedding support.
+- **A non-default `train_attn` / `train_mlp` on Megatron is rejected.** Megatron builds its LoRA target list from fixed module names rather than by inspecting the model. Since both default to `True`, this only fires when a narrower adapter was explicitly asked for. Use `trainer.strategy=fsdp`, or name the modules directly in `trainer.policy.model.lora.target_modules`.
 
 At least one of `train_attn` / `train_mlp` must be `True`: an adapter covering no modules would have nothing to train.
 

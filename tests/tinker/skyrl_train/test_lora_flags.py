@@ -10,6 +10,9 @@ needs a backend extra. No Ray cluster and no GPU. Run:
     pytest tests/tinker/skyrl_train/test_lora_flags.py
 """
 
+import logging
+from contextlib import contextmanager
+
 import pytest
 
 from skyrl.backends.skyrl_train_backend import (
@@ -48,14 +51,59 @@ def test_defaults_adapt_both_groups():
     assert cfg.trainer.policy.model.lora.target_modules == "all-linear"
 
 
-def test_train_unembed_is_rejected_not_ignored():
-    """PEFT's "all-linear" skips the output layer, so honouring it is impossible here.
+@contextmanager
+def _capture_skyrl_logs():
+    """Collect records off the ``skyrl`` logger.
 
-    Accepting and ignoring would be a silent no-op, the failure mode #1279 exists
-    to remove; fail loudly instead.
+    ``caplog`` cannot see them: ``skyrl/utils/log.py`` sets ``propagate=False``,
+    so nothing reaches the root logger pytest attaches to.
     """
-    with pytest.raises(NotImplementedError, match="train_unembed"):
-        _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora(train_unembed=True))
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    skyrl_logger = logging.getLogger("skyrl")
+    skyrl_logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        skyrl_logger.removeHandler(handler)
+
+
+def test_train_unembed_warns_but_does_not_break_the_client():
+    """PEFT's "all-linear" skips the output layer, so it cannot be honoured here.
+
+    It also cannot be rejected: the Tinker SDK defaults `train_unembed` to True,
+    so a hard error would break every client that never set it. Warn instead, so
+    the limitation is visible without being breaking.
+    """
+    with _capture_skyrl_logs() as records:
+        cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora(train_unembed=True))
+
+    assert cfg.trainer.policy.model.lora.rank == 8
+    warnings = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+    assert any("train_unembed" in m for m in warnings), warnings
+
+
+def test_sdk_default_lora_config_is_accepted():
+    """The exact config `create_lora_training_client(rank=8)` produces must work.
+
+    Regression guard: an earlier revision rejected train_unembed=True, which is
+    the SDK default, and broke every caller that passed no flags at all.
+    """
+    import tinker
+
+    sdk_cfg = tinker.LoraConfig(rank=8)
+    lora = types.LoraConfig(
+        rank=sdk_cfg.rank,
+        alpha=32.0,
+        seed=0,
+        train_attn=sdk_cfg.train_attn,
+        train_mlp=sdk_cfg.train_mlp,
+        train_unembed=sdk_cfg.train_unembed,
+    )
+    cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), lora)
+    assert cfg.trainer.policy.model.lora.train_attn is True
+    assert cfg.trainer.policy.model.lora.train_mlp is True
 
 
 def test_flags_are_not_applied_without_lora():

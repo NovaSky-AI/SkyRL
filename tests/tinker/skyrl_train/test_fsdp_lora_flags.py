@@ -120,10 +120,22 @@ def _make_datum(tokenizer, prompt: str, completion: str):
     )
 
 
+def _find_export(lora_sync_path: str, filename: str) -> str:
+    """Locate an exported adapter file under the configured sync path.
+
+    The worker writes to a per-model subdirectory whenever a LoRA signature is
+    registered (``_resolve_lora_sync_target`` in workers/worker.py), which is
+    every LoRA model, so search rather than assuming the layout.
+    """
+    matches = [os.path.join(root, filename) for root, _dirs, files in os.walk(lora_sync_path) if filename in files]
+    assert matches, f"no {filename} exported anywhere under {lora_sync_path}"
+    assert len(matches) == 1, f"expected one {filename}, found {matches}"
+    return matches[0]
+
+
 def _adapter_leaf_names(lora_sync_path: str) -> set[str]:
     """Leaf module names that received a LoRA adapter, read off the export."""
-    weights_file = os.path.join(lora_sync_path, "adapter_model.safetensors")
-    assert os.path.exists(weights_file), f"no adapter exported to {lora_sync_path}"
+    weights_file = _find_export(lora_sync_path, "adapter_model.safetensors")
     leaves = set()
     for key in load_file(weights_file):
         parts = key.split(".")
@@ -176,7 +188,7 @@ def test_adapter_config_records_the_narrowed_targets():
     with tempfile.TemporaryDirectory() as sync_dir:
         with _api_server(8034, sync_dir):
             _train_one_step_and_export(8034, train_attn=True, train_mlp=False)
-            with open(os.path.join(sync_dir, "adapter_config.json")) as f:
+            with open(_find_export(sync_dir, "adapter_config.json")) as f:
                 config = json.load(f)
 
     assert config["r"] == LORA_RANK
