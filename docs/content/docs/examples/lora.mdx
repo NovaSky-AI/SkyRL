@@ -52,6 +52,13 @@ trainer:
 
 ## Running LoRA Training
 
+For text-only training of a vision-language model (for example, Qwen3.5) with FSDP,
+you can set `trainer.policy.language_model_only=true` to load only its language
+model. LoRA export restores the enclosing `language_model` namespace so vLLM
+can match the adapter weights to its inference modules.
+This follows the same namespace convention as full-weight synchronization;
+support for other VLM architectures depends on their inference-model naming.
+
 Here's a complete example of running LoRA training on GSM8K:
 
 ### Dataset Preparation

@@ -9,8 +9,9 @@ bypassing the engine subprocess's serial scheduling loop.
 Coverage:
   - test_engine_state_published: after ``save_weights_for_sampler``, the
     engine's vLLM proxy URL is written to ``EngineStateDB``.
-  - test_sample_uses_external_path: an issued sample creates a future of
-    type ``EXTERNAL`` (not ``SAMPLE``) and resolves successfully.
+  - test_sample_uses_external_path: an issued sample resolves successfully
+    without writing any ``FutureDB`` row — external sample futures live
+    purely in the API process's in-memory store.
   - test_sample_concurrent_with_training_is_fast: the central
     parallelism test. While a long-running stream of ``forward_backward``
     + ``optim_step`` calls is in flight, a sample request resolves in
@@ -169,17 +170,18 @@ def _read_engine_state(db_path: str):
         engine.dispose()
 
 
-def _read_future_request_type(db_path: str, request_id: int) -> str:
-    """Read the request_type of a single future from the test server's DB."""
-    from sqlmodel import Session, create_engine
+def _read_external_future_ids(db_path: str) -> set[int]:
+    """Read the IDs of terminal EXTERNAL futures from the test server's DB."""
+    from sqlmodel import Session, create_engine, select
 
+    from skyrl.tinker import types as skyrl_types
     from skyrl.tinker.db_models import FutureDB
 
     engine = create_engine(f"sqlite:///{db_path}", echo=False)
     try:
         with Session(engine) as session:
-            row = session.get(FutureDB, request_id)
-            return None if row is None else str(row.request_type)
+            statement = select(FutureDB.request_id).where(FutureDB.request_type == skyrl_types.RequestType.EXTERNAL)
+            return set(session.exec(statement).all())
     finally:
         engine.dispose()
 
@@ -211,16 +213,13 @@ def test_engine_state_published(server_db_path):
 
 
 def test_sample_uses_external_path(server_db_path):
-    """A sample issued through the SDK creates a FutureDB row of type EXTERNAL.
+    """A sample issued through the SDK resolves without writing any FutureDB row.
 
     This is the "test" half of the design: the API hoists the sample off
-    the engine's serial loop and into the API process's asyncio loop.
+    the engine's serial loop and into the API process's in-memory store, so
+    the sample never touches the database. A regression that re-routes
+    samples through the DB path would leave a new EXTERNAL row behind.
     """
-    from sqlmodel import Session, create_engine, func, select
-
-    from skyrl.tinker import types as skyrl_types
-    from skyrl.tinker.db_models import FutureDB
-
     proc, db_path, _ = server_db_path
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)
     tc = sc.create_lora_training_client(base_model=BASE_MODEL, rank=8)
@@ -229,14 +228,7 @@ def test_sample_uses_external_path(server_db_path):
     _train_one_step(tc, tok)
     sampler = tc.save_weights_and_get_sampling_client(name="external_path_a")
 
-    # Snapshot the max future_id before submitting our sample so we can
-    # filter out any EXTERNAL futures from earlier tests.
-    eng = create_engine(f"sqlite:///{db_path}", echo=False)
-    try:
-        with Session(eng) as s:
-            max_before = s.exec(select(func.max(FutureDB.request_id))).one() or 0
-    finally:
-        eng.dispose()
+    future_ids_before = _read_external_future_ids(db_path)
 
     out = sampler.sample(
         prompt=tinker_types.ModelInput.from_ints(tok.encode("Hi", add_special_tokens=True)),
@@ -245,23 +237,14 @@ def test_sample_uses_external_path(server_db_path):
     ).result()
     assert len(out.sequences) == 1
 
-    # Look for an EXTERNAL future with id > max_before. If async routing
-    # is on, every sample creates exactly one such row.
-    eng = create_engine(f"sqlite:///{db_path}", echo=False)
-    try:
-        with Session(eng) as s:
-            stmt = (
-                select(FutureDB.request_id, FutureDB.request_type)
-                .where(FutureDB.request_id > max_before)
-                .where(FutureDB.request_type == skyrl_types.RequestType.EXTERNAL)
-            )
-            rows = s.exec(stmt).all()
-    finally:
-        eng.dispose()
-
-    assert len(rows) >= 1, (
-        f"expected at least one EXTERNAL future to be created by the sample call, "
-        f"found {len(rows)}; async sample routing may not be active"
+    # The result was delivered (asserted above), so if the store path were
+    # inactive the fallback DB row would already be terminal — give any stray
+    # write a moment to land, then require that none appeared.
+    time.sleep(2)
+    new_future_ids = _read_external_future_ids(db_path) - future_ids_before
+    assert not new_future_ids, (
+        f"expected no new EXTERNAL FutureDB rows after the sample call, found {new_future_ids}; "
+        "samples should resolve purely from the in-memory store"
     )
 
 

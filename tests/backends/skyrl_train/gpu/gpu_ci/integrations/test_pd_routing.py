@@ -4,9 +4,20 @@ Integration test for PD (Prefill-Decode) routing verification.
 Verifies that the vllm-router correctly routes prefill requests to prefill
 servers and decode requests to decode servers by inspecting router debug logs.
 
-Run:
+Parametrized over the supported P2P transfer connectors:
+  * ``NixlConnector``     -- pull-based, the default.
+  * ``MooncakeConnector`` -- push-based; the router discovers each prefill
+    server's bootstrap port. Marked ``mooncake`` because it needs the
+    ``mooncake`` extra (``mooncake-transfer-engine``), which is not installed
+    in the default GPU CI environment.
+
+Run (NIXL only):
     uv run --isolated --extra dev --extra fsdp pytest \
-        tests/backends/skyrl_train/gpu/gpu_ci/integrations/test_pd_routing.py -v -s
+        tests/backends/skyrl_train/gpu/gpu_ci/integrations/test_pd_routing.py -v -s -m "not mooncake"
+
+Run (Mooncake):
+    uv run --isolated --extra dev --extra fsdp --extra mooncake pytest \
+        tests/backends/skyrl_train/gpu/gpu_ci/integrations/test_pd_routing.py -v -s -m "mooncake"
 """
 
 import re
@@ -16,9 +27,22 @@ import httpx
 import pytest
 
 from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+
+# Mooncake's transfer engine defaults to RDMA (``mooncake_protocol``, read from
+# kv_connector_extra_config in vLLM's mooncake_connector.py) and needs an RDMA NIC
+# to register the KV cache. This test uses the TCP transport to stay runnable
+# on CI hosts without RDMA.
+_MOONCAKE_EXTRA_CONFIG = {"mooncake_protocol": "tcp"}
+
+# Set `WITH_NVIDIA_PEERMEM=0` to use the dma-buf path.
+# Since we use TCP for the test, this doesn't affect correctness
+# Running without this override can lead to failures on machines without
+# the `nvidia-peermem` module
+_MOONCAKE_ENV_VARS = {"WITH_NVIDIA_PEERMEM": "0"}
 
 # ANSI escape code pattern for stripping colored terminal output
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -43,13 +67,27 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     return cfg
 
 
-def test_pd_routing_verification(ray_init_fixture):
+@pytest.mark.parametrize(
+    "kv_connector",
+    [
+        pytest.param("NixlConnector", id="nixl"),
+        # Needs the `mooncake` extra
+        pytest.param("MooncakeConnector", id="mooncake", marks=pytest.mark.mooncake),
+    ],
+)
+def test_pd_routing_verification(kv_connector):
     """Verify that the router sends prefill traffic to prefill servers and decode traffic to decode servers.
 
-    Setup: 1P1D (2 engines, TP=1) with NixlConnector.
+    Setup: 1P1D (2 engines, TP=1) with the parametrized P2P transfer connector.
     Sends a single prompt via httpx.post to the router's /v1/completions endpoint,
     then parses the router log file to verify correct Stage 1 (prefill) and Stage 2 (decode) routing.
     """
+    extra_env_vars = _MOONCAKE_ENV_VARS if kv_connector == "MooncakeConnector" else None
+    with ray_init(extra_env_vars=extra_env_vars):
+        _run_pd_routing_verification(kv_connector)
+
+
+def _run_pd_routing_verification(kv_connector: str) -> None:
     cfg = get_test_actor_config()
 
     with InferenceEngineState.create(
@@ -60,19 +98,41 @@ def test_pd_routing_verification(ray_init_fixture):
         num_prefill=1,
         engine_init_kwargs={
             "kv_transfer_config": {
-                "kv_connector": "NixlConnector",
+                "kv_connector": kv_connector,
+                **(
+                    {"kv_connector_extra_config": _MOONCAKE_EXTRA_CONFIG} if kv_connector == "MooncakeConnector" else {}
+                ),
             },
         },
     ) as engines:
         # -- Extract ground-truth URLs from router args --
         router_args = engines.router._router_args
-        # prefill_urls is List[Tuple[str, Optional[int]]]
+        # prefill_urls is List[Tuple[str, Optional[int]]], where the second element
+        # is the Mooncake bootstrap port (None for NIXL).
         prefill_urls = [url for url, _ in router_args.prefill_urls]
+        prefill_bootstrap_ports = [port for _, port in router_args.prefill_urls]
         # decode_urls is List[str]
         decode_urls = list(router_args.decode_urls)
 
         assert len(prefill_urls) > 0, "Expected at least one prefill URL"
         assert len(decode_urls) > 0, "Expected at least one decode URL"
+
+        # -- Connector-specific router wiring --
+        if kv_connector == "MooncakeConnector":
+            assert (
+                router_args.kv_connector == "mooncake"
+            ), f"Expected router kv_connector='mooncake', got {router_args.kv_connector!r}"
+            assert all(
+                port is not None for port in prefill_bootstrap_ports
+            ), f"Every prefill server must advertise a Mooncake bootstrap port, got {prefill_bootstrap_ports}"
+            assert len(set(prefill_bootstrap_ports)) == len(
+                prefill_bootstrap_ports
+            ), f"Mooncake bootstrap ports must be unique per prefill server, got {prefill_bootstrap_ports}"
+        else:
+            assert getattr(router_args, "kv_connector", None) != "mooncake"
+            assert all(
+                port is None for port in prefill_bootstrap_ports
+            ), f"NIXL prefill servers must not advertise bootstrap ports, got {prefill_bootstrap_ports}"
 
         # -- Check log file availability --
         log_file = engines.router._log_file

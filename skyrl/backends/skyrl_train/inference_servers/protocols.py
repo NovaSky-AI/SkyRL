@@ -74,6 +74,7 @@ class ServerActorProtocol(Protocol):
         dp_rpc_port: Optional[int],
         enable_pd: bool,
         nixl_side_channel_base: int,
+        mooncake_bootstrap_base_port: int,
         colocated_training: bool,
         **kwargs: Any,
     ) -> None:
@@ -90,6 +91,7 @@ class ServerActorProtocol(Protocol):
             dp_rpc_port: DP RPC port (for non-rank-0 servers).
             enable_pd: Enable prefill-decode disaggregation.
             nixl_side_channel_base: Base port for NIXL side channels.
+            mooncake_bootstrap_base_port: Base port for Mooncake bootstrap server.
             colocated_training: Whether the server is colocated with training workers.
             **kwargs: Additional engine-specific keyword arguments (e.g.
                 ``distributed_executor_backend``, ``mp_cuda_visible_devices``).

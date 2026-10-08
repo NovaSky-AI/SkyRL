@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlparse
 
-from pydantic import Base64Bytes, BaseModel, Discriminator, Field
+from pydantic import Base64Bytes, BaseModel, ConfigDict, Discriminator, Field
 
 
 class RequestType(str, Enum):
@@ -151,6 +151,7 @@ class LossFnInputs(BaseModel):
     logprobs: TensorData
     values: TensorData = Field(default_factory=lambda: TensorData(data=[]))
     returns: TensorData = Field(default_factory=lambda: TensorData(data=[]))
+    rollout_logprobs: TensorData = Field(default_factory=lambda: TensorData(data=[]))
 
 
 class Datum(BaseModel):
@@ -160,11 +161,13 @@ class Datum(BaseModel):
 
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo", "ppo_critic", "dppo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "gspo", "cispo", "ppo_critic", "dppo"]
     loss_fn_config: dict[str, float] | None = None
 
 
 class ForwardBackwardOutput(BaseModel):
+    model_config = ConfigDict(ser_json_inf_nan="strings")
+
     loss_fn_output_type: str
     loss_fn_outputs: list[dict]
     metrics: dict
@@ -208,6 +211,7 @@ class SaveWeightsOutput(BaseModel):
 class LoadWeightsInput(BaseModel):
     source_model_id: str
     checkpoint_id: str
+    load_optimizer: bool = True
 
 
 class LoadWeightsOutput(BaseModel):
@@ -303,6 +307,9 @@ class PreparedModelPassBatch(BaseModel):
     all_advantages: list[list[float]]
     all_values: list[list[float]]
     all_returns: list[list[float]]
+    all_rollout_logprobs: list[list[float]] = Field(default_factory=list)
+    """Per-example rollout-engine logprobs (see ``LossFnInputs.rollout_logprobs``). Empty
+    inner lists mean "not provided" for that example."""
 
     # Per-example scalars
     all_model_ids: list[str]
@@ -341,6 +348,7 @@ SUPPORTED_LOSS_FNS = {
     "cross_entropy",
     "importance_sampling",
     "ppo",
+    "gspo",
     "cispo",
     "ppo_critic",
     "dppo",

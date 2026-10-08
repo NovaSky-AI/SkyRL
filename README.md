@@ -35,6 +35,7 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 For a list of supported models, see our [Supported Models](https://docs.skyrl.ai/docs/getting-started/supported_models) docs.
 
 # News
+- **[2026/09/01]** 🎉 We released an E2E recipe for long horizon knowledge work on SkyRL on the APEX-Agents dataset in collaboration with Mercor [[tweet](https://x.com/edwardjhu/status/2094897903290757588)] [[blog](https://www.mercor.com/blog/training-frontier-knowledge-work-agents-a-397b-rl-training-guide-with-skyrl/)]
 - **[2026/08/18]** 🎉 SkyRL is hosting it's first meetup at the Anyscale SF office! [[Link](https://luma.com/y4ahouh6)]
 - **[2026/07/16]** 🎉 SkyRL v0.3.0 is released [[Blog](https://novasky-ai.notion.site/skyrl-v03)]
 - **[2026/02/17]** 🎉 SkyRL is officially integrated with Harbor! Train your terminal-use agent! [[Blog](https://novasky-ai.notion.site/skyrl-harbor)]
@@ -47,6 +48,9 @@ For a list of supported models, see our [Supported Models](https://docs.skyrl.ai
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
+- 📜 [Training frontier knowledge work agents: A 397B RL training guide with SkyRL](https://www.mercor.com/blog/training-frontier-knowledge-work-agents-a-397b-rl-training-guide-with-skyrl/)
+- 📜 [SkyRL Ray Summit Slides](https://docs.google.com/presentation/d/1GYeVaCer0oRTTsdoCgsbHhwMY4_RGoYQlcAzUIPyd-0/edit?usp=sharing)
+- 📜 [SkyRL Meetup Slides](https://docs.google.com/presentation/d/1vYTiLShiesgWftBo3o8zZJG5bGhy4RMFhvlgd_wESrE/edit?usp=sharing)
 - 📜 [SkyRL v0.3.0 Release](https://novasky-ai.notion.site/skyrl-v03)
 - 📜 [Multi-LoRA Training for Continual Learning (w/ Trajectory)](https://trajectory.ai/field-notes/multi-lora-training-for-continual-learning)
 - 📜 [Native RL APIs in vLLM](https://vllm.ai/blog/2026-05-28-native-rl-apis)
@@ -68,7 +72,7 @@ For a list of supported models, see our [Supported Models](https://docs.skyrl.ai
 - [Endless Terminals](https://arxiv.org/abs/2601.16443): A fully autonomous pipeline that procedurally generates terminal tasks for RL training with no human annotation needed ![GitHub Repo stars](https://img.shields.io/github/stars/kanishkg/endless-terminals)
 - [CodeScout](https://arxiv.org/abs/2603.17829): Open-source SoTA code localization on SWE-Bench via RL ![GitHub Repo stars](https://img.shields.io/github/stars/OpenHands/codescout)
 - [Reinforcing Recursive Language Models](https://www.alphaxiv.org/blog/reinforcement-learning-for-rlms): RL fine-tuning small models to behave as recursive language models
-- [ECHO]: Terminal Agents Learn World Models for Free ![Github repo stars](https://github.com/microsoft/echo-rl)
+- [ECHO](https://arxiv.org/abs/2605.24517): Terminal Agents Learn World Models for Free
 
 # Acknowledgement
 
