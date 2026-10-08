@@ -15,6 +15,8 @@
 #   * Autotune all reachable kernels with cached, bucketed token-shape keys;
 #     exact token counts remain runtime values to avoid recompilation churn.
 #   * Compile out entropy-only work in SkyRL's log-prob-only adapter path.
+#   * Optionally return entropy from the same LM-head projection and include its
+#     gradient in the fused backward for RL entropy bonuses.
 #   * Made epilogue outputs distinct from inputs so repeated tuning runs cannot
 #     corrupt reductions.
 #   * Use the true row maximum as the epilogue log-sum-exp shift, including
@@ -1142,6 +1144,9 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
     Targets outside this shard get a sentinel that matches no column. Fully OOV
     targets are forced to log-prob 0 in forward, but their backward path is left
     unchanged to match the stock and torch fused references.
+
+    ``compute_entropy`` optionally returns entropy from the same projection;
+    ``entropy_requires_grad`` includes its contribution in fused backward.
     """
 
     @staticmethod
@@ -1155,13 +1160,19 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         chunk_size: int,
         tp_group: torch.distributed.ProcessGroup,
         inference_only: bool = False,
-    ) -> torch.Tensor:
+        compute_entropy: bool = False,
+        entropy_requires_grad: bool = False,
+    ) -> typing.Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if not _verl_logprob_kernel_available():
             raise RuntimeError(
                 "FusedLinearLogprobTriton requires Triton (and a CUDA device), but triton is not "
                 "importable. Use the Linux Megatron/FSDP dependency stack, or use the default pure-torch "
                 "'torch' backend (FusedLinearChunkedDistributedLogprob) instead."
             )
+        if entropy_requires_grad and not compute_entropy:
+            raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
+        if entropy_requires_grad and inference_only:
+            raise ValueError("entropy gradients are unavailable with inference_only=True")
 
         B, S, H = hidden.shape
         local_vocab = int(weight.shape[0])
@@ -1179,15 +1190,15 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         weight_c = weight.contiguous()
 
         # The caller folds temperature in before dispatch.
-        logprobs_flat, _entropy, _maximum, _accumulate, _entropy_b = efficient_entropy_forward(
+        logprobs_flat, entropy_flat, _maximum, _accumulate, _entropy_b = efficient_entropy_forward(
             hidden_2d,
             weight_c,
             labels_verl.reshape(-1),
             1.0,
             tp_group,
-            compute_entropy=False,
+            compute_entropy=compute_entropy,
         )
-        assert _entropy is None and _entropy_b is None
+        assert (_entropy_b is not None) == compute_entropy
         log_probs = logprobs_flat.reshape(B, S).to(torch.float32)
 
         # Fully-OOV targets have no label-logit contribution, so verl returns
@@ -1200,23 +1211,37 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         log_probs = log_probs.masked_fill(fully_oov, 0.0)
 
         if not inference_only:
-            ctx.save_for_backward(
+            saved_tensors = [
                 hidden_2d,
                 weight_c,
                 labels_verl.reshape(-1),
                 _maximum,
                 _accumulate,
-            )
+            ]
+            if entropy_requires_grad:
+                assert _entropy_b is not None
+                saved_tensors.append(_entropy_b)
+            ctx.save_for_backward(*saved_tensors)
             ctx.B, ctx.S, ctx.H = B, S, H
             ctx.tp_group = tp_group
             ctx.hidden_dtype = ctx_hidden_dtype
+            ctx.entropy_requires_grad = entropy_requires_grad
 
-        return log_probs
+        if not compute_entropy:
+            assert entropy_flat is None
+            return log_probs
+
+        assert entropy_flat is not None
+        entropy = entropy_flat.reshape(B, S).to(torch.float32)
+        if not entropy_requires_grad:
+            ctx.mark_non_differentiable(entropy)
+        return log_probs, entropy
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs: torch.Tensor) -> tuple:
         grad_output = grad_outputs[0]  # [B, S], grad of full-vocab logprob
-        hidden_2d, weight_c, labels_verl, _maximum, _accumulate = ctx.saved_tensors
+        hidden_2d, weight_c, labels_verl, _maximum, _accumulate, *saved_entropy = ctx.saved_tensors
+        _entropy_b = saved_entropy[0] if ctx.entropy_requires_grad else None
         B, S, H = ctx.B, ctx.S, ctx.H
         tp_group = ctx.tp_group
 
@@ -1227,24 +1252,33 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             dlogprobs = torch.zeros(B * S, dtype=torch.float32, device=hidden_2d.device)
         else:
             dlogprobs = grad_output.reshape(-1).to(torch.float32).contiguous()
+        grad_entropy = grad_outputs[1] if ctx.entropy_requires_grad else None
+        if ctx.entropy_requires_grad:
+            dentropy = (
+                torch.zeros_like(dlogprobs)
+                if grad_entropy is None
+                else grad_entropy.reshape(-1).to(torch.float32).contiguous()
+            )
+        else:
+            dentropy = None
 
         d_hidden_2d, d_weight = efficient_entropy_backward(
             dlogprobs,
-            None,
+            dentropy,
             hidden_2d,
             weight_c,
             labels_verl,
             _maximum,
             _accumulate,
-            None,
+            _entropy_b,
             False,  # should_return_fp32_grad
             1.0,  # temperature (pre-baked into hidden by the caller)
             tp_group,
-            compute_entropy=False,
+            compute_entropy=ctx.entropy_requires_grad,
         )
 
         # d_hidden is this rank's partial; SP gather backward performs TP reduction.
         d_hidden = d_hidden_2d.reshape(B, S, H).to(ctx.hidden_dtype)
 
-        # (hidden, weight, target, vstart, vend, chunk, tp_group, inference_only)
-        return d_hidden, d_weight, None, None, None, None, None, None
+        grads = (d_hidden, d_weight, None, None, None, None, None, None, None, None)
+        return grads[: len(ctx.needs_input_grad)]
