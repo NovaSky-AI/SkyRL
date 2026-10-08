@@ -8,12 +8,16 @@ no Python and no tokenizer.
 
 A record directory holds, per trajectory `{id}`:
 
-| File | Always Outputted | Holds |
+| File | Present | Holds |
 | --- | --- | --- |
-| `{id}.json.zst` | yes | the document (graph) |
-| `{id}.tokens.zst` | token mode, when any node has tokens | token ids, logprobs, the text the tokens decode to, and each token's byte offset in it |
-| `{id}.experts.zst` | when routed experts were captured | routed experts (R3) |
-| `{id}.sampling_mask.zst` | when a captured sampling mask has at least one row | per sampled token, the ids it could have been drawn from |
+| `{id}.json.zst` | always | the document (graph) |
+| `{id}.tokens.zst` | optional: token mode only, when any node has tokens; never in text mode | token ids, logprobs, the text the tokens decode to, and each token's byte offset in it |
+| `{id}.experts.zst` | optional: when routed experts were captured (R3) | routed experts |
+| `{id}.sampling_mask.zst` | optional: when a captured sampling mask has at least one row | per sampled token, the ids it could have been drawn from |
+
+Every sidecar is optional. The document's `sidecars` manifest lists the ones
+the trajectory captured, and a kind missing from it is one the trajectory
+doesn't have.
 
 Every file is exactly one zstd frame: compress the whole payload in one call
 and write it once. Never add to a file that already exists, whether by
@@ -27,10 +31,64 @@ A trajectory is not partially written when it is live, it is only written when i
 Each document has a `sidecars` field naming the sidecar files that belong to
 it. The writer writes those sidecars before the document, and writes every file
 under a temporary name and then renames it, so no file is ever seen
-half-written. If a document exists, every sidecar named in its `sidecars` field
-exists too. A crash can leave sidecars with no document, but never a document
-with a missing sidecar.
+half-written. In a record directory, if a document exists, every sidecar named
+in its `sidecars` field exists too. A crash can leave sidecars with no
+document, but never a document with a missing sidecar.
+
+A copy of a record directory, such as a mirror that leaves sidecar kinds out,
+may lack sidecar files its manifest lists. A reader treats a listed sidecar
+whose file is missing as absent, as if the trajectory hadn't captured it, and
+doesn't tell it apart from one that went missing: without `tokens` it has
+message text only and should say so; without `experts` or `sampling_mask` it
+loses nothing a reader shows, since only training uses them, and training
+takes its samples from `finish`.
 A reader lists trajectories by listing `*.json.zst`.
+
+### A mirror
+
+A server started with a record mirror (`--record-mirror URL`, an fsspec URL
+such as `s3://bucket/run-7`) also copies each trajectory's files, under the
+same names, to `{URL}/{name}`, after writing them to the record directory.
+The copy is made in the background, sidecars before the document, so a
+mirrored document also has its sidecars beside it. The copy fails open: a
+record the store never got is missing from the mirror (the server's
+`/healthz` counts them under `record_mirror`), and the record directory is
+always complete. A reader reads a mirror exactly as it reads a record
+directory.
+
+A mirror can leave sidecar kinds out (`--record-mirror-config '{"exclude":
+["experts"]}'`), e.g. when the remote copy is for reading rather than
+retraining. It still copies the document unchanged, so the document lists
+sidecars the mirror doesn't hold, which a reader reads as absent (above). The
+record directory's copy is untouched. Leaving out `tokens` is allowed, but a
+reader of the mirror then has message text only.
+
+### Where a trajectory's record is
+
+`finish` answers with the document's location as `record`, or `null` when the
+server has no record directory or couldn't write the record:
+
+```json
+{"record": {"host": "10.0.0.5",
+            "path": "/data/record/tr_ab12.json.zst",
+            "mirror": "s3://bucket/run-7/tr_ab12.json.zst",
+            "files": ["tr_ab12.tokens.zst", "tr_ab12.json.zst"]}}
+```
+
+`path` is on the server's own disk, and `host` is that machine: its IP address
+(or hostname), so another node can reach a record that exists only there, e.g.
+`scp 10.0.0.5:/data/record/tr_ab12.json.zst .` (an IPv6 host is bracketed
+there, `[fe80::1]:/data/...`). The server reports the address it is reached
+at, or its primary IP when it has none to report; `--record-host` sets it. `mirror` is null without a mirror, and
+otherwise where the copy is going: it may not be there yet, or at all. The
+sidecars are beside the document in both places.
+
+`files` names the record's files, sidecars first and the document last. With a
+mirror they are the files the mirror holds (or will hold), so the kinds its
+`exclude` leaves out are not listed; without one they are the files in the
+record directory. A sidecar the trajectory didn't capture is never listed.
+Each file is beside the document: `{dirname(mirror)}/{name}`, or
+`{dirname(path)}/{name}` without a mirror.
 
 ## The document
 

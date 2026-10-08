@@ -1,7 +1,7 @@
 """The capture server: a control plane plus one OpenAI-compatible route per trajectory.
 
     POST /trajectories                    {meta}                -> {id, base_url, api_key[, exposed_base_url]}
-    POST /trajectories/{id}/finish        {annotations, paths}  -> {status, samples}
+    POST /trajectories/{id}/finish        {annotations, paths}  -> {status, samples, record}
     GET  /trajectories/{id}                                      -> the trajectory document
     POST /t/{id}/v1/chat/completions                             (the harness)
     GET  /t/{id}/v1/models                                       (passed through)
@@ -30,6 +30,12 @@ ended trajectories stay in memory, which is only for tests and development,
 unless ``keep_unrecorded=False``: then a trajectory is dropped once it ends,
 and the reply to its ``finish`` is the only copy of its samples. That is for a
 trainer that keeps no record.
+
+With a ``record_mirror`` as well, each written record is then copied to that
+URL in the background (``skycap.mirror``). The copy fails open: a slow or
+failing store never fails a trajectory, and its losses are counted on
+``/healthz``. ``finish`` answers with where the record is: its path on this
+server's disk, its mirror URI, and its file names.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import asyncio
 import contextlib
 import hmac
 import logging
+import socket
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -47,6 +54,7 @@ import orjson
 from aiohttp import web
 
 from skycap import record
+from skycap.mirror import RecordMirror
 from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
 from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
 from skycap.samples import Sample, build_samples, samples_for
@@ -69,6 +77,21 @@ class Backend(Protocol):
     ) -> web.StreamResponse: ...
 
 
+def node_address() -> str:
+    """This machine's primary IP address: the one its default route leaves from. Falls back to its hostname.
+
+    Connecting a UDP socket sends nothing; it only makes the kernel pick the outgoing interface.
+    """
+    for family, probe in ((socket.AF_INET, ("8.8.8.8", 53)), (socket.AF_INET6, ("2001:4860:4860::8888", 53))):
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as probe_socket:
+                probe_socket.connect(probe)
+                return probe_socket.getsockname()[0]
+        except OSError:
+            continue
+    return socket.gethostname()
+
+
 def _json(payload: Any, status: int = 200) -> web.Response:
     return web.Response(body=orjson.dumps(payload), status=status, content_type="application/json")
 
@@ -83,6 +106,9 @@ class CaptureServer:
         backend: Backend,
         *,
         record_dir: str | Path | None = None,
+        record_mirror: str | RecordMirror | None = None,
+        record_mirror_config: Mapping[str, Any] | None = None,
+        record_host: str | None = None,
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
@@ -98,7 +124,20 @@ class CaptureServer:
         #: The rules ``finish`` accepts, by name: the built-in ones plus ``path_rules``, each given as a
         #: function or as its ``"pkg.module:function"`` import path.
         self.path_rules = rule_registry(path_rules)
-        self.record_dir = Path(record_dir) if record_dir is not None else None
+        self.record_dir = Path(record_dir).absolute() if record_dir is not None else None
+        #: The machine ``record_dir`` is on, as ``finish``'s ``record.host``: so another node (a trainer's
+        #: head node, say) knows where to reach a record that only exists here.
+        self.record_host = record_host or (node_address() if self.record_dir is not None else None)
+        if record_mirror is not None and self.record_dir is None:
+            raise ValueError("record_mirror copies what is written to record_dir, so it needs a record_dir")
+        #: The remote copy of the record directory, if any.
+        if record_mirror_config and not isinstance(record_mirror, str):
+            raise ValueError("record_mirror_config configures a mirror given by URL; set it on a RecordMirror directly")
+        self.mirror = (
+            RecordMirror.from_config(record_mirror, record_mirror_config)
+            if isinstance(record_mirror, str)
+            else record_mirror
+        )
         #: Seconds an open trajectory may go without a request before it is abandoned.
         self.ttl = ttl
         self.sweep_interval = sweep_interval
@@ -150,6 +189,9 @@ class CaptureServer:
                 except Exception:
                     logger.exception("releasing %s failed", trajectory.id)
         await self.backend.close()
+        if self.mirror is not None:
+            # Bounded by the mirror's shutdown deadline; what is left is dropped with a warning.
+            await asyncio.to_thread(self.mirror.close)
 
     # -- ending a trajectory -----------------------------------------------------
     async def end(
@@ -229,7 +271,29 @@ class CaptureServer:
         except Exception:
             logger.exception("writing %s failed", trajectory.id)
             return False
+        if self.mirror is not None:
+            self.mirror.submit(self.record_dir, trajectory.id)
         return True
+
+    def location(self, trajectory: Trajectory) -> dict[str, Any] | None:
+        """Where a trajectory's record is: ``{"host", "path", "mirror", "files"}``, or None when it isn't written.
+
+        ``files`` names the record's files, sidecars then document: as the mirror holds them when there is
+        one (without the sidecar kinds it excludes), else as the record directory does.
+        """
+        if self.record_dir is None or self.trajectories.get(trajectory.id) is trajectory:
+            return None
+        name = record.document_path(self.record_dir, trajectory.id).name
+        if self.mirror is None:
+            files = [path.name for path in record.record_files(self.record_dir, trajectory.id)]
+        else:
+            files = self.mirror.names(self.record_dir, trajectory.id)
+        return {
+            "host": self.record_host,
+            "path": str(self.record_dir / name),
+            "mirror": None if self.mirror is None else self.mirror.uri(name),
+            "files": files,
+        }
 
     async def sweep(self) -> list[str]:
         """End trajectories nobody finished within the TTL; open ones as abandoned. Returns their ids."""
@@ -275,7 +339,10 @@ class CaptureServer:
     # -- control plane --------------------------------------------------------
     async def healthz(self, request: web.Request) -> web.Response:
         open_count = sum(1 for t in self.trajectories.values() if t.is_open)
-        return _json({"ok": True, "open_trajectories": open_count, "capture": self.backend.describe()})
+        health = {"ok": True, "open_trajectories": open_count, "capture": self.backend.describe()}
+        if self.mirror is not None:
+            health["record_mirror"] = {"url": self.mirror.url, **self.mirror.stats()}
+        return _json(health)
 
     async def create(self, request: web.Request) -> web.Response:
         body = await _read_json(request, default={})
@@ -327,6 +394,7 @@ class CaptureServer:
                 "status": trajectory.status,
                 "samples": [s.to_json() for s in samples],
                 "unbridged_calls": trajectory.graph.unbridged_calls(),
+                "record": self.location(trajectory),
             }
         )
 

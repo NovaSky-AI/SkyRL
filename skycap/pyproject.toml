@@ -24,6 +24,11 @@ multimodal = [
     "renderers[multimodal]>=0.1.9.dev9",
     "transformers>=4.50",
 ]
+# The record mirror (--record-mirror). A store fsspec doesn't ship needs its own
+# implementation as well, e.g. s3fs for s3:// or gcsfs for gs://.
+remote = [
+    "fsspec>=2024.2",
+]
 
 [project.scripts]
 skycap = "skycap.cli:main"
@@ -33,6 +38,7 @@ Repository = "https://github.com/NovaSky-AI/SkyRL"
 
 [dependency-groups]
 dev = [
+    "fsspec>=2024.2",
     "openai>=1.40",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

@@ -17,6 +17,7 @@ route there.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import threading
 from collections.abc import Callable, Mapping
@@ -35,6 +36,7 @@ from skycap.server import Backend, CaptureServer
 from skycap.text import TextBackend
 
 if TYPE_CHECKING:
+    from skycap.mirror import RecordMirror
     from skycap.tokens.engine import VLLMEngine
     from skycap.tokens.renderer import TokenRenderer
 
@@ -108,6 +110,10 @@ def build_backend(
 class CaptureService:
     """The model options are ``build_backend``'s; the rest place and persist the server.
 
+    ``record_mirror`` (an fsspec URL, or a ``RecordMirror``) copies each record written to ``record_dir``
+    to a remote store in the background; see ``skycap.mirror``. ``record_mirror_config`` holds the
+    mirror's options for a URL, e.g. ``{"exclude": ["experts"], "timeout": 120}``.
+
     ``port=0`` lets the OS pick a free port. ``advertise_host`` is the address clients use to reach
     this server, which ``url`` carries once started. ``path_rules`` are the custom path rules
     ``finish`` may name besides ``all`` and ``final``, each a function or its ``"pkg.module:function"``
@@ -138,6 +144,9 @@ class CaptureService:
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
         record_dir: str | None = None,
+        record_mirror: str | RecordMirror | None = None,
+        record_mirror_config: Mapping[str, Any] | None = None,
+        record_host: str | None = None,
         ttl: float = 3600.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
         keep_unrecorded: bool = True,
@@ -168,6 +177,10 @@ class CaptureService:
         self.server = CaptureServer(
             backend,
             record_dir=record_dir,
+            record_mirror=record_mirror,
+            record_mirror_config=record_mirror_config,
+            # Where the records are: the address this node is reached at, unless that's only loopback.
+            record_host=record_host or (None if _is_loopback(advertise_host) else advertise_host),
             ttl=ttl,
             path_rules=path_rules,
             keep_unrecorded=keep_unrecorded,
@@ -209,7 +222,11 @@ class CaptureService:
         return self.url
 
     def stop(self, timeout: float = 120.0) -> bool:
-        """Stop serving, writing what is still in memory. Returns whether that finished in time."""
+        """Stop serving, writing what is still in memory. Returns whether that finished in time.
+
+        With a record mirror, stopping also waits up to the mirror's ``shutdown_timeout`` for its queue,
+        so ``timeout`` should exceed that.
+        """
         thread = self._thread
         if thread is None:
             return True
@@ -337,3 +354,10 @@ _LOOPBACK = {"0.0.0.0": "127.0.0.1", "": "127.0.0.1", "::": "::1"}
 
 def _http_url(host: str, port: int) -> str:
     return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return host == "localhost"
