@@ -729,6 +729,58 @@ def gspo_policy_loss(
     return loss, loss_metrics
 
 
+@torch.no_grad()
+def compute_cispo_support_metrics(
+    ratio: torch.Tensor,
+    clamped_ratio: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_mask: torch.Tensor | None,
+    is_clipped: torch.Tensor,
+) -> dict[str, float]:
+    """Return CISPO ratio statistics as sums that add up across micro-batches, ranks and mini-batches.
+
+    The keys end in ``_sum`` so metric reduction sums them. ``ratio_sum / mask_weight_sum`` is the
+    loss-mask-weighted mean ratio over everything reduced together (undefined when
+    ``mask_weight_sum`` is 0). ``reports_sum`` and ``empty_reports_sum`` count loss calls, and those
+    with no active tokens, not samples. Statistics use the loss mask before off-policy correction.
+    """
+    weights = (
+        torch.ones_like(ratio, dtype=torch.float64)
+        if loss_mask is None
+        else torch.broadcast_to(loss_mask, ratio.shape).to(torch.float64)
+    )
+    active = weights != 0
+    active_weights = weights[active]
+    active_ratio = ratio[active].to(torch.float64)
+    active_clamped_ratio = clamped_ratio[active].to(torch.float64)
+    active_advantages = torch.broadcast_to(advantages, ratio.shape)[active]
+    values = torch.stack(
+        (
+            active_weights.sum(),
+            (active_ratio * active_weights).sum(),
+            (active_clamped_ratio * active_weights).sum(),
+            (is_clipped[active].to(torch.float64) * active_weights).sum(),
+            active.sum(dtype=torch.float64),
+            (active_advantages != 0).sum(dtype=torch.float64),
+            (~torch.isfinite(active_ratio)).sum(dtype=torch.float64),
+            weights.new_tensor(float(active_weights.numel() == 0)),
+            weights.new_tensor(1.0),
+        )
+    )
+    names = (
+        "mask_weight",
+        "ratio",
+        "clamped_ratio",
+        "cap_hit_weight",
+        "active_tokens",
+        "advantage_nonzero_tokens",
+        "nonfinite_ratio_tokens",
+        "empty_reports",
+        "reports",
+    )
+    return {f"cispo/support/{name}_sum": value for name, value in zip(names, values.cpu().tolist(), strict=True)}
+
+
 @register_policy_loss(PolicyLossType.CISPO)
 def compute_policy_loss_cispo(
     log_probs: torch.Tensor,
@@ -812,6 +864,7 @@ def compute_policy_loss_cispo(
         "cispo/ratio_max": cispo_ratio_max,
         "cispo/ratio_min": cispo_ratio_min,
     }
+    loss_metrics.update(compute_cispo_support_metrics(ratio, clamped_ratio, advantages, loss_mask, is_clipped))
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )
