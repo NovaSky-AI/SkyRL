@@ -346,14 +346,18 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
-        # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
-        # the residual it would re-materialize is the n-stream tensor consumed by the mHC
-        # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
-        # needs the mHC recompute managers, which SkyRL's mHC layer does not implement, so
-        # downgrade to selective recompute of the remaining modules instead of failing.
-        # Tied to the vendored mHC layer: see patches/megatron/README.md (Megatron-LM#7521) for
-        # when to change or delete this.
-        if getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
+        # megatron-core rejects mHC (hyper-connection) models under full activation recompute.
+        # SkyRL's own mHC layer (GLM-5.3-Flash) supports it -- Glm5NextModelProvider.finalize()
+        # bypasses that one check (supports_mhc_full_recompute). Any other mHC layer
+        # keeps megatron-core's guard; its suggestion -- selective recompute with "mhc" in
+        # recompute_modules -- needs mHC recompute managers, so downgrade to selective recompute
+        # of the remaining modules instead of failing. Tied to the vendored mHC layer: see
+        # patches/megatron/README.md (Megatron-LM#7521) for when to change or delete this.
+        if (
+            getattr(provider, "enable_mhc_connections", False)
+            and provider.recompute_granularity == "full"
+            and not getattr(provider, "supports_mhc_full_recompute", False)
+        ):
             provider.recompute_granularity = "selective"
             provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
             provider.recompute_method = None
@@ -565,6 +569,14 @@ class MegatronWorker:
         )
 
         patch_moe_combine_bf16_reduce()
+
+        # Drop the MoE dispatcher's router-probs reference after each MoE forward; under full
+        # recompute it otherwise pins every MoE layer's recomputed graph through backward.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_release_dispatcher_probs import (
+            patch_moe_release_dispatcher_probs,
+        )
+
+        patch_moe_release_dispatcher_probs()
 
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
