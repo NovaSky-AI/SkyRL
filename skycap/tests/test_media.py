@@ -199,3 +199,32 @@ async def test_a_message_whose_image_changed_is_a_new_node_with_the_new_image() 
         assert [[m.hash for m in graph.nodes[root].tokens.media] for root in graph.roots()] == [["cat"], ["cat-v2"]]
         (_, second) = build_samples(graph)
         assert [item.hash for item in second.media] == ["cat-v2"]
+
+
+async def test_a_repeated_finish_of_a_recorded_trajectory_rebuilds_its_image_arrays(tmp_path: Path) -> None:
+    async with token_stack(record_dir=tmp_path) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        messages: list[dict[str, Any]] = []
+        await ask(llm, messages, look("what is this?", image("cat", 3)))
+        await ask(llm, messages, look("and this?", image("dog", 2)))
+        first = await stack.finish(created["id"])
+        assert created["id"] not in stack.server.trajectories
+        repeat = await stack.finish(created["id"])
+
+    assert repeat["samples"] == first["samples"]
+    (sample,) = [Sample.from_json(s) for s in repeat["samples"]]
+    assert [item.hash for item in sample.media] == ["cat", "dog"]
+    np.testing.assert_array_equal(sample.media[1].data["pixel_values"], image_data("dog", 2)["pixel_values"])
+
+
+async def test_a_repeated_finish_refuses_an_image_that_no_longer_renders_the_same(tmp_path: Path) -> None:
+    async with token_stack(record_dir=tmp_path) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        await ask(llm, [], look("what is this?", image("cat", 3)))
+        await stack.finish(created["id"])
+        stack.renderer.image_salt = "-v2"
+        async with stack.http.post(f"{stack.url}/trajectories/{created['id']}/finish", json={}) as response:
+            assert response.status == 500
+            assert "no longer renders image cat" in (await response.json())["error"]

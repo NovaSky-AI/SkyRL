@@ -71,6 +71,7 @@ class Backend(Protocol):
     async def close(self) -> None: ...
     async def release(self, trajectory: Trajectory) -> None: ...
     async def finalize(self, trajectory: Trajectory) -> None: ...
+    async def restore(self, trajectory: Trajectory) -> None: ...
     async def models(self, request: web.Request) -> web.Response: ...
     async def chat(
         self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
@@ -382,6 +383,13 @@ class CaptureServer:
                 return _json({"error": f"trajectory already finished with paths={trajectory.samples['paths']!r}"}, 409)
         elif paths not in self.path_rules:
             return _json({"error": f"`paths` must be one of {sorted(self.path_rules)}"}, 400)
+        if trajectory.id not in self.trajectories:
+            # Read back from its record, which doesn't keep what samples need beyond the messages.
+            try:
+                await self.backend.restore(trajectory)
+            except Exception as error:  # noqa: BLE001 - reported to the caller
+                logger.exception("restoring %s from its record failed", trajectory.id)
+                return _json({"error": f"restoring the recorded trajectory failed: {error}"}, 500)
         try:
             samples = await self.end(trajectory, "finished", annotations, paths=paths)
         except Exception as error:  # noqa: BLE001 - a custom rule's failure, reported to the caller

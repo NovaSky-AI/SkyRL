@@ -81,6 +81,9 @@ def build_backend(
             "renderer_name, chat_template_kwargs and processor_kwargs configure the tokenizer's renderer, "
             "not a given one"
         )
+    for name, value in (("chat_template_kwargs", chat_template_kwargs), ("processor_kwargs", processor_kwargs)):
+        if value is not None and not isinstance(value, Mapping):
+            raise ValueError(f"{name} must be a mapping (a JSON object), got {type(value).__name__}")
     from skycap.tokens.backend import TokensBackend
 
     if renderer is None:

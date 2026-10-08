@@ -66,3 +66,11 @@ def test_bad_options_are_refused_before_anything_starts() -> None:
         build_backend("http://x", mode="tokens", tokenizer="t", renderer=FakeRenderer())
     with pytest.raises(TypeError):
         CaptureService("http://x", unknown_option=1)
+
+
+@pytest.mark.parametrize("option", ["chat_template_kwargs", "processor_kwargs"])
+def test_renderer_options_must_be_mappings(option: str) -> None:
+    from skycap.service import build_backend
+
+    with pytest.raises(ValueError, match=f"{option} must be a mapping"):
+        build_backend("http://engine", mode="tokens", tokenizer="unused", **{option: ["not", "a", "mapping"]})
