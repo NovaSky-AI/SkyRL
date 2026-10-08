@@ -2,6 +2,7 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator_chat_templating.py
 """
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
@@ -134,7 +135,7 @@ def _make_input_batch(prompt, extras):
         "qwen3-custom_chat_template_builtin",
     ],
 )
-async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenization_codepath, expected_str):
+async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenization_codepath, expected_str, monkeypatch):
     """
     Tests the behavior of chat templating for various models in multi-turn conversation.
 
@@ -144,6 +145,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     We hardcode the expected string in the constants file, so it is easier to check. But we also double
     check that those expected strings are correct by applying the chat template on the expected chat history.
     """
+    # Keep the template's clock consistent with the fixed expected date across midnight.
+    template_datetime = MagicMock()
+    template_datetime.now.return_value = datetime(2024, 7, 26)
+    monkeypatch.setattr("transformers.utils.chat_template_utils.datetime", template_datetime)
+
     # 1. Preparations to mock the generation.
     _register_test_env_if_needed()  # Register only when needed
     tokenizer = AutoTokenizer.from_pretrained(model_name)

@@ -166,6 +166,7 @@ class VLLMServerActor(ServerActorProtocol):
         distributed_executor_backend: str = "ray",
         mp_cuda_visible_devices: Optional[str] = None,
         enable_ray_prometheus_stats: bool = True,
+        metrics_role: Optional[str] = None,
     ):
         """
         Initialize the vLLM server actor.
@@ -197,6 +198,7 @@ class VLLMServerActor(ServerActorProtocol):
                 through ``RayPrometheusStatLogger`` so they land in Ray's
                 per-node metrics agent (and thus Anyscale's hosted Prometheus +
                 Grafana).
+            metrics_role: Prefill/decode role exposed to external metrics collectors.
         """
         from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
 
@@ -209,6 +211,7 @@ class VLLMServerActor(ServerActorProtocol):
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
         self._use_mp_backend = distributed_executor_backend == "mp"
         self._enable_ray_prometheus_stats = enable_ray_prometheus_stats
+        self._metrics_role = metrics_role
 
         # Ensure vLLM sleep endpoints are enabled by using dev mode
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
@@ -454,10 +457,11 @@ class VLLMServerActor(ServerActorProtocol):
         await _build_and_serve_vllm_server(
             self._cli_args,
             enable_ray_prometheus_stats=self._enable_ray_prometheus_stats,
+            metrics_role=self._metrics_role,
         )
 
     @staticmethod
-    def _add_custom_endpoints(app, engine, cli_args) -> None:
+    def _add_custom_endpoints(app, engine, cli_args, metrics_info=None) -> None:
         """Add custom SkyRL endpoints to the FastAPI app.
 
         Shared by the Ray-actor deployment and the standalone ``python -m``
@@ -467,6 +471,13 @@ class VLLMServerActor(ServerActorProtocol):
         # Most weight-sync endpoints are registered by vLLM dev mode. SkyRL
         # adds /fetch_weights because checkpoint-delta pulls and applies
         # payloads before the paused /update_weights reload.
+
+        if metrics_info is not None:
+
+            @app.get("/get_metrics_worker_info")
+            async def _metrics_worker_info():
+                """Identify the Ray frontend exporting this server's engine metrics."""
+                return Response(content=orjson.dumps(metrics_info), media_type="application/json")
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
@@ -684,6 +695,7 @@ async def _build_and_serve_vllm_server(
     cli_args: Namespace,
     *,
     enable_ray_prometheus_stats: bool = False,
+    metrics_role: Optional[str] = None,
 ) -> None:
     """Build the vLLM OpenAI app + engine, register SkyRL custom endpoints, and
     serve with uvicorn. Blocks until the server stops.
@@ -723,7 +735,12 @@ async def _build_and_serve_vllm_server(
     logger.info(f"Engine initialized on {cli_args.host}:{cli_args.port}, adding custom endpoints...")
 
     # Add custom SkyRL endpoints
-    VLLMServerActor._add_custom_endpoints(app, engine, cli_args)
+    metrics_info = None
+    if enable_ray_prometheus_stats:
+        import ray
+
+        metrics_info = {"worker_id": ray.get_runtime_context().get_worker_id(), "role": metrics_role}
+    VLLMServerActor._add_custom_endpoints(app, engine, cli_args, metrics_info=metrics_info)
 
     await init_app_state(engine, app.state, cli_args)
 
