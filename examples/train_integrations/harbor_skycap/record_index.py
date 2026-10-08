@@ -19,12 +19,6 @@ that once per step, as one version of the W&B artifact
   ``checksum=False``: W&B stores the URI and neither reads the store nor
   copies bytes. A local-only record is in the index only.
 
-``pull`` (``python -m examples.train_integrations.harbor_skycap.record_index
-pull <entity>/<project>/<artifact>[:<alias>] <out_dir>``) brings a run back as
-a record directory: each version's record files, fetched by W&B from the
-mirror with the caller's credentials, and its ``step.json`` as
-``index/<phase>/step-<N>.json``, which ``skycap-viewer <out_dir>`` reads.
-
 Nothing here is Harbor's: any skycap generator that adds its trajectories to a
 ``RecordLog`` gets the index.
 
@@ -579,7 +573,11 @@ def _download_entries(artifact: Any, root: Path) -> None:
     artifact.get_entry("step.json").download(root=str(root))
     step = json.loads((root / "step.json").read_bytes())
     for row in step.get("rows", []) if isinstance(step, dict) else []:
-        for name in _record_files(row):
+        try:
+            names = _record_files(row)
+        except ValueError:
+            continue  # reported per record when moving in
+        for name in names:
             try:
                 artifact.get_entry(f"records/{name}").download(root=str(root))
             except Exception as error:  # noqa: BLE001 - this record is reported missing
@@ -587,18 +585,40 @@ def _download_entries(artifact: Any, root: Path) -> None:
 
 
 def _record_files(row: Dict[str, Any]) -> List[str]:
-    """A mirrored row's file names, as ``record_references`` referenced them; [] for a local-only row."""
+    """A mirrored row's file names, as ``record_references`` referenced them; [] for a local-only row.
+
+    Raises ValueError when a name isn't a plain file name: the names come from the downloaded ``step.json``,
+    and one like ``../x`` would move a file out of the directory.
+    """
     record = row.get("record")
     if not record or not record.get("mirror"):
         return []
-    return list(record.get("files") or [record["mirror"].rsplit("/", 1)[-1]])
+    names = list(record.get("files") or [record["mirror"].rsplit("/", 1)[-1]])
+    unsafe = [name for name in names if not _plain_name(name)]
+    if unsafe:
+        raise ValueError(f"file names that aren't plain file names: {unsafe!r}")
+    return names
+
+
+def _plain_name(name: Any) -> bool:
+    return (
+        isinstance(name, str)
+        and name not in ("", ".", "..")
+        and "/" not in name
+        and "\\" not in name
+        and "\0" not in name
+    )
 
 
 def _move_record(row: Dict[str, Any], downloaded: Path, out: Path, label: str, summary: PullSummary) -> None:
     record = row.get("record")
     if not record:
         return
-    names = _record_files(row)
+    try:
+        names = _record_files(row)
+    except ValueError as error:
+        summary.missing.append(f"{label}: not pulled: {error}")
+        return
     if not names:
         from skycap import RecordLocation
 
@@ -610,16 +630,33 @@ def _move_record(row: Dict[str, Any], downloaded: Path, out: Path, label: str, s
         summary.missing.append(f"{label}: could not fetch {', '.join(absent)}")
         return
     # Sidecars before the document, as skycap writes them, so a document in out_dir has its sidecars.
-    for name in names:
-        moved = _move_in(downloaded / name, out / name)
-        summary.files += moved
-        summary.unchanged += not moved
+    placed: List[Path] = []
+    moved = unchanged = 0
+    try:
+        for name in names:
+            target = out / name
+            existed = target.exists()
+            if _move_in(downloaded / name, target):
+                moved += 1
+                if not existed:
+                    placed.append(target)
+            else:
+                unchanged += 1
+    except OSError as error:
+        # One record that can't move in (say, a directory where a file goes) mustn't stop the others:
+        # take back what it newly placed, report it, and go on.
+        for path in placed:
+            path.unlink(missing_ok=True)
+        summary.missing.append(f"{label}: could not move into {out}: {type(error).__name__}: {error}")
+        return
+    summary.files += moved
+    summary.unchanged += unchanged
     summary.records += 1
 
 
 def _move_in(source: Path, target: Path) -> bool:
     """Rename ``source`` onto ``target`` unless an identical file is there. Returns whether it moved."""
-    if target.is_file() and _digest(target) == _digest(source):
+    if target.is_file() and target.stat().st_size == source.stat().st_size and _digest(target) == _digest(source):
         return False
     # The scratch directory is inside out_dir, so this is an atomic rename on one filesystem.
     os.replace(source, target)
@@ -641,7 +678,7 @@ def main(argv: Optional[List[str]] = None, *, api: Any = None) -> int:
         "pull", help="pull a run's records and step index from W&B into a record directory"
     )
     pull_parser.add_argument("ref", help="<entity>/<project>/<artifact>[:<alias>]; every version without an alias")
-    pull_parser.add_argument("out_dir", help="the record directory to fill, e.g. for skycap-viewer")
+    pull_parser.add_argument("out_dir", help="the record directory to fill")
     args = parser.parse_args(argv)
     try:
         summary = pull(args.ref, args.out_dir, api=api)

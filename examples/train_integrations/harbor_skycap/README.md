@@ -112,7 +112,7 @@ turns the index off. Logging runs on a background thread and never fails a
 step: W&B errors and timeouts are logged and counted, and at the end of
 training it waits up to two minutes for what is queued.
 
-### Pull a run and view it
+### Pull a run
 
 `record_index pull` turns a run's artifact back into a record directory: each
 version's record files, which W&B fetches from the mirror with your own
@@ -124,7 +124,6 @@ one version, or none to pull every version:
 uv run --isolated --extra skyrl-train --extra harbor --extra skycap \
   python -m examples.train_integrations.harbor_skycap.record_index \
   pull my-team/my-project/skycap-records-train-<run id>:train-step-3 ./run-records
-skycap-viewer ./run-records
 ```
 
 It fails open per record: a record whose files W&B can't fetch is reported as

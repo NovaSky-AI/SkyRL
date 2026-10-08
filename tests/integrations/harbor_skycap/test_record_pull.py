@@ -208,3 +208,29 @@ def test_wandb_is_imported_only_when_no_api_is_given(tmp_path: Path, monkeypatch
     fake = SimpleNamespace(Api=lambda: made.append(1) or FakeApi(FakeArtifact("v0", "train", 1, [row("tr_a")])))
     monkeypatch.setitem(__import__("sys").modules, "wandb", fake)
     assert record_index.pull(REF, tmp_path).records == 1 and made == [1]
+
+
+def test_a_file_name_that_isnt_a_plain_name_is_refused(tmp_path: Path) -> None:
+    """step.json comes from the artifact: a name like ../victim.txt must not move a file out of out_dir."""
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"original")
+    rows = [row("tr_a"), row("tr_evil", files=("json",))]
+    rows[1]["record"]["files"] = ["../victim.txt"]
+    summary = pull(f"{REF}:v0", tmp_path / "out", api=FakeApi(FakeArtifact("v0", "train", 1, rows)))
+
+    assert victim.read_bytes() == b"original"
+    assert summary.records == 1 and len(summary.missing) == 1 and "not pulled" in summary.missing[0]
+    assert (tmp_path / "out" / "tr_a.json.zst").is_file()
+
+
+def test_a_record_that_cant_move_in_doesnt_stop_the_others(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    (out / "tr_a.json.zst").mkdir(parents=True)  # a directory where tr_a's document goes
+    rows = [row("tr_a"), row("tr_b")]
+    summary = pull(f"{REF}:v0", out, api=FakeApi(FakeArtifact("v0", "train", 1, rows)))
+
+    assert summary.records == 1 and len(summary.missing) == 1 and "tr_a" in summary.missing[0]
+    # tr_a's sidecar, moved in before its document failed, is taken back out; tr_b and the index are in.
+    assert not (out / "tr_a.tokens.zst").exists()
+    assert (out / "tr_b.tokens.zst").is_file() and (out / "tr_b.json.zst").is_file()
+    assert (out / "index" / "train" / "step-1.json").is_file()
