@@ -178,3 +178,62 @@ class TestImageChunkBase64RoundTrip:
         json_dict = types_input.model_dump(mode="json")
         recovered = types.ModelInput.model_validate(json_dict)
         assert recovered.chunks[0].data == _RAW_PNG
+
+
+class TestLoRAConfigFieldRoundTrip:
+    """Every field the Tinker SDK sends must survive the wire -> internal hop.
+
+    Regression guard for https://github.com/NovaSky-AI/SkyRL/issues/1632: the wire
+    model is a plain ``BaseModel``, so an undeclared field is dropped by Pydantic's
+    default ``extra="ignore"`` and the client is never told.
+    """
+
+    def test_sdk_fields_are_declared(self):
+        """Mirrors tinker.types.LoraConfig; a field missing here is silently lost."""
+        assert set(api.LoRAConfig.model_fields) == {
+            "rank",
+            "seed",
+            "train_attn",
+            "train_mlp",
+            "train_unembed",
+        }
+
+    def test_defaults_match_the_tinker_sdk(self):
+        cfg = api.LoRAConfig(rank=8)
+        assert (cfg.seed, cfg.train_attn, cfg.train_mlp, cfg.train_unembed) == (None, True, True, False)
+
+    @pytest.mark.parametrize("train_attn", [True, False])
+    @pytest.mark.parametrize("train_mlp", [True, False])
+    @pytest.mark.parametrize("train_unembed", [True, False])
+    def test_to_types_forwards_every_flag(self, train_attn, train_mlp, train_unembed):
+        api_cfg = api.LoRAConfig(
+            rank=16,
+            seed=7,
+            train_attn=train_attn,
+            train_mlp=train_mlp,
+            train_unembed=train_unembed,
+        )
+        internal = api_cfg.to_types(seed=7, alpha=32.0)
+        assert (internal.rank, internal.seed, internal.alpha) == (16, 7, 32.0)
+        assert (internal.train_attn, internal.train_mlp, internal.train_unembed) == (
+            train_attn,
+            train_mlp,
+            train_unembed,
+        )
+
+    def test_to_types_applies_the_resolved_seed(self):
+        """A client that omits `seed` gets the server-generated one, not None."""
+        internal = api.LoRAConfig(rank=8).to_types(seed=12345, alpha=32.0)
+        assert internal.seed == 12345
+
+    def test_from_types_preserves_the_resolved_seed(self):
+        """The read-back path must not drop the seed, or runs are unreproducible."""
+        internal = types.LoraConfig(rank=8, alpha=32.0, seed=4242, train_attn=False, train_mlp=True)
+        wire = api.LoRAConfig.from_types(internal)
+        assert wire.seed == 4242
+        assert (wire.train_attn, wire.train_mlp, wire.train_unembed) == (False, True, False)
+
+    def test_round_trip_is_lossless(self):
+        original = types.LoraConfig(rank=32, alpha=32.0, seed=99, train_attn=False, train_mlp=True, train_unembed=True)
+        recovered = api.LoRAConfig.from_types(original).to_types(seed=original.seed, alpha=original.alpha)
+        assert recovered == original

@@ -131,6 +131,19 @@ def _build_skyrl_train_config(
         user_overrides["trainer.policy.model.lora.rank"] = lora_config.rank
         if "trainer.policy.model.lora.alpha" not in user_overrides:
             user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
+        # train_attn/train_mlp narrow which modules get an adapter; the worker
+        # resolves them against the loaded model. train_unembed has no
+        # equivalent here: PEFT's "all-linear" already skips the output layer
+        # and Megatron's target list has no lm_head entry, so honouring it would
+        # be a silent no-op. Reject it rather than accept and ignore.
+        if lora_config.train_unembed:
+            raise NotImplementedError(
+                "`train_unembed=True` is not supported by the skyrl-train backend: LoRA is applied "
+                "through PEFT's 'all-linear', which excludes the output layer. Use `--backend jax`, "
+                "which supports it, or set `train_unembed=False`."
+            )
+        user_overrides["trainer.policy.model.lora.train_attn"] = lora_config.train_attn
+        user_overrides["trainer.policy.model.lora.train_mlp"] = lora_config.train_mlp
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
@@ -521,12 +534,20 @@ class SkyRLTrainBackend(AbstractBackend):
             self._render_server = None
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
-        # Tinker's public LoraConfig only exposes rank + alpha (plus
-        # seed/train_attn/train_mlp/train_unembed) - pending support https://github.com/NovaSky-AI/SkyRL/issues/1632.
-        # Equality across adapters therefore reduces to (rank, alpha); the worker-side
-        # AdapterStore additionally verifies parallel-state equality via
-        # its own LoraSignature.
-        return (int(lora_config.rank), int(lora_config.alpha))
+        # Every field that changes an adapter's *shape*, since adapters sharing a
+        # runtime are byte-copies of one pristine template and must match
+        # structurally. train_attn/train_mlp decide which modules get an adapter,
+        # so they belong here; `seed` does not -- it changes initial values, not
+        # structure, and including it would reject compatible adapters.
+        # target_modules is fixed server-side, hence absent. The worker-side
+        # AdapterStore additionally verifies parallel-state equality via its own
+        # LoraSignature.
+        return (
+            int(lora_config.rank),
+            int(lora_config.alpha),
+            bool(lora_config.train_attn),
+            bool(lora_config.train_mlp),
+        )
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
         if model_id in self._model_ids_to_role:
@@ -557,10 +578,11 @@ class SkyRLTrainBackend(AbstractBackend):
             if new_signature != self._base_lora_signature:
                 raise ValueError(
                     f"LoRA signature mismatch for model '{model_id}': "
-                    f"got (rank, alpha)={new_signature}, "
+                    f"got (rank, alpha, train_attn, train_mlp)={new_signature}, "
                     f"first adapter registered with {self._base_lora_signature}. "
-                    "Multi-LoRA with the SkyRLTrainBackend requires identical (rank, alpha) across all "
-                    "adapters; target_modules is fixed server-side."
+                    "Multi-LoRA with the SkyRLTrainBackend requires identical "
+                    "(rank, alpha, train_attn, train_mlp) across all adapters; target_modules is "
+                    "fixed server-side."
                 )
             self._dispatch.register_adapter("policy", model_id)
             self._model_ids_to_role[model_id] = model_role

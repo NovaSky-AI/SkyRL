@@ -52,7 +52,7 @@ def _backend(
     backend._inference_adapter_ids = set()
     backend._renderer = None
     backend._render_server = None
-    backend._base_lora_signature = (LORA_CONFIG.rank, int(LORA_CONFIG.alpha)) if lora else None
+    backend._base_lora_signature = SkyRLTrainBackend._lora_signature_from(backend, LORA_CONFIG) if lora else None
     backend._server_groups = []
     backend._inference_router = None
     backend._inference_state_publisher = Mock()
@@ -70,7 +70,7 @@ def test_last_lora_unload_keeps_runtime_warm_when_enabled():
     dispatch.delete_adapter.assert_called_once_with("policy", "model-a")
     assert backend._dispatch is dispatch
     assert backend._model_ids_to_role == {}
-    assert backend._base_lora_signature == (8, 16)
+    assert backend._base_lora_signature == (8, 16, True, True)
     assert backend._inference_engines_initialized
     # Item 3: the proxy URL published at engine bring-up stays valid — the
     # warm path never clears (None) or re-publishes it.

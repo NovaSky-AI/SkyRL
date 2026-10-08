@@ -525,10 +525,57 @@ async def create_checkpoint(
 
 
 class LoRAConfig(BaseModel):
+    """Mirrors ``tinker.types.LoraConfig`` on the wire.
+
+    Every field the Tinker SDK sends is declared here: Pydantic's default
+    ``extra="ignore"`` means an undeclared field is dropped silently, so a
+    missing one is invisible to the client rather than an error.
+    """
+
     rank: int
     seed: int | None = Field(
         default=None, description="Seed for LoRA weight initialization. If None, a random seed is used."
     )
+    train_attn: bool = Field(default=True, description="Whether to add LoRA to the attention layers.")
+    train_mlp: bool = Field(default=True, description="Whether to add LoRA to the MLP (and MoE) layers.")
+    train_unembed: bool = Field(default=False, description="Whether to add LoRA to the unembedding layer.")
+
+    def to_types(self, *, seed: int, alpha: float) -> types.LoraConfig:
+        """Convert to the internal type, resolving the server-chosen values.
+
+        Args:
+            seed: The resolved seed -- the request's, or a generated one.
+            alpha: The server-side alpha; Tinker's wire format has no such field.
+
+        Returns:
+            The internal :class:`types.LoraConfig`.
+        """
+        return types.LoraConfig(
+            rank=self.rank,
+            alpha=alpha,
+            seed=seed,
+            train_attn=self.train_attn,
+            train_mlp=self.train_mlp,
+            train_unembed=self.train_unembed,
+        )
+
+    @classmethod
+    def from_types(cls, lora_config: types.LoraConfig) -> "LoRAConfig":
+        """Rebuild the wire model from a stored internal config, losing nothing.
+
+        Args:
+            lora_config: The stored internal config.
+
+        Returns:
+            The wire-format equivalent, including the resolved seed.
+        """
+        return cls(
+            rank=lora_config.rank,
+            seed=lora_config.seed,
+            train_attn=lora_config.train_attn,
+            train_mlp=lora_config.train_mlp,
+            train_unembed=lora_config.train_unembed,
+        )
 
 
 class CreateModelRequest(BaseModel):
@@ -1336,7 +1383,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
     # Generate a random seed if not provided
     seed = request.lora_config.seed if request.lora_config.seed is not None else random.randint(0, 2**31 - 1)
-    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0, seed=seed)
+    lora_config = request.lora_config.to_types(seed=seed, alpha=32.0)
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.CREATE_MODEL,
@@ -1359,7 +1406,10 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     return CreateModelResponse(
         model_id=model_id,
         base_model=request.base_model,
-        lora_config=request.lora_config,
+        # Echo the resolved config, not the request: when the client omits `seed`
+        # the generated one is otherwise never visible, making the run impossible
+        # to reproduce.
+        lora_config=LoRAConfig.from_types(lora_config),
         status="created",
         request_id=str(request_id),
     )
@@ -1401,7 +1451,9 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
     model_data = ModelData(
-        base_model=model.base_model, lora_config=LoRAConfig(rank=lora_config.rank), model_name=model.base_model
+        base_model=model.base_model,
+        lora_config=LoRAConfig.from_types(lora_config),
+        model_name=model.base_model,
     )
 
     return ModelInfoResponse(model_id=model.model_id, status=model.status, model_data=model_data)

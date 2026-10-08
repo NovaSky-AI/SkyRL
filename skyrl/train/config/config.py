@@ -123,6 +123,15 @@ class SkyRLLoraConfig(BaseConfig):
     LoRA adapter through Megatron-Bridge. A list of specific module names can be given instead."""
     exclude_modules: Optional[str] = None
     """Modules to exclude from LoRA."""
+    train_attn: bool = True
+    """Whether to apply LoRA to the attention projections.
+    Set to ``False`` together with ``train_mlp=True`` to adapt only the MLP layers. Narrowing
+    either way requires ``target_modules="all-linear"``; with an explicit module list, select the
+    modules there instead. FSDP only -- Megatron raises for a non-default value."""
+    train_mlp: bool = True
+    """Whether to apply LoRA to the MLP (and MoE expert) projections.
+    The counterpart to ``train_attn``; see its docstring for the constraints. At least one of the
+    two must be ``True``, since a LoRA model with no adapted modules has nothing to train."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""

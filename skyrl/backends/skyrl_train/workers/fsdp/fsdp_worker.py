@@ -77,6 +77,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_init_method=self.cfg.policy.model.lora.init_method,
             target_modules=self.cfg.policy.model.lora.target_modules,
             exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+            train_attn=self.cfg.policy.model.lora.train_attn,
+            train_mlp=self.cfg.policy.model.lora.train_mlp,
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,

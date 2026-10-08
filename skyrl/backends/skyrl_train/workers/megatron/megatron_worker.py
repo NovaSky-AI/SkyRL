@@ -440,6 +440,16 @@ class MegatronWorker:
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
+        # Megatron builds its target list from fixed module names (see the
+        # "all-linear" expansion below) rather than by inspecting the model, so
+        # the FSDP group narrowing does not apply here. Reject rather than
+        # silently ignore, so a request for attention-only LoRA fails loudly.
+        if not (lora_config.train_attn and lora_config.train_mlp):
+            raise NotImplementedError(
+                "`train_attn`/`train_mlp` are only supported on the FSDP backend; the Megatron "
+                "backend always adapts both attention and MLP. Use `trainer.strategy=fsdp`, or "
+                "name the modules explicitly in `trainer.policy.model.lora.target_modules`."
+            )
         if experts_shared_outer_loras:
             apply_packed_per_expert_sharded_state_dict_patch()
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
