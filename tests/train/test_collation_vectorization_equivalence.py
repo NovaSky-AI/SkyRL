@@ -153,7 +153,7 @@ def test_rl_preprocess_bit_identical(seed, with_logprobs):
     tokenizer = MagicMock()
     tokenizer.pad_token_id = 0
 
-    seq, attn, action, rew, lm, lp, _ = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, lp, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id, prompts, responses, rewards, loss_masks, logprobs
     )
     r_seq, r_attn, r_action, r_rew, r_lm, r_lp = _ref_convert_prompts_responses(
@@ -185,7 +185,7 @@ def test_rl_preprocess_accepts_tensor_rewards():
     rewards = [torch.tensor([1.0]), torch.tensor([0.5, 0.6, 0.7])]
     loss_masks = [[1], [1, 0, 1]]
 
-    _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
+    _, _, _, rew, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id, prompts, responses, rewards, loss_masks
     )
     _, _, _, r_rew, _, _ = _ref_convert_prompts_responses(prompts, responses, rewards, loss_masks, None, pad_token_id=0)
@@ -203,7 +203,7 @@ def test_rl_preprocess_accepts_grad_tensor_rewards():
     ]
     loss_masks = [[1], [1, 0, 1]]
 
-    _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
+    _, _, _, rew, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id, prompts, responses, rewards, loss_masks
     )
 
@@ -223,7 +223,7 @@ def test_rl_preprocess_accepts_cuda_tensor_rewards():
     ]
     loss_masks = [[1], [1, 0, 1]]
 
-    _, _, _, rew, _, _, _ = convert_prompts_responses_to_batch_tensors(
+    _, _, _, rew, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer.pad_token_id, prompts, responses, rewards, loss_masks
     )
 

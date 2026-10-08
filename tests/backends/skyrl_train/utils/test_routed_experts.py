@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from skyrl.backends.skyrl_train.utils.routed_experts import (
+    RoutedExpertTrace,
     compact_routed_expert_indices,
 )
 
@@ -61,3 +62,37 @@ def test_compaction_rejects_nested_lists():
 def test_compaction_rejects_invalid_routes(routes):
     with pytest.raises(ValueError):
         compact_routed_expert_indices(routes)
+
+
+def _turn_routes(num_rows):
+    return np.arange(num_rows * 4, dtype=np.int16).reshape(num_rows, 2, 2) % 8
+
+
+def test_trace_returns_only_the_rows_it_captured():
+    """The row count identifies where capture stops."""
+    trace = RoutedExpertTrace()
+    trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=_turn_routes(4))
+    trace.record_generation(prompt_token_count=7, generated_token_count=2, routed_experts=_turn_routes(4))
+
+    routes = trace.finalize(token_count=10, loss_mask=[0, 0, 0, 1, 1, 0, 0, 1, 1, 0])
+
+    assert routes.shape == (8, 2, 2)
+    assert np.array_equal(routes, np.concatenate((_turn_routes(4), _turn_routes(4))))
+
+
+def test_trace_keeps_full_coverage_when_every_token_has_a_route():
+    trace = RoutedExpertTrace()
+    trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=_turn_routes(4))
+
+    routes = trace.finalize(token_count=4, loss_mask=[0, 0, 0, 1])
+
+    assert routes.shape == (4, 2, 2)
+
+
+def test_trace_rejects_an_uncaptured_loss_active_target():
+    """Every loss-active target must have a captured route."""
+    trace = RoutedExpertTrace()
+    trace.record_generation(prompt_token_count=3, generated_token_count=2, routed_experts=_turn_routes(4))
+
+    with pytest.raises(ValueError, match="missing routed-expert row for loss-active target at token 5"):
+        trace.finalize(token_count=6, loss_mask=[0, 0, 0, 1, 1, 1])
