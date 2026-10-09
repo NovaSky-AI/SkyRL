@@ -5,9 +5,6 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 # Run Megatron tests:
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron"
 
-# Only the FSDP rows with a bf16 frozen base (``lora.base_dtype="bfloat16"``):
-uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "bf16_base"
-
 # Only the adapter-only rows (merge_lora=false), disk and in-memory sync:
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron_adapter"
 
@@ -17,11 +14,11 @@ since they exercise the inference-server LoRA control plane, not the
 trainer + weight-sync path covered here.
 """
 
-import math
 import os
 
 import pytest
 import ray
+import torch
 
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
@@ -33,24 +30,10 @@ from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
     init_worker_with_type,
-    make_dummy_training_batch,
     run_inference,
 )
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-class ParamDtypePolicyWorkerBase(FSDPPolicyWorkerBase):
-    def param_dtypes(self) -> dict:
-        """The dtypes of the frozen and the trainable parameters, as stored on this rank."""
-        params = list(self.model.parameters())
-        return {
-            "frozen": sorted({str(p.dtype) for p in params if not p.requires_grad}),
-            "trainable": sorted({str(p.dtype) for p in params if p.requires_grad}),
-        }
-
-
-ParamDtypePolicyWorker = ray.remote(num_gpus=1)(ParamDtypePolicyWorkerBase)
 
 
 def get_test_actor_config(
@@ -62,7 +45,6 @@ def get_test_actor_config(
     merge_lora: bool = True,
     lora_sync_mode: str = "disk",
     lora_sync_path: str | None = None,
-    lora_base_dtype: str | None = None,
 ) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
     cfg = SkyRLTrainConfig()
@@ -89,7 +71,6 @@ def get_test_actor_config(
             dropout=0.1,
             target_modules="all-linear",
             sync_mode=lora_sync_mode,
-            base_dtype=lora_base_dtype,
         )
         if lora_sync_path is not None:
             cfg.trainer.policy.model.lora.lora_sync_path = lora_sync_path
@@ -98,27 +79,22 @@ def get_test_actor_config(
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "tp_size", "merge_lora", "lora_sync_mode", "lora_base_dtype"),
+    ("colocate_all", "weight_sync_backend", "strategy", "tp_size", "merge_lora", "lora_sync_mode"),
     [
-        pytest.param(False, "nccl", "fsdp", 2, True, "disk", None),
-        pytest.param(True, "nccl", "fsdp", 2, True, "disk", None),
-        # Frozen base stored in bf16 (adapters stay fp32), through the worker's real FSDP init.
-        pytest.param(False, "nccl", "fsdp", 2, True, "disk", "bfloat16"),
-        pytest.param(True, "nccl", "fsdp", 2, True, "disk", "bfloat16"),
-        pytest.param(False, "nccl", "megatron", 2, True, "disk", None, marks=pytest.mark.megatron),
-        pytest.param(True, "nccl", "megatron", 2, True, "disk", None, marks=pytest.mark.megatron),
-        pytest.param(False, "nccl", "megatron", 2, False, "disk", None, marks=pytest.mark.megatron),
-        pytest.param(True, "nccl", "megatron", 2, False, "disk", None, marks=pytest.mark.megatron),
+        pytest.param(False, "nccl", "fsdp", 2, True, "disk"),
+        pytest.param(True, "nccl", "fsdp", 2, True, "disk"),
+        pytest.param(False, "nccl", "megatron", 2, True, "disk", marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, True, "disk", marks=pytest.mark.megatron),
+        pytest.param(False, "nccl", "megatron", 2, False, "disk", marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, False, "disk", marks=pytest.mark.megatron),
         # Adapter-only sync over the transport itself (NCCL broadcast when
         # non-colocated, CUDA IPC when colocated): no PEFT files are written.
-        pytest.param(False, "nccl", "megatron", 2, False, "memory", None, marks=pytest.mark.megatron),
-        pytest.param(True, "nccl", "megatron", 2, False, "memory", None, marks=pytest.mark.megatron),
+        pytest.param(False, "nccl", "megatron", 2, False, "memory", marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, False, "memory", marks=pytest.mark.megatron),
     ],
     ids=[
         "no_colocate_nccl_fsdp",
         "colocate_nccl_fsdp",
-        "no_colocate_nccl_fsdp_bf16_base",
-        "colocate_nccl_fsdp_bf16_base",
         "no_colocate_nccl_megatron_merged",
         "colocate_nccl_megatron_merged",
         "no_colocate_nccl_megatron_adapter",
@@ -129,24 +105,13 @@ def get_test_actor_config(
 )
 @pytest.mark.asyncio
 async def test_policy_local_engines_e2e(
-    ray_init_fixture,
-    tmp_path,
-    colocate_all,
-    weight_sync_backend,
-    strategy,
-    tp_size,
-    merge_lora,
-    lora_sync_mode,
-    lora_base_dtype,
+    ray_init_fixture, tmp_path, colocate_all, weight_sync_backend, strategy, tp_size, merge_lora, lora_sync_mode
 ):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
 
     ``lora_sync_path`` is a fresh temporary directory so the assertions at the
     end can tell the disk and in-memory adapter syncs apart by what they wrote.
-
-    With ``lora_base_dtype="bfloat16"`` it also checks the stored dtypes on every rank before and
-    after a training step: bf16 frozen base, fp32 adapters.
     """
     lora_sync_path = str(tmp_path / "lora_sync")
     cfg = get_test_actor_config(
@@ -158,7 +123,6 @@ async def test_policy_local_engines_e2e(
         merge_lora=merge_lora,
         lora_sync_mode=lora_sync_mode,
         lora_sync_path=lora_sync_path,
-        lora_base_dtype=lora_base_dtype,
     )
 
     # Only enable LoRA on the vLLM side when adapters are loaded separately.
@@ -187,16 +151,7 @@ async def test_policy_local_engines_e2e(
             colocate_all=cfg.trainer.placement.colocate_all,
             num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
             cfg=cfg,
-            worker_cls=ParamDtypePolicyWorker if lora_base_dtype is not None else None,
         )
-        if lora_base_dtype is not None:
-            expected = [{"frozen": ["torch.bfloat16"], "trainable": ["torch.float32"]}] * len(policy.actor_infos)
-            assert ray.get(policy.async_run_ray_method("pass_through", "param_dtypes")) == expected
-            batch = make_dummy_training_batch(batch_size=policy.actor_infos[0].rank.dp_size)
-            results = ray.get(policy.async_run_ray_method("mesh", "forward_backward", data=batch))
-            ray.get(policy.async_run_ray_method("pass_through", "optim_step"))
-            assert all(math.isfinite(result.metrics["policy_loss"]) for result in results)
-            assert ray.get(policy.async_run_ray_method("pass_through", "param_dtypes")) == expected
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
@@ -233,3 +188,25 @@ async def test_policy_local_engines_e2e(
     elif needs_vllm_lora and lora_sync_mode == "memory":
         assert not os.path.exists(lora_sync_path), f"in-memory LoRA sync wrote to {lora_sync_path}"
     # megatron + merge_lora syncs merged full weights and never touches lora_sync_path.
+
+
+class ParamDtypePolicyWorkerBase(FSDPPolicyWorkerBase):
+    def param_dtypes(self) -> dict[str, set[torch.dtype]]:
+        """Returns the dtypes of this rank's frozen and trainable parameters."""
+        params = list(self.model.parameters())
+        return {
+            "frozen": {p.dtype for p in params if not p.requires_grad},
+            "trainable": {p.dtype for p in params if p.requires_grad},
+        }
+
+
+ParamDtypePolicyWorker = ray.remote(num_gpus=1)(ParamDtypePolicyWorkerBase)
+
+
+def test_fsdp_lora_base_loaded_in_bf16(ray_init_fixture):
+    """An FSDP LoRA policy stores the frozen base in bf16 and the adapters in fp32."""
+    cfg = get_test_actor_config(strategy="fsdp", enable_lora=True)
+    policy = init_worker_with_type("policy", num_gpus_per_node=1, cfg=cfg, worker_cls=ParamDtypePolicyWorker)
+
+    dtypes = ray.get(policy.async_run_ray_method("pass_through", "param_dtypes"))
+    assert dtypes == [{"frozen": {torch.bfloat16}, "trainable": {torch.float32}}]

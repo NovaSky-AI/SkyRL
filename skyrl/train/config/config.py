@@ -126,13 +126,6 @@ class SkyRLLoraConfig(BaseConfig):
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
-    base_dtype: Optional[Literal["float32", "bfloat16"]] = None
-    """Storage dtype of the frozen base weights of a LoRA policy. FSDP policy only; requires ``rank > 0``.
-    Unset or ``"float32"`` keeps fp32 master weights for every parameter. ``"bfloat16"`` loads the base
-    model in bf16: PEFT still creates the adapter weights in fp32, and with the default
-    ``fsdp_config.mixed_precision`` (bf16 params) the forward pass computes in bf16 either way, so the
-    frozen weights take half the GPU memory and half the colocation offload traffic. Full fine-tuning
-    keeps fp32 master weights."""
 
     share_expert_adapters: bool = True
     """Share one LoRA adapter across local grouped experts."""
@@ -146,28 +139,6 @@ class SkyRLLoraConfig(BaseConfig):
     """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
     ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
     >= ``max_loras`` if explicitly set."""
-
-    def validate_base_dtype(self, strategy: str, field_prefix: str, strategy_field: str) -> None:
-        """``base_dtype="bfloat16"`` stores a frozen base model in bf16: only defined for an FSDP LoRA policy.
-
-        Shared by the RL (``validate_cfg``) and SFT (``validate_sft_cfg``) entrypoints, which name the fields
-        differently: ``field_prefix`` is this config's path and ``strategy_field`` the strategy's path.
-        """
-        if self.base_dtype not in (None, "float32", "bfloat16"):
-            raise ValueError(
-                f"`{field_prefix}.base_dtype` must be 'float32', 'bfloat16' or unset, got {self.base_dtype!r}"
-            )
-        if self.base_dtype != "bfloat16":
-            return
-        if strategy != "fsdp":
-            raise ValueError(
-                f"`{field_prefix}.base_dtype='bfloat16'` requires {strategy_field}='fsdp', got {strategy!r}"
-            )
-        if self.rank <= 0:
-            raise ValueError(
-                f"`{field_prefix}.base_dtype='bfloat16'` requires LoRA (`{field_prefix}.rank > 0`): "
-                "full fine-tuning keeps fp32 master weights"
-            )
 
 
 @dataclass
@@ -1515,6 +1486,8 @@ class TrainerConfig(BaseConfig):
     For sharded multi-node HF exports with ``policy.megatron_config.hf_export_config.distributed_save=True``, this must
     be a shared filesystem path visible to all Megatron ranks."""
     bf16: bool = True
+    """Load models in bf16. FSDP: the ref model and a LoRA policy's frozen base (the adapters stay fp32).
+    Megatron: the policy and ref models, including LoRA adapters. ``False`` uses fp32."""
     epochs: int = 1
     """Number of epochs (passes over the full dataset)."""
     max_training_steps: Optional[int] = None

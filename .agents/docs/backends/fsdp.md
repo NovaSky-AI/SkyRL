@@ -23,5 +23,5 @@ Default backend (`trainer.strategy=fsdp`). Uses PyTorch FSDP2 for distributed tr
 
 ## Parameter dtypes
 
-- The policy loads in fp32 (`HFModelWrapper(bf16=...)` is `False` for training) and FSDP2's `MixedPrecisionPolicy` casts parameters to bf16 for compute (`fsdp_config.mixed_precision`, default param bf16 / reduce fp32).
-- `trainer.policy.model.lora.base_dtype=bfloat16` (LoRA only) loads the policy in bf16 instead. PEFT still creates the adapters in fp32, so only the frozen base changes dtype; FSDP2 requires a uniform original dtype for trainable parameters only.
+- Full fine-tuning: the policy loads in fp32 master weights and FSDP2's `MixedPrecisionPolicy` casts parameters to bf16 for compute (`fsdp_config.mixed_precision`, default param bf16 / reduce fp32).
+- LoRA: with `trainer.bf16=true` (default) the frozen base loads in bf16, as on Megatron. PEFT creates the adapters in fp32; FSDP2 only requires trainable parameters to share a dtype. `trainer.bf16=false` keeps the base in fp32.

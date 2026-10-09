@@ -347,16 +347,6 @@ def _validate_draft_weight_sync_cfg(cfg: SkyRLTrainConfig):
         )
 
 
-def _validate_lora_base_dtype(cfg: SkyRLTrainConfig) -> None:
-    """``lora.base_dtype="bfloat16"`` stores a frozen base model in bf16: only defined for an FSDP LoRA policy."""
-    for role in ("critic", "ref"):
-        if getattr(cfg.trainer, role).model.lora.base_dtype is not None:
-            raise ValueError(f"`trainer.{role}.model.lora.base_dtype` is not supported; it applies to the policy only")
-    cfg.trainer.policy.model.lora.validate_base_dtype(
-        cfg.trainer.strategy, field_prefix="trainer.policy.model.lora", strategy_field="trainer.strategy"
-    )
-
-
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -409,7 +399,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         if use_ref_model:
             assert cfg.trainer.ref.language_model_only
     validate_batch_sizes(cfg)
-    _validate_lora_base_dtype(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:
         raise ValueError(

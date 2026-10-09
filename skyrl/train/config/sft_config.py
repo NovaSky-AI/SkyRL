@@ -558,7 +558,6 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             raise ValueError(f"num_epochs must be > 0, got {cfg.num_epochs}")
     if not cfg.model.path:
         raise ValueError("model.path must be set")
-    cfg.model.lora.validate_base_dtype(cfg.strategy, field_prefix="model.lora", strategy_field="strategy")
     if cfg.dummy_run_full_ctx and cfg.dummy_run_max_steps <= 0:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
     if cfg.max_training_steps is not None and cfg.max_training_steps <= 0:

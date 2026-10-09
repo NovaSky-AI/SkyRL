@@ -59,10 +59,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.strategy = strategy
 
         self._is_lora = self.cfg.policy.model.lora.rank > 0
-        bf16_base = self.cfg.policy.model.lora.base_dtype == "bfloat16"
-        # Backstop for entrypoints that skip config validation: full fine-tuning keeps fp32 master weights.
-        if bf16_base and not self._is_lora:
-            raise ValueError("`lora.base_dtype='bfloat16'` requires LoRA (`lora.rank > 0`)")
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
@@ -74,7 +70,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=self.cfg.policy.inference_only_init or bf16_base,
+            # Under trainer.bf16, a LoRA policy's frozen base loads in bf16; PEFT keeps the adapters in fp32.
+            bf16=self.cfg.policy.inference_only_init or (self._is_lora and self.cfg.bf16),
             lora_rank=self.cfg.policy.model.lora.rank,
             lora_alpha=self.cfg.policy.model.lora.alpha,
             lora_dropout=self.cfg.policy.model.lora.dropout,
