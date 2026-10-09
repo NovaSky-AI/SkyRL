@@ -89,7 +89,9 @@ class FakeRenderer:
         indices = [-1, *tail.tail_indices]
         return Rendered(token_ids=tokens, tail_indices=indices, reused=len(previous_prompt) + len(previous_completion))
 
-    def parse(self, completion_ids: Sequence[int], tools: Any, prompt_ids: Any = None) -> dict[str, Any]:
+    def parse(
+        self, completion_ids: Sequence[int], tools: Any, prompt_ids: Sequence[int] | None = None
+    ) -> dict[str, Any]:
         text = decode([t for t in completion_ids if t != END])
         message: dict[str, Any] = {"role": "assistant", "content": text}
         reasoning_content = None
