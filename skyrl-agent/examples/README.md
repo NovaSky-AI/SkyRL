@@ -54,6 +54,8 @@ Launch an OpenAI API-compatible serving (e.g., vLLM or similar), then configure 
 
 - Required `.env`: `WANDB_API_KEY`, `GOOGLE_SEARCH_KEY` (Serper key), `JINA_API_KEYS`, `WEB_SUMMARY_API_BASE`, `WEB_SUMMARY_MODEL` (e.g., `Qwen/Qwen3-32B`), `SKYAGENT_WEB_CACHE_DIR`, `STEM_LLM_JUDGE_URL`; optional blocklists.
 
+- Optional date-pinned search: replace `search_engine` with `rewind_search_engine` in `tools` and set `LINKUP_API_KEY` plus `REWIND_AS_OF` (a `YYYY-MM-DD` day before the eval benchmark was published) or a per-instance `as_of` field. Results only come from pages crawled by that day, so leaked copies of benchmark answers can't appear and the blocklists aren't needed.
+
 - Dataset:
   ```bash
   python ./data/deep_research.py --output-dir DR_DATA_DIR
