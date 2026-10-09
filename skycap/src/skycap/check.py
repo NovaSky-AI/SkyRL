@@ -6,7 +6,8 @@ matching what the graph already had, and comparing the new branch's first node
 with the sibling it should have matched says why:
 
 * ``resample``: the model replied again to a history it had already answered
-  (a retry, ``n > 1``, or a reply to a history the harness cut short).
+  (a retry, another sample of the same turn, or a reply to a history the harness
+  cut short).
 * ``edited reply``: the harness sent back a model reply with fields changed,
   such as stripped reasoning or a repaired tool call.
 * ``re-rendered``: token mode only. The same message, but its re-render didn't
@@ -25,9 +26,8 @@ to run over a whole record directory.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
-from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,7 +35,7 @@ import zstandard
 
 from skycap import record
 from skycap.graph import MessageGraph, Node
-from skycap.hashing import MatchKey, canonical_bytes
+from skycap.hashing import MatchKey
 
 Kind = Literal["resample", "edited reply", "re-rendered", "different message", "tools or model"]
 
@@ -126,61 +126,35 @@ def check_dir(record_dir: Path, trajectory_ids: Sequence[str] = ()) -> list[Repo
 def _forks_under(graph: MessageGraph, parent: int | None, messages: dict[int, dict[str, Any]]) -> Iterator[Fork]:
     """One fork per child after the first: each started a path its earlier siblings don't share."""
     children = [graph.nodes[i] for i in graph.children(parent)]
-    earlier = _Siblings(messages)
-    for index, node in enumerate(children):
-        if index:
-            sibling = earlier.closest(node, islice(children, index))
-            kind, detail = _cause(sibling, node, messages)
-            yield Fork(parent=parent, node=node.id, sibling=sibling.id, kind=kind, detail=detail)
-        earlier.add(node)
+    for index, node in enumerate(children[1:], 1):
+        sibling = _closest(node, children[:index], messages)
+        kind, detail = _cause(sibling, node, messages)
+        yield Fork(parent=parent, node=node.id, sibling=sibling.id, kind=kind, detail=detail)
 
 
-class _Siblings:
-    """The siblings seen so far under one parent, indexed for ``closest``."""
+def _closest(node: Node, earlier: list[Node], messages: dict[int, dict[str, Any]]) -> Node:
+    """The earlier sibling ``node``'s history should have matched.
 
-    def __init__(self, messages: dict[int, dict[str, Any]]) -> None:
-        self.messages = messages
-        self.latest: Node | None = None
-        self.by_match: dict[str, list[Node]] = {}
-        self.by_message: dict[bytes, Node] = {}
-        #: The latest sibling of each role, and the latest model reply of each role.
-        self.by_role: dict[str | None, Node] = {}
-        self.model_by_role: dict[str | None, Node] = {}
+    One with the same match hash (only the tokens or the sampling differ), else
+    the same message (only the tools or model differ), else the same role: for
+    a client node the one with the fewest changed fields. Ties go to a model
+    reply, then to the latest.
+    """
+    message = messages[node.id]
 
-    def add(self, node: Node) -> None:
-        self.latest = node
-        self.by_match.setdefault(node.match_hash, []).append(node)
-        self.by_message[canonical_bytes(self.messages[node.id])] = node
-        self.by_role[node.role] = node
-        if node.author == "model":
-            self.model_by_role[node.role] = node
-
-    def closest(self, node: Node, earlier: Iterable[Node]) -> Node:
-        """The earlier sibling ``node``'s history should have matched.
-
-        One with the same match hash first (only the tokens or the sampling
-        differ), preferring a model reply, then one with the same message (only
-        the tools or model differ). Otherwise the same-role sibling, preferring
-        a model reply: for a model node the latest, since every model sibling is
-        a resample of it; for a client node the one with the fewest differing
-        fields, the only case that compares against every earlier sibling.
-        """
-        same_match = self.by_match.get(node.match_hash)
-        if same_match:
-            return ([s for s in same_match if s.author == "model"] or same_match)[-1]
-        same_message = self.by_message.get(canonical_bytes(self.messages[node.id]))
-        if same_message is not None:
-            return same_message
-        if node.role not in self.by_role:
-            assert self.latest is not None
-            return self.latest
-        if node.author == "model":
-            return self.model_by_role.get(node.role) or self.by_role[node.role]
-        message = self.messages[node.id]
-        return min(
-            (s for s in earlier if s.role == node.role),
-            key=lambda s: (_count_changes(self.messages[s.id], message), s.author != "model", -s.id),
+    def rank(sibling: Node) -> tuple:
+        before = messages[sibling.id]
+        same_role = sibling.role == node.role
+        return (
+            sibling.match_hash != node.match_hash,
+            before != message,
+            not same_role,
+            len(_changes(before, message)) if same_role and node.author == "client" else 0,
+            sibling.author != "model",
+            -sibling.id,
         )
+
+    return min(earlier, key=rank)
 
 
 def _cause(sibling: Node, node: Node, messages: dict[int, dict[str, Any]]) -> tuple[Kind, str]:
@@ -203,11 +177,6 @@ def _cause(sibling: Node, node: Node, messages: dict[int, dict[str, Any]]) -> tu
     if sibling.author == "model":
         return "edited reply", f"the harness sent back the model's reply with {changes}"
     return "different message", f"a different {node.role} message: {changes}"
-
-
-def _count_changes(before: dict[str, Any], after: dict[str, Any]) -> int:
-    """How many top-level fields differ (``len(_changes(...))`` without building the words)."""
-    return len(before.keys() ^ after.keys()) + sum(before[k] != after[k] for k in before.keys() & after.keys())
 
 
 def _changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
