@@ -5,10 +5,12 @@ UID tracking, and the consumer's exhaustion-aware buffer drain.
 """
 
 import asyncio
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl.train.fully_async_trainer import (
@@ -18,6 +20,8 @@ from skyrl.train.fully_async_trainer import (
     _AsyncStalenessManager,
 )
 from skyrl.train.utils.async_utils import BackgroundFailure
+from skyrl.train.utils.metrics import ScalarGauges, TrainingPhaseGauge
+from skyrl.train.utils.trainer_utils import ResumeMode
 
 
 def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
@@ -296,3 +300,254 @@ def test_should_keep_group_token_level_rewards():
         )
         is True
     )
+
+
+# --------------------------------------------------------------------------------------
+# train(): checkpoint step names
+# --------------------------------------------------------------------------------------
+
+
+def _make_train_loop_trainer(
+    *,
+    num_prompts=4,
+    mini_batch_size=2,
+    epochs=1,
+    ckpt_interval=1,
+    hf_save_interval=0,
+    max_training_steps=None,
+    exhaust_after_steps=None,
+    partial_at_exhaustion=0,
+    resume=None,
+    ckpt_root="ckpt",
+):
+    """Build a FullyAsyncRayPPOTrainer whose train() runs on CPU with generation and training stubbed.
+
+    Mini-batches are drawn from a real ``_AsyncDataloader``. ``exhaust_after_steps`` ends each
+    epoch early (as ``sample_full_batch`` does) after that many steps, returning
+    ``partial_at_exhaustion`` groups as the partial mini-batch to discard. ``resume`` is the
+    ``load_checkpoints`` return value. Saves record ``(global_step, epoch)``; checkpoint saves
+    return ``{ckpt_root}/global_step_{N}``.
+    """
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    num_steps_per_epoch = num_prompts // mini_batch_size
+    trainer.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(
+            weight_sync_timeout_s=None,
+            step_timeout_s=None,
+            eval_interval=0,
+            eval_before_train=False,
+            epochs=epochs,
+            ckpt_interval=ckpt_interval,
+            hf_save_interval=hf_save_interval,
+            max_training_steps=max_training_steps,
+            update_ref_every_epoch=False,
+            critic=SimpleNamespace(model=SimpleNamespace(path=None)),
+        )
+    )
+    trainer.resume_mode = ResumeMode.NONE if resume is None else ResumeMode.LATEST
+    trainer.load_checkpoints = lambda: resume
+    trainer.mini_batch_size = mini_batch_size
+    trainer.num_steps_per_epoch = num_steps_per_epoch
+    trainer.total_training_steps = num_steps_per_epoch * epochs
+    if max_training_steps is not None:
+        trainer.total_training_steps = min(trainer.total_training_steps, max_training_steps)
+    trainer.num_parallel_generation_workers = mini_batch_size
+    trainer._gen_buffer_maxsize = mini_batch_size
+    trainer.sample_full_batch = False
+    trainer.async_train_dataloader = _make_async_dataloader(num_prompts, mini_batch_size)
+    trainer._staleness_manager = SimpleNamespace(
+        load_state_from_checkpoint=lambda step: None,
+        notify_capacity_change=AsyncMock(),
+        validate_state_at_epoch_end=AsyncMock(),
+        on_rollout_filtered=AsyncMock(),
+    )
+    trainer.dispatch = SimpleNamespace(
+        save_weights_for_sampler=AsyncMock(),
+        get_timing_metrics=lambda: {},
+        finalize_pending_saves=lambda model: None,
+    )
+    trainer.ref_model = None
+    trainer.init_weight_sync_state = lambda: None
+    trainer._ray_gpu_monitor = None
+    trainer._vllm_metrics_scraper = None
+    trainer._profiler_start = trainer._profiler_step = trainer._profiler_stop = lambda: None
+    trainer._phase_gauge = TrainingPhaseGauge()
+    trainer._loop_gauges = ScalarGauges()
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer.tracker = SimpleNamespace(log=lambda *args, **kwargs: None, finish=lambda: None)
+    trainer.finalize_metrics = AsyncMock()
+    trainer.convert_generation_group_mini_batch_to_training_input = lambda groups, dropped: None
+    trainer._run_training = AsyncMock(return_value={})
+
+    async def idle_generator(buffer, failure):
+        await asyncio.Event().wait()
+
+    trainer._run_generate_for_a_group_loop = idle_generator
+
+    steps_in_epoch = {"count": 0}
+
+    async def collect(buffer, all_generators_done, failure):
+        async def draw(num_groups):
+            groups = []
+            for _ in range(num_groups):
+                prompts = await trainer.async_train_dataloader.get_next_non_consumed_data()
+                groups.append(
+                    GeneratedOutputGroup(generator_output={}, uid=prompts[0]["uid"], global_step_when_scheduled=0)
+                )
+            return groups
+
+        if exhaust_after_steps is not None and steps_in_epoch["count"] == exhaust_after_steps:
+            steps_in_epoch["count"] = 0
+            return await draw(partial_at_exhaustion), [], True
+        steps_in_epoch["count"] += 1
+        return await draw(mini_batch_size), [], False
+
+    trainer._collect_generation_mini_batch = collect
+    trainer.saved_checkpoints = []
+    trainer.saved_models = []
+
+    def save_checkpoints():
+        trainer.saved_checkpoints.append((trainer.global_step, trainer.epoch))
+        return os.path.join(ckpt_root, f"global_step_{trainer.global_step}")
+
+    trainer.save_checkpoints = save_checkpoints
+    trainer.save_models = lambda: trainer.saved_models.append(trainer.global_step)
+    return trainer
+
+
+@pytest.mark.asyncio
+async def test_final_saves_are_named_after_the_last_trained_step():
+    """Two steps run; the epoch-end save already covers step 2, so nothing is saved after the loop."""
+    trainer = _make_train_loop_trainer(ckpt_interval=1, hf_save_interval=1)
+
+    await trainer.train()
+
+    assert trainer.global_step == 2
+    assert trainer.saved_checkpoints == [(1, 0), (2, 0)]
+    assert trainer.saved_models == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_max_training_steps_saves_the_last_trained_step():
+    trainer = _make_train_loop_trainer(num_prompts=8, ckpt_interval=2, hf_save_interval=2, max_training_steps=3)
+
+    await trainer.train()
+
+    assert trainer.global_step == 3
+    assert trainer.saved_checkpoints == [(2, 0), (3, 0)]
+    assert trainer.saved_models == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_early_epoch_end_saves_the_last_trained_step():
+    """An epoch that runs out of groups after one step saves step 1, and the next epoch trains step 2."""
+    trainer = _make_train_loop_trainer(epochs=2, ckpt_interval=5, hf_save_interval=5, exhaust_after_steps=1)
+
+    await trainer.train()
+
+    assert trainer.global_step == 2
+    assert trainer.saved_checkpoints == [(1, 0), (2, 1)]
+    assert trainer.saved_models == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_epoch_ending_before_the_first_step_saves_nothing():
+    """No checkpoint or HF model is saved for step 0, which no step has trained."""
+    trainer = _make_train_loop_trainer(
+        ckpt_interval=1, hf_save_interval=1, exhaust_after_steps=0, partial_at_exhaustion=1
+    )
+
+    await trainer.train()
+
+    assert trainer.global_step == 0
+    assert trainer.saved_checkpoints == []
+    assert trainer.saved_models == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial_at_exhaustion", [0, 1])
+async def test_early_epoch_end_records_prompts_filtered_after_the_last_checkpoint(tmp_path, partial_at_exhaustion):
+    """Prompts filtered after the last trained step's checkpoint are added to its fully-async state,
+    without saving the model again."""
+    trainer = _make_train_loop_trainer(
+        num_prompts=6,
+        ckpt_interval=1,
+        exhaust_after_steps=1,
+        partial_at_exhaustion=partial_at_exhaustion,
+        ckpt_root=str(tmp_path),
+    )
+    checkpoint_dir = tmp_path / "global_step_1"
+    checkpoint_dir.mkdir()
+
+    await trainer.train()
+
+    assert trainer.saved_checkpoints == [(1, 0)]
+    state_path = checkpoint_dir / "fully_async_state.pt"
+    if not partial_at_exhaustion:
+        assert not state_path.exists()
+        return
+    state = torch.load(state_path, weights_only=False)
+    assert state["epoch"] == 0
+    assert len(state["consumed_uids"]) == 3
+    assert len(state["filtered_uids"]) == 1
+    assert set(state["filtered_uids"]) <= set(state["consumed_uids"])
+
+
+@pytest.mark.asyncio
+async def test_early_epoch_end_leaves_the_resumed_from_checkpoint_untouched(tmp_path):
+    """Prompts filtered right after resuming are not written into the checkpoint the run resumed from."""
+    checkpoint_dir = tmp_path / "global_step_1"
+    checkpoint_dir.mkdir()
+    state_path = checkpoint_dir / "fully_async_state.pt"
+    torch.save({"consumed_uids": ["0", "1"], "filtered_uids": [], "epoch": 0}, state_path)
+    original = state_path.read_bytes()
+    trainer = _make_train_loop_trainer(
+        num_prompts=6,
+        ckpt_interval=1,
+        exhaust_after_steps=0,
+        partial_at_exhaustion=1,
+        resume=(1, str(checkpoint_dir), {"0", "1"}, set(), 0),
+        ckpt_root=str(tmp_path),
+    )
+
+    await trainer.train()
+
+    assert trainer.saved_checkpoints == []
+    assert state_path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_failed_early_epoch_end_save_keeps_the_next_step():
+    """If the early epoch-end save fails, ``global_step`` still names the next step, as for any other failure."""
+    trainer = _make_train_loop_trainer(epochs=2, ckpt_interval=5, exhaust_after_steps=1)
+
+    def failing_save():
+        raise OSError("disk full")
+
+    trainer.save_checkpoints = failing_save
+
+    with pytest.raises(OSError, match="disk full"):
+        await trainer.train()
+    assert trainer.global_step == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resume",
+    [
+        pytest.param((2, "ckpt/global_step_2", set(), set(), 1), id="all_epochs_done"),
+        # The epoch ended early after step 1 with every prompt trained or filtered.
+        pytest.param((1, "ckpt/global_step_1", {"0", "1", "2", "3"}, {"2", "3"}, 0), id="last_epoch_exhausted"),
+    ],
+)
+async def test_resume_with_no_steps_left_saves_nothing(resume):
+    """A resumed run with nothing left to train neither syncs weights nor saves a checkpoint or HF model."""
+    trainer = _make_train_loop_trainer(ckpt_interval=1, hf_save_interval=1, exhaust_after_steps=0, resume=resume)
+
+    await trainer.train()
+
+    assert trainer.global_step == resume[0]
+    assert trainer.saved_checkpoints == []
+    assert trainer.saved_models == []
+    trainer.dispatch.save_weights_for_sampler.assert_not_awaited()
