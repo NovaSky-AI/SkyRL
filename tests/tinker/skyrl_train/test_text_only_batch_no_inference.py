@@ -227,4 +227,28 @@ def test_extract_metrics_without_loss_metrics_is_unchanged():
     metrics = skyrl_train_backend.SkyRLTrainBackend._extract_metrics(
         _fake_backend(), {"final_loss": 2.0, "policy_loss": 1.0}
     )
-    assert metrics == {"total_loss:sum": 2.0, "pg_loss:sum": 1.0}
+    assert metrics == {"total_loss:sum": 2.0, "loss:sum": 2.0, "pg_loss:sum": 1.0}
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        ({"loss": 2.5}, 2.5),
+        ({"final_loss": 2.5}, 2.5),
+        ({"loss": 2.5, "final_loss": 7.0}, 2.5),
+        ({"loss": 0.0}, 0.0),
+        ({"final_loss": -0.25}, -0.25),
+    ],
+)
+def test_training_loss_supports_sdk_custom_loss(data, expected):
+    metrics = skyrl_train_backend.SkyRLTrainBackend._extract_metrics(_fake_backend(), data)
+
+    # The SDK's custom-loss callback consumes this key before the optimizer step.
+    assert metrics.pop("loss:sum") == expected
+    assert metrics["total_loss:sum"] == expected
+
+
+def test_missing_training_loss_is_not_fabricated():
+    metrics = skyrl_train_backend.SkyRLTrainBackend._extract_metrics(_fake_backend(), {"policy_loss": 1.0})
+
+    assert metrics == {"pg_loss:sum": 1.0}
