@@ -76,7 +76,7 @@ class Report:
 
 
 #: The errors a malformed or foreign record raises while it is read.
-_READ_ERRORS = (OSError, ValueError, KeyError, TypeError, AssertionError, zstandard.ZstdError)
+_READ_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, AssertionError, zstandard.ZstdError)
 
 
 def check_document(document: dict[str, Any]) -> Report:

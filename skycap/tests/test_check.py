@@ -262,6 +262,8 @@ def test_an_unreadable_record_is_reported_and_exits_2(tmp_path: Path, capsys: py
     future = {"format_version": 99, "id": "tr_new"}
     (tmp_path / "tr_new.json.zst").write_bytes(zstandard.ZstdCompressor().compress(orjson.dumps(future)))
     (tmp_path / "tr_list.json.zst").write_bytes(zstandard.ZstdCompressor().compress(orjson.dumps([1, 2, 3])))
+    shape = {"format_version": 1, "id": "tr_shape", "tools": {}, "nodes": [], "capture": ["tokens"]}
+    (tmp_path / "tr_shape.json.zst").write_bytes(zstandard.ZstdCompressor().compress(orjson.dumps(shape)))
 
     assert cli.main(["check", str(tmp_path)]) == 2
     lines = capsys.readouterr().out.splitlines()
@@ -270,7 +272,8 @@ def test_an_unreadable_record_is_reported_and_exits_2(tmp_path: Path, capsys: py
         "tr_list  unreadable: the document is a JSON list, not an object",
         "tr_new  unreadable: format_version 99, this skycap reads 1",
         "tr_ok  finished  empty",
-        "1 of 1 trajectories linear; 3 unreadable",
+        "tr_shape  unreadable: AttributeError: 'list' object has no attribute 'get'",
+        "1 of 1 trajectories linear; 4 unreadable",
     ]
 
 
