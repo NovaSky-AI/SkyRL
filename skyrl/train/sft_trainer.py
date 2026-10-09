@@ -934,10 +934,12 @@ class SFTTrainer:
         )
         if self.is_vlm:
             self.processor = get_processor(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
-            # Sequence packing / microbatch padding removal are unsupported for
-            # VLMs (3D RoPE + image token positions). ``remove_microbatch_padding``
-            # defaults to True, so disable both unconditionally and mirror the
-            # change onto the already-built trainer config the workers receive.
+            # VLM microbatch padding removal is enabled for RL only (Megatron, on
+            # Megatron-Bridge's Qwen3VLModel); VLM SFT runs unpacked for now.
+            # ``remove_microbatch_padding`` defaults to True, so disable both
+            # unconditionally and mirror the change onto the already-built trainer
+            # config the workers receive.
+            # TODO(xgui): enable remove_microbatch_padding for VLM SFT on Megatron.
             if self.sft_cfg.use_sequence_packing or self.sft_cfg.remove_microbatch_padding:
                 logger.warning("VLM detected: disabling sequence packing / microbatch padding removal.")
             self.sft_cfg.use_sequence_packing = False

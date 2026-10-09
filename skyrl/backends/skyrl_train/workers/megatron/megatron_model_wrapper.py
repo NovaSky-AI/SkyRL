@@ -10,6 +10,7 @@ from megatron.bridge.peft.utils import (
     finalize_model_grads_with_expert_adapter_sync,
 )
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.utils import unwrap_model
 from omegaconf import OmegaConf
 
 from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
@@ -19,7 +20,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     make_batch_generator,
-    model_packs_sequences_internally,
+    model_owns_vlm_packing,
     preprocess_packed_seqs,
     recover_left_padding,
     remove_left_padding,
@@ -215,24 +216,14 @@ class MegatronModelWrapper:
         self.policy_loss_fn = policy_loss_fn
         self.remove_microbatch_padding = self.cfg.remove_microbatch_padding
         self.is_vlm = is_vlm
+        # Sample packing for VLMs needs a model that computes mRoPE positions from the packed
+        # stream itself; other VLMs only run unpacked (see _assert_vlm_supported).
+        self.model_owns_vlm_packing = is_vlm and model_owns_vlm_packing(self.actor_module)
         # Fuse the LM-head projection into the chunked log-prob/entropy via the
         # GPTModel output_processor hook (avoids materializing the full
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
         self._fused_lm_head = bool(getattr(self.cfg, "fused_lm_head_logprob", False))
         self._fused_lm_head_backend = getattr(self.cfg, "fused_lm_head_logprob_backend", "torch")
-        # Some models (e.g. Qwen3.5 via the VL bridge -> Qwen3VLModel) pack
-        # sequences inside their own forward; SkyRL sample packing would then
-        # double-pack and corrupt the GDN cu_seqlens, so refuse it. For Qwen3.5,
-        # use language_model_only=True (native GPTModel GDN path) to pack.
-        if self.remove_microbatch_padding and model_packs_sequences_internally(self.actor_module):
-            raise ValueError(
-                "remove_microbatch_padding=True (sample packing) is not supported for models that "
-                "pack sequences inside their own forward (e.g. the Qwen3.5 VL Qwen3VLModel): it "
-                "double-packs and corrupts the GatedDeltaNet cu_seqlens. Set "
-                "trainer.policy.language_model_only=True to route Qwen3.5 to the native GPTModel GDN "
-                "packing path, or set trainer.remove_microbatch_padding=False."
-            )
-
         # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
         # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
         self._pending_grad_sync: Optional[dict] = None
@@ -299,12 +290,24 @@ class MegatronModelWrapper:
         return self.forward(*args, **kwargs)
 
     def _assert_vlm_supported(self):
-        """Guard the VLM parallelism constraints carried over from the FSDP path.
+        """Guard the VLM parallelism constraints.
 
-        3D RoPE and multimodal token positions make sample/microbatch packing,
-        context parallelism, and sequence parallelism unsafe for VLMs today.
+        With ``remove_microbatch_padding`` the model receives a [1, T] THD stream and
+        Megatron-Bridge's Qwen3-VL model rebuilds 3D mRoPE positions per packed
+        sub-sequence from ``packed_seq_params`` (``rope.get_rope_index``), without
+        re-packing the stream (NVIDIA-NeMo/Megatron-Bridge#4532). Other VLMs only run
+        unpacked (``model_owns_vlm_packing``).
+        TODO(xgui): context parallelism. preprocess_packed_seqs pre-shards the stream
+        per CP rank, which the bridge model only accepts with explicit rank-local
+        3D position ids.
         """
-        assert not self.remove_microbatch_padding, "VLM + microbatch padding removal unsupported"
+        if self.remove_microbatch_padding and not self.model_owns_vlm_packing:
+            model_cls = type(unwrap_model(self.actor_module[0])).__name__
+            raise ValueError(
+                "trainer.remove_microbatch_padding=true (sample packing) is supported for VLMs only on "
+                "Megatron-Bridge's Qwen3VLModel (Qwen3-VL, Qwen3.5-VL), which rebuilds mRoPE positions per "
+                f"packed sample; got {model_cls}. Set trainer.remove_microbatch_padding=false."
+            )
         assert mpu.get_context_parallel_world_size() == 1, "VLM + context parallelism unsupported"
         assert (
             mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1

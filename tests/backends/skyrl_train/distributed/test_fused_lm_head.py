@@ -151,6 +151,54 @@ def test_native_model_uses_output_processor_hook(hybrid_model_type):
     )
 
 
+def test_vl_wrapper_passes_output_processor_to_language_model(hybrid_model_type):
+    # Megatron-Bridge's Qwen3VLModel: forward takes **kwargs and hands them to a GPT-style language model.
+    class LanguageModel:
+        def forward(self, *, output_processor=None, output_processor_context=None): ...
+
+    class VLWrapper:
+        config = SimpleNamespace(mxfp8_output_projection=False, use_mup=False)
+        language_model = LanguageModel()
+
+        def forward(self, input_ids, pixel_values=None, **kwargs): ...
+
+    processor = Mock()
+    context = {}
+    model = Mock(module=VLWrapper(), return_value="vl-output")
+
+    output = call_model_with_fused_lm_head(
+        model,
+        "input",
+        output_processor=processor,
+        output_processor_context=context,
+        pixel_values="pixels",
+    )
+
+    assert output == "vl-output"
+    model.assert_called_once_with(
+        "input",
+        output_processor=processor,
+        output_processor_context=context,
+        pixel_values="pixels",
+    )
+
+
+def test_vl_wrapper_without_output_processor_hook_is_rejected(hybrid_model_type):
+    class LanguageModel:
+        def forward(self, input_ids): ...
+
+    class VLWrapper:
+        config = SimpleNamespace(mxfp8_output_projection=False, use_mup=False)
+        language_model = LanguageModel()
+
+        def forward(self, input_ids, **kwargs): ...
+
+    with pytest.raises(NotImplementedError, match="VLWrapper"):
+        call_model_with_fused_lm_head(
+            Mock(module=VLWrapper()), "input", output_processor=Mock(), output_processor_context={}
+        )
+
+
 def test_hybrid_restores_post_process_when_forward_fails(hybrid_model_type):
     hybrid = _make_hybrid(hybrid_model_type)
     wrapped_model = Mock(module=hybrid, side_effect=RuntimeError("forward failed"))

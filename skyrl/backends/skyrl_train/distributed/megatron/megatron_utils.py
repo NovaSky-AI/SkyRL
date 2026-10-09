@@ -815,28 +815,30 @@ def preprocess_packed_seqs(
         return input_ids, packed_seq_params
 
 
-def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
-    """Whether the model packs sequences inside its own ``forward``.
+def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
+    """Whether the VLM handles a packed [1, T] stream itself.
 
-    True for ``Qwen3VLModel`` (e.g. Qwen3.5 via the VL bridge), which would
-    double-pack and corrupt the GDN ``cu_seqlens`` under SkyRL sample packing, so
-    :class:`MegatronModelWrapper` refuses packing for it. Returns ``False`` when
-    mbridge / Qwen3VL is not importable, so other models are unaffected.
+    True when every model chunk is Megatron-Bridge's ``Qwen3VLModel`` (Qwen3-VL,
+    Qwen3.5-VL), which rebuilds 3D mRoPE positions per packed sub-sequence from
+    ``packed_seq_params``, or sets ``model_owns_packing = True`` (NeMo-RL's opt-in
+    attribute for models that pack and split for context parallelism themselves).
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
             Qwen3VLModel,
         )
     except ImportError:
-        return False
+        Qwen3VLModel = None
 
     chunks = model if isinstance(model, (list, tuple)) else [model]
     for chunk in chunks:
         unwrapped = unwrap_model(chunk)
-        unwrapped_list = unwrapped if isinstance(unwrapped, (list, tuple)) else [unwrapped]
-        if any(isinstance(m, Qwen3VLModel) for m in unwrapped_list):
-            return True
-    return False
+        if getattr(unwrapped, "model_owns_packing", False):
+            continue
+        if Qwen3VLModel is not None and isinstance(unwrapped, Qwen3VLModel):
+            continue
+        return False
+    return bool(chunks)
 
 
 def remove_left_padding(

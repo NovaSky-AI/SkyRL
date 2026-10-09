@@ -58,7 +58,12 @@ def call_model_with_fused_lm_head(
     if unwrapped_model.config.use_mup:
         raise NotImplementedError("fused_lm_head_logprob does not support MuP logit scaling")
     # Standard GPTModel objects directly take `output_processor`, just call the model like normal
-    if "output_processor" in inspect.signature(unwrapped_model.forward).parameters:
+    # VL wrappers (e.g. Megatron-Bridge's Qwen3VLModel) forward extra kwargs to a GPT-style language model
+    # that takes `output_processor`.
+    language_model = getattr(unwrapped_model, "language_model", None)
+    if "output_processor" in inspect.signature(unwrapped_model.forward).parameters or (
+        language_model is not None and "output_processor" in inspect.signature(language_model.forward).parameters
+    ):
         return model(
             *args,
             output_processor=output_processor,
