@@ -222,6 +222,7 @@ uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap \
   harbor_trial_config.environment.kwargs.labels.run="$EXPERIMENT" \
   harbor_trial_config.environment.kwargs.ttl_minutes="$SANDBOX_TTL_MINUTES" \
   harbor_trial_config.environment.kwargs.auto_stop_interval_mins=30 \
+  harbor_trial_config.environment.kwargs.setup_script="$REPO/$HERE/sandbox_setup.sh" \
   harbor_trial_config.environment.override_cpus="$SANDBOX_CPUS" \
   harbor_trial_config.environment.override_memory_mb="$SANDBOX_MEMORY_MB" \
   harbor_trial_config.environment.override_storage_mb="$SANDBOX_STORAGE_MB" \
