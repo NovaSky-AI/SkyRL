@@ -283,6 +283,30 @@ doesn't hold; readers treat those as absent (see [`docs/format.md`](docs/format.
 The local record is untouched. Excluding `tokens` is allowed, but a viewer of
 the mirror then shows message text only.
 
+## Check a harness
+
+A harness that only appends to its history should record one path per
+trajectory. `skycap check` reads a record directory and reports, for each
+trajectory, how many paths it has and why each fork happened:
+
+```console
+$ uv run skycap check ./record
+tr_a  finished  linear
+tr_b  finished  2 paths
+  node 2 (under node 0, vs node 1): edited reply: the harness sent back the model's reply with reasoning_content dropped
+1 of 2 trajectories linear; forks: 1 edited reply
+```
+
+A fork is a `resample` (the model replied again to a history it had already
+answered), an `edited reply` (the harness replayed a model reply with fields
+changed, such as stripped reasoning), `re-rendered` (token mode: the same
+message, but its render didn't reproduce the sampled tokens), a `different
+message` (a compaction, a subagent, a rewritten turn), or `tools or model` (the
+same message sent with a different tool set or model). In token mode it also
+counts unbridged calls, whose prompt was re-rendered rather than extended.
+It exits 0 if every trajectory is linear, 1 if any forks and 2 if a record
+can't be read. Pass trajectory ids after the directory to check only those.
+
 ## Develop
 
 ```bash

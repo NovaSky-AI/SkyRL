@@ -33,7 +33,7 @@ import numpy as np
 import orjson
 import zstandard
 
-from skycap.graph import CallInfo, NodeTokens
+from skycap.graph import CallInfo, MessageGraph, NodeTokens
 from skycap.trajectory import Failure, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -247,7 +247,20 @@ def load(record_dir: Path, trajectory_id: str) -> Trajectory:
     retries = document.get("retries") or {}
     trajectory.replay.replayed = retries.get("replayed", 0)
     trajectory.replay.coalesced = retries.get("coalesced", 0)
-    graph = trajectory.graph
+    add_nodes(trajectory.graph, document, arrays)
+    return trajectory
+
+
+def add_nodes(
+    graph: MessageGraph,
+    document: dict[str, Any],
+    arrays: dict[str, dict[str, np.ndarray] | None] | None = None,
+) -> None:
+    """Rebuild a written document's tools and nodes into ``graph``.
+
+    Without ``arrays`` (the sidecars ``load`` reads) the nodes carry no tokens,
+    which is enough for anything that only reads the graph's shape.
+    """
     graph.tools.update(document["tools"])
     for entry in document["nodes"]:
         node, _ = graph.add(
@@ -258,11 +271,10 @@ def load(record_dir: Path, trajectory_id: str) -> Trajectory:
             match_hash=entry["match_hash"],
             delta_hash=entry["delta_hash"],
             created_at=entry["created_at"],
-            tokens=_node_tokens(entry.get("tokens"), arrays),
+            tokens=None if arrays is None else _node_tokens(entry.get("tokens"), arrays),
         )
         assert node.id == entry["id"], "record nodes are stored in creation order"
         node.calls.extend(CallInfo(**call) for call in entry["calls"])
-    return trajectory
 
 
 def _node_tokens(meta: dict[str, Any] | None, arrays: dict[str, dict[str, np.ndarray] | None]) -> NodeTokens | None:

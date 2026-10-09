@@ -1,4 +1,4 @@
-"""`skycap serve`: run one capture server against one upstream."""
+"""`skycap serve`: run one capture server against one upstream. `skycap check`: report forks in a record."""
 
 from __future__ import annotations
 
@@ -9,10 +9,12 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 from aiohttp import web
 
-from skycap import __version__
+from skycap import __version__, record
+from skycap.check import check_dir, format_reports
 from skycap.exposure import Exposure, load_exposure
 from skycap.server import CaptureServer
 from skycap.service import build_backend, serve
@@ -129,6 +131,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="harness routes answer only a caller sending the trajectory's own key (create returns it) "
         "as `Authorization: Bearer <key>`, as an OpenAI client does with its api_key",
     )
+
+    check = commands.add_parser(
+        "check",
+        help="report whether recorded trajectories stayed on one path, and the cause of each fork",
+        description="Report whether recorded trajectories stayed on one path, and the cause of each fork, so a "
+        "harness whose history should be linear can be checked against a recorded run.",
+        epilog="causes: resample (another reply to the same history), edited reply (a model reply sent back with "
+        "fields changed), re-rendered (token mode: the same message rendered to different tokens), different "
+        "message (a compaction, subagent or rewritten turn), tools or model (the same message with another tool "
+        "set or model). Exit status: 0 if every trajectory is linear, 1 if any forks, 2 if a record can't be read.",
+    )
+    check.set_defaults(subparser=check)
+    check.add_argument("record_dir", type=Path, help="a --record-dir written by `skycap serve`")
+    check.add_argument("trajectory_ids", nargs="*", help="trajectories to check (default: every one in the directory)")
     return parser
 
 
@@ -172,6 +188,8 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "check":
+        return check(args.subparser, args.record_dir, args.trajectory_ids)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.command == "serve":
         if args.expose is None and args.expose_kwargs:
@@ -203,6 +221,24 @@ async def _serve_exposed(server: CaptureServer, *, host: str, port: int, exposur
     await serve(
         server, host=host, port=port, advertise_host=advertise, exposure=exposure, stopping=stopping, ready=ready
     )
+
+
+def check(parser: argparse.ArgumentParser, record_dir: Path, trajectory_ids: list[str]) -> int:
+    """`skycap check`. Exits 0 if every trajectory is linear, 1 if any forks, 2 if a record can't be read."""
+    if not record_dir.is_dir():
+        parser.error(f"{record_dir} is not a directory")
+    ids = list(dict.fromkeys(trajectory_ids))
+    known = set(record.list_ids(record_dir))
+    unknown = [i for i in ids if i not in known]
+    if unknown:
+        parser.error(f"no trajectory {', '.join(unknown)} in {record_dir}")
+    reports = check_dir(record_dir, ids)
+    if not reports:
+        parser.error(f"no trajectories in {record_dir}")
+    print(format_reports(reports))
+    if any(report.error is not None for report in reports):
+        return 2
+    return 0 if all(report.linear for report in reports) else 1
 
 
 if __name__ == "__main__":
