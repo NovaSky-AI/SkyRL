@@ -1298,7 +1298,8 @@ class InferenceEngineConfig(BaseConfig):
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine.
     Names must match the engine's args. Applied last, so they silently override config-derived
-    engine args (e.g. ``tensor_parallel_size``).
+    engine args (e.g. ``tensor_parallel_size``). The exception is ``logprobs_mode``, which is
+    always ``"processed_logprobs"``; any other value is rejected.
 
     For HuggingFace config overrides such as RoPE scaling, use
     ``engine_init_kwargs.hf_overrides.rope_parameters`` and set the matching trainer-side override
@@ -1325,7 +1326,8 @@ class InferenceEngineConfig(BaseConfig):
     """Pass-through kwargs for the vLLM engine, applied only to prefill engines when
     ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs``: provide role-specific
     kwargs (including shared ones like ``kv_transfer_config``) via ``prefill_init_kwargs`` /
-    ``decode_init_kwargs`` instead."""
+    ``decode_init_kwargs`` instead. As with ``engine_init_kwargs``, ``logprobs_mode`` must be
+    ``"processed_logprobs"``."""
     decode_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine, applied only to decode engines when
     ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs`` (see ``prefill_init_kwargs``)."""

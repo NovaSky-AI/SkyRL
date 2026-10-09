@@ -155,6 +155,13 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
 
 
 @pytest.mark.vllm
+def test_default_logprobs_mode_is_processed_logprobs():
+    args = build_vllm_cli_args(SkyRLTrainConfig())
+
+    assert args.logprobs_mode == "processed_logprobs"
+
+
+@pytest.mark.vllm
 def test_sample_support_uses_processed_top_k_logprobs():
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
