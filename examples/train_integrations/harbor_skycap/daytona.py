@@ -16,44 +16,21 @@ once their time is up. Use it in place of ``type: daytona``:
 
 import argparse
 import asyncio
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from harbor.environments.daytona import DaytonaEnvironment
 
 
-#: Where ``setup_script`` is copied in the sandbox.
-SETUP_SCRIPT_PATH = "/tmp/skyrl_sandbox_setup.sh"
-
-
 class LabelledDaytonaEnvironment(DaytonaEnvironment):
     def __init__(
-        self,
-        *args: Any,
-        labels: Optional[Dict[str, str]] = None,
-        ttl_minutes: Optional[int] = None,
-        setup_script: Optional[str] = None,
-        **kwargs: Any,
+        self, *args: Any, labels: Optional[Dict[str, str]] = None, ttl_minutes: Optional[int] = None, **kwargs: Any
     ) -> None:
-        """``labels`` go on every sandbox; ``ttl_minutes`` is how long one may live, whatever happens to us.
-        ``setup_script``, a local shell script, runs as root in each sandbox once it is up, before the agent."""
+        """``labels`` go on every sandbox; ``ttl_minutes`` is how long one may live, whatever happens to us."""
         if not labels:
             raise ValueError("LabelledDaytonaEnvironment needs labels, e.g. {owner: <you>, run: <run name>}")
-        if setup_script is not None and not Path(setup_script).is_file():
-            raise ValueError(f"setup_script {setup_script!r} is not a file")
         super().__init__(*args, **kwargs)
         self._labels = {str(key): str(value) for key, value in labels.items()}
         self._ttl_minutes = ttl_minutes
-        self._setup_script = setup_script
-
-    async def start(self, force_build: bool) -> None:
-        await super().start(force_build)
-        if self._setup_script is None:
-            return
-        await self.upload_file(self._setup_script, SETUP_SCRIPT_PATH)
-        result = await self.exec(f"bash {SETUP_SCRIPT_PATH}", user="root")
-        if result.return_code != 0:
-            raise RuntimeError(f"setup_script failed with code {result.return_code}: {result.stdout} {result.stderr}")
 
     async def _create_sandbox(self, params: Any, daytona: Any = None) -> None:
         params.labels = {**(params.labels or {}), **self._labels}

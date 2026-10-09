@@ -169,9 +169,7 @@ def build(row: Dict, out_dir: Path, image_dir: Path, args: argparse.Namespace) -
     (task / "environment").mkdir()
 
     problem = inline_images(row["problem_statement"].strip(), local)
-    (task / "instruction.md").write_text(
-        INSTRUCTION.format(problem_statement=problem, cpus=args.cpus, memory_gb=args.memory_mb // 1024)
-    )
+    (task / "instruction.md").write_text(INSTRUCTION.format(problem_statement=problem, cpus=args.cpus, memory_gb=args.memory_mb // 1024))
     (task / "task.toml").write_text(
         TASK_TOML.format(
             instance_id=instance_id,

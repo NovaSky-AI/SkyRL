@@ -1,7 +1,6 @@
 # mini-swe-agent 2.x's own mini_textbased.yaml, for SWE-bench Multimodal through skycap:
 # - model_class litellm_textbased and multimodal_regex (below), so the issue's screenshots reach the model;
-# - step_limit 50, cost_limit 0 (skycap's model has no price);
-# - NODE_OPTIONS loads sandbox_setup.sh's preload, so Jest starts workers for the sandbox's CPUs only.
+# - step_limit 50, cost_limit 0 (skycap's model has no price).
 # Harbor runs it as `-c mini -c <this file>`, so every key mini.yaml sets that this config replaces is here.
 agent:
   system_template: |
@@ -111,8 +110,6 @@ agent:
   mode: confirm
 environment:
   env:
-    # sandbox_setup.sh's preload: Node (so Jest) sees the sandbox's CPUs, not the host's 64.
-    NODE_OPTIONS: --require /opt/skyrl/node_cpus.js
     PAGER: cat
     MANPAGER: cat
     LESS: -R

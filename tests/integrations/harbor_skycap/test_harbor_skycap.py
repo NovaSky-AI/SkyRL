@@ -692,39 +692,3 @@ def test_the_labelled_environment_tags_every_sandbox_and_bounds_its_life(monkeyp
     with pytest.raises(ValueError, match="needs labels"):
         daytona.LabelledDaytonaEnvironment(labels={})
     assert daytona.command_is_unscoped({"owner": "me"}) and not daytona.command_is_unscoped({"owner": "me", "run": "r"})
-
-
-def test_the_labelled_environment_runs_its_setup_script_as_root_after_start(monkeypatch, tmp_path) -> None:
-    from types import SimpleNamespace as NS
-
-    from examples.train_integrations.harbor_skycap import daytona
-
-    calls = []
-
-    async def start(self, force_build):
-        calls.append(("start", force_build))
-
-    async def upload_file(self, source, target):
-        calls.append(("upload", source, target))
-
-    async def exec_(self, command, user=None, **_):
-        calls.append(("exec", command, user))
-        return NS(return_code=self.code, stdout="out", stderr="err")
-
-    monkeypatch.setattr(daytona.DaytonaEnvironment, "start", start)
-    monkeypatch.setattr(daytona.LabelledDaytonaEnvironment, "upload_file", upload_file, raising=False)
-    monkeypatch.setattr(daytona.LabelledDaytonaEnvironment, "exec", exec_, raising=False)
-    script = tmp_path / "setup.sh"
-    script.write_text("true")
-    environment = object.__new__(daytona.LabelledDaytonaEnvironment)
-    environment._setup_script, environment.code = str(script), 0
-
-    asyncio.run(environment.start(False))
-
-    path = daytona.SETUP_SCRIPT_PATH
-    assert calls == [("start", False), ("upload", str(script), path), ("exec", f"bash {path}", "root")]
-    environment.code = 1
-    with pytest.raises(RuntimeError, match="setup_script failed with code 1"):
-        asyncio.run(environment.start(False))
-    with pytest.raises(ValueError, match="is not a file"):
-        daytona.LabelledDaytonaEnvironment(labels={"owner": "me"}, setup_script=str(tmp_path / "missing.sh"))
