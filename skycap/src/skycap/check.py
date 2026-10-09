@@ -25,7 +25,7 @@ to run over a whole record directory.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
@@ -35,7 +35,7 @@ import zstandard
 
 from skycap import record
 from skycap.graph import MessageGraph, Node
-from skycap.hashing import canonical_bytes, canonical_message, rendered_fields
+from skycap.hashing import MatchKey, canonical_bytes
 
 Kind = Literal["resample", "edited reply", "re-rendered", "different message", "tools or model"]
 
@@ -92,10 +92,10 @@ def check_document(document: dict[str, Any]) -> Report:
         )
     graph = MessageGraph()
     record.add_nodes(graph, document)
-    tokens = (document.get("capture") or {}).get("mode") == "tokens"
-    normalize = _token_message if tokens else canonical_message
-    # Each message as the graph's matching sees it, normalized once.
-    messages = {node.id: normalize(node.message) for node in graph}
+    # Each message's fields as the graph's matching sees them. The key's tools and model don't
+    # matter here: ``fields`` ignores them, and the match hashes already cover them.
+    key = MatchKey("", None, rendered_only=(document.get("capture") or {}).get("mode") == "tokens")
+    messages = {node.id: key.fields(node.message) for node in graph}
     forks = [fork for parent in [None, *graph.branch_points()] for fork in _forks_under(graph, parent, messages)]
     return Report(
         trajectory_id=document["id"],
@@ -121,11 +121,6 @@ def check_dir(record_dir: Path, trajectory_ids: Sequence[str] = ()) -> list[Repo
         except _READ_ERRORS as error:
             reports.append(Report(trajectory_id, "unreadable", error=f"{type(error).__name__}: {error}"))
     return reports
-
-
-def _token_message(message: Mapping[str, Any]) -> dict[str, Any]:
-    """A token-mode message as its match hash sees it: the rendered fields (``MatchKey.fields``)."""
-    return canonical_message(rendered_fields(message))
 
 
 def _forks_under(graph: MessageGraph, parent: int | None, messages: dict[int, dict[str, Any]]) -> Iterator[Fork]:

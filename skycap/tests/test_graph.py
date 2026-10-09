@@ -30,9 +30,9 @@ class Harness:
         self.graph = MessageGraph()
         self.clock = 0.0
 
-    def call(self, messages, reply, *, tools=None, model="policy", **sampling):
+    def call(self, messages, reply, *, tools=None, model="policy", bridged=None, **sampling):
         self.clock += 1.0
-        info = CallInfo(t_start=self.clock, t_end=self.clock + 0.5, model=model, sampling=sampling)
+        info = CallInfo(t_start=self.clock, t_end=self.clock + 0.5, model=model, sampling=sampling, bridged=bridged)
         return self.graph.commit_text(messages, reply, tools=tools, model=model, call=info)
 
     def shape(self) -> list[tuple[int | None, str, str]]:

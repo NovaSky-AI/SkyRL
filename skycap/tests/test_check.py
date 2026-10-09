@@ -10,35 +10,21 @@ import zstandard
 
 from skycap import cli, record
 from skycap.check import check_dir, format_reports
-from skycap.graph import CallInfo
 from skycap.trajectory import Trajectory
+from tests import test_graph
 from tests.conftest import Stack, openai_client
 from tests.fake_renderer import END, NL, encode
+from tests.test_graph import SEARCH, SYS, assistant, user
 from tests.test_tokens import token_stack
 
-SYS = {"role": "system", "content": "You are terse."}
-SEARCH = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
 
-
-def user(text: str) -> dict:
-    return {"role": "user", "content": text}
-
-
-def assistant(text: str, **extra) -> dict:
-    return {"role": "assistant", "content": text, **extra}
-
-
-class Harness:
-    """Drives one text-mode trajectory's graph a call at a time, then writes it."""
+class Harness(test_graph.Harness):
+    """``test_graph``'s harness, driving one trajectory's graph, which it then writes."""
 
     def __init__(self, trajectory_id: str) -> None:
+        super().__init__()
         self.trajectory = Trajectory(id=trajectory_id)
-        self.clock = 0.0
-
-    def call(self, messages, reply, *, tools=None, model="policy", bridged=None, **sampling) -> None:
-        self.clock += 1.0
-        info = CallInfo(t_start=self.clock, t_end=self.clock + 0.5, model=model, sampling=sampling, bridged=bridged)
-        self.trajectory.graph.commit_text(messages, reply, tools=tools, model=model, call=info)
+        self.graph = self.trajectory.graph
 
     def write(self, record_dir: Path) -> None:
         self.trajectory.seal("finished", {"reward": 1.0})
