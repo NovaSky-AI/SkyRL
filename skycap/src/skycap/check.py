@@ -25,8 +25,9 @@ to run over a whole record directory.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -80,6 +81,8 @@ _READ_ERRORS = (OSError, ValueError, KeyError, TypeError, AssertionError, zstand
 
 def check_document(document: dict[str, Any]) -> Report:
     """Check one record document, as ``record.read_document`` returns it."""
+    if not isinstance(document, dict):
+        return Report("?", "unreadable", error=f"the document is a JSON {type(document).__name__}, not an object")
     version = document.get("format_version")
     if version != record.FORMAT_VERSION:
         return Report(
@@ -93,7 +96,7 @@ def check_document(document: dict[str, Any]) -> Report:
     normalize = _token_message if tokens else canonical_message
     # Each message as the graph's matching sees it, normalized once.
     messages = {node.id: normalize(node.message) for node in graph}
-    forks = [fork for parent in [None, *(node.id for node in graph)] for fork in _forks_under(graph, parent, messages)]
+    forks = [fork for parent in [None, *graph.branch_points()] for fork in _forks_under(graph, parent, messages)]
     return Report(
         trajectory_id=document["id"],
         status=document["status"],
@@ -112,7 +115,9 @@ def check_dir(record_dir: Path, trajectory_ids: Sequence[str] = ()) -> list[Repo
     reports = []
     for trajectory_id in trajectory_ids or list(record.list_ids(record_dir)):
         try:
-            reports.append(check_document(record.read_document(record_dir, trajectory_id)))
+            report = check_document(record.read_document(record_dir, trajectory_id))
+            # A document too malformed to name itself is named by its file.
+            reports.append(report if report.error is None else replace(report, trajectory_id=trajectory_id))
         except _READ_ERRORS as error:
             reports.append(Report(trajectory_id, "unreadable", error=f"{type(error).__name__}: {error}"))
     return reports
@@ -126,48 +131,61 @@ def _token_message(message: Mapping[str, Any]) -> dict[str, Any]:
 def _forks_under(graph: MessageGraph, parent: int | None, messages: dict[int, dict[str, Any]]) -> Iterator[Fork]:
     """One fork per child after the first: each started a path its earlier siblings don't share."""
     children = [graph.nodes[i] for i in graph.children(parent)]
-    by_match: dict[str, list[Node]] = {}
-    by_message: dict[bytes, Node] = {}
+    earlier = _Siblings(messages)
     for index, node in enumerate(children):
         if index:
-            sibling = _sibling_to_compare(children, index, by_match, by_message, messages)
+            sibling = earlier.closest(node, islice(children, index))
             kind, detail = _cause(sibling, node, messages)
             yield Fork(parent=parent, node=node.id, sibling=sibling.id, kind=kind, detail=detail)
-        by_match.setdefault(node.match_hash, []).append(node)
-        by_message[canonical_bytes(messages[node.id])] = node
+        earlier.add(node)
 
 
-def _sibling_to_compare(
-    children: list[Node],
-    index: int,
-    by_match: dict[str, list[Node]],
-    by_message: dict[bytes, Node],
-    messages: dict[int, dict[str, Any]],
-) -> Node:
-    """The earlier sibling ``children[index]``'s history should have matched: the closest one.
+class _Siblings:
+    """The siblings seen so far under one parent, indexed for ``closest``."""
 
-    One with the same match hash first (only the tokens or the sampling
-    differ), preferring a model reply, then one with the same message (only the
-    tools or model differ). Otherwise the same-role sibling, preferring a model
-    reply: for a model node the latest, since every model sibling is a resample
-    of it; for a client node the one with the fewest differing fields.
-    """
-    node, earlier = children[index], children[:index]
-    same_match = by_match.get(node.match_hash)
-    if same_match:
-        return ([s for s in same_match if s.author == "model"] or same_match)[-1]
-    same_message = by_message.get(canonical_bytes(messages[node.id]))
-    if same_message is not None:
-        return same_message
-    same_role = [s for s in earlier if s.role == node.role]
-    if not same_role:
-        return earlier[-1]
-    if node.author == "model":
-        return ([s for s in same_role if s.author == "model"] or same_role)[-1]
-    return min(
-        same_role,
-        key=lambda s: (len(_changes(messages[s.id], messages[node.id])), s.author != "model", -s.id),
-    )
+    def __init__(self, messages: dict[int, dict[str, Any]]) -> None:
+        self.messages = messages
+        self.latest: Node | None = None
+        self.by_match: dict[str, list[Node]] = {}
+        self.by_message: dict[bytes, Node] = {}
+        #: The latest sibling of each role, and the latest model reply of each role.
+        self.by_role: dict[str | None, Node] = {}
+        self.model_by_role: dict[str | None, Node] = {}
+
+    def add(self, node: Node) -> None:
+        self.latest = node
+        self.by_match.setdefault(node.match_hash, []).append(node)
+        self.by_message[canonical_bytes(self.messages[node.id])] = node
+        self.by_role[node.role] = node
+        if node.author == "model":
+            self.model_by_role[node.role] = node
+
+    def closest(self, node: Node, earlier: Iterable[Node]) -> Node:
+        """The earlier sibling ``node``'s history should have matched.
+
+        One with the same match hash first (only the tokens or the sampling
+        differ), preferring a model reply, then one with the same message (only
+        the tools or model differ). Otherwise the same-role sibling, preferring
+        a model reply: for a model node the latest, since every model sibling is
+        a resample of it; for a client node the one with the fewest differing
+        fields, the only case that compares against every earlier sibling.
+        """
+        same_match = self.by_match.get(node.match_hash)
+        if same_match:
+            return ([s for s in same_match if s.author == "model"] or same_match)[-1]
+        same_message = self.by_message.get(canonical_bytes(self.messages[node.id]))
+        if same_message is not None:
+            return same_message
+        if node.role not in self.by_role:
+            assert self.latest is not None
+            return self.latest
+        if node.author == "model":
+            return self.model_by_role.get(node.role) or self.by_role[node.role]
+        message = self.messages[node.id]
+        return min(
+            (s for s in earlier if s.role == node.role),
+            key=lambda s: (_count_changes(self.messages[s.id], message), s.author != "model", -s.id),
+        )
 
 
 def _cause(sibling: Node, node: Node, messages: dict[int, dict[str, Any]]) -> tuple[Kind, str]:
@@ -192,6 +210,11 @@ def _cause(sibling: Node, node: Node, messages: dict[int, dict[str, Any]]) -> tu
     return "different message", f"a different {node.role} message: {changes}"
 
 
+def _count_changes(before: dict[str, Any], after: dict[str, Any]) -> int:
+    """How many top-level fields differ (``len(_changes(...))`` without building the words)."""
+    return len(before.keys() ^ after.keys()) + sum(before[k] != after[k] for k in before.keys() & after.keys())
+
+
 def _changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     """Which top-level fields differ, e.g. ``["content changed", "reasoning_content dropped"]``."""
     changes = []
@@ -207,7 +230,8 @@ def _changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
 
 def _a(role: str | None) -> str:
     word = role or "unnamed"
-    return f"{'an' if word[0] in 'aeio' else 'a'} {word}"
+    vowel = word[0].lower() in "aeio" or word.lower().startswith("un")
+    return f"{'an' if vowel else 'a'} {word}"
 
 
 def format_reports(reports: Sequence[Report]) -> str:
