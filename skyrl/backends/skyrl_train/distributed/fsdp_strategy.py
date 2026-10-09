@@ -56,6 +56,61 @@ else:
     CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy = None, None, None
 
 
+_BNB_QUANTIZATION_STATE_SUFFIXES = (
+    ".absmax",
+    ".quant_map",
+    ".nested_absmax",
+    ".nested_quant_map",
+    ".quant_state.bitsandbytes__fp4",
+    ".quant_state.bitsandbytes__nf4",
+)
+
+
+def _is_bnb_quantization_state_key(key: str, loaded_keys: set[str]) -> bool:
+    if not key.endswith(_BNB_QUANTIZATION_STATE_SUFFIXES):
+        return False
+    for suffix in _BNB_QUANTIZATION_STATE_SUFFIXES:
+        if key.endswith(suffix):
+            return key[: -len(suffix)] in loaded_keys
+    return False
+
+
+def _load_model_state_dict(model: nn.Module, state_dict, *, strict: bool) -> None:
+    if not strict:
+        model.load_state_dict(state_dict, strict=False)
+        return
+
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    loaded_keys = state_dict.keys() - incompatible.unexpected_keys
+    unexpected = [key for key in incompatible.unexpected_keys if not _is_bnb_quantization_state_key(key, loaded_keys)]
+    metadata_keys = set(incompatible.unexpected_keys) - set(unexpected)
+    mismatched_metadata = []
+    if metadata_keys:
+        # Linear4bit saves quantization state but does not restore it through
+        # load_state_dict. Ignoring it is safe only when the frozen base was
+        # initialized with exactly the same state. Otherwise the loaded packed
+        # bytes would be interpreted using different scales or a different codebook.
+        initialized_state = model.state_dict()
+        mismatched_metadata = [
+            key
+            for key in sorted(metadata_keys)
+            if key not in initialized_state
+            or not torch.equal(state_dict[key].detach().cpu(), initialized_state[key].detach().cpu())
+        ]
+    if incompatible.missing_keys or unexpected or mismatched_metadata:
+        errors = []
+        if incompatible.missing_keys:
+            errors.append(f"Missing key(s): {incompatible.missing_keys}")
+        if unexpected:
+            errors.append(f"Unexpected key(s): {unexpected}")
+        if mismatched_metadata:
+            errors.append(
+                f"Bitsandbytes quantization state differs from the initialized model: {mismatched_metadata}. "
+                "Resume with the same base model and quantization settings."
+            )
+        raise RuntimeError("Error(s) in loading model state_dict:\n\t" + "\n\t".join(errors))
+
+
 class FSDPStrategy(DistributedStrategy):
     """
     The strategy for training with FSDP.
@@ -519,7 +574,7 @@ class FSDPStrategy(DistributedStrategy):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             # FSDP2: load_state_dict accepts DTensors directly; no state_dict_type context needed.
-            load_model.load_state_dict(model_state_dict, strict=load_module_strict)
+            _load_model_state_dict(load_model, model_state_dict, strict=load_module_strict)
             self.print(f"[rank-{rank}]: Successfully loaded model state dict")
 
             # Load optimizer state dict if optimizer object is provided and loading is requested
