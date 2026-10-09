@@ -9,7 +9,8 @@
 # under IMAGE_DIR), then trains EPOCHS passes over the chosen tasks.
 #
 #   TASKS=a,b                 task (instance) names; else the first NUM_PROMPTS
-#   NUM_PROMPTS, GROUP_SIZE   tasks per step and samples per task (default 8 x 8)
+#   NUM_PROMPTS, GROUP_SIZE   tasks per step and samples per task (default 8 x 8); their product must be
+#                             at least NUM_GPUS
 #   EPOCHS, LR                passes over the tasks, learning rate (default 20, 1e-6). LR=0 with one epoch
 #                             over many tasks measures each task's pass@GROUP_SIZE without training
 #   MAX_CONCURRENCY           trials (so sandboxes) in flight at once, eval included (default 64). The
@@ -102,10 +103,18 @@ for task in "${tasks[@]}"; do
   ln -s "$task" "$SUBSET_DIR/$(basename "$task")"
 done
 NUM_PROMPTS="${#tasks[@]}"
+if (( NUM_PROMPTS * GROUP_SIZE < NUM_GPUS )); then
+  echo "NUM_PROMPTS x GROUP_SIZE ($NUM_PROMPTS x $GROUP_SIZE) must be at least NUM_GPUS ($NUM_GPUS): every GPU trains a row" >&2
+  exit 1
+fi
 echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples, at most $MAX_CONCURRENCY sandboxes at once"
 echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, ttl ${SANDBOX_TTL_MINUTES}m"
 
+# A fresh local Ray cluster. Workspaces (Anyscale) export Ray event settings a local cluster can't serve:
+# it segfaults in the event aggregator about a second after ray.init.
 export RAY_ADDRESS=local
+export RAY_enable_ray_event=0
+export RAY_enable_core_worker_ray_event_to_aggregator=0
 echo "==> experiment $EXPERIMENT in $RUN_DIR"
 
 uv run --isolated --extra fsdp --extra harbor --extra skycap \
