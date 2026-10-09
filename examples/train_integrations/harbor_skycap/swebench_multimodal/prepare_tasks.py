@@ -94,10 +94,12 @@ SOLVE_SH = """\
 set -euo pipefail
 cd /testbed
 git apply - <<'__SOLUTION__'
-{patch}
-__SOLUTION__
+{patch}__SOLUTION__
 """
 
+
+#: Instances whose gold patch doesn't pass their own FAIL_TO_PASS tests in a Daytona sandbox: they can't be solved.
+UNSOLVABLE = frozenset({"Automattic__wp-calypso-21635", "diegomura__react-pdf-1552"})
 
 #: Jest starts a worker per CPU it sees, and a Daytona sandbox shows the host's (64): a whole suite in a
 #: 4 GiB sandbox loses its workers ("Call retries were exceeded") and tests that pass at the base commit fail.
@@ -183,7 +185,7 @@ def build(row: Dict, out_dir: Path, image_dir: Path, args: argparse.Namespace) -
     shutil.copy(HERE / "grade.py", task / "tests" / "grade.py")
     (task / "tests" / "test.sh").write_text(TEST_SH)
     (task / "tests" / "test.sh").chmod(0o755)
-    (task / "solution" / "solve.sh").write_text(SOLVE_SH.format(patch=row["patch"].strip()))
+    (task / "solution" / "solve.sh").write_text(SOLVE_SH.format(patch=row["patch"].rstrip("\n") + "\n"))
     (task / "solution" / "solve.sh").chmod(0o755)
     print(f"{instance_id}: {len(local)} image(s)")
     return task
@@ -220,6 +222,8 @@ def main() -> None:
         if args.repos and row["repo"] not in args.repos:
             continue
         if row["repo"] in FAIL_ONLY_REPOS and not args.include_fail_only_repos:
+            continue
+        if row["instance_id"] in UNSOLVABLE:
             continue
         built += build(row, out_dir, image_dir, args) is not None
     print(f"{built} tasks in {out_dir}, images in {image_dir}")
