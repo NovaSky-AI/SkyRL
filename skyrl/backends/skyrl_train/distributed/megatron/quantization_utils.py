@@ -1,10 +1,30 @@
 """Recipe/architecture helpers shared by FP8 packing, weight sync, and workers."""
 
-from typing import Any, MutableMapping, Optional
+from typing import Any, MutableMapping, Optional, Sequence
 
 from loguru import logger
 
 AUTO_FP8_RECIPE = "auto"
+
+
+def fp8_exclude_recipe(exclude_modules: Sequence[str]) -> dict:
+    """Build a Megatron per-module precision recipe that keeps the given modules in BF16.
+
+    Input is list of globs over Megatron module names, such as
+    ``["decoder.layers.0.*", "*.mlp.linear_fc2"]``
+    """
+    return {
+        "configs": {
+            "bf16": {
+                "transformer_engine_config_type": "TEQuantizationParams",
+                "training_recipe": {},
+            }
+        },
+        "matchers": {
+            f"fp8_exclude_{idx}": {"config": "bf16", "type": "glob", "pattern": pattern, "enabled": True}
+            for idx, pattern in enumerate(exclude_modules)
+        },
+    }
 
 
 def is_fp8_enabled(fp8: Any) -> bool:

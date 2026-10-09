@@ -645,6 +645,27 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-0.8b-dense_mxfp8_fp8kv",
             marks=pytest.mark.b200,
         ),
+        # Same dense shape with per-module exclusions on both sides
+        # (fp8_exclude_modules + num_layers_at_start_in_bf16 for training,
+        # fp8_weight_sync_exclude_modules for the rollout). If the engine's
+        # ignore list and the sync disagreed on a module, the synced weights
+        # would be corrupt and the logprob checks would fail.
+        pytest.param(
+            1,
+            1,
+            1,
+            1,
+            None,
+            1,
+            2,
+            "Qwen/Qwen3.5-0.8B",
+            1e-1,
+            5e-2,
+            "mxfp8_exclude",
+            None,
+            id="qwen3.5-0.8b-dense_mxfp8_exclude",
+            marks=pytest.mark.b200,
+        ),
         pytest.param(
             1,
             1,
@@ -714,6 +735,19 @@ async def test_logprobs_matching_roundtrip(
                     "fp8_param": fp8_mode == "fp8_param",
                 }
             )
+            if fp8_mode == "mxfp8_exclude":
+                # The same modules stay BF16 on both sides: the first layer, layer 3
+                # (full attention, plus the routed and shared experts on MoE models)
+                # and every GDN out_proj, named in Megatron and in HF terms.
+                mcfg.fp8_exclude_modules = ["decoder.layers.3.*", "*.self_attention.out_proj"]
+                transformer_config_kwargs.update(
+                    {"first_last_layers_bf16": True, "num_layers_at_start_in_bf16": 1, "num_layers_at_end_in_bf16": 0}
+                )
+                cfg.generator.inference_engine.fp8_weight_sync_exclude_modules = [
+                    "*.layers.0.*",
+                    "*.layers.3.*",
+                    "*.linear_attn.out_proj",
+                ]
             mcfg.transformer_config_kwargs = transformer_config_kwargs
             if fp8_mode == "fp8_param":
                 mcfg.ddp_config.fp8_param_gather = True

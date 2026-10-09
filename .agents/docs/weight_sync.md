@@ -128,7 +128,23 @@ metadata is derived from that same serialized stream, so the trainer engine's bu
 layout remains identical to the tensors sent on the wire.
 
 The inference launch path supplies vLLM's FP8 dummy-load configuration, including the
-model-specific ignored layers. The receiver reload proxy recognizes the compact batched
+model-specific base exclude list. That quantization config is built entirely by SkyRL; a
+user-supplied `engine_init_kwargs.hf_overrides.quantization_config` is replaced with a
+warning.
+
+`generator.inference_engine.fp8_weight_sync_exclude_modules` (HF module-name globs) keeps
+more modules in the model dtype. `resolve_user_provided_exclude_list` expands it against
+the spec's `fp8_modules`; the driver calls it for the engine (`engine_exclude_list`, the
+spec's `base_exclude_list` plus the user's modules) and each trainer rank calls it for the
+sender (`SerializedFp8Config.user_provided_exclude_list`), on the same config, so the two
+cannot disagree. Patterns that match nothing are rejected before engine init; vLLM itself
+rejects excluding part of a fused module. Excluded routed experts go out as the
+bridge's BF16 batched tensors through the model's own loader. The Megatron side has its
+own, independent knobs (`fp8_exclude_modules`, `num_layers_at_{start,end}_in_bf16`,
+`te_precision_config_file` on `MegatronConfig`); nothing checks the two sides against each
+other. See `fp8/models/README.md`.
+
+The receiver reload proxy recognizes the compact batched
 MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this keeps
 the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
 is incompatible with the delta and sharded-RDT transfer backends.
@@ -604,6 +620,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `DeltaWeightTransferEngine` (receive side) | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |
 | Who pauses / resets the prefix cache | `test_prefix_cache_reset.py` **and** `distributed/test_worker_dispatch.py` |
 | `DeltaWeightSyncConfig` defaults or validation | `tests/train/test_config.py` |
+| Serialized FP8 (`fp8/` specs, exclusions, wire formats) | `tests/backends/skyrl_train/weight_sync/fp8/` (CPU; `test_fp8_exclusions_vllm.py` runs SkyRL's exclude list through vLLM's matching and needs the vllm extra) **and** GPU `megatron/test_megatron_models.py -m b200 -k mxfp8` (or `-m h100 -k full_fp8` on Hopper) |
 
 ## vLLM version coupling
 

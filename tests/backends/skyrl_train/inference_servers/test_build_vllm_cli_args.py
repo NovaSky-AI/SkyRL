@@ -1,5 +1,6 @@
 """Tests for build_vllm_cli_args on GPU-less hosts."""
 
+import logging
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -18,7 +19,7 @@ from skyrl.train.config import SkyRLTrainConfig
 def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
     ie_cfg.fp8_weight_sync_mode = "blockwise"
@@ -41,13 +42,12 @@ def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monke
     [
         {"quantization": "awq"},
         {"load_format": "safetensors"},
-        {"hf_overrides": {"quantization_config": {"weight_block_size": [64, 128]}}},
     ],
 )
 def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwargs, monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
 
@@ -59,23 +59,39 @@ def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwa
         )
 
 
-@pytest.mark.parametrize(
-    "engine_kwargs",
-    [
-        {"hf_overrides": []},
-        {"hf_overrides": {"quantization_config": []}},
-    ],
-)
-def test_serialized_fp8_weight_sync_rejects_non_mapping_overrides(engine_kwargs):
+def test_serialized_fp8_weight_sync_rejects_non_mapping_overrides():
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
 
     with pytest.raises(ValueError, match="must be a dict"):
         _apply_serialized_fp8_weight_sync_defaults(
             cfg.generator.inference_engine,
-            engine_kwargs,
+            {"hf_overrides": []},
             model_path="qwen35-test",
         )
+
+
+@pytest.mark.parametrize("user_quantization_config", [{"weight_block_size": [64, 128]}, {"store_dtype": "mxfp4"}, []])
+def test_serialized_fp8_replaces_a_user_quantization_config(user_quantization_config, monkeypatch, caplog):
+    """FP8 weight sync owns the engine's quantization config: it must describe exactly what the trainer sends."""
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+    engine_kwargs = {"hf_overrides": {"quantization_config": user_quantization_config}}
+
+    with caplog.at_level(logging.WARNING, logger=inference_utils.__name__):
+        _apply_serialized_fp8_weight_sync_defaults(
+            cfg.generator.inference_engine, engine_kwargs, model_path="qwen35-test"
+        )
+
+    assert engine_kwargs["hf_overrides"]["quantization_config"] == {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [128, 128],
+    }
+    assert "Ignoring engine_init_kwargs.hf_overrides.quantization_config" in caplog.text
 
 
 def test_serialized_fp8_requires_model_path():
@@ -190,8 +206,8 @@ def test_serialized_fp8_threads_the_wire_format_into_the_ignore_list(monkeypatch
     seen = []
     monkeypatch.setattr(
         inference_utils,
-        "_serialized_fp8_ignored_layers",
-        lambda _model_path, wire_format=None: seen.append(wire_format) or [],
+        "_serialized_fp8_engine_exclude_list",
+        lambda _model_path, wire_format, _exclude_modules: seen.append(wire_format) or [],
     )
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
@@ -202,6 +218,38 @@ def test_serialized_fp8_threads_the_wire_format_into_the_ignore_list(monkeypatch
 
     assert seen == ["mxfp8"]
     assert engine_kwargs["quantization"] == "compressed-tensors"
+
+
+def test_serialized_fp8_exclusions_reach_the_engine_ignore_list(monkeypatch):
+    import transformers
+
+    hf_config = SimpleNamespace(
+        model_type="qwen3_5_moe",
+        text_config=SimpleNamespace(
+            model_type="qwen3_5_moe_text",
+            layer_types=["linear_attention", "full_attention"],
+            shared_expert_intermediate_size=512,
+        ),
+    )
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: hf_config)
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.fp8_weight_sync_mode = "blockwise"
+    ie_cfg.fp8_weight_sync_exclude_modules = ["*.layers.1.self_attn.*", "*.layers.0.mlp.experts"]
+    engine_kwargs = {}
+
+    _apply_serialized_fp8_weight_sync_defaults(ie_cfg, engine_kwargs, model_path="qwen35-test")
+
+    ignored = engine_kwargs["hf_overrides"]["quantization_config"]["ignored_layers"]
+    assert ignored[-7:] == [
+        "model.language_model.layers.0.mlp.experts.0.gate_proj",
+        "model.language_model.layers.0.mlp.experts.0.up_proj",
+        "model.language_model.layers.0.mlp.experts.0.down_proj",
+        "model.language_model.layers.1.self_attn.q_proj",
+        "model.language_model.layers.1.self_attn.k_proj",
+        "model.language_model.layers.1.self_attn.v_proj",
+        "model.language_model.layers.1.self_attn.o_proj",
+    ]
 
 
 class TestGetPDP2PConnectorName:

@@ -130,7 +130,7 @@ def test_vllm_serialized_fp8_quantization_config():
         "activation_scheme": "dynamic",
         "weight_block_size": [128, 128],
     }
-    assert get_serialized_fp8_quantization_config(ignored_layers=["model.layers.0.linear_attn.in_proj_b"]) == {
+    assert get_serialized_fp8_quantization_config(exclude_list=["model.layers.0.linear_attn.in_proj_b"]) == {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
         "weight_block_size": [128, 128],
@@ -138,7 +138,7 @@ def test_vllm_serialized_fp8_quantization_config():
     }
 
 
-def test_qwen35_fp8_ignored_layers_keep_shared_experts_fp8():
+def test_qwen35_base_exclude_list_keeps_shared_experts_fp8():
     hf_config = SimpleNamespace(
         model_type="qwen3_5_text",
         shared_expert_intermediate_size=512,
@@ -149,7 +149,7 @@ def test_qwen35_fp8_ignored_layers_keep_shared_experts_fp8():
         ],
     )
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == [
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == [
         "model.layers.0.linear_attn.in_proj_b",
         "model.layers.0.linear_attn.in_proj_a",
         "model.language_model.layers.0.linear_attn.in_proj_b",
@@ -161,24 +161,24 @@ def test_qwen35_fp8_ignored_layers_keep_shared_experts_fp8():
     ]
 
 
-def test_qwen35_fp8_ignored_layers_do_not_hide_shared_experts_for_other_tp_sizes():
+def test_qwen35_base_exclude_list_does_not_hide_shared_experts_for_other_tp_sizes():
     hf_config = SimpleNamespace(
         model_type="qwen3_5_text",
         shared_expert_intermediate_size=512,
         layer_types=["full_attention"],
     )
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == []
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == []
 
 
-def test_qwen35_ignored_layers_include_only_checkpoint_vision_prefixes():
+def test_qwen35_base_exclude_list_includes_only_checkpoint_vision_prefixes():
     hf_config = SimpleNamespace(
         model_type="qwen3_5",
         text_config=SimpleNamespace(model_type="qwen3_5_text", layer_types=[]),
         vision_config=SimpleNamespace(depth=2),
     )
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == [
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == [
         "model.visual.blocks.0.attn.proj",
         "model.visual.blocks.0.mlp.linear_fc1",
         "model.visual.blocks.0.mlp.linear_fc2",
@@ -188,10 +188,10 @@ def test_qwen35_ignored_layers_include_only_checkpoint_vision_prefixes():
     ]
 
 
-def test_qwen35_ignored_layers_are_not_inferred_from_unrelated_hybrid_config():
+def test_qwen35_base_exclude_list_is_not_inferred_from_unrelated_hybrid_config():
     hf_config = SimpleNamespace(model_type="unrelated_hybrid", layer_types=["linear_attention"])
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == []
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == []
 
 
 def test_moe_batched_expert_spec_recognizes_and_splits_gate_up():

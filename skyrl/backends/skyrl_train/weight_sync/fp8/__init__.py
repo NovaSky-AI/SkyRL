@@ -5,9 +5,11 @@ from skyrl.backends.skyrl_train.weight_sync.fp8.models import (
     MoeExpertSpec,
     MoeProjection,
     batched_moe_wire_targets,
+    engine_exclude_list,
     register_fp8_spec,
     registered_fp8_spec_names,
     resolve_fp8_spec,
+    resolve_user_provided_exclude_list,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8.quantize import (
     MXFP8_GROUP_SIZE,
@@ -47,6 +49,7 @@ __all__ = [
     "batched_moe_wire_targets",
     "batched_mx_cast_to_fp8",
     "blockwise_cast_to_fp8",
+    "engine_exclude_list",
     "mx_cast_to_fp8",
     "get_serialized_fp8_quantization_config",
     "iter_batched_moe_expert_fp8_tensors",
@@ -56,6 +59,7 @@ __all__ = [
     "registered_fp8_spec_names",
     "resolve_fp8_spec",
     "resolve_serialized_fp8_config",
+    "resolve_user_provided_exclude_list",
     "scale_name_for_weight",
     "use_power_2_scales_default",
 ]

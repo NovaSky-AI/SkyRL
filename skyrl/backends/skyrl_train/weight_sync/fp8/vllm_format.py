@@ -61,6 +61,9 @@ class SerializedFp8Config:
 
     ``spec`` is the per-model quantization policy, resolved once from the HF
     config via ``resolve_fp8_spec``; the tensor iterators require it.
+    ``user_provided_exclude_list`` holds the spec's FP8 modules the user keeps
+    in the model dtype (``resolve_user_provided_exclude_list``); the engine
+    builds the same modules unquantized.
     """
 
     # blockwise-wire parameters; the MXFP8 wire has no equivalents (its group
@@ -70,6 +73,7 @@ class SerializedFp8Config:
     # shared across wires
     spec: ModelFp8Spec | None = None
     wire_format: str = BLOCKWISE_FP8
+    user_provided_exclude_list: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "weight_block_size", normalize_block_size(self.weight_block_size))
@@ -94,12 +98,16 @@ class SerializedFp8Config:
 def resolve_serialized_fp8_config(
     fp8_weight_sync_mode: str | None,
     hf_config: object | None,
+    exclude_modules: Sequence[str] | None = None,
 ) -> SerializedFp8Config | None:
     """Turn ``fp8_weight_sync_mode`` into the sender's serializer config.
 
     The single place a wire-format name becomes a ``SerializedFp8Config``, so a
     gate that admits one wire and not another cannot diverge between backends:
     every wire in ``WIRE_FORMATS`` is usable end to end, or none is.
+
+    ``exclude_modules`` (``fp8_weight_sync_exclude_modules``) goes through the
+    same ``resolve_user_provided_exclude_list`` expansion the engine's exclude list does.
 
     Returns None when FP8 weight sync is off. Raises ``ValueError`` for a wire
     outside ``WIRE_FORMATS`` (``"auto"`` included -- it must already be resolved
@@ -108,6 +116,7 @@ def resolve_serialized_fp8_config(
     from skyrl.backends.skyrl_train.weight_sync.fp8.models import (
         registered_fp8_spec_names,
         resolve_fp8_spec,
+        resolve_user_provided_exclude_list,
     )
 
     if fp8_weight_sync_mode is None:
@@ -123,7 +132,12 @@ def resolve_serialized_fp8_config(
             "FP8 weight sync requires a registered model spec for the configured checkpoint "
             f"(registered specs: {', '.join(registered_fp8_spec_names())})."
         )
-    return SerializedFp8Config(spec=spec, wire_format=fp8_weight_sync_mode)
+    user_provided_exclude_list = resolve_user_provided_exclude_list(spec, hf_config, exclude_modules or ())
+    return SerializedFp8Config(
+        spec=spec,
+        wire_format=fp8_weight_sync_mode,
+        user_provided_exclude_list=frozenset(user_provided_exclude_list),
+    )
 
 
 def _mxfp8_group_args(dynamic: bool) -> dict:
@@ -147,7 +161,7 @@ def _mxfp8_group_args(dynamic: bool) -> dict:
 
 def get_serialized_fp8_quantization_config(
     weight_block_size: Sequence[int] = (128, 128),
-    ignored_layers: Sequence[str] | None = None,
+    exclude_list: Sequence[str] | None = None,
     wire_format: str = BLOCKWISE_FP8,
 ) -> dict:
     """Return vLLM's Hugging Face quantization config for serialized FP8."""
@@ -156,8 +170,8 @@ def get_serialized_fp8_quantization_config(
         raise ValueError(f"wire_format must be one of {WIRE_FORMATS}, got {wire_format!r}")
 
     if wire_format == MXFP8:
-        # MXFP8 is served through compressed-tensors, which names the excluded
-        # modules "ignore" rather than vLLM-fp8's "ignored_layers".
+        # MXFP8 is served through compressed-tensors, which takes the exclude
+        # list as "ignore" rather than vLLM-fp8's "ignored_layers".
         return {
             "quant_method": "compressed-tensors",
             "format": "float-quantized",
@@ -168,7 +182,7 @@ def get_serialized_fp8_quantization_config(
                     "input_activations": _mxfp8_group_args(dynamic=True),
                 }
             },
-            "ignore": list(ignored_layers or ()),
+            "ignore": list(exclude_list or ()),
         }
 
     block_m, block_n = normalize_block_size(weight_block_size)
@@ -177,8 +191,8 @@ def get_serialized_fp8_quantization_config(
         "activation_scheme": "dynamic",
         "weight_block_size": [block_m, block_n],
     }
-    if ignored_layers:
-        qconfig["ignored_layers"] = list(ignored_layers)
+    if exclude_list:
+        qconfig["ignored_layers"] = list(exclude_list)
     return qconfig
 
 
@@ -244,14 +258,24 @@ def iter_serialized_fp8_tensors(
     target_dtype: torch.dtype,
     config: SerializedFp8Config,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Yield vLLM checkpoint tensors for one Megatron-exported weight."""
+    """Yield vLLM checkpoint tensors for one Megatron-exported weight.
+
+    Weights of an excluded module pass through in ``target_dtype``, the way
+    the unquantized engine module loads them; a batched expert tensor then
+    keeps its checkpoint name and goes through the model's own loader.
+    """
 
     spec = config.require_spec()
-    if spec.moe_expert_spec(name) is not None:
+    moe_spec = spec.moe_expert_spec(name)
+    if moe_spec is not None and moe_spec.experts_base not in config.user_provided_exclude_list:
         yield from iter_batched_moe_expert_fp8_tensors(name, tensor, config)
         return
 
-    if tensor.ndim == 2 and spec.should_quantize(name, tuple(tensor.shape), config.wire_format):
+    if (
+        tensor.ndim == 2
+        and spec.should_quantize(name, tuple(tensor.shape), config.wire_format)
+        and name.removesuffix(".weight") not in config.user_provided_exclude_list
+    ):
         if config.is_mxfp8:
             q_weight, scale = mx_cast_to_fp8(tensor)
         else:
