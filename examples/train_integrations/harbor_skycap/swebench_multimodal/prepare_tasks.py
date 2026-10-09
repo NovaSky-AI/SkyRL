@@ -99,6 +99,18 @@ __SOLUTION__
 """
 
 
+#: Jest starts a worker per CPU it sees, and a Daytona sandbox shows the host's (64): a whole suite in a
+#: 4 GiB sandbox loses its workers ("Call retries were exceeded") and tests that pass at the base commit fail.
+JEST = "./node_modules/.bin/jest"
+
+
+def cap_test_workers(eval_script: str, workers: int) -> str:
+    """``eval_script`` with every Jest run capped at ``workers`` workers. Raises if it runs no Jest."""
+    if JEST not in eval_script:
+        raise ValueError(f"the eval script runs no {JEST}; cap its test runner's workers here")
+    return eval_script.replace(JEST, f"{JEST} --maxWorkers={workers}")
+
+
 def image_urls(row: Dict) -> List[str]:
     return json.loads(row["image_assets"] or "{}").get("problem_statement", [])
 
@@ -167,7 +179,7 @@ def build(row: Dict, out_dir: Path, image_dir: Path, args: argparse.Namespace) -
         )
     )
     (task / "tests" / "config.json").write_text(json.dumps(row, indent=2))
-    (task / "tests" / "eval.sh").write_text(spec.eval_script)
+    (task / "tests" / "eval.sh").write_text(cap_test_workers(spec.eval_script, args.test_workers))
     shutil.copy(HERE / "grade.py", task / "tests" / "grade.py")
     (task / "tests" / "test.sh").write_text(TEST_SH)
     (task / "tests" / "test.sh").chmod(0o755)
@@ -194,6 +206,7 @@ def main() -> None:
     parser.add_argument("--cpus", type=int, default=1)
     parser.add_argument("--memory-mb", type=int, default=4096)
     parser.add_argument("--storage-mb", type=int, default=10240)
+    parser.add_argument("--test-workers", type=int, default=2, help="Jest workers in the verifier's test run")
     args = parser.parse_args()
 
     out_dir = args.output_dir.expanduser().resolve()
