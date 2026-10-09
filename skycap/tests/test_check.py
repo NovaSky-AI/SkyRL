@@ -118,25 +118,17 @@ def test_compaction_is_a_different_message(tmp_path: Path) -> None:
     )
 
 
-def test_a_subagent_with_its_own_system_prompt_is_a_new_root(tmp_path: Path) -> None:
-    h = Harness("tr")
-    h.call([SYS, user("task")], assistant("delegating"))
-    h.call([{"role": "system", "content": "You are a searcher."}, user("find x")], assistant("found"))
-
-    assert report_lines(tmp_path, h)[1] == (
-        "  node 3 (new root, vs node 0): different message: a different system message: content changed"
-    )
-
-
-def test_a_changed_tool_set_is_compared_with_the_root_it_repeats(tmp_path: Path) -> None:
+def test_a_subagent_and_a_changed_tool_set_start_new_roots(tmp_path: Path) -> None:
     h = Harness("tr")
     h.call([SYS, user("task")], assistant("plan"))
     h.call([{"role": "system", "content": "You are a searcher."}, user("find x")], assistant("found"))
     h.call([SYS, user("task"), assistant("plan"), user("go")], assistant("done"), tools=SEARCH)
 
-    assert report_lines(tmp_path, h)[2] == (
-        "  node 6 (new root, vs node 0): tools or model: the same message, sent with a different tool set or model"
-    )
+    # The tool change repeats the first root's message, so it is compared with that root, not the latest.
+    assert report_lines(tmp_path, h)[1:3] == [
+        "  node 3 (new root, vs node 0): different message: a different system message: content changed",
+        "  node 6 (new root, vs node 0): tools or model: the same message, sent with a different tool set or model",
+    ]
 
 
 def test_a_message_of_another_role_names_both(tmp_path: Path) -> None:
