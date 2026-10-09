@@ -145,6 +145,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   generator.inference_engine.backend=vllm \
+  generator.inference_engine.enable_prefix_caching=false \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
