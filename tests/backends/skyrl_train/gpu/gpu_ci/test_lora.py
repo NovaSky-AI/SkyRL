@@ -18,11 +18,13 @@ import os
 
 import pytest
 import ray
+import torch
 
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -186,3 +188,25 @@ async def test_policy_local_engines_e2e(
     elif needs_vllm_lora and lora_sync_mode == "memory":
         assert not os.path.exists(lora_sync_path), f"in-memory LoRA sync wrote to {lora_sync_path}"
     # megatron + merge_lora syncs merged full weights and never touches lora_sync_path.
+
+
+class ParamDtypePolicyWorkerBase(FSDPPolicyWorkerBase):
+    def param_dtypes(self) -> dict[str, set[torch.dtype]]:
+        """Returns the dtypes of this rank's frozen and trainable parameters."""
+        params = list(self.model.parameters())
+        return {
+            "frozen": {p.dtype for p in params if not p.requires_grad},
+            "trainable": {p.dtype for p in params if p.requires_grad},
+        }
+
+
+ParamDtypePolicyWorker = ray.remote(num_gpus=1)(ParamDtypePolicyWorkerBase)
+
+
+def test_fsdp_lora_base_loaded_in_bf16(ray_init_fixture):
+    """An FSDP LoRA policy stores the frozen base in bf16 and the adapters in fp32."""
+    cfg = get_test_actor_config(strategy="fsdp", enable_lora=True)
+    policy = init_worker_with_type("policy", num_gpus_per_node=1, cfg=cfg, worker_cls=ParamDtypePolicyWorker)
+
+    dtypes = ray.get(policy.async_run_ray_method("pass_through", "param_dtypes"))
+    assert dtypes == [{"frozen": {torch.bfloat16}, "trainable": {torch.float32}}]

@@ -1515,6 +1515,8 @@ class TrainerConfig(BaseConfig):
     For sharded multi-node HF exports with ``policy.megatron_config.hf_export_config.distributed_save=True``, this must
     be a shared filesystem path visible to all Megatron ranks."""
     bf16: bool = True
+    """Load models in bf16. FSDP: the ref model and a LoRA policy's frozen base (the adapters stay fp32).
+    Megatron: the policy and ref models, including LoRA adapters. ``False`` uses fp32."""
     epochs: int = 1
     """Number of epochs (passes over the full dataset)."""
     max_training_steps: Optional[int] = None

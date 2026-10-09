@@ -136,6 +136,8 @@ We recommend looking at the blog [LoRA Without Regret](https://thinkingmachines.
 
 3. **Layer coverage:** Apply LoRA to *all* layers, particularly MLP/MoE layers — attention-only LoRA tends to underperform.
 
+4. **Memory (FSDP):** With LoRA the base model is never updated, so it is stored in bf16 rather than as fp32 master weights (set `trainer.bf16=false` to keep it in fp32). On a single node, `trainer.policy.fsdp_config.fsdp_size=1` keeps a full copy of the model on each GPU (no weight sharding, gradient all-reduce only, like DDP), which avoids re-gathering the base weights on every forward and backward pass.
+
 ## Current Limitations
 
 SkyRL's LoRA implementation has the following current limitations:
