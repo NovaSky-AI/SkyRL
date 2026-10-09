@@ -83,7 +83,12 @@ class TokenRenderer(Protocol):
 
     def features(self, media: Sequence[Media]) -> dict[str, Any]: ...
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]: ...
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] = (),
+    ) -> dict[str, Any]: ...
 
     def stop_token_ids(self) -> list[int]: ...
 
@@ -91,14 +96,15 @@ class TokenRenderer(Protocol):
 
 
 def normalize_tools(tools: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """OpenAI's ``{"type": "function", "function": {...}}`` wrapper, flattened."""
+    """The request's tools as sent, OpenAI's ``{"type": "function", "function": {...}}`` wrapper kept.
+
+    Chat templates that print the tool list (Qwen's ``tool | tojson``) print what the server passes
+    them, and vLLM passes the request's tools as they came. The renderers that read a tool's
+    fields unwrap the envelope themselves.
+    """
     if not tools:
         return None
-    flat = []
-    for tool in tools:
-        function = tool.get("function") if tool.get("type") == "function" else None
-        flat.append(dict(function) if isinstance(function, Mapping) else dict(tool))
-    return flat
+    return [dict(tool) for tool in tools]
 
 
 def join_pieces(pieces: Sequence[str]) -> tuple[str, list[int]]:
@@ -287,12 +293,24 @@ class RenderersRenderer:
             single = _build_mm_features(renderer, _multi_modal_data([item]))
         return single["kwargs_data"][item.modality][0]
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
-        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text."""
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] = (),
+    ) -> dict[str, Any]:
+        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text.
+
+        ``prompt_ids`` is the prompt the completion was sampled after. A template that opens the
+        thinking block in the generation prompt (Qwen3.5's ``<think>``) leaves the completion
+        starting inside it, and the parser only splits ``reasoning_content`` off when it can see that.
+        """
         from renderers import ToolCallParseStatus
 
         with self._checkout() as (renderer, _):
-            parsed = renderer.parse_response(list(completion_ids), tools=normalize_tools(tools))
+            parsed = renderer.parse_response(
+                list(completion_ids), tools=normalize_tools(tools), prompt_ids=list(prompt_ids)
+            )
         message: dict[str, Any] = {"role": "assistant", "content": parsed.content}
         if getattr(parsed, "reasoning_content", None) is not None:
             message["reasoning_content"] = parsed.reasoning_content

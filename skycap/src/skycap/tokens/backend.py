@@ -248,7 +248,7 @@ class TokensBackend:
         if self.use_raw_content:
             reply = await asyncio.to_thread(self._raw_reply, output.completion_ids, planned.prompt_ids)
         else:
-            reply = await asyncio.to_thread(self.renderer.parse, output.completion_ids, chat.tools)
+            reply = await asyncio.to_thread(self.renderer.parse, output.completion_ids, chat.tools, planned.prompt_ids)
         reason = response.finish_reason(output.finish_reason, reply)
         call = CallInfo(
             t_start=started,

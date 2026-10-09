@@ -72,7 +72,7 @@ class FakeRenderer:
             reused=len(previous_prompt) + len(previous_completion),
         )
 
-    def parse(self, completion_ids: Sequence[int], tools: Any) -> dict[str, Any]:
+    def parse(self, completion_ids: Sequence[int], tools: Any, prompt_ids: Sequence[int] = ()) -> dict[str, Any]:
         return {"role": "assistant", "content": decode([t for t in completion_ids if t != END])}
 
     def stop_token_ids(self) -> list[int]:

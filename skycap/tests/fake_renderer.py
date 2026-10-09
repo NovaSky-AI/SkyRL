@@ -140,7 +140,7 @@ class FakeRenderer:
             "kwargs_data": {"image": [f"encoded:{item.hash}" for item in media]},
         }
 
-    def parse(self, completion_ids: Sequence[int], tools: Any) -> dict[str, Any]:
+    def parse(self, completion_ids: Sequence[int], tools: Any, prompt_ids: Sequence[int] = ()) -> dict[str, Any]:
         text = decode([t for t in completion_ids if t != END])
         message: dict[str, Any] = {"role": "assistant", "content": text}
         reasoning_content = None
