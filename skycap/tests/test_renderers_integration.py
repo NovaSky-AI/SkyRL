@@ -139,3 +139,37 @@ def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: Ren
     spans = [data[start:end] for start, end in zip(bounds, bounds[1:])]
     assert all("\ufffd" not in span.decode() for span in spans)
     assert b"".join(spans) == data
+
+
+PREFILLING_TOKENIZER = "Qwen/Qwen3.5-0.8B"
+
+
+@pytest.fixture(scope="module")
+def prefilling_renderer() -> RenderersRenderer:
+    try:
+        # Thinking is off by default below 4B; on, the template prefills the reasoning block.
+        return RenderersRenderer(PREFILLING_TOKENIZER, size=1, chat_template_kwargs={"enable_thinking": True})
+    except Exception as error:  # noqa: BLE001 - no network and no cache
+        pytest.skip(f"tokenizer unavailable: {error}")
+
+
+async def test_reasoning_is_split_when_the_prompt_opened_the_think_block(
+    prefilling_renderer: RenderersRenderer,
+) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(PREFILLING_TOKENIZER)
+    # Qwen3.5 with thinking on ends the generation prompt in `<think>\n`, so the model's
+    # completion starts inside the reasoning block and never samples the opening tag.
+    prompt = prefilling_renderer.render([{"role": "user", "content": "hi"}], None).token_ids
+    assert tokenizer.decode(prompt).endswith("<think>\n")
+    completion = tokenizer.encode("hmm\n</think>\n\nhello<|im_end|>", add_special_tokens=False)
+
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.server.backend.renderer = prefilling_renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        reply = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
+
+    message = reply.choices[0].message.model_dump(exclude_none=True)
+    assert message["content"] == "hello"
+    assert message["reasoning_content"] == "hmm"

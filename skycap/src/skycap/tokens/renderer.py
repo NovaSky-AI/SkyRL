@@ -47,7 +47,12 @@ class TokenRenderer(Protocol):
         tools: Sequence[Mapping[str, Any]] | None,
     ) -> Rendered | None: ...
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]: ...
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]: ...
 
     def stop_token_ids(self) -> list[int]: ...
 
@@ -158,12 +163,27 @@ class RenderersRenderer:
             return None
         return Rendered(token_ids=token_ids, tail_indices=list(out.message_indices[reused:]), reused=reused)
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
-        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text."""
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
+        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text.
+
+        ``prompt_ids`` is the prompt the completion was sampled from. The parser reads its tail to
+        tell whether the template already opened the reasoning block: Qwen3.5 with thinking on ends
+        every generation prompt in ``<think>\\n``, so the completion starts mid-reasoning and has no
+        opening tag of its own.
+        """
         from renderers import ToolCallParseStatus
 
         with self._checkout() as (renderer, _):
-            parsed = renderer.parse_response(list(completion_ids), tools=normalize_tools(tools))
+            parsed = renderer.parse_response(
+                list(completion_ids),
+                tools=normalize_tools(tools),
+                prompt_ids=list(prompt_ids) if prompt_ids is not None else None,
+            )
         message: dict[str, Any] = {"role": "assistant", "content": parsed.content}
         if getattr(parsed, "reasoning_content", None) is not None:
             message["reasoning_content"] = parsed.reasoning_content
