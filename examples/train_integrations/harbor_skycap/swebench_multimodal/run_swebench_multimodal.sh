@@ -24,6 +24,19 @@
 #   MAX_MODEL_LEN             context length, prompt and completions (default 32768)
 #   AGENT_TIMEOUT_SEC         wall time per trajectory (default 2400)
 #   IMAGE_DIR                 the screenshots, at the same path on every node (skycap renders there)
+#   STRATEGY=fsdp|megatron    the training backend (default fsdp); megatron takes MEGATRON_TP, MEGATRON_PP,
+#                             MEGATRON_EP, MEGATRON_ETP and OPTIMIZER_OFFLOAD, and trains the vision tower
+#                             too (language_model_only=false) and computes logprobs with a fused LM head
+#                             (fused_lm_head_logprob=true)
+#   PACKING=0|1               trainer.remove_microbatch_padding: pack samples into the THD layout (default 0). On
+#                             megatron, Qwen3VLModel (Qwen3.5) packs images too
+#   MAX_TOKENS_PER_MICROBATCH with PACKING=1, bin-pack microbatches up to this many tokens (default -1: one sample each)
+#   MEGATRON_CP               megatron context parallel size (default 1); CP > 1 needs PACKING=1 and
+#                             MEGATRON_TP x MEGATRON_PP x MEGATRON_CP to divide NUM_GPUS
+#   MAX_NUM_SEQS              vLLM's sequences in flight per engine (default 256, well above MAX_CONCURRENCY). vLLM's
+#                             1024 can exceed a hybrid model's Mamba cache blocks (Qwen3.5-35B-A3B at TP=2 has 1022)
+#   ENGINE_INIT_KWARGS        extra vLLM engine kwargs as a JSON object, e.g. '{"gdn_prefill_backend": "triton"}'
+#                             for Qwen3.5 (vllm-project/vllm#36921)
 #
 # Needs: the GPUs, `DAYTONA_API_KEY=...` in DAYTONA_KEY_FILE, optionally WANDB_API_KEY (or WANDB_KEY_FILE).
 set -euo pipefail
@@ -59,6 +72,17 @@ NUM_ENGINES="${NUM_ENGINES:-4}"
 TP_SIZE="${TP_SIZE:-1}"
 SKYCAP_SERVERS="${SKYCAP_SERVERS:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.7}"
+STRATEGY="${STRATEGY:-fsdp}"
+MEGATRON_TP="${MEGATRON_TP:-1}"
+MEGATRON_PP="${MEGATRON_PP:-1}"
+MEGATRON_EP="${MEGATRON_EP:-8}"
+MEGATRON_ETP="${MEGATRON_ETP:-1}"
+MEGATRON_CP="${MEGATRON_CP:-1}"
+PACKING="${PACKING:-0}"
+MAX_TOKENS_PER_MICROBATCH="${MAX_TOKENS_PER_MICROBATCH:--1}"
+OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
+ENGINE_INIT_KWARGS="${ENGINE_INIT_KWARGS:-}"
 DATA_ROOT="${DATA_ROOT:-$HOME/data/swebench_multimodal}"
 TASKS_DIR="$DATA_ROOT/tasks"
 IMAGE_DIR="${IMAGE_DIR:-$DATA_ROOT/images}"
@@ -118,6 +142,54 @@ grep -q "^  step_limit: $STEP_LIMIT$" "$AGENT_CONFIG" || { echo "could not set s
 echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples, at most $MAX_CONCURRENCY sandboxes at once"
 echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, ttl ${SANDBOX_TTL_MINUTES}m"
 
+case "$PACKING" in
+  0) REMOVE_MICROBATCH_PADDING=false ;;
+  1) REMOVE_MICROBATCH_PADDING=true ;;
+  *) echo "PACKING must be 0 or 1, got $PACKING" >&2; exit 1 ;;
+esac
+if [[ "$MEGATRON_CP" != 1 && ( "$STRATEGY" != megatron || "$PACKING" != 1 ) ]]; then
+  echo "MEGATRON_CP=$MEGATRON_CP needs STRATEGY=megatron and PACKING=1" >&2
+  exit 1
+fi
+case "$STRATEGY" in
+  fsdp) STRATEGY_ARGS=() ;;
+  megatron)
+    STRATEGY_ARGS=(
+      trainer.policy.megatron_config.tensor_model_parallel_size="$MEGATRON_TP"
+      trainer.policy.megatron_config.pipeline_model_parallel_size="$MEGATRON_PP"
+      trainer.policy.megatron_config.expert_model_parallel_size="$MEGATRON_EP"
+      trainer.policy.megatron_config.expert_tensor_parallel_size="$MEGATRON_ETP"
+      trainer.policy.megatron_config.context_parallel_size="$MEGATRON_CP"
+      trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity=full
+      trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=uniform
+      trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1
+      trainer.policy.language_model_only=false
+      generator.inference_engine.language_model_only=false
+      # The logprob pass on a long row OOMs materializing the full [B, S, vocab/TP] logits.
+      trainer.fused_lm_head_logprob=true
+    )
+    if [[ "$OPTIMIZER_OFFLOAD" == 1 ]]; then
+      STRATEGY_ARGS+=(
+        trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true
+        trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0
+        trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=true
+        trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=true
+      )
+    fi
+    ;;
+  *)
+    echo "STRATEGY must be fsdp or megatron, got $STRATEGY" >&2
+    exit 1
+    ;;
+esac
+if [[ -n "$ENGINE_INIT_KWARGS" ]]; then
+  while IFS= read -r arg; do STRATEGY_ARGS+=("$arg"); done < <(python3 -c '
+import json, sys
+for key, value in json.loads(sys.argv[1]).items():
+    print(f"generator.inference_engine.engine_init_kwargs.{key}={value if isinstance(value, str) else json.dumps(value)}")
+' "$ENGINE_INIT_KWARGS")
+fi
+
 # A fresh local Ray cluster. Workspaces (Anyscale) export Ray event settings a local cluster can't serve:
 # it segfaults in the event aggregator about a second after ray.init.
 export RAY_ADDRESS=local
@@ -125,7 +197,7 @@ export RAY_enable_ray_event=0
 export RAY_enable_core_worker_ray_event_to_aggregator=0
 echo "==> experiment $EXPERIMENT in $RUN_DIR"
 
-uv run --isolated --extra fsdp --extra harbor --extra skycap \
+uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap \
   -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \
   data.train_data="['$SUBSET_DIR']" \
   trainer.policy.model.path="$MODEL" \
@@ -173,12 +245,14 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   generator.inference_engine.gpu_memory_utilization="$GPU_MEMORY_UTILIZATION" \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.engine_init_kwargs.max_model_len="$MAX_MODEL_LEN" \
+  generator.inference_engine.engine_init_kwargs.max_num_seqs="$MAX_NUM_SEQS" \
   trainer.epochs="$EPOCHS" \
   trainer.train_batch_size="$NUM_PROMPTS" \
   trainer.policy_mini_batch_size="$NUM_PROMPTS" \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.remove_microbatch_padding=false \
+  trainer.remove_microbatch_padding="$REMOVE_MICROBATCH_PADDING" \
+  trainer.max_tokens_per_microbatch="$MAX_TOKENS_PER_MICROBATCH" \
   trainer.eval_before_train=false \
   trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
@@ -188,10 +262,11 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.max_seq_len="$MAX_MODEL_LEN" \
   trainer.policy.optimizer_config.lr="$LR" \
-  trainer.strategy=fsdp \
+  trainer.strategy="$STRATEGY" \
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_gpus_per_node="$NUM_GPUS" \
   trainer.placement.ref_num_gpus_per_node="$NUM_GPUS" \
+  "${STRATEGY_ARGS[@]}" \
   "$@" 2>&1 | tee "$RUN_DIR/run.log"
 
 echo
