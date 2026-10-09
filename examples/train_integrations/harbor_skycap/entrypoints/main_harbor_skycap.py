@@ -106,6 +106,12 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    images: bool = False
+    """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
+    with the model's processor (``generator.vision_language_renderer``, and the engine's
+    ``mm_processor_kwargs``), calls the engine on the route that keeps them, and each row carries its path's
+    ``pixel_values`` and ``image_grid_thw`` to training. That route has no packed side channels, so R3 and
+    sampler support are off."""
     require_api_key: Optional[bool] = None
     """Whether a trajectory's harness routes answer only its own key, which the generator hands its agent. ``None``
     (default): whenever ``skycap.exposure`` is set, so routes reachable from outside the cluster can't be written to
@@ -147,7 +153,11 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
         "record_mirror": cfg.skycap.record_mirror,
         "record_mirror_config": dict(cfg.skycap.record_mirror_config or {}) or None,
+        "renderer_name": cfg.generator.vision_language_renderer,
+        "chat_template_kwargs": dict(cfg.generator.chat_template_kwargs or {}) or None,
     }
+    if cfg.skycap.images:
+        settings["processor_kwargs"] = engine_init.get("mm_processor_kwargs")
     return start_servers(
         settings,
         num_servers=cfg.skycap.num_servers,
@@ -157,6 +167,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         ttl=cfg.skycap.ttl,
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
+        images=cfg.skycap.images,
     )
 
 
@@ -164,6 +175,16 @@ def _require_api_key(cfg: Any) -> bool:
     """``skycap.require_api_key``, on by default whenever the servers are exposed."""
     required = cfg.skycap.require_api_key
     return cfg.skycap.exposure.type != "none" if required is None else bool(required)
+
+
+def _validate_images(cfg: Any) -> None:
+    """``skycap.images`` rules out what only the packed engine route carries."""
+    if not cfg.skycap.images:
+        return
+    ie = cfg.generator.inference_engine
+    for flag in ("enable_return_routed_experts", "enable_return_sample_support_set"):
+        if getattr(ie, flag, False):
+            raise ValueError(f"skycap.images needs generator.inference_engine.{flag}=false")
 
 
 def _exposure(cfg: Any) -> Optional[str]:
@@ -196,6 +217,7 @@ class HarborSkycapExp(HarborExp):
             inference_engine_client=inference_engine_client,
             train_paths=cfg.skycap.train_paths,
             records=self.records,
+            images=cfg.skycap.images,
         )
         return self.generator
 
@@ -228,6 +250,7 @@ def main() -> None:
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
     _exposure(cfg)
+    _validate_images(cfg)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)

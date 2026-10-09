@@ -3,6 +3,7 @@ server in token mode, which calls a mock SkyRL router."""
 
 import asyncio
 import re
+from copy import deepcopy
 from types import SimpleNamespace
 
 import numpy as np
@@ -32,11 +33,16 @@ from skycap import CaptureService, Sample, record  # noqa: E402
 from skycap.graph import MessageGraph  # noqa: E402
 from skycap.paths import Row, final_path  # noqa: E402
 from skycap.tokens.engine import EngineError  # noqa: E402
+from skycap.tokens.renderer import Media  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
 )
+from skyrl.backends.skyrl_train.inference_servers.skycap_engine import (
+    SkyRLEngine,  # noqa: E402
+)
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
+from skyrl.train.utils.rate_limiter import RateLimiterConfig  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     AGENT,
@@ -82,7 +88,8 @@ def generator_cfg(**overrides):
         merge_stepwise_output=False,
         use_cache_salt=True,
         apply_overlong_filtering=False,
-        rate_limit=None,
+        # The default Harbor config runs sandboxes on Daytona, which needs a cap.
+        rate_limit=RateLimiterConfig(enabled=True, max_concurrency=64),
         inference_engine=SimpleNamespace(served_model_name="policy"),
         sampling_params=SimpleNamespace(top_k=TOP_K),
     )
@@ -608,3 +615,72 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
         assert len(graph.paths()) == 1
     finally:
         await asyncio.to_thread(service.stop)
+
+
+def test_remote_sandboxes_are_refused_without_a_concurrency_cap() -> None:
+    daytona = {"environment": {"type": "daytona"}}
+    labelled = {
+        "environment": {"import_path": "examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment"}
+    }
+    for template in (daytona, labelled):
+        for rate_limit in (None, RateLimiterConfig(), RateLimiterConfig(enabled=True, trajectories_per_second=5)):
+            with pytest.raises(ValueError, match="max_concurrency"):
+                HarborSkycapGenerator(generator_cfg(rate_limit=rate_limit), deepcopy(template), ["http://x"])
+        HarborSkycapGenerator(
+            generator_cfg(rate_limit={"enabled": True, "max_concurrency": 8}), deepcopy(template), ["http://x"]
+        )
+    # Docker runs on this machine: no provider quota to protect.
+    HarborSkycapGenerator(generator_cfg(rate_limit=None), {"environment": {"type": "docker"}}, ["http://x"])
+
+
+def _image(offset: int, patches: int, grid: list) -> Media:
+    data = {"pixel_values": np.full((patches, 4), offset, np.float32), "image_grid_thw": np.array([grid])}
+    return Media(modality="image", offset=offset, length=patches // 4, hash=f"h{offset}", data=data)
+
+
+def test_with_images_each_row_carries_its_paths_vision_features_and_a_masked_row_none() -> None:
+    first, second = _image(1, 8, [1, 2, 4]), _image(4, 4, [1, 2, 2])
+    sample = Sample(
+        leaf=1,
+        path=[0, 1],
+        messages=[],
+        targets=[1],
+        input_ids=list(range(8)),
+        loss_mask=[0] * 6 + [1, 1],
+        logprobs=[0.0] * 8,
+        media=[first, second],
+    )
+    trained = TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
+    masked = TrialOutcome(trajectory_id=TrajectoryID("b", 0), stop_reason="error")
+
+    out = compose([trained, masked], overlong_filtering=False, images=True)
+
+    assert [tuple(t.shape) for t in out["pixel_values"]] == [(12, 4), (0, 4)]
+    assert out["pixel_values"][0][:8].eq(1).all() and out["pixel_values"][0][8:].eq(4).all()
+    assert out["image_grid_thw"][0].tolist() == [[1, 2, 4], [1, 2, 2]]
+    assert tuple(out["image_grid_thw"][1].shape) == (0, 3)
+    without = compose([trained], overlong_filtering=False)
+    assert without.get("pixel_values") is None
+
+
+def test_the_labelled_environment_tags_every_sandbox_and_bounds_its_life(monkeypatch) -> None:
+    from daytona import CreateSandboxFromImageParams
+
+    from examples.train_integrations.harbor_skycap import daytona
+
+    created = []
+
+    async def create(self, params, daytona=None):
+        created.append(params)
+
+    monkeypatch.setattr(daytona.DaytonaEnvironment, "_create_sandbox", create)
+    environment = object.__new__(daytona.LabelledDaytonaEnvironment)
+    environment._labels, environment._ttl_minutes = {"owner": "me", "run": "r1"}, 90
+
+    asyncio.run(environment._create_sandbox(CreateSandboxFromImageParams(image="x", labels={"kept": "1"})))
+
+    (params,) = created
+    assert params.labels == {"kept": "1", "owner": "me", "run": "r1"} and params.ttl_minutes == 90
+    with pytest.raises(ValueError, match="needs labels"):
+        daytona.LabelledDaytonaEnvironment(labels={})
+    assert daytona.command_is_unscoped({"owner": "me"}) and not daytona.command_is_unscoped({"owner": "me", "run": "r"})
