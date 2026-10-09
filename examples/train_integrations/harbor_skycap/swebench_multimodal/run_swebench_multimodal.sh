@@ -25,6 +25,9 @@
 #   STEP_LIMIT                mini-swe-agent's model calls per trajectory (default 50)
 #   MAX_MODEL_LEN             context length, prompt and completions (default 32768)
 #   AGENT_TIMEOUT_SEC         wall time per trajectory (default 2400)
+#   SNAPSHOTS=1|0             start sandboxes from build_snapshots.py's Daytona snapshots (default 1). Without them
+#                             every sandbox pulls its image from Docker Hub, which rate-limits a 64-wide run
+#   WANDB_ENTITY              the W&B entity to log under, when the key's default one can't create the project
 #   IMAGE_DIR                 the screenshots, at the same path on every node (skycap renders there)
 #   STRATEGY=fsdp|megatron    the training backend (default fsdp); megatron takes MEGATRON_TP, MEGATRON_PP,
 #                             MEGATRON_EP, MEGATRON_ETP and OPTIMIZER_OFFLOAD, and trains the vision tower
@@ -85,6 +88,7 @@ MAX_TOKENS_PER_MICROBATCH="${MAX_TOKENS_PER_MICROBATCH:--1}"
 OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 ENGINE_INIT_KWARGS="${ENGINE_INIT_KWARGS:-}"
+SNAPSHOTS="${SNAPSHOTS:-1}"
 DATA_ROOT="${DATA_ROOT:-$HOME/data/swebench_multimodal}"
 TASKS_DIR="$DATA_ROOT/tasks"
 IMAGE_DIR="${IMAGE_DIR:-$DATA_ROOT/images}"
@@ -109,6 +113,7 @@ if [[ -z "${WANDB_API_KEY:-}" && -f "$WANDB_KEY_FILE" ]]; then
   set +a
 fi
 LOGGER="${LOGGER:-$([[ -n "${WANDB_API_KEY:-}" ]] && echo wandb || echo console)}"
+[[ -z "${WANDB_ENTITY:-}" ]] || export WANDB_ENTITY
 [[ "$LOGGER" != wandb ]] || export WANDB_API_KEY
 
 #-----------------------
@@ -144,6 +149,14 @@ grep -q "^  step_limit: $STEP_LIMIT$" "$AGENT_CONFIG" || { echo "could not set s
 echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples, at most $MAX_CONCURRENCY sandboxes at once"
 echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, ttl ${SANDBOX_TTL_MINUTES}m"
 
+if [[ "$SNAPSHOTS" == 1 ]]; then
+  # build_snapshots.py names each snapshot after the sandbox size and the task; Harbor fills in {name}.
+  SNAPSHOT_PREFIX="swebm-c${SANDBOX_CPUS}m$((SANDBOX_MEMORY_MB / 1024))d$((SANDBOX_STORAGE_MB / 1024))-"
+  echo "==> sandboxes start from snapshots ${SNAPSHOT_PREFIX}<task> (build them with $HERE/build_snapshots.py)"
+  SANDBOX_ARGS=(harbor_trial_config.environment.kwargs.snapshot_template_name="${SNAPSHOT_PREFIX}{name}")
+else
+  SANDBOX_ARGS=()
+fi
 case "$PACKING" in
   0) REMOVE_MICROBATCH_PADDING=false ;;
   1) REMOVE_MICROBATCH_PADDING=true ;;
@@ -269,6 +282,7 @@ uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap \
   trainer.placement.policy_num_gpus_per_node="$NUM_GPUS" \
   trainer.placement.ref_num_gpus_per_node="$NUM_GPUS" \
   "${STRATEGY_ARGS[@]}" \
+  "${SANDBOX_ARGS[@]}" \
   "$@" 2>&1 | tee "$RUN_DIR/run.log"
 
 echo
