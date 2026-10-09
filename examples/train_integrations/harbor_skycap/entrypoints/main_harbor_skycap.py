@@ -106,9 +106,12 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    renderer: Optional[str] = None
+    """The ``renderers`` renderer skycap renders with, e.g. ``qwen3.5``. By default it is looked up from the
+    model's Hugging Face name; set it for a local checkpoint, a fine-tune or a name the library doesn't list."""
     images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
-    with the model's processor (``generator.vision_language_renderer``, and the engine's
+    with the model's processor (``skycap.renderer``, and the engine's
     ``mm_processor_kwargs``), calls the engine on the route that keeps them, and each row carries its path's
     ``pixel_values`` and ``image_grid_thw`` to training. That route has no packed side channels, so R3 and
     sampler support are off."""
@@ -153,7 +156,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
         "record_mirror": cfg.skycap.record_mirror,
         "record_mirror_config": dict(cfg.skycap.record_mirror_config or {}) or None,
-        "renderer_name": cfg.generator.vision_language_renderer,
+        "renderer_name": cfg.skycap.renderer,
         "chat_template_kwargs": dict(cfg.generator.chat_template_kwargs or {}) or None,
     }
     if cfg.skycap.images:

@@ -37,9 +37,6 @@ from skycap.tokens.renderer import Media  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
 )
-from skyrl.backends.skyrl_train.inference_servers.skycap_engine import (
-    SkyRLEngine,  # noqa: E402
-)
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
 from skyrl.train.utils.rate_limiter import RateLimiterConfig  # noqa: E402
@@ -546,6 +543,17 @@ def test_the_engine_asks_for_support_only_with_a_sampling_mask() -> None:
     kwargs = dict(prompt_ids=[1], sampling={"top_k": 3}, model="policy", cache_salt="s")
     assert SkyRLEngine().request(sampling_mask=True, **kwargs)["return_sample_support"] is True
     assert "return_sample_support" not in SkyRLEngine().request(sampling_mask=False, **kwargs)
+
+
+def test_images_take_the_unpacked_route_and_the_packed_one_refuses_them() -> None:
+    kwargs = dict(prompt_ids=[1], sampling={}, model="policy", cache_salt=None, features={"mm_hashes": {}})
+    unpacked = SkyRLEngine(packed_side_channels=False)
+    assert unpacked.generate_path == "/inference/v1/generate" and SkyRLEngine().generate_path == "/skyrl/v1/generate"
+    assert "features" in unpacked.request(sampling_mask=False, **kwargs)
+    with pytest.raises(EngineError, match="drops multimodal features"):
+        SkyRLEngine().request(sampling_mask=False, **kwargs)
+    with pytest.raises(EngineError, match="sampler support"):
+        unpacked.request(sampling_mask=True, **kwargs)
 
 
 def test_with_r3_an_overlong_filtered_trial_needs_no_routes() -> None:

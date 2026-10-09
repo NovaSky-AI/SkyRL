@@ -46,7 +46,6 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_PADDING,
 )
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
-from skyrl.train.generators.skyrl_vlm_generator import _vision_features
 from skyrl.train.generators.utils import get_rollout_metrics
 
 MASKED_STOP_REASONS = frozenset({"agent_timeout", "error"})
@@ -207,6 +206,17 @@ def _sample_support(
                 array[index, : len(ids)] = ids
             arrays.append(array)
     return arrays
+
+
+def _vision_features(media: List[Any]) -> tuple:
+    """A path's images as ``(pixel_values, image_grid_thw)`` in placeholder order, or ``(None, None)``."""
+    if any(item.modality != "image" for item in media):
+        raise ValueError(f"only images are supported, got {sorted({item.modality for item in media})}")
+    if not media:
+        return None, None
+    pixel_values = torch.from_numpy(np.concatenate([np.asarray(item.data["pixel_values"]) for item in media]))
+    image_grid_thw = torch.from_numpy(np.concatenate([np.asarray(item.data["image_grid_thw"]) for item in media]))
+    return pixel_values, image_grid_thw
 
 
 def _vision_rows(groups: List[List[_Row]]) -> Dict[str, Optional[List[torch.Tensor]]]:
