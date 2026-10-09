@@ -100,8 +100,6 @@ class AgentLoopState:
     done: bool
     routed_expert_trace: Optional[RoutedExpertTrace] = None
     sample_support_trace: Optional[SampleSupportTrace] = None
-    # Support for an EOS sliced from a single-turn response.
-    dropped_eos_sample_support: Optional[SampleSupport] = None
 
 
 @dataclass
@@ -263,9 +261,8 @@ class SkyRLGymGenerator(GeneratorInterface):
             raise ValueError(
                 "`generator.inference_engine.enable_return_routed_experts=True` requires "
                 "`generator.use_conversation_multi_turn=True`. With `use_conversation_multi_turn=False` the "
-                "agent loop appends a synthetic EOS that is loss-active but that the inference engine never "
-                "evaluated, so the routed-expert trace holds no row for it and refuses to dummy-pad a "
-                "loss-active target."
+                "final sampled EOS can be loss-active but the inference engine returns no routed-expert row "
+                "for it, so the trace cannot cover every loss-active target."
             )
 
         if self.custom_chat_template is not None:
@@ -681,22 +678,17 @@ class SkyRLGymGenerator(GeneratorInterface):
                     response_ids
                 ), f"loss_mask and response_ids should have the same length, got {len(loss_mask)} and {len(response_ids)}"
 
-            appended_eos_token = False
             if not self.use_conversation_multi_turn:
                 assert response_ids is not None and loss_mask is not None
                 if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
+                    # This EOS was not sampled. Keep it for formatting, but exclude
+                    # it from the policy loss and importance-sampling ratios.
                     response_ids.append(self.tokenizer.eos_token_id)
-                    loss_mask.append(1)
+                    loss_mask.append(0)
                     if rollout_logprobs is not None:
                         rollout_logprobs.append(0.0)
                     if agent_loop_state.sample_support_trace is not None:
-                        # Restore support for a sampled EOS; a synthetic EOS remains padding.
-                        dropped_row = agent_loop_state.dropped_eos_sample_support
-                        if dropped_row is not None:
-                            agent_loop_state.sample_support_trace.append(dropped_row, expected_rows=1)
-                        else:
-                            agent_loop_state.sample_support_trace.append_padding(1)
-                    appended_eos_token = True
+                        agent_loop_state.sample_support_trace.append_padding(1)
 
             if agent_loop_state.routed_expert_trace is not None and agent_loop_state.routed_expert_trace.prompt_start:
                 rollout_expert_indices_out = agent_loop_state.routed_expert_trace.finalize(
@@ -716,7 +708,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     # in-place update to per-token reward
                     per_step_output.reward = per_token_reward
             else:
-                reward_out = self._build_per_token_rewards(per_step_rewards, response_ids, appended_eos_token)
+                reward_out = self._build_per_token_rewards(per_step_rewards, response_ids)
 
                 agent_loop_output = TrajectoryOutput(
                     response_ids=response_ids,
@@ -743,7 +735,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             await self.inference_engine_client.finish_session(session_id)
 
     def _build_per_token_rewards(
-        self, per_step_rewards: List[Tuple[float, Optional[int]]], response_ids: List[int], appended_eos_token: bool
+        self, per_step_rewards: List[Tuple[float, Optional[int]]], response_ids: List[int]
     ) -> Union[float, List[float]]:
         """
         Build reward output from per-step rewards.
@@ -751,7 +743,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         Args:
             per_step_rewards: List of (reward, response_end_token_idx) tuples for each step
             response_ids: List of response token IDs
-            appended_eos_token: Whether an EOS token was manually appended at the end
 
         Returns:
             Union[float, List[float]]: If custom_chat_template is used, returns the last step's reward (float).
@@ -765,18 +756,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             # Build token-level rewards placed at assistant turn boundaries
             token_level_rewards: List[float] = [0.0] * len(response_ids)
-            for i, (step_reward, idx) in enumerate(per_step_rewards):
+            for step_reward, idx in per_step_rewards:
                 assert step_reward is not None
+                if idx < 0:
+                    # An empty response has no generated token to receive a reward.
+                    continue
                 if idx >= len(response_ids):
                     break
-                if appended_eos_token and i == len(per_step_rewards) - 1:
-                    # NOTE(Charlie): If we appended the eos token, we need to place
-                    # the reward at the last token (the manually appended eos token)
-                    # rather than the last turn's assistant-generated token. This matches
-                    # the logic in trainer.py::postprocess_generator_output when rewards are List[float].
-                    token_level_rewards[-1] = step_reward
-                else:
-                    token_level_rewards[idx] += step_reward
+                token_level_rewards[idx] += step_reward
             reward_out = token_level_rewards
         return reward_out
 
@@ -1346,8 +1333,9 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         Returns:
             AgentLoopState: Updated agent loop state with appended turn IDs, loss mask, and logprobs.
-                The EOS token is removed from response tokens (if present) since we are continuing
-                the current assistant message. Observations are encoded directly without chat template formatting.
+                An intermediate EOS is removed while continuing the current assistant message.
+                A final sampled EOS and its logprob are preserved. Observations are encoded directly
+                without chat template formatting.
         """
         agent_loop_state.chat_history = self._update_chat_history(
             agent_loop_state.chat_history, turn_output.output, turn_output.new_obs
@@ -1355,17 +1343,11 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         obs_ids_to_add = turn_output.obs_ids
 
-        # Remove EOS token from response tokens since we are continuing the current assistant message
+        # Only remove EOS while continuing the current assistant message. The
+        # final sampled EOS is a real action with its own rollout probability.
         new_resp_tokens = turn_output.output_ids.copy()
-        dropped_eos = bool(new_resp_tokens) and new_resp_tokens[-1] == self.tokenizer.eos_token_id
-        if dropped_eos:
+        if not agent_loop_state.done and new_resp_tokens and new_resp_tokens[-1] == self.tokenizer.eos_token_id:
             new_resp_tokens = new_resp_tokens[:-1]
-        # Keep the sliced EOS token's support row so the trajectory's re-appended EOS can carry it.
-        agent_loop_state.dropped_eos_sample_support = (
-            turn_output.rollout_sample_support[len(new_resp_tokens) : len(new_resp_tokens) + 1]
-            if dropped_eos and turn_output.rollout_sample_support is not None
-            else None
-        )
 
         turn_ids = new_resp_tokens + obs_ids_to_add
         loss_mask_for_turn = [1] * len(new_resp_tokens) + [0] * len(obs_ids_to_add)
