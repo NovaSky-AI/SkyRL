@@ -19,7 +19,9 @@
 #                             After a crash: python -m examples.train_integrations.harbor_skycap.daytona
 #                             cleanup --label owner=$SANDBOX_OWNER --label run=<experiment>
 #   SANDBOX_TTL_MINUTES       hard lifetime of a sandbox, whatever happens to this run (default 180)
-#   SANDBOX_CPUS, SANDBOX_MEMORY_MB, SANDBOX_STORAGE_MB   per sandbox (default 1, 4096, 10240)
+#   SANDBOX_CPUS, SANDBOX_MEMORY_MB, SANDBOX_STORAGE_MB   per sandbox (default 1, 16384, 10240). The agent's own
+#                             Jest runs start a worker per host CPU (Daytona shows 64): a whole suite peaks at
+#                             ~11.6 GB, so 4 GB sandboxes get OOM-killed. 16 GB counts as 4 of the org's 4 GB slots
 #   STEP_LIMIT                mini-swe-agent's model calls per trajectory (default 50)
 #   MAX_MODEL_LEN             context length, prompt and completions (default 32768)
 #   AGENT_TIMEOUT_SEC         wall time per trajectory (default 2400)
@@ -61,7 +63,7 @@ LR="${LR:-1.0e-6}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-64}"
 SANDBOX_TTL_MINUTES="${SANDBOX_TTL_MINUTES:-180}"
 SANDBOX_CPUS="${SANDBOX_CPUS:-1}"
-SANDBOX_MEMORY_MB="${SANDBOX_MEMORY_MB:-4096}"
+SANDBOX_MEMORY_MB="${SANDBOX_MEMORY_MB:-16384}"
 SANDBOX_STORAGE_MB="${SANDBOX_STORAGE_MB:-10240}"
 MINI_SWE_AGENT_VERSION="${MINI_SWE_AGENT_VERSION:-2.4.6}"
 AGENT_TIMEOUT_SEC="${AGENT_TIMEOUT_SEC:-2400}"

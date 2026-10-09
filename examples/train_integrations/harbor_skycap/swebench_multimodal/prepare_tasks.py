@@ -46,7 +46,7 @@ INSTRUCTION = """\
 The repository is checked out at /testbed. Edit its source files to resolve the issue.
 Do not modify the existing tests.
 The sandbox has {cpus} CPU(s) and {memory_gb} GB of memory, but reports the host's CPUs: run Jest with
---maxWorkers=2 (or --runInBand), or its workers run out of memory and your command is killed.
+--maxWorkers=2 (or --runInBand); a worker per reported CPU is slow and can run out of memory.
 """
 
 TASK_TOML = """\
@@ -169,7 +169,9 @@ def build(row: Dict, out_dir: Path, image_dir: Path, args: argparse.Namespace) -
     (task / "environment").mkdir()
 
     problem = inline_images(row["problem_statement"].strip(), local)
-    (task / "instruction.md").write_text(INSTRUCTION.format(problem_statement=problem, cpus=args.cpus, memory_gb=args.memory_mb // 1024))
+    (task / "instruction.md").write_text(
+        INSTRUCTION.format(problem_statement=problem, cpus=args.cpus, memory_gb=args.memory_mb // 1024)
+    )
     (task / "task.toml").write_text(
         TASK_TOML.format(
             instance_id=instance_id,
@@ -208,7 +210,8 @@ def main() -> None:
     parser.add_argument("--agent-timeout", type=int, default=3000)
     parser.add_argument("--verifier-timeout", type=int, default=1800)
     parser.add_argument("--cpus", type=int, default=1)
-    parser.add_argument("--memory-mb", type=int, default=4096)
+    # An agent's whole-suite Jest run, a worker per host CPU (64 on Daytona), peaks at ~11.6 GB (react-pdf).
+    parser.add_argument("--memory-mb", type=int, default=16384)
     parser.add_argument("--storage-mb", type=int, default=10240)
     parser.add_argument("--test-workers", type=int, default=2, help="Jest workers in the verifier's test run")
     args = parser.parse_args()
