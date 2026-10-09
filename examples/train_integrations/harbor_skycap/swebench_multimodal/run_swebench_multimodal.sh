@@ -20,6 +20,9 @@
 #                             cleanup --label owner=$SANDBOX_OWNER --label run=<experiment>
 #   SANDBOX_TTL_MINUTES       hard lifetime of a sandbox, whatever happens to this run (default 180)
 #   SANDBOX_CPUS, SANDBOX_MEMORY_MB, SANDBOX_STORAGE_MB   per sandbox (default 1, 4096, 10240)
+#   STEP_LIMIT                mini-swe-agent's model calls per trajectory (default 50)
+#   MAX_MODEL_LEN             context length, prompt and completions (default 32768)
+#   AGENT_TIMEOUT_SEC         wall time per trajectory (default 2400)
 #   IMAGE_DIR                 the screenshots, at the same path on every node (skycap renders there)
 #
 # Needs: the GPUs, `DAYTONA_API_KEY=...` in DAYTONA_KEY_FILE, optionally WANDB_API_KEY (or WANDB_KEY_FILE).
@@ -49,6 +52,7 @@ SANDBOX_MEMORY_MB="${SANDBOX_MEMORY_MB:-4096}"
 SANDBOX_STORAGE_MB="${SANDBOX_STORAGE_MB:-10240}"
 MINI_SWE_AGENT_VERSION="${MINI_SWE_AGENT_VERSION:-2.4.6}"
 AGENT_TIMEOUT_SEC="${AGENT_TIMEOUT_SEC:-2400}"
+STEP_LIMIT="${STEP_LIMIT:-50}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 NUM_GPUS="${NUM_GPUS:-4}"
 NUM_ENGINES="${NUM_ENGINES:-4}"
@@ -107,6 +111,10 @@ if (( NUM_PROMPTS * GROUP_SIZE < NUM_GPUS )); then
   echo "NUM_PROMPTS x GROUP_SIZE ($NUM_PROMPTS x $GROUP_SIZE) must be at least NUM_GPUS ($NUM_GPUS): every GPU trains a row" >&2
   exit 1
 fi
+# mini-swe-agent's config with this run's step limit.
+AGENT_CONFIG="$RUN_DIR/mini_swe_agent.yaml"
+sed "s/^  step_limit: [0-9]*$/  step_limit: $STEP_LIMIT/" "$HERE/mini_swe_agent_textbased.yaml" > "$AGENT_CONFIG"
+grep -q "^  step_limit: $STEP_LIMIT$" "$AGENT_CONFIG" || { echo "could not set step_limit in $AGENT_CONFIG" >&2; exit 1; }
 echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples, at most $MAX_CONCURRENCY sandboxes at once"
 echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, ttl ${SANDBOX_TTL_MINUTES}m"
 
@@ -134,7 +142,7 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   harbor_trial_config.trials_dir="$RUN_DIR/trials" \
   harbor_trial_config.agent.name=mini-swe-agent \
   harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT_SEC" \
-  harbor_trial_config.agent.kwargs.config_file="$REPO/$HERE/mini_swe_agent_textbased.yaml" \
+  harbor_trial_config.agent.kwargs.config_file="$AGENT_CONFIG" \
   harbor_trial_config.agent.kwargs.version="$MINI_SWE_AGENT_VERSION" \
   harbor_trial_config.environment.import_path=examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment \
   harbor_trial_config.environment.kwargs.labels.owner="$SANDBOX_OWNER" \
