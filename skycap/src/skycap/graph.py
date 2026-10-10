@@ -218,6 +218,33 @@ class MessageGraph:
             parent = node
         return matched
 
+    def match_deepest(self, match_hashes: Sequence[str], parent: int | None = None) -> list[int]:
+        """Like ``match``, but through whichever same-hash sibling continues the request furthest.
+
+        A sibling a request's message hashes to is the chosen one (``child``) or one it shadows: in token mode,
+        a client twin with the tokens a full render gave that history. Once a turn continues from such a twin,
+        the conversation goes on below it, and ``match`` alone would stop on the chosen sibling's stale branch.
+        On a tie, the chosen sibling wins, as in ``match``.
+        """
+        best: dict[tuple[int | None, int], list[int]] = {}
+
+        def walk(node: int | None, depth: int) -> list[int]:
+            if depth == len(match_hashes):
+                return []
+            if (node, depth) in best:
+                return best[(node, depth)]
+            chosen = self.child(node, match_hashes[depth])
+            twins = [c for c in self.children(node) if c != chosen and self.nodes[c].match_hash == match_hashes[depth]]
+            path: list[int] = []
+            for candidate in ([chosen] if chosen is not None else []) + twins:
+                below = [candidate, *walk(candidate, depth + 1)]
+                if len(below) > len(path):
+                    path = below
+            best[(node, depth)] = path
+            return path
+
+        return walk(parent, 0)
+
     def commit_text(
         self,
         messages: Sequence[Mapping[str, Any]],

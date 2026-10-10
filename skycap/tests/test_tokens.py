@@ -780,3 +780,34 @@ def test_a_node_with_no_tokens_keeps_the_paths_routed_experts() -> None:
     empty = routing.slice(3, 0)
 
     assert empty is not None and empty.shape == (0, 2, 2)
+
+
+async def test_one_full_render_costs_one_unbridged_call_not_the_rest_of_the_trajectory() -> None:
+    # A reasoning model's history doesn't re-render as sampled (the template drops earlier reasoning), so a
+    # full render twins the history as client nodes and the conversation continues below them. Later calls
+    # must follow those twins to the newest reply and extend it, not stop on the stale model branch.
+    replies = iter(f"THINK:r{n}|a{n}" for n in range(1, 6))
+    async with token_stack(
+        completion=lambda prompt, sampling: [*encode(next(replies)), END], use_raw_content=True
+    ) as stack:
+        stack.renderer.drop_history_thinking = True
+        created = await stack.create()
+        llm = client(created["base_url"])
+        messages = [user("q1")]
+
+        async def call(next_user: str) -> None:
+            reply = (await llm.chat.completions.create(model="policy", messages=messages)).choices[0].message
+            messages.extend([{"role": "assistant", "content": reply.content}, user(next_user)])
+
+        await call("q2")
+        await call("q3")
+        stack.renderer.no_bridge = True  # e.g. a harness edit the renderer can't extend: one full render
+        await call("q4")
+        stack.renderer.no_bridge = False
+        await call("q5")
+        await call("q6")
+        graph = stack.server.trajectories[created["id"]].graph
+
+        bridged = [call.bridged for node in graph if node.author == "model" for call in node.calls]
+        assert bridged == [None, True, False, True, True]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 1

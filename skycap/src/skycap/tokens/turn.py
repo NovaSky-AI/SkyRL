@@ -138,7 +138,7 @@ def _match(
     that its alias matches by hash.
     """
     rendered: Rendered | None = None
-    matched = graph.match(matches)
+    matched = graph.match_deepest(matches)
     while len(matched) < len(messages):
         depth = len(matched)
         parent = matched[-1] if matched else None
@@ -153,7 +153,7 @@ def _match(
         if same is None:
             break
         graph.alias(parent, matches[depth], same)
-        matched += [same, *graph.match(matches[depth + 1 :], parent=same)]
+        matched += [same, *graph.match_deepest(matches[depth + 1 :], parent=same)]
     return matched, rendered
 
 
