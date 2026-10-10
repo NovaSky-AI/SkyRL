@@ -53,6 +53,19 @@ def test_replay_padding_rejects_missing_topk(shape):
         make_replay_padding_indices(shape, dtype=torch.uint8)
 
 
+@pytest.mark.parametrize("batch_size", [1, 2, 3])
+@pytest.mark.parametrize("tp_size", [1, 2, 8])
+def test_replay_indices_match_router_token_order(batch_size, tp_size):
+    routes = torch.arange(batch_size * 16 * 2 * 2).reshape(batch_size, 16, 2, 2)
+    for local_routes in routes.chunk(tp_size, dim=1):
+        per_layer = replay_utils._split_replay_indices(local_routes)
+        for layer, actual in enumerate(per_layer):
+            expected = torch.stack(
+                [local_routes[batch, pos, layer] for pos in range(local_routes.shape[1]) for batch in range(batch_size)]
+            ).to(torch.int32)
+            torch.testing.assert_close(actual, expected)
+
+
 def test_replay_has_no_dispatcher_specific_patch():
     assert "TokenDispatcher" not in inspect.getsource(replay_utils)
 
