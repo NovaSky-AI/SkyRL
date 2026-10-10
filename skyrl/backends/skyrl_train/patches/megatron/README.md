@@ -29,6 +29,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `patches/megatron/test_offload_checkpoint_inputs.py` (CPU) | `patch_offload_checkpoint_inputs.py` wraps every importer, fake functions |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -226,6 +227,23 @@ patches that replace dispatcher methods can't drop it. Applied unconditionally i
 - **Landed?** megatron-core's dispatcher clears `self.probs` after the combine (or stops storing it).
 - **Remove:** the module, its call in `make_megatron_module`, and
   `patches/megatron/test_moe_release_dispatcher_probs.py`.
+
+### `patch_offload_checkpoint_inputs.py`: opt-in, not an upstream bug
+
+Wraps `checkpointed_forward` in both modules that import it by name (`transformer_block` and
+`hybrid_block`) in `torch.autograd.graph.save_on_cpu` when
+`SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1`, so full-recompute checkpoint inputs (one hidden state per
+layer) wait in host memory. Applied in `make_megatron_module` after `patch_dsa_index_share()`,
+which rebinds the same function. Pageable by default (exact-size host allocations); pinned with
+`SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED=1` (~4x faster copies, asynchronous), in which case
+`release_pinned_offload_cache()` returns PyTorch's cached pinned blocks at the end of every
+`forward_backward` -- otherwise they stay reserved next to the CPU optimizer's buffers and the
+node runs out of host RAM.
+- **Landed?** Not a fix to retire; delete it if megatron-core grows its own offload of
+  checkpointed layer inputs, or if nobody needs contexts past ~288k tokens per sequence.
+- **Remove:** the module, its call in `make_megatron_module`, the `release_pinned_offload_cache()`
+  call in `forward_backward`, `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`, and
+  `patches/megatron/test_offload_checkpoint_inputs.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 
