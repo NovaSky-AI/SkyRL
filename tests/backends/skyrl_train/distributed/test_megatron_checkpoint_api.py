@@ -32,7 +32,7 @@ def test_save_uses_native_checkpoint_signature_and_queue(tmp_path, monkeypatch, 
     owner.megatron_config = SimpleNamespace(async_dist_ckpt_save=asynchronous, async_save_prestage_to_cpu=False)
     owner.is_lora = False
     owner.is_rank_0 = Mock(return_value=False)
-    owner.get_rng_state = Mock(return_value={})
+    owner._sharded_rng_state = Mock(return_value={})
     owner.print = Mock()
     model = SimpleNamespace(actor_module=[SimpleNamespace(sharded_state_dict=lambda: {})])
 
