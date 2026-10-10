@@ -5,7 +5,7 @@ SkyRL's implementation of the [Tinker API](https://tinker-docs.thinkingmachines.
 ## Code Layout
 
 - **`skyrl/tinker/api.py`** -- FastAPI HTTP server. Receives Tinker SDK requests, writes them to SQLite/Postgres, returns future IDs.
-- **`skyrl/tinker/proto_serialization.py`** -- Proto wire-format conversion. The tinker SDK (>= 0.25.0, the minimum supported) sends `forward_backward` request bodies as protobuf (forward-only passes use the same endpoint with a `forward_only` flag; JSON bodies are rejected with 415) and requires proto-serialized `SampleResponse`/`ForwardBackwardOutput` results from `retrieve_future`. Mirrors the SDK's `tinker/proto/{request,response}_conv.py`; round-trip tested in `tests/tinker/test_proto_serialization.py`.
+- **`skyrl/tinker/proto_serialization.py`** -- Proto wire-format conversion. The tinker SDK (`>=0.25.0,<0.28.0` in `pyproject.toml`; see *SDK compatibility* below) sends `forward_backward` request bodies as protobuf (forward-only passes use the same endpoint with a `forward_only` flag; JSON bodies are rejected with 415) and requires proto-serialized `SampleResponse`/`ForwardBackwardOutput` results from `retrieve_future`. Mirrors the SDK's `tinker/proto/{request,response}_conv.py`; round-trip tested in `tests/tinker/test_proto_serialization.py`.
 - **`skyrl/tinker/engine.py`** -- Background subprocess (`TinkerEngine`). Polls DB, batches compatible requests, dispatches to backend.
 - **`skyrl/tinker/types.py`** -- Internal Pydantic models (distinct from API request/response models in `api.py`). `LOSS_TYPES` dict defines valid loss functions.
 - **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields.
@@ -33,7 +33,7 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 | `/create_model` | POST | Create a LoRA (or full-param) training model |
 | `/forward_backward` | POST | Forward + backward pass, accumulates gradients (protobuf body; forward-only via the `forward_only` flag) |
 | `/optim_step` | POST | Apply accumulated gradients |
-| `/asample` | POST | Generate samples from current or base model |
+| `/asample` | POST | Generate samples from current or base model. Returns `sample_sequence_ids` (one per sample) alongside the future id; SDK >= 0.26 asserts on them |
 | `/save_weights` | POST | Save full training checkpoint (weights + optimizer) |
 | `/save_weights_for_sampler` | POST | Sync weights to inference engines |
 | `/load_weights` | POST | Load a previously saved checkpoint. Only permitted as a model's first request (matching the Tinker service); later attempts get a 400 -- load into a freshly created model instead |
@@ -41,6 +41,16 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 | `/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}` | DELETE | Delete a saved sampler checkpoint archive from disk |
 | `/retrieve_future` | POST | Long-poll for async result (300s timeout) |
 | `/healthz` | GET | Liveness check |
+
+## SDK compatibility
+
+`pyproject.toml` pins `tinker>=0.25.0,<0.28.0`; `uv.lock` resolves 0.27.2. Verified against 0.25.0, 0.27.0 and 0.27.2. What each SDK line needs from the server:
+
+- **0.25**: proto `forward_backward` bodies and proto `retrieve_future` results (`proto_serialization.py`).
+- **0.26/0.27**: `asample` must return `sample_sequence_ids`, one per `num_samples` (`SampleFutureResponse`); the SDK stamps them onto `SampledSequence.sequence_id` client-side, so the proto result does not carry them. `forward_backward` requests dual-write `loss_fn_config` into a legacy float map and `loss_fn_config_v2` (number/text union); the parser prefers v2 so string values reach the API model (which rejects them, since no SkyRL loss takes a string).
+- **0.28 is not supported yet**: it renames the proto `TopkPromptLogprobs` message to `TopkLogprobs` (`prompt_length` -> `length`), which breaks `serialize_sample_output` for `topk_prompt_logprobs > 0`, and adds `save_weights_external`.
+
+0.27 client features that are opt-in behind server-driven flags and that SkyRL leaves off (the stub `/api/v1/client/config` returns defaults): `sample_use_retrieve_futures` (`/api/v1/retrieve_futures` session poller), `sample_cancel_enabled` (`/api/v1/cancel_future`). Not implemented and ignored: `copy_weights`, checkpoint `user_metadata`, `Datum` provenance spans, `SampleRequest.record_stability_info`.
 
 ## Concurrency and Batching
 
