@@ -141,6 +141,16 @@ class StampLogs(TrainingCallback):
         self.payloads.append(ci.logs)
 
 
+class CaptureStepEnd(TrainingCallback):
+    """Keeps the batch and trajectory IDs of every on_step_end."""
+
+    def __init__(self):
+        self.steps: list[tuple[TrainingInputBatch, list]] = []
+
+    def on_step_end(self, trainer, ci, control):
+        self.steps.append((ci.batch, ci.trajectory_ids))
+
+
 def _stub_training_input(uids: list[str]) -> TrainingInputBatch:
     """Minimal TrainingInputBatch with one row per uid that survives the keys ``_run_training`` pops."""
     num_rows = len(uids)
@@ -164,6 +174,33 @@ def _stub_training_input(uids: list[str]) -> TrainingInputBatch:
 def _varied_rewards(uid: str, n: int) -> list[float]:
     """Rewards that differ within the group, so the group has reward variance."""
     return [float(i % 2) for i in range(n)]
+
+
+def _stepwise_generate(generator_input):
+    """Two turns per trajectory. Turn 2's prompt extends turn 1's prompt and response, so the turns merge."""
+    output = {
+        key: []
+        for key in (
+            "prompt_token_ids",
+            "response_ids",
+            "rewards",
+            "loss_masks",
+            "stop_reasons",
+            "trajectory_ids",
+            "is_last_step",
+        )
+    }
+    for i, trajectory_id in enumerate(generator_input["trajectory_ids"]):
+        turns = [([1, 2], [3, 4], 0.0, False), ([1, 2, 3, 4, 5], [6, 7], float(i % 2), True)]
+        for prompt, response, reward, is_last_step in turns:
+            output["prompt_token_ids"].append(prompt)
+            output["response_ids"].append(response)
+            output["rewards"].append(reward)
+            output["loss_masks"].append([1, 1])
+            output["stop_reasons"].append("stop")
+            output["trajectory_ids"].append(trajectory_id)
+            output["is_last_step"].append(is_last_step)
+    return {**output, "rollout_metrics": {}, "rollout_logprobs": None}
 
 
 def _build_test_cfg():
@@ -444,6 +481,42 @@ def test_dropped_groups_are_excluded_from_trajectory_ids(monkeypatch):
     # 4 groups trained; the discarded fifth one is absent too.
     assert len(trained_uids) == 4
     assert trainer.generator.generate.await_count == 6
+
+
+def test_trajectory_ids_line_up_with_merged_stepwise_rows(monkeypatch):
+    """With step-wise merging and the real ``convert_to_training_input``, ``trajectory_ids`` has one ID per
+    merged row, in batch row order, ahead of the padding rows."""
+    cfg = _build_test_cfg()
+    cfg.generator.step_wise_trajectories = True
+    cfg.generator.merge_stepwise_output = True
+
+    capture = CaptureStepEnd()
+    trainer, _ = _make_trainer(monkeypatch, cfg, num_prompts=4, callbacks=[capture])
+    trainer.generator.generate.side_effect = _stepwise_generate
+    # Pads each batch to a multiple of 3 rows.
+    trainer.dispatch.get_lcm_dp_size.return_value = 3
+
+    converted_uids: list[list[str]] = []
+
+    def _convert_to_training_input(generator_output, uids):
+        converted_uids.append(list(uids))
+        return FullyAsyncRayPPOTrainer.convert_to_training_input(trainer, generator_output, uids)
+
+    monkeypatch.setattr(trainer, "convert_to_training_input", _convert_to_training_input)
+
+    asyncio.run(trainer.train())
+
+    assert len(capture.steps) == len(converted_uids) == 2
+    for (batch, trajectory_ids), uids in zip(capture.steps, converted_uids):
+        # 2 prompts x 2 samples, each trajectory's 2 turns merged into one row, then padded from 4 to 6 rows.
+        num_rows = 2 * _N_SAMPLES_PER_PROMPT
+        assert len(trajectory_ids) == len(uids) == num_rows
+        assert batch.batch_size == 6
+        assert [tid.instance_id for tid in trajectory_ids] == uids
+        expected_pairs = [(uid, rep) for uid in set(uids) for rep in range(_N_SAMPLES_PER_PROMPT)]
+        assert Counter(_id_pairs(trajectory_ids)) == Counter(expected_pairs)
+        # Merged rows train on both turns' tokens (2 + 2); padding rows train on none.
+        assert batch["loss_mask"].sum(dim=1).tolist() == [4] * num_rows + [0, 0]
 
 
 def test_early_stop_still_ends_the_epoch(monkeypatch):
