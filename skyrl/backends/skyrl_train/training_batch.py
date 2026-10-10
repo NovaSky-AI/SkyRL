@@ -23,6 +23,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 )
 
 DictType = TypeVar("DictType")
+REAL_SAMPLE_MASK = "real_sample_mask"
 
 
 class TensorFormat(StrEnum):
@@ -525,6 +526,7 @@ class TrainingInput(TypedDict, total=False):
     ``convert_prompts_responses_to_batch_tensors``, which documents the layout in full.
     """
 
+    real_sample_mask: Bool[torch.Tensor, "batch_size"]  # noqa: F821
     sequences: Integer[torch.Tensor, "batch_size seq_len"]  # prompt + response token ids
     attention_mask: Integer[torch.Tensor, "batch_size seq_len"]  # 1 = real token, 0 = padding
     loss_mask: Float[torch.Tensor, "batch_size response_len"]  # 1 = trainable; 0 masks e.g. tool output
@@ -549,7 +551,12 @@ class TrainingInput(TypedDict, total=False):
 class TrainingInputBatch(TensorBatch[TrainingInput]):
     """Training input data"""
 
-    pass
+    @property
+    def real_sample_mask(self) -> torch.Tensor:
+        """Identify real rows, including real trajectories with no loss tokens."""
+        if REAL_SAMPLE_MASK in self:
+            return self[REAL_SAMPLE_MASK]
+        return torch.ones(self.batch_size, dtype=torch.bool, device=self["sequences"].device)
 
 
 class TrainingOutputBatch(TensorBatch[Dict[str, torch.Tensor]]):
@@ -674,6 +681,10 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             pad_indices = [0] * pad_size
             padding_tensor = tensor[pad_indices].clone()
             new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+
+    new_tensors[REAL_SAMPLE_MASK] = torch.cat(
+        [unpadded_batch.real_sample_mask, torch.zeros(pad_size, dtype=torch.bool)]
+    )
 
     # Update metadata as well.
     new_metadata = {}

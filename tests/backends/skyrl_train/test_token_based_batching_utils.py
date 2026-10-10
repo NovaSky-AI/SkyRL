@@ -12,7 +12,11 @@ from typing import List
 
 import torch
 
-from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import (
+    REAL_SAMPLE_MASK,
+    TensorList,
+    TrainingInputBatch,
+)
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
     cu_seqlens_from_lengths,
@@ -104,6 +108,22 @@ class TestBalancedBinpacking:
 
 
 class TestTokenBasedBatchIterator:
+    def test_training_outputs_keep_one_item_per_input_row(self):
+        # Callers trim their own input padding by count, so synthetic input rows stay.
+        batch = self._make_batch([6, 10, 4, 8])
+        batch[REAL_SAMPLE_MASK] = torch.tensor([True, True, True, False])
+        iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=12)
+        outputs = [
+            [{"sample": index} for index in indices] + [{"sample": "pipeline-padding"}]
+            for indices in iterator._microbatches
+        ]
+        iterator._num_padding_microbatches = 1
+        outputs.append([{"sample": "schedule-padding"}])
+        assert iterator.reorder_and_combine_items(outputs) == [{"sample": i} for i in range(4)]
+        padding = iterator._create_padding_microbatch()
+        assert padding.real_sample_mask.tolist() == [False]
+        assert padding["loss_mask"].count_nonzero() == 0
+
     def _make_batch(self, seq_lens, num_actions=4):
         """Create a dummy TrainingInputBatch with variable sequence lengths."""
         batch_size = len(seq_lens)
@@ -321,6 +341,7 @@ class TestTokenBasedBatchIterator:
             "skyrl.backends.skyrl_train.workers.worker.all_reduce_metrics",
             lambda metrics, strategy, group=None, sum_loss_metrics=False: metrics,
         )
+        monkeypatch.setattr("torch.cuda.current_device", lambda: "cpu")
 
         class _StubWorker(PolicyWorkerBase):
             def __init__(self, cfg):
@@ -328,7 +349,7 @@ class TestTokenBasedBatchIterator:
                 self.strategy = None
                 self.device_mesh = SimpleNamespace(get_group=lambda name: None)
 
-            def _forward_backward_micro(self, experience, microbatch_weight, **kwargs):
+            def _forward_backward_micro(self, experience, loss_normalization, **kwargs):
                 # One output per sample, identified by its first-token marker.
                 markers = experience.sequences[:, 0].tolist()
                 return {"loss": 1.0, "loss_fn_outputs": [{"logprobs": [float(m)]} for m in markers]}
@@ -353,6 +374,7 @@ class TestTokenBasedBatchIterator:
             "skyrl.backends.skyrl_train.workers.worker.all_reduce_metrics",
             lambda metrics, strategy, group=None, sum_loss_metrics=False: metrics,
         )
+        monkeypatch.setattr("torch.cuda.current_device", lambda: "cpu")
 
         class _StubWorker(PolicyWorkerBase):
             def __init__(self, cfg):
@@ -360,7 +382,7 @@ class TestTokenBasedBatchIterator:
                 self.strategy = None
                 self.device_mesh = SimpleNamespace(get_group=lambda name: None)
 
-            def _forward_backward_micro(self, experience, microbatch_weight, **kwargs):
+            def _forward_backward_micro(self, experience, loss_normalization, **kwargs):
                 return {"loss": 1.0}
 
         worker = _StubWorker(SimpleNamespace(micro_train_batch_size_per_gpu=2, max_tokens_per_microbatch=8))
