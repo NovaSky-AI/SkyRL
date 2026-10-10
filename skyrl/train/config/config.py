@@ -588,6 +588,13 @@ class MegatronConfig(BaseConfig):
     cannot receive a gradient; leaving them trainable trips Megatron's
     ``overlap_grad_reduce`` assert that every bucketed parameter's backward hook fired. No-op on
     models without a DSA indexer. Leave False when training the indexer with auxiliary loss."""
+    freeze_vision_model: bool = False
+    """If True, freeze the vision encoder of a vision-language model (patch embedding and ViT
+    blocks). Requires a model whose vision tower is built on the Megatron side
+    (``language_model_only=false``); raises otherwise. LoRA already freezes all base weights."""
+    freeze_vision_projection: bool = False
+    """If True, freeze the vision-to-language projection of a vision-language model (the merger,
+    plus GLM-5.3-Flash's downsample conv). Same requirements as ``freeze_vision_model``."""
     mtp_num_layers: Optional[int] = None
     """Number of Multi-Token Prediction (MTP) heads to build. ``None`` honors the model's HF config
     (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are

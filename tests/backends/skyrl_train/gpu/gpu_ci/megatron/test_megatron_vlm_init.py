@@ -26,6 +26,7 @@ from skyrl.train.config import (
 from skyrl.train.config.sft_config import SFTConfig, SFTPlacementConfig
 from skyrl.train.sft_trainer import SFTTrainer
 from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
     ray_init_for_tests,
@@ -277,12 +278,9 @@ async def test_vlm_sft_hf_parity(ray_init_fixture):
 @pytest.mark.parametrize(
     ("tp", "cp", "sequence_parallel_size", "remove_microbatch_padding", "gpus_per_node", "expected_substring"),
     [
-        # Qwen3VL packs sequences internally, `remove_microbatch_padding` is not supported
-        (1, 1, 1, True, 2, "pack sequences inside their own forward"),
         (2, 1, 2, False, 2, "sequence parallelism"),
     ],
     ids=[
-        "microbatch_padding",
         "sequence_parallel",
     ],
 )
@@ -362,3 +360,331 @@ async def test_vlm_train(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
         training_losses.append(step_i_outputs["loss"])
 
     assert training_losses[0] > training_losses[-1]
+
+
+# Packed-vs-unpacked parity. Microbatches of 4 samples (plus a trailing single-sample
+# microbatch), so every packed row has samples after the first: a sample-boundary leak
+# (wrong mRoPE restart, or GDN state / conv carried across samples) can only show up there.
+PACKING_MICRO_BATCH = 4
+PACKING_PROMPTS = [
+    ("Describe this picture in one short sentence.", (56, 56), "A small square of noise."),
+    ("What shapes can you see here? Answer briefly.", (112, 84), "Mostly scattered dots with no clear shape."),
+    ("Is this image bright or dark?", (224, 168), "It is a mix of bright and dark pixels."),
+    ("Count the colors.", (84, 224), "Too many colors to count; it looks like random noise."),
+    ("Give a title for this image.", (140, 140), "Static."),
+    ("Without any image: what is two plus three?", None, "Two plus three is five."),
+    ("What would you call this texture?", (196, 112), "A grainy, television-static texture."),
+    ("Summarize the image.", (70, 154), "Random colored noise in a tall rectangle."),
+    ("One word for this image?", (168, 56), "Noise."),
+]
+
+
+def get_packing_parity_batch(model_name: str) -> TrainingInputBatch:
+    """Variable-length image (and one text-only) samples laid out like an RL batch.
+
+    Each row is prompt + assistant answer, left-padded. ``response_length`` is the
+    longest answer and ``loss_mask`` marks each row's answer tokens (right-aligned),
+    so only text targets are scored -- image-placeholder targets of random-noise
+    images have huge, bf16-sensitive logprobs and are never trained on.
+    """
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+    gen = torch.Generator().manual_seed(0)
+    rows = []
+    for prompt, size, answer in PACKING_PROMPTS:
+        user_content = [{"type": "text", "text": prompt}]
+        images = None
+        if size is not None:
+            from PIL import Image
+
+            w, h = size
+            pixels = torch.randint(0, 256, (h, w, 3), generator=gen, dtype=torch.uint8).numpy()
+            images = [Image.fromarray(pixels)]
+            user_content = [{"type": "image"}] + user_content
+        messages = [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": answer},
+        ]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        prompt_text = processor.apply_chat_template(messages[:1], tokenize=False, add_generation_prompt=True)
+        out = processor(text=[text], images=images, return_tensors="pt")
+        prompt_ids = processor(text=[prompt_text], images=images, return_tensors="pt")["input_ids"][0].tolist()
+        ids = out["input_ids"][0].tolist()
+        # Score what follows the shared prompt prefix (some templates render the
+        # generation prompt slightly differently from a completed turn, e.g. think tags).
+        prefix = next((k for k, (a, b) in enumerate(zip(ids, prompt_ids)) if a != b), len(prompt_ids))
+        assert 0 < len(ids) - prefix <= len(ids) // 2, (prefix, len(ids))
+        rows.append((ids, len(ids) - prefix, out.get("pixel_values"), out.get("image_grid_thw")))
+
+    ref_pv = next(pv for _, _, pv, _ in rows if pv is not None)
+    max_len = max(len(ids) for ids, _, _, _ in rows)
+    num_actions = max(resp_len for _, resp_len, _, _ in rows)
+    pad_token_id = processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
+    sequences, attention_mask, loss_mask, pixel_values, image_grid_thw = [], [], [], [], []
+    for ids, resp_len, pv, grid in rows:
+        pad = max_len - len(ids)
+        sequences.append([pad_token_id] * pad + ids)
+        attention_mask.append([0] * pad + [1] * len(ids))
+        loss_mask.append([0] * (num_actions - resp_len) + [1] * resp_len)
+        # Text-only rows carry empty vision tensors.
+        pixel_values.append(pv if pv is not None else ref_pv.new_zeros((0, *ref_pv.shape[1:])))
+        image_grid_thw.append(grid if grid is not None else torch.zeros(0, 3, dtype=torch.long))
+
+    batch_size = len(rows)
+    loss_mask = torch.tensor(loss_mask, dtype=torch.float)
+    zeros = torch.zeros(batch_size, num_actions)
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.tensor(sequences),
+            "attention_mask": torch.tensor(attention_mask),
+            "action_log_probs": zeros,
+            "base_action_log_probs": zeros,
+            "rollout_logprobs": zeros,
+            "values": zeros,
+            "returns": zeros,
+            "advantages": zeros,
+            "loss_mask": loss_mask,
+            "response_mask": loss_mask,
+            "pixel_values": TensorList(pixel_values),
+            "image_grid_thw": TensorList(image_grid_thw),
+        }
+    )
+    data.metadata = {"response_length": num_actions}
+    return data
+
+
+def _megatron_vlm_forward_logprobs(
+    model_name, batch, tp, remove_microbatch_padding, micro_batch=PACKING_MICRO_BATCH, pp=1
+) -> torch.Tensor:
+    """Inference forward (the RL old/ref-logprob path): [B, response_length], right-aligned."""
+    cfg = get_test_actor_config(model_name=model_name)
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.policy_num_gpus_per_node = tp * pp
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+    cfg.trainer.micro_forward_batch_size_per_gpu = micro_batch
+    cfg.trainer.micro_train_batch_size_per_gpu = micro_batch
+    cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
+    # A fresh Ray runtime per forward frees the GPUs for the next one.
+    with ray_init():
+        actor_group = init_worker_with_type(
+            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=tp * pp, cfg=cfg
+        )
+        refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
+        output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
+        return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_name", "tp", "pp"),
+    [
+        ("Qwen/Qwen3-VL-2B-Instruct", 1, 1),
+        ("Qwen/Qwen3-VL-2B-Instruct", 2, 1),
+        # PP=2: pixel values reach only the first stage; every stage rebuilds mRoPE positions.
+        ("Qwen/Qwen3-VL-2B-Instruct", 1, 2),
+        # Qwen3.5 goes through the same Qwen3VLModel but with GatedDeltaNet layers, whose
+        # state and conv must reset at every packed sample boundary.
+        ("Qwen/Qwen3.5-0.8B", 1, 1),
+        ("Qwen/Qwen3.5-0.8B", 2, 1),
+        ("Qwen/Qwen3.5-0.8B", 1, 2),
+    ],
+    ids=["qwen3_vl_tp1", "qwen3_vl_tp2_sp", "qwen3_vl_pp2", "qwen3_5_vl_tp1", "qwen3_5_vl_tp2_sp", "qwen3_5_vl_pp2"],
+)
+@pytest.mark.megatron
+async def test_megatron_vlm_packed_vs_unpacked(model_name, tp, pp):
+    """Sample packing must add no error beyond ordinary batching.
+
+    Packed and padded (unpacked) microbatches run different kernels on different
+    shapes, so in bf16 they agree only to rounding -- and so does unpacked with
+    itself when the microbatch composition changes. The reference is therefore
+    each sample run alone (unpacked, one sample per microbatch), and the check is
+    that packed microbatches of 4 are no further from it than unpacked ones.
+    A sample-boundary leak (mRoPE restart, GatedDeltaNet state/conv carried
+    across samples) would also make later slots of a packed microbatch worse
+    than slot 0.
+    """
+    batch = get_packing_parity_batch(model_name)
+    num_actions = batch.metadata["response_length"]
+    unpacked = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=False, pp=pp)
+    packed = _megatron_vlm_forward_logprobs(model_name, batch, tp, remove_microbatch_padding=True, pp=pp)
+    assert packed.shape == unpacked.shape == (len(PACKING_PROMPTS), num_actions)
+
+    # Reference: every sample alone. At TP>1 (sequence parallel) a microbatch with no image
+    # crashes Megatron-Bridge's split_deepstack_embs (fixed upstream in Megatron-Bridge#3869,
+    # not yet merged), so the text-only row is left out of the reference there.
+    has_image = torch.tensor([size is not None for _, size, _ in PACKING_PROMPTS])
+    ref_rows = torch.arange(len(PACKING_PROMPTS)) if tp == 1 else has_image.nonzero().flatten()
+    ref_batch = TrainingInputBatch({k: (None if v is None else v[ref_rows]) for k, v in batch.items()})
+    ref_batch.metadata = batch.metadata
+    alone = _megatron_vlm_forward_logprobs(
+        model_name, ref_batch, tp, remove_microbatch_padding=False, micro_batch=1, pp=pp
+    )
+
+    scored = batch["loss_mask"].bool()
+    for name, t in (("unpacked", unpacked), ("packed", packed), ("alone", alone)):
+        rows_scored = scored[ref_rows] if name == "alone" else scored
+        assert torch.isfinite(t[rows_scored]).all(), name
+    ref_scored = scored[ref_rows]
+    packed_vs_alone = (packed[ref_rows] - alone).abs()
+    unpacked_vs_alone = (unpacked[ref_rows] - alone).abs()
+    packed_vs_unpacked = (packed - unpacked).abs()
+
+    slots = (torch.arange(len(PACKING_PROMPTS)) % PACKING_MICRO_BATCH)[ref_rows]
+    print(f"\n[packing parity] {model_name} tp={tp} pp={pp}  (mean/max abs logprob diff on answer tokens)")
+    for name, d, m in (
+        ("packed vs alone", packed_vs_alone, ref_scored),
+        ("unpacked vs alone", unpacked_vs_alone, ref_scored),
+        ("packed vs unpacked", packed_vs_unpacked, scored),
+    ):
+        print(f"  {name:18s}: mean={d[m].mean().item():.5f} max={d[m].max().item():.4f}")
+    for j, i in enumerate(ref_rows.tolist()):
+        m = ref_scored[j]
+        print(
+            f"  sample {i} slot {slots[j].item()}: packed-alone={packed_vs_alone[j][m].mean().item():.5f} "
+            f"unpacked-alone={unpacked_vs_alone[j][m].mean().item():.5f}"
+        )
+
+    packed_err = packed_vs_alone[ref_scored].mean().item()
+    unpacked_err = unpacked_vs_alone[ref_scored].mean().item()
+    # Packing must not add error beyond what ordinary batching already shows.
+    assert packed_err <= 1.5 * unpacked_err + 5e-3, (packed_err, unpacked_err)
+    # Guard against gross breakage (a wrong position or boundary is >> bf16 noise).
+    assert packed_vs_unpacked[scored].mean().item() < 5e-2
+    # No boundary leak: later slots of a packed microbatch are not worse than slot 0.
+    first, later = slots == 0, slots > 0
+    first_d, later_d = packed_vs_alone[first][ref_scored[first]], packed_vs_alone[later][ref_scored[later]]
+    assert later_d.mean().item() <= 3 * first_d.mean().item() + 1e-2, (later_d.mean(), first_d.mean())
+    assert later_d.max().item() <= 3 * first_d.max().item() + 0.25, (later_d.max(), first_d.max())
+
+
+def _vlm_cp_training_batch(model_name: str) -> TrainingInputBatch:
+    """The packing-parity batch (first 8 samples) with non-trivial PPO inputs.
+
+    The old and rollout logprobs are placeholders: ``_run_vlm_cp_layout`` replaces them with
+    the layout's own forward logprobs before training.
+    """
+    batch = get_packing_parity_batch(model_name)[:8]
+    shape = batch["advantages"].shape
+    batch["advantages"] = torch.full(shape, 0.5)
+    for key in ("action_log_probs", "base_action_log_probs", "rollout_logprobs"):
+        batch[key] = torch.full(shape, -1.0)
+    batch.metadata["global_step"] = 0
+    return batch
+
+
+def _on_policy(batch: TrainingInputBatch, logprobs: torch.Tensor) -> TrainingInputBatch:
+    """Copy of ``batch`` with old and rollout logprobs set to ``logprobs`` (importance ratio 1).
+
+    Fixed old logprobs put some tokens near the PPO clip boundary, where bf16-level logprob
+    differences between parallel layouts clip different tokens and move the grad norm by
+    several percent. With ratio 1 no token is near the boundary.
+    """
+    on_policy = TrainingInputBatch({k: v for k, v in batch.items()})
+    on_policy.metadata = batch.metadata
+    on_policy["action_log_probs"] = logprobs.clone()
+    on_policy["rollout_logprobs"] = logprobs.clone()
+    return on_policy
+
+
+def _forward_logprobs(actor_group, batch: TrainingInputBatch) -> torch.Tensor:
+    refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
+    output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
+    return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
+
+
+def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
+    """Packed forward logprobs, one forward_backward + optim_step, then two half-batch
+    forward_backward calls + optim_step; returns (logprobs, results, grad_norms, split_grad_norms).
+
+    lr is 0, so optim_step only reduces, reports and clears the gradients: both phases see the
+    same weights and their grad norms are directly comparable.
+    """
+    cfg = get_test_actor_config(model_name=model_name)
+    cfg.trainer.strategy = "megatron"
+    num_gpus = tp * cp
+    cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.remove_microbatch_padding = True
+    cfg.trainer.algorithm.use_kl_loss = True
+    cfg.trainer.algorithm.kl_loss_coef = 0.1
+    cfg.trainer.train_batch_size = len(batch)
+    cfg.trainer.policy_mini_batch_size = len(batch)
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.micro_train_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.policy.optimizer_config.lr = 0
+    with ray_init():
+        actor_group = init_worker_with_type(
+            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=num_gpus, cfg=cfg
+        )
+        logprobs = _forward_logprobs(actor_group, batch)
+        train_batch = _on_policy(batch, logprobs)
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", train_batch))
+        grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        # Gradient accumulation over two forward_backward calls in one optimizer step (as a
+        # Tinker client may do). Under calculate_per_token_loss each call's gradients are
+        # divided by that call's own token count. The halves are the two microbatches of the
+        # full-batch call, so both modes should give the full-batch gradient.
+        half = len(batch) // 2
+        for part in (train_batch.slice(0, half), train_batch.slice(half, len(batch))):
+            ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", part))
+        split_grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        return logprobs, results, grad_norms, split_grad_norms
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_name", "tp"),
+    [
+        ("Qwen/Qwen3-VL-2B-Instruct", 1),
+        ("Qwen/Qwen3.5-0.8B", 1),
+        # TP=2 turns on sequence parallelism: the deepstack/SP split runs on top of the CP split.
+        ("Qwen/Qwen3-VL-2B-Instruct", 2),
+        ("Qwen/Qwen3.5-0.8B", 2),
+    ],
+    ids=["qwen3_vl", "qwen3_5_vl", "qwen3_vl_tp2_sp", "qwen3_5_vl_tp2_sp"],
+)
+@pytest.mark.megatron
+async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
+    """VLM context parallelism must match CP=1: per-token logprobs and the gradient.
+
+    The full packed stream goes to every CP rank and Megatron-Bridge's Qwen3VLModel
+    computes mRoPE, places image features and applies the CP split itself. Images span
+    the 2*CP chunk boundaries of most samples, so a mismatched split shows up as large
+    logprob differences. The grad-norm check covers loss scaling: the bridge forces
+    calculate_per_token_loss under CP, so CP=2 runs Megatron's per-token mode (DDP sums,
+    each call's gradients divided by its token count) while CP=1 runs the default mode.
+    The batch is on-policy (old logprobs from the layout's own forward), so PPO clipping
+    can't differ between layouts.
+    Both layouts use DP=1 (TP*1 vs TP*2 GPUs) so their microbatches are
+    identical and only the CP split differs; the bf16 floor still applies (changing
+    only microbatch composition moves these logprobs by ~0.034 mean), so the logprob
+    bar is the bf16 floor while a wrong split shows up as O(1) differences.
+    """
+    batch = _vlm_cp_training_batch(model_name)
+    logprobs_nocp, results_nocp, grad_norms_nocp, split_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, tp=tp)
+    logprobs_cp, results_cp, grad_norms_cp, split_cp = _run_vlm_cp_layout(model_name, batch, cp=2, tp=tp)
+
+    scored = batch["loss_mask"].bool()
+    diff = (logprobs_cp - logprobs_nocp).abs()[scored]
+    print(f"\n[cp parity] {model_name} tp={tp}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
+    print(f"[cp parity] grad norms CP1={grad_norms_nocp} CP2={grad_norms_cp}")
+    print(f"[cp parity] two-call grad norms CP1={split_nocp} CP2={split_cp}")
+    for k in ("policy_loss", "policy_kl"):
+        print(f"[cp parity] {k}: CP1={results_nocp[0].metrics[k]} CP2={results_cp[0].metrics[k]}")
+
+    assert torch.isfinite(logprobs_cp[scored]).all()
+    # bf16 floor: HF bf16 vs fp32 differs by ~5e-2 mean on these answer tokens.
+    assert diff.mean().item() < 5e-2
+    assert diff.max().item() < 1.0
+    gn_nocp, gn_cp = grad_norms_nocp[0], grad_norms_cp[0]
+    assert gn_nocp is not None and gn_nocp > 0 and gn_cp is not None
+    # Same 10% band as test_megatron_worker's text CP check: a scaling bug is ~2x off.
+    assert abs(gn_cp - gn_nocp) / gn_nocp < 0.1, (gn_cp, gn_nocp)
+    # Two calls per optimizer step must add up to the one-call gradient in each layout (same
+    # weights, lr=0). Dividing the window once by the summed token count would average the two
+    # calls instead, about half the norm.
+    for gn, split_gn in ((gn_nocp, split_nocp[0]), (gn_cp, split_cp[0])):
+        assert split_gn is not None and abs(split_gn - gn) / gn < 0.02, (split_gn, gn)

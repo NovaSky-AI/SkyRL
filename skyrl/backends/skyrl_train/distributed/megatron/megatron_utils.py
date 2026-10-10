@@ -675,6 +675,7 @@ def preprocess_packed_seqs(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     fp8_enabled: bool = False,
     fp8_recipe: Optional[str] = None,
+    shard_for_cp: bool = True,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences.
@@ -697,6 +698,11 @@ def preprocess_packed_seqs(
     gets first and last chunks, GPU1 gets second and second last chunks,
     and so on), this is for load balancing with causal masking.
     See https://github.com/NVIDIA/TransformerEngine/issues/1368
+
+    ``shard_for_cp=False`` keeps the full packed stream on every CP rank (each
+    sub-sequence still padded to the CP alignment) for models that apply the CP
+    split themselves, such as Megatron-Bridge's Qwen3VLModel: its mRoPE positions
+    and image-feature placement need the whole stream.
     """
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
@@ -759,8 +765,10 @@ def preprocess_packed_seqs(
     # Pure Python int calculation to avoid further synchronization
     max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
 
+    # Ranks the stream is split across here (1 when the model applies the CP split itself).
+    shard_cp_size = cp_size if shard_for_cp else 1
     shape = list(input_ids.shape[1:])
-    shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
+    shape[0] = sum(seqlens_in_batch_padded_cpu) // shard_cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
         for i in range(num_subseqs):
@@ -773,7 +781,7 @@ def preprocess_packed_seqs(
                 seqlen = seqlens_in_batch_cpu[i]
                 seq_tokens = input_ids[i, attention_mask[i]]
 
-            if cp_size <= 1:
+            if shard_cp_size <= 1:
                 start_idx = cu_seqlens_padded_cpu[i]
                 input_ids_rmpad[start_idx : start_idx + seqlen] = seq_tokens
                 continue
@@ -815,28 +823,31 @@ def preprocess_packed_seqs(
         return input_ids, packed_seq_params
 
 
-def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
-    """Whether the model packs sequences inside its own ``forward``.
+def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
+    """Whether the VLM handles a packed [1, T] stream itself.
 
-    True for ``Qwen3VLModel`` (e.g. Qwen3.5 via the VL bridge), which would
-    double-pack and corrupt the GDN ``cu_seqlens`` under SkyRL sample packing, so
-    :class:`MegatronModelWrapper` refuses packing for it. Returns ``False`` when
-    mbridge / Qwen3VL is not importable, so other models are unaffected.
+    True when every model chunk is Megatron-Bridge's ``Qwen3VLModel`` (Qwen3-VL,
+    Qwen3.5-VL), which rebuilds 3D mRoPE positions per packed sub-sequence from
+    ``packed_seq_params``, or sets ``model_owns_packing = True`` (NeMo-RL's opt-in
+    attribute for models that pack and split for context parallelism themselves;
+    GLM-5.3-Flash's ``Glm5NextVLModel``).
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
             Qwen3VLModel,
         )
     except ImportError:
-        return False
+        Qwen3VLModel = None
 
     chunks = model if isinstance(model, (list, tuple)) else [model]
     for chunk in chunks:
         unwrapped = unwrap_model(chunk)
-        unwrapped_list = unwrapped if isinstance(unwrapped, (list, tuple)) else [unwrapped]
-        if any(isinstance(m, Qwen3VLModel) for m in unwrapped_list):
-            return True
-    return False
+        if getattr(unwrapped, "model_owns_packing", False):
+            continue
+        if Qwen3VLModel is not None and isinstance(unwrapped, Qwen3VLModel):
+            continue
+        return False
+    return bool(chunks)
 
 
 def remove_left_padding(

@@ -57,6 +57,7 @@ class TestGradScaleFunc:
         mock_config_obj = MagicMock()
         mock_config_obj.finalize_model_grads_func = None
         mock_config_obj.grad_scale_func = None
+        mock_config_obj.calculate_per_token_loss = False
 
         mock_optimizer = MagicMock()
         mock_optimizer.scale_loss = MagicMock(return_value=1.0)
@@ -86,6 +87,7 @@ class TestGradScaleFunc:
         mock_config_obj = MagicMock()
         mock_config_obj.finalize_model_grads_func = None
         mock_config_obj.grad_scale_func = None
+        mock_config_obj.calculate_per_token_loss = False
 
         with patch(
             "skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper.get_model_config",
@@ -101,6 +103,34 @@ class TestGradScaleFunc:
             )
 
         assert mock_config_obj.grad_scale_func is None
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@pytest.mark.parametrize("overlap_grad_reduce", [False, True])
+def test_per_token_loss_requires_no_overlap_grad_reduce(overlap_grad_reduce):
+    """Under calculate_per_token_loss the wrapper rescales grad buffers between calls, which would
+    race with overlapped grad reductions, so overlap_grad_reduce=True is refused at init."""
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
+        MegatronModelWrapper,
+    )
+
+    mock_module = MagicMock()
+    mock_module.ddp_config.overlap_grad_reduce = overlap_grad_reduce
+    mock_config_obj = MagicMock()
+    mock_config_obj.calculate_per_token_loss = True
+    mock_skyrl_config = MagicMock()
+    mock_skyrl_config.trainer.remove_microbatch_padding = True
+
+    with patch(
+        "skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper.get_model_config",
+        return_value=mock_config_obj,
+    ):
+        if overlap_grad_reduce:
+            with pytest.raises(ValueError, match="overlap_grad_reduce=false"):
+                MegatronModelWrapper(config=mock_skyrl_config, actor_module=[mock_module], actor_optimizer=None)
+        else:
+            wrapper = MegatronModelWrapper(config=mock_skyrl_config, actor_module=[mock_module], actor_optimizer=None)
+            assert wrapper._per_token_loss
 
 
 # ---------------------------------------------------------------------------
