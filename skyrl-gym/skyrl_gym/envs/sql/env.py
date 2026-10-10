@@ -36,9 +36,7 @@ class SQLEnv(BaseTextEnv):
         self.db_path = env_config.db_path
         # Works for both Text2SQLEnvConfig and DictConfig (missing key -> the
         # config default, keeping a single source of truth for the default).
-        self.reward_empty_gold = bool(
-            getattr(env_config, "reward_empty_gold", Text2SQLEnvConfig.reward_empty_gold)
-        )
+        self.reward_empty_gold = bool(getattr(env_config, "reward_empty_gold", Text2SQLEnvConfig.reward_empty_gold))
         self.db_id = extras["db_id"]
         self.gold_sql = extras["reward_spec"]["ground_truth"]
         self.task = extras["data"]
