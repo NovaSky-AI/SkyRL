@@ -1091,6 +1091,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "HF_TOKEN",
         "HF_HUB_OFFLINE",
         "HF_ENDPOINT",
+        # Kernel caches must be writable before workers import model modules.
+        # In particular, TileLang does not derive its cache from XDG_CACHE_HOME.
+        "XDG_CACHE_HOME",
+        "TILELANG_CACHE_DIR",
+        "TRITON_CACHE_DIR",
+        "TORCHINDUCTOR_CACHE_DIR",
         "PYTORCH_CUDA_ALLOC_CONF",
         # Selects the DSA indexer top-k backend under dsa_kernel_backend=cudnn
         # (patches/megatron/patch_dsa_hybrid_indexer.py); read in the Megatron workers.

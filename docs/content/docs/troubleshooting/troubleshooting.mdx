@@ -24,6 +24,32 @@ uv run --isolated --env-file .env scripts/multi_node_nccl_test.py --num-nodes 2
 
 If you are using RDMA, you may need to customize the `LD_LIBRARY_PATH` to include the RDMA libraries (Ex: EFA on AWS). We've seen issues with `uv` where the `LD_LIBRARY_PATH` is not exported even if it is set in the `.env` file. It is recommended to set the `SKYRL_LD_LIBRARY_PATH_EXPORT=1` in the `.env` file and set `LD_LIBRARY_PATH` directly in the current shell.
 
+
+## Slow Qwen3.5 training with FLA installed
+
+Qwen3.5 uses FLA for its Gated DeltaNet layers. An FLA import failure can cause
+Transformers to silently select its slower PyTorch implementation, even when
+`flash-linear-attention` is installed and FlashAttention is enabled.
+
+One cause is an unwritable home directory in a container. FLA can import TileLang
+through its optional Mamba dependencies; TileLang then tries to create
+`~/.tilelang`. With `HOME=/`, this can fail with
+`PermissionError: [Errno 13] Permission denied: '/.tilelang'`.
+
+Set `TILELANG_CACHE_DIR` to a directory writable by the worker's UID on every node
+before starting Python, for example in the environment file passed to `uv run`:
+
+```dotenv
+TILELANG_CACHE_DIR=/path/to/writable/cache/tilelang
+```
+
+SkyRL forwards this override to Ray workers for both FSDP and Megatron. It also
+forwards explicitly set `XDG_CACHE_HOME`, `TRITON_CACHE_DIR`, and
+`TORCHINDUCTOR_CACHE_DIR`; unset values keep each library's defaults.
+`XDG_CACHE_HOME` alone does not redirect TileLang's cache. Restart existing
+processes after fixing the path because Transformers selects the fallback during
+model-module import.
+
 ## Worker startup timeout
 
 Sometimes, you might see the following logs from the raylet:

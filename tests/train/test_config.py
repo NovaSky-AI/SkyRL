@@ -166,6 +166,40 @@ def test_trainer_config_rejects_invalid_vocab_entropy_chunking(field_name, value
         TrainerConfig(**{field_name: value})
 
 
+@pytest.mark.parametrize("strategy", ["fsdp", "megatron"])
+def test_runtime_env_forwards_kernel_cache_directories(monkeypatch, tmp_path, strategy):
+    caches = {
+        "XDG_CACHE_HOME": str(tmp_path / "user cache"),
+        "TILELANG_CACHE_DIR": str(tmp_path / "tilelang"),
+        "TRITON_CACHE_DIR": str(tmp_path / "triton"),
+        "TORCHINDUCTOR_CACHE_DIR": str(tmp_path / "inductor"),
+    }
+    for name, value in caches.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = strategy
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert {name: env_vars.get(name) for name in caches} == caches
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_runtime_env_preserves_default_kernel_cache_directories(monkeypatch, value):
+    names = ("XDG_CACHE_HOME", "TILELANG_CACHE_DIR", "TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR")
+    for name in names:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert not set(names).intersection(env_vars)
+
+
 def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     monkeypatch.setenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1")
     monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
