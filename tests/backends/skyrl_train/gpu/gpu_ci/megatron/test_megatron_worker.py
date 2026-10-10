@@ -1011,5 +1011,8 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
         result_backload = results_backload[i]
         for k, v in result.metrics.items():
             assert k in result_backload.metrics
+            # Peak memory is telemetry, not a model output, and changes after offload/backload.
+            if k in {"peak_mem_allocated_gb_max", "peak_mem_reserved_gb_max"}:
+                continue
             assert v == result_backload.metrics[k], f"Metrics mismatch for {k}: {v} != {result_backload.metrics[k]}"
         assert result.loss_fn_outputs == result_backload.loss_fn_outputs, "loss_fn_outputs mismatch after backload"
