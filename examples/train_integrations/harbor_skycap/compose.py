@@ -20,6 +20,10 @@ The masking policy is the sibling's: an instance with any rollout that timed
 out or failed is masked whole, and a trial that hit the context limit trains
 with its reward unless overlong filtering is on.
 
+With ``images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
+placeholder order. A row without images (a masked rollout's placeholder) carries zero-row tensors, as the
+trainer pads a batch.
+
 With R3, each row carries its own routes: one per token of the path, prompt and
 history included, each from the forward pass that ran it. The path's last token
 was never forwarded, so its row is left out; the trainer pads it, as it does for
@@ -30,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import torch
 from skycap import Sample
 
 from skyrl.backends.skyrl_train.utils.routed_experts import (
@@ -71,6 +76,7 @@ class _Row:
     logprobs: List[float]
     support: Optional[List[List[int]]] = None
     routes: Optional[RoutedExpertIndices] = None
+    media: List[Any] = field(default_factory=list)
     placeholder: bool = False
 
 
@@ -91,6 +97,7 @@ def split(sample: Sample) -> Optional[_Row]:
         ),
         support=sample.sampling_mask[first:] if sample.sampling_mask is not None else None,
         routes=_routes(sample),
+        media=list(sample.media or ()),
     )
 
 
@@ -114,12 +121,13 @@ def compose(
     top_k: int = -1,
     sample_support: bool = False,
     routed_experts: bool = False,
+    images: bool = False,
 ) -> GeneratorOutput:
     """``top_k`` sets the width of sampler-support rows, as SkyRL's own capture pads them.
 
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries padded support rows, as every other batch will. ``routed_experts`` says the same
-    of routes (R3); every trained row must then have them.
+    of routes (R3); every trained row must then have them. ``images`` adds each row's vision features.
     """
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
 
@@ -168,8 +176,10 @@ def compose(
             out["is_last_step"].append(last)
             times.append(outcome.e2e_time)
 
+    vision = _vision_rows(groups) if images else {}
     return GeneratorOutput(
         **out,
+        **vision,
         trajectory_generation_times=None if any(t is None for t in times) else times,
         rollout_expert_indices=routes,
         rollout_sample_support=support,
@@ -196,6 +206,28 @@ def _sample_support(
                 array[index, : len(ids)] = ids
             arrays.append(array)
     return arrays
+
+
+def _vision_features(media: List[Any]) -> tuple:
+    """A path's images as ``(pixel_values, image_grid_thw)`` in placeholder order, or ``(None, None)``."""
+    if any(item.modality != "image" for item in media):
+        raise ValueError(f"only images are supported, got {sorted({item.modality for item in media})}")
+    if not media:
+        return None, None
+    pixel_values = torch.from_numpy(np.concatenate([np.asarray(item.data["pixel_values"]) for item in media]))
+    image_grid_thw = torch.from_numpy(np.concatenate([np.asarray(item.data["image_grid_thw"]) for item in media]))
+    return pixel_values, image_grid_thw
+
+
+def _vision_rows(groups: List[List[_Row]]) -> Dict[str, Optional[List[torch.Tensor]]]:
+    """Each row's ``pixel_values`` and ``image_grid_thw``; None for both when no row has an image."""
+    features = [_vision_features(row.media) for rows in groups for row in rows]
+    shaped = next((pair for pair in features if pair[0] is not None), None)
+    if shaped is None:
+        return {"pixel_values": None, "image_grid_thw": None}
+    empty = tuple(torch.empty(0, *t.shape[1:], dtype=t.dtype) for t in shaped)
+    pixel_values, image_grid_thw = zip(*(empty if pair[0] is None else pair for pair in features))
+    return {"pixel_values": list(pixel_values), "image_grid_thw": list(image_grid_thw)}
 
 
 def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List[RoutedExpertIndices]]:

@@ -32,13 +32,27 @@ class SkyRLEngine(VLLMEngine):
     generate_path = "/skyrl/v1/generate"
     release_path = "/finish_session"
 
+    def __init__(self, packed_side_channels: bool = True) -> None:
+        """Without ``packed_side_channels``, calls go to ``/inference/v1/generate``, which takes images but
+        returns no routed experts or sampler support in SkyRL's packed form."""
+        self.packed_side_channels = packed_side_channels
+        if not packed_side_channels:
+            self.generate_path = VLLMEngine.generate_path
+
     def request(self, *, sampling_mask: bool, **kwargs: Any) -> dict[str, Any]:
+        if sampling_mask and not self.packed_side_channels:
+            raise EngineError("sampler support needs packed side channels (/skyrl/v1/generate)")
         body = super().request(sampling_mask=sampling_mask, **kwargs)
+        if self.packed_side_channels and "features" in body:
+            raise EngineError("/skyrl/v1/generate drops multimodal features; use packed_side_channels=False")
         if sampling_mask:
             body["return_sample_support"] = True
         return body
 
     def _side_channels(self, choice: Mapping[str, Any], output: EngineOutput) -> None:
+        if not self.packed_side_channels:
+            super()._side_channels(choice, output)
+            return
         routed = choice.get(PackedField.ROUTED_EXPERTS)
         support = choice.get(PackedField.ROLLOUT_SAMPLE_SUPPORT)
         try:

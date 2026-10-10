@@ -24,7 +24,7 @@ import importlib
 import os
 import time
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import litellm
 from harbor.agents.factory import AgentFactory
@@ -45,7 +45,7 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
-from skyrl.train.utils.rate_limiter import create_rate_limiter
+from skyrl.train.utils.rate_limiter import RateLimiterConfig, create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
 from .compose import TrialOutcome, compose, split
@@ -69,6 +69,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         inference_engine_client: Any = None,
         train_paths: str = "all",
         records: Optional[RecordLog] = None,
+        images: bool = False,
     ) -> None:
         """
         Args:
@@ -79,6 +80,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
+            images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -116,7 +118,16 @@ class HarborSkycapGenerator(GeneratorInterface):
         kwargs = agent.setdefault("kwargs", {})
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
+        self.images = images
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
+        if remote_sandboxes(self._template) and not max_concurrency(getattr(generator_cfg, "rate_limit", None)):
+            # A provider's sandboxes count against an account quota others share, and every trial of a batch
+            # (eval: the whole eval set) would start one at once.
+            raise ValueError(
+                f"harbor_trial_config.environment runs sandboxes remotely ({environment_name(self._template)}): "
+                "cap how many run at once with generator.rate_limit.enabled=true and "
+                "generator.rate_limit.max_concurrency=<n>"
+            )
 
     async def close(self) -> None:
         """Close the pool's HTTP session. The generator can't generate afterwards."""
@@ -169,6 +180,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
+            images=self.images,
         )
         output["rollout_metrics"].update(trial_metrics(attempts))
         return output
@@ -234,10 +246,11 @@ class HarborSkycapGenerator(GeneratorInterface):
         }
         trajectory = None
         try:
-            async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
+            # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
+            # than skycap.ttl would otherwise be abandoned as idle before its agent's first call.
+            async with self._rate_limiter, self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
                 config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
-                async with self._rate_limiter:
-                    results = await (await Trial.create(TrialConfig.model_validate(config))).run()
+                results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None
@@ -345,3 +358,27 @@ def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
     else:
         return False
     return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)
+
+
+#: Harbor environments whose sandboxes run on this machine or cluster, not in a provider's account.
+LOCAL_ENVIRONMENTS = frozenset({"docker"})
+
+
+def environment_name(template: Dict[str, Any]) -> str:
+    """The trial's environment, as Harbor picks it: an import path over a type, Docker by default."""
+    environment = template.get("environment") or {}
+    return environment.get("import_path") or str(environment.get("type") or "docker")
+
+
+def remote_sandboxes(template: Dict[str, Any]) -> bool:
+    """Whether the trial's sandboxes run remotely (Daytona, Modal, ...)."""
+    return environment_name(template) not in LOCAL_ENVIRONMENTS
+
+
+def max_concurrency(rate_limit: Any) -> Optional[int]:
+    """``generator.rate_limit``'s cap on trials in flight, or None when it sets none."""
+    if isinstance(rate_limit, Mapping):
+        rate_limit = RateLimiterConfig(**rate_limit)
+    if rate_limit is None or not rate_limit.enabled:
+        return None
+    return rate_limit.max_concurrency
