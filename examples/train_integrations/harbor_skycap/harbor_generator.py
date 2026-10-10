@@ -246,10 +246,11 @@ class HarborSkycapGenerator(GeneratorInterface):
         }
         trajectory = None
         try:
-            async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
+            # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
+            # than skycap.ttl would otherwise be abandoned as idle before its agent's first call.
+            async with self._rate_limiter, self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
                 config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
-                async with self._rate_limiter:
-                    results = await (await Trial.create(TrialConfig.model_validate(config))).run()
+                results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None

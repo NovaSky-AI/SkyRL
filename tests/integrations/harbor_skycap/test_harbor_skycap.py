@@ -228,6 +228,33 @@ async def test_the_generator_keeps_one_pool_across_batches(skycap, trials, gener
 
 
 @pytest.mark.asyncio
+async def test_a_trajectory_opens_only_once_its_trial_may_run(skycap, trials, generator) -> None:
+    """A trial queued behind the rate limiter must not hold an open trajectory: skycap abandons one idle past its ttl."""
+    gen = generator()
+    events = []
+    limiter, open_trajectory = gen._rate_limiter, gen.pool.trajectory
+
+    class Recording:
+        async def __aenter__(self):
+            await limiter.__aenter__()
+            events.append("slot")
+
+        async def __aexit__(self, *exc):
+            events.append("release")
+            return await limiter.__aexit__(*exc)
+
+    def trajectory(*args, **kwargs):
+        events.append("open")
+        return open_trajectory(*args, **kwargs)
+
+    gen._rate_limiter = Recording()
+    gen.pool.trajectory = trajectory
+    out = await gen.generate(batch("linear"), disable_tqdm=True)
+    assert out["rewards"] == [1.0]
+    assert events == ["slot", "open", "release"]
+
+
+@pytest.mark.asyncio
 async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(skycap, trials, generator) -> None:
     out = await generator().generate(batch("summarize"), disable_tqdm=True)
     validate_generator_output(1, out, step_wise=True)
