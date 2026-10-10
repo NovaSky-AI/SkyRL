@@ -178,3 +178,73 @@ class TestImageChunkBase64RoundTrip:
         json_dict = types_input.model_dump(mode="json")
         recovered = types.ModelInput.model_validate(json_dict)
         assert recovered.chunks[0].data == _RAW_PNG
+
+
+# --- SDK >= 0.32 request fields SkyRL does not implement -------------------
+
+
+def _sample_request(**extra) -> api.SampleRequest:
+    return api.SampleRequest(
+        base_model="m",
+        prompt=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[1, 2])]),
+        sampling_params=api.SamplingParams(max_tokens=1),
+        **extra,
+    )
+
+
+def test_sample_request_accepts_default_new_options():
+    req = _sample_request(topk_sample_logprobs=0, prompt_alt_tokens_k=0, target_prompt_logprobs=None)
+    assert req.topk_sample_logprobs == 0
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"topk_sample_logprobs": 4},
+        {"prompt_alt_tokens_k": 2},
+        {"target_prompt_logprobs": {"data": [1], "dtype": "int64", "shape": [1, 1]}},
+        {"prompt_logprobs_last_n": 3},
+    ],
+)
+def test_sample_request_rejects_unsupported_options(extra):
+    """Rejecting beats ignoring: the SDK would otherwise return None for data the caller asked for."""
+    with pytest.raises(ValidationError, match="Unsupported sampling options"):
+        _sample_request(**extra)
+
+
+def test_create_model_accepts_adamw_optimizer_config():
+    req = api.CreateModelRequest(
+        session_id="s", base_model="m", lora_config=api.LoRAConfig(rank=1), optimizer_config={"type": "adamw"}
+    )
+    assert req.optimizer_config == {"type": "adamw"}
+
+
+def test_create_model_rejects_non_adam_optimizer_config():
+    with pytest.raises(ValidationError, match="only 'adamw' is supported"):
+        api.CreateModelRequest(
+            session_id="s",
+            base_model="m",
+            lora_config=api.LoRAConfig(rank=1),
+            optimizer_config={"type": "dimuon", "version": 1},
+        )
+
+
+def test_load_weights_rejects_non_adam_optimizer_config():
+    with pytest.raises(ValidationError, match="only 'adamw' is supported"):
+        api.LoadWeightsRequest(model_id="m", path="tinker://m/weights/c", optimizer_config={"type": "dimuon"})
+
+
+def test_optim_step_legacy_adam_params_wire_key():
+    req = api.OptimStepRequest(model_id="m", adam_params={"learning_rate": 1e-4})
+    assert req.adam_params is not None and req.adam_params.learning_rate == 1e-4
+
+
+def test_optim_step_rejects_non_adam_optimizer_params():
+    """SDK >= 0.32 sends non-Adam families under ``optimizer_params``."""
+    with pytest.raises(ValidationError, match="only Adam"):
+        api.OptimStepRequest(model_id="m", optimizer_params={"type": "dimuon", "learning_rate": 1e-3})
+
+
+def test_optim_step_requires_adam_params():
+    with pytest.raises(ValidationError, match="adam_params is required"):
+        api.OptimStepRequest(model_id="m")
