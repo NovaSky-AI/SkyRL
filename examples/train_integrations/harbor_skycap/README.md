@@ -170,7 +170,9 @@ counted in `generate/skycap/num_missing_route_trajectories`.
 
 - **Sampler support** (`enable_return_sample_support_set`) is passed through,
   padded to `top_k`.
-- **No W&B record index under the fully-async trainer.** It fires no callbacks.
+- **No fully-async entrypoint yet.** `SkycapRecordIndex` assumes the
+  synchronous trainer's step boundaries (it discards untaken entries at
+  step start).
 
 ## Tests
 
