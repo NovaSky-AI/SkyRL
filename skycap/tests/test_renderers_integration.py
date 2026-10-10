@@ -139,3 +139,131 @@ def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: Ren
     spans = [data[start:end] for start, end in zip(bounds, bounds[1:])]
     assert all("\ufffd" not in span.decode() for span in spans)
     assert b"".join(spans) == data
+
+
+VL_TOKENIZER = "Qwen/Qwen3-VL-2B-Instruct"
+
+
+@pytest.fixture(scope="module")
+def vl_renderer() -> RenderersRenderer:
+    pytest.importorskip("PIL")
+    pytest.importorskip("torchvision")
+    from transformers import AutoProcessor
+
+    # Only missing model files skip (transformers raises OSError without network or cache); a broken
+    # renderer or processor setup fails the test.
+    try:
+        AutoProcessor.from_pretrained(VL_TOKENIZER)
+    except OSError as error:
+        pytest.skip(f"processor unavailable: {error}")
+    return RenderersRenderer(VL_TOKENIZER, size=1, renderer="qwen3-vl", processor_kwargs={"max_pixels": 200704})
+
+
+def _png(color: str, size: tuple[int, int]) -> dict:
+    import base64
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, "PNG")
+    return {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()},
+    }
+
+
+def test_an_image_turn_bridges_to_exactly_the_full_render(vl_renderer: RenderersRenderer) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(VL_TOKENIZER)
+    pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    first_message = {"role": "user", "content": [_png("red", (1024, 768)), {"type": "text", "text": "color?"}]}
+    second_message = {"role": "user", "content": [_png("blue", (96, 64)), {"type": "text", "text": "and?"}]}
+    first = vl_renderer.render([first_message], None)
+    completion = tokenizer.encode("red<|im_end|>", add_special_tokens=False)
+    bridged = vl_renderer.bridge(first.token_ids, completion, [second_message], None, first.media)
+    full = vl_renderer.render([first_message, {"role": "assistant", "content": "red"}, second_message], None)
+
+    # The processor kwargs apply: 1024x768 under max_pixels=200704 is a 24x32 grid, 192 placeholders.
+    (image,) = first.media
+    assert image.length == 192 and image.data["image_grid_thw"].tolist() == [[1, 24, 32]]
+    assert bridged is not None and bridged.token_ids == full.token_ids
+    assert [m.hash for m in bridged.media] == [full.media[1].hash]
+    assert [(m.offset, m.length) for m in [*first.media, *bridged.media]] == [(m.offset, m.length) for m in full.media]
+    for item in full.media:
+        assert full.token_ids[item.offset : item.offset + item.length] == [pad] * item.length
+
+
+def test_processor_kwargs_for_a_text_only_model_are_refused(renderer: RenderersRenderer) -> None:
+    with pytest.raises(ValueError, match="processor_kwargs are for a multimodal model"):
+        RenderersRenderer(TOKENIZER, size=1, processor_kwargs={"max_pixels": 200704})
+
+
+QWEN35_TOKENIZER = "Qwen/Qwen3.5-0.8B"
+BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a command.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def qwen35_renderer() -> RenderersRenderer:
+    try:
+        # Thinking on, as Qwen3.5's larger models default to; the small ones' template leaves it off.
+        return RenderersRenderer(QWEN35_TOKENIZER, size=1, chat_template_kwargs={"enable_thinking": True})
+    except OSError as error:  # no network and no cache
+        pytest.skip(f"tokenizer unavailable: {error}")
+
+
+def test_tools_render_as_the_chat_template_prints_them(qwen35_renderer: RenderersRenderer) -> None:
+    from renderers.base import load_tokenizer
+
+    # vLLM hands the template the request's tools as sent, so the wrapper is in the prompt.
+    messages = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "list files"}]
+    template = load_tokenizer(QWEN35_TOKENIZER).apply_chat_template(
+        messages,
+        tools=[BASH_TOOL],
+        add_generation_prompt=True,
+        enable_thinking=True,
+        tokenize=True,
+        return_dict=False,
+    )
+
+    assert qwen35_renderer.render(messages, [BASH_TOOL]).token_ids == list(template)
+
+
+async def test_thinking_opened_by_the_generation_prompt_is_split_and_its_replay_bridges(
+    qwen35_renderer: RenderersRenderer,
+) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(QWEN35_TOKENIZER)
+    # Qwen3.5's generation prompt ends in `<think>\n`, so the completion starts inside the thinking block.
+    completion = tokenizer.encode(
+        "look first\n</think>\n\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n"
+        "</function>\n</tool_call><|im_end|>",
+        add_special_tokens=False,
+    )
+
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.server.backend.renderer = qwen35_renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        llm = client(created["base_url"])
+        first = await llm.chat.completions.create(model="policy", messages=[user("q")], tools=[BASH_TOOL])
+        reply = first.choices[0].message.model_dump(exclude_none=True)
+        assert reply["reasoning_content"] == "look first"
+        assert "</think>" not in (reply.get("content") or "")
+        assert reply["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command":"ls"}'}
+
+        tool_result = {"role": "tool", "tool_call_id": reply["tool_calls"][0]["id"], "content": "a.txt"}
+        await llm.chat.completions.create(model="policy", messages=[user("q"), reply, tool_result], tools=[BASH_TOOL])
+
+        first_request, second_request = stack.engine.requests
+        exact_prefix = first_request["token_ids"] + completion
+        assert second_request["token_ids"][: len(exact_prefix)] == exact_prefix
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 0

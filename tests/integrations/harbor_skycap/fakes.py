@@ -60,7 +60,7 @@ class FakeRenderer:
         prompt = [START, *encode("assistant"), NL]
         return Rendered(token_ids=tokens + prompt, tail_indices=indices + [-1] * len(prompt))
 
-    def bridge(self, previous_prompt, previous_completion, new_messages, tools) -> Rendered | None:
+    def bridge(self, previous_prompt, previous_completion, new_messages, tools, previous_media=()) -> Rendered | None:
         if not previous_completion or previous_completion[-1] != END:
             return None
         if any(m.get("role") == "assistant" for m in new_messages):
@@ -72,7 +72,7 @@ class FakeRenderer:
             reused=len(previous_prompt) + len(previous_completion),
         )
 
-    def parse(self, completion_ids: Sequence[int], tools: Any) -> dict[str, Any]:
+    def parse(self, completion_ids: Sequence[int], tools: Any, prompt_ids: Sequence[int] = ()) -> dict[str, Any]:
         return {"role": "assistant", "content": decode([t for t in completion_ids if t != END])}
 
     def stop_token_ids(self) -> list[int]:

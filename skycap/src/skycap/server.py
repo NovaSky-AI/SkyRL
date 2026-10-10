@@ -26,7 +26,10 @@ network, and ``create`` adds the trajectory's route on the exposed URL,
 With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
 and then dropped from memory; reads of it are served from disk. Without one,
-ended trajectories stay in memory, which is only for tests and development.
+ended trajectories stay in memory, which is only for tests and development,
+unless ``keep_unrecorded=False``: then a trajectory is dropped once it ends,
+and the reply to its ``finish`` is the only copy of its samples. That is for a
+trainer that keeps no record.
 
 With a ``record_mirror`` as well, each written record is then copied to that
 URL in the background (``skycap.mirror``). The copy fails open: a slow or
@@ -109,9 +112,13 @@ class CaptureServer:
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
+        keep_unrecorded: bool = True,
         require_api_key: bool = False,
     ) -> None:
+        if record_dir is not None and not keep_unrecorded:
+            raise ValueError("keep_unrecorded=False is for a server with no record_dir")
         self.backend = backend
+        self.keep_unrecorded = keep_unrecorded
         #: Whether the harness routes check the trajectory's own key.
         self.require_api_key = require_api_key
         #: The rules ``finish`` accepts, by name: the built-in ones plus ``path_rules``, each given as a
@@ -229,6 +236,9 @@ class CaptureServer:
         unwritten = self.trajectories.get(trajectory.id) is trajectory
         recorded_now = not recorded and trajectory.samples is not None
         if (ended_now or unwritten or recorded_now) and await self._persist(trajectory):
+            self.trajectories.pop(trajectory.id, None)
+        elif not self.keep_unrecorded and error is None:
+            # A rule that raised keeps the trajectory, so a later finish can run it again.
             self.trajectories.pop(trajectory.id, None)
         if error is not None:
             raise error
@@ -372,12 +382,21 @@ class CaptureServer:
                 return _json({"error": f"trajectory already finished with paths={trajectory.samples['paths']!r}"}, 409)
         elif paths not in self.path_rules:
             return _json({"error": f"`paths` must be one of {sorted(self.path_rules)}"}, 400)
+        recorded = trajectory.id not in self.trajectories
         try:
             samples = await self.end(trajectory, "finished", annotations, paths=paths)
         except Exception as error:  # noqa: BLE001 - a custom rule's failure, reported to the caller
             logger.exception("path rule %r failed on %s", paths, trajectory.id)
             message = f"path rule {paths!r} failed: {type(error).__name__}: {error}"
             return _json({"error": message, "code": PATH_RULE_FAILED}, 500)
+        if recorded and any(item.data is None for sample in samples for item in sample.media):
+            # Answered from the record: a repeat, or the first finish of one the TTL or a shutdown wrote. A
+            # record keeps images' placeholders, not their processed arrays, so there are no complete samples
+            # to give, and the finish answers with none; the caller drops the trajectory.
+            logger.warning(
+                "%s: a finish answered from the record of a trajectory with images has no samples", trajectory.id
+            )
+            samples = []
         return _json(
             {
                 "id": trajectory.id,

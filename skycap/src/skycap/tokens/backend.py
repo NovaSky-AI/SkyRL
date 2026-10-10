@@ -174,6 +174,19 @@ class TokensBackend:
         except turn.TokenError as error:
             return _error(str(error), 400)
 
+        # A caller's own bound on the prompt, checked before inference: the trajectory stays open.
+        max_prompt_tokens = chat.body.get("max_prompt_tokens")
+        if max_prompt_tokens is not None and (
+            isinstance(max_prompt_tokens, bool) or not isinstance(max_prompt_tokens, int) or max_prompt_tokens < 0
+        ):
+            return _error(f"max_prompt_tokens must be a non-negative integer, got {max_prompt_tokens!r}", 400)
+        if max_prompt_tokens is not None and len(planned.prompt_ids) > max_prompt_tokens:
+            return _error(
+                f"prompt of {len(planned.prompt_ids)} tokens exceeds max_prompt_tokens={max_prompt_tokens}",
+                400,
+                code="context_length_exceeded",
+            )
+
         # `max_completion_tokens` is an alias of `max_tokens`; resolving it on each side before
         # merging is what lets an override win over a caller's alias.
         sampling = {**_resolve_max_tokens(chat.sampling), **_resolve_max_tokens(self.sampling_overrides)}
@@ -193,6 +206,13 @@ class TokensBackend:
         sampling.setdefault("stop_token_ids", self.renderer.stop_token_ids())
 
         routes_from = turn.routes_from(graph, planned)
+        features = None
+        if planned.media:
+            try:
+                features = await asyncio.to_thread(self.renderer.features, planned.media)
+            except Exception as error:  # noqa: BLE001 - the renderer's encoder, whatever it raises
+                logger.exception("trajectory %s: encoding the prompt's media failed", trajectory.id)
+                return _error(f"encoding the prompt's media: {error}", 500, kind="api_error")
         body = self.engine.request(
             prompt_ids=planned.prompt_ids,
             sampling=sampling,
@@ -200,6 +220,7 @@ class TokensBackend:
             cache_salt=chat.body.get("cache_salt"),
             sampling_mask=self.sampling_mask,
             routes_from=routes_from,
+            features=features,
         )
         try:
             async with self.session.post(
@@ -227,7 +248,7 @@ class TokensBackend:
         if self.use_raw_content:
             reply = await asyncio.to_thread(self._raw_reply, output.completion_ids, planned.prompt_ids)
         else:
-            reply = await asyncio.to_thread(self.renderer.parse, output.completion_ids, chat.tools)
+            reply = await asyncio.to_thread(self.renderer.parse, output.completion_ids, chat.tools, planned.prompt_ids)
         reason = response.finish_reason(output.finish_reason, reply)
         call = CallInfo(
             t_start=started,

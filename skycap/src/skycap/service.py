@@ -51,6 +51,9 @@ def build_backend(
     tokenizer: str | None = None,
     renderer: TokenRenderer | None = None,
     renderer_pool_size: int = 8,
+    renderer_name: str | None = None,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+    processor_kwargs: Mapping[str, Any] | None = None,
     engine: VLLMEngine | None = None,
     model: str | None = None,
     max_model_len: int | None = None,
@@ -62,7 +65,10 @@ def build_backend(
     """What ``skycap serve`` and ``CaptureService`` run, from the options they share.
 
     Token mode renders with ``tokenizer`` through ``renderers``, or with ``renderer`` when one is given
-    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default.
+    (e.g. a test's). ``renderer_name`` picks the ``renderers`` renderer when the tokenizer's name doesn't
+    (a local checkpoint). ``chat_template_kwargs`` configure that renderer's template (``enable_thinking``),
+    and ``processor_kwargs`` the image processor of a multimodal model, which must match the engine's
+    (``RenderersRenderer``). ``engine`` is the engine's wire, vLLM's by default.
     """
     if mode == "text":
         return TextBackend(upstream_url, api_key=api_key)
@@ -70,12 +76,21 @@ def build_backend(
         raise ValueError(f"mode must be 'text' or 'tokens', not {mode!r}")
     if (tokenizer is None) == (renderer is None):
         raise ValueError("token mode needs exactly one of tokenizer and renderer")
+    for name, value in (("chat_template_kwargs", chat_template_kwargs), ("processor_kwargs", processor_kwargs)):
+        if value is not None and not isinstance(value, Mapping):
+            raise ValueError(f"{name} must be a mapping (a JSON object), got {type(value).__name__}")
     from skycap.tokens.backend import TokensBackend
 
     if renderer is None:
         from skycap.tokens.renderer import RenderersRenderer
 
-        renderer = RenderersRenderer(tokenizer, size=renderer_pool_size)
+        renderer = RenderersRenderer(
+            tokenizer,
+            size=renderer_pool_size,
+            renderer=renderer_name,
+            chat_template_kwargs=chat_template_kwargs,
+            processor_kwargs=processor_kwargs,
+        )
     return TokensBackend(
         upstream_url,
         renderer,
@@ -103,6 +118,8 @@ class CaptureService:
     import path (``skycap.paths``). ``exposure`` makes the harness routes reachable from outside this
     network (``skycap.exposure``); opening it can take a while (a tunnel), which ``start`` waits for.
     With ``require_api_key``, harness routes need the trajectory's own key (``Trajectory.api_key``).
+    Without a ``record_dir``, ``keep_unrecorded=False`` drops each trajectory once it ends instead of
+    keeping it in memory (``CaptureServer``).
     """
 
     def __init__(
@@ -114,6 +131,9 @@ class CaptureService:
         tokenizer: str | None = None,
         renderer: TokenRenderer | None = None,
         renderer_pool_size: int = 8,
+        renderer_name: str | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+        processor_kwargs: Mapping[str, Any] | None = None,
         engine: VLLMEngine | None = None,
         model: str | None = None,
         max_model_len: int | None = None,
@@ -127,6 +147,7 @@ class CaptureService:
         record_host: str | None = None,
         ttl: float = 3600.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
+        keep_unrecorded: bool = True,
         require_api_key: bool = False,
         host: str = "0.0.0.0",
         port: int = 0,
@@ -140,6 +161,9 @@ class CaptureService:
             tokenizer=tokenizer,
             renderer=renderer,
             renderer_pool_size=renderer_pool_size,
+            renderer_name=renderer_name,
+            chat_template_kwargs=chat_template_kwargs,
+            processor_kwargs=processor_kwargs,
             engine=engine,
             model=model,
             max_model_len=max_model_len,
@@ -157,6 +181,7 @@ class CaptureService:
             record_host=record_host or (None if _is_loopback(advertise_host) else advertise_host),
             ttl=ttl,
             path_rules=path_rules,
+            keep_unrecorded=keep_unrecorded,
             require_api_key=require_api_key,
         )
         self._host, self._port = host, port
