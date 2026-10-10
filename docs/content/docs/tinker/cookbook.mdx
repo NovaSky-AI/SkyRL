@@ -123,8 +123,10 @@ This recipe uses a **different server command** than the common one at the top o
 uv run --isolated --extra tinker --extra fsdp \
     -m skyrl.tinker.api \
     --base-model "Qwen/Qwen3-VL-8B-Instruct" --backend fsdp \
-    --backend-config '{"trainer.remove_microbatch_padding": false}'
+    --backend-config '{"trainer.remove_microbatch_padding": false, "trainer.policy.model.lora.exclude_modules": ".*visual.*"}'
 ```
+
+On the FSDP backend, LoRA on a VLM requires `trainer.policy.model.lora.exclude_modules` to exclude the vision tower (`.*visual.*` for Qwen3-VL): vLLM does not apply LoRA to the vision tower, so adapters trained there would make the trainer and sampler disagree.
 
 Then launch the training recipe:
 

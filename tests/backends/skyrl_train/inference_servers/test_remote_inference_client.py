@@ -1837,3 +1837,24 @@ class TestFinishSession:
             await client.finish_session("traj-unreachable")
         finally:
             await client.teardown()
+
+
+@pytest.mark.asyncio
+async def test_local_detokenize_skips_special_tokens(mock_servers):
+    """Response text rebuilt from ids must not carry the eos (contract in inference_servers/base.py)."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    client = RemoteInferenceClient(
+        proxy_url=mock_servers["proxy_url"],
+        server_urls=mock_servers["server_urls"],
+        data_parallel_size=1,
+        tokenizer=tokenizer,
+    )
+    try:
+        ids = tokenizer.encode("hello world", add_special_tokens=False) + [tokenizer.eos_token_id]
+        (text,) = await client.detokenize([ids])
+        assert text == "hello world"
+        assert tokenizer.eos_token not in text
+    finally:
+        await client.teardown()

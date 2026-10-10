@@ -110,6 +110,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     all_reduce_metrics,
     get_microbatch_iterator,
     reduce_metrics,
+    scope_megatron_vlm_lora_targets,
 )
 from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
@@ -482,6 +483,12 @@ class MegatronWorker:
                 target_modules.remove("in_proj")
         else:
             target_modules = lora_config.target_modules
+        target_modules = scope_megatron_vlm_lora_targets(
+            target_modules,
+            is_vlm=self.is_vlm,
+            from_all_linear=lora_config.target_modules == "all-linear",
+            exclude_modules=lora_config.exclude_modules,
+        )
 
         if lora_type == "lora":
             self.lora_cls = LoRA(
