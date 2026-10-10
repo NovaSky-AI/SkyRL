@@ -1469,3 +1469,51 @@ class TestMegatronRouterReplayValidation:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["virtual_pipeline_model_parallel_size"] = 2
 
         validate_megatron_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_allows_both_executor_backends(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+
+        validate_inference_engine_cfg(cfg)
+
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_refuses_inference_pipeline_parallelism(self, backend):
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+        cfg.generator.inference_engine.pipeline_parallel_size = 2
+
+        with pytest.raises(AssertionError, match="pipeline_parallel_size=1"):
+            validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "step_timeout_s,weight_sync_timeout_s,match",
+    [
+        (0, None, "step_timeout_s must be > 0"),
+        (None, -1.0, "weight_sync_timeout_s must be > 0"),
+        (900.0, 1200.0, "weight_sync_timeout_s .* must be <= trainer.step_timeout_s"),
+    ],
+)
+def test_validate_cfg_rejects_invalid_step_timeouts(step_timeout_s, weight_sync_timeout_s, match):
+    cfg = _make_validated_test_config()
+    cfg.trainer.step_timeout_s = step_timeout_s
+    cfg.trainer.weight_sync_timeout_s = weight_sync_timeout_s
+    with pytest.raises(ValueError, match=match):
+        validate_cfg(cfg)
+
+
+def test_validate_step_timeouts_warns_below_nccl_timeout():
+    from loguru import logger
+
+    messages = []
+    handler_id = logger.add(messages.append, level="WARNING")
+    try:
+        nccl_timeout_s = train_utils.SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+        train_utils.validate_step_timeouts(nccl_timeout_s * 2, nccl_timeout_s * 2)
+        assert messages == []
+        train_utils.validate_step_timeouts(nccl_timeout_s * 2, nccl_timeout_s / 2)
+    finally:
+        logger.remove(handler_id)
+    (message,) = messages
+    assert "trainer.weight_sync_timeout_s" in message and "NCCL watchdog" in message

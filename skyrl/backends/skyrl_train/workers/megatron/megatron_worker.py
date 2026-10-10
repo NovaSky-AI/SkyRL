@@ -51,6 +51,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
+    apply_dsa_hybrid_indexer_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
@@ -108,7 +111,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     get_microbatch_iterator,
     reduce_metrics,
 )
-from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -126,6 +129,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 )
 
 apply_shared_expert_lora_tp_patch()
+apply_dsa_hybrid_indexer_patch()
 
 
 class MegatronWorker:
@@ -284,7 +288,11 @@ class MegatronWorker:
                 "DeepSeek-V3 bridge (vision tower + mm projector dropped)"
             )
 
-        provider = bridge.to_megatron_provider()
+        if SKYRL_MEGATRON_RANDOM_INIT:
+            logger.warning("SKYRL_MEGATRON_RANDOM_INIT=1: randomly initializing weights (checkpoint not loaded)")
+        # Random init needs no extra sync: MegatronStrategy.set_seed seeds every TP rank alike and calls
+        # model_parallel_cuda_manual_seed, so TP-replicated parameters come out identical.
+        provider = bridge.to_megatron_provider(load_weights=not SKYRL_MEGATRON_RANDOM_INIT)
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
@@ -531,6 +539,14 @@ class MegatronWorker:
         # Delete along with the patch module once the megatron-core pin includes
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
+
+        # Drop the MoE dispatcher's router-probs reference after each MoE forward; under full
+        # recompute it otherwise pins every MoE layer's recomputed graph through backward.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_release_dispatcher_probs import (
+            patch_moe_release_dispatcher_probs,
+        )
+
+        patch_moe_release_dispatcher_probs()
 
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
@@ -1100,6 +1116,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ``metrics`` (all-reduced across DP).
         """
         self.model.train()
+        torch.cuda.reset_peak_memory_stats()
 
         all_metrics = defaultdict(list)
 
@@ -1250,6 +1267,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if use_token_batching:
             status["num_microbatches"] = float(len(micro_buffer))
             status["num_padding_microbatches"] = float(num_padding_microbatches)
+
+        # Peak CUDA memory over this forward_backward call, max-reduced across ranks.
+        status["peak_mem_allocated_gb_max"] = torch.cuda.max_memory_allocated() / 1024**3
+        status["peak_mem_reserved_gb_max"] = torch.cuda.max_memory_reserved() / 1024**3
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)
