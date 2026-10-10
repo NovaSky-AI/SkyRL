@@ -207,24 +207,15 @@ class MessageGraph:
             raise ValueError(f"node {node} is not a child of {parent}")
         self._by_match.setdefault((parent, match_hash), node)
 
-    def match(self, match_hashes: Sequence[str], parent: int | None = None) -> list[int]:
-        """The longest prefix of ``match_hashes`` already in the graph below ``parent``, as node ids."""
-        matched: list[int] = []
-        for match in match_hashes:
-            node = self.child(parent, match)
-            if node is None:
-                break
-            matched.append(node)
-            parent = node
-        return matched
-
     def match_deepest(self, match_hashes: Sequence[str], parent: int | None = None) -> list[int]:
-        """Like ``match``, but through whichever same-hash sibling continues the request furthest.
+        """The longest prefix of ``match_hashes`` already in the graph below ``parent``, as node ids.
 
-        A sibling a request's message hashes to is the chosen one (``child``) or one it shadows: in token mode,
-        a client twin with the tokens a full render gave that history. Once a turn continues from such a twin,
-        the conversation goes on below it, and ``match`` alone would stop on the chosen sibling's stale branch.
-        On a tie, the chosen sibling wins, as in ``match``.
+        A parent can have several children with the same match hash and different delta hashes: the same
+        message stored with different tokens, such as a token-mode client twin that a full render gave a
+        history the model's own tokens no longer reproduce. The conversation may go on below any of them, so
+        every such child is explored and the path matching the most messages wins; on a tie, the chosen one
+        (``child``: model-authored, then latest). In text mode history only continues from the chosen child,
+        so the walk is the plain one.
         """
         best: dict[tuple[int | None, int], list[int]] = {}
 
@@ -270,7 +261,7 @@ class MessageGraph:
         call.tools = tools_key or None
         key = hashing.MatchKey.text(tools_key, model)
         matches = [key(message) for message in messages]
-        matched = self.match(matches)
+        matched = self.match_deepest(matches)
         parent = matched[-1] if matched else None
         created: list[int] = []
         for message, match in zip(messages[len(matched) :], matches[len(matched) :], strict=True):
