@@ -199,6 +199,23 @@ def test_vl_wrapper_without_output_processor_hook_is_rejected(hybrid_model_type)
         )
 
 
+def test_vl_wrapper_without_kwargs_is_rejected(hybrid_model_type):
+    # The language model takes the hook, but the wrapper has no **kwargs to pass it through.
+    class LanguageModel:
+        def forward(self, *, output_processor=None, output_processor_context=None): ...
+
+    class VLWrapper:
+        config = SimpleNamespace(mxfp8_output_projection=False, use_mup=False)
+        language_model = LanguageModel()
+
+        def forward(self, input_ids, pixel_values=None): ...
+
+    with pytest.raises(NotImplementedError, match="VLWrapper"):
+        call_model_with_fused_lm_head(
+            Mock(module=VLWrapper()), "input", output_processor=Mock(), output_processor_context={}
+        )
+
+
 def test_hybrid_restores_post_process_when_forward_fails(hybrid_model_type):
     hybrid = _make_hybrid(hybrid_model_type)
     wrapped_model = Mock(module=hybrid, side_effect=RuntimeError("forward failed"))
