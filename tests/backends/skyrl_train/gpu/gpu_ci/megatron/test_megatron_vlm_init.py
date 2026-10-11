@@ -607,8 +607,9 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     cfg.trainer.remove_microbatch_padding = True
-    cfg.trainer.algorithm.use_kl_loss = True
-    cfg.trainer.algorithm.kl_loss_coef = 0.1
+    # KL off: the KL term is a mean over each call's microbatches, so two calls weight it twice and
+    # the two-call check below would not be comparing like for like. Both checks cover the policy loss.
+    cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.train_batch_size = len(batch)
     cfg.trainer.policy_mini_batch_size = len(batch)
     cfg.generator.n_samples_per_prompt = 1
@@ -672,8 +673,9 @@ async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
     print(f"\n[cp parity] {model_name} tp={tp}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
     print(f"[cp parity] grad norms CP1={grad_norms_nocp} CP2={grad_norms_cp}")
     print(f"[cp parity] two-call grad norms CP1={split_nocp} CP2={split_cp}")
-    for k in ("policy_loss", "policy_kl"):
-        print(f"[cp parity] {k}: CP1={results_nocp[0].metrics[k]} CP2={results_cp[0].metrics[k]}")
+    print(
+        f"[cp parity] policy_loss: CP1={results_nocp[0].metrics['policy_loss']} CP2={results_cp[0].metrics['policy_loss']}"
+    )
 
     assert torch.isfinite(logprobs_cp[scored]).all()
     # bf16 floor: HF bf16 vs fp32 differs by ~5e-2 mean on these answer tokens.
