@@ -19,7 +19,7 @@ wget -O "${TEST_FILE_2025}" "https://huggingface.co/datasets/zhuzilin/aime-2025/
 
 # remove duplicate rows in the original dataset
 # https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k/discussions/3 
-uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.data_preprocess_dapo_aime --data-dir ${DATA_DIR}
+uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.data_preprocess_dapo_aime --data-dir "${DATA_DIR}"
 
 # convert AIME 2025 to the AIME-2024 prompt / reward format
-uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.data_preprocess_aime2025 --data-dir ${DATA_DIR} --input-file ${TEST_FILE_2025}
+uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.data_preprocess_aime2025 --data-dir "${DATA_DIR}" --input-file "${TEST_FILE_2025}"
