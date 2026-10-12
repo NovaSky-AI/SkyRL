@@ -132,18 +132,8 @@ def _build_skyrl_train_config(
         if "trainer.policy.model.lora.alpha" not in user_overrides:
             user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
         # train_attn/train_mlp narrow which modules get an adapter; the worker
-        # resolves them against the loaded model. train_unembed has no
-        # equivalent here: PEFT's "all-linear" already skips the output layer.
-        # It cannot be rejected either -- the Tinker SDK defaults it to True, so
-        # every client sends it and a hard error would break them all. Warn so
-        # the limitation is at least visible.
-        if lora_config.train_unembed:
-            logger.warning(
-                "`train_unembed=True` is not honoured by the skyrl-train backend: LoRA is applied "
-                "through PEFT's 'all-linear', which excludes the output layer. The adapter will "
-                "cover the attention and MLP projections only. Use `--backend jax` for unembedding "
-                "support."
-            )
+        # resolves them against the loaded model. train_unembed is resolved in
+        # the API (see api._supported_lora_config) and never arrives as True.
         user_overrides["trainer.policy.model.lora.train_attn"] = lora_config.train_attn
         user_overrides["trainer.policy.model.lora.train_mlp"] = lora_config.train_mlp
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)

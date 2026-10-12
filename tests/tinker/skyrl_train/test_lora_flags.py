@@ -1,17 +1,14 @@
-"""CPU tests for Tinker's train_attn / train_mlp / train_unembed on skyrl-train.
+"""CPU tests for Tinker's train_attn / train_mlp on skyrl-train.
 
-Covers the request -> SkyRLTrainConfig mapping, the train_unembed rejection, and
-the multi-adapter signature. The worker-side narrowing these feed into is tested
-separately in tests/backends/skyrl_train/utils/test_lora_targets.py.
+Covers the request -> SkyRLTrainConfig mapping and the multi-adapter signature.
+The worker-side narrowing these feed into is tested separately in
+tests/backends/skyrl_train/utils/test_lora_targets.py.
 
 Lives under ``skyrl_train`` because it reaches into the SkyRL-Train config, so it
 needs a backend extra. No Ray cluster and no GPU. Run:
   uv run --isolated --extra fsdp --extra tinker --extra dev \\
     pytest tests/tinker/skyrl_train/test_lora_flags.py
 """
-
-import logging
-from contextlib import contextmanager
 
 import pytest
 
@@ -49,39 +46,6 @@ def test_defaults_adapt_both_groups():
     assert cfg.trainer.policy.model.lora.train_attn is True
     assert cfg.trainer.policy.model.lora.train_mlp is True
     assert cfg.trainer.policy.model.lora.target_modules == "all-linear"
-
-
-@contextmanager
-def _capture_skyrl_logs():
-    """Collect records off the ``skyrl`` logger.
-
-    ``caplog`` cannot see them: ``skyrl/utils/log.py`` sets ``propagate=False``,
-    so nothing reaches the root logger pytest attaches to.
-    """
-    records: list[logging.LogRecord] = []
-    handler = logging.Handler()
-    handler.emit = records.append
-    skyrl_logger = logging.getLogger("skyrl")
-    skyrl_logger.addHandler(handler)
-    try:
-        yield records
-    finally:
-        skyrl_logger.removeHandler(handler)
-
-
-def test_train_unembed_warns_but_does_not_break_the_client():
-    """PEFT's "all-linear" skips the output layer, so it cannot be honoured here.
-
-    It also cannot be rejected: the Tinker SDK defaults `train_unembed` to True,
-    so a hard error would break every client that never set it. Warn instead, so
-    the limitation is visible without being breaking.
-    """
-    with _capture_skyrl_logs() as records:
-        cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora(train_unembed=True))
-
-    assert cfg.trainer.policy.model.lora.rank == 8
-    warnings = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
-    assert any("train_unembed" in m for m in warnings), warnings
 
 
 def test_sdk_default_lora_config_is_accepted():

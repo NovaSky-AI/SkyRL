@@ -1,4 +1,5 @@
 import base64
+from unittest import mock
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -254,3 +255,27 @@ class TestLoRAConfigFieldRoundTrip:
         original = types.LoraConfig(rank=32, alpha=32.0, seed=99, train_attn=False, train_mlp=True, train_unembed=True)
         recovered = api.LoRAConfig.from_types(original).to_types(seed=original.seed, alpha=original.alpha)
         assert recovered == original
+
+
+class TestSupportedLoraConfig:
+    """What the API stores, sends to the engine and echoes is what the backend builds."""
+
+    @pytest.mark.parametrize("backend", ["fsdp", "megatron"])
+    def test_train_unembed_is_dropped_on_skyrl_train(self, backend):
+        with mock.patch.object(api, "logger") as log:
+            lora = api._supported_lora_config(api.LoRAConfig(rank=8), backend)
+        assert (lora.train_attn, lora.train_mlp, lora.train_unembed) == (True, True, False)
+        log.warning.assert_called_once()
+
+    def test_train_unembed_passes_through_on_jax(self):
+        with mock.patch.object(api, "logger") as log:
+            lora = api._supported_lora_config(api.LoRAConfig(rank=8), "jax")
+        assert lora.train_unembed is True
+        log.warning.assert_not_called()
+
+    def test_warning_names_only_the_adapted_groups(self):
+        with mock.patch.object(api, "logger") as log:
+            api._supported_lora_config(api.LoRAConfig(rank=8, train_mlp=False), "fsdp")
+        message = log.warning.call_args.args[0]
+        assert "covers the attention projections only" in message
+        assert "MLP" not in message
