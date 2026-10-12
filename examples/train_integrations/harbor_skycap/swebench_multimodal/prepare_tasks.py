@@ -127,24 +127,27 @@ def download(url: str, out: Path) -> bool:
         with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310 - the dataset's own asset URLs
             image = Image.open(io.BytesIO(response.read()))
             image.load()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        image.convert("RGB").save(out, "PNG")
     except Exception as error:  # noqa: BLE001 - one bad asset skips that image, not the task
         print(f"  skipping {url}: {type(error).__name__}: {error}")
+        out.unlink(missing_ok=True)
         return False
-    out.parent.mkdir(parents=True, exist_ok=True)
-    image.convert("RGB").save(out, "PNG")
     return True
 
 
 def inline_images(text: str, local: Dict[str, str]) -> str:
-    """``text`` with each downloaded image (markdown, ``<img>``, or a bare URL) replaced by its tag."""
+    """``text`` with each downloaded image (markdown, ``<img>``, or a bare URL) replaced by its tag.
+
+    Every occurrence is replaced, in any of the three forms. A bare URL is only replaced whole, not inside a
+    longer URL that starts with it.
+    """
     for url, path in local.items():
         tag = IMAGE_TAG.format(url=f"file://{path}")
         escaped = re.escape(url)
-        text, n = re.subn(rf"!\[[^\]]*\]\(\s*{escaped}\s*\)", tag, text)
-        if not n:
-            text, n = re.subn(rf"<img\b[^>]*?src=[\"']{escaped}[\"'][^>]*>", tag, text)
-        if not n:
-            text = text.replace(url, tag)
+        text = re.sub(rf"!\[[^\]]*\]\(\s*{escaped}\s*\)", lambda _: tag, text)
+        text = re.sub(rf"<img\b[^>]*?src=[\"']{escaped}[\"'][^>]*>", lambda _: tag, text)
+        text = re.sub(rf"(?<![^\s(<\[\"']){escaped}(?=$|[\s)>\]\"']|[.,;:!?](?:\s|$))", lambda _: tag, text)
     return text
 
 

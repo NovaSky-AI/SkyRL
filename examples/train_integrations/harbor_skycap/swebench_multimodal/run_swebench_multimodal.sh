@@ -16,8 +16,9 @@
 #   MAX_CONCURRENCY           trials (so sandboxes) in flight at once, eval included (default 64). The
 #                             Daytona org is shared: keep it well under what others leave free
 #   SANDBOX_OWNER             required: the `owner` label on every sandbox; `run` is the experiment name.
-#                             After a crash: python -m examples.train_integrations.harbor_skycap.daytona
-#                             cleanup --label owner=$SANDBOX_OWNER --label run=<experiment>
+#                             After a crash: uv run --isolated --extra harbor python -m
+#                             examples.train_integrations.harbor_skycap.daytona cleanup
+#                             --label owner=$SANDBOX_OWNER --label run=<experiment>
 #   SANDBOX_TTL_MINUTES       hard lifetime of a sandbox, whatever happens to this run (default 180)
 #   SANDBOX_CPUS, SANDBOX_MEMORY_MB, SANDBOX_STORAGE_MB   per sandbox (default 1, 16384, 10240). The agent's own
 #                             Jest runs start a worker per host CPU (Daytona shows 64): a whole suite peaks at
@@ -30,13 +31,15 @@
 #   WANDB_ENTITY              the W&B entity to log under, when the key's default one can't create the project
 #   IMAGE_DIR                 the screenshots, at the same path on every node (skycap renders there)
 #   STRATEGY=fsdp|megatron    the training backend (default fsdp); megatron takes MEGATRON_TP, MEGATRON_PP,
-#                             MEGATRON_EP, MEGATRON_ETP and OPTIMIZER_OFFLOAD, and trains the vision tower
+#                             MEGATRON_EP (default 1; e.g. 8 for Qwen3.5-35B-A3B), MEGATRON_ETP and
+#                             OPTIMIZER_OFFLOAD, and trains the vision tower
 #                             too (language_model_only=false) and computes logprobs with a fused LM head
 #                             (fused_lm_head_logprob=true)
 #   PACKING=0|1               trainer.remove_microbatch_padding: pack samples into the THD layout (default 0). On
-#                             megatron, Qwen3VLModel (Qwen3.5) packs images too
+#                             megatron, a vision-language model needs VLM packing (#2357) first: until then the
+#                             trainer refuses it
 #   MAX_TOKENS_PER_MICROBATCH with PACKING=1, bin-pack microbatches up to this many tokens (default -1: one sample each)
-#   MEGATRON_CP               megatron context parallel size (default 1); CP > 1 needs PACKING=1 and
+#   MEGATRON_CP               megatron context parallel size (default 1); CP > 1 needs #2357 and #2404, PACKING=1 and
 #                             MEGATRON_TP x MEGATRON_PP x MEGATRON_CP to divide NUM_GPUS
 #   MAX_NUM_SEQS              vLLM's sequences in flight per engine (default 256, well above MAX_CONCURRENCY). vLLM's
 #                             1024 can exceed a hybrid model's Mamba cache blocks (Qwen3.5-35B-A3B at TP=2 has 1022)
@@ -80,7 +83,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.7}"
 STRATEGY="${STRATEGY:-fsdp}"
 MEGATRON_TP="${MEGATRON_TP:-1}"
 MEGATRON_PP="${MEGATRON_PP:-1}"
-MEGATRON_EP="${MEGATRON_EP:-8}"
+MEGATRON_EP="${MEGATRON_EP:-1}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
 MEGATRON_CP="${MEGATRON_CP:-1}"
 PACKING="${PACKING:-0}"
@@ -93,7 +96,7 @@ DATA_ROOT="${DATA_ROOT:-$HOME/data/swebench_multimodal}"
 TASKS_DIR="$DATA_ROOT/tasks"
 IMAGE_DIR="${IMAGE_DIR:-$DATA_ROOT/images}"
 
-EXPERIMENT="swebm-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+EXPERIMENT="swebm-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 RUN_DIR="${RUN_ROOT:-/tmp/harbor/runs}/$EXPERIMENT"
 SUBSET_DIR="$RUN_DIR/tasks"
 
@@ -119,11 +122,17 @@ LOGGER="${LOGGER:-$([[ -n "${WANDB_API_KEY:-}" ]] && echo wandb || echo console)
 #-----------------------
 # Data: the tasks once, then this run's subset
 #-----------------------
-if [[ -n "$(ls -A "$TASKS_DIR" 2>/dev/null)" ]]; then
+# A finished prepare records the image directory its prompts point at; a partial one, or one built for another
+# IMAGE_DIR, is rebuilt. Downloaded images are kept.
+if [[ "$(cat "$TASKS_DIR/.image_dir" 2>/dev/null)" == "$IMAGE_DIR" ]]; then
   echo "==> tasks already at $TASKS_DIR"
 else
+  rm -rf "$TASKS_DIR.partial"
   uv run --isolated --with "swebench==4.1.0" --with datasets --with pillow "$HERE/prepare_tasks.py" \
-    --output-dir "$TASKS_DIR" --image-dir "$IMAGE_DIR"
+    --output-dir "$TASKS_DIR.partial" --image-dir "$IMAGE_DIR"
+  echo "$IMAGE_DIR" > "$TASKS_DIR.partial/.image_dir"
+  rm -rf "$TASKS_DIR"
+  mv "$TASKS_DIR.partial" "$TASKS_DIR"
 fi
 mkdir -p "$SUBSET_DIR"
 if [[ -n "$TASKS" ]]; then
@@ -198,7 +207,7 @@ case "$STRATEGY" in
     ;;
 esac
 if [[ -n "$ENGINE_INIT_KWARGS" ]]; then
-  while IFS= read -r arg; do STRATEGY_ARGS+=("$arg"); done < <(python3 -c '
+  while IFS= read -r arg; do STRATEGY_ARGS+=("$arg"); done < <(uv run --isolated --no-project python -c '
 import json, sys
 for key, value in json.loads(sys.argv[1]).items():
     print(f"generator.inference_engine.engine_init_kwargs.{key}={value if isinstance(value, str) else json.dumps(value)}")
@@ -289,5 +298,5 @@ echo
 echo "==> done: $EXPERIMENT"
 echo "    skycap records: $RUN_DIR/skycap"
 echo "    Harbor trials:  $RUN_DIR/trials"
-echo "    leftover sandboxes: python -m examples.train_integrations.harbor_skycap.daytona list \\"
+echo "    leftover sandboxes: uv run --isolated --extra harbor python -m examples.train_integrations.harbor_skycap.daytona list \\"
 echo "        --label owner=$SANDBOX_OWNER --label run=$EXPERIMENT"

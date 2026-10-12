@@ -60,11 +60,16 @@ async def build(daytona, name: str, image: str, resources, gate: asyncio.Semapho
 
     try:
         existing = await daytona.snapshot.get(name)
-        if "error" not in str(existing.state).lower():
-            return f"{name}: exists ({existing.state})"
-        await daytona.snapshot.delete(existing)
     except Exception:  # noqa: BLE001 - not found
-        pass
+        existing = None
+    if existing is not None:
+        state = str(getattr(existing.state, "value", existing.state))
+        if state == "active":
+            return f"{name}: exists"
+        # building, pending, pulling: another build of it is under way.
+        if state not in ("error", "build_failed"):
+            return f"{name}: NOT READY ({state}); run again once it settles"
+        await daytona.snapshot.delete(existing)
     for attempt in range(1, attempts + 1):
         async with gate:
             try:

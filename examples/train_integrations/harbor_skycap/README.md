@@ -104,7 +104,7 @@ run's leftovers can be found and deleted without touching anyone else's:
   harbor_trial_config.environment.import_path=examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment \
   harbor_trial_config.environment.kwargs.labels.owner=<you> harbor_trial_config.environment.kwargs.labels.run=<run> \
   harbor_trial_config.environment.kwargs.ttl_minutes=180
-python -m examples.train_integrations.harbor_skycap.daytona cleanup --label owner=<you> --label run=<run>
+uv run --isolated --extra harbor python -m examples.train_integrations.harbor_skycap.daytona cleanup --label owner=<you> --label run=<run>
 ```
 
 ## Images

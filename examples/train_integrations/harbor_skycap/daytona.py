@@ -10,8 +10,8 @@ once their time is up. Use it in place of ``type: daytona``:
     harbor_trial_config.environment.kwargs.labels.owner=<you> harbor_trial_config.environment.kwargs.labels.run=<run>
     harbor_trial_config.environment.kwargs.ttl_minutes=180
 
-    python -m examples.train_integrations.harbor_skycap.daytona list --label owner=<you> --label run=<run>
-    python -m examples.train_integrations.harbor_skycap.daytona cleanup --label owner=<you> --label run=<run>
+    uv run --isolated --extra harbor python -m examples.train_integrations.harbor_skycap.daytona list --label owner=<you> --label run=<run>
+    uv run --isolated --extra harbor python -m examples.train_integrations.harbor_skycap.daytona cleanup --label owner=<you> --label run=<run>
 """
 
 import argparse
@@ -64,6 +64,8 @@ def main() -> None:
     parser.add_argument("command", choices=["list", "cleanup"])
     parser.add_argument("--label", action="append", required=True, metavar="KEY=VALUE")
     args = parser.parse_args()
+    if bad := [item for item in args.label if "=" not in item]:
+        parser.error(f"labels are KEY=VALUE, got {bad}")
     labels = dict(item.split("=", 1) for item in args.label)
     if command_is_unscoped(labels):
         parser.error("give at least an owner label and a run label, so cleanup can't reach other runs' sandboxes")

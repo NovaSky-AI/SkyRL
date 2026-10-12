@@ -107,7 +107,7 @@ agent:
     ```
   step_limit: 50
   cost_limit: 0
-  mode: confirm
+  mode: yolo
 environment:
   env:
     PAGER: cat
