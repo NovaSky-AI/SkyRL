@@ -181,3 +181,24 @@ RUN pip uninstall -y ray && pip install --force-reinstall --no-deps --no-cache-d
 # Fail the build, not the first sandbox, if a tool is missing or a shared lib is absent.
 RUN runsc --version && mkfs.erofs --version && slirp4netns --version \
     && python -c "import ray, ray.experimental.sandbox; assert ray.__commit__ == '${RAY_COMMIT}', ray.__commit__"
+
+# ---------- Warm SkyRL's uv cache ----------
+# The uv runtime-env hook runs `uv run --isolated --extra fsdp --extra harbor` on every
+# node. On a cold node that downloads ~33G of packages (~28 min), longer than Ray's
+# worker registration timeout, so actors fail with "worker startup repeatedly failed".
+# Warm the cache instead of shipping a venv, so the hook works unchanged: with a warm
+# cache, the same `uv run --isolated` installs in seconds.
+# - The cache stays at the default ~/.cache/uv, on the same filesystem as the venvs uv
+#   creates, so uv hardlinks instead of copying. Don't point UV_CACHE_DIR at shared
+#   network storage.
+# - Fetched from git because Anyscale builds have no local build context. Bump
+#   SKYRL_REF when uv.lock changes; small drift only downloads the difference at runtime.
+# - Adds roughly 15-20GB to the image.
+ARG SKYRL_REPO=https://github.com/xinyuangui2/SkyRL.git
+ARG SKYRL_REF=af166afc2341fd9ec3b9dc06d7ef3c77af88e7fb
+RUN mkdir /tmp/skyrl && cd /tmp/skyrl \
+    && git init -q && git remote add origin "${SKYRL_REPO}" \
+    && git fetch -q --depth 1 origin "${SKYRL_REF}" && git checkout -q FETCH_HEAD \
+    && uv sync --frozen --extra fsdp --extra harbor --no-install-project \
+    && cd / && rm -rf /tmp/skyrl \
+    && du -sh ~/.cache/uv
