@@ -127,8 +127,8 @@ bash examples/train/sft/run_sft_megatron.sh \
 Each entry is a local path to a file or directory (a directory may hold multiple
 shards) in one of these auto-detected formats: **Parquet**, **JSON-lines**, **raw
 Arrow IPC**, or a HuggingFace **`Dataset.save_to_disk`** directory. Like
-`train_datasets`, multiple stores are concatenated and mixed per
-`train_dataset_weights`; multiple eval stores are evaluated separately under
+`train_datasets`, multiple stores are concatenated and sampled as their union
+(every row once per epoch) -- or mixed per `train_dataset_weights` when set; multiple eval stores are evaluated separately under
 `eval/{name}/`, with names from `eval_dataset_names` (defaulting to each path's
 basename).
 

@@ -29,17 +29,29 @@ bash examples/train/sft/run_sft_megatron.sh \
 ```
 
 Each dataset is tokenized (and cached) independently, then concatenated. With
-multiple datasets and the default `sampler=random`, the trainer switches to
-weighted per-source sampling via
-[`DataMixingSampler`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/dataset/samplers.py).
+multiple datasets and the default `sampler=random`, the sampling mode depends
+on whether `train_dataset_weights` is set:
+
+- **No weights (default): union sampling.** One shuffle over the concatenated
+  datasets, **without replacement** -- an epoch covers every sample of every
+  dataset exactly once, and each dataset's share of the batches follows its
+  size. This is "train on the union of my datasets".
+- **Weights set: weighted mixing.** The trainer switches to weighted
+  per-source sampling via
+  [`DataMixingSampler`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/dataset/samplers.py),
+  which samples **with replacement** -- the only way per-batch ratios can hold
+  independent of dataset sizes. An epoch is then `len(union)` weighted draws,
+  not a full pass: over-weighted small sources repeat, under-weighted rows may
+  not appear.
 
 ### How weights work
 
 `train_dataset_weights` is the approximate **per-batch ratio of samples drawn
 from each source, independent of the dataset sizes**. A 1k-example dataset with
 weight `0.5` contributes half of every batch even when mixed with a 1M-example
-one. Weights need not sum to 1 (relative scale is what matters) and default to
-equal mixing (`1/N` each).
+one. Weights need not sum to 1 (relative scale is what matters). To make the
+ratios follow dataset sizes, leave the weights unset (union sampling) rather
+than computing size-proportional weights by hand.
 
 The sampler draws a fresh weighted plan every epoch and stores its RNG state in
 the checkpoint, so `resume_from` reproduces the exact sample stream: a mid-epoch
