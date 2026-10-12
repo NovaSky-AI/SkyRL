@@ -3,41 +3,9 @@
 # SkyRL training image + Ray Sandboxes (ray.experimental.sandbox) on Ray nightly.
 # Nodes that host sandboxes need runsc (gVisor), mkfs.erofs >= 1.7, and slirp4netns
 # (only for network="public").
-
-ARG GVISOR_VERSION=20260921.0
-ARG SLIRP4NETNS_VERSION=1.3.5
-ARG EROFS_UTILS_VERSION=1.9.4
-
-# ---------- sandbox tools (build stage) ----------
-# Ubuntu 22.04 to match the Ray image's glibc. Its own erofs-utils (1.4) is too
-# old, so build from source here and keep the build tools out of the final image.
-FROM ubuntu:22.04 AS sandbox-tools
-ARG GVISOR_VERSION
-ARG SLIRP4NETNS_VERSION
-ARG EROFS_UTILS_VERSION
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends autoconf automake bzip2 \
-        ca-certificates curl gcc libtool liblz4-dev make pkg-config uuid-dev
-
-# gVisor, with the gvisor-bin/ helpers that must stay next to runsc
-RUN mkdir -p /out/bin \
-    && curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/$(uname -m)/gvisor.tar.bz2" \
-        | tar -xj -C /out/bin
-
-# slirp4netns, for network="public"
-RUN curl -fsSL -o /out/bin/slirp4netns \
-        "https://github.com/rootless-containers/slirp4netns/releases/download/v${SLIRP4NETNS_VERSION}/slirp4netns-$(uname -m)" \
-    && chmod a+rx /out/bin/slirp4netns
-
-# erofs-utils
-RUN curl -fsSL "https://github.com/erofs/erofs-utils/archive/refs/tags/v${EROFS_UTILS_VERSION}.tar.gz" \
-        | tar -xz -C /tmp \
-    && cd "/tmp/erofs-utils-${EROFS_UTILS_VERSION}" \
-    && ./autogen.sh \
-    && ./configure --disable-fuse --prefix=/out \
-    && make -j"$(nproc)" \
-    && make install
+#
+# Single stage: Anyscale's image build only accepts Anyscale base images in FROM,
+# so the sandbox tools are installed in place near the end.
 
 # ---------- training image ----------
 # Nightly base; the Ray wheel at the end pins the exact commit SkyRL's uv.lock uses.
@@ -173,8 +141,31 @@ RUN curl -fsSL https://claude.ai/install.sh | bash && sudo apt-get update && sud
 ENV CLAUDE_CONFIG_DIR=/home/ray/default/.claude-home
 
 # ---------- Ray Sandboxes ----------
-# runsc + gvisor-bin helpers, slirp4netns, mkfs.erofs/fsck.erofs/dump.erofs
-COPY --from=sandbox-tools /out/bin/ /usr/local/bin/
+ARG GVISOR_VERSION=20260921.0
+ARG SLIRP4NETNS_VERSION=1.3.5
+ARG EROFS_UTILS_VERSION=1.9.4
+
+# gVisor runsc (with the gvisor-bin/ helpers that must stay next to it) and
+# slirp4netns, for network="public". wget: the base purges curl.
+RUN sudo wget -qO- "https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/$(uname -m)/gvisor.tar.bz2" \
+        | sudo tar -xj -C /usr/local/bin \
+    && sudo wget -qO /usr/local/bin/slirp4netns \
+        "https://github.com/rootless-containers/slirp4netns/releases/download/v${SLIRP4NETNS_VERSION}/slirp4netns-$(uname -m)" \
+    && sudo chmod a+rx /usr/local/bin/slirp4netns
+
+# erofs-utils from source: Ubuntu 22.04's package (1.4) is too old.
+RUN sudo apt-get update \
+    && sudo apt-get install -y --no-install-recommends autoconf automake bzip2 libtool \
+        liblz4-dev pkg-config uuid-dev \
+    && wget -qO- "https://github.com/erofs/erofs-utils/archive/refs/tags/v${EROFS_UTILS_VERSION}.tar.gz" \
+        | tar -xz -C /tmp \
+    && cd "/tmp/erofs-utils-${EROFS_UTILS_VERSION}" \
+    && ./autogen.sh \
+    && ./configure --disable-fuse --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && sudo make install \
+    && cd / && rm -rf "/tmp/erofs-utils-${EROFS_UTILS_VERSION}" \
+    && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
 # Use the open-source Ray wheel below instead of Anyscale's optimized Ray build.
 ENV ANYSCALE_DISABLE_OPTIMIZED_RAY=1
