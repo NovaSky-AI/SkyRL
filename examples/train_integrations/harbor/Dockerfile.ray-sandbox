@@ -1,0 +1,155 @@
+# syntax=docker/dockerfile:1
+#
+# SkyRL training image + Ray Sandboxes (ray.experimental.sandbox), Ray 2.59.0.
+# In 2.59.0, nodes that host sandboxes only need gVisor's runsc. Newer Ray (master)
+# also needs mkfs.erofs >= 1.7 and slirp4netns; see Ray's sandbox docs.
+
+ARG GVISOR_VERSION=20260921.0
+
+# ---------- gVisor (download stage) ----------
+FROM ubuntu:22.04 AS gvisor
+ARG GVISOR_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends bzip2 ca-certificates curl
+# runsc, with the gvisor-bin/ helpers that must stay next to it
+RUN mkdir -p /out/bin \
+    && curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/$(uname -m)/gvisor.tar.bz2" \
+        | tar -xj -C /out/bin
+
+# ---------- training image ----------
+# 2.59.0 (matching SkyRL's pin) is the first release with ray.experimental.sandbox.
+FROM anyscale/ray:2.59.0-py312-cu130
+
+RUN sudo apt-get update -y && sudo apt-get install -y wget kmod libxml2 build-essential libnuma-dev
+
+RUN curl -LsSf https://astral.sh/uv/0.9.4/install.sh | sh
+# The uv installer writes to ~/.local/bin, which this base (unlike the slim images)
+# leaves off PATH. Without this, `uv` is not found either by the build steps below or
+# by the CI entrypoints at runtime.
+ENV PATH=/home/ray/.local/bin:${PATH}
+RUN echo "export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook" >> /home/ray/.bashrc
+
+
+RUN sudo apt-get update \
+    && sudo apt-get install -y openssh-server iputils-ping net-tools iproute2 traceroute netcat \
+    libopenexr-dev libxi-dev libglfw3-dev libglew-dev libomp-dev libxinerama-dev libxcursor-dev tzdata \
+    && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+
+RUN sudo apt update && sudo apt install --fix-broken && sudo apt install -y default-jre-headless openjdk-8-jdk \
+    && sudo apt-get clean \
+    && sudo rm -rf /var/lib/apt/lists/*
+
+# Restore NVIDIA's CUDA apt repo. The cu130 base has cuda-keyring installed (dpkg
+# reports `ii cuda-keyring 1.1-1`) but its /etc/apt/sources.list.d/ is *empty* -- a
+# later layer deleted the repo list, so `apt-get update` fetches only the ubuntu
+# archives and libnccl* is not findable at all:
+#   E: Version '2.28.9-1+cuda13.0' for 'libnccl2' was not found
+# (The slim cu128 base kept the repo, which is why this only appears on this base.)
+#
+# --force-confmiss is the point of this step: that list file is a dpkg conffile, and
+# reinstalling the same package version will NOT recreate a conffile the admin
+# deleted. Without the flag `dpkg -i` exits 0 and changes nothing. The flag also
+# restores preferences.d/cuda-repository-pin-600, the repo's apt priority.
+# wget rather than curl: the base purges curl in its own layers.
+RUN wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && sudo dpkg -i --force-confmiss cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb
+
+# build toolchain + nccl dev headers for the source-built CUDA extensions
+# (nv-grouped-gemm). Pinned to the same NCCL the pip stack resolves
+# (nvidia-nccl-cu13 2.28.9) so the headers match the library loaded at runtime.
+#
+# --allow-change-held-packages: NVIDIA's CUDA images apt-mark hold libnccl2 (and, on
+# the cu130 base, libnccl-dev too) so an unrelated apt call cannot bump NCCL. Moving it
+# to our pinned 2.28.9 is a change to a held package, which apt refuses under plain -y:
+#   E: Held packages were changed and -y was used without --allow-change-held-packages
+# The flag scopes the override to this step and leaves the hold in place for later apt
+# calls, which `apt-mark unhold` would not.
+RUN sudo apt-get update && sudo apt-get install -y --allow-change-held-packages \
+    cmake \
+    ninja-build \
+    libnccl-dev=2.28.9-1+cuda13.0 \
+    libnccl2=2.28.9-1+cuda13.0 \
+    && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+
+# ---------- PyTorch + cuDNN (setup for transformer-engine) ----------
+# PyTorch + cuDNN
+RUN uv pip install --system --no-cache-dir "torch==2.11.0" "nvidia-cudnn-cu13>=9.3" && \
+    CUDNN_PATH="$(python -c 'import nvidia.cudnn as c; print(c.__path__[0])')" && \
+    sudo mkdir -p /opt && sudo ln -sfn "$CUDNN_PATH" /opt/cudnn && \
+    echo "/opt/cudnn/lib" | sudo tee /etc/ld.so.conf.d/cudnn.conf >/dev/null && sudo ldconfig
+
+ENV CUDNN_PATH=/opt/cudnn
+ENV CPATH=${CUDNN_PATH}/include:${CPATH}
+ENV LD_LIBRARY_PATH=${CUDNN_PATH}/lib:${LD_LIBRARY_PATH}
+
+RUN uv pip install  --system --no-cache-dir \
+    nvidia-mathdx \
+    pybind11 \
+    setuptools \
+    wheel
+
+ENV CMAKE_ARGS=-DPython_EXECUTABLE=/home/ray/anaconda3/bin/python3
+# --------------------
+
+# ---- EFA layer -------
+ENV EFA_VERSION="1.47.0"
+ENV AWS_OFI_NCCL_VERSION="1.18.0"
+ENV GDRCOPY_VERSION="2.4.1"
+
+RUN <<EOF
+sudo apt-get update -y
+# Install EFA
+wget -q https://efa-installer.amazonaws.com/aws-efa-installer-$EFA_VERSION.tar.gz -O /tmp/aws-efa-installer-$EFA_VERSION.tar.gz
+wget -q https://efa-installer.amazonaws.com/aws-efa-installer.key -O /tmp/aws-efa-installer.key && gpg --import /tmp/aws-efa-installer.key
+gpg --fingerprint </tmp/aws-efa-installer.key
+wget -q https://efa-installer.amazonaws.com/aws-efa-installer-$EFA_VERSION.tar.gz.sig -O /tmp/aws-efa-installer-$EFA_VERSION.tar.gz.sig
+gpg --verify /tmp/aws-efa-installer-$EFA_VERSION.tar.gz.sig
+tar -xzf /tmp/aws-efa-installer-$EFA_VERSION.tar.gz -C /tmp
+cd /tmp/aws-efa-installer && sudo bash efa_installer.sh --yes --skip-kmod
+rm -rf /tmp/aws-efa-installer-$EFA_VERSION.tar.gz /tmp/aws-efa-installer.key /tmp/aws-efa-installer
+# Install GDRCopy
+if [ -d "/usr/local/cuda" ]; then
+    echo "Installing gdrcopy for GPU images"
+        sudo apt-get -y install build-essential devscripts debhelper check libsubunit-dev fakeroot pkg-config dkms
+        echo ${GDRCOPY_VERSION}
+        wget -q https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v$GDRCOPY_VERSION.tar.gz -O /tmp/v$GDRCOPY_VERSION.tar.gz
+        tar -xzf /tmp/v$GDRCOPY_VERSION.tar.gz -C /tmp
+        cd /tmp/gdrcopy-${GDRCOPY_VERSION}
+        sudo make -j`nproc` lib_install
+        rm -rf /tmp/gdrcopy-${GDRCOPY_VERSION}
+else
+    echo "Skip installing gdrcopy for CPU images"
+fi
+# Install AWS OFI NCCL
+if [ -d "/usr/local/cuda" ]; then
+    echo "Installing aws-ofi-nccl for GPU images"
+    sudo apt-get install -y autoconf libhwloc-dev
+    cd /tmp \
+            && git clone --depth=1 https://github.com/aws/aws-ofi-nccl.git -b v${AWS_OFI_NCCL_VERSION} \
+            && cd aws-ofi-nccl \
+            && ./autogen.sh \
+            && ./configure --with-libfabric=/opt/amazon/efa \
+            --with-mpi=/opt/amazon/openmpi \
+            --with-cuda=/usr/local/cuda \
+            --with-nccl=/usr/local --prefix=/usr/local \
+            && make -j`nproc` && sudo make install
+            rm -rf /tmp/aws-ofi-nccl
+else
+    echo "Skip installing aws-ofi-nccl for CPU images"
+fi
+
+# (optional) clean at the very end of the whole image build, not before installs
+sudo apt-get clean
+sudo rm -rf /var/lib/apt/lists/*
+
+EOF
+
+# -y: without it apt aborts at the confirmation prompt when tmux pulls in new deps.
+RUN curl -fsSL https://claude.ai/install.sh | bash && sudo apt-get update && sudo apt-get install -y tmux
+# An `export` inside RUN does not persist past that layer; ENV does.
+ENV CLAUDE_CONFIG_DIR=/home/ray/default/.claude-home
+
+# ---------- Ray Sandboxes ----------
+COPY --from=gvisor /out/bin/ /usr/local/bin/
+
+# Fail the build, not the first sandbox, if runsc or the sandbox module is missing.
+RUN runsc --version && python -c "import ray.experimental.sandbox"
