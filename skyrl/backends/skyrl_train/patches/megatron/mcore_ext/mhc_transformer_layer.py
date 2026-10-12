@@ -179,7 +179,20 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pre_mlp_layernorm_output, moe_padding_mask, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
             pre_mlp_layernorm_output, padding_mask, packed_seq_params
         )
-        mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=moe_padding_mask)
+        num_chunks = min(self.config.mlp_chunks_for_training, pre_mlp_layernorm_output.shape[0])
+        if self.training and num_chunks > 1:
+            # As megatron-core's TransformerLayer does: run the MLP/MoE over sequence chunks so only
+            # one chunk's routed tokens are in flight. Routing is per token, so outputs are unchanged;
+            # it bounds the dispatch/expert/combine buffers on ranks that receive many more tokens
+            # than average under real (uneven) routing.
+            masks = moe_padding_mask.chunk(num_chunks, dim=-1) if moe_padding_mask is not None else [None] * num_chunks
+            outputs = [
+                self.mlp(chunk, padding_mask=mask)
+                for chunk, mask in zip(pre_mlp_layernorm_output.chunk(num_chunks, dim=0), masks)
+            ]
+            mlp_output_with_bias = (torch.cat([out for out, _ in outputs], dim=0), outputs[0][1])
+        else:
+            mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=moe_padding_mask)
         if moe_unflatten_mbs is not None:
             mlp_output, mlp_bias = mlp_output_with_bias
             mlp_output = self._maybe_reflatten_from_moe(mlp_output, packed_seq_params, moe_unflatten_mbs)
