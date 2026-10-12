@@ -66,6 +66,10 @@ async def build(daytona, name: str, image: str, resources, gate: asyncio.Semapho
         state = str(getattr(existing.state, "value", existing.state))
         if state == "active":
             return f"{name}: exists"
+        # Daytona deactivates a snapshot left unused; it starts no sandboxes until activated again.
+        if state == "inactive":
+            await daytona.snapshot.activate(existing)
+            return f"{name}: reactivated"
         # building, pending, pulling: another build of it is under way.
         if state not in ("error", "build_failed"):
             return f"{name}: NOT READY ({state}); run again once it settles"

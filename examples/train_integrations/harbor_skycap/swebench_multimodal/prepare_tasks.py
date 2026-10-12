@@ -235,6 +235,9 @@ def main() -> None:
             continue
         built += build(row, out_dir, image_dir, args) is not None
     print(f"{built} tasks in {out_dir}, images in {image_dir}")
+    # Fail rather than leave an empty task set for the run script to treat as prepared.
+    if not built:
+        raise SystemExit("no tasks prepared")
 
 
 if __name__ == "__main__":
