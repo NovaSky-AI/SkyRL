@@ -220,19 +220,37 @@ class MessageGraph:
         turns on the path, where following the chosen sibling would re-add them as client copies below it.
         """
 
-        def walk(node: int | None, depth: int) -> list[int]:
+        def candidates(node: int | None, depth: int) -> list[int]:
             if depth == len(match_hashes):
                 return []
             chosen = self.child(node, match_hashes[depth])
             twins = [c for c in self.children(node) if c != chosen and self.nodes[c].match_hash == match_hashes[depth]]
-            path: list[int] = []
-            for candidate in ([chosen] if chosen is not None else []) + twins:
-                below = [candidate, *walk(candidate, depth + 1)]
-                if len(below) > len(path):
-                    path = below
-            return path
+            return ([chosen] if chosen is not None else []) + twins
 
-        return walk(parent, 0)
+        # Iterative, so a long history doesn't hit the recursion limit. Each node is reached by one path, so
+        # it is visited once; after its candidates, ``reach`` is how many messages its best continuation
+        # matches and ``best`` that continuation's next node (the first candidate on a tie: the chosen one).
+        reach: dict[int, int] = {}
+        best: dict[int, int] = {}
+        top = candidates(parent, 0)
+        stack: list[tuple[int, int, list[int] | None]] = [(c, 1, None) for c in top]
+        while stack:
+            node, depth, below = stack.pop()
+            if below is None:
+                below = candidates(node, depth)
+                stack.append((node, depth, below))
+                stack.extend((c, depth + 1, None) for c in below)
+                continue
+            reach[node] = depth
+            for c in below:
+                if reach[c] > reach[node]:
+                    reach[node], best[node] = reach[c], c
+        path: list[int] = []
+        node = max(top, key=reach.__getitem__, default=None)
+        while node is not None:
+            path.append(node)
+            node = best.get(node)
+        return path
 
     def commit_text(
         self,

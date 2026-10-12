@@ -81,6 +81,15 @@ def test_text_mode_follows_the_conversation_below_a_client_copy_the_model_later_
     assert h.graph.path_to(h.call([user("q"), assistant("a"), user("q4")], assistant("a4")).output)[1] == sample
 
 
+def test_a_long_history_matches_without_recursion() -> None:
+    h = Harness()
+    history = [user(f"q{i}") if i % 2 == 0 else assistant(f"a{i}") for i in range(3001)]
+    h.call(history, assistant("end"))
+    turn = h.call([*history, assistant("end"), user("more")], assistant("done"))
+
+    assert turn.matched == 3002
+
+
 def test_different_reply_forks() -> None:
     h = Harness()
     h.call([user("q")], assistant("a"))
