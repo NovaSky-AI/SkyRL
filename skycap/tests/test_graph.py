@@ -67,6 +67,20 @@ def test_identical_reply_is_one_node_with_two_calls() -> None:
     assert len(h.graph.nodes[first.output].calls) == 2
 
 
+def test_text_mode_follows_the_conversation_below_a_client_copy_the_model_later_samples() -> None:
+    h = Harness()
+    # The client sends "a" as history before the model samples it, and the conversation goes on below that copy.
+    first = h.call([user("q"), assistant("a"), user("q2")], assistant("a2"))
+    sample = h.call([user("q")], assistant("a")).output
+    turn = h.call([user("q"), assistant("a"), user("q2"), assistant("a2"), user("q3")], assistant("a3"))
+
+    # The model sample is the chosen sibling, but the conversation continues below the copy, with a2 on its path.
+    assert h.graph.child(0, h.graph.nodes[sample].match_hash) == sample
+    assert first.output in h.graph.path_to(turn.output)
+    # With nothing below the copy to match, the chosen sibling (the sample) wins the tie.
+    assert h.graph.path_to(h.call([user("q"), assistant("a"), user("q4")], assistant("a4")).output)[1] == sample
+
+
 def test_different_reply_forks() -> None:
     h = Harness()
     h.call([user("q")], assistant("a"))

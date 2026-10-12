@@ -214,16 +214,15 @@ class MessageGraph:
         message stored with different tokens, such as a token-mode client twin that a full render gave a
         history the model's own tokens no longer reproduce. The conversation may go on below any of them, so
         every such child is explored and the path matching the most messages wins; on a tie, the chosen one
-        (``child``: model-authored, then latest). In text mode history only continues from the chosen child,
-        so the walk is the plain one.
+        (``child``: model-authored, then latest). In text mode, same-hash siblings hold the same text, so this
+        only differs from following the chosen child when the conversation already went on below another one:
+        e.g. a client copy of a reply the model samples later. Following that conversation keeps its model
+        turns on the path, where following the chosen sibling would re-add them as client copies below it.
         """
-        best: dict[tuple[int | None, int], list[int]] = {}
 
         def walk(node: int | None, depth: int) -> list[int]:
             if depth == len(match_hashes):
                 return []
-            if (node, depth) in best:
-                return best[(node, depth)]
             chosen = self.child(node, match_hashes[depth])
             twins = [c for c in self.children(node) if c != chosen and self.nodes[c].match_hash == match_hashes[depth]]
             path: list[int] = []
@@ -231,7 +230,6 @@ class MessageGraph:
                 below = [candidate, *walk(candidate, depth + 1)]
                 if len(below) > len(path):
                     path = below
-            best[(node, depth)] = path
             return path
 
         return walk(parent, 0)
