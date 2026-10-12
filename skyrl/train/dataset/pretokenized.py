@@ -18,7 +18,8 @@ Row schema (all rows must be stored unpadded; SkyRL pads at collation time):
 - ``loss_mask`` (list[int], same length as ``input_ids``): 1 for tokens to
   compute loss on, 0 otherwise. Works for instruction-following data (1s on
   the response) and multi-turn conversational data (1s on every assistant
-  turn, 0s in between).
+  turn, 0s in between). The first token is ignored because it has no preceding
+  context from which to predict it.
 - VLM data additionally carries ``pixel_values`` and ``image_grid_thw``
   (Qwen-style image tensors, stored as nested lists).
 
@@ -210,18 +211,18 @@ def _validate_and_plan(dataset: Dataset, max_length: Optional[int]) -> tuple[np.
                     "unpadded (padding is applied at collation time)."
                 )
 
-        # A row is trainable iff a 1 exists in the loss mask before the
-        # (optional) max_length truncation boundary.
+        # A row is trainable iff a 1 exists after the first token and before
+        # the (optional) max_length truncation boundary.
         n = len(ids_len)
         starts = np.zeros(n, dtype=np.int64)
         np.cumsum(mask_len[:-1], out=starts[1:])
         has_loss = np.zeros(n, dtype=bool)
         if flat_mask.size:
+            window = flat_mask.copy()
+            window[starts[mask_len > 0]] = 0
             if max_length is not None:
                 positions = np.arange(flat_mask.size, dtype=np.int64) - np.repeat(starts, mask_len)
-                window = np.where(positions < max_length, flat_mask, 0)
-            else:
-                window = flat_mask
+                window = np.where(positions < max_length, window, 0)
             nonempty = mask_len > 0
             if nonempty.any():
                 # reduceat segments run between consecutive non-empty starts;
@@ -290,7 +291,7 @@ class _NormalizeTransform:
         out = {k: v for k, v in batch.items() if k not in _CONSUMED_KEYS}
         input_ids_out, attention_out, num_actions_out, loss_mask_out = [], [], [], []
         for input_ids, loss_mask in zip(batch["input_ids"], batch["loss_mask"]):
-            first = loss_mask.index(1)
+            first = loss_mask.index(1, 1)
             if max_length is not None and len(input_ids) > max_length:
                 # Text-row truncation, mirroring the online tokenization path:
                 # the prompt prefix is kept and the trailing window shrinks.
