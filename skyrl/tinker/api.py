@@ -25,6 +25,7 @@ from pydantic import (
     Field,
     Tag,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
@@ -531,11 +532,23 @@ class LoRAConfig(BaseModel):
     )
 
 
+def _validate_adam_optimizer_config(optimizer_config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """SDK >= 0.32 selects the optimizer family at model creation; SkyRL only has Adam."""
+    if optimizer_config is not None and optimizer_config.get("type", "adamw") != "adamw":
+        raise ValueError(
+            f"Unsupported optimizer_config type {optimizer_config.get('type')!r}; only 'adamw' is supported"
+        )
+    return optimizer_config
+
+
 class CreateModelRequest(BaseModel):
     session_id: str
     base_model: str
     lora_config: LoRAConfig
     model_role: str = "policy"
+    optimizer_config: dict[str, Any] | None = None
+
+    _check_optimizer = field_validator("optimizer_config")(_validate_adam_optimizer_config)
 
 
 class CreateModelResponse(BaseModel):
@@ -762,8 +775,20 @@ class AdamParams(BaseModel):
 
 class OptimStepRequest(BaseModel):
     model_id: str
-    adam_params: AdamParams
+    adam_params: AdamParams | None = None
+    # SDK >= 0.32 sends non-Adam families (e.g. Dimuon) under this key instead.
+    optimizer_params: dict[str, Any] | None = None
     seq_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_adam_only(self):
+        if self.optimizer_params is not None:
+            raise ValueError(
+                f"Unsupported optimizer_params type {self.optimizer_params.get('type')!r}; only Adam (adam_params) is supported"
+            )
+        if self.adam_params is None:
+            raise ValueError("adam_params is required")
+        return self
 
 
 class SaveWeightsForSamplerRequest(BaseModel):
@@ -832,7 +857,30 @@ class SampleRequest(BaseModel):
     seq_id: int | None = None
     prompt_logprobs: bool | None = None
     topk_prompt_logprobs: int = Field(default=0, ge=0)
+    # SDK >= 0.32 / 0.33 request options SkyRL's engines do not produce. They
+    # are rejected rather than ignored, since the SDK would otherwise hand the
+    # caller None for data it asked for.
+    topk_sample_logprobs: int = 0
+    target_prompt_logprobs: Any | None = None
+    prompt_alt_tokens_k: int = 0
+    prompt_logprobs_last_n: int | None = None
     type: Literal["sample"] = "sample"
+
+    @model_validator(mode="after")
+    def validate_unsupported_options(self):
+        unsupported = [
+            name
+            for name, value in (
+                ("topk_sample_logprobs", self.topk_sample_logprobs),
+                ("target_prompt_logprobs", self.target_prompt_logprobs),
+                ("prompt_alt_tokens_k", self.prompt_alt_tokens_k),
+                ("prompt_logprobs_last_n", self.prompt_logprobs_last_n),
+            )
+            if value not in (0, None)
+        ]
+        if unsupported:
+            raise ValueError(f"Unsupported sampling options: {unsupported}")
+        return self
 
     @model_validator(mode="after")
     def validate_model_source(self):
@@ -862,7 +910,10 @@ class LoadWeightsRequest(BaseModel):
     path: str
     optimizer: bool = True
     seq_id: int | None = None
+    optimizer_config: dict[str, Any] | None = None
     type: Literal["load_weights"] | None = None
+
+    _check_optimizer = field_validator("optimizer_config")(_validate_adam_optimizer_config)
 
 
 class FutureResponse(BaseModel):
@@ -1498,7 +1549,7 @@ async def optim_step(request: OptimStepRequest, session: AsyncSession = Depends(
         session=session,
         request_type=types.RequestType.OPTIM_STEP,
         model_id=request.model_id,
-        request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),
+        request_data=types.OptimStepInput(adam_params=request.adam_params.to_types()),  # validated non-None
         seq_id=request.seq_id,
     )
 
