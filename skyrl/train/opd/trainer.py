@@ -101,11 +101,14 @@ class OPDTrainer(RayPPOTrainer):
         # metrics over the whole batch (the fully-async trainer's path) and keeps `teacher_logprobs`
         # as one more per-row list.
         step_wise = self.cfg.generator.step_wise_trajectories
-        generator_output = concatenate_generator_outputs(outputs, step_wise=step_wise)
+        routes_expected = self.cfg.generator.inference_engine.enable_return_routed_experts
+        generator_output = concatenate_generator_outputs(outputs, step_wise=step_wise, routes_expected=routes_expected)
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
         generator_output.pop("rollout_metrics", None)
-        validate_generator_output(len(input_batch["prompts"]), generator_output, step_wise=step_wise)
+        validate_generator_output(
+            len(input_batch["prompts"]), generator_output, step_wise=step_wise, routes_expected=routes_expected
+        )
 
         self.all_metrics["opd/teacher_time_per_group_mean"] = (
             sum(teacher_times) / len(teacher_times) if teacher_times else 0.0
