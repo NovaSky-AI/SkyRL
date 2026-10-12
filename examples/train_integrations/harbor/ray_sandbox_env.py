@@ -8,10 +8,9 @@ trial config::
       import_path: examples.train_integrations.harbor.ray_sandbox_env:RaySandboxEnvironment
 
 Requirements:
-  * Ray >= 2.59.0 on every node (SkyRL's pin).
-  * Nodes that host sandboxes need gVisor's ``runsc`` on PATH. See
-    Dockerfile.ray-sandbox. Ray master additionally needs ``mkfs.erofs`` >= 1.7
-    and ``slirp4netns``.
+  * Ray nightly at the commit pinned in pyproject.toml, on every node.
+  * Nodes that host sandboxes need ``runsc``, ``mkfs.erofs`` >= 1.7, and
+    ``slirp4netns`` (network="public" only). Dockerfile.ray-sandbox has all three.
   * Tasks must name a prebuilt, publicly pullable image (``[environment].docker_image``
     or the ``image`` kwarg below). Ray sandboxes cannot build Dockerfiles.
 """
@@ -124,10 +123,9 @@ class RaySandboxEnvironment(BaseEnvironment):
             # Agents write all over the filesystem; writes go to a per-sandbox
             # copy-on-write overlay that is discarded on delete.
             readonly=False,
-            # In Ray 2.59.0, "public" is runsc host networking: the sandbox shares
-            # the node's network namespace, including 127.0.0.1 services such as
-            # the raylet and dashboard. Only use it for trusted tasks or on a
-            # dedicated sandbox cluster; pass network="none" otherwise.
+            # "public" has its own network namespace but can still reach anything
+            # the node can, including the Ray GCS. Only use it for trusted tasks or
+            # on a dedicated sandbox cluster; pass network="none" otherwise.
             network=self._network or ("none" if self._network_disabled else "public"),
             resources=self._resources,
             # First pull of an image on a node includes download + EROFS build.

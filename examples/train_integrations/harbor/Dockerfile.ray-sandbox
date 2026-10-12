@@ -1,23 +1,47 @@
 # syntax=docker/dockerfile:1
 #
-# SkyRL training image + Ray Sandboxes (ray.experimental.sandbox), Ray 2.59.0.
-# In 2.59.0, nodes that host sandboxes only need gVisor's runsc. Newer Ray (master)
-# also needs mkfs.erofs >= 1.7 and slirp4netns; see Ray's sandbox docs.
+# SkyRL training image + Ray Sandboxes (ray.experimental.sandbox) on Ray nightly.
+# Nodes that host sandboxes need runsc (gVisor), mkfs.erofs >= 1.7, and slirp4netns
+# (only for network="public").
 
 ARG GVISOR_VERSION=20260921.0
+ARG SLIRP4NETNS_VERSION=1.3.5
+ARG EROFS_UTILS_VERSION=1.9.4
 
-# ---------- gVisor (download stage) ----------
-FROM ubuntu:22.04 AS gvisor
+# ---------- sandbox tools (build stage) ----------
+# Ubuntu 22.04 to match the Ray image's glibc. Its own erofs-utils (1.4) is too
+# old, so build from source here and keep the build tools out of the final image.
+FROM ubuntu:22.04 AS sandbox-tools
 ARG GVISOR_VERSION
-RUN apt-get update && apt-get install -y --no-install-recommends bzip2 ca-certificates curl
-# runsc, with the gvisor-bin/ helpers that must stay next to it
+ARG SLIRP4NETNS_VERSION
+ARG EROFS_UTILS_VERSION
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends autoconf automake bzip2 \
+        ca-certificates curl gcc libtool liblz4-dev make pkg-config uuid-dev
+
+# gVisor, with the gvisor-bin/ helpers that must stay next to runsc
 RUN mkdir -p /out/bin \
     && curl -fsSL "https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/$(uname -m)/gvisor.tar.bz2" \
         | tar -xj -C /out/bin
 
+# slirp4netns, for network="public"
+RUN curl -fsSL -o /out/bin/slirp4netns \
+        "https://github.com/rootless-containers/slirp4netns/releases/download/v${SLIRP4NETNS_VERSION}/slirp4netns-$(uname -m)" \
+    && chmod a+rx /out/bin/slirp4netns
+
+# erofs-utils
+RUN curl -fsSL "https://github.com/erofs/erofs-utils/archive/refs/tags/v${EROFS_UTILS_VERSION}.tar.gz" \
+        | tar -xz -C /tmp \
+    && cd "/tmp/erofs-utils-${EROFS_UTILS_VERSION}" \
+    && ./autogen.sh \
+    && ./configure --disable-fuse --prefix=/out \
+    && make -j"$(nproc)" \
+    && make install
+
 # ---------- training image ----------
-# 2.59.0 (matching SkyRL's pin) is the first release with ray.experimental.sandbox.
-FROM anyscale/ray:2.59.0-py312-cu130
+# Nightly base; the Ray wheel at the end pins the exact commit SkyRL's uv.lock uses.
+FROM anyscale/ray:nightly-py312-cu130
 
 RUN sudo apt-get update -y && sudo apt-get install -y wget kmod libxml2 build-essential libnuma-dev
 
@@ -149,7 +173,20 @@ RUN curl -fsSL https://claude.ai/install.sh | bash && sudo apt-get update && sud
 ENV CLAUDE_CONFIG_DIR=/home/ray/default/.claude-home
 
 # ---------- Ray Sandboxes ----------
-COPY --from=gvisor /out/bin/ /usr/local/bin/
+# runsc + gvisor-bin helpers, slirp4netns, mkfs.erofs/fsck.erofs/dump.erofs
+COPY --from=sandbox-tools /out/bin/ /usr/local/bin/
 
-# Fail the build, not the first sandbox, if runsc or the sandbox module is missing.
-RUN runsc --version && python -c "import ray.experimental.sandbox"
+# Use the open-source Ray wheel below instead of Anyscale's optimized Ray build.
+ENV ANYSCALE_DISABLE_OPTIMIZED_RAY=1
+# Must be the same commit as the ray override in SkyRL's pyproject.toml: every
+# nightly reports version 3.0.0.dev0, so Ray will not catch a commit mismatch
+# between the cluster and the job's uv environment.
+ARG RAY_COMMIT=a1a2cc64ee092f63495c382b1ab35aa1d9abd131
+# --no-deps: the nightly base already has Ray's deps; force-reinstalling them could
+# move packages the torch stack above depends on.
+RUN pip uninstall -y ray && pip install --force-reinstall --no-deps --no-cache-dir \
+    "https://s3-us-west-2.amazonaws.com/ray-wheels/master/${RAY_COMMIT}/ray-3.0.0.dev0-cp312-cp312-manylinux2014_$(uname -m).whl"
+
+# Fail the build, not the first sandbox, if a tool is missing or a shared lib is absent.
+RUN runsc --version && mkfs.erofs --version && slirp4netns --version \
+    && python -c "import ray, ray.experimental.sandbox; assert ray.__commit__ == '${RAY_COMMIT}', ray.__commit__"
