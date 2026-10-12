@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Similar to https://github.com/volcengine/verl/blob/recipe/dapo/recipe/dapo/prepare_dapo_data.sh
 # Example: DATA_DIR=/path/to/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-set -uxo pipefail
+set -euxo pipefail
 
 export DATA_DIR=${DATA_DIR:-"${HOME}/data/dapo"}
 export TRAIN_FILE=${TRAIN_FILE:-"${DATA_DIR}/dapo-math-17k.parquet"}
