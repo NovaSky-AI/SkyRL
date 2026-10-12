@@ -141,13 +141,30 @@ class RenderersRenderer:
         new_messages: Sequence[Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None,
     ) -> Rendered | None:
-        with self._checkout() as (renderer, _):
+        completion = list(previous_completion)
+        with self._checkout() as (renderer, tokenizer):
             out = renderer.bridge_to_next_turn(
-                list(previous_prompt),
-                list(previous_completion),
-                list(new_messages),
-                tools=normalize_tools(tools),
+                list(previous_prompt), completion, list(new_messages), tools=normalize_tools(tools)
             )
+            # A turn the model ended with its stop token while still thinking (no ``</think>``) is
+            # final as sampled, but the library declines to extend it, and the full render that
+            # follows drops every earlier turn's thinking: the call forks at the first reply, and
+            # so does every call after it until the model closes its thinking again. What follows
+            # a closed turn doesn't depend on what the turn said, so bridge after a stand-in that
+            # only closes the thinking and the turn, and keep the sampled tokens in its place.
+            stand_in = self._closed_stand_in(tokenizer, completion)
+            if out is None and stand_in is not None:
+                out = renderer.bridge_to_next_turn(
+                    list(previous_prompt), stand_in, list(new_messages), tools=normalize_tools(tools)
+                )
+                at = len(previous_prompt) + len(stand_in)
+                if out is None or list(out.token_ids[:at]) != [*previous_prompt, *stand_in]:
+                    return None
+                return Rendered(
+                    token_ids=[*previous_prompt, *completion, *out.token_ids[at:]],
+                    tail_indices=list(out.message_indices[at:]),
+                    reused=len(previous_prompt) + len(completion),
+                )
         if out is None:
             return None
         reused = len(previous_prompt) + len(previous_completion)
@@ -157,6 +174,15 @@ class RenderersRenderer:
         if token_ids[:reused] != [*previous_prompt, *previous_completion]:
             return None
         return Rendered(token_ids=token_ids, tail_indices=list(out.message_indices[reused:]), reused=reused)
+
+    def _closed_stand_in(self, tokenizer: Any, completion: Sequence[int]) -> list[int] | None:
+        """``</think>`` and the stop token ending ``completion``, if it ended a turn without closing its thinking."""
+        if not completion or completion[-1] not in self._stop_ids:
+            return None
+        think_end = tokenizer.convert_tokens_to_ids("</think>")
+        if not isinstance(think_end, int) or think_end == tokenizer.unk_token_id or think_end in completion:
+            return None
+        return [think_end, completion[-1]]
 
     def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
         """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text."""

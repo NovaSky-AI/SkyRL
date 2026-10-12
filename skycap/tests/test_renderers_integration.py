@@ -139,3 +139,41 @@ def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: Ren
     spans = [data[start:end] for start, end in zip(bounds, bounds[1:])]
     assert all("\ufffd" not in span.decode() for span in spans)
     assert b"".join(spans) == data
+
+
+QWEN35_TOKENIZER = "Qwen/Qwen3.5-0.8B"
+
+
+@pytest.fixture(scope="module")
+def qwen35_renderer() -> RenderersRenderer:
+    try:
+        # Thinking on, as Qwen3.5's larger models default to; the small ones' template leaves it off.
+        return RenderersRenderer(QWEN35_TOKENIZER, size=1, chat_template_kwargs={"enable_thinking": True})
+    except OSError as error:  # no network and no cache
+        pytest.skip(f"tokenizer unavailable: {error}")
+
+
+async def test_a_turn_ended_without_closing_its_thinking_still_bridges(qwen35_renderer: RenderersRenderer) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(QWEN35_TOKENIZER)
+    closed = tokenizer.encode("look\n</think>\n\nls\n<|im_end|>", add_special_tokens=False)
+    # The model stopped inside the thinking block: no `</think>` before `<|im_end|>`.
+    still_thinking = tokenizer.encode("cat a.txt\n<|im_end|>", add_special_tokens=False)
+    replies = iter([closed, still_thinking, closed])
+
+    # Raw content, as a text-mode agent like mini-swe-agent replays it: the reasoning stays inline.
+    async with token_stack(completion=lambda prompt, sampling: next(replies), use_raw_content=True) as stack:
+        stack.server.backend.renderer = qwen35_renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        llm = client(created["base_url"])
+        messages = [user("q")]
+        for observation in ("a.txt", "hello"):
+            response = await llm.chat.completions.create(model="policy", messages=messages)
+            messages += [{"role": "assistant", "content": response.choices[0].message.content}, user(observation)]
+        await llm.chat.completions.create(model="policy", messages=messages)
+
+        second, third = stack.engine.requests[1:]
+        exact_prefix = second["token_ids"] + still_thinking
+        assert third["token_ids"][: len(exact_prefix)] == exact_prefix
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
