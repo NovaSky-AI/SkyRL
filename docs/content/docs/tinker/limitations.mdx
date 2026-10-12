@@ -10,7 +10,18 @@ This page documents the features that are not yet wired through the Tinker integ
 
 Multi-tenant LoRA training and sampling are supported on the **Megatron** backend with vLLM serving per-tenant adapters by name. See [Multi-tenancy](./multi_tenancy) for the operator contract and SL/RL quickstarts. **FSDP** support is pending, and full-parameter fine-tuning remains single-tenant on both backends — calling `create_model` with `lora_rank=0` while another model exists returns an error.
 
-All adapters registered against one server must share the same `(rank, alpha, target_modules)` signature; mismatched signatures are hard-rejected at `create_model`.
+All adapters registered against one server must share the same `(rank, alpha, train_attn, train_mlp)` signature; mismatched signatures are hard-rejected at `create_model`. `seed` is deliberately excluded — it changes an adapter's initial values, not its shape. `target_modules` is fixed server-side and so is identical across adapters by construction.
+
+### LoRA group flags: `train_unembed`, and Megatron
+
+`train_attn` and `train_mlp` are honoured on the **FSDP** backend, where they narrow PEFT's `"all-linear"` to the attention or MLP projections. See the [`lora_flags` example](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/lora_flags).
+
+Two cases are rejected rather than silently ignored:
+
+- **`train_unembed=True`** on the skyrl-train backend. PEFT's `"all-linear"` already excludes the output layer, so there is nothing to narrow; honouring the flag would mean targeting `lm_head` separately, which is architecture-sensitive (tied embeddings). Use `--backend jax`, which supports it, or leave it `False` (Tinker's default).
+- **A non-default `train_attn` / `train_mlp` on Megatron.** Megatron builds its LoRA target list from fixed module names rather than by inspecting the model. Use `trainer.strategy=fsdp`, or name the modules directly in `trainer.policy.model.lora.target_modules`.
+
+At least one of `train_attn` / `train_mlp` must be `True`: an adapter covering no modules would have nothing to train.
 
 ### No Prompt Logprobs
 
