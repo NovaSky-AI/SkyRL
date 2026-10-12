@@ -179,7 +179,8 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pre_mlp_layernorm_output, moe_padding_mask, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
             pre_mlp_layernorm_output, padding_mask, packed_seq_params
         )
-        mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=moe_padding_mask)
+        num_chunks = self.config.mlp_chunks_for_training if self.training else 1
+        mlp_output_with_bias = chunked_mlp(self.mlp, pre_mlp_layernorm_output, moe_padding_mask, num_chunks)
         if moe_unflatten_mbs is not None:
             mlp_output, mlp_bias = mlp_output_with_bias
             mlp_output = self._maybe_reflatten_from_moe(mlp_output, packed_seq_params, moe_unflatten_mbs)
@@ -197,3 +198,20 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         output = make_viewless_tensor(inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True)
         return output, None
+
+
+def chunked_mlp(mlp, hidden_states: Tensor, padding_mask: Optional[Tensor], num_chunks: int):
+    """Run ``mlp`` over ``num_chunks`` sequence chunks of ``hidden_states`` ([s, b, h]).
+
+    megatron-core's ``TransformerLayer._forward_mlp`` does this for ``mlp_chunks_for_training``; this
+    layer replaces that method, so it does it here. MLP and MoE outputs are per token, so the result
+    is unchanged; with MoE, only one chunk's routed tokens are dispatched at a time, which bounds the
+    dispatch / expert / combine buffers on ranks whose experts receive far more than their share
+    under real routing.
+    """
+    num_chunks = min(num_chunks, hidden_states.shape[0])
+    if num_chunks <= 1:
+        return mlp(hidden_states, padding_mask=padding_mask)
+    masks = padding_mask.chunk(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
+    outputs = [mlp(chunk, padding_mask=mask) for chunk, mask in zip(hidden_states.chunk(num_chunks, dim=0), masks)]
+    return torch.cat([out for out, _ in outputs], dim=0), outputs[0][1]
