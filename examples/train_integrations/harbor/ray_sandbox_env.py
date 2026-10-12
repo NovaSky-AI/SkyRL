@@ -1,7 +1,7 @@
 """Harbor environment backed by Ray sandboxes (``ray.experimental.sandbox``).
 
-Each Harbor trial gets one ``Sandbox`` actor, which runs the task image in a
-gVisor container on whichever Ray node has room. Select it from the Harbor
+Each Harbor trial gets one ``HarborSandbox`` actor (ray_sandbox_actor.py), which
+runs the task image in a gVisor container on whichever Ray node has room. Select it from the Harbor
 trial config::
 
     environment:
@@ -11,6 +11,8 @@ Requirements:
   * Ray nightly at the commit pinned in pyproject.toml, on every node.
   * Nodes that host sandboxes need ``runsc``, ``mkfs.erofs`` >= 1.7, and
     ``slirp4netns`` (network="public" only). Dockerfile.ray-sandbox has all three.
+    For network="public" they also need /dev/net/tun; the actor creates it with
+    passwordless sudo if it's missing.
   * Tasks must name a prebuilt, publicly pullable image (``[environment].docker_image``
     or the ``image`` kwarg below). Ray sandboxes cannot build Dockerfiles.
 """
@@ -30,8 +32,12 @@ from harbor.environments.capabilities import (
 )
 from harbor.environments.definition import effective_exec_cwd, parse_dockerfile_workdir
 from harbor.models.task.config import NetworkMode
-from ray.experimental import sandbox
 from ray.experimental.sandbox import DOCKER_DEFAULT_CAPABILITIES, SandboxTimeoutError
+
+from examples.train_integrations.harbor.ray_sandbox_actor import (
+    SANDBOX_RUNTIME_ENV,
+    HarborSandbox,
+)
 
 # Same exit code GNU ``timeout`` uses, which is what Harbor agents expect.
 _TIMEOUT_EXIT_CODE = 124
@@ -109,12 +115,18 @@ class RaySandboxEnvironment(BaseEnvironment):
         return self.task_env_config.workdir or self._dockerfile_workdir
 
     async def start(self, force_build: bool) -> None:
-        cpus = self._effective_cpus
+        cpus = float(self._effective_cpus or 1)
         memory_mb = self._effective_memory_mb
-        self._sb = sandbox.create(
+        actor_options = {"num_cpus": cpus, "runtime_env": SANDBOX_RUNTIME_ENV}
+        if memory_mb:
+            actor_options["memory"] = memory_mb * 1024 * 1024
+        if self._resources:
+            actor_options["resources"] = self._resources
+        self._sb = HarborSandbox.options(**actor_options).remote(
             image=self._image,
-            cpu=float(cpus) if cpus else None,
-            memory=f"{memory_mb}Mi" if memory_mb else None,
+            # The same cpu/memory also become the sandbox's cgroup limits.
+            cpu=cpus,
+            memory=f"{memory_mb}Mi" if memory_mb else 0,
             env=self._persistent_env or None,
             workdir=self._workdir(),
             ttl_seconds=self._ttl_seconds,
@@ -127,13 +139,12 @@ class RaySandboxEnvironment(BaseEnvironment):
             # the node can, including the Ray GCS. Only use it for trusted tasks or
             # on a dedicated sandbox cluster; pass network="none" otherwise.
             network=self._network or ("none" if self._network_disabled else "public"),
-            resources=self._resources,
             # First pull of an image on a node includes download + EROFS build.
             timeout_seconds=self.task_env_config.build_timeout_sec,
         )
         # The actor's __init__ creates the container; any creation error
         # surfaces here.
-        await self._sb.get_instance_id.remote()
+        await self._sb.ready.remote()
         await self.ensure_dirs(self._mount_targets(writable_only=True))
         await self._upload_environment_dir_after_start()
 
@@ -164,9 +175,6 @@ class RaySandboxEnvironment(BaseEnvironment):
     ) -> ExecResult:
         sb = self._require_sandbox()
         user = self._resolve_user(user)
-        if user is not None and str(user) not in ("root", "0"):
-            # Sandbox.exec has no `user` argument yet; drop privileges in-shell.
-            command = f"su -s /bin/bash {shlex.quote(str(user))} -c {shlex.quote(command)}"
         try:
             result = await sb.exec.remote(
                 command,
@@ -174,6 +182,7 @@ class RaySandboxEnvironment(BaseEnvironment):
                 cwd=effective_exec_cwd(cwd, self.task_env_config.workdir, self._dockerfile_workdir),
                 env=self._merge_env(env),
                 shell=self._shell,
+                user=str(user) if user is not None else None,
             )
         except SandboxTimeoutError as e:
             return ExecResult(stdout=None, stderr=str(e), return_code=_TIMEOUT_EXIT_CODE)
@@ -181,8 +190,8 @@ class RaySandboxEnvironment(BaseEnvironment):
             stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code
         )
 
-    # File transfer. Sandbox.upload_file/download_file use the *actor's* node
-    # filesystem, so bytes are shipped through Ray instead.
+    # File transfer: bytes are shipped through Ray, since the actor runs on
+    # another node.
 
     async def upload_file(self, source_path: Path | str, target_path: str):
         await self._require_sandbox().write_file.remote(
