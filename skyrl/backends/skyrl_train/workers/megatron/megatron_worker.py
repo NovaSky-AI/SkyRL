@@ -73,12 +73,17 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
+    REAL_SAMPLE_MASK,
     TensorList,
     TrainingInputBatch,
     TrainingOutputBatch,
     append_packed_field_padding,
     append_tensor_list_padding,
     packed_dummy_row_segments,
+)
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MINIBATCH_LOSS_NORMALIZATION,
+    MinibatchLossNormalization,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
@@ -715,8 +720,8 @@ class MegatronWorker:
         Padded samples have loss_mask/response_mask=0 so they don't contribute to the loss
         (forward micro-batches carry neither key, so this is inert there). This is needed
         because Megatron's forward_backward_func requires uniform micro_batch_size across all
-        microbatches (especially with PP > 1). Scalar keys (``num_actions``,
-        ``num_microbatches``, ``num_real_microbatches``) are passed through unchanged.
+        microbatches (especially with PP > 1). Scalar keys (``num_actions``
+        and ``num_microbatches``) are passed through unchanged.
         Ragged per-sample fields carried as a ``TensorList`` (``sub_seq_lengths``,
         ``pixel_values``, ``image_grid_thw``) grow by ``append_tensor_list_padding``.
 
@@ -732,7 +737,7 @@ class MegatronWorker:
 
         padded = {}
         for key, value in micro_dict.items():
-            if key in ("num_actions", "num_microbatches", "num_real_microbatches"):
+            if key in ("num_actions", "num_microbatches"):
                 padded[key] = value
                 continue
             if value is None:
@@ -745,7 +750,7 @@ class MegatronWorker:
                 )
                 continue
             if isinstance(value, torch.Tensor):
-                if key == "loss_mask":
+                if key in ("loss_mask", REAL_SAMPLE_MASK):
                     # Pad with zeros so padded samples don't contribute to loss
                     pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
                 elif key == "attention_mask":
@@ -1011,6 +1016,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self._drop_pixel_values_on_non_first_pp_stage(data)
 
+        loss_normalization = MinibatchLossNormalization.from_batch(
+            data, dp_group=mpu.get_data_parallel_group(with_context_parallel=False)
+        )
+
         # Build micro-batch dicts expected by forward_backward_mini_batch
         micro_buffer = []
         for experience in BatchIterator(data, micro_batch_size, drop_last=False):
@@ -1033,6 +1042,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "position_ids": position_ids,
                     "num_actions": experience.num_actions,
                     "old_action_log_probs": experience.action_log_probs,
+                    REAL_SAMPLE_MASK: experience.real_sample_mask,
+                    MINIBATCH_LOSS_NORMALIZATION: loss_normalization,
                     "base_action_log_probs": experience.base_action_log_probs,
                     "advantages": experience.advantages,
                     "loss_mask": experience.loss_mask,
@@ -1093,6 +1104,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         return_per_token_outputs: bool = True,
+        loss_normalization: Optional[MinibatchLossNormalization] = None,
     ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
@@ -1110,6 +1122,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn_config: Optional config overrides for the loss function.
             return_per_token_outputs: When False, skip building per-token
                 ``loss_fn_outputs`` when callers read only ``metrics``.
+            loss_normalization: Denominators of the optimizer step this call contributes to.
+                Defaults to counting ``data`` as the whole step.
 
         Returns:
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
@@ -1124,24 +1138,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
-        if use_token_batching:
-            microbatch_iterator = get_microbatch_iterator(
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
+        if loss_normalization is None:
+            loss_normalization = MinibatchLossNormalization.from_batch(
                 data,
-                micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
-                max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+                dp_group=mpu.get_data_parallel_group(with_context_parallel=False),
             )
-        else:
-            microbatch_iterator = None
 
-        # Build micro-batch dicts expected by forward_backward_mini_batch.
-        # Token-based batching yields TrainingInputBatch microbatches (converted to
-        # Experience here); sample-based BatchIterator yields Experience directly.
+        # Both iterator modes share the same batch-to-experience conversion.
         micro_buffer = []
 
-        if microbatch_iterator is not None:
-            experiences = (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator)
-        else:
-            experiences = BatchIterator(data, self.cfg.micro_train_batch_size_per_gpu, drop_last=False)
+        experiences = (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator)
 
         for experience in experiences:
             attention_mask = experience.attention_mask
@@ -1162,6 +1173,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "position_ids": position_ids,
                     "num_actions": experience.num_actions,
                     "old_action_log_probs": experience.action_log_probs,
+                    REAL_SAMPLE_MASK: experience.real_sample_mask,
+                    MINIBATCH_LOSS_NORMALIZATION: loss_normalization,
                     "base_action_log_probs": experience.base_action_log_probs,
                     "advantages": experience.advantages,
                     "loss_mask": experience.loss_mask,
@@ -1181,17 +1194,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 }
             )
 
-        # Count real (non-padding) microbatches. Token-based batching appends padding
-        # microbatches so every DP rank runs the same number of forward passes; they must
-        # not inflate the KL/entropy denominators. Use the iterator's padding count rather
-        # than loss_mask, since a real microbatch can be all-zero (e.g. DAPO overlong filtering).
-        num_padding_microbatches = (
-            getattr(microbatch_iterator, "num_padding_microbatches", 0) if microbatch_iterator is not None else 0
-        )
-        num_real_microbatches = len(micro_buffer) - num_padding_microbatches
+        num_padding_microbatches = microbatch_iterator.num_padding_microbatches
         for m_batch in micro_buffer:
             m_batch["num_microbatches"] = len(micro_buffer)
-            m_batch["num_real_microbatches"] = num_real_microbatches
 
         if not micro_buffer:
             return WorkerOutput()
@@ -1292,14 +1297,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 for k, v in moe_metrics.items():
                     status[k] = v
 
-        if not any(loss_fn_output_batches):
-            all_loss_fn_outputs = []
-        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
-            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
-        else:
-            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
-
-        return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
+        return WorkerOutput(
+            loss_fn_outputs=microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches), metrics=status
+        )
 
     def optim_step(self) -> Optional[float]:
         """
