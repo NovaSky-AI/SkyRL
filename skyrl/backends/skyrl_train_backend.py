@@ -586,6 +586,20 @@ class SkyRLTrainBackend(AbstractBackend):
                     "model was created without LoRA. Recreate the server with a "
                     "LoRA-enabled first model."
                 )
+            # Capability before compatibility: otherwise a request this backend can never
+            # serve is reported as a signature mismatch with the first adapter.
+            strategy = self._cfg.trainer.strategy
+            if strategy != "megatron":
+                raise NotImplementedError(
+                    f"A second LoRA adapter on one server is not implemented on the {strategy} backend, "
+                    "which serves a single adapter per server; multi-tenant LoRA requires Megatron."
+                )
+            check_lora_group_flags(
+                self._cfg.trainer.policy.model.lora.target_modules,
+                lora_config.train_attn,
+                lora_config.train_mlp,
+                strategy,
+            )
             new_signature = self._lora_signature_from(lora_config)
             if new_signature != self._base_lora_signature:
                 raise ValueError(
