@@ -146,3 +146,19 @@ def test_critic_rejects_unappliable_flags_before_workers_start(monkeypatch):
     monkeypatch.setattr(skyrl_train_backend, "PPORayActorGroup", lambda *a, **k: pytest.fail("workers started"))
     with pytest.raises(ValueError, match="narrow"):
         backend._build_critic(CriticWorker=None, lora_config=_lora(train_mlp=False))
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["trainer.policy.model.lora.rank", "trainer.policy.model.lora.train_mlp", "trainer.critic.model.lora.train_attn"],
+)
+def test_backend_config_may_not_set_request_fields(key):
+    """The request always carries these, so a backend_config value could never take effect."""
+    with pytest.raises(ValueError, match="may not set"):
+        _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(**{key: False}), _lora())
+
+
+def test_backend_config_alpha_still_overrides_the_api_placeholder():
+    overrides = FSDPBackendOverrides(**{"trainer.policy.model.lora.alpha": 64})
+    cfg = _build_skyrl_train_config(BASE_MODEL, overrides, _lora())
+    assert cfg.trainer.policy.model.lora.alpha == 64

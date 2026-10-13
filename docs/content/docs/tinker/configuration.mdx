@@ -54,6 +54,8 @@ python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 
 No server-side configuration is needed to switch between single-tenant LoRA and full-parameter fine-tuning.
 
+The fields a Tinker request carries — `rank`, `train_attn` and `train_mlp` — come only from the request. Setting `trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}` in `backend_config` is rejected, since the request would always overwrite it. Settings the SDK cannot express, such as `alpha`, `dropout` and `target_modules`, are configured in `backend_config`.
+
 ### Multi-tenant LoRA
 
 Hosting multiple LoRA tenants concurrently against one server *does* require server-side configuration on the Megatron backend. At minimum:

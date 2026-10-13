@@ -108,6 +108,19 @@ def _build_skyrl_train_config(
             f"torch profiling at runtime: start the server with --torch-profiler to enable the "
             f"endpoints, then call /start_profiling and /stop_profiling."
         )
+    # The Tinker request carries these, so a backend_config value would always be
+    # overwritten. Reject it so each LoRA setting has exactly one source.
+    client_lora_keys = [
+        f"trainer.{role}.model.lora.{field}"
+        for role in ("policy", "critic")
+        for field in ("rank", "train_attn", "train_mlp")
+    ]
+    operator_set = sorted(k for k in client_lora_keys if k in user_overrides)
+    if operator_set:
+        raise ValueError(
+            f"`backend_config` may not set {operator_set}. These come from each Tinker request "
+            f"(`create_lora_training_client(rank=..., train_attn=..., train_mlp=...)`); set them there."
+        )
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
     # that resolves other config derived from the policy model path.
@@ -124,8 +137,7 @@ def _build_skyrl_train_config(
     # LoRA rank/alpha must also be on the override dict so post_init validation
     # sees them — e.g. fake_int4_qat.enabled requires lora.rank > 0, which
     # would spuriously fail for LoRA clients if the rank were applied after
-    # from_cli_overrides. The client-requested rank wins over any backend_config
-    # value. The Tinker SDK cannot express alpha (the API server fills in 32), so
+    # from_cli_overrides. The Tinker SDK cannot express alpha (the API server fills in 32), so
     # an explicit `trainer.policy.model.lora.alpha` in backend_config takes
     # precedence over that placeholder; otherwise the API's value is used.
     if lora_config is not None and lora_config.rank > 0:
