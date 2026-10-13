@@ -80,6 +80,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     append_tensor_list_padding,
     packed_dummy_row_segments,
 )
+from skyrl.backends.skyrl_train.utils.lora_targets import check_lora_group_flags
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
@@ -441,15 +442,10 @@ class MegatronWorker:
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
         # Megatron builds its target list from fixed module names (see the
-        # "all-linear" expansion below) rather than by inspecting the model, so
-        # the FSDP group narrowing does not apply here. Reject rather than
-        # silently ignore, so a request for attention-only LoRA fails loudly.
-        if not (lora_config.train_attn and lora_config.train_mlp):
-            raise NotImplementedError(
-                "`train_attn`/`train_mlp` are only supported on the FSDP backend; the Megatron "
-                "backend always adapts both attention and MLP. Use `trainer.strategy=fsdp`, or "
-                "name the modules explicitly in `trainer.policy.model.lora.target_modules`."
-            )
+        # "all-linear" expansion below), so the FSDP group narrowing does not apply.
+        check_lora_group_flags(
+            lora_config.target_modules, lora_config.train_attn, lora_config.train_mlp, strategy="megatron"
+        )
         if experts_shared_outer_loras:
             apply_packed_per_expert_sharded_state_dict_patch()
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora

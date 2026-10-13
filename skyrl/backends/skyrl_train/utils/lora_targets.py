@@ -40,6 +40,42 @@ def lora_module_group(module_name: str) -> Optional[str]:
     return None
 
 
+def check_lora_group_flags(
+    target_modules: Union[str, list[str], None],
+    train_attn: bool,
+    train_mlp: bool,
+    strategy: Optional[str] = None,
+) -> None:
+    """Reject ``train_attn``/``train_mlp`` combinations that cannot be applied.
+
+    Needs no model, so callers can run it before reserving GPUs.
+
+    Raises:
+        ValueError: If both flags are ``False``, or if narrowing is requested alongside an explicit
+            module list.
+        NotImplementedError: If narrowing is requested on Megatron.
+    """
+    if train_attn and train_mlp:
+        return
+    if not train_attn and not train_mlp:
+        raise ValueError(
+            "LoRA requires at least one of `train_attn` or `train_mlp` to be True; with both False "
+            "no module would be adapted and there would be nothing to train."
+        )
+    if strategy == "megatron":
+        raise NotImplementedError(
+            "`train_attn`/`train_mlp` are only supported on the FSDP backend; the Megatron "
+            "backend always adapts both attention and MLP. Use `trainer.strategy=fsdp`, or "
+            "name the modules explicitly in `trainer.policy.model.lora.target_modules`."
+        )
+    if target_modules != "all-linear":
+        raise ValueError(
+            f"`train_attn`/`train_mlp` narrow `target_modules='all-linear'`, but it is set to "
+            f"{target_modules!r}. Name the modules in `target_modules` directly, or leave it at "
+            f'"all-linear" and use the flags.'
+        )
+
+
 def resolve_lora_target_modules(
     model: nn.Module,
     target_modules: Union[str, list[str], None],
@@ -69,17 +105,7 @@ def resolve_lora_target_modules(
     """
     if train_attn and train_mlp:
         return target_modules
-    if not train_attn and not train_mlp:
-        raise ValueError(
-            "LoRA requires at least one of `train_attn` or `train_mlp` to be True; with both False "
-            "no module would be adapted and there would be nothing to train."
-        )
-    if target_modules != "all-linear":
-        raise ValueError(
-            f"`train_attn`/`train_mlp` narrow `target_modules='all-linear'`, but it is set to "
-            f"{target_modules!r}. Name the modules in `target_modules` directly, or leave it at "
-            f'"all-linear" and use the flags.'
-        )
+    check_lora_group_flags(target_modules, train_attn, train_mlp)
 
     wanted = "attn" if train_attn else "mlp"
     names = sorted(

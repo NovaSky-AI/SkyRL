@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.lora_targets import check_lora_group_flags
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -137,6 +138,10 @@ def _build_skyrl_train_config(
         user_overrides["trainer.policy.model.lora.train_attn"] = lora_config.train_attn
         user_overrides["trainer.policy.model.lora.train_mlp"] = lora_config.train_mlp
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
+    lora = cfg.trainer.policy.model.lora
+    if lora.rank > 0:
+        # Fail before Ray starts or any GPU is reserved; the worker only re-checks.
+        check_lora_group_flags(lora.target_modules, lora.train_attn, lora.train_mlp, cfg.trainer.strategy)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"

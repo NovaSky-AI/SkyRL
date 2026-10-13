@@ -576,6 +576,12 @@ class LoRAConfig(BaseModel):
 
 def _supported_lora_config(lora: LoRAConfig) -> LoRAConfig:
     """Drop what no backend applies, so the stored and echoed config match the adapter."""
+    if lora.rank > 0 and not (lora.train_attn or lora.train_mlp):
+        raise HTTPException(
+            status_code=400,
+            detail="LoRA requires at least one of `train_attn` or `train_mlp` to be True; "
+            "`train_unembed` is not supported, so with both False there would be nothing to train.",
+        )
     if not lora.train_unembed:
         return lora
     # Warn rather than reject: the SDK sends train_unembed=True by default.

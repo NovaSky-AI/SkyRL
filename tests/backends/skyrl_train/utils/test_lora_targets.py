@@ -9,6 +9,7 @@ import pytest
 import torch.nn as nn
 
 from skyrl.backends.skyrl_train.utils.lora_targets import (
+    check_lora_group_flags,
     lora_module_group,
     resolve_lora_target_modules,
 )
@@ -224,3 +225,15 @@ def test_fused_moe_experts_cannot_be_adapted() -> None:
 
     with pytest.raises(ValueError, match="No mlp linear layers found"):
         resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)
+
+
+@pytest.mark.parametrize(
+    ("train_attn", "train_mlp", "error"),
+    [(True, True, None), (True, False, NotImplementedError), (False, False, ValueError)],
+)
+def test_megatron_rejects_narrowing(train_attn: bool, train_mlp: bool, error) -> None:
+    if error is None:
+        check_lora_group_flags("all-linear", train_attn, train_mlp, strategy="megatron")
+        return
+    with pytest.raises(error):
+        check_lora_group_flags("all-linear", train_attn, train_mlp, strategy="megatron")

@@ -14,6 +14,7 @@ import pytest
 
 from skyrl.backends.skyrl_train_backend import (
     FSDPBackendOverrides,
+    MegatronBackendOverrides,
     SkyRLTrainBackend,
     _build_skyrl_train_config,
 )
@@ -97,3 +98,17 @@ class TestLoraSignature:
     def test_rank_and_alpha_still_count(self):
         assert self._sig(rank=16) != self._sig(rank=8)
         assert self._sig(alpha=16.0) != self._sig(alpha=32.0)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        (FSDPBackendOverrides(**{"trainer.policy.model.lora.target_modules": ["q_proj"]}), ValueError),
+        (MegatronBackendOverrides(), NotImplementedError),
+    ],
+    ids=["explicit_target_modules", "megatron"],
+)
+def test_unappliable_flags_fail_while_building_the_config(overrides, error):
+    """Raised here, before create_model starts Ray or reserves GPUs."""
+    with pytest.raises(error):
+        _build_skyrl_train_config(BASE_MODEL, overrides, _lora(train_mlp=False))

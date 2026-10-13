@@ -278,3 +278,14 @@ class TestSupportedLoraConfig:
         message = log.warning.call_args.args[0]
         assert "covers the attention projections only" in message
         assert "MLP" not in message
+
+    def test_nothing_left_to_train_is_rejected(self):
+        with pytest.raises(api.HTTPException) as exc:
+            api._supported_lora_config(api.LoRAConfig(rank=8, train_attn=False, train_mlp=False))
+        assert exc.value.status_code == 400
+
+    def test_full_fine_tuning_ignores_the_group_flags(self):
+        lora = api._supported_lora_config(
+            api.LoRAConfig(rank=0, train_attn=False, train_mlp=False, train_unembed=False)
+        )
+        assert lora.rank == 0
