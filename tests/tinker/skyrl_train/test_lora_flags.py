@@ -12,6 +12,7 @@ needs a backend extra. No Ray cluster and no GPU. Run:
 
 import pytest
 
+from skyrl.backends import skyrl_train_backend
 from skyrl.backends.skyrl_train_backend import (
     FSDPBackendOverrides,
     MegatronBackendOverrides,
@@ -112,3 +113,36 @@ def test_unappliable_flags_fail_while_building_the_config(overrides, error):
     """Raised here, before create_model starts Ray or reserves GPUs."""
     with pytest.raises(error):
         _build_skyrl_train_config(BASE_MODEL, overrides, _lora(train_mlp=False))
+
+
+class _StopBeforeWorkers(Exception):
+    pass
+
+
+def _build_critic_until_workers(monkeypatch, lora: types.LoraConfig):
+    """Run _build_critic up to the point where it would start Ray workers."""
+    backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
+    backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
+    backend._colocate_pg = None
+
+    def stop(*args, **kwargs):
+        raise _StopBeforeWorkers
+
+    monkeypatch.setattr(skyrl_train_backend, "PPORayActorGroup", stop)
+    with pytest.raises(_StopBeforeWorkers):
+        backend._build_critic(CriticWorker=None, lora_config=lora)
+    return backend._cfg.trainer.critic.model.lora
+
+
+def test_critic_receives_the_flags(monkeypatch):
+    critic_lora = _build_critic_until_workers(monkeypatch, _lora(train_mlp=False))
+    assert (critic_lora.rank, critic_lora.train_attn, critic_lora.train_mlp) == (8, True, False)
+
+
+def test_critic_rejects_unappliable_flags_before_workers_start(monkeypatch):
+    backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
+    backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
+    backend._cfg.trainer.critic.model.lora.target_modules = ["q_proj"]
+    monkeypatch.setattr(skyrl_train_backend, "PPORayActorGroup", lambda *a, **k: pytest.fail("workers started"))
+    with pytest.raises(ValueError, match="narrow"):
+        backend._build_critic(CriticWorker=None, lora_config=_lora(train_mlp=False))

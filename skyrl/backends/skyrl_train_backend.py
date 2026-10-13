@@ -358,8 +358,16 @@ class SkyRLTrainBackend(AbstractBackend):
                 num_policy_gpus == num_critic_gpus
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
-        cfg.trainer.critic.model.lora.rank = lora_config.rank
-        cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+        critic_lora = cfg.trainer.critic.model.lora
+        critic_lora.rank = lora_config.rank
+        critic_lora.alpha = int(lora_config.alpha)
+        critic_lora.train_attn = lora_config.train_attn
+        critic_lora.train_mlp = lora_config.train_mlp
+        if critic_lora.rank > 0:
+            # Before the critic workers start, as for the policy in _build_skyrl_train_config.
+            check_lora_group_flags(
+                critic_lora.target_modules, critic_lora.train_attn, critic_lora.train_mlp, cfg.trainer.strategy
+            )
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,

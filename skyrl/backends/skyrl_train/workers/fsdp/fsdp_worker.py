@@ -285,6 +285,8 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
             lora_dropout=self.cfg.critic.model.lora.dropout,
             target_modules=self.cfg.critic.model.lora.target_modules,
             exclude_modules=self.cfg.critic.model.lora.exclude_modules,
+            train_attn=self.cfg.critic.model.lora.train_attn,
+            train_mlp=self.cfg.critic.model.lora.train_mlp,
             value_head_prefix=self.cfg.algorithm.value_head_prefix,
             init_value_head=self.cfg.policy.model.path == self.cfg.critic.model.path,
             sequence_parallel_size=self.cfg.critic.sequence_parallel_size,
