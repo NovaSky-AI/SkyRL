@@ -33,6 +33,9 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.utils import ppo_utils
 from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MinibatchLossNormalization,
+)
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
     off_policy_correction_enabled,
 )
@@ -1541,22 +1544,23 @@ class RayPPOTrainer:
         self,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
+        normalizations: List[MinibatchLossNormalization],
         prompt_boundaries: Optional[List[Tuple[int, int]]] = None,
     ) -> TrainingInputBatch:
         advantages = data["advantages"]
-        response_mask = data["response_mask"]
 
-        # Step 1: Z-score normalization (if enabled)
+        # Step 1: Z-score normalization over the real response tokens (if enabled)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
+            response_mask = data["response_mask"] * data.real_sample_mask[:, None]
             num_actions = response_mask.sum()
-            mean = advantages.mean()
+            mean = (advantages * response_mask).sum() / num_actions.clamp(min=1)
             std = ((advantages - mean).pow(2) * response_mask).sum()
             rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
             data["advantages"] = (advantages - mean) * rstd
 
         # Step 2: Loss reduction normalization per mini-batch
         normalized_advantages = torch.zeros_like(advantages)
-        for start_idx, end_idx in mini_batch_boundaries:
+        for (start_idx, end_idx), normalization in zip(mini_batch_boundaries, normalizations, strict=True):
             mini_batch = data[start_idx:end_idx]
             # For prompt_mean, select the prompt boundaries falling within this mini-batch
             # and rebase them to mini-batch-relative indices.
@@ -1574,6 +1578,7 @@ class RayPPOTrainer:
                 micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
                 max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
                 prompt_boundaries=mb_prompt_boundaries,
+                normalization=normalization,
             )
 
         data["advantages"] = normalized_advantages
@@ -1597,11 +1602,13 @@ class RayPPOTrainer:
             Dict of reduced metrics from training
         """
         boundaries = data.metadata[f"{model}_mini_batch_boundaries"]
+        # Each mini-batch is one optimizer step; its loss terms share these denominators.
+        normalizations = [MinibatchLossNormalization.from_batch(data[start:end]) for start, end in boundaries]
 
         if model == "policy":
             # Normalize advantages for policy training; critic training does not need this
             prompt_boundaries = data.metadata.get("policy_prompt_boundaries")
-            data = self._normalize_advantages(data, boundaries, prompt_boundaries)
+            data = self._normalize_advantages(data, boundaries, normalizations, prompt_boundaries)
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
@@ -1611,8 +1618,8 @@ class RayPPOTrainer:
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            for chunk_refs in all_chunk_refs:
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+            for chunk_refs, normalization in zip(all_chunk_refs, normalizations, strict=True):
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs, loss_normalization=normalization)
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
