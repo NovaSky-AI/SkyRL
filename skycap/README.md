@@ -176,6 +176,7 @@ result.status          # "finished", or "failed" if a turn couldn't be attribute
 for sample in result.samples:
     sample.input_ids, sample.loss_mask, sample.logprobs
     sample.routed_experts, sample.sampling_mask
+    sample.sampling_mask_logprobs  # when the engine returns the sampler's logprob of each support id
 ```
 
 Creates go round-robin over the servers, and each trajectory's URL names its

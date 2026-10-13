@@ -74,7 +74,8 @@ class NodeTokens:
     For a model node, ``token_ids[:sampled_start]`` is template scaffold the
     model did not produce, and the rest is what it sampled. ``logprobs``,
     ``routed_experts`` and ``sampling_mask`` are aligned to ``token_ids``;
-    ``sampling_mask`` has one support set per sampled token.
+    ``sampling_mask`` has one support set per sampled token, and
+    ``sampling_mask_logprobs``, when captured, the sampler's logprob of each id in it.
 
     ``text`` is what these tokens decode to, special tokens kept, and
     ``text_offsets[k]`` is the UTF-8 byte offset in ``text`` where token ``k``
@@ -91,6 +92,7 @@ class NodeTokens:
     logprobs: list[float] | None = None
     routed_experts: Any | None = None
     sampling_mask: list[list[int]] | None = None
+    sampling_mask_logprobs: list[list[float]] | None = None
     text: str | None = None
     text_offsets: list[int] | None = None
 

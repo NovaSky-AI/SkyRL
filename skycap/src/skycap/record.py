@@ -9,7 +9,8 @@ zstd files in ``record_dir``, split by who reads them:
     {id}.tokens.zst         token ids, logprobs, and the text the tokens decode to
                             with each token's byte offset into it
     {id}.experts.zst        routed experts (R3)
-    {id}.sampling_mask.zst  per sampled token, the ids it could have been drawn from
+    {id}.sampling_mask.zst  per sampled token, the ids it could have been drawn from, and
+                            their sampler logprobs when captured
 
 A sidecar is raw little-endian arrays, concatenated at 8-byte-aligned offsets
 and compressed as one zstd frame. The document's ``sidecars`` manifest gives
@@ -42,7 +43,10 @@ FORMAT_VERSION = 1
 _LEVEL = 3
 _ALIGN = 8
 #: The dtypes a sidecar array may have, by the name the manifest uses.
-DTYPES = {name: np.dtype(name).newbyteorder("<") for name in ("uint8", "uint16", "int16", "int32", "int64", "float64")}
+DTYPES = {
+    name: np.dtype(name).newbyteorder("<")
+    for name in ("uint8", "uint16", "int16", "int32", "int64", "float32", "float64")
+}
 
 
 def document_path(record_dir: Path, trajectory_id: str) -> Path:
@@ -100,6 +104,8 @@ class _Columns:
         self.text: list[bytes] = []
         self.experts: list[np.ndarray] = []
         self.mask_rows: list[list[int]] = []
+        #: Row for row with ``mask_rows``; None for a node's rows captured without logprobs.
+        self.mask_logprobs: list[list[float] | None] = []
         self.tokens = self.text_bytes = self.expert_rows = 0
 
     def add(self, tokens: NodeTokens) -> dict[str, Any]:
@@ -115,6 +121,7 @@ class _Columns:
             "experts_rows": 0,
             "mask_offset": None,
             "mask_rows": 0,
+            "has_mask_logprobs": False,
         }
         self.token_ids.append(np.asarray(tokens.token_ids, dtype=np.int32))
         self.logprobs.append(
@@ -139,7 +146,14 @@ class _Columns:
             self.expert_rows += routed.shape[0]
         if tokens.sampling_mask is not None:
             meta["mask_offset"], meta["mask_rows"] = len(self.mask_rows), len(tokens.sampling_mask)
+            meta["has_mask_logprobs"] = tokens.sampling_mask_logprobs is not None
             self.mask_rows.extend(tokens.sampling_mask)
+            if tokens.sampling_mask_logprobs is None:
+                self.mask_logprobs.extend(None for _ in tokens.sampling_mask)
+            else:
+                if [len(row) for row in tokens.sampling_mask_logprobs] != [len(row) for row in tokens.sampling_mask]:
+                    raise ValueError("sampling_mask_logprobs must match sampling_mask row for row")
+                self.mask_logprobs.extend(tokens.sampling_mask_logprobs)
         return meta
 
     def sidecars(self) -> dict[str, dict[str, np.ndarray]]:
@@ -158,6 +172,16 @@ class _Columns:
             offsets[1:] = np.cumsum([len(row) for row in self.mask_rows])
             ids = np.fromiter((i for row in self.mask_rows for i in row), dtype=np.int32, count=int(offsets[-1]))
             out["sampling_mask"] = {"ids": ids, "offsets": offsets}
+            if any(row is not None for row in self.mask_logprobs):
+                out["sampling_mask"]["logprobs"] = np.fromiter(
+                    (
+                        value
+                        for ids_row, row in zip(self.mask_rows, self.mask_logprobs, strict=True)
+                        for value in (row if row is not None else [np.nan] * len(ids_row))
+                    ),
+                    dtype=np.float32,
+                    count=int(offsets[-1]),
+                )
         return out
 
 
@@ -283,22 +307,29 @@ def _node_tokens(meta: dict[str, Any] | None, arrays: dict[str, dict[str, np.nda
     if meta["experts_offset"] is not None and experts is not None:
         start = meta["experts_offset"]
         routed = experts["routed_experts"][start : start + meta["experts_rows"]].copy()
-    rows = None
+    rows = row_logprobs = None
+    # Written before sampler logprobs were recorded, a node has no flag: read it as without them.
+    has_mask_logprobs = meta.get("has_mask_logprobs", False)
     if meta["mask_offset"] is None or (meta["mask_rows"] and arrays["sampling_mask"] is None):
         pass
     elif meta["mask_rows"] == 0:
         rows = []
+        row_logprobs = [] if has_mask_logprobs else None
     else:
         mask = arrays["sampling_mask"]
         ids, bounds = mask["ids"], mask["offsets"]
         first = meta["mask_offset"]
-        rows = [ids[bounds[r] : bounds[r + 1]].tolist() for r in range(first, first + meta["mask_rows"])]
+        spans = [(bounds[r], bounds[r + 1]) for r in range(first, first + meta["mask_rows"])]
+        rows = [ids[a:b].tolist() for a, b in spans]
+        if has_mask_logprobs and "logprobs" in mask:
+            row_logprobs = [mask["logprobs"][a:b].tolist() for a, b in spans]
     return NodeTokens(
         token_ids=tokens["token_ids"][span].tolist(),
         sampled_start=meta["sampled_start"],
         logprobs=tokens["logprobs"][span].tolist() if meta["has_logprobs"] else None,
         routed_experts=routed,
         sampling_mask=rows,
+        sampling_mask_logprobs=row_logprobs,
         text=text,
         text_offsets=offsets,
     )

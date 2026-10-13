@@ -312,6 +312,7 @@ def commit(
             logprobs=[0.0] * sampled_start + list(output.logprobs),
             routed_experts=routed.slice(position, len(tokens)),
             sampling_mask=output.sampling_mask,
+            sampling_mask_logprobs=output.sampling_mask_logprobs,
         ),
     )
     reply_node.calls.append(call)
