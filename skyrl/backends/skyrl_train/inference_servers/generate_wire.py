@@ -26,9 +26,9 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
     compact_routed_expert_indices,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_DTYPE,
     SAMPLE_SUPPORT_DTYPES,
-    SampleSupport,
-    validate_sample_support,
+    CompactSampleSupport,
 )
 
 # Matches the floor vLLM applies at its own serving boundaries.
@@ -50,12 +50,22 @@ class PackedField(StrEnum):
     ROLLOUT_SAMPLE_SUPPORT = "rollout_sample_support"
 
 
+class SampleSupportWireKey(StrEnum):
+    """Sample-support envelope sidecar fields.
+
+    The envelope's int32 data is the CSR row lengths followed by the member IDs.
+    """
+
+    NUM_ROWS = "num_rows"
+    TOP_K = "top_k"
+
+
 PACKED_SIDE_CHANNEL_FIELDS: tuple[str, ...] = tuple(PackedField)
 
 _ENVELOPE_KEYS = frozenset(PackedArrayKey)
 
 _ROUTED_EXPERTS_NDIM = 3
-_SAMPLE_SUPPORT_NDIM = 2
+_SAMPLE_SUPPORT_NDIM = 1
 
 _QUOTE = b'"'
 
@@ -191,13 +201,32 @@ def decode_packed_routed_experts(payload: dict[str, Any]) -> RoutedExpertIndices
     return compact
 
 
-def pack_sample_support(sample_support: SampleSupport) -> dict[str, Any]:
-    return pack_ndarray(validate_sample_support(sample_support), allowed_dtypes=SAMPLE_SUPPORT_DTYPES)
+def pack_sample_support(sample_support: CompactSampleSupport) -> dict[str, Any]:
+    lengths = sample_support.row_lengths.astype(SAMPLE_SUPPORT_DTYPE)
+    return pack_ndarray(
+        np.concatenate([lengths, sample_support.token_ids]),
+        allowed_dtypes=SAMPLE_SUPPORT_DTYPES,
+        # `.value` keys: orjson rejects str subclasses as dict keys.
+        extra={
+            SampleSupportWireKey.NUM_ROWS.value: sample_support.num_rows,
+            SampleSupportWireKey.TOP_K.value: sample_support.top_k,
+        },
+    )
 
 
-def decode_packed_sample_support(payload: dict[str, Any]) -> SampleSupport:
-    decoded, _ = unpack_ndarray(payload, allowed_dtypes=SAMPLE_SUPPORT_DTYPES, ndim=_SAMPLE_SUPPORT_NDIM)
-    return validate_sample_support(decoded)
+def decode_packed_sample_support(payload: dict[str, Any]) -> CompactSampleSupport:
+    decoded, sidecar = unpack_ndarray(payload, allowed_dtypes=SAMPLE_SUPPORT_DTYPES, ndim=_SAMPLE_SUPPORT_NDIM)
+    try:
+        num_rows = sidecar[SampleSupportWireKey.NUM_ROWS]
+        top_k = sidecar[SampleSupportWireKey.TOP_K]
+    except KeyError as exc:
+        raise ValueError(f"packed rollout_sample_support carries no {exc.args[0]}") from exc
+    if not isinstance(num_rows, int) or isinstance(num_rows, bool) or not 0 <= num_rows <= decoded.size:
+        raise ValueError(f"packed rollout_sample_support has invalid {SampleSupportWireKey.NUM_ROWS} {num_rows!r}")
+    if not isinstance(top_k, int) or isinstance(top_k, bool):
+        raise ValueError(f"packed rollout_sample_support has invalid {SampleSupportWireKey.TOP_K} {top_k!r}")
+    # CompactSampleSupport validates the offsets against the member count and top_k.
+    return CompactSampleSupport.from_token_ids(decoded[num_rows:], decoded[:num_rows], top_k=top_k)
 
 
 def _data_prefix(field: str) -> bytes:

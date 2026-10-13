@@ -9,16 +9,13 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataLayout,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.packed_tensor import (
-    PackedTensor,
-    cu_seqlens_from_lengths,
-)
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_NO_ROW,
-    SAMPLE_SUPPORT_TORCH_DTYPE,
     align_sample_support_row_ids,
 )
+from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 TOP_K = 3
 # Anti-correlated lengths exercise different support offsets.
@@ -53,12 +50,17 @@ def _layout(lengths: List[Tuple[int, int]], *, packed: bool = False, align: int 
     )
 
 
-def _support(lengths: List[Tuple[int, int]]) -> PackedTensor:
+def _support(lengths: List[Tuple[int, int]]) -> PackedRaggedTensor:
     """Distinct support rows, so a gather by id pins the exact row it landed on."""
-    response_lens = [response for _, response in lengths]
-    total_rows = sum(response_lens)
-    values = torch.arange(total_rows * TOP_K, dtype=SAMPLE_SUPPORT_TORCH_DTYPE).reshape(total_rows, TOP_K)
-    return PackedTensor(values, cu_seqlens_from_lengths(response_lens))
+    grids, first = [], 0
+    for _, response in lengths:
+        grids.append(torch.arange(first, first + response * TOP_K).reshape(response, TOP_K))
+        first += response * TOP_K
+    return ragged_support(grids)
+
+
+def _rows(support: PackedRaggedTensor, row_ids: torch.Tensor) -> List[List[int]]:
+    return [support.row(int(row_id)).tolist() for row_id in row_ids]
 
 
 def test_row_ids_land_on_the_positions_that_predict_response_tokens():
@@ -79,8 +81,7 @@ def test_row_ids_gather_the_support_rows_of_each_response_token():
     row_ids = align_sample_support_row_ids(support, _layout(LENGTHS))
 
     scored = row_ids >= 0
-    gathered = support.values[row_ids[scored]]
-    assert torch.equal(gathered, support.values)
+    assert _rows(support, row_ids[scored]) == _rows(support, torch.arange(support.num_rows))
     assert scored.sum(dim=1).tolist() == [response for _, response in LENGTHS]
 
 
@@ -105,12 +106,12 @@ def test_row_ids_rebase_under_batch_selection(selection):
     row_ids = align_sample_support_row_ids(selected[SAMPLE_SUPPORT_FIELD], _layout(LENGTHS[1:]))
 
     assert row_ids[row_ids >= 0].tolist() == [0, 1]
-    assert torch.equal(selected[SAMPLE_SUPPORT_FIELD].values[row_ids[row_ids >= 0]], support.segment(1))
+    assert _rows(selected[SAMPLE_SUPPORT_FIELD], row_ids[row_ids >= 0]) == _rows(support, torch.tensor([3, 4]))
 
 
 def test_row_ids_accept_an_empty_padding_segment():
     """A synthetic batch row attends one token and generates nothing, so it scores no position."""
-    support = PackedTensor(torch.empty((0, TOP_K), dtype=SAMPLE_SUPPORT_TORCH_DTYPE), cu_seqlens_from_lengths([0]))
+    support = ragged_support([torch.empty((0, TOP_K))])
     mask = torch.zeros((1, 4), dtype=torch.bool)
     mask[0, 0] = True
     layout = TokenMetadataLayout(attention_mask=mask, sequence_lengths=[1], aligned_sequence_length=4)
@@ -122,7 +123,7 @@ def test_row_ids_accept_an_empty_padding_segment():
 
 def test_row_ids_reject_a_trajectory_with_no_prompt_token():
     """With no prompt there is no position whose logit predicts the first response token."""
-    support = PackedTensor.from_segments([torch.zeros((3, TOP_K), dtype=SAMPLE_SUPPORT_TORCH_DTYPE)])
+    support = ragged_support([torch.zeros((3, TOP_K))])
     layout = TokenMetadataLayout(
         attention_mask=torch.ones((1, 3), dtype=torch.bool),
         sequence_lengths=[3],

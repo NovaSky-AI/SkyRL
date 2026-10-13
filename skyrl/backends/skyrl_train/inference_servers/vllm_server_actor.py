@@ -50,8 +50,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
-    SampleSupport,
+    CompactSampleSupport,
 )
 from skyrl.backends.skyrl_train.weight_sync.lora_target import in_memory_lora_path
 from skyrl.env_vars import (
@@ -97,8 +96,8 @@ def _multimodal_prompt(token_ids: List[int], features: dict, cache_salt: Optiona
 def _sample_support_from_flat_logprobs(
     logprobs: FlatLogprobs,
     top_k: int,
-) -> tuple[list[dict[str, float]], SampleSupport]:
-    """Extract sampled scores and post-filter support from vLLM's flat rows.
+) -> tuple[list[dict[str, float]], CompactSampleSupport]:
+    """Extract sampled scores and post-filter CSR support from vLLM's flat rows.
 
     Each row is ``[sampled token, top-1, ..., top-k]``; filtered candidates are ``-inf``.
     """
@@ -108,27 +107,20 @@ def _sample_support_from_flat_logprobs(
     sampled_logprobs_values = processed_logprobs[:, 0]
     if not np.isfinite(sampled_logprobs_values).all():
         raise ValueError("sample-support capture received non-finite sampled logprob(s)")
+    sampled = token_ids[:, 0]
     candidate_ids = token_ids[:, 1:]
-    candidate_logprobs = processed_logprobs[:, 1:]
-    support_ids = np.full(candidate_ids.shape, SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_DTYPE)
-    for row_index, (row_ids, row_logprobs) in enumerate(zip(candidate_ids, candidate_logprobs)):
-        # vLLM emits filtered candidates as -inf. Treat all non-finite values
-        # (including NaN and +inf) as absent, then compact the remaining IDs so
-        # the packed representation retains its required trailing padding.
-        finite_ids = row_ids[np.isfinite(row_logprobs)]
-        support_ids[row_index, : len(finite_ids)] = finite_ids
-    sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
+    # vLLM emits filtered candidates as -inf. Treat all non-finite values
+    # (including NaN and +inf) as absent.
+    present = np.isfinite(processed_logprobs[:, 1:])
 
     # vLLM's approximate top-k/top-p pivot can omit the sampled token. Replace the
-    # weakest valid candidate while preserving the support width and trailing padding.
-    sampled = token_ids[:, 0]
-    valid = support_ids >= 0
-    present = np.any(support_ids == sampled[:, None], axis=1)
-    missing = (~present) & valid.any(axis=1)
-    if np.any(missing):
-        rows = np.flatnonzero(missing)
-        weakest_col = valid.sum(axis=1) - 1
-        support_ids[rows, weakest_col[rows]] = sampled[rows]
+    # weakest valid candidate so the row keeps its size and contains the sample.
+    rows_missing_sample = present.any(axis=1) & ~((candidate_ids == sampled[:, None]) & present).any(axis=1)
+    if np.any(rows_missing_sample):
+        rows = np.flatnonzero(rows_missing_sample)
+        weakest_col = top_k - 1 - np.argmax(present[rows, ::-1], axis=1)
+        candidate_ids = candidate_ids.copy()
+        candidate_ids[rows, weakest_col] = sampled[rows]
         logger.warning(
             "sample-support repair: %d token(s) had the sampled id absent from top-%d support; "
             "overwrote the weakest member to preserve the invariant (vLLM approx top-k/top-p "
@@ -138,7 +130,8 @@ def _sample_support_from_flat_logprobs(
             int(sampled[rows[0]]),
             int(rows[0]),
         )
-    return sampled_logprobs, support_ids
+    sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
+    return sampled_logprobs, CompactSampleSupport.from_masked_rows(candidate_ids, present)
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -660,14 +653,14 @@ class VLLMServerActor(ServerActorProtocol):
             finish_reason = resp.finish_reason
 
             logprobs = None
-            sample_support = None
+            packed_sample_support = None
             if capture_sample_support:
-                content, support_ids = _sample_support_from_flat_logprobs(
+                content, sample_support = _sample_support_from_flat_logprobs(
                     resp.logprobs,
                     sampling_params_dict["top_k"],
                 )
                 logprobs = {"content": content}
-                sample_support = pack_sample_support(support_ids)
+                packed_sample_support = pack_sample_support(sample_support)
             elif resp.logprobs is not None:
                 content, num_clamped = build_logprobs_content(token_ids_out, resp.logprobs)
                 if num_clamped:
@@ -688,7 +681,7 @@ class VLLMServerActor(ServerActorProtocol):
                         "finish_reason": finish_reason,
                         "logprobs": logprobs,
                         PackedField.ROUTED_EXPERTS.value: routed_experts,
-                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: sample_support,
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: packed_sample_support,
                     }
                 ]
             }
