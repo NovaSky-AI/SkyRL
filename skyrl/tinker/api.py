@@ -1034,6 +1034,23 @@ class WeightsInfoResponse(BaseModel):
     base_model: str
     is_lora: bool
     lora_rank: int | None = None
+    train_unembed: bool | None = None
+    train_mlp: bool | None = None
+    train_attn: bool | None = None
+
+    @classmethod
+    def from_types(cls, base_model: str, lora_config: types.LoraConfig) -> "WeightsInfoResponse":
+        """Describe a stored model so the SDK can recreate an adapter of the same shape on resume."""
+        if lora_config.rank == 0:
+            return cls(base_model=base_model, is_lora=False, lora_rank=0)
+        return cls(
+            base_model=base_model,
+            is_lora=True,
+            lora_rank=lora_config.rank,
+            train_unembed=lora_config.train_unembed,
+            train_mlp=lora_config.train_mlp,
+            train_attn=lora_config.train_attn,
+        )
 
 
 class ClientConfigResponse(BaseModel):
@@ -2149,13 +2166,7 @@ async def get_weights_info(request: WeightsInfoRequest, req: Request, session: A
     await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
-    is_lora = lora_config.rank > 0
-
-    return WeightsInfoResponse(
-        base_model=model.base_model,
-        is_lora=is_lora,
-        lora_rank=lora_config.rank,
-    )
+    return WeightsInfoResponse.from_types(model.base_model, lora_config)
 
 
 @app.get("/")

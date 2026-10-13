@@ -289,3 +289,22 @@ class TestSupportedLoraConfig:
             api.LoRAConfig(rank=0, train_attn=False, train_mlp=False, train_unembed=False)
         )
         assert lora.rank == 0
+
+
+class TestWeightsInfoResponse:
+    """The SDK resumes from state by recreating the adapter from this response."""
+
+    def test_reports_the_group_flags(self):
+        lora = types.LoraConfig(rank=8, alpha=32.0, seed=0, train_attn=True, train_mlp=False, train_unembed=False)
+        info = api.WeightsInfoResponse.from_types("base", lora)
+        assert (info.is_lora, info.lora_rank) == (True, 8)
+        assert (info.train_attn, info.train_mlp, info.train_unembed) == (True, False, False)
+
+    def test_matches_the_sdk_fields(self):
+        import tinker
+
+        assert set(tinker.types.WeightsInfoResponse.model_fields) <= set(api.WeightsInfoResponse.model_fields)
+
+    def test_full_fine_tuning_has_no_flags(self):
+        info = api.WeightsInfoResponse.from_types("base", types.LoraConfig(rank=0, alpha=32.0, seed=0))
+        assert (info.is_lora, info.train_attn, info.train_mlp) == (False, None, None)
