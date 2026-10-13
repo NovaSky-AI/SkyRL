@@ -75,14 +75,44 @@ class Tracking:
             self.logger = ConsoleLogger()
 
         self._exception_logged = False
+        self._finished = False
+        self.run_status = "running"
+        self._vllm_history_metrics = set()
+
+    def update_summary(self, data) -> None:
+        """Write run summaries without adding another training history step."""
+        try:
+            if self.backend == "wandb" and not self._finished and self.logger.run is not None:
+                self.logger.run.summary.update(data)
+        except Exception as e:
+            logger.warning(f"Could not update run summary: {e}")
 
     def log(self, data, step, commit=False):
         if self.backend == "wandb":
+            for name in data:
+                if name.startswith("vllm/") and name not in self._vllm_history_metrics:
+                    self.logger.define_metric(name, summary="none")
+                    self._vllm_history_metrics.add(name)
             self.logger.log(data=data, step=step, commit=commit)
         else:
             self.logger.log(data=data, step=step)
 
-    def finish(self):
+    def finish(self, exit_code: int = 0):
+        if self._finished:
+            return
+        if self.run_status == "running":
+            self.run_status = "success" if exit_code == 0 else "failed"
+        if self.backend == "wandb" and self.logger.run is not None:
+            # Explicit removals also clear summaries already inferred from history.
+            for name in self._vllm_history_metrics:
+                try:
+                    del self.logger.run.summary[name]
+                except KeyError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Could not remove automatic metric summary {name}: {e}")
+        self.update_summary({"run_status": self.run_status})
+        self._finished = True
         if self.backend == "console":
             return
         # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
@@ -90,7 +120,7 @@ class Tracking:
         # https://github.com/wandb/wandb/issues/6449
         try:
             if self.backend == "wandb":
-                self.logger.finish(exit_code=0)
+                self.logger.finish(exit_code=exit_code)
             else:
                 self.logger.finish()
         except Exception as e:
@@ -113,6 +143,7 @@ class Tracking:
         if self._exception_logged:
             return
         self._exception_logged = True
+        self.run_status = "failed"
         tb_str = traceback.format_exc()[-10000:]
         logger.error(f"Training failed at step {step} with {type(e).__name__}:\n{tb_str}")
         if self.backend == "wandb":
@@ -128,7 +159,7 @@ class Tracking:
                 # Tables upload asynchronously. Finish the run so the upload
                 # completes before the caller re-raises and the process dies.
                 try:
-                    self.finish()
+                    self.finish(exit_code=1)
                 except Exception as finish_exc:
                     logger.warning(f"tracker.finish() raised after logging exception: {finish_exc}")
             except Exception as log_exc:

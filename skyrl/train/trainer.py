@@ -1,3 +1,4 @@
+import asyncio
 import math
 import os
 import shutil
@@ -7,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
@@ -75,6 +75,7 @@ from skyrl.train.generators.utils import (
 )
 from skyrl.train.utils import (
     Timer,
+    deadline,
     get_ray_pg_ready_with_timeout,
     trainer_utils,
 )
@@ -143,6 +144,9 @@ class RayPPOTrainer:
         self._vllm_metrics_scraper: Optional[VLLMMetricsScraper] = (
             VLLMMetricsScraper() if cfg.generator.inference_engine.enable_ray_prometheus_stats else None
         )
+
+        self._metrics_finalized = False
+        self._resumed_from_checkpoint = False
 
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.trainer.enable_ray_gpu_monitor else None
 
@@ -232,6 +236,24 @@ class RayPPOTrainer:
             if self.cfg.trainer.max_training_steps is not None:
                 self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
 
+    async def finalize_metrics(self, status: str) -> None:
+        """Finalize observations before the tracker closes, including failed runs."""
+        if self._metrics_finalized:
+            return
+        self._metrics_finalized = True
+        self.tracker.run_status = status
+        try:
+            if self._vllm_metrics_scraper is not None:
+                summary = await asyncio.wait_for(self._vllm_metrics_scraper.finalize(), timeout=10)
+                if not self._resumed_from_checkpoint and (
+                    not self.cfg.generator.inference_engine.enable_pd or self._vllm_metrics_scraper.has_worker_roles
+                ):
+                    self.tracker.update_summary(summary)
+        except Exception as e:
+            logger.warning(f"Could not finalize vLLM metrics: {e}")
+        finally:
+            self.tracker.update_summary({"run_status": status})
+
     @torch.no_grad()
     async def eval(self, vllm_metrics_scraper: Optional[VLLMMetricsScraper] = None) -> Dict[str, float]:
         """
@@ -267,7 +289,7 @@ class RayPPOTrainer:
             self._ray_gpu_monitor.start()
 
         # Initialize weight sync state between policy model and inference engines.
-        with Timer("init_weight_sync_state"):
+        async with self._weight_sync_deadline(), Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
         # Load checkpoint state if resumption is enabled.
@@ -276,7 +298,7 @@ class RayPPOTrainer:
                 self.global_step, _ = self.load_checkpoints()
 
         # Prepare weights for sampling
-        with Timer("sync_weights"):
+        async with self._weight_sync_deadline(), Timer("sync_weights"):
             await self.dispatch.save_weights_for_sampler()
 
         # Compute start_epoch up-front so callback metadata is ready before
@@ -330,7 +352,7 @@ class RayPPOTrainer:
                         if self._vllm_metrics_scraper is not None:
                             await self._vllm_metrics_scraper.start("vllm/train")
                             self._vllm_metrics_scraper.pause()
-                    with Timer("step", self.all_timings):
+                    async with self._step_deadline(), Timer("step", self.all_timings):
                         # for colocate_all=true, inference engine is always on GPU when starting the training step
 
                         # 0. truncate data to have even shards
@@ -349,7 +371,7 @@ class RayPPOTrainer:
                         # 1.1. generation phase
                         if self._vllm_metrics_scraper is not None:
                             self._vllm_metrics_scraper.resume()
-                        with Timer("generate", self.all_timings):
+                        with Timer("generate", self.all_timings), deadline.operation("generate"):
                             generator_output: GeneratorOutput = await self.generate(generator_input)
                         if self._vllm_metrics_scraper is not None:
                             self._vllm_metrics_scraper.pause()
@@ -444,7 +466,12 @@ class RayPPOTrainer:
                             # One profiler step per RL global step.
                             self._profiler_step()
 
-                        self._fire("on_step_end", batch=training_input, metrics=status)
+                        self._fire(
+                            "on_step_end",
+                            batch=training_input,
+                            metrics=status,
+                            trajectory_ids=generator_output.get("trajectory_ids"),
+                        )
                         step_started = False
 
                         # Capture callback-driven triggers, then reset.
@@ -481,7 +508,7 @@ class RayPPOTrainer:
                                 self.update_ref_with_policy()
 
                         # 10. Prepare weights for sampling
-                        with Timer("sync_weights", self.all_timings):
+                        async with self._weight_sync_deadline(), Timer("sync_weights", self.all_timings):
                             await self.dispatch.save_weights_for_sampler()
                         # `sync_weights` above is the full bracket: it also pauses and
                         # resumes generation, which under vLLM DP costs seconds of
@@ -583,12 +610,12 @@ class RayPPOTrainer:
         # Safety net: always save final checkpoint at end of training.
         # Skip if we already saved at the last step
         if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
-            with Timer("save_checkpoints", self.all_timings):
+            async with self._step_deadline(), Timer("save_checkpoints", self.all_timings):
                 ckpt_path = self.save_checkpoints()
                 logger.info("Saved final checkpoint.")
             self._fire("on_save", ckpt_path=ckpt_path)
         if self.cfg.trainer.hf_save_interval > 0 and not hf_model_save:
-            with Timer("save_hf_model", self.all_timings):
+            async with self._step_deadline(), Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
 
@@ -598,9 +625,7 @@ class RayPPOTrainer:
         if self.has_critic:
             self.dispatch.finalize_pending_saves("critic")
 
-        if self._vllm_metrics_scraper is not None:
-            await self._vllm_metrics_scraper.aclose()
-
+        await self.finalize_metrics("success")
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.stop()
 
@@ -626,6 +651,16 @@ class RayPPOTrainer:
             logger.warning(f"Failed to flush pending metrics at step {self.global_step}: {e}")
         self.all_metrics = {}
         self.all_timings = {}
+
+    def _step_deadline(self):
+        """Budget for one training step, or one save made outside a step (``trainer.step_timeout_s``)."""
+        return deadline.step_deadline(self.global_step, self.cfg.trainer.step_timeout_s)
+
+    def _weight_sync_deadline(self):
+        """Budget for one weight sync (``trainer.weight_sync_timeout_s``), nested within the step's."""
+        return deadline.step_deadline(
+            self.global_step, self.cfg.trainer.weight_sync_timeout_s, deadline.WeightSyncTimeoutError
+        )
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
         """Remove tail data to have even shards in terms of *effective* samples.
@@ -813,26 +848,34 @@ class RayPPOTrainer:
                         num_training_steps=critic_num_training_steps,
                     )
                 )
-            ray.get(refs)
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            deadline.ray_get(refs, "init_models")
+            deadline.ray_get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                "set_pad_token_id",
+            )
         else:
             if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
+                deadline.ray_get(ref_model.async_init_model(cfg.trainer.ref.model.path), "init_ref_model")
                 ref_model.offload_to_cpu()
-            ray.get(
+            deadline.ray_get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
                     num_training_steps=policy_num_training_steps,
-                )
+                ),
+                "init_policy_model",
             )
-            ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+            deadline.ray_get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                "set_pad_token_id",
+            )
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
-                ray.get(
+                deadline.ray_get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
                         num_training_steps=critic_num_training_steps,
-                    )
+                    ),
+                    "init_critic_model",
                 )
                 critic_model.offload_to_cpu()
 
@@ -1819,6 +1862,7 @@ class RayPPOTrainer:
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
+        self._resumed_from_checkpoint = True
         saved_global_step = trainer_state.get("global_step", global_step)
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:

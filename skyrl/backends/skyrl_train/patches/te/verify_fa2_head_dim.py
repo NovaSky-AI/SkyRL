@@ -1,6 +1,6 @@
 """Verification harness for the TE FA2 head_dim patch (NVIDIA/TransformerEngine#3360).
 
-Run this on a GPU whose compute capability is OUTSIDE TE 2.16.0's allowlist of
+Run this on a GPU whose compute capability is OUTSIDE TE's allowlist of
 sm80 / sm90 / sm100 / sm120 -- e.g. sm103 (B300/GB300), or sm86/sm89
 (A10, A40, L4, L40S, RTX 4090). On an allowlisted GPU the gate is dead code and
 the patch is a deliberate no-op, so phase A shows no change; pass --force to
@@ -90,7 +90,7 @@ def main():
     te_version = importlib.metadata.version("transformer_engine")
     print(f"TE: {te_version}   affected by the allowlist: {affected}")
     if not affected and not args.force:
-        print("\nThis GPU is already allowlisted by TE 2.16.0 -- the patch is a no-op here.")
+        print("\nThis GPU is already allowlisted by TE -- the patch is a no-op here.")
         print("Re-run with --force to exercise the mechanics, or use an sm103/sm86/sm89 box.")
 
     print("\n--- phase A: backend selection ---")

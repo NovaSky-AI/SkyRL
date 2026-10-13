@@ -27,7 +27,6 @@ trainer.algorithm.off_policy_correction.geo_mask_high=1.01
 # for MoE models, enabling router replay (R3) to fix the source of train/infer mismatch is recommended 
 trainer.policy.megatron_config.moe_enable_routing_replay=True
 generator.inference_engine.enable_return_routed_experts=True
-generator.inference_engine.distributed_executor_backend="mp"    # this is temporarily needed for vLLM, since routed experts cause issues with the ray backend.
 # ------------ #
 
 # TIS (Truncated Importance Sampling) applies logprob corrections on a per-token basis

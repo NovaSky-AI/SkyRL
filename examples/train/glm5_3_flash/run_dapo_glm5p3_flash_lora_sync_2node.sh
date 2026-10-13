@@ -44,8 +44,8 @@ MAX_TOKENS_PER_MICROBATCH=8192  # must hold one full sequence; 16384 OOM'd at st
 # Rollout router replay (R3): vLLM returns the experts it routed each token to and Megatron
 # replays that routing, so the trainer scores rollouts with the router the sampler used. On a
 # 288-expert sigmoid MoE this removes most of the rollout/train logprob gap (~4x smaller
-# policy/rollout_train_logprobs_abs_diff_mean). Needs distributed_executor_backend=mp (set
-# below). SkyRLGymGenerator refuses R3 together with step_wise_trajectories,
+# policy/rollout_train_logprobs_abs_diff_mean). Needs inference pipeline_parallel_size=1
+# (vLLM returns routes only from the last pipeline stage). SkyRLGymGenerator refuses R3 together with step_wise_trajectories,
 # use_conversation_multi_turn=false, a custom chat_template, or vision_language_generator; this
 # recipe leaves all four at R3-compatible defaults. Routing is fixed across the
 # train_batch_size / policy_mini_batch_size mini-batches of a step, a small known bias.

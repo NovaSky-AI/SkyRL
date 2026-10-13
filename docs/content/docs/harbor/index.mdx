@@ -211,6 +211,10 @@ The generator includes built-in rate limiting to avoid overloading sandbox provi
 - **`trajectories_per_second`**: Throttles trial submission rate (e.g., 5/sec).
 - **`max_concurrency`**: Caps parallel `trial.run()` calls (e.g., 512).
 
+Rate-token waiters are served in FIFO order. Grouped samples retain their order
+when they reach the limiter together; trials can still complete in any order.
+Cancelling a waiter allows the remaining callers to proceed.
+
 These are configured via overrides on the `generator` config (not in the Harbor TrialConfig YAML). For example:
 
 ```bash

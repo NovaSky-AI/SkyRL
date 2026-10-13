@@ -6,10 +6,61 @@ optimizer-offload policy applied before and after the sync. CPU-only: the
 dispatch is built via ``__new__`` with mocked actor groups and client.
 """
 
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import ray
+
+from skyrl.train.utils import Timer, deadline
+from skyrl.train.utils.deadline import StepTimeoutError
+
+
+@ray.remote
+class _BlockingForwardBackwardWorker:
+    def forward_backward(self):
+        time.sleep(30)
+
+
+class _BlockingForwardBackwardGroup:
+    def __init__(self, actor):
+        self.actor = actor
+
+    def async_run_ray_method(self, dispatch_type, method, *args, **kwargs):
+        assert (dispatch_type, method) == ("mesh", "forward_backward")
+        return [self.actor.forward_backward.remote()]
+
+
+class ForwardBackwardTimeoutError(StepTimeoutError):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_forward_backward_times_out_on_cpu():
+    from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+    actor = _BlockingForwardBackwardWorker.remote()
+    dispatch = WorkerDispatch.__new__(WorkerDispatch)
+    dispatch._actor_groups = {"policy": _BlockingForwardBackwardGroup(actor)}
+    dispatch._ensure_on_gpu = MagicMock()
+    dispatch.ensure_active_adapter = MagicMock()
+    dispatch._save_memory_snapshot = MagicMock()
+
+    started_at = time.monotonic()
+    try:
+        async with deadline.step_deadline(7, 0.2, ForwardBackwardTimeoutError):
+            with Timer("train_critic_and_policy"):
+                with pytest.raises(ForwardBackwardTimeoutError) as exc_info:
+                    dispatch.forward_backward("policy", SimpleNamespace())
+    finally:
+        ray.kill(actor)
+
+    assert time.monotonic() - started_at < 5
+    assert (exc_info.value.stage, exc_info.value.operation) == (
+        "train_critic_and_policy",
+        "forward_backward",
+    )
 
 
 # NOTE: this duplicates the config helper in test_megatron_correctness.py, but that is
@@ -129,21 +180,25 @@ class TestSaveWeights:
 
     @pytest.mark.asyncio
     async def test_non_colocated_resumes_on_broadcast_failure(self):
-        """resume_generation must be called even if broadcast raises."""
+        """A failed resume must not hide the broadcast failure."""
         from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
         dispatch.cfg = _fft_dispatch_cfg()
         dispatch._inference_engine_client = AsyncMock()
-        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=RuntimeError("broadcast failed"))
+        dispatch._inference_engine_client.resume_generation.side_effect = ConnectionError("resume failed")
+        primary = RuntimeError("broadcast failed")
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=primary)
         dispatch._prepare_for_weight_sync = AsyncMock()
         dispatch._finish_weight_sync = MagicMock()
         dispatch.ensure_active_adapter = MagicMock()
 
-        with pytest.raises(RuntimeError, match="broadcast failed"):
+        with pytest.raises(RuntimeError) as exc_info:
             await dispatch.save_weights_for_sampler()
 
+        assert exc_info.value is primary
+        assert "resume_generation also failed during cleanup: ConnectionError('resume failed')" in primary.__notes__
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
 
@@ -282,7 +337,7 @@ class TestAdapterOnlyColocatedSync:
         from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
 
         dispatch = _adapter_sync_dispatch(model_on_gpu=False)
-        monkeypatch.setattr(wd.ray, "get", lambda _: None)
+        monkeypatch.setattr(wd.deadline.ray, "get", lambda _: None)
 
         await dispatch.save_weights_for_sampler(model_id="m1")
 
@@ -302,7 +357,7 @@ class TestAdapterOnlyColocatedSync:
         from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
 
         dispatch = _adapter_sync_dispatch(model_on_gpu=False)
-        monkeypatch.setattr(wd.ray, "get", lambda _: None)
+        monkeypatch.setattr(wd.deadline.ray, "get", lambda _: None)
 
         await dispatch.save_weights_for_sampler(model_id="m1")
 
@@ -317,7 +372,7 @@ class TestAdapterOnlyColocatedSync:
         from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
 
         dispatch = _adapter_sync_dispatch(model_on_gpu=True, optimizer_on_gpu=True)
-        monkeypatch.setattr(wd.ray, "get", lambda _: None)
+        monkeypatch.setattr(wd.deadline.ray, "get", lambda _: None)
 
         await dispatch.save_weights_for_sampler(model_id="m1")
 

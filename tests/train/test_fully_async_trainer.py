@@ -6,6 +6,7 @@ UID tracking, and the consumer's exhaustion-aware buffer drain.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -16,6 +17,7 @@ from skyrl.train.fully_async_trainer import (
     _AsyncDataloader,
     _AsyncStalenessManager,
 )
+from skyrl.train.utils.async_utils import BackgroundFailure
 
 
 def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
@@ -150,13 +152,14 @@ async def test_drain_next_group_returns_buffered_items_then_exhaustion():
     # _drain_next_group uses no instance state, so a bare object stands in for `self`.
     drain = FullyAsyncRayPPOTrainer._drain_next_group
     dummy = object()
+    failure = BackgroundFailure()
 
-    assert await drain(dummy, buffer, done) == "a"
-    assert await drain(dummy, buffer, done) == "b"
+    assert await drain(dummy, buffer, done, failure) == "a"
+    assert await drain(dummy, buffer, done, failure) == "b"
 
     # Buffer empty and generators done -> exhausted.
-    done.set()
-    assert await drain(dummy, buffer, done) is None
+    await FullyAsyncRayPPOTrainer._watch_generators_done([asyncio.create_task(asyncio.sleep(0))], done, failure)
+    assert await drain(dummy, buffer, done, failure) is None
 
 
 @pytest.mark.asyncio
@@ -169,8 +172,8 @@ async def test_drain_next_group_drains_remaining_before_exhaustion():
 
     drain = FullyAsyncRayPPOTrainer._drain_next_group
     dummy = object()
-    assert await drain(dummy, buffer, done) == "a"
-    assert await drain(dummy, buffer, done) is None
+    assert await drain(dummy, buffer, done, BackgroundFailure()) == "a"
+    assert await drain(dummy, buffer, done, BackgroundFailure()) is None
 
 
 @pytest.mark.asyncio
@@ -185,8 +188,43 @@ async def test_drain_next_group_blocks_until_item_arrives():
         buffer.put_nowait("x")
 
     producer = asyncio.create_task(delayed_put())
-    assert await drain(dummy, buffer, done) == "x"
+    assert await drain(dummy, buffer, done, BackgroundFailure()) == "x"
     await producer
+
+
+@pytest.mark.asyncio
+async def test_drain_next_group_raises_when_worker_fails_mid_drain():
+    """A worker failure while other workers are still alive must raise, not block or read as exhaustion."""
+    buffer: asyncio.Queue = asyncio.Queue()
+    done = asyncio.Event()
+    failure = BackgroundFailure()
+    drain = FullyAsyncRayPPOTrainer._drain_next_group
+    err = RuntimeError("generator crashed")
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.async_train_dataloader = SimpleNamespace(get_next_non_consumed_data=AsyncMock(side_effect=err))
+
+    async def live_worker():
+        await asyncio.sleep(3600)
+
+    tasks = [
+        asyncio.create_task(trainer._run_generate_for_a_group_loop(buffer, failure)),
+        asyncio.create_task(live_worker()),
+    ]
+    watcher = asyncio.create_task(FullyAsyncRayPPOTrainer._watch_generators_done(tasks, done, failure))
+    with pytest.raises(RuntimeError) as exc_info:
+        await asyncio.wait_for(drain(trainer, buffer, done, failure), timeout=5)
+    assert exc_info.value is err
+    assert err.__notes__ == ["raised in background generation worker"]
+    assert not done.is_set()
+    buffer.put_nowait("a")
+    with pytest.raises(RuntimeError) as buffered_exc:
+        await drain(trainer, buffer, done, failure)
+    assert buffered_exc.value is err
+    assert buffer.get_nowait() == "a"
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.wait_for(watcher, timeout=5)
 
 
 # --------------------------------------------------------------------------------------

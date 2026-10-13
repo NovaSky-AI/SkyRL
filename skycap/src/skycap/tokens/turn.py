@@ -2,7 +2,11 @@
 
 Planning, in order:
 
-1. Match the request's messages against the graph in message space.
+1. Match the request's messages against the graph in message space: walk
+   down from the root by match hash, one message at a time. When a message
+   has no node with its hash, it may still be a stored message spelled
+   differently; if the renderer renders both alike, it matches that node and
+   the walk continues (``_match``).
 2. If the matched prefix contains a model node, bridge from the deepest one:
    the renderer extends that call's exact prompt and completion with the new
    messages instead of re-rendering what the model sampled.
@@ -29,7 +33,7 @@ import numpy as np
 from skycap import hashing
 from skycap.graph import CallInfo, MessageGraph, NodeTokens
 from skycap.tokens.engine import EngineOutput
-from skycap.tokens.renderer import TokenRenderer
+from skycap.tokens.renderer import Rendered, TokenRenderer
 
 
 class TokenError(Exception):
@@ -47,6 +51,9 @@ class Plan:
     chunks: list[list[int]]
     scaffold: list[int]
     bridged: bool
+    #: One match hash per request message: a matched message's is its node's, which differs from
+    #: the request's own for a message matched in another spelling, so committing it finds that node.
+    matches: list[str]
 
 
 def routes_from(graph: MessageGraph, planned: Plan) -> int:
@@ -65,24 +72,32 @@ def routes_from(graph: MessageGraph, planned: Plan) -> int:
     return planned.prefix_len - 1
 
 
-def match_hashes(messages: Sequence[Mapping[str, Any]], tools: str, model: str | None) -> list[str]:
-    return [hashing.token_match_hash(m, tools=tools, model=model) for m in messages]
-
-
 def plan(
     graph: MessageGraph,
     renderer: TokenRenderer,
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
-    matches: Sequence[str],
+    key: hashing.MatchKey,
 ) -> Plan:
+    """Where a request attaches to the graph, the prompt tokens it sends, and its new nodes' tokens.
+
+    ``key`` is the call's ``MatchKey.tokens``. The steps are in the module
+    docstring. Planning changes the graph only by recording aliases for
+    messages matched in another spelling.
+    """
     if not messages:
         raise TokenError("a request needs at least one message")
-    matched = graph.match(matches)
-    bridged = _bridge(graph, renderer, messages, tools, matched)
+    matches = [key(message) for message in messages]
+    matched, rendered = _match(graph, renderer, messages, tools, matches, key)
+    # A matched message takes its node's hash, which differs from the request's for a respelling.
+    resolved = list(matches)
+    for depth, node_id in enumerate(matched):
+        resolved[depth] = graph.nodes[node_id].match_hash
+    bridged = _bridge(graph, renderer, messages, tools, matched, resolved)
     if bridged is not None:
         return bridged
-    rendered = renderer.render(messages, tools)
+    if rendered is None:
+        rendered = renderer.render(messages, tools)
     prompt = rendered.token_ids
     offset, parent, start = 0, None, 0
     for depth, node_id in enumerate(matched):
@@ -93,7 +108,92 @@ def plan(
         parent, start = node_id, depth + 1
     indices = [i - start if i >= 0 else -1 for i in rendered.tail_indices[offset:]]
     chunks, scaffold = attribute(prompt[offset:], indices, len(messages) - start)
-    return Plan(prompt, parent, offset, start, chunks, scaffold, bridged=False)
+    return Plan(prompt, parent, offset, start, chunks, scaffold, bridged=False, matches=resolved)
+
+
+def _match(
+    graph: MessageGraph,
+    renderer: TokenRenderer,
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    matches: Sequence[str],
+    key: hashing.MatchKey,
+) -> tuple[list[int], Rendered | None]:
+    """The longest prefix of ``messages`` in the graph, and the full render if one was needed.
+
+    The walk down the graph by match hash stops at the first message with no
+    node under its parent. That message may still be a stored message spelled
+    differently, e.g. ``content: ""`` against no ``content``. Whether two
+    spellings are the same message depends on the chat template, so the renderer
+    decides: a child of the parent whose rendered fields agree once empty
+    strings are dropped is swapped into the request, and if the request renders
+    to the same tokens either way, the message is that node. Its hash is
+    recorded as an alias, so later requests sending this spelling match by hash,
+    and the walk continues from that node.
+
+    Cost, for ``n`` messages: hash lookups are ``O(n)``, since the walk never
+    restarts. Renders happen only for a message whose hash misses and that has
+    a candidate: one render of the request, plus one per distinct candidate
+    spelling (``_candidates``). Each spelling is checked once per parent; after
+    that its alias matches by hash.
+    """
+    rendered: Rendered | None = None
+    matched = graph.match(matches)
+    while len(matched) < len(messages):
+        depth = len(matched)
+        parent = matched[-1] if matched else None
+        same = None
+        for node_id in _candidates(graph, parent, messages[depth], key):
+            if rendered is None:
+                rendered = renderer.render(messages, tools)
+            swapped = [*messages[:depth], graph.nodes[node_id].message, *messages[depth + 1 :]]
+            if renderer.render(swapped, tools).token_ids == rendered.token_ids:
+                same = node_id
+                break
+        if same is None:
+            break
+        graph.alias(parent, matches[depth], same)
+        matched += [same, *graph.match(matches[depth + 1 :], parent=same)]
+    return matched, rendered
+
+
+def _candidates(
+    graph: MessageGraph, parent: int | None, message: Mapping[str, Any], key: hashing.MatchKey
+) -> list[int]:
+    """Children of ``parent`` that may be ``message`` spelled differently, one per spelling.
+
+    A child qualifies if its fields equal the message's once empty strings are
+    dropped too, and it was matched by this call's key: the same tools and
+    model. Siblings with the same match hash render alike, so only one is
+    tried: the one history continues from (model-authored, then latest), as
+    in ``MessageGraph.add``.
+    """
+    loose = _loose(message, key)
+    found: list[int] = []
+    for node_id in graph.children(parent):
+        node = graph.nodes[node_id]
+        if _loose(node.message, key) != loose:
+            continue
+        if key(node.message) != node.match_hash:
+            continue
+        found.append(node_id)
+
+    def preference(node_id: int) -> tuple[bool, int]:
+        return graph.nodes[node_id].author == "model", node_id
+
+    by_spelling: dict[str, int] = {}
+    for node_id in sorted(found, key=preference, reverse=True):
+        by_spelling.setdefault(graph.nodes[node_id].match_hash, node_id)
+    return list(by_spelling.values())
+
+
+def _loose(message: Mapping[str, Any], key: hashing.MatchKey) -> dict[str, Any]:
+    """The fields ``key`` matches ``message`` on, with empty strings dropped as well as empty values."""
+    loose = {}
+    for field, value in key.fields(message).items():
+        if value != "":
+            loose[field] = value
+    return loose
 
 
 def _bridge(
@@ -102,6 +202,7 @@ def _bridge(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
     matched: list[int],
+    matches: list[str],
 ) -> Plan | None:
     """Extend the deepest matched model call, if there is one and the renderer agrees."""
     for depth in range(len(matched) - 1, -1, -1):
@@ -118,7 +219,9 @@ def _bridge(
         if rendered is None:
             return None
         chunks, scaffold = attribute(rendered.token_ids[rendered.reused :], rendered.tail_indices, len(new_messages))
-        return Plan(rendered.token_ids, node.id, rendered.reused, depth + 1, chunks, scaffold, bridged=True)
+        return Plan(
+            rendered.token_ids, node.id, rendered.reused, depth + 1, chunks, scaffold, bridged=True, matches=matches
+        )
     return None
 
 
@@ -166,7 +269,6 @@ def commit(
     turn: Plan,
     *,
     messages: Sequence[Mapping[str, Any]],
-    matches: Sequence[str],
     reply: Mapping[str, Any],
     reply_match: str,
     output: EngineOutput,
@@ -187,8 +289,8 @@ def commit(
             role=messages[index].get("role"),
             author="client",
             message=messages[index],
-            match_hash=matches[index],
-            delta_hash=hashing.client_token_delta_hash(matches[index], chunk),
+            match_hash=turn.matches[index],
+            delta_hash=hashing.client_token_delta_hash(turn.matches[index], chunk),
             created_at=call.t_start,
             tokens=NodeTokens(token_ids=list(chunk), routed_experts=routed.slice(position, len(chunk))),
         )

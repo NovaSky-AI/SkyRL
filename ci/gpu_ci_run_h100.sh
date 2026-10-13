@@ -15,4 +15,5 @@ uv run --directory . --isolated --extra dev --extra megatron pytest -s -vvv -m h
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_router_replay.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_kimi_k25_bridge.py \
-    tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py
+    tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py \
+    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_sparse_mla_nope.py

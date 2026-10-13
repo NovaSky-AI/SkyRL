@@ -128,6 +128,7 @@ def create_inference_servers(
                 placement_group_bundle_offset=i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
+                metrics_role="prefill",
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
                 mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT + i * servers_per_group * SERVER_PORT_STRIDE,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
@@ -149,6 +150,7 @@ def create_inference_servers(
                 placement_group_bundle_offset=decode_bundle_offset + i * gpus_per_server * servers_per_group,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 enable_pd=True,
+                metrics_role="decode",
                 nixl_side_channel_base=NIXL_SIDE_CHANNEL_BASE_PORT
                 + (num_prefill + i) * servers_per_group * SERVER_PORT_STRIDE,
                 mooncake_bootstrap_base_port=MOONCAKE_BOOTSTRAP_BASE_PORT

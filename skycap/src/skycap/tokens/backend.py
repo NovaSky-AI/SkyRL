@@ -164,9 +164,9 @@ class TokensBackend:
         tools_key = hashing.tools_hash(chat.tools)
         if tools_key and chat.tools is not None:
             graph.tools.setdefault(tools_key, [dict(tool) for tool in chat.tools])
-        matches = turn.match_hashes(chat.messages, tools_key, model)
+        key = hashing.MatchKey.tokens(tools_key, model)
         try:
-            planned = await asyncio.to_thread(turn.plan, graph, self.renderer, chat.messages, chat.tools, matches)
+            planned = await asyncio.to_thread(turn.plan, graph, self.renderer, chat.messages, chat.tools, key)
             # A first call has nothing to extend; after that, not extending is worth reporting.
             # A call commits its messages and its reply together (``turn.commit``), so the graph
             # has nodes exactly when an earlier call went through.
@@ -247,9 +247,8 @@ class TokensBackend:
                     graph,
                     planned,
                     messages=chat.messages,
-                    matches=matches,
                     reply=reply,
-                    reply_match=hashing.token_match_hash(reply, tools=tools_key, model=model),
+                    reply_match=key(reply),
                     output=output,
                     call=call,
                 )

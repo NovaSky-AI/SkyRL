@@ -30,6 +30,7 @@ from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
     slice_generator_output,
 )
+from skyrl.train.utils import deadline
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -76,13 +77,19 @@ def get_node_ids(
         critic_model: Critic model actor group (Optional)
         ref_model: Ref model actor group (Optional)
     """
-    policy_node_ids: List[str] = ray.get(policy_model.async_run_ray_method("pass_through", "get_ray_node_id"))
+    policy_node_ids: List[str] = deadline.ray_get(
+        policy_model.async_run_ray_method("pass_through", "get_ray_node_id"), "get_policy_ray_node_id"
+    )
     if critic_model is not None:
-        critic_node_ids: List[str] = ray.get(critic_model.async_run_ray_method("pass_through", "get_ray_node_id"))
+        critic_node_ids: List[str] = deadline.ray_get(
+            critic_model.async_run_ray_method("pass_through", "get_ray_node_id"), "get_critic_ray_node_id"
+        )
     else:
         critic_node_ids = []
     if ref_model is not None:
-        ref_node_ids: List[str] = ray.get(ref_model.async_run_ray_method("pass_through", "get_ray_node_id"))
+        ref_node_ids: List[str] = deadline.ray_get(
+            ref_model.async_run_ray_method("pass_through", "get_ray_node_id"), "get_ref_ray_node_id"
+        )
     else:
         ref_node_ids = []
 
@@ -112,7 +119,7 @@ def run_on_each_node(node_ids: List[str], fn: Callable, *args, **kwargs):
         )
         refs.append(node_task.remote(*args, **kwargs))
 
-    return ray.get(refs)
+    return deadline.ray_get(refs, "run_on_each_node")
 
 
 def extract_step_from_path(path: str) -> int:

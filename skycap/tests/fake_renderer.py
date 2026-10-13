@@ -31,8 +31,8 @@ def decode(tokens: Sequence[int]) -> str:
     return "".join(chr(t - 100) for t in tokens if t >= 100)
 
 
-def _body(message: Mapping[str, Any]) -> str:
-    text = message.get("content") or ""
+def _body(message: Mapping[str, Any], empty_content: str = "") -> str:
+    text = empty_content if message.get("content") == "" else message.get("content") or ""
     if message.get("reasoning_content"):
         text = f"THINK:{message['reasoning_content']}|{text}"
     for call in message.get("tool_calls") or ():
@@ -46,11 +46,20 @@ class FakeRenderer:
     def __init__(self) -> None:
         #: Set to make the next render attribute a token out of range.
         self.corrupt = False
+        #: What ``content: ""`` renders as. Empty by default, so it renders like no content.
+        self.empty_content = ""
+        #: Full renders requested (``render``); bridges don't count.
+        self.renders = 0
 
     def _message(self, message: Mapping[str, Any]) -> list[int]:
-        return [START, *encode(str(message.get("role"))), NL, *encode(_body(message)), END, NL]
+        body = _body(message, self.empty_content)
+        return [START, *encode(str(message.get("role"))), NL, *encode(body), END, NL]
 
     def render(self, messages: Sequence[Mapping[str, Any]], tools: Any) -> Rendered:
+        self.renders += 1
+        return self._render(messages, tools)
+
+    def _render(self, messages: Sequence[Mapping[str, Any]], tools: Any) -> Rendered:
         tokens: list[int] = []
         indices: list[int] = []
         for index, message in enumerate(messages):
@@ -75,7 +84,7 @@ class FakeRenderer:
             return None
         if any(m.get("role") == "assistant" for m in new_messages):
             return None
-        tail = self.render(new_messages, tools)
+        tail = self._render(new_messages, tools)
         tokens = [*previous_prompt, *previous_completion, NL, *tail.token_ids]
         indices = [-1, *tail.tail_indices]
         return Rendered(token_ids=tokens, tail_indices=indices, reused=len(previous_prompt) + len(previous_completion))

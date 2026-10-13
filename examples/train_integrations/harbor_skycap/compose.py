@@ -2,9 +2,10 @@
 
 ``finish`` returns one sample per root-to-leaf path of the trajectory's context
 graph. A linear rollout is one path; a summarization, a stripped-reasoning
-replay or a subagent adds more. skycap has already made each sampled message a
-training target in exactly one path, so the paths' loss masks never count a
-token twice.
+replay, a subagent or a reply the harness discarded adds more. skycap has
+already made each sampled message a training target in at most one path, so
+the paths' loss masks never count a token twice. With ``skycap.train_paths``
+set to ``final`` or a custom rule, the samples are the rows that rule picks.
 
 One Harbor trial is one rollout with one reward, however many paths it has.
 SkyRL's step-wise shape already says "several rows, one rollout": a trial's

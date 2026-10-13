@@ -280,7 +280,7 @@ class TestWorkerDispatchProfilerRPCs:
 
         calls = []
         stub = self._stub({"policy": self._fake_group(calls)})
-        with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=lambda x: x):
+        with patch("skyrl.train.utils.deadline.ray.get", side_effect=lambda x: x):
             WorkerDispatch.start_profile(stub, "policy")
             WorkerDispatch.profile_step(stub, "policy")
             WorkerDispatch.stop_profile(stub, "policy")
@@ -296,7 +296,7 @@ class TestWorkerDispatchProfilerRPCs:
         calls = []
         payload = [{"window_count": 1, "pairs": [("gemm", 2.0)]}, None]
         stub = self._stub({"policy": self._fake_group(calls)})
-        with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=lambda x: payload):
+        with patch("skyrl.train.utils.deadline.ray.get", side_effect=lambda x: payload):
             out = WorkerDispatch.dump_profiler_summary(stub, "policy")
         assert out == payload
         assert calls == [("pass_through", "dump_profiler_summary")]
@@ -310,11 +310,24 @@ class TestWorkerDispatchProfilerRPCs:
         def boom(_):
             raise RuntimeError("ray.get boom")
 
-        with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=boom):
+        with patch("skyrl.train.utils.deadline.ray.get", side_effect=boom):
             WorkerDispatch.start_profile(stub, "policy")
             WorkerDispatch.profile_step(stub, "policy")
             WorkerDispatch.stop_profile(stub, "policy")
             assert WorkerDispatch.dump_profiler_summary(stub, "policy") is None
+
+    def test_deadline_error_is_not_swallowed(self):
+        import pytest
+
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+        from skyrl.train.utils.deadline import StepTimeoutError
+
+        timeout = StepTimeoutError(3, "step", "profile_step", 1.0, 1.0)
+        stub = self._stub({"policy": self._fake_group([])})
+        with patch("skyrl.train.utils.deadline.ray_get", side_effect=timeout):
+            with pytest.raises(StepTimeoutError) as exc_info:
+                WorkerDispatch.profile_step(stub, "policy")
+        assert exc_info.value is timeout
 
 
 class TestTrainerProfilerHelpers:
@@ -535,7 +548,7 @@ class TestDispatchRaiseOnError:
 
         group = SimpleNamespace(async_run_ray_method=lambda *a, **k: ["x"])
         stub = SimpleNamespace(_actor_groups={"policy": group})
-        with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=boom):
+        with patch("skyrl.train.utils.deadline.ray.get", side_effect=boom):
             import pytest
 
             with pytest.raises(RuntimeError):
@@ -567,6 +580,6 @@ class TestDispatchRaiseOnError:
 
         stub = SimpleNamespace(_actor_groups={"policy": SimpleNamespace(async_run_ray_method=async_run_ray_method)})
         cfg = {"enable": True, "save_path": "/tmp/x"}
-        with patch("skyrl.backends.skyrl_train.workers.worker_dispatch.ray.get", side_effect=lambda x: x):
+        with patch("skyrl.train.utils.deadline.ray.get", side_effect=lambda x: x):
             WorkerDispatch.start_profile(stub, "policy", config=cfg)
         assert seen == [("start_profile", (cfg,))]

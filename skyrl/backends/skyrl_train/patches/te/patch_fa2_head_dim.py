@@ -1,10 +1,17 @@
-"""Backport of NVIDIA/TransformerEngine#3360 for transformer-engine 2.16.0.
+"""Backport of NVIDIA/TransformerEngine#3360 for transformer-engine 2.19.0.
 
-TE 2.16.0 gates FlashAttention 2 for ``head_dim > 192`` behind a compute
-capability allowlist of ``(8, 0), (9, 0), (10, 0), (12, 0)``. Upstream removed
-that allowlist in #2836, #2629 accidentally reintroduced it, and #3360 removes
-it again -- keeping only the real FA2 constraints (``head_dim <= 256`` and
-``head_dim % 8 == 0``).
+TE gates FlashAttention 2 for ``head_dim > 192`` behind a compute capability
+allowlist of ``(8, 0), (9, 0), (10, 0), (12, 0)``. Upstream removed that
+allowlist in #2836, #2629 accidentally reintroduced it, and #3360 removes it
+again -- keeping only the real FA2 constraints (``head_dim <= 256`` and
+``head_dim % 8 == 0``). **#3360 is still open and unmerged**, so the allowlist
+is present in every release through at least 2.19.0 and this backport is still
+required.
+
+The clause survived a rename: 2.16.0 spelled it ``head_dim_qk``, and 2.17.0
+onward spell it ``fa2_padded_head_dim = max(head_dim_qk, head_dim_v)``. Both
+forms are matched below, because matching only one silently no-ops -- which is
+exactly how the 2.16 -> 2.19 bump nearly shipped the gate back on.
 
 On an architecture outside the allowlist -- notably sm103 (B300/GB300) -- a
 head_dim of 256 (Gemma 2/3, for example) makes TE reject FA2. If cuDNN fused
@@ -23,36 +30,51 @@ module. Its only caller resolves it as a module attribute
 (``dpa_utils.get_attention_backend``), so the rebind is picked up.
 
 DELETE THIS PATCH once the transformer-engine pin moves to a release that
-contains #3360. This is a temporary backport of an upstream fix, not a SkyRL
-behavior change, and it has no reason to outlive the pin it works around.
-It fails safe in the meantime: the match below is against the literal 2.16.0
-source text, and TE expresses the same check against ``fa2_padded_head_dim``
-after the padding refactor, so on a newer TE this logs and no-ops rather than
-misfiring. That means a stale copy is quiet rather than harmful -- which also
-means nothing will alert you to remove it. Check this file when bumping TE.
+actually contains #3360. This is a temporary backport of an upstream fix, not a
+SkyRL behavior change, and it has no reason to outlive the pin it works around.
+
+Verifying that is a source check, not a PR-number check: upstream has already
+removed this clause once (#2836) and had it come back under a different variable
+name, so "the fix merged" and "the gate is gone from the release you pinned" are
+not the same claim. Grep the installed wheel::
+
+    python -c "import inspect; \
+from transformer_engine.pytorch.attention.dot_product_attention import utils as u; \
+print('device_compute_capability not in' in inspect.getsource(u.get_attention_backend))"
+
+If that prints False, delete this module. If it prints True, the gate is still
+there whatever the changelog says. ``verify_fa2_head_dim.py`` does the same check
+and then measures the effect on a real GPU.
 """
 
 import inspect
 
 from loguru import logger
 
-# The allowlist clause as it appears in TE 2.16.0. Newer TE expresses the same
-# check against `fa2_padded_head_dim`; this patch deliberately does not match
-# that form, so it no-ops instead of misfiring after a TE upgrade.
-_SM_ALLOWLIST_CLAUSE = """        and (
-            head_dim_qk > 256
-            or head_dim_qk % 8 != 0
+# The allowlist clause, keyed by the variable TE uses to express it. 2.16.x
+# spells it `head_dim_qk`; 2.17.0 through at least 2.19.0 spell it
+# `fa2_padded_head_dim` (= max(head_dim_qk, head_dim_v)). The clause is otherwise
+# identical, so both map onto the same rewrite: keep FA2's real limits (<= 256,
+# % 8 == 0) and drop the compute-capability allowlist.
+_CLAUSE_TEMPLATE = """        and (
+            {v} > 256
+            or {v} % 8 != 0
             or (
-                head_dim_qk > 192
+                {v} > 192
                 and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
             )
         )
 """
 
-_REPLACEMENT_CLAUSE = """        and (head_dim_qk > 256 or head_dim_qk % 8 != 0)
+_REPLACEMENT_TEMPLATE = """        and ({v} > 256 or {v} % 8 != 0)
 """
 
-# Architectures TE 2.16.0 already allows; on these the gate is dead code.
+# Ordered newest-spelling-first; only one will ever match a given TE.
+_CLAUSE_VARIANTS = tuple(
+    (_CLAUSE_TEMPLATE.format(v=v), _REPLACEMENT_TEMPLATE.format(v=v)) for v in ("fa2_padded_head_dim", "head_dim_qk")
+)
+
+# Architectures TE already allows; on these the gate is dead code.
 _UNAFFECTED_COMPUTE_CAPABILITIES = ((8, 0), (9, 0), (10, 0), (12, 0))
 
 _PATCHED_FLAG = "_skyrl_fa2_head_dim_patched"
@@ -62,7 +84,7 @@ def patch_fa2_head_dim_allowlist(force: bool = False) -> bool:
     """Remove TE's compute-capability gate on FlashAttention 2 for head_dim > 192.
 
     No-ops (returning False) when the current GPU is one TE already allows, when
-    TE is not importable, or when TE's source does not match the 2.16.0 form.
+    TE is not importable, or when TE's source matches none of the known forms.
     Pass ``force=True`` to patch regardless of the detected compute capability.
 
     Safe to call more than once; the second call is a no-op returning True.
@@ -108,17 +130,24 @@ def patch_fa2_head_dim_allowlist(force: bool = False) -> bool:
         logger.warning("Cannot read TE get_attention_backend source; skipping FA2 head_dim patch")
         return False
 
-    if _SM_ALLOWLIST_CLAUSE not in source:
-        # Most likely the TE pin moved past 2.16.0 and picked up #3360, in which
-        # case this whole module should be deleted rather than left to no-op.
-        logger.info(
-            "TE get_attention_backend does not contain the sm allowlist for head_dim > 192 "
-            "(likely fixed or refactored upstream); skipping FA2 head_dim patch. "
-            "If TE now includes NVIDIA/TransformerEngine#3360, delete this patch module."
+    match = next(((c, r) for c, r in _CLAUSE_VARIANTS if c in source), None)
+    if match is None:
+        # Either upstream finally removed the gate, or it was rewritten into a
+        # third form. Those need opposite responses -- delete this module vs. add
+        # a variant -- and only reading the source tells them apart, so say so
+        # loudly instead of implying the former.
+        still_gated = "device_compute_capability not in" in source
+        logger.warning(
+            "TE get_attention_backend matches none of the known head_dim allowlist forms "
+            "(an sm allowlist {} present in the source). If it is gone, delete this patch "
+            "module; if it is still there in a new spelling, add that spelling to "
+            "_CLAUSE_VARIANTS -- do not assume the former.",
+            "IS still" if still_gated else "is NOT",
         )
         return False
 
-    patched_source = source.replace(_SM_ALLOWLIST_CLAUSE, _REPLACEMENT_CLAUSE)
+    clause, replacement = match
+    patched_source = source.replace(clause, replacement)
     # Execute in TE's own module namespace so the recompiled function keeps the
     # live module globals it depends on, and so the rebind lands on the module.
     fn = getattr(dpa_utils, "__file__", None) or "<string>"

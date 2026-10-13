@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlparse
 
-from pydantic import Base64Bytes, BaseModel, Discriminator, Field
+from pydantic import Base64Bytes, BaseModel, ConfigDict, Discriminator, Field
 
 
 class RequestType(str, Enum):
@@ -166,6 +166,8 @@ class ForwardBackwardInput(BaseModel):
 
 
 class ForwardBackwardOutput(BaseModel):
+    model_config = ConfigDict(ser_json_inf_nan="strings")
+
     loss_fn_output_type: str
     loss_fn_outputs: list[dict]
     metrics: dict

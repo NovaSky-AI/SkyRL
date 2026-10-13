@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-ALEMBIC_CMD_PREFIX = ["uv", "run", "--extra", "dev"]
+ALEMBIC_CMD_PREFIX = ["uv", "run", "--isolated", "--extra", "tinker", "--extra", "dev"]
 
 
 def test_alembic_migration_generation():
@@ -44,7 +44,7 @@ def test_alembic_history():
 
     # Test: alembic history
     result = subprocess.run(
-        ["uv", "run", "alembic", "history"],
+        ALEMBIC_CMD_PREFIX + ["alembic", "history"],
         cwd=tinker_dir,
         capture_output=True,
         text=True,
