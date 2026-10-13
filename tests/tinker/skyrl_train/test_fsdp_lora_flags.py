@@ -178,8 +178,7 @@ def test_flags_select_which_modules_are_adapted(train_attn, train_mlp, expected,
             leaves = _adapter_leaf_names(sync_dir)
 
     assert leaves == expected, f"adapted {sorted(leaves)}, expected {sorted(expected)}"
-    # lm_head is never adapted: PEFT's "all-linear" excludes the output layer,
-    # which is why train_unembed is rejected rather than honoured here.
+    # PEFT's "all-linear" excludes the output layer, so lm_head is never adapted.
     assert "lm_head" not in leaves
 
 

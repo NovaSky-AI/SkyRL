@@ -188,8 +188,11 @@ def test_linear_experts_are_selected_as_mlp() -> None:
     assert resolved == MLP_NAMES
 
 
-def test_moe_router_is_never_adapted() -> None:
-    """The router selects experts; adapting it would perturb routing, not representations."""
+def test_router_beside_the_experts_is_in_neither_group() -> None:
+    """A router outside any `mlp` parent is unclassified, so narrowing leaves it out.
+
+    A router under an `mlp` parent would be classified as MLP, as `"all-linear"` would adapt it.
+    """
     model = _MoECausalLM()
     attn = resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=False)
     mlp = resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)

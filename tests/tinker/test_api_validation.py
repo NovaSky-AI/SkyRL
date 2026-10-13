@@ -184,9 +184,8 @@ class TestImageChunkBase64RoundTrip:
 class TestLoRAConfigFieldRoundTrip:
     """Every field the Tinker SDK sends must survive the wire -> internal hop.
 
-    Regression guard for https://github.com/NovaSky-AI/SkyRL/issues/1632: the wire
-    model is a plain ``BaseModel``, so an undeclared field is dropped by Pydantic's
-    default ``extra="ignore"`` and the client is never told.
+    The wire model is a plain ``BaseModel``, so Pydantic's default ``extra="ignore"`` drops an
+    undeclared field without telling the client.
     """
 
     def test_sdk_fields_are_declared(self):

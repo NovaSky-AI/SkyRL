@@ -66,7 +66,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     the per-tenant adapter machinery, which FSDP does not implement);
     full-parameter fine-tuning and FSDP always tear down on unload. Set to
     ``False`` to release all GPUs on the last unload (scale-to-zero) — also
-    the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
+    the escape hatch for changing the LoRA ``(rank, alpha, train_attn, train_mlp)`` signature, which
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
     runtime_role: Literal["trainer", "inference", "combined"] = "combined"

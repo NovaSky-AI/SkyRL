@@ -1439,9 +1439,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     return CreateModelResponse(
         model_id=model_id,
         base_model=request.base_model,
-        # Echo the resolved config, not the request: when the client omits `seed`
-        # the generated one is otherwise never visible, making the run impossible
-        # to reproduce.
+        # The resolved config, including the server-generated seed and train_unembed=False.
         lora_config=LoRAConfig.from_types(lora_config),
         status="created",
         request_id=str(request_id),

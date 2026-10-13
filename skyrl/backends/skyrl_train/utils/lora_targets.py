@@ -10,9 +10,8 @@ import torch.nn as nn
 from loguru import logger
 
 # Parent module names that identify which part of a transformer block a linear
-# layer belongs to. Mirrors the JAX backend's `filter_lora`
-# (skyrl/tx/utils/models.py), so both backends agree on what "attention" and
-# "MLP" mean for Tinker's train_attn / train_mlp flags.
+# layer belongs to, in Llama/Qwen-style naming. The JAX backend's `filter_lora`
+# (skyrl/tx/utils/models.py) uses the same names, except `linear_attn`.
 LORA_ATTN_PARENT_MODULES = frozenset({"self_attn", "linear_attn"})
 # `experts` matches only architectures exposing expert projections as nn.Linear;
 # current transformers fuses them into 3-D nn.Parameter tensors that PEFT cannot

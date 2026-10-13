@@ -51,11 +51,7 @@ def test_defaults_adapt_both_groups():
 
 
 def test_sdk_default_lora_config_is_accepted():
-    """The exact config `create_lora_training_client(rank=8)` produces must work.
-
-    Regression guard: an earlier revision rejected train_unembed=True, which is
-    the SDK default, and broke every caller that passed no flags at all.
-    """
+    """The config `create_lora_training_client(rank=8)` sends, train_unembed=True included, must build."""
     import tinker
 
     sdk_cfg = tinker.LoraConfig(rank=8)
