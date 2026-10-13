@@ -1477,14 +1477,34 @@ class TestMegatronRouterReplayValidation:
 
         validate_inference_engine_cfg(cfg)
 
-    @pytest.mark.parametrize("backend", ["mp", "ray"])
-    def test_routing_replay_refuses_inference_pipeline_parallelism(self, backend):
+    def test_routing_replay_allows_v2_inference_pipeline_parallelism(self, monkeypatch):
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
         cfg = self._cfg()
-        cfg.generator.inference_engine.distributed_executor_backend = backend
+        cfg.generator.inference_engine.distributed_executor_backend = "ray"
+        cfg.generator.inference_engine.pipeline_parallel_size = 2
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
+
+        validate_inference_engine_cfg(cfg)
+
+    def test_routing_replay_refuses_v1_inference_pipeline_parallelism(self, monkeypatch):
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+        cfg = self._cfg()
         cfg.generator.inference_engine.pipeline_parallel_size = 2
 
-        with pytest.raises(AssertionError, match="pipeline_parallel_size=1"):
+        with pytest.raises(AssertionError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
             validate_inference_engine_cfg(cfg)
+
+    def test_routing_replay_forwards_v2_selection_to_workers(self, monkeypatch):
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+        monkeypatch.setenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1")
+        monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+        cfg = self._cfg()
+        cfg.generator.inference_engine.pipeline_parallel_size = 2
+
+        env_vars = prepare_runtime_environment(cfg)
+
+        assert env_vars["VLLM_USE_V2_MODEL_RUNNER"] == "1"
+        assert env_vars["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] == "1"
 
 
 @pytest.mark.parametrize(
