@@ -277,6 +277,11 @@ version = {attr = "skyrl.__version__"}
 [project.scripts]
 # The following is for supporting the skyrl-train dependency
 
+[project.entry-points."vllm.general_plugins"]
+# Installs the R3 pipeline-parallel config patch in every vLLM process (incl. the engine core); no-op unless
+# SKYRL_R3_PP_RELAY=1 (set by the server actor for R3 with PP > 1).
+skyrl_r3_pp_relay = "skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay:vllm_general_plugin"
+
 [tool.uv]
 # Resolve only the Linux architectures covered by the CUDA wheels, plus the
 # supported macOS development target. CUDA-only extras cannot resolve on other

@@ -165,6 +165,14 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import 
 
 apply_routed_experts_rebind_patch()
 
+# R3 with inference PP > 1: relay each stage's routes to the next so the last stage returns every
+# layer (pass-through at PP=1; a no-op when vLLM relays natively).
+from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (  # noqa: E402
+    apply_pp_relay_worker_patch,
+)
+
+apply_pp_relay_worker_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
