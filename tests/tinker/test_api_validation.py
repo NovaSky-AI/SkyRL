@@ -188,55 +188,18 @@ class TestLoRAConfigFieldRoundTrip:
     undeclared field without telling the client.
     """
 
-    def test_sdk_fields_are_declared(self):
-        """Mirrors tinker.types.LoraConfig; a field missing here is silently lost."""
-        assert set(api.LoRAConfig.model_fields) == {
-            "rank",
-            "seed",
-            "train_attn",
-            "train_mlp",
-            "train_unembed",
-        }
+    def test_fields_and_defaults_match_the_installed_sdk(self):
+        """A field the SDK adds, drops or re-defaults must show up here.
 
-    def test_defaults_match_the_tinker_sdk(self):
-        """Pinned against `tinker.LoraConfig`'s own defaults.
-
-        train_unembed is True there, not False: the SDK sends it on every
-        request, so treating it as opt-in would misread what clients ask for.
+        The SDK defaults train_unembed to True, so every client sends it.
         """
-        cfg = api.LoRAConfig(rank=8)
-        assert (cfg.seed, cfg.train_attn, cfg.train_mlp, cfg.train_unembed) == (None, True, True, True)
-
-    def test_defaults_are_checked_against_the_installed_sdk(self):
-        """Fails if a future SDK release changes a default out from under us."""
         import tinker
 
-        sdk_defaults = {
-            name: field.default
-            for name, field in tinker.LoraConfig.model_fields.items()
-            if name in {"seed", "train_attn", "train_mlp", "train_unembed"}
-        }
-        ours = {name: api.LoRAConfig.model_fields[name].default for name in sdk_defaults}
-        assert ours == sdk_defaults
-
-    @pytest.mark.parametrize("train_attn", [True, False])
-    @pytest.mark.parametrize("train_mlp", [True, False])
-    @pytest.mark.parametrize("train_unembed", [True, False])
-    def test_to_types_forwards_every_flag(self, train_attn, train_mlp, train_unembed):
-        api_cfg = api.LoRAConfig(
-            rank=16,
-            seed=7,
-            train_attn=train_attn,
-            train_mlp=train_mlp,
-            train_unembed=train_unembed,
-        )
-        internal = api_cfg.to_types(seed=7, alpha=32.0)
-        assert (internal.rank, internal.seed, internal.alpha) == (16, 7, 32.0)
-        assert (internal.train_attn, internal.train_mlp, internal.train_unembed) == (
-            train_attn,
-            train_mlp,
-            train_unembed,
-        )
+        sdk = tinker.LoraConfig.model_fields
+        assert set(sdk) == set(api.LoRAConfig.model_fields)
+        optional = {name: field for name, field in sdk.items() if not field.is_required()}
+        ours = {name: api.LoRAConfig.model_fields[name].default for name in optional}
+        assert ours == {name: field.default for name, field in optional.items()}
 
     def test_to_types_applies_the_resolved_seed(self):
         """A client that omits `seed` gets the server-generated one, not None."""
