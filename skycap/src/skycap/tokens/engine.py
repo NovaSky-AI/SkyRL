@@ -32,6 +32,8 @@ class EngineOutput:
     routed_start: int = 0
     #: One support set per completion token.
     sampling_mask: list[list[int]] | None = None
+    #: The sampler's logprob of each id in ``sampling_mask``, row for row, when the wire returns them.
+    sampling_mask_logprobs: list[list[float]] | None = None
 
 
 class VLLMEngine:
