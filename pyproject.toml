@@ -28,6 +28,10 @@ dependencies = [
     "xxhash>=3.0.0",
 ]
 
+[project.entry-points."vllm.general_plugins"]
+# Apply the PP config runtime patch in spawned engine-core processes and workers.
+skyrl_routed_experts_pp = "skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp:apply_routed_experts_pp_patch"
+
 [project.optional-dependencies]
 gpu = [
     "jax[cuda13]>=0.7.2; sys_platform == 'linux'",

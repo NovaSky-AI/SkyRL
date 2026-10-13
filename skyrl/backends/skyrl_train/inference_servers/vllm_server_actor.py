@@ -715,6 +715,11 @@ async def _build_and_serve_vllm_server(
     app = build_app(cli_args)
 
     # Initialize the engine (this loads the model - takes time)
+    from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp import (
+        apply_routed_experts_pp_patch,
+    )
+
+    apply_routed_experts_pp_patch()
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
     # Standalone parsing can leave the CUDA worker class unresolved.
     if engine_args.worker_cls == "auto":

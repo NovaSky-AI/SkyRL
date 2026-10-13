@@ -791,16 +791,10 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     if ie_cfg.enable_return_routed_experts:
-        # vLLM captures routes per worker, into a buffer covering only that worker's layers, and
-        # only the last pipeline stage returns model output. With inference PP > 1 the routes of
-        # every earlier stage's MoE layers are silently dropped (left as expert 0). This holds for
-        # both executor backends. The ray backend itself is fine: vLLM copies the routed-expert
-        # arrays out of Ray's shared-memory channel before the next read (v1/executor/ray_utils.py).
-        assert ie_cfg.pipeline_parallel_size == 1, (
-            "rollout router replay (r3) requires generator.inference_engine.pipeline_parallel_size=1: "
-            "vLLM returns routed experts only from the last pipeline stage, so earlier stages' routes "
-            "would be lost. Scale the inference engine with tensor/expert parallelism instead."
-        )
+        if ie_cfg.pipeline_parallel_size > 1:
+            assert os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "1") == "1", (
+                "rollout router replay (r3) with inference pipeline parallelism requires " "VLLM_USE_V2_MODEL_RUNNER=1"
+            )
         assert (
             cfg.trainer.strategy == "megatron"
         ), "rollout router replay (r3) is only supported with Megatron training backend"
@@ -1016,6 +1010,18 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
                 f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
             )
             env_vars["RAY_CGRAPH_get_timeout"] = os.environ["RAY_CGRAPH_get_timeout"]
+
+        for var_name in (
+            "VLLM_USE_V2_MODEL_RUNNER",
+            "VLLM_USE_RAY_V2_EXECUTOR_BACKEND",
+        ):
+            if var_name in os.environ:
+                env_vars[var_name] = os.environ[var_name]
+        if (
+            cfg.generator.inference_engine.enable_return_routed_experts
+            and cfg.generator.inference_engine.pipeline_parallel_size > 1
+        ):
+            env_vars["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []

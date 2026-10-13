@@ -156,6 +156,12 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import 
 
 apply_routed_experts_rebind_patch()
 
+from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp import (  # noqa: E402
+    apply_routed_experts_pp_patch,
+)
+
+apply_routed_experts_pp_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
