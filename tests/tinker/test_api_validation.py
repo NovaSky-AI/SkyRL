@@ -260,22 +260,21 @@ class TestLoRAConfigFieldRoundTrip:
 class TestSupportedLoraConfig:
     """What the API stores, sends to the engine and echoes is what the backend builds."""
 
-    @pytest.mark.parametrize("backend", ["fsdp", "megatron"])
-    def test_train_unembed_is_dropped_on_skyrl_train(self, backend):
+    def test_train_unembed_is_dropped(self):
         with mock.patch.object(api, "logger") as log:
-            lora = api._supported_lora_config(api.LoRAConfig(rank=8), backend)
+            lora = api._supported_lora_config(api.LoRAConfig(rank=8))
         assert (lora.train_attn, lora.train_mlp, lora.train_unembed) == (True, True, False)
         log.warning.assert_called_once()
 
-    def test_train_unembed_passes_through_on_jax(self):
+    def test_no_warning_when_not_requested(self):
         with mock.patch.object(api, "logger") as log:
-            lora = api._supported_lora_config(api.LoRAConfig(rank=8), "jax")
-        assert lora.train_unembed is True
+            lora = api._supported_lora_config(api.LoRAConfig(rank=8, train_unembed=False))
+        assert lora.train_unembed is False
         log.warning.assert_not_called()
 
     def test_warning_names_only_the_adapted_groups(self):
         with mock.patch.object(api, "logger") as log:
-            api._supported_lora_config(api.LoRAConfig(rank=8, train_mlp=False), "fsdp")
+            api._supported_lora_config(api.LoRAConfig(rank=8, train_mlp=False))
         message = log.warning.call_args.args[0]
         assert "covers the attention projections only" in message
         assert "MLP" not in message

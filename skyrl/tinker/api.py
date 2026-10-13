@@ -574,16 +574,15 @@ class LoRAConfig(BaseModel):
         )
 
 
-def _supported_lora_config(lora: LoRAConfig, backend: str) -> LoRAConfig:
-    """Drop what ``backend`` cannot apply, so the stored and echoed config match the adapter."""
-    if not (lora.train_unembed and backend in ("fsdp", "megatron")):
+def _supported_lora_config(lora: LoRAConfig) -> LoRAConfig:
+    """Drop what no backend applies, so the stored and echoed config match the adapter."""
+    if not lora.train_unembed:
         return lora
     # Warn rather than reject: the SDK sends train_unembed=True by default.
     covered = " and ".join(name for name, on in (("attention", lora.train_attn), ("MLP", lora.train_mlp)) if on)
     logger.warning(
-        f"`train_unembed=True` is not supported by the {backend} backend and is ignored"
-        + (f"; the adapter covers the {covered} projections only" if covered else "")
-        + ". Use `--backend jax` for unembedding support."
+        "`train_unembed=True` is not supported and is ignored"
+        + (f"; the adapter covers the {covered} projections only." if covered else ".")
     )
     return lora.model_copy(update={"train_unembed": False})
 
@@ -1381,7 +1380,7 @@ async def get_sampler(sampler_id: str, session: AsyncSession = Depends(get_sessi
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
-async def create_model(request: CreateModelRequest, req: Request, session: AsyncSession = Depends(get_session)):
+async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
     """Create a new model, optionally with a LoRA adapter."""
     # Validate session exists
     session_db = await session.get(SessionDB, request.session_id)
@@ -1393,7 +1392,7 @@ async def create_model(request: CreateModelRequest, req: Request, session: Async
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
     # Generate a random seed if not provided
     seed = request.lora_config.seed if request.lora_config.seed is not None else random.randint(0, 2**31 - 1)
-    lora = _supported_lora_config(request.lora_config, req.app.state.engine_config.backend)
+    lora = _supported_lora_config(request.lora_config)
     lora_config = lora.to_types(seed=seed, alpha=32.0)
     request_id = await create_future(
         session=session,
