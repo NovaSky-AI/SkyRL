@@ -171,8 +171,9 @@ def test_model_without_the_requested_group_is_rejected() -> None:
             super().__init__()
             self.self_attn = _Attn()
 
-    with pytest.raises(ValueError, match="No mlp linear layers found"):
+    with pytest.raises(ValueError, match="No mlp linear layers found") as exc:
         resolve_lora_target_modules(_NoMlp(), "all-linear", train_attn=False, train_mlp=True)
+    assert "target_modules" in str(exc.value)
 
 
 def test_linear_experts_are_selected_as_mlp() -> None:

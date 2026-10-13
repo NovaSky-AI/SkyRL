@@ -119,7 +119,9 @@ def resolve_lora_target_modules(
         expected = LORA_ATTN_PARENT_MODULES if wanted == "attn" else LORA_MLP_PARENT_MODULES
         raise ValueError(
             f"No {wanted} linear layers found for LoRA on {type(model).__name__}. Expected module "
-            f"paths containing one of {sorted(expected)}."
+            f"paths containing one of {sorted(expected)}, which this architecture does not use. "
+            f"Set `train_attn` and `train_mlp` to True and name the modules to adapt in "
+            f"`trainer.policy.model.lora.target_modules` instead."
         )
     logger.info(f"LoRA restricted to {wanted} modules: {names}")
     return names
