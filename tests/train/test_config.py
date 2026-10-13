@@ -1384,6 +1384,50 @@ class TestDeltaWeightSyncConfig:
         assert "my_sync_dir" in cfg.local_checkpoint_dir
 
 
+def _scale_moe_lora_rank_cfg():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.model.lora.rank = 64
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
+    cfg.generator.inference_engine.scale_moe_lora_rank = True
+    return cfg
+
+
+def test_scale_moe_lora_rank_accepts_megatron_normalized_adapters():
+    validate_inference_engine_cfg(_scale_moe_lora_rank_cfg())
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("strategy", "fsdp", "requires trainer.strategy='megatron'"),
+        ("merge_lora", True, "requires trainer.strategy='megatron'"),
+        ("rank", 0, "requires trainer.strategy='megatron'"),
+        ("normalize_moe_lora", False, "requires megatron_config.lora_config.normalize_moe_lora=true"),
+    ],
+)
+def test_scale_moe_lora_rank_rejects_unsupported_settings(field, value, match):
+    cfg = _scale_moe_lora_rank_cfg()
+    target = {
+        "strategy": cfg.trainer,
+        "merge_lora": cfg.trainer.policy.megatron_config.lora_config,
+        "rank": cfg.trainer.policy.model.lora,
+        "normalize_moe_lora": cfg.trainer.policy.megatron_config.lora_config,
+    }[field]
+    setattr(target, field, value)
+    with pytest.raises(ValueError, match=match):
+        validate_inference_engine_cfg(cfg)
+
+
+@pytest.mark.parametrize("kwargs_name", ["engine_init_kwargs", "prefill_init_kwargs", "decode_init_kwargs"])
+def test_max_expert_lora_rank_is_not_a_user_engine_kwarg(kwargs_name):
+    cfg = _make_validated_test_config()
+    setattr(cfg.generator.inference_engine, kwargs_name, {"additional_config": {"max_expert_lora_rank": 8}})
+    with pytest.raises(ValueError, match="use generator.inference_engine.scale_moe_lora_rank=true"):
+        validate_inference_engine_cfg(cfg)
+
+
 def _memory_lora_megatron_cfg():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"

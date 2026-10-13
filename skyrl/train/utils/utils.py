@@ -744,6 +744,26 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
 
+    if ie_cfg.scale_moe_lora_rank:
+        megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
+        if cfg.trainer.strategy != "megatron" or lora_cfg.rank <= 0 or megatron_lora_cfg.merge_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires trainer.strategy='megatron', "
+                "lora.rank > 0 and megatron_config.lora_config.merge_lora=false"
+            )
+        if not megatron_lora_cfg.normalize_moe_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires "
+                "megatron_config.lora_config.normalize_moe_lora=true: otherwise the experts train at lora.rank"
+            )
+    for kwargs_name in ("engine_init_kwargs", "prefill_init_kwargs", "decode_init_kwargs"):
+        additional_config = (getattr(ie_cfg, kwargs_name) or {}).get("additional_config") or {}
+        if "max_expert_lora_rank" in additional_config:
+            raise ValueError(
+                f"generator.inference_engine.{kwargs_name}.additional_config.max_expert_lora_rank is set by "
+                "SkyRL; use generator.inference_engine.scale_moe_lora_rank=true instead"
+            )
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (

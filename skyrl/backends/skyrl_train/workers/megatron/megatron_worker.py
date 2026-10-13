@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
     fold_lora_alpha_for_vllm,
     fold_lora_rank_scale_for_vllm,
     mark_alpha_folded,
+    normalized_moe_expert_lora_rank,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
@@ -456,7 +457,7 @@ class MegatronWorker:
                 f"normalize_moe_lora requires lora.rank divisible by moe_router_topk; "
                 f"got rank={lora_config.rank}, topk={topk}"
             )
-            expert_rank = -(-(lora_config.rank // topk) // etp) * etp
+            expert_rank = normalized_moe_expert_lora_rank(lora_config.rank, topk, etp)
             assert expert_rank <= lora_config.rank, (
                 f"normalize_moe_lora: expert rank {lora_config.rank // topk} (rank {lora_config.rank} // topk "
                 f"{topk}) rounds up to {expert_rank} for expert_tensor_parallel_size={etp}, exceeding the "
