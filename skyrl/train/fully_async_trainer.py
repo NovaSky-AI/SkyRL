@@ -399,7 +399,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert optimizes_against_rollout, (
             f"Found trainer.algorithm.policy_loss_type={loss_type} in "
             f"{sorted([loss.value for loss in LOSSES_WITH_OLD_LOGPROBS])}. Fully async training should use "
-            "rollout logprobs (i.e. rollout_is, dppo, or cispo with cispo.cispo_anchor='rollout') instead "
+            "rollout logprobs (i.e. rollout_is, dppo, reinforce, or cispo with cispo.cispo_anchor='rollout') instead "
             "of recomputing logprobs, since stale policies are not kept for logprob computation."
         )
 
@@ -1074,6 +1074,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             step_wise=self.cfg.generator.step_wise_trajectories,
             routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
             support_expected=self.cfg.trainer.algorithm.enable_sample_support_replay,
+            support_scores_expected=self.cfg.trainer.algorithm.enable_score_centering,
         )
         kept_rollout_metrics = generator_output["rollout_metrics"]
         assert kept_rollout_metrics is not None, "Rollout metrics should be non-null."

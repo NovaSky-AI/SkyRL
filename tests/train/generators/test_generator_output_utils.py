@@ -649,6 +649,33 @@ class TestMergeStepwiseOutput:
         assert support.top_k == 3
         assert support.token_ids.dtype == SAMPLE_SUPPORT_DTYPE
 
+    def test_sampler_member_logprobs_follow_their_members_through_the_merge(self):
+        tid = _make_tid("scored")
+        gen_out: GeneratorOutput = {
+            "prompt_token_ids": [[10], [10, 20, 30]],
+            "response_ids": [[20], [40, 41]],
+            "rewards": [[1.0], [0.0, 5.0]],
+            "loss_masks": [[1], [1, 1]],
+            "stop_reasons": ["continue", "eos"],
+            "rollout_metrics": None,
+            "rollout_logprobs": None,
+            "rollout_sample_support": [
+                csr([[20, 21, -1]], [[-0.1, -2.0, 0.0]]),
+                csr([[40, 44, -1], [41, 45, 46]], [[-0.2, -1.5, 0.0], [-0.3, -1.0, -3.0]]),
+            ],
+            "trajectory_ids": [tid, tid],
+            "rollout_expert_indices": None,
+            "is_last_step": [False, True],
+        }
+
+        merged = merge_stepwise_output(gen_out)
+
+        support = merged["rollout_sample_support"][0]
+        assert support.row_lengths.tolist() == [2, 0, 2, 3]
+        np.testing.assert_array_equal(
+            support.logprobs, np.array([-0.1, -2.0, -0.2, -1.5, -0.3, -1.0, -3.0], dtype=np.float32)
+        )
+
     def test_native_output_carrying_dict_valued_time_splits(self):
         tid = _make_tid("timed")
         gen_out: GeneratorOutput = {
