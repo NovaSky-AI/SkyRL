@@ -57,7 +57,12 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
 )
 from skyrl.backends.skyrl_train.training_batch import (
     PACKED_BATCH_FIELD_TYPES,
+    REAL_SAMPLE_MASK,
     TensorList,
+)
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MINIBATCH_LOSS_NORMALIZATION,
+    MinibatchLossNormalization,
 )
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
@@ -764,11 +769,7 @@ class MegatronModelWrapper:
             rollout_action_logprobs = data["rollout_action_logprobs"]
             response_mask = data.get("response_mask")
             num_microbatches = data.get("num_microbatches")
-            # Number of microbatches carrying real samples (excludes fully-padding
-            # microbatches added by token-based batching). Used to normalize the
-            # KL/entropy terms over real microbatches only. Falls back to
-            # num_microbatches when not provided (no padding microbatches).
-            num_real_microbatches = data.get("num_real_microbatches", num_microbatches)
+            normalization: MinibatchLossNormalization = data[MINIBATCH_LOSS_NORMALIZATION]
 
             sparse_active_mask = None
             if self._fused_lm_head_block_sparse:
@@ -787,9 +788,8 @@ class MegatronModelWrapper:
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
-            # The policy loss is already normalized through the pre-scaled advantages (#1296), so the
-            # intended gradient is the sum of every microbatch's policy loss over all DP x CP ranks;
-            # KL / entropy / MTP terms are per-microbatch means averaged over DP and real microbatches.
+            # Policy, KL, entropy and MTP losses are normalized over the optimizer step, so
+            # undo Megatron's gradient averaging to sum their contributions across microbatches.
             if per_token_loss:
                 # calculate_per_token_loss: the schedule leaves a 3-tuple loss unscaled, DDP sums over
                 # DP x CP, and this call's gradients are divided by its global token count
@@ -798,7 +798,6 @@ class MegatronModelWrapper:
                 # Forward-only loss passes have no gradient sync, so the counts default there.
                 num_tokens_global = data.get("num_tokens_global", 1)
                 grad_sum_correction_factor = num_tokens_global
-                kl_entropy_microbatch_scale = num_tokens_global / (dp_size * max(1, num_real_microbatches))
             else:
                 # Default: Megatron divides loss by num_microbatches
                 # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248)
@@ -808,12 +807,6 @@ class MegatronModelWrapper:
                 # (https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285)
                 # so we multiply by both factors to recover the correct sum reduction.
                 grad_sum_correction_factor = num_microbatches * dp_size
-                # Megatron divides by num_microbatches (which includes fully-padding microbatches
-                # added by token-based batching). Those padding microbatches contribute 0 to
-                # KL/entropy, so dividing by the full count would dilute the regularization by
-                # num_real/num_total. Scale up by num_microbatches/num_real_microbatches so the
-                # terms are averaged over real microbatches only (no-op when there is no padding).
-                kl_entropy_microbatch_scale = num_microbatches / max(1, num_real_microbatches)
 
             def loss_output(loss, metrics):
                 if per_token_loss:
@@ -972,8 +965,7 @@ class MegatronModelWrapper:
 
             # Decoupled MTP / draft loss: soft-CE distillation of the detached-input MTP head against
             # the policy's own next-token distribution (full-vocab, or top-k when mtp_loss_topk is
-            # set). The local masked-mean scalar is folded into the loss below like the KL/entropy
-            # aux terms.
+            # set). Each depth's masked sum is normalized over the whole optimizer step, like entropy.
             draft_loss = None
             student_logits_list = data.get("mtp_student_logits")
             if mtp_enabled and student_logits_list:
@@ -982,7 +974,9 @@ class MegatronModelWrapper:
                 # MTP roll/mask respect sub-sequence boundaries (see shift_mask_for_mtp). Otherwise the
                 # [batch, seq] attention mask aligns with the de-padded logits.
                 packed = packed_seq_params is not None
-                draft_mask = (data["mtp_packed_mask"] if packed else data["attention_mask"]).to(logits.dtype)
+                draft_mask = (
+                    data["mtp_packed_mask"] if packed else data["attention_mask"] & data[REAL_SAMPLE_MASK][:, None]
+                ).to(logits.dtype)
                 mtp_cu_seqlens = packed_seq_params.cu_seqlens_q_padded if packed else None
                 vocab_size_tp = logits.shape[-1]
                 # Undo the in-place temperature scaling so the teacher is the true policy distribution.
@@ -1002,6 +996,9 @@ class MegatronModelWrapper:
                     if true_shard_width != vocab_size_tp:
                         student_logits = student_logits[..., :true_shard_width]
                     layer_mask = shift_mask_for_mtp(draft_mask, layer_idx, cu_seqlens=mtp_cu_seqlens)
+                    num_layer_tokens = torch.tensor(
+                        normalization.num_mtp_tokens(layer_idx + 1), dtype=torch.float32, device=layer_mask.device
+                    )
                     if mtp_loss_topk:
                         # Top-k draft loss: O(seq*k) memory, no full-vocab softmax. Pass the un-rolled
                         # policy logits + roll_shift so top-k runs on them directly and only the small
@@ -1014,6 +1011,7 @@ class MegatronModelWrapper:
                                 k=mtp_loss_topk,
                                 vocab_parallel_group=tp_grp,
                                 roll_shift=layer_idx + 1,
+                                global_normalization_factor=num_layer_tokens,
                             )
                         )
                     else:
@@ -1025,6 +1023,7 @@ class MegatronModelWrapper:
                                 layer_mask,
                                 vocab_parallel_group=tp_grp,
                                 chunk_size=mtp_loss_chunk_size,
+                                global_normalization_factor=num_layer_tokens,
                             )
                         )
                 draft_loss = torch.stack(per_layer_losses).mean()
@@ -1039,9 +1038,8 @@ class MegatronModelWrapper:
                 # Policy loss masks are pre-scaled to achieve the correct reduction
                 # when summing across the entire minibatch (see `DefaultCollator`).
                 loss = policy_loss * grad_sum_correction_factor
-                # Fold the per-token-mean MTP/draft loss in with the same micro-batch correction as the RL path.
                 if draft_loss is not None:
-                    loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
+                    loss = loss + mtp_loss_weight * draft_loss * grad_sum_correction_factor
                 unscaled_loss = policy_loss
 
                 # Only build per-token outputs for callers that consume them.
@@ -1124,6 +1122,8 @@ class MegatronModelWrapper:
                     entropy = masked_mean(entropy_BS, loss_mask)
                     entropy_for_loss = entropy
 
+            entropy = normalization.token_mean_contribution(entropy, loss_mask)
+            entropy_for_loss = normalization.token_mean_contribution(entropy_for_loss, loss_mask)
             if loss_config.use_entropy_loss:
                 entropy_loss_term = entropy_for_loss * loss_config.entropy_loss_coef
             else:
@@ -1136,25 +1136,18 @@ class MegatronModelWrapper:
                     loss_mask=loss_mask,
                     kl_estimator_type=loss_config.kl_estimator_type,
                 )
-                kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
+                kl_loss = normalization.sequence_mean_contribution(
+                    masked_mean(kl_loss, loss_mask, dim=-1), data[REAL_SAMPLE_MASK]
+                )
             else:
                 kl_loss = torch.tensor(0.0, device=logits.device)
             kl_loss_term = kl_loss * loss_config.kl_loss_coef
 
             # Policy losses are pre-scaled to achieve the correct loss_reduction
             # when summing across the entire minibatch (see `apply_loss_reduction_to_advantages_minibatch`).
-            # NOTE: The KL and entropy loss terms are not pre-scaled,
-            # so we just average them across microbatches and DP workers.
-            loss = (
-                policy_loss * grad_sum_correction_factor
-                + (kl_loss_term - entropy_loss_term) * kl_entropy_microbatch_scale
-            )
-            # The decoupled MTP/draft loss is a per-token mean (like KL/entropy), so fold it in with
-            # the same micro-batch correction. Its gradient only reaches the MTP-head parameters: the
-            # trunk hidden states, the re-embedding, the output weight and the teacher distribution
-            # are all detached.
+            loss = (policy_loss + kl_loss_term - entropy_loss_term) * grad_sum_correction_factor
             if draft_loss is not None:
-                loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
+                loss = loss + mtp_loss_weight * draft_loss * grad_sum_correction_factor
             unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
@@ -1388,8 +1381,12 @@ class MegatronModelWrapper:
                 student_logits = project_mtp_hidden_to_logits(student_hidden, student_model)
                 if self.remove_microbatch_padding:
                     batch["mtp_student_logits"] = student_logits
+                    real_token_mask = (
+                        attention_mask.to(dtype=torch.bool)
+                        & batch[REAL_SAMPLE_MASK].to(device=attention_mask.device, dtype=torch.bool)[:, None]
+                    )
                     batch["mtp_packed_mask"] = _pack_sequence_values(
-                        attention_mask.to(dtype=torch.float32),
+                        real_token_mask.to(dtype=torch.float32),
                         attention_mask,
                         packed_seq_params,
                         sub_seq_lengths=sub_seq_lengths,

@@ -9,6 +9,10 @@ import numpy as np
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MinibatchLossNormalization,
+)
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     AdaptiveKLController,
     AdvantageEstimatorRegistry,
@@ -711,6 +715,40 @@ class TestApplyLossReductionToAdvantagesMinibatch:
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(4.25))
+
+    @pytest.mark.parametrize(
+        "loss_reduction", ["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "prompt_mean"]
+    )
+    def test_chunks_with_the_step_normalization_sum_to_the_whole(self, loss_reduction):
+        """Chunks of a mini-batch scaled with its normalization give the whole mini-batch's loss."""
+        advantages = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]])
+        whole = TrainingInputBatch(
+            {"sequences": torch.zeros(4, 3), "loss_mask": loss_mask, "attention_mask": torch.ones(4, 3)}
+        )
+        kwargs = dict(loss_reduction=loss_reduction, micro_batch_size=1, max_seq_len=2)
+        expected = reduce_loss(
+            apply_loss_reduction_to_advantages_minibatch(
+                advantages, loss_mask, prompt_boundaries=[(0, 2), (2, 4)], **kwargs
+            ),
+            loss_mask,
+        )
+        normalization = MinibatchLossNormalization.from_batch(whole)
+        actual = sum(
+            reduce_loss(
+                apply_loss_reduction_to_advantages_minibatch(
+                    advantages[start:end],
+                    loss_mask[start:end],
+                    prompt_boundaries=[(0, 2)],
+                    normalization=normalization,
+                    num_prompts=2,
+                    **kwargs,
+                ),
+                loss_mask[start:end],
+            )
+            for start, end in [(0, 2), (2, 4)]
+        )
+        torch.testing.assert_close(actual, expected)
 
     def test_prompt_mean_requires_boundaries(self):
         """prompt_mean without prompt_boundaries should raise ValueError."""

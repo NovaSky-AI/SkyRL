@@ -70,6 +70,22 @@ def get_fsdp_test_config() -> SkyRLTrainConfig:
     return cfg
 
 
+def _make_regularized_batch(seq_lens):
+    batch = _make_variable_length_batch(seq_lens)
+    # Put response targets in the shared trailing response window.
+    for row, length in enumerate(seq_lens):
+        tokens = batch["sequences"][row, :length].clone()
+        batch["sequences"][row].zero_()
+        batch["sequences"][row, -length:] = tokens
+        batch["attention_mask"][row].zero_()
+        batch["attention_mask"][row, -length:] = 1
+        batch["loss_mask"][row, : row % 4] = 0
+    # A filtered trajectory must remain in the KL sequence denominator.
+    batch["loss_mask"][-1].zero_()
+    batch.metadata["global_step"] = 0
+    return batch
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("worker_type", ["policy"])
 async def test_fsdp_token_based_forward_backward(ray_init_fixture, worker_type):
@@ -368,25 +384,26 @@ async def test_megatron_token_based_forward(ray_init_fixture):
 @pytest.mark.megatron
 @pytest.mark.parametrize("remove_microbatch_padding", [True, False])
 @pytest.mark.parametrize(
-    "tp, pp, gpus, seq_lens, max_tokens",
+    "tp, pp, cp, gpus, seq_lens, max_tokens",
     [
         # DP=1 (PP=2): varied/odd lengths so token-based packing yields uneven
         # microbatch sizes (the longest and an unpaired short each land alone and
         # get a dummy-padded partner). Odd lengths (31, 21) keep the packed/THD
         # fp noise visible. No padding *microbatches* here (DP=1).
-        (2, 2, 4, [50, 40, 31, 30, 20, 21, 10, 10], 55),
+        (2, 2, 1, 4, [50, 40, 31, 30, 20, 21, 10, 10], 55),
         # DP=2 (PP=1): exercises the padding-*microbatch* path. Mesh dispatch
         # chunks the batch into two contiguous halves, so with max_tokens=30:
         #   rank0 = [30,30,30,30] -> 4 microbatches
         #   rank1 = [15,15,15,15] -> 2 microbatches (+2 padding microbatches)
         # Padding microbatches only appear when DP ranks bin-pack into different
         # microbatch counts, i.e. DP > 1.
-        (2, 1, 4, [30, 30, 30, 30, 15, 15, 15, 15], 30),
+        (2, 1, 1, 4, [30, 30, 30, 30, 15, 15, 15, 15], 30),
+        (1, 1, 2, 4, [30, 30, 30, 30, 15, 15, 15, 15], 30),
     ],
-    ids=["dp1_pp2", "dp2_pp1_padding_microbatch"],
+    ids=["dp1_pp2", "dp2_pp1_padding_microbatch", "dp2_cp2"],
 )
 async def test_megatron_token_based_loss_equivalence(
-    ray_init_fixture, tp, pp, gpus, seq_lens, max_tokens, remove_microbatch_padding
+    ray_init_fixture, tp, pp, cp, gpus, seq_lens, max_tokens, remove_microbatch_padding
 ):
     """
     Test that the policy loss from forward_backward matches between sample-based
@@ -398,36 +415,58 @@ async def test_megatron_token_based_loss_equivalence(
 
     Parametrized over two axes:
 
-    - ``remove_microbatch_padding`` covers both forward paths. Token-based batching
-      pads uneven microbatches with dummy (single-token) rows, and (at DP>1) appends
-      loss-neutral padding microbatches; both are held to different tolerances:
-
-      * dense (``False``): each row is attended independently at full width, so
-        real-sample logits are bitwise-stable regardless of dummy rows / grouping.
-        We expect ~exact equivalence (``1e-6``).
-      * packed/THD (``True``): dummy rows pack as length-1 segments, shifting the
-        ``cu_seqlens`` layout vs the sample-based grouping. Block-diagonal attention
-        keeps this mathematically equivalent, but the varlen kernel's fp reduction
-        order shifts, giving ~1e-4 noise. Held to ``1e-3``.
+    - Packed/THD execution uses BF16, required by FlashAttention. Dense controls
+      use FP32 to isolate reduction invariance from BF16 rounding when trimming
+      changes GEMM shapes. Compare gradients directly before optimizer clipping;
+      post-update logprobs can amplify BF16 noise through Adam and inference.
 
     - topology covers ``DP=1`` (PP=2) and ``DP=2`` (PP=1). The DP=2 case is the
       regression guard for padding microbatches (only emitted when DP ranks
       bin-pack into different microbatch counts).
     """
+    from tests.backends.skyrl_train.gpu.megatron_packing_worker import (
+        PackingParityWorker,
+    )
     from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
+
+    if cp > 1 and not remove_microbatch_padding:
+        pytest.skip("Context parallelism requires padding removal")
+
+    dp_size = gpus // (tp * pp * cp)
+
+    def evaluate_updates(actor_group, batch):
+        # One trajectory per DP rank gives the same inference layout for both
+        # batching settings, without changing either worker's configuration.
+        rows = []
+        for start in range(0, len(seq_lens), dp_size):
+            results = ray.get(
+                actor_group.async_run_ray_method("mesh", "forward", data=batch.slice(start, start + dp_size))
+            )
+            rows.extend(WorkerOutput.cat(actor_group.actor_infos, results).loss_fn_outputs)
+        return rows
 
     def _make_cfg(max_tokens_per_microbatch):
         cfg = _get_megatron_test_config(tp=tp, pp=pp, gpus=gpus)
         cfg.trainer.max_tokens_per_microbatch = max_tokens_per_microbatch
         cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
+        if not remove_microbatch_padding:
+            cfg.trainer.bf16 = False
+            cfg.trainer.flash_attn = False
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(
+                attention_backend="unfused", bf16=False, fp16=False, params_dtype=torch.float32
+            )
+            cfg.trainer.policy.megatron_config.optimizer_config_kwargs.update(bf16=False, params_dtype="float32")
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
         cfg.trainer.train_batch_size = len(seq_lens)
         cfg.trainer.policy_mini_batch_size = len(seq_lens)
-        cfg.trainer.algorithm.use_kl_loss = False
+        cfg.trainer.algorithm.use_kl_loss = True
+        cfg.trainer.algorithm.kl_loss_coef = 0.1
+        cfg.trainer.algorithm.use_entropy_loss = True
+        cfg.trainer.algorithm.entropy_loss_coef = 0.01
         return cfg
 
     # Run 1: sample-based baseline
-    batch = _make_variable_length_batch(seq_lens, num_actions=4)
-    batch.metadata["global_step"] = 0
+    batch = _make_regularized_batch(seq_lens)
     cfg_baseline = _make_cfg(max_tokens_per_microbatch=-1)
     actor_group = init_worker_with_type(
         "policy",
@@ -435,16 +474,20 @@ async def test_megatron_token_based_loss_equivalence(
         colocate_all=False,
         num_gpus_per_node=cfg_baseline.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg_baseline,
+        worker_cls=PackingParityWorker,
     )
+    initial_baseline = evaluate_updates(actor_group, batch)
     results_baseline = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
+    gradients_baseline = ray.get(actor_group.async_run_ray_method("pass_through", "gradient_samples"))
+    grad_norm_baseline = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    updated_baseline = evaluate_updates(actor_group, batch)
 
     ray.shutdown()
     ray_init_for_tests()
 
     # Run 2: token-based (packs short seqs together; long/unpaired seqs get their
     # own dummy-padded microbatch, and at DP>1 short ranks get padding microbatches)
-    batch = _make_variable_length_batch(seq_lens, num_actions=4)
-    batch.metadata["global_step"] = 0
+    batch = _make_regularized_batch(seq_lens)
     cfg_token = _make_cfg(max_tokens_per_microbatch=max_tokens)
     actor_group = init_worker_with_type(
         "policy",
@@ -452,12 +495,16 @@ async def test_megatron_token_based_loss_equivalence(
         colocate_all=False,
         num_gpus_per_node=cfg_token.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg_token,
+        worker_cls=PackingParityWorker,
     )
+    initial_token = evaluate_updates(actor_group, batch)
     results_token = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
+    gradients_token = ray.get(actor_group.async_run_ray_method("pass_through", "gradient_samples"))
+    grad_norm_token = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    updated_token = evaluate_updates(actor_group, batch)
 
     # Token-based batching exposes microbatch-count diagnostics. They are gated on
     # max_tokens_per_microbatch > 0, so the sample-based baseline must not have them.
-    dp_size = gpus // (tp * pp)
     for r in results_baseline:
         assert "num_microbatches" not in r.metrics
         assert "num_padding_microbatches" not in r.metrics
@@ -478,19 +525,42 @@ async def test_megatron_token_based_loss_equivalence(
         f"num_padding_microbatches={results_token[0].metrics['num_padding_microbatches']}"
     )
 
-    # Dense attention is bitwise-stable across groupings; packed/THD has
-    # ~1e-4 varlen-kernel fp noise from the shifted cu_seqlens layout.
-    tol = 1e-3 if remove_microbatch_padding else 1e-6
-    # Also check clip_ratio: its magnitude is small, so it's a sensitive probe for
-    # padding microbatches leaking into the metrics.
-    metric_keys = ["policy_loss", "loss_metrics/clip_ratio"]
-    print(f"\nMegatron loss equivalence (remove_microbatch_padding={remove_microbatch_padding}, tol={tol}):")
+    # Packed execution uses BF16; changing kernel shapes introduces rounding.
+    # Use two BF16 epsilons there and a stricter tolerance for FP32 controls.
+    # Exact reduction and update invariance is covered by the CPU worker tests.
+    rtol = 2 * torch.finfo(torch.bfloat16).eps if remove_microbatch_padding else 1e-4
+    atol = 1e-3 if remove_microbatch_padding else 1e-5
+    # KL and entropy use different denominators, so check both and their combined loss.
+    metric_keys = ["policy_loss", "policy_kl", "policy_entropy", "final_loss"]
+    print(f"\nMegatron loss equivalence (remove_microbatch_padding={remove_microbatch_padding}, rtol={rtol}):")
     for i, (r_baseline, r_token) in enumerate(zip(results_baseline, results_token)):
         for key in metric_keys:
             bl = r_baseline.metrics[key]
             tl = r_token.metrics[key]
             print(f"  Rank {i} {key}: baseline={bl:.6f}, token-based={tl:.6f}, diff={abs(bl - tl):.6f}")
-            assert abs(bl - tl) < tol, f"{key} mismatch on rank {i}: {bl} vs {tl} (tol={tol})"
+            assert tl == pytest.approx(bl, rel=rtol, abs=atol), f"{key} mismatch on rank {i}: {bl} vs {tl}"
+
+    for baseline_grad, token_grad in zip(grad_norm_baseline, grad_norm_token):
+        if baseline_grad is not None:
+            print(f"  Gradient norm: baseline={baseline_grad:.8f}, token-based={token_grad:.8f}")
+            assert token_grad == pytest.approx(baseline_grad, rel=rtol, abs=1e-4)
+    # Identical weights and inference shapes must agree before the update.
+    for baseline_row, token_row in zip(initial_baseline, initial_token, strict=True):
+        torch.testing.assert_close(
+            torch.tensor(token_row["logprobs"]), torch.tensor(baseline_row["logprobs"]), rtol=1e-3, atol=1e-3
+        )
+    for rank, (baseline_grads, token_grads) in enumerate(zip(gradients_baseline, gradients_token, strict=True)):
+        assert baseline_grads.keys() == token_grads.keys()
+        baseline_vector = torch.cat(list(baseline_grads.values()))
+        token_vector = torch.cat(list(token_grads.values()))
+        assert baseline_vector.norm() > 0
+        relative_error = (token_vector - baseline_vector).norm() / baseline_vector.norm()
+        print(f"  Rank {rank} gradient relative L2 error: {relative_error.item():.8f}")
+        assert relative_error < rtol
+    # Both optimizer steps must leave finite inference outputs in input order.
+    assert len(updated_baseline) == len(updated_token) == len(seq_lens)
+    for row in updated_baseline + updated_token:
+        assert torch.isfinite(torch.tensor(row["logprobs"])).all()
 
 
 @pytest.mark.asyncio
