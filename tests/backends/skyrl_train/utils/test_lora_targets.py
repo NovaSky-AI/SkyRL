@@ -5,6 +5,8 @@ mirror what `Qwen3ForCausalLM` exposes, so the test stays offline and fast while
 still covering the paths `resolve_lora_target_modules` classifies on.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch.nn as nn
 
@@ -238,3 +240,12 @@ def test_megatron_rejects_narrowing(train_attn: bool, train_mlp: bool, error) ->
         return
     with pytest.raises(error):
         check_lora_group_flags("all-linear", train_attn, train_mlp, strategy="megatron")
+
+
+def test_narrowing_a_vision_language_model_is_rejected() -> None:
+    """Vision towers reuse leaf names like `out_proj` and `linear_fc1`, so narrowing would leak."""
+    model = _CausalLM()
+    model.config = SimpleNamespace(vision_config=SimpleNamespace())
+    assert resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=True) == "all-linear"
+    with pytest.raises(ValueError, match="vision-language"):
+        resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=False)

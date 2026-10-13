@@ -23,6 +23,8 @@ At least one of `train_attn` / `train_mlp` must be `True`: an adapter covering n
 
 **Narrowing needs Llama/Qwen-style module names.** The flags select layers by their parent module: `self_attn` (or `linear_attn`) for attention, `mlp` (or `experts`) for the MLP. Llama, Qwen, Gemma, Mistral and Phi-3 follow this. Architectures that use other names — GPT-NeoX, Falcon and BLOOM (`attention` / `self_attention`), Llama 4 (`feed_forward`), GPT-2 (`Conv1D` layers) — fail with `No attn linear layers found` (or `mlp`) when the matching group is requested. Leaving both flags `True` is unaffected. For those models, name the modules directly in `trainer.policy.model.lora.target_modules`.
 
+**Narrowing is not supported for vision-language models.** Their vision towers and projectors reuse layer names from the language model, so a narrowed adapter would also cover modules outside the requested group. Requesting it raises; leaving both flags `True` is unaffected.
+
 **MoE expert projections are not covered on FSDP.** Current `transformers` stores them as fused 3-D `nn.Parameter` tensors (Qwen3-MoE, Mixtral, DeepSeek-V3) rather than `nn.Linear` modules, and PEFT can only adapt the latter, so the MLP group is empty on such a model and narrowing to it raises. Megatron adapts MoE experts directly, with its own grouped-expert handling, but rejects these flags.
 
 ### No Prompt Logprobs

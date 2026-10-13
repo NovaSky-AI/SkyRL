@@ -101,11 +101,20 @@ def resolve_lora_target_modules(
 
     Raises:
         ValueError: If both flags are ``False``, if narrowing is requested alongside an explicit
-            module list, or if the model has no linear layers in the requested group.
+            module list or on a vision-language model, or if the model has no linear layers in the
+            requested group.
     """
     if train_attn and train_mlp:
         return target_modules
     check_lora_group_flags(target_modules, train_attn, train_mlp)
+    # Vision towers and mergers reuse the language model's leaf names and use other
+    # parent names, so the narrowed list would adapt modules outside the group.
+    if getattr(getattr(model, "config", None), "vision_config", None) is not None:
+        raise ValueError(
+            f"`train_attn`/`train_mlp` narrowing is not supported for vision-language models "
+            f"({type(model).__name__}). Set both to True and name the modules to adapt in "
+            f"`trainer.policy.model.lora.target_modules` instead."
+        )
 
     wanted = "attn" if train_attn else "mlp"
     names = sorted(
