@@ -1,0 +1,59 @@
+# Colocated: vLLM, SkyRL, the facade and every sandbox in this job's cluster,
+# here one node. See README.md. Submit from the SkyRL checkout root:
+#
+#   anyscale job submit -f examples/train_integrations/harbor/ray_sandbox/job-colocated.yaml
+name: skyrl-harbor-ray-sandbox-colocated
+image_uri: anyscale/image/skyrl-harbor-ray-sandbox:4
+ray_version: "2.57.0"
+compute_config:
+  # Your Anyscale cloud and, for a multi-resource cloud, its Kubernetes resource.
+  # The tested runs used a CoreWeave resource; the instance types are its names.
+  cloud: <your-cloud>
+  cloud_resource: <your-cloud-resource>
+  # Half an RTX PRO 6000 node: 4 vLLM engines, and the spare CPU for sandboxes.
+  head_node:
+    instance_type: 60CPU-480GB-4xRTX-PRO-6000
+  worker_nodes: []
+  auto_select_worker_config: false
+  # gVisor on CoreWeave's Ubuntu 24.04 nodes, on every node that can host a
+  # sandbox: root (the node blocks rootless user namespaces for uid 1000),
+  # AppArmor unconfined and SYS_ADMIN for runsc's mounts and namespaces, cgroup
+  # setup skipped (EBUSY on the writable cgroup v2), /dev/net/tun for slirp4netns.
+  advanced_instance_config:
+    spec:
+      containers:
+      - name: ray
+        env:
+        - {name: RAY_SANDBOX_IGNORE_CGROUPS, value: '1'}
+        # runsc defaults GOMAXPROCS to every CPU of the pod; 2 helps when nodes
+        # saturate (gVisor's containerd shim uses 2 as well).
+        - {name: GOMAXPROCS, value: '2'}
+        volumeMounts:
+        - {name: sandbox-tun, mountPath: /dev/net/tun}
+        securityContext:
+          runAsUser: 0
+          appArmorProfile: {type: Unconfined}
+          capabilities:
+            add: [SYS_ADMIN]
+      volumes:
+      - name: sandbox-tun
+        hostPath: {path: /dev/net/tun, type: CharDevice}
+      securityContext:
+        sysctls:
+        - {name: net.ipv4.ip_unprivileged_port_start, value: '0'}
+working_dir: .
+excludes:
+  - .git
+  - .venv
+  - docs
+  - "*.pdf"
+entrypoint: bash examples/train_integrations/harbor/ray_sandbox/run_harbor_gen_ray_sandbox.sh
+max_retries: 0
+env_vars:
+  MODE: colocated
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+  SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S: "3600"
+  # Let SkyRL's ray.init(runtime_env=...) merge with the job's runtime env.
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+  # Workers `uv run` the full SkyRL env (vLLM, torch) on first start.
+  RAY_worker_register_timeout_seconds: "1800"
