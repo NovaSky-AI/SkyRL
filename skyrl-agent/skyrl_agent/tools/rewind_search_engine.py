@@ -7,6 +7,7 @@ from typing import Optional, Union
 import json
 import logging
 import os
+import time
 import requests
 
 
@@ -23,12 +24,13 @@ class RewindSearchEngine(BaseTool):
     Matching and ranking only use pages crawled by that day, so results cannot reveal later events or
     later copies of a benchmark's answers. This replaces domain/keyword blocklists for leakage control.
 
-    Requires the LINKUP_API_KEY environment variable. The day comes from the instance field named by
-    REWIND_AS_OF_FIELD (default "as_of"), falling back to REWIND_AS_OF (YYYY-MM-DD) for the whole run,
-    e.g. a date before the evaluation benchmark was published. Example of adding as a tool:
+    Works without an API key on Linkup's shared, rate-limited keyless tier; set LINKUP_API_KEY for
+    higher limits. The day comes from the instance field named by REWIND_AS_OF_FIELD (default "as_of"),
+    falling back to REWIND_AS_OF (YYYY-MM-DD) for the whole run, e.g. a date before the evaluation
+    benchmark was published. Example of adding as a tool:
     tools: ["rewind_search_engine", "finish"]
     To run this tool standalone:
-    LINKUP_API_KEY="<your_api_key>" REWIND_AS_OF="2025-01-01" python -m skyrl_agent.tools.rewind_search_engine
+    REWIND_AS_OF="2025-01-01" python -m skyrl_agent.tools.rewind_search_engine
     """
 
     name = "rewind_search_engine"
@@ -55,8 +57,6 @@ class RewindSearchEngine(BaseTool):
     def __init__(self):
         super().__init__()
         self.linkup_api_key = os.getenv("LINKUP_API_KEY")
-        if not self.linkup_api_key:
-            raise ValueError("LINKUP_API_KEY environment variable is required")
         self.default_as_of = os.getenv("REWIND_AS_OF")
         self.as_of_field = os.getenv("REWIND_AS_OF_FIELD", "as_of")
         self.num_results = int(os.getenv("REWIND_NUM_RESULTS", "10"))
@@ -83,15 +83,19 @@ class RewindSearchEngine(BaseTool):
         """
         url = "https://api.linkup.so/v1/rewind/search"
         headers = {
-            "Authorization": f"Bearer {self.linkup_api_key}",
             "Content-Type": "application/json",
             "user-agent": f"SkyRL-Agent/{_SKYRL_AGENT_VERSION}",
         }
+        if self.linkup_api_key:
+            headers["Authorization"] = f"Bearer {self.linkup_api_key}"
         data = {"q": query, "asOf": as_of}
 
         for i in range(5):
             try:
                 response = requests.post(url, headers=headers, data=json.dumps(data), timeout=30)
+                if response.status_code == 429 and i < 4:
+                    time.sleep(2**i)
+                    continue
                 results = response.json()
                 break
             except requests.exceptions.RequestException as re:
