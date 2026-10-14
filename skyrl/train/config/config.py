@@ -113,8 +113,9 @@ class SkyRLLoraConfig(BaseConfig):
     ``"memory"`` ships the adapter tensors through the configured
     ``generator.inference_engine.weight_sync_backend`` transport (``nccl``: NCCL broadcast when
     non-colocated, CUDA IPC when colocated) and vLLM builds the adapter from the received GPU
-    tensors; nothing is written. Shared expert adapters are sent once and aliased on the receiver.
-    Megatron only."""
+    tensors; nothing is written. Once the adapter is copied into vLLM's LoRA slots, the built
+    adapter and the received tensors move to pinned host memory, where ``"disk"`` keeps the built
+    adapter. Shared expert adapters are sent once and aliased on the receiver. Megatron only."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
