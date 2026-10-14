@@ -136,7 +136,9 @@ class MegatronWeightSource(WeightSource):
     ) -> None:
         self._bridge = bridge
         self._module = module
-        self._dtype = dtype
+        config = getattr(getattr(bridge, "hf_pretrained", None), "config", None)
+        # Quantized exports contain packed weights and scales with distinct dtypes.
+        self._dtype = None if getattr(config, "quantization_config", None) else dtype
         self._param_filter = param_filter
         self._meta: Optional[List[ParamMeta]] = None
 
@@ -154,7 +156,7 @@ class MegatronWeightSource(WeightSource):
         if self._meta is None:
             meta: List[ParamMeta] = []
             for name, tensor in self._export():
-                meta.append(ParamMeta(name, self._dtype, tuple(tensor.shape)))
+                meta.append(ParamMeta(name, self._dtype or tensor.dtype, tuple(tensor.shape)))
                 del tensor
             self._meta = meta
         return self._meta
