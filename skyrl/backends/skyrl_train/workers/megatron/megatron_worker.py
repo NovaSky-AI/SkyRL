@@ -583,7 +583,8 @@ class MegatronWorker:
         if getattr(self.provider, "calculate_per_token_loss", False) and default_ddp_config.average_in_collective:
             # Per-token loss normalization (forced by Megatron-Bridge's Qwen-VL providers under CP)
             # sums gradients across DP x CP and divides by the global token count in
-            # finalize_model_grads; Megatron's DDP asserts average_in_collective is off for it.
+            # finalize_model_grads; Megatron's DDP asserts average_in_collective is off for it:
+            # https://github.com/NVIDIA/Megatron-LM/blob/d476c21be396dc666d2e04fa8c199c3851a1551f/megatron/core/distributed/distributed_data_parallel.py#L250-L255
             logger.info("calculate_per_token_loss is on: setting ddp_config.average_in_collective=False")
             default_ddp_config.average_in_collective = False
         model = self.provider.provide_distributed_model(
@@ -1098,20 +1099,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
     def _set_per_token_loss_counts(self, micro_buffer: List[dict]) -> None:
-        """Attach token counts for Megatron's per-token loss normalization, if it is on.
-
-        With ``calculate_per_token_loss`` (forced on by Megatron-Bridge's Qwen-VL
-        providers when CP > 1), Megatron sums gradients over DP x CP and divides
-        them by the global token count; SkyRL applies that division to each
-        ``forward_backward`` call's gradients (``_per_token_grad_scaling``), so calls
-        accumulate. SkyRL's policy loss is already normalized (advantages are
-        pre-scaled per mini-batch, #1296), so the loss function returns this rank's
-        per-microbatch token count and multiplies the loss by the global total, which
-        the division then cancels (as in verl's Megatron engine). Counts are the
-        tokens each CP rank processes (padded packed length / CP); the MoE router's
-        aux-loss scaling assumes the same quantity, so the division also normalizes
-        the MoE aux / z losses.
-        """
+        """Attach token counts for Megatron's per-token loss normalization, if it is on."""
         if not getattr(get_model_config(self.actor_module[0]), "calculate_per_token_loss", False):
             return
         if not self.cfg.remove_microbatch_padding:

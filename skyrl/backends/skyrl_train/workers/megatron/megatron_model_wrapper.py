@@ -268,9 +268,15 @@ class MegatronModelWrapper:
         So we record the request here and replay it exactly once from
         :meth:`run_pending_grad_sync`, called by the worker's ``optim_step``.
 
-        ``num_tokens`` is only non-None under ``calculate_per_token_loss``. It is dropped: that
-        mode's division by the token count is applied to each call's gradients by
-        :meth:`_per_token_grad_scaling`, so the replay must not divide again.
+        ``num_tokens`` is only non-None under ``calculate_per_token_loss``. The schedule passes the
+        call's token count, ``finalize_model_grads`` all-reduces it and divides every gradient by it,
+        and Bridge's finalize wrapper passes it through:
+        https://github.com/NVIDIA/Megatron-LM/blob/d476c21be396dc666d2e04fa8c199c3851a1551f/megatron/core/pipeline_parallel/schedules.py#L863-L870
+        https://github.com/NVIDIA/Megatron-LM/blob/d476c21be396dc666d2e04fa8c199c3851a1551f/megatron/core/distributed/finalize_model_grads.py#L694-L713
+        https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0/src/megatron/bridge/peft/utils.py#L1095-L1114
+        We drop it and replay with ``num_tokens=None``, because one division at the end would average
+        several ``forward_backward`` calls instead of adding them. Each call's gradients are divided by
+        its own count instead; see :meth:`_per_token_grad_scaling` for details.
         """
         del model, num_tokens, kwargs  # replayed against self.actor_module with default process groups
         self._pending_grad_sync = {"num_tokens": None}
@@ -279,12 +285,22 @@ class MegatronModelWrapper:
     def _per_token_grad_scaling(self, num_tokens_global: int):
         """Apply ``calculate_per_token_loss``'s division by the token count to this call's gradients only.
 
-        Megatron divides the accumulated gradients once, at finalize, by the token count summed
-        over the window. Each call's loss is multiplied by its own global token count N (see
-        ``loss_func``), and the MoE router's aux loss by its token count, so with several calls
-        per window that single division would weight each call by N / window_total instead of
-        adding them up. Scaling the buffer by N before the call and by 1/N after it divides only
-        this call's gradients by N. The finalize replay then skips the division.
+        ``loss_func`` multiplies each call's loss by that call's global token count N, so the
+        buffer gets N·g from the call. Megatron would divide once at finalize, by the counts summed
+        over every call before the optimizer step. With three calls of N = 100, 200, 300:
+
+            buffer = 100·g1 + 200·g2 + 300·g3, divided by 600
+                   = 1/6·g1 + 1/3·g2 + 1/2·g3        (wrong: a weighted average)
+
+        Instead, scale the buffer by N before the call and by 1/N after it:
+
+            call  enter (×N)      + backward   exit (÷N)   buffer
+            1     0               + 100·g1     ÷100        g1
+            2     200·g1          + 200·g2     ÷200        g1 + g2
+            3     300·(g1+g2)     + 300·g3     ÷300        g1 + g2 + g3
+
+        The finalize replay then runs with ``num_tokens=None`` and doesn't divide, so the result is
+        g1 + g2 + g3. With a single call the enter scaling is a no-op (the buffer is zero).
 
         Gradients are still local here (the DP/CP reduction runs once, from
         ``run_pending_grad_sync``), and ``scale_gradients`` is the per-chunk method finalize
@@ -348,8 +364,9 @@ class MegatronModelWrapper:
             if not self.remove_microbatch_padding:
                 raise ValueError("VLM context parallelism requires trainer.remove_microbatch_padding=true")
             if getattr(get_model_config(self.actor_module[0]), "mtp_num_layers", None):
-                # TODO(xgui): the native MTP block re-embeds position_ids in the packed layout,
-                # which SkyRL still pre-shards per CP rank.
+                # SkyRL's decoupled MTP draft loss rolls teacher logits and labels with a plain
+                # torch.roll, which isn't CP-aware, so MTP requires CP=1 for every model (see the
+                # assert in forward_backward_mini_batch). Raise early with a VLM-specific message.
                 raise ValueError("VLM context parallelism with MTP is not supported")
         assert (
             mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
@@ -515,6 +532,9 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    # Qwen3VLModel needs the full stream on every CP rank to compute mRoPE and place
+                    # image features, then applies the CP split itself (see preprocess_packed_seqs).
+                    # Other models get SkyRL's per-rank split, which GPTModel requires.
                     shard_for_cp=not self.model_owns_vlm_packing,
                 )
                 batch["packed_seq_params"] = packed_seq_params
@@ -1169,6 +1189,9 @@ class MegatronModelWrapper:
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    # Qwen3VLModel needs the full stream on every CP rank to compute mRoPE and place
+                    # image features, then applies the CP split itself (see preprocess_packed_seqs).
+                    # Other models get SkyRL's per-rank split, which GPTModel requires.
                     shard_for_cp=not self.model_owns_vlm_packing,
                 )
                 batch["packed_seq_params"] = packed_seq_params
