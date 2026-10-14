@@ -31,7 +31,10 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
-from skyrl.backends.skyrl_train.utils.lora_targets import resolve_lora_target_modules
+from skyrl.backends.skyrl_train.utils.lora_targets import (
+    resolve_critic_lora_target_modules,
+    resolve_lora_target_modules,
+)
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
@@ -679,11 +682,7 @@ def get_llm_for_sequence_regression(
     # LoRA
     if lora_rank > 0:
         model.enable_input_require_grads()
-        targets = resolve_lora_target_modules(model, target_modules, train_attn, train_mlp)
-        if not (train_attn and train_mlp):
-            # The value head is in neither group; "all-linear" adapts it, and without an
-            # adapter it would stay frozen at its initial weights.
-            targets = [*targets, value_head_prefix]
+        targets = resolve_critic_lora_target_modules(model, target_modules, train_attn, train_mlp, value_head_prefix)
         lora_config = LoraConfig(
             r=lora_rank,
             lora_alpha=lora_alpha,

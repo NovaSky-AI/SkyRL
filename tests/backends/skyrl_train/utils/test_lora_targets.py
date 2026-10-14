@@ -13,6 +13,7 @@ import torch.nn as nn
 from skyrl.backends.skyrl_train.utils.lora_targets import (
     check_lora_group_flags,
     lora_module_group,
+    resolve_critic_lora_target_modules,
     resolve_lora_target_modules,
 )
 
@@ -271,3 +272,29 @@ def test_all_linear_is_matched_in_any_case() -> None:
     """PEFT accepts the shorthand in any case, so narrowing must too."""
     resolved = resolve_lora_target_modules(_CausalLM(), "ALL-LINEAR", train_attn=True, train_mlp=False)
     assert resolved == ATTN_NAMES
+
+
+class _CriticModel(nn.Module):
+    """Stand-in for SkyRL's critic: a decoder with a scalar value head and no lm_head."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _Inner()
+        self.value_head = nn.Linear(4, 1, bias=False)
+
+
+@pytest.mark.parametrize(
+    ("train_attn", "train_mlp", "group"),
+    [(True, False, ATTN_NAMES), (False, True, MLP_NAMES)],
+    ids=["attn_only", "mlp_only"],
+)
+def test_narrowed_critic_keeps_its_value_head(train_attn: bool, train_mlp: bool, group: list[str]) -> None:
+    """The value head is in neither group, so it must be added back or it stays frozen."""
+    assert lora_module_group("value_head") is None
+    resolved = resolve_critic_lora_target_modules(_CriticModel(), "all-linear", train_attn, train_mlp, "value_head")
+    assert resolved == [*group, "value_head"]
+
+
+def test_default_critic_targets_are_unchanged() -> None:
+    resolved = resolve_critic_lora_target_modules(_CriticModel(), "all-linear", True, True, "value_head")
+    assert resolved == "all-linear"

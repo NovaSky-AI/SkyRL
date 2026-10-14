@@ -146,3 +146,21 @@ def resolve_lora_target_modules(
         )
     logger.info(f"LoRA restricted to {wanted} modules: {names}")
     return names
+
+
+def resolve_critic_lora_target_modules(
+    model: nn.Module,
+    target_modules: Union[str, list[str], None],
+    train_attn: bool,
+    train_mlp: bool,
+    value_head_name: str,
+) -> Union[str, list[str], None]:
+    """Like :func:`resolve_lora_target_modules`, but a narrowed critic also adapts its value head.
+
+    The value head is in neither group. ``"all-linear"`` adapts it, and without an adapter it
+    would stay frozen at its initial weights.
+    """
+    targets = resolve_lora_target_modules(model, target_modules, train_attn, train_mlp)
+    if train_attn and train_mlp:
+        return targets
+    return [*targets, value_head_name]
