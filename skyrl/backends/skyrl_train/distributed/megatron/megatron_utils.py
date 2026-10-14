@@ -702,15 +702,7 @@ def preprocess_packed_seqs(
     ``shard_for_cp=False`` keeps the full packed stream on every CP rank (each
     sub-sequence still padded to the CP alignment) for models that apply the CP
     split themselves, such as Megatron-Bridge's Qwen3VLModel: its mRoPE positions
-    and image-feature placement need the whole stream. Given a full stream it
-    computes this rank's partition itself and slices the embeddings and positions
-    after placing image features and computing mRoPE:
-    https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py#L632-L647
-    https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py#L852-L865
-    https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py#L931-L955
-    A pre-split stream is accepted only with explicit rank-local 3D position ids,
-    which SkyRL doesn't compute:
-    https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/8e7077c6826d17eb4d4d54e6eb15c5a581eda4c0/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py#L630-L631
+    and image-feature placement need the whole stream.
     """
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
