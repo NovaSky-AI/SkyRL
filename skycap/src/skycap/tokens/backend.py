@@ -13,7 +13,6 @@ the trajectory is marked ``failed``: it accepts no further turns and
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
 from collections.abc import Mapping
@@ -228,9 +227,9 @@ class TokensBackend:
         if self.use_raw_content:
             reply = await asyncio.to_thread(self._raw_reply, output.completion_ids, planned.prompt_ids)
         else:
-            # Renderers written before `parse` took the prompt still get the two-argument call.
-            prompt = {"prompt_ids": planned.prompt_ids} if _takes_prompt_ids(self.renderer.parse) else {}
-            reply = await asyncio.to_thread(self.renderer.parse, output.completion_ids, chat.tools, **prompt)
+            reply = await asyncio.to_thread(
+                self.renderer.parse, output.completion_ids, chat.tools, prompt_ids=planned.prompt_ids
+            )
         reason = response.finish_reason(output.finish_reason, reply)
         call = CallInfo(
             t_start=started,
@@ -322,8 +321,3 @@ def _resolve_max_tokens(sampling: Mapping[str, Any]) -> dict[str, Any]:
     if alias is not None:
         resolved["max_tokens"] = alias
     return resolved
-
-
-def _takes_prompt_ids(parse: Any) -> bool:
-    parameters = inspect.signature(parse).parameters.values()
-    return any(p.name == "prompt_ids" or p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)

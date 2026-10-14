@@ -202,13 +202,6 @@ class PromptRecordingRenderer(FakeRenderer):
         return super().parse(completion_ids, tools, prompt_ids)
 
 
-class TwoArgumentRenderer(FakeRenderer):
-    """A renderer written before `parse` took the prompt."""
-
-    def parse(self, completion_ids: Any, tools: Any) -> dict[str, Any]:  # type: ignore[override]
-        return super().parse(completion_ids, tools)
-
-
 async def test_the_parser_gets_the_prompt_the_completion_was_sampled_from() -> None:
     async with token_stack() as stack:
         renderer = stack.server.backend.renderer = PromptRecordingRenderer()  # type: ignore[attr-defined]
@@ -216,15 +209,6 @@ async def test_the_parser_gets_the_prompt_the_completion_was_sampled_from() -> N
         await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
 
         assert renderer.prompts == [stack.engine.requests[0]["token_ids"]]
-
-
-async def test_a_renderer_whose_parse_takes_no_prompt_still_parses_replies() -> None:
-    async with token_stack() as stack:
-        stack.server.backend.renderer = TwoArgumentRenderer()  # type: ignore[attr-defined]
-        created = await stack.create()
-        reply = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
-
-        assert reply.choices[0].message.content.startswith("re")
 
 
 async def test_the_sample_is_exactly_what_inference_saw() -> None:
