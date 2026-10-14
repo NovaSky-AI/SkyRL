@@ -1,7 +1,9 @@
-"""Hugging Face <-> Megatron bridge for GLM-5.3-Flash (``Glm5NextForConditionalGeneration``).
+"""Hugging Face <-> Megatron bridges for GLM-5.3-Flash (``Glm5NextForConditionalGeneration``).
 
-Only the language model is bridged (``model.language_model.*`` and ``lm_head``); the vision
-tower of the unified VL checkpoint has no Megatron counterpart and is left untouched.
+``Glm5NextBridge`` (the default dispatch) bridges only the language model
+(``model.language_model.*`` and ``lm_head``) into a ``GPTModel``; the vision tower of the unified
+VL checkpoint is left untouched. ``Glm5NextVLBridge`` (selected through a sentinel architecture
+when ``language_model_only=false``) builds ``Glm5NextVLModel`` and also maps ``model.visual.*``.
 """
 
 from typing import Any, Dict, Optional
@@ -23,6 +25,10 @@ from torch import nn
 
 from skyrl.backends.skyrl_train.patches.megatron.glm5_next.provider import (
     Glm5NextModelProvider,
+    Glm5NextVLModelProvider,
+)
+from skyrl.backends.skyrl_train.patches.megatron.glm5_next.vl_model import (
+    Glm5NextVLModel,
 )
 
 # Sinkhorn epsilon hard-coded in megatron-core's HyperConnectionModule (``_MHC_SINKHORN_EPS``).
@@ -212,18 +218,26 @@ class Glm5NextBridge(MegatronModelBridge):
             raise ValueError(f"hc_eps={text_config.hc_eps} differs from megatron-core's mHC epsilon {_MCORE_MHC_EPS}.")
         return provider
 
+    # Prefix of the language model's parameter names on the Megatron side: "" for the text-only
+    # GPTModel, "language_model." inside Glm5NextVLModel.
+    megatron_prefix = ""
+
     def mapping_registry(self) -> MegatronMappingRegistry:
+        return MegatronMappingRegistry(*self._language_model_mappings())
+
+    def _language_model_mappings(self) -> list:
+        p = self.megatron_prefix
         hf_prefix = "model.language_model"
         hf_layer = f"{hf_prefix}.layers.*"
         hf_attn = f"{hf_layer}.self_attn"
-        megatron_layer = "decoder.layers.*"
+        megatron_layer = f"{p}decoder.layers.*"
         megatron_attn = f"{megatron_layer}.self_attention"
 
         # Standard megatron-core modules: AutoMapping infers the TP layout from the module type.
         auto_mappings = {
-            "embedding.word_embeddings.weight": f"{hf_prefix}.embed_tokens.weight",
-            "output_layer.weight": "lm_head.weight",
-            "decoder.final_layernorm.weight": f"{hf_prefix}.norm.weight",
+            f"{p}embedding.word_embeddings.weight": f"{hf_prefix}.embed_tokens.weight",
+            f"{p}output_layer.weight": "lm_head.weight",
+            f"{p}decoder.final_layernorm.weight": f"{hf_prefix}.norm.weight",
             f"{megatron_layer}.input_layernorm.weight": f"{hf_layer}.input_layernorm.weight",
             # MoE layers keep a standalone pre-MLP norm; the dense TE MLP fuses it into linear_fc1.
             f"{megatron_layer}.pre_mlp_layernorm.weight": f"{hf_layer}.post_attention_layernorm.weight",
@@ -327,4 +341,57 @@ class Glm5NextBridge(MegatronModelBridge):
                 HyperConnectionScaleSliceMapping(f"{megatron_site}.alpha_res", f"{hf_layer}.{hf_site}_scale", 2),
             ]
 
-        return MegatronMappingRegistry(*mappings)
+        return mappings
+
+
+# Sentinel architecture that selects the vision-language bridge below. The checkpoint's real
+# architecture (Glm5NextForConditionalGeneration) keeps dispatching to the text-only bridge,
+# which ``language_model_only=true`` relies on; the Megatron worker rewrites the bridge's
+# architecture to this sentinel when the vision tower is wanted (model_bridges.py). The
+# ``ForConditionalGeneration`` suffix passes AutoBridge's architecture filter, and not being a
+# transformers class makes dispatch fall back to this string key.
+GLM5_NEXT_VL_SENTINEL = "Glm5NextVLForConditionalGeneration"
+
+
+@MegatronModelBridge.register_bridge(
+    source=GLM5_NEXT_VL_SENTINEL,
+    target=Glm5NextVLModel,
+    provider=Glm5NextVLModelProvider,
+    model_type="glm5_next",
+)
+class Glm5NextVLBridge(Glm5NextBridge):
+    """Megatron Bridge for the full GLM-5.3-Flash checkpoint: vision tower + language model.
+
+    The language model maps as in :class:`Glm5NextBridge`, under ``language_model.``; the HF
+    vision tower (``model.visual.*``) is held as the HF module itself, so its parameters map
+    one to one and are replicated across tensor-parallel ranks.
+    """
+
+    megatron_prefix = "language_model."
+
+    def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> Glm5NextVLModelProvider:
+        # register_bridge(provider=...) sets PROVIDER_CLASS, so the text bridge's provider_bridge
+        # already builds a Glm5NextVLModelProvider with every language-model field resolved.
+        provider = super().provider_bridge(hf_pretrained)
+        assert isinstance(provider, Glm5NextVLModelProvider), type(provider)
+        hf_config = hf_pretrained.config
+        provider.vision_config = hf_config.vision_config
+        for name in (
+            "image_token_id",
+            "video_token_id",
+            "image_start_token_id",
+            "image_end_token_id",
+            "video_start_token_id",
+            "video_end_token_id",
+        ):
+            value = getattr(hf_config, name, None)
+            if value is None:
+                raise ValueError(f"GLM-5.3-Flash HF config has no {name}; cannot place vision features.")
+            setattr(provider, name, value)
+        return provider
+
+    def mapping_registry(self) -> MegatronMappingRegistry:
+        return MegatronMappingRegistry(
+            *self._language_model_mappings(),
+            ReplicatedMapping(megatron_param="visual.**", hf_param="model.visual.**"),
+        )
