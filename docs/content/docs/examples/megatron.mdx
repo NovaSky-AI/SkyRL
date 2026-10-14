@@ -134,6 +134,47 @@ Field-specific checks:
 https://github.com/nvidia/megatron-lm/issues/1820. We recommend leaving this setting to `false`.
 </Callout>
 
+### Optimizer state on disk
+
+For full fine-tuning where the distributed optimizer's state does not fit (12 bytes per parameter per DP
+shard: fp32 master weights plus two fp32 Adam moments), `optimizer_offload_to_disk` keeps that state in files on
+node-local disk:
+
+```bash
+# node-local NVMe; unset (default) disables it
+trainer.policy.megatron_config.optimizer_offload_to_disk.dir=/mnt/local_storage/skyrl_optimizer_state
+# optional: moments stored as bf16 (8 instead of 12 bytes/param of I/O, not bit-identical); default fp32
+trainer.policy.megatron_config.optimizer_offload_to_disk.moment_storage_dtype=bf16
+# optional: pinned host staging buffer per rank and optimizer; default 256
+trainer.policy.megatron_config.optimizer_offload_to_disk.staging_buffer_mb=256
+```
+
+or, with the Python config API:
+
+```python
+cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = "/mnt/local_storage/skyrl_optimizer_state"
+```
+
+The optimizer step reads the state into the GPU one chunk at a time, runs Adam there, and writes it back, so
+the GPU holds one chunk at a time (`SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL`, default 200M elements, about
+2.4 GB) and host RAM holds only the staging buffers (one per rank and optimizer). The state file is read and
+written with O_DIRECT, so the state does not pass through the page cache (buffered I/O is the fallback where the
+filesystem refuses O_DIRECT). Unlike `optimizer_cpu_offload`, the update runs on the GPU and no gradients or state
+stay in host memory. With fp32 moments the result is identical to the regular optimizer. The cost is the I/O:
+every step reads and writes the whole state, 12 B x (local params / DP size) per GPU, so it pays off only on fast
+local NVMe. Each GPU needs that much free disk. Example:
+`examples/train/megatron/run_megatron_optimizer_offload_to_disk.sh`.
+
+Requirements: the distributed optimizer (the default), bf16 training, `grad_reduce_in_fp32=true` (the default),
+`optimizer_cpu_offload=false`, `use_precision_aware_optimizer=false`, Adam, no fp8 or fp4 params (fp8 compute is
+fine), no `optimizer_cuda_graph`, no Megatron-FSDP, full fine-tuning (not LoRA). Concurrent runs on one node need
+different `trainer.run_name` values.
+
+<Callout type="warn">
+Checkpoints store this state as per-rank files next to the distributed checkpoint. They resume only with the
+same parallelism, DDP bucket size and chunk size, and only from a local `ckpt_path`.
+</Callout>
+
 ## Parallelism Resources
 
 Understanding and configuring parallelism strategies for large models can be challenging.

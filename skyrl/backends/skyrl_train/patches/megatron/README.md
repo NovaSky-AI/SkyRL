@@ -314,6 +314,20 @@ Skips megatron-core's MLA THD value pad on Blackwell. **Nothing calls it:** the 
 from `megatron_worker.py` together with `disable_fa4_if_requested()`. Don't delete it silently: decide whether Blackwell MLA + CP training
 still needs it. If yes, re-wire the call. If no, delete the module and this entry.
 
+### `optimizer_offload_to_disk.py`: generated `_build_model_and_main_param_groups`, SkyRL-only
+
+Not a module in this directory: `skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py`
+generates `OffloadedDistributedOptimizer._build_model_and_main_param_groups` from the installed megatron-core source,
+replacing the line `shard_main_param = shard_model_param.clone().float()` so the per-param fp32 main shards are
+created with empty storage. Only the subclass gets the generated method; `DistributedOptimizer` is unchanged. It
+raises if the line does not appear exactly once.
+- **Landed?** Obsolete once `OptimizerConfig` has a field to defer main-param allocation (e.g.
+  `defer_main_param_initialization`).
+- **Remove:** `_deferred_build_model_and_main_param_groups` and its installation in
+  `build_optimizer_offloaded_to_disk`; set the config field instead.
+- **Verify:** `tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py` and
+  `tests/backends/skyrl_train/gpu/gpu_ci/test_optimizer_offload_to_disk.py` (2 GPUs).
+
 ## Verification
 
 Use `RAY_ADDRESS=local` if a Ray cluster is already up on the box. Don't put `--` after
@@ -322,6 +336,7 @@ Use `RAY_ADDRESS=local` if a Ray cluster is already up on the box. Don't put `--
 ```bash
 # CPU
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/patches/megatron/mcore_ext/test_dsa_kpool_math.py
+uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py
 
 # GPU (4+ GPUs): kernels, KDA/mHC vs HF, and the three GLM roundtrip rows vs vLLM
 uv run --isolated --extra dev --extra megatron pytest -s -v -m "h100 or not h100" \
