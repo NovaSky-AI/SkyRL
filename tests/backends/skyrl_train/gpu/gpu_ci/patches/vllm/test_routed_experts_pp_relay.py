@@ -13,10 +13,10 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 import numpy as np
 import pytest
-from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInput
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
 
 MODEL = "allenai/OLMoE-1B-7B-0924"
@@ -49,7 +49,7 @@ def _cfg(pipeline_parallel_size: int, enforce_eager: bool) -> SkyRLTrainConfig:
 @pytest.fixture(scope="module")
 def prompt_token_ids():
     # The OLMoE base model has no chat template: tokenize the user turns as plain text.
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    tokenizer = get_tokenizer(MODEL)
     return [
         tokenizer.encode(conversation[-1]["content"])
         for conversation in get_test_prompts(MODEL, num_samples=NUM_PROMPTS)
