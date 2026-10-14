@@ -1233,8 +1233,11 @@ def configure_ray_worker_logging() -> None:
     # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
     class _InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
+            level_name = record.levelname
+            if record.levelno == logging.INFO and (record.name == "httpx" or record.name.startswith("httpx.")):
+                level_name = "DEBUG"
             try:
-                level = logger.level(record.levelname).name
+                level = logger.level(level_name).name
             except ValueError:
                 level = record.levelno
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
