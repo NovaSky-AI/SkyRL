@@ -193,6 +193,25 @@ async def test_a_continued_conversation_extends_the_previous_tokens() -> None:
         assert [graph.nodes[i].author for i in path] == ["client", "model", "client", "model"]
 
 
+class PromptRecordingRenderer(FakeRenderer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list[list[int] | None] = []
+
+    def parse(self, completion_ids: Any, tools: Any, prompt_ids: Any = None) -> dict[str, Any]:
+        self.prompts.append(None if prompt_ids is None else list(prompt_ids))
+        return super().parse(completion_ids, tools, prompt_ids)
+
+
+async def test_the_parser_gets_the_prompt_the_completion_was_sampled_from() -> None:
+    async with token_stack() as stack:
+        renderer = stack.server.backend.renderer = PromptRecordingRenderer()  # type: ignore[attr-defined]
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
+
+        assert renderer.prompts == [stack.engine.requests[0]["token_ids"]]
+
+
 async def test_the_sample_is_exactly_what_inference_saw() -> None:
     async with token_stack() as stack:
         created = await stack.create()

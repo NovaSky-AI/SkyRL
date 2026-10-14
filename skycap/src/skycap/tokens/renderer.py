@@ -87,7 +87,7 @@ class TokenRenderer(Protocol):
         self,
         completion_ids: Sequence[int],
         tools: Sequence[Mapping[str, Any]] | None,
-        prompt_ids: Sequence[int] = (),
+        prompt_ids: Sequence[int] | None = None,
     ) -> dict[str, Any]: ...
 
     def stop_token_ids(self) -> list[int]: ...
@@ -297,19 +297,22 @@ class RenderersRenderer:
         self,
         completion_ids: Sequence[int],
         tools: Sequence[Mapping[str, Any]] | None,
-        prompt_ids: Sequence[int] = (),
+        prompt_ids: Sequence[int] | None = None,
     ) -> dict[str, Any]:
         """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text.
 
-        ``prompt_ids`` is the prompt the completion was sampled after. A template that opens the
-        thinking block in the generation prompt (Qwen3.5's ``<think>``) leaves the completion
-        starting inside it, and the parser only splits ``reasoning_content`` off when it can see that.
+        ``prompt_ids`` is the prompt the completion was sampled from. The parser reads its tail to
+        tell whether the template already opened the reasoning block: Qwen3.5 with thinking on ends
+        every generation prompt in ``<think>\\n``, so the completion starts mid-reasoning and has no
+        opening tag of its own.
         """
         from renderers import ToolCallParseStatus
 
         with self._checkout() as (renderer, _):
             parsed = renderer.parse_response(
-                list(completion_ids), tools=normalize_tools(tools), prompt_ids=list(prompt_ids)
+                list(completion_ids),
+                tools=normalize_tools(tools),
+                prompt_ids=list(prompt_ids) if prompt_ids is not None else None,
             )
         message: dict[str, Any] = {"role": "assistant", "content": parsed.content}
         if getattr(parsed, "reasoning_content", None) is not None:

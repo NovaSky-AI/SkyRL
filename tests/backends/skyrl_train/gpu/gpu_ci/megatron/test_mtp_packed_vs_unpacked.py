@@ -33,9 +33,8 @@ from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type
 
-# MiMo-7B-RL, not Qwen3.5: Qwen3.5's GDN layers cannot sample-pack at all (megatron-LM PR #2644),
-# so its recipes run remove_microbatch_padding=false and the wrapper rejects packing outright --
-# there is no packed path to probe. MiMo is dense (Qwen2-style attention) and ships a native MTP
+# MiMo-7B-RL, not Qwen3.5: the Qwen3.5 MTP recipes run remove_microbatch_padding=false, so they
+# have no packed path to probe. MiMo is dense (Qwen2-style attention) and ships a native MTP
 # head, and its spec-decode recipe packs for real, so this exercises the path production uses.
 MODEL_NAME = "XiaomiMiMo/MiMo-7B-RL"
 
@@ -123,7 +122,7 @@ class _ProbeMegatronPolicyWorker(MegatronPolicyWorkerBase):
 
         # =========================================================================
         # (2) BATCHED LEFT-PADDED, non-packed (remove_left_padding) -- the ACTUAL
-        # Qwen3.5 training path (GDN can't pack -> REMOVE_MICROBATCH_PADDING=false).
+        # Qwen3.5 MTP training path (its recipes set REMOVE_MICROBATCH_PADDING=false).
         # =========================================================================
         B = len(token_ids_list)
         L = max(len(x) for x in token_ids_list)

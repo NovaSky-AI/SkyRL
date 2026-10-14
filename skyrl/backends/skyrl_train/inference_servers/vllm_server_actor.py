@@ -778,6 +778,8 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+    from skyrl.backends.skyrl_train.inference_servers.utils import VLLM_LOGPROBS_MODE
+
     # See build_vllm_cli_args: pin the device type so arg parsing's DeviceConfig
     # autodetection succeeds even before CUDA is fully initialized.
     if not current_platform.device_type:
@@ -788,7 +790,12 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = _AsyncEngineArgs.add_cli_args(parser)
-    return parser.parse_args(argv)
+    # Matches build_vllm_cli_args: logprobs are computed from the sampling distribution.
+    parser.set_defaults(logprobs_mode=VLLM_LOGPROBS_MODE)
+    args = parser.parse_args(argv)
+    if args.logprobs_mode != VLLM_LOGPROBS_MODE:
+        parser.error(f"--logprobs-mode must be {VLLM_LOGPROBS_MODE!r}, got {args.logprobs_mode!r}.")
+    return args
 
 
 def main(argv: Optional[List[str]] = None) -> None:
