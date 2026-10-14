@@ -247,10 +247,10 @@ class TestSupportedLoraConfig:
         assert exc.value.status_code == 400
 
     def test_full_fine_tuning_ignores_the_group_flags(self):
-        lora = api._supported_lora_config(
-            api.LoRAConfig(rank=0, train_attn=False, train_mlp=False, train_unembed=False)
-        )
-        assert lora.rank == 0
+        with mock.patch.object(api, "logger") as log:
+            lora = api._supported_lora_config(api.LoRAConfig(rank=0, train_attn=False, train_mlp=False))
+        assert (lora.rank, lora.train_unembed) == (0, True)
+        log.warning.assert_not_called()
 
 
 class TestWeightsInfoResponse:

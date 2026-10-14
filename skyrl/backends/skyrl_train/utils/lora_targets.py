@@ -13,9 +13,10 @@ from loguru import logger
 # layer belongs to, in Llama/Qwen-style naming. The JAX backend's `filter_lora`
 # (skyrl/tx/utils/models.py) uses the same names, except `linear_attn`.
 LORA_ATTN_PARENT_MODULES = frozenset({"self_attn", "linear_attn"})
-# `experts` matches only architectures exposing expert projections as nn.Linear;
-# current transformers fuses them into 3-D nn.Parameter tensors that PEFT cannot
-# target, so on those models the MLP group is empty and narrowing to it raises.
+# `experts` matches only architectures exposing expert projections as nn.Linear.
+# Current transformers fuses routed experts into 3-D nn.Parameter tensors that PEFT
+# cannot target, so narrowing to the MLP group covers only shared experts and dense
+# MLP layers, and raises on a model that has neither.
 LORA_MLP_PARENT_MODULES = frozenset({"mlp", "experts"})
 LORA_UNEMBED_MODULES = frozenset({"lm_head", "embed_tokens"})
 
@@ -67,7 +68,7 @@ def check_lora_group_flags(
             "backend always adapts both attention and MLP. Use `trainer.strategy=fsdp`, or "
             "name the modules explicitly in `trainer.policy.model.lora.target_modules`."
         )
-    if target_modules != "all-linear":
+    if not (isinstance(target_modules, str) and target_modules.lower() == "all-linear"):
         raise ValueError(
             f"`train_attn`/`train_mlp` narrow `target_modules='all-linear'`, but it is set to "
             f"{target_modules!r}. Name the modules in `target_modules` directly, or leave it at "
@@ -100,8 +101,8 @@ def resolve_lora_target_modules(
 
     Raises:
         ValueError: If both flags are ``False``, if narrowing is requested alongside an explicit
-            module list or on a vision-language model, or if the model has no linear layers in the
-            requested group.
+            module list or on a vision-language model, if the model has no linear layers in the
+            requested group, or if a selected name also matches a module outside it.
     """
     if train_attn and train_mlp:
         return target_modules
@@ -129,6 +130,18 @@ def resolve_lora_target_modules(
             f"No {wanted} linear layers found for LoRA on {type(model).__name__}. Expected module "
             f"paths containing one of {sorted(expected)}, which this architecture does not use. "
             f"Set `train_attn` and `train_mlp` to True and name the modules to adapt in "
+            f"`trainer.policy.model.lora.target_modules` instead."
+        )
+    # PEFT matches each name against the end of every module path, so a name the group
+    # shares with a module outside it would adapt that module too.
+    leaked = sorted(
+        name for name, _ in model.named_modules() if name.split(".")[-1] in names and lora_module_group(name) != wanted
+    )
+    if leaked:
+        raise ValueError(
+            f"Narrowing LoRA to the {wanted} group on {type(model).__name__} would also adapt {leaked[:3]}"
+            f"{' and others' if len(leaked) > 3 else ''}, which share a name with {wanted} layers. Set "
+            f"`train_attn` and `train_mlp` to True and name the modules to adapt in "
             f"`trainer.policy.model.lora.target_modules` instead."
         )
     logger.info(f"LoRA restricted to {wanted} modules: {names}")

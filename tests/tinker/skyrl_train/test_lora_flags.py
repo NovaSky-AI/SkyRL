@@ -158,3 +158,10 @@ def test_backend_config_alpha_still_overrides_the_api_placeholder():
     overrides = FSDPBackendOverrides(**{"trainer.policy.model.lora.alpha": 64})
     cfg = _build_skyrl_train_config(BASE_MODEL, overrides, _lora())
     assert cfg.trainer.policy.model.lora.alpha == 64
+
+
+def test_backend_config_rank_is_allowed_without_a_request():
+    """An inference-only server builds its config with no request, so backend_config is its only source."""
+    overrides = FSDPBackendOverrides(**{"trainer.policy.model.lora.rank": 16})
+    cfg = _build_skyrl_train_config(BASE_MODEL, overrides, None)
+    assert cfg.trainer.policy.model.lora.rank == 16

@@ -252,3 +252,22 @@ def test_narrowing_a_vision_language_model_is_rejected() -> None:
     assert resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=True) == "all-linear"
     with pytest.raises(ValueError, match="vision-language"):
         resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=False)
+
+
+def test_a_name_shared_across_groups_is_rejected() -> None:
+    """GPT-BigCode names both the MLP and the attention output projection `c_proj`.
+
+    PEFT matches target names by suffix, so returning `c_proj` for the MLP group
+    would also adapt `attn.c_proj`.
+    """
+    from transformers import GPTBigCodeConfig, GPTBigCodeForCausalLM
+
+    model = GPTBigCodeForCausalLM(GPTBigCodeConfig(n_layer=1, n_embd=32, n_head=4, vocab_size=64))
+    with pytest.raises(ValueError, match="would also adapt"):
+        resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)
+
+
+def test_all_linear_is_matched_in_any_case() -> None:
+    """PEFT accepts the shorthand in any case, so narrowing must too."""
+    resolved = resolve_lora_target_modules(_CausalLM(), "ALL-LINEAR", train_attn=True, train_mlp=False)
+    assert resolved == ATTN_NAMES

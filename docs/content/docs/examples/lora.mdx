@@ -55,7 +55,7 @@ trainer:
   - is FSDP-only — Megatron raises;
   - requires `target_modules: "all-linear"` — with an explicit list, select the modules there;
   - needs Llama/Qwen-style module names (`self_attn`, `mlp`) and is not supported for vision-language models;
-  - does not reach MoE experts that `transformers` stores as fused `nn.Parameter` tensors (Qwen3-MoE, Mixtral, DeepSeek-V3).
+  - does not reach routed MoE experts, which `transformers` stores as fused `nn.Parameter` tensors; shared experts and dense MLP layers are covered.
 
 ## Running LoRA Training
 

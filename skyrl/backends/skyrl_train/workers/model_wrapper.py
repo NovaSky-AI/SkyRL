@@ -679,10 +679,15 @@ def get_llm_for_sequence_regression(
     # LoRA
     if lora_rank > 0:
         model.enable_input_require_grads()
+        targets = resolve_lora_target_modules(model, target_modules, train_attn, train_mlp)
+        if not (train_attn and train_mlp):
+            # The value head is in neither group; "all-linear" adapts it, and without an
+            # adapter it would stay frozen at its initial weights.
+            targets = [*targets, value_head_prefix]
         lora_config = LoraConfig(
             r=lora_rank,
             lora_alpha=lora_alpha,
-            target_modules=resolve_lora_target_modules(model, target_modules, train_attn, train_mlp),
+            target_modules=targets,
             exclude_modules=exclude_modules,
             lora_dropout=lora_dropout,
             bias="none",

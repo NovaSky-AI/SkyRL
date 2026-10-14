@@ -54,7 +54,7 @@ python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 
 No server-side configuration is needed to switch between single-tenant LoRA and full-parameter fine-tuning.
 
-The fields a Tinker request carries — `rank`, `train_attn` and `train_mlp` — come only from the request. Setting `trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}` in `backend_config` is rejected, since the request would always overwrite it. Settings the SDK cannot express, such as `alpha`, `dropout` and `target_modules`, are configured in `backend_config`.
+The fields a Tinker request carries — `rank`, `train_attn` and `train_mlp` — come only from the request. Setting `trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}` in `backend_config` is rejected, since the request would always overwrite it. The exception is an inference-only server (`--runtime-role inference`), which receives no training requests: there `trainer.policy.model.lora.rank` in `backend_config` is how LoRA serving is enabled. Settings the SDK cannot express, such as `dropout` and `target_modules`, are configured in `backend_config`, and so is the policy's `alpha`; the critic's `alpha` is always 32.
 
 ### Multi-tenant LoRA
 

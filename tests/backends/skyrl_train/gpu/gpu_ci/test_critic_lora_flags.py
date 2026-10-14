@@ -58,7 +58,7 @@ def _cfg(train_attn: bool, train_mlp: bool) -> SkyRLTrainConfig:
 
 @pytest.mark.parametrize(
     ("train_attn", "train_mlp", "expected"),
-    [(True, False, ATTN_LEAVES), (False, True, MLP_LEAVES)],
+    [(True, False, ATTN_LEAVES | {"value_head"}), (False, True, MLP_LEAVES | {"value_head"})],
     ids=["attn_only", "mlp_only"],
 )
 def test_narrowed_critic_adapts_only_its_group_and_trains(ray_init_fixture, train_attn, train_mlp, expected):
