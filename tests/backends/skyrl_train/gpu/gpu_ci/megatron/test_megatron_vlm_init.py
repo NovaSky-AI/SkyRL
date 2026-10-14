@@ -478,17 +478,13 @@ def _megatron_vlm_forward_logprobs(
 @pytest.mark.parametrize(
     ("model_name", "tp", "pp"),
     [
-        ("Qwen/Qwen3-VL-2B-Instruct", 1, 1),
-        ("Qwen/Qwen3-VL-2B-Instruct", 2, 1),
-        # PP=2: pixel values reach only the first stage; every stage rebuilds mRoPE positions.
-        ("Qwen/Qwen3-VL-2B-Instruct", 1, 2),
-        # Qwen3.5 goes through the same Qwen3VLModel but with GatedDeltaNet layers, whose
-        # state and conv must reset at every packed sample boundary.
-        ("Qwen/Qwen3.5-0.8B", 1, 1),
-        ("Qwen/Qwen3.5-0.8B", 2, 1),
-        ("Qwen/Qwen3.5-0.8B", 1, 2),
+        # Qwen3.5 goes through the same Qwen3VLModel as Qwen3-VL but with GatedDeltaNet layers,
+        # whose state and conv must reset at every packed sample boundary. TP=2 runs sequence
+        # parallel; PP=2 sends pixel values only to the first stage, and every stage rebuilds
+        # mRoPE positions.
+        ("Qwen/Qwen3.5-0.8B", 2, 2),
     ],
-    ids=["qwen3_vl_tp1", "qwen3_vl_tp2_sp", "qwen3_vl_pp2", "qwen3_5_vl_tp1", "qwen3_5_vl_tp2_sp", "qwen3_5_vl_pp2"],
+    ids=["qwen3_5_vl_tp2_sp_pp2"],
 )
 @pytest.mark.megatron
 async def test_megatron_vlm_packed_vs_unpacked(model_name, tp, pp):

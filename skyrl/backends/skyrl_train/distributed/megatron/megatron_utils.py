@@ -756,25 +756,17 @@ def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
 
     True when every model chunk is Megatron-Bridge's ``Qwen3VLModel`` (Qwen3-VL,
     Qwen3.5-VL), which rebuilds 3D mRoPE positions per packed sub-sequence from
-    ``packed_seq_params``, or sets ``model_owns_packing = True`` (NeMo-RL's opt-in
-    attribute for models that pack and split for context parallelism themselves).
+    ``packed_seq_params``.
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
             Qwen3VLModel,
         )
     except ImportError:
-        Qwen3VLModel = None
+        return False
 
     chunks = model if isinstance(model, (list, tuple)) else [model]
-    for chunk in chunks:
-        unwrapped = unwrap_model(chunk)
-        if getattr(unwrapped, "model_owns_packing", False):
-            continue
-        if Qwen3VLModel is not None and isinstance(unwrapped, Qwen3VLModel):
-            continue
-        return False
-    return bool(chunks)
+    return bool(chunks) and all(isinstance(unwrap_model(chunk), Qwen3VLModel) for chunk in chunks)
 
 
 def remove_left_padding(
