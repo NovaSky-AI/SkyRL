@@ -4,6 +4,7 @@ import pytest
 
 from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
     is_fp8_enabled,
     is_mxfp8_recipe,
     resolve_auto_fp8_recipe,
@@ -219,3 +220,31 @@ def test_mxfp8_gdn_tp_alignment_ignores_non_mxfp8_configs(kwargs):
 
 def test_mxfp8_gdn_tp_alignment_ignores_models_without_gdn():
     validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, SimpleNamespace(hidden_size=4096), 8)
+
+
+def test_fp8_exclude_recipe_keeps_the_matched_modules_in_bf16():
+    recipe = fp8_exclude_recipe(["*.shared_experts.*", "decoder.layers.0.*"])
+
+    # A TE recipe with neither an FP8 nor an FP4 setting runs and stores the module in BF16.
+    assert recipe["configs"] == {
+        "bf16": {"transformer_engine_config_type": "TEQuantizationParams", "training_recipe": {}}
+    }
+    assert list(recipe["matchers"].values()) == [
+        {"config": "bf16", "type": "glob", "pattern": "*.shared_experts.*", "enabled": True},
+        {"config": "bf16", "type": "glob", "pattern": "decoder.layers.0.*", "enabled": True},
+    ]
+
+
+def test_fp8_exclude_recipe_matches_megatron_module_paths():
+    quant_config = pytest.importorskip("megatron.core.quantization.quant_config")
+    recipe = quant_config.RecipeConfig.from_config_dict(
+        fp8_exclude_recipe(["*.shared_experts.*", "decoder.layers.0.*"])
+    )
+
+    def config_key(module_path):
+        return recipe.match_to_config_key(quant_config.MatchContext(module_path=module_path, layer_number=None))
+
+    assert config_key("decoder.layers.3.mlp.shared_experts.linear_fc1") == "bf16"
+    assert config_key("decoder.layers.0.self_attention.in_proj") == "bf16"
+    assert config_key("decoder.layers.10.self_attention.linear_qkv") is None
+    assert config_key("decoder.layers.3.mlp.experts.linear_fc1") is None

@@ -410,6 +410,61 @@ def test_megatron_explicit_transformer_config_kwargs_override_top_level_fp8_fiel
     assert cfg.transformer_config_kwargs["fp8"] == "e4m3"
 
 
+def test_megatron_bf16_layer_counts_fold_into_first_last_layers_bf16():
+    from skyrl.train.config.config import MegatronConfig
+
+    cfg = MegatronConfig(fp8="e4m3", num_layers_at_end_in_bf16=2)
+
+    assert cfg.transformer_config_kwargs["first_last_layers_bf16"] is True
+    assert cfg.transformer_config_kwargs["num_layers_at_start_in_bf16"] == 0
+    assert cfg.transformer_config_kwargs["num_layers_at_end_in_bf16"] == 2
+    # Megatron's own defaults (one BF16 layer at each end once enabled) never apply implicitly.
+    assert "first_last_layers_bf16" not in MegatronConfig(fp8="e4m3").transformer_config_kwargs
+
+
+def test_megatron_rejects_two_per_module_precision_sources():
+    from skyrl.train.config.config import MegatronConfig
+
+    with pytest.raises(ValueError, match="only use one"):
+        MegatronConfig(fp8_exclude_modules=["*.shared_experts.*"], te_precision_config_file="/tmp/recipe.yaml")
+
+
+@pytest.mark.parametrize("pattern", ["decoder.layers.0.*", "*.layers.[0-3].*"])
+def test_megatron_rejects_layer_indexed_fp8_exclusions_under_pipeline_parallelism(pattern):
+    from skyrl.train.config.config import MegatronConfig
+
+    with pytest.raises(ValueError, match="within each pipeline stage"):
+        MegatronConfig(pipeline_model_parallel_size=2, fp8_exclude_modules=[pattern])
+    MegatronConfig(pipeline_model_parallel_size=2, fp8_exclude_modules=["*.shared_experts.*"])
+    MegatronConfig(fp8_exclude_modules=[pattern])
+
+
+def test_fp8_weight_sync_exclusions_require_fp8_weight_sync():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.inference_engine.fp8_weight_sync_exclude_modules = ["*.layers.0.*"]
+
+    with pytest.raises(ValueError, match="requires fp8_weight_sync_mode"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_cli_overrides_accept_fp8_exclusion_lists():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.megatron_config.fp8_exclude_modules=['*.shared_experts.*']",
+            "trainer.policy.megatron_config.num_layers_at_start_in_bf16=1",
+            "generator.inference_engine.fp8_weight_sync_mode=mxfp8",
+            "generator.inference_engine.fp8_weight_sync_exclude_modules=['*.layers.0.*','*.layers.39.*']",
+        ]
+    )
+
+    megatron_config = cfg.trainer.policy.megatron_config
+    assert list(megatron_config.fp8_exclude_modules) == ["*.shared_experts.*"]
+    assert megatron_config.transformer_config_kwargs["first_last_layers_bf16"] is True
+    assert list(cfg.generator.inference_engine.fp8_weight_sync_exclude_modules) == ["*.layers.0.*", "*.layers.39.*"]
+
+
 def test_megatron_validation_allows_inference_only_fp8_param_without_gather():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"

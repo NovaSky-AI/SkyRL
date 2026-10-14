@@ -160,7 +160,7 @@ apply_routed_experts_rebind_patch()
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 # Checkpoint-name suffix -> (fused vLLM parameter suffix, FusedMoE shard id).
-# The model specs own this mapping so sender and receiver cannot drift.
+# Fixed by vLLM's FusedMoE, so it is the same for every model.
 _BATCHED_MOE_TARGETS = batched_moe_wire_targets()
 
 

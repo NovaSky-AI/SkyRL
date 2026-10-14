@@ -2,17 +2,25 @@
 
 ``ModelFp8Spec`` groups everything the sync path must know about one model
 family — which HF configs it matches, which weights quantize, which vLLM
-modules stay unquantized, and how Megatron-Bridge's batched expert tensors
-map onto wire projections. ``resolve_fp8_spec`` selects the spec for a
-checkpoint; unsupported layouts resolve to ``None`` and callers reject them
-explicitly. The vLLM-side fused-loader targets are derived from the same
-projections via ``batched_moe_wire_targets``, so sender and receiver share
-one source of truth instead of hardcoding the mapping twice.
+modules stay unquantized, and which exported tensors stack a layer's routed
+experts. ``resolve_fp8_spec`` selects the spec for a checkpoint; unsupported
+layouts resolve to ``None`` and callers reject them explicitly. Where vLLM
+loads each projection of a stacked expert tensor is fixed by vLLM's FusedMoE,
+not by the model, so the receiver's table (``batched_moe_wire_targets``) is
+built from one constant here.
+
+User exclusions (``fp8_weight_sync_exclude_modules``) are layered on top of
+the spec's ``base_exclude_list``: ``resolve_user_provided_exclude_list``
+expands them into names from the spec's ``fp8_modules``. The driver (for the
+engine, ``engine_exclude_list``) and every trainer rank (for the sender,
+``SerializedFp8Config.user_provided_exclude_list``) call it on the same
+config, so both sides see the same tensors.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import fnmatch
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
 # Wire formats live here rather than in vllm_format so model specs can name them
@@ -31,18 +39,29 @@ WIRE_SCALE_SUFFIX = {
 }
 
 
+# vLLM's FusedMoE slot for each projection of a stacked expert tensor on the batched
+# wire: projection -> (fused parameter, shard id). Fixed by vLLM
+# (``build_expert_params_mapping``), the same for every model.
+_FUSED_MOE_TARGETS = {
+    "gate_proj": ("w13_weight", "w1"),
+    "up_proj": ("w13_weight", "w3"),
+    "down_proj": ("w2_weight", "w2"),
+}
+
+# vLLM builds all routed experts of a layer as one module, at one precision. Listing
+# expert 0's three projections makes both wires build that module unquantized; for
+# model.layers.3.mlp.experts that is model.layers.3.mlp.experts.0.{gate,up,down}_proj:
+#   - mxfp8 (compressed-tensors) checks exactly these three names and leaves the layer
+#     unquantized when all are listed
+#   - blockwise (fp8) leaves it unquantized when any listed name contains the experts
+#     module's name, which these three do.
+_VLLM_EXPERT_PRECISION_NAMES = ("0.gate_proj", "0.up_proj", "0.down_proj")
+
+
 @dataclass(frozen=True)
-class MoeProjection:
-    """One routed-expert projection and its vLLM fused-loader target."""
-
-    hf_name: str  # projection name on the wire / in HF checkpoints, e.g. "gate_proj"
-    vllm_param: str  # fused vLLM parameter it loads into, e.g. "w13_weight"
-    shard_id: str  # FusedMoE weight_loader shard id, e.g. "w1"
-
-
-@dataclass(frozen=True)
-class MoeExpertSpec:
-    """A Megatron-Bridge batched expert tensor mapped onto wire projections.
+class StackedExperts:
+    """An exported tensor that stacks one projection, or two concatenated ones, of every
+    routed expert in a layer, as Megatron-Bridge exports Qwen3.5's experts.
 
     ``split_dim`` names the tensor dimension that concatenates the
     projections (split evenly, in order); ``None`` means the tensor is a
@@ -50,7 +69,7 @@ class MoeExpertSpec:
     """
 
     experts_base: str  # checkpoint prefix ending in the experts module
-    projections: tuple[MoeProjection, ...]
+    projections: tuple[str, ...]  # in stacking order, e.g. ("gate_proj", "up_proj")
     split_dim: Optional[int] = None
 
 
@@ -64,14 +83,15 @@ class ModelFp8Spec:
     matches: Callable[[Any], bool]
     # (hf_name, shape, wire_format) -> serialize this exported weight as FP8?
     should_quantize: Callable[[str, Sequence[int], str], bool]
-    # (hf_config, wire_format) -> vLLM module prefixes that must stay unquantized
-    ignored_layers: Callable[[Any, str], list[str]]
-    # batched expert tensor name -> MoeExpertSpec, or None if not one
-    moe_expert_spec: Callable[[str], Optional[MoeExpertSpec]]
-    # module segment holding routed experts in vLLM parameter names
-    moe_module: str = "experts"
-    # every projection the model emits, for receiver-side target derivation
-    moe_projections: tuple[MoeProjection, ...] = field(default=())
+    # (hf_config, wire_format) -> modules the engine always builds unquantized, before
+    # any user exclusions; vLLM matches these names as module prefixes
+    base_exclude_list: Callable[[Any, str], list[str]]
+    # (hf_config, wire_format) -> one name per tensor the sender sends as FP8, as
+    # Megatron-Bridge exports it minus a trailing ".weight". User exclusion globs match
+    # against these.
+    fp8_modules: Callable[[Any, str], list[str]]
+    # exported tensor name -> StackedExperts, or None if it does not stack experts
+    stacked_experts: Callable[[str], Optional[StackedExperts]] = lambda name: None
 
 
 _REGISTRY: list[ModelFp8Spec] = []
@@ -99,25 +119,113 @@ def resolve_fp8_spec(hf_config: Any) -> Optional[ModelFp8Spec]:
     return None
 
 
-def batched_moe_wire_targets() -> dict[str, tuple[str, str]]:
-    """Receiver mapping: checkpoint suffix -> (fused vLLM suffix, shard id).
+def _routed_experts_module(name: str) -> Optional[str]:
+    """Return the experts module a routed-expert tensor belongs to, or None for any other.
 
-    Derived from every registered spec's projections so the vLLM worker
-    extension never re-encodes per-model fused-loader knowledge.
+    ``model.layers.3.mlp.experts.17.gate_proj`` and ``model.layers.3.mlp.experts.gate_up_proj``
+    both give ``model.layers.3.mlp.experts``; ``model.layers.3.mlp.shared_experts.gate_proj``
+    gives None. "experts" is vLLM's name for every FusedMoE module.
     """
 
+    head, found, _ = name.partition(".experts.")
+    return f"{head}.experts" if found else None
+
+
+def resolve_user_provided_exclude_list(
+    spec: ModelFp8Spec,
+    hf_config: Any,
+    wire_format: str,
+    patterns: Sequence[str],
+) -> tuple[str, ...]:
+    """Expand the user's exclusion globs into the FP8 tensors they keep unquantized.
+
+    Args:
+        spec (ModelFp8Spec): The checkpoint's model spec.
+        hf_config (Any): The checkpoint's HF config.
+        wire_format (str): The serialized FP8 wire, ``"blockwise"`` or ``"mxfp8"``.
+        patterns (Sequence[str]): Globs over the spec's ``fp8_modules`` names, such as
+            ``["*.layers.3.mlp.*"]``.
+
+    Raises:
+        ValueError: A pattern matches none of the tensors the spec syncs as FP8, or the
+            patterns exclude only some of a layer's routed experts. vLLM runs all of a
+            layer's routed experts at one precision
+
+    Returns:
+        tuple[str, ...]: The matched names, without duplicates. On a Qwen3.5 MoE
+            checkpoint, ``["*.layers.3.mlp.*"]`` gives
+            ``(
+                "model.language_model.layers.3.mlp.experts.gate_up_proj",
+                "model.language_model.layers.3.mlp.experts.down_proj",
+                "model.language_model.layers.3.mlp.shared_expert.gate_proj",
+                ...
+            )``
+    """
+
+    modules = spec.fp8_modules(hf_config, wire_format)
+    excluded: set[str] = set()
+    for pattern in patterns:
+        matched = [module for module in modules if fnmatch.fnmatchcase(module, pattern)]
+        if not matched:
+            example = f" (e.g. {modules[0]!r})" if modules else ""
+            raise ValueError(
+                f"fp8_weight_sync_exclude_modules pattern {pattern!r} matches none of the "
+                f"{len(modules)} tensors {spec.name} syncs as FP8{example}."
+            )
+        excluded.update(matched)
+
+    experts_tensors: dict[str, list[str]] = {}
+    for module in modules:
+        experts = _routed_experts_module(module)
+        if experts is not None:
+            experts_tensors.setdefault(experts, []).append(module)
+    for experts, tensors in experts_tensors.items():
+        kept = [tensor for tensor in tensors if tensor not in excluded]
+        if 0 < len(kept) < len(tensors):
+            raise ValueError(
+                f"fp8_weight_sync_exclude_modules excludes {len(tensors) - len(kept)} of the {len(tensors)} "
+                f"routed-expert tensors in {experts!r}, but not {kept[0]!r}. vLLM runs all of a layer's "
+                f"routed experts at one precision: exclude all of them (e.g. '{experts}.*') or none."
+            )
+    return tuple(excluded)
+
+
+def engine_exclude_list(
+    spec: ModelFp8Spec,
+    hf_config: Any,
+    wire_format: str,
+    user_provided_exclude_list: Sequence[str],
+) -> list[str]:
+    """Return the modules the engine builds unquantized: the spec's base list plus the user's.
+
+    A layer's excluded routed experts (all of them, per
+    ``resolve_user_provided_exclude_list``) are listed as the names vLLM reads to choose
+    their precision.
+    """
+
+    exclude_list = list(spec.base_exclude_list(hf_config, wire_format))
+    listed_experts: set[str] = set()
+    for module in user_provided_exclude_list:
+        experts = _routed_experts_module(module)
+        if experts is None:
+            exclude_list.append(module)
+        elif experts not in listed_experts:
+            listed_experts.add(experts)
+            exclude_list.extend(f"{experts}.{name}" for name in _VLLM_EXPERT_PRECISION_NAMES)
+    return exclude_list
+
+
+def batched_moe_wire_targets() -> dict[str, tuple[str, str]]:
+    """Receiver mapping: batched wire suffix -> (fused vLLM suffix, shard id)."""
+
     targets: dict[str, tuple[str, str]] = {}
-    for spec in _REGISTRY:
-        for proj in spec.moe_projections:
-            # Blockwise ships weight_scale_inv; MXFP8 ships compressed-tensors'
-            # weight_scale. Both map onto the same fused parameter family.
-            for weight_suffix, param_suffix in (
-                (".weight", ""),
-                (WIRE_SCALE_SUFFIX[BLOCKWISE_FP8], "_scale_inv"),
-                (WIRE_SCALE_SUFFIX[MXFP8], "_scale"),
-            ):
-                key = f".{spec.moe_module}.{proj.hf_name}{weight_suffix}"
-                value = (f".{spec.moe_module}.{proj.vllm_param}{param_suffix}", proj.shard_id)
-                if targets.setdefault(key, value) != value:
-                    raise ValueError(f"Conflicting batched MoE wire target registered for suffix {key!r}")
+    for projection, (param, shard_id) in _FUSED_MOE_TARGETS.items():
+        # Blockwise ships weight_scale_inv; MXFP8 ships compressed-tensors'
+        # weight_scale. Both map onto the same fused parameter family.
+        for weight_suffix, param_suffix in (
+            (".weight", ""),
+            (WIRE_SCALE_SUFFIX[BLOCKWISE_FP8], "_scale_inv"),
+            (WIRE_SCALE_SUFFIX[MXFP8], "_scale"),
+        ):
+            targets[f".experts.{projection}{weight_suffix}"] = (f".experts.{param}{param_suffix}", shard_id)
     return targets
