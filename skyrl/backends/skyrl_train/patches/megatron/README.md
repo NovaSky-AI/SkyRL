@@ -95,8 +95,9 @@ Two pieces, which may land separately.
 **b) MoE sub-layers in the mHC layer**
 - **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
   - The layer replaces megatron-core's `_forward_mlp`, where `mlp_chunks_for_training` is applied,
-    so it chunks the MLP/MoE itself (`chunked_mlp`). On real data, routing sends some expert ranks
-    several times their share of tokens; chunking bounds their dispatch/expert/combine buffers.
+    so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
+    data, routing sends some expert ranks several times their share of tokens; chunking bounds their
+    dispatch/expert/combine buffers.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
   no `NotImplementedError` for MoE. Check that it honors `mlp_chunks_for_training` before switching.
 - **Remove:**

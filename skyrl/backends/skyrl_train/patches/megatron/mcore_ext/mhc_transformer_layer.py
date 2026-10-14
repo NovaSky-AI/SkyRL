@@ -179,8 +179,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pre_mlp_layernorm_output, moe_padding_mask, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
             pre_mlp_layernorm_output, padding_mask, packed_seq_params
         )
-        num_chunks = self.config.mlp_chunks_for_training if self.training else 1
-        mlp_output_with_bias = chunked_mlp(self.mlp, pre_mlp_layernorm_output, moe_padding_mask, num_chunks)
+        # Also in eval mode (megatron-core chunks only in training): eval and logprob forwards see the
+        # same per-rank routing spikes, and without chunking they ran out of memory first.
+        mlp_output_with_bias = chunked_mlp(
+            self.mlp, pre_mlp_layernorm_output, moe_padding_mask, self.config.mlp_chunks_for_training
+        )
         if moe_unflatten_mbs is not None:
             mlp_output, mlp_bias = mlp_output_with_bias
             mlp_output = self._maybe_reflatten_from_moe(mlp_output, packed_seq_params, moe_unflatten_mbs)
