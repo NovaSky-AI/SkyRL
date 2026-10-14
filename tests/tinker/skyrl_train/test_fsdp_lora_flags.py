@@ -215,6 +215,7 @@ def _unload(port: int, model_id: str) -> None:
     ],
 )
 def test_flags_select_which_modules_are_adapted(train_attn, train_mlp, expected, port):
+    """Each flag combination exports exactly the expected modules, and vLLM can sample from the adapter."""
     with tempfile.TemporaryDirectory() as sync_dir:
         with _api_server(port, sync_dir):
             client, sampler = _train_one_step_and_export(port, train_attn=train_attn, train_mlp=train_mlp)

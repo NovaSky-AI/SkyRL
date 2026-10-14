@@ -214,6 +214,7 @@ class TestLoRAConfigFieldRoundTrip:
         assert (wire.train_attn, wire.train_mlp, wire.train_unembed) == (False, True, False)
 
     def test_round_trip_is_lossless(self):
+        """Converting to the internal type and back loses no field."""
         original = types.LoraConfig(rank=32, alpha=32.0, seed=99, train_attn=False, train_mlp=True, train_unembed=True)
         recovered = api.LoRAConfig.from_types(original).to_types(seed=original.seed, alpha=original.alpha)
         assert recovered == original
@@ -223,18 +224,21 @@ class TestSupportedLoraConfig:
     """What the API stores, sends to the engine and echoes is what the backend builds."""
 
     def test_train_unembed_is_dropped(self):
+        """The SDK's default train_unembed=True is dropped with one warning."""
         with mock.patch.object(api, "logger") as log:
             lora = api._supported_lora_config(api.LoRAConfig(rank=8))
         assert (lora.train_attn, lora.train_mlp, lora.train_unembed) == (True, True, False)
         log.warning.assert_called_once()
 
     def test_no_warning_when_not_requested(self):
+        """A client that turns train_unembed off gets no warning."""
         with mock.patch.object(api, "logger") as log:
             lora = api._supported_lora_config(api.LoRAConfig(rank=8, train_unembed=False))
         assert lora.train_unembed is False
         log.warning.assert_not_called()
 
     def test_warning_names_only_the_adapted_groups(self):
+        """The warning describes the groups the adapter actually covers."""
         with mock.patch.object(api, "logger") as log:
             api._supported_lora_config(api.LoRAConfig(rank=8, train_mlp=False))
         message = log.warning.call_args.args[0]
@@ -242,11 +246,13 @@ class TestSupportedLoraConfig:
         assert "MLP" not in message
 
     def test_nothing_left_to_train_is_rejected(self):
+        """Both groups off is a 400 at the API, before anything is stored."""
         with pytest.raises(api.HTTPException) as exc:
             api._supported_lora_config(api.LoRAConfig(rank=8, train_attn=False, train_mlp=False))
         assert exc.value.status_code == 400
 
     def test_full_fine_tuning_ignores_the_group_flags(self):
+        """Full fine-tuning has no adapter, so its config is kept as sent and nothing is logged."""
         with mock.patch.object(api, "logger") as log:
             lora = api._supported_lora_config(api.LoRAConfig(rank=0, train_attn=False, train_mlp=False))
         assert (lora.rank, lora.train_unembed) == (0, True)
@@ -257,16 +263,19 @@ class TestWeightsInfoResponse:
     """The SDK resumes from state by recreating the adapter from this response."""
 
     def test_reports_the_group_flags(self):
+        """A LoRA model reports its rank and group flags, so a resume rebuilds the same adapter."""
         lora = types.LoraConfig(rank=8, alpha=32.0, seed=0, train_attn=True, train_mlp=False, train_unembed=False)
         info = api.WeightsInfoResponse.from_types("base", lora)
         assert (info.is_lora, info.lora_rank) == (True, 8)
         assert (info.train_attn, info.train_mlp, info.train_unembed) == (True, False, False)
 
     def test_matches_the_sdk_fields(self):
+        """The response declares every field the installed SDK reads."""
         import tinker
 
         assert set(tinker.types.WeightsInfoResponse.model_fields) <= set(api.WeightsInfoResponse.model_fields)
 
     def test_full_fine_tuning_has_no_flags(self):
+        """A full fine-tuning model reports is_lora=False and no group flags."""
         info = api.WeightsInfoResponse.from_types("base", types.LoraConfig(rank=0, alpha=32.0, seed=0))
         assert (info.is_lora, info.train_attn, info.train_mlp) == (False, None, None)

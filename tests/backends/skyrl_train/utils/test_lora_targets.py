@@ -118,6 +118,7 @@ MLP_NAMES = ["down_proj", "gate_proj", "up_proj"]
     ],
 )
 def test_lora_module_group_classification(module_name: str, expected: str | None) -> None:
+    """Each module path maps to the group its parent module names, or to none."""
     assert lora_module_group(module_name) == expected
 
 
@@ -130,11 +131,13 @@ def test_both_flags_set_passes_target_modules_through() -> None:
 
 
 def test_attn_only_selects_attention_projections() -> None:
+    """train_mlp=False narrows the targets to the attention projections."""
     resolved = resolve_lora_target_modules(_CausalLM(), "all-linear", train_attn=True, train_mlp=False)
     assert resolved == ATTN_NAMES
 
 
 def test_mlp_only_selects_mlp_projections() -> None:
+    """train_attn=False narrows the targets to the MLP projections."""
     resolved = resolve_lora_target_modules(_CausalLM(), "all-linear", train_attn=False, train_mlp=True)
     assert resolved == MLP_NAMES
 
@@ -159,16 +162,20 @@ def test_groups_are_disjoint_and_cover_every_linear() -> None:
 
 
 def test_both_flags_false_is_rejected() -> None:
+    """With both groups off there is nothing to train, so the request raises."""
     with pytest.raises(ValueError, match="at least one of `train_attn` or `train_mlp`"):
         resolve_lora_target_modules(_CausalLM(), "all-linear", train_attn=False, train_mlp=False)
 
 
 def test_narrowing_an_explicit_module_list_is_rejected() -> None:
+    """Narrowing applies only to the all-linear default, not to an explicit module list."""
     with pytest.raises(ValueError, match="narrow `target_modules='all-linear'`"):
         resolve_lora_target_modules(_CausalLM(), ["q_proj"], train_attn=True, train_mlp=False)
 
 
 def test_model_without_the_requested_group_is_rejected() -> None:
+    """An empty group raises, and the error points to target_modules as the workaround."""
+
     class _NoMlp(nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -239,6 +246,7 @@ def test_fused_moe_experts_cannot_be_adapted() -> None:
     [(True, True, None), (True, False, NotImplementedError), (False, False, ValueError)],
 )
 def test_megatron_rejects_narrowing(train_attn: bool, train_mlp: bool, error) -> None:
+    """Megatron accepts the default flags, rejects narrowing, and still rejects both groups off."""
     if error is None:
         check_lora_group_flags("all-linear", train_attn, train_mlp, strategy="megatron")
         return
@@ -296,5 +304,6 @@ def test_narrowed_critic_keeps_its_value_head(train_attn: bool, train_mlp: bool,
 
 
 def test_default_critic_targets_are_unchanged() -> None:
+    """With both flags on, the critic passes target_modules through unchanged."""
     resolved = resolve_critic_lora_target_modules(_CriticModel(), "all-linear", True, True, "value_head")
     assert resolved == "all-linear"

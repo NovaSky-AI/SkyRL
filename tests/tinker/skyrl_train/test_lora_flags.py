@@ -33,6 +33,7 @@ def _lora(**kwargs) -> types.LoraConfig:
     [(True, True), (True, False), (False, True)],
 )
 def test_flags_reach_the_policy_lora_config(train_attn, train_mlp):
+    """The request's flags land in the policy's SkyRLLoraConfig unchanged."""
     cfg = _build_skyrl_train_config(
         BASE_MODEL,
         FSDPBackendOverrides(),
@@ -84,6 +85,7 @@ class TestLoraSignature:
         return SkyRLTrainBackend._lora_signature_from(None, _lora(**kwargs))
 
     def test_differing_groups_produce_different_signatures(self):
+        """Adapters covering different groups have different shapes, so their signatures differ."""
         assert self._sig(train_mlp=False) != self._sig(train_attn=False)
         assert self._sig(train_mlp=False) != self._sig()
 
@@ -93,6 +95,7 @@ class TestLoraSignature:
         assert self._sig(seed=1) == self._sig(seed=2)
 
     def test_rank_and_alpha_still_count(self):
+        """Rank and alpha remain part of the signature."""
         assert self._sig(rank=16) != self._sig(rank=8)
         assert self._sig(alpha=16.0) != self._sig(alpha=32.0)
 
@@ -131,11 +134,13 @@ def _build_critic_until_workers(monkeypatch, lora: types.LoraConfig):
 
 
 def test_critic_receives_the_flags(monkeypatch):
+    """_build_critic copies the request's rank and flags into the critic's LoRA config."""
     critic_lora = _build_critic_until_workers(monkeypatch, _lora(train_mlp=False))
     assert (critic_lora.rank, critic_lora.train_attn, critic_lora.train_mlp) == (8, True, False)
 
 
 def test_critic_rejects_unappliable_flags_before_workers_start(monkeypatch):
+    """An invalid critic request raises before any critic worker is created."""
     backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
     backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
     backend._cfg.trainer.critic.model.lora.target_modules = ["q_proj"]
@@ -155,6 +160,7 @@ def test_backend_config_may_not_set_request_fields(key):
 
 
 def test_backend_config_alpha_still_overrides_the_api_placeholder():
+    """An operator's alpha in backend_config wins over the API's placeholder of 32."""
     overrides = FSDPBackendOverrides(**{"trainer.policy.model.lora.alpha": 64})
     cfg = _build_skyrl_train_config(BASE_MODEL, overrides, _lora())
     assert cfg.trainer.policy.model.lora.alpha == 64
