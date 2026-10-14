@@ -180,7 +180,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             pre_mlp_layernorm_output, padding_mask, packed_seq_params
         )
         num_chunks = min(self.config.mlp_chunks_for_training, pre_mlp_layernorm_output.shape[0])
-        if self.training and num_chunks > 1:
+        if num_chunks > 1:  # training and eval: eval forwards hit the same routed-token spikes
             # As megatron-core's TransformerLayer does: run the MLP/MoE over sequence chunks so only
             # one chunk's routed tokens are in flight. Routing is per token, so outputs are unchanged;
             # it bounds the dispatch/expert/combine buffers on ranks that receive many more tokens
