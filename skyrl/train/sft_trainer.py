@@ -1684,7 +1684,9 @@ class SFTTrainer:
             )
             if pos_bucket > 0:
                 for sample in (output.loss_fn_outputs or [])[: num_rows]:
-                    el = sample.get("elementwise_loss") or []
+                    # ``elementwise_loss`` carries the pre-scaled loss mask (1 / total tokens), so use the
+                    # unscaled per-token NLL from ``logprobs`` instead.
+                    el = [-x for x in (sample.get("logprobs") or [])]
                     for b in range(0, len(el), pos_bucket):
                         chunk = el[b : b + pos_bucket]
                         k = b // pos_bucket
@@ -1700,7 +1702,7 @@ class SFTTrainer:
             overall = sum(pos_sum.values()) / max(sum(pos_cnt.values()), 1)
             logger.info(
                 f"Eval position buckets (step {self.global_step}, {pos_bucket} tokens each, overall {overall:.4f}): "
-                + json.dumps({str(k * pos_bucket): round(v, 5) for k, v in means.items()})
+                + json.dumps({str(k * pos_bucket): round(v, 6) for k, v in means.items()})
             )
         return eval_loss, num_eval_batches
 
