@@ -58,6 +58,14 @@ uv sync --extra tokens   # token mode; add --extra remote for the record mirror
 
 ### Start a server in token mode
 
+Token mode needs vLLM's token-in/token-out endpoint, `/inference/v1/generate`. With `vllm serve`, that endpoint is registered only when the server is started with `--enable-scale-out`:
+
+```bash
+vllm serve Qwen/Qwen3-8B --port 8000 --enable-scale-out
+```
+
+Then start skycap in front of it:
+
 ```bash
 cd skycap && uv sync --extra tokens
 uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
@@ -201,7 +209,7 @@ uv run --isolated --extra skyrl-train --extra harbor --extra skycap \
 ## Current limitations
 
 - **OpenAI Chat Completions only.** Harnesses must call `/v1/chat/completions`.
-- **Token mode targets vLLM**, over its `/inference/v1/generate` endpoint. Another engine needs a subclass of `skycap.tokens.engine.VLLMEngine`.
+- **Token mode targets vLLM**, over its `/inference/v1/generate` endpoint (start `vllm serve` with `--enable-scale-out`). Another engine needs a subclass of `skycap.tokens.engine.VLLMEngine`.
 - **Text only.** Image inputs are not supported.
 - **No W&B record index under the fully-async trainer**, which fires no callbacks.
 - **Not on PyPI yet.** Install from the repository, as above.
