@@ -56,13 +56,13 @@ placeholder offsets in `input_ids` and the processor's arrays
 ```bash
 uv sync --extra tokens --extra multimodal   # plus torch and torchvision, for the processor
 uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
-  --tokenizer Qwen/Qwen3-VL-8B-Instruct --processor-kwargs '{"max_pixels": 1003520}' --record-dir ./record
+  --tokenizer Qwen/Qwen3-VL-8B-Instruct --record-dir ./record
 ```
 
-`--processor-kwargs` must match the engine's `mm_processor_kwargs`: an image
-processed differently has a different number of placeholders than the engine
-expects. Encoding the images for the engine needs `vllm` installed beside
-skycap.
+The renderer uses the model's own processor settings, so run the engine
+without `mm_processor_kwargs`: an image processed differently has a different
+number of placeholders than the engine expects. Encoding the images for the
+engine needs `vllm` installed beside skycap.
 
 ## Embed a server
 

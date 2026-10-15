@@ -141,7 +141,8 @@ def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: Ren
     assert b"".join(spans) == data
 
 
-VL_TOKENIZER = "Qwen/Qwen3-VL-2B-Instruct"
+# The smallest Qwen3-VL the `renderers` library maps by name.
+VL_TOKENIZER = "Qwen/Qwen3-VL-4B-Instruct"
 
 
 @pytest.fixture(scope="module")
@@ -156,7 +157,7 @@ def vl_renderer() -> RenderersRenderer:
         AutoProcessor.from_pretrained(VL_TOKENIZER)
     except OSError as error:
         pytest.skip(f"processor unavailable: {error}")
-    return RenderersRenderer(VL_TOKENIZER, size=1, renderer="qwen3-vl", processor_kwargs={"max_pixels": 200704})
+    return RenderersRenderer(VL_TOKENIZER, size=1)
 
 
 def _png(color: str, size: tuple[int, int]) -> dict:
@@ -185,19 +186,14 @@ def test_an_image_turn_bridges_to_exactly_the_full_render(vl_renderer: Renderers
     bridged = vl_renderer.bridge(first.token_ids, completion, [second_message], None, first.media)
     full = vl_renderer.render([first_message, {"role": "assistant", "content": "red"}, second_message], None)
 
-    # The processor kwargs apply: 1024x768 under max_pixels=200704 is a 24x32 grid, 192 placeholders.
+    # One placeholder per 2x2 block of the processor's patch grid.
     (image,) = first.media
-    assert image.length == 192 and image.data["image_grid_thw"].tolist() == [[1, 24, 32]]
+    assert image.length == int(image.data["image_grid_thw"].prod()) // 4
     assert bridged is not None and bridged.token_ids == full.token_ids
     assert [m.hash for m in bridged.media] == [full.media[1].hash]
     assert [(m.offset, m.length) for m in [*first.media, *bridged.media]] == [(m.offset, m.length) for m in full.media]
     for item in full.media:
         assert full.token_ids[item.offset : item.offset + item.length] == [pad] * item.length
-
-
-def test_processor_kwargs_for_a_text_only_model_are_refused(renderer: RenderersRenderer) -> None:
-    with pytest.raises(ValueError, match="processor_kwargs are for a multimodal model"):
-        RenderersRenderer(TOKENIZER, size=1, processor_kwargs={"max_pixels": 200704})
 
 
 QWEN35_TOKENIZER = "Qwen/Qwen3.5-0.8B"
