@@ -49,7 +49,7 @@ tinker = [
 ]
 
 ray = [
-    "ray[default]==2.57.0",
+    "ray[default]==2.59.0",
 ]
 
 aws = [
@@ -85,7 +85,7 @@ skyrl-train = [
     "accelerate",
     "torchdata",
     "omegaconf",
-    "ray==2.57.0",
+    "ray==2.59.0",
     "peft==0.18.1",
     "debugpy==1.8.0",
     "hf_transfer",
@@ -292,6 +292,16 @@ no-build-isolation-package = [
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
 # unpinned dependencies.
 override-dependencies = [
+    # Ray nightly (master @ a1a2cc64ee) for ray.experimental.sandbox fixes newer than
+    # 2.59.0. Pinned to one commit's wheels: the cluster image must run the same
+    # commit, since every nightly reports version 3.0.0.dev0. No macOS nightlies.
+    "ray[default]==2.59.0; sys_platform == 'darwin'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp312-cp312-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp312-cp312-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp313-cp313-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp313-cp313-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp314-cp314-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp314-cp314-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'",
     "transformer-engine[pytorch]==2.19.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.16.1; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
