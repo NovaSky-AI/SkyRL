@@ -496,6 +496,9 @@ class MegatronWorker:
                 experts_shared_outer_loras=experts_shared_outer_loras,
                 normalize_moe_lora=normalize_moe_lora,
                 share_expert_adapters=lora_config.share_expert_adapters,
+                sequence_parallel_input_regather=(
+                    self.cfg.policy.megatron_config.lora_config.sequence_parallel_input_regather
+                ),
             )
         elif lora_type == "canonical_lora":
             if experts_shared_outer_loras:
