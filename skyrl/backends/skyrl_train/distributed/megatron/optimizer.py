@@ -16,7 +16,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
 from typing import Union
 
 import torch
@@ -31,8 +30,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer_dtype import (
     coerce_optimizer_dtype_kwargs,
 )
 from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
-
-logger = logging.getLogger(__name__)
 
 
 def init_megatron_optim_config(
@@ -95,19 +92,17 @@ def get_megatron_optimizer_param_scheduler(
         )
     lr_decay_style = _SCHEDULER_TO_DECAY_STYLE[scheduler_name]
 
-    # Decay over the whole run unless an explicit ``lr_decay_steps`` is given. (Assign
-    # unconditionally -- the previous version left this undefined when lr_decay_steps was set.)
+    # Decay over the whole run unless an explicit ``lr_decay_steps`` is given.
     lr_decay_steps = getattr(config, "lr_decay_steps", None)
     if lr_decay_steps is None:
         lr_decay_steps = num_training_steps
-    # A decaying schedule needs a finite, real horizon. When num_steps is derived from epochs
-    # the trainer passes the true total; if it ever falls back to the ~1e9 default, cosine would
-    # be ~flat -- warn rather than silently no-op.
-    if lr_decay_style != "constant" and lr_decay_steps >= 1e9:
-        logger.warning(
-            f"scheduler={scheduler_name!r} but lr_decay_steps={lr_decay_steps} looks like the "
-            "unbounded default; the LR will barely decay. Ensure num_steps (or lr_decay_steps) "
-            "is set to the real training horizon."
+    # A decaying schedule needs the real horizon at init. Epoch-based SFT passes ``None`` (the
+    # dataset isn't loaded yet), and the 1e9 default would leave the LR ~flat.
+    if lr_decay_style != "constant" and (lr_decay_steps is None or lr_decay_steps >= 1e9):
+        raise ValueError(
+            f"scheduler={scheduler_name!r} needs a finite training horizon, got "
+            f"lr_decay_steps={lr_decay_steps}. Set num_steps explicitly (epoch-derived step "
+            "counts are not known when the optimizer is built)."
         )
 
     lr_warmup_steps = config.num_warmup_steps

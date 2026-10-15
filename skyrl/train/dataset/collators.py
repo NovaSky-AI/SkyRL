@@ -30,6 +30,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
 from .bin_packing import make_seq_packer
+from .sft_dataset import REF_LOGPROBS_KEY
 
 
 class DefaultCollator:
@@ -171,7 +172,7 @@ class PackedDataCollator:
         # All-or-nothing across the batch, mirroring collate_sft_batch, which
         # rejects mixed batches -- a partially-populated tensor would anchor
         # some rows against a phantom log p_ref = 0.
-        num_with_ref = sum(1 for ex in examples if ex.get("ref_logprobs") is not None)
+        num_with_ref = sum(1 for ex in examples if ex.get(REF_LOGPROBS_KEY) is not None)
         if num_with_ref not in (0, len(examples)):
             raise ValueError(
                 f"Mixed batches with/without 'ref_logprobs' are not supported: "
@@ -195,7 +196,7 @@ class PackedDataCollator:
             if batch_has_ref:
                 # Same window convention as loss_mask: covers the trailing
                 # ``num_actions`` positions, prompt prefix is 0.
-                ref = np.asarray(ex["ref_logprobs"], dtype=np.float32)
+                ref = np.asarray(ex[REF_LOGPROBS_KEY], dtype=np.float32)
                 if ref.shape[0] != ex["num_actions"]:
                     raise ValueError(
                         f"ref_logprobs length {ref.shape[0]} != num_actions "

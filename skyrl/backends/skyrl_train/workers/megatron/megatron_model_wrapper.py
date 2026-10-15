@@ -74,7 +74,10 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
 
 # Importing this registers the SFT objectives (cross_entropy/dft/asft/kl_reg_sft) into
 # PolicyLossRegistry, which is looked up by name below.
-from skyrl.backends.skyrl_train.utils.sft_loss_utils import LOSSES_WITH_BASE_LOGPROBS
+from skyrl.backends.skyrl_train.utils.sft_loss_utils import (
+    LOSSES_WITH_BASE_LOGPROBS,
+    SFT_LOSSES,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
@@ -705,7 +708,7 @@ class MegatronModelWrapper:
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             support_entropy = None
             if self.cfg.algorithm.enable_sample_support_replay:
-                compute_support_entropy = resolved_loss_name != "cross_entropy"
+                compute_support_entropy = resolved_loss_name not in SFT_LOSSES
                 support_scores = compute_sample_support_scores(
                     logits,
                     sequences,
@@ -868,8 +871,8 @@ class MegatronModelWrapper:
                 del data["mtp_student_logits"]
                 student_logits_list = None
 
-            # SFT path: cross_entropy loss (negative log likelihood)
-            if resolved_loss_name == "cross_entropy":
+            # SFT path: no RL entropy/KL terms
+            if resolved_loss_name in SFT_LOSSES:
                 # Policy loss masks are pre-scaled to achieve the correct reduction
                 # when summing across the entire minibatch (see `DefaultCollator`).
                 # Megatron divides loss by num_microbatches
@@ -935,6 +938,8 @@ class MegatronModelWrapper:
                 }
                 if draft_loss is not None:
                     metrics["mtp_loss"] = draft_loss.detach().item()
+                for k, v in loss_metrics.items():
+                    metrics["loss_metrics/" + k] = v
                 return loss, metrics
 
             # RL path: add optional KL/entropy terms

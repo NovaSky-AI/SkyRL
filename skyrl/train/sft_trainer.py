@@ -20,6 +20,7 @@ Or as a CLI entrypoint::
     python -m skyrl.train.main_sft strategy=megatron model.path=Qwen/Qwen3-0.6B
 """
 
+import copy
 import functools
 import json
 import multiprocessing as mp
@@ -54,7 +55,12 @@ from skyrl.train.config.sft_config import (
     build_skyrl_config_for_sft,
 )
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
-from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
+from skyrl.train.dataset.sft_dataset import (
+    REF_LOGPROBS_KEY,
+    ConcatSFTDataset,
+    SFTDataset,
+    TextDataset,
+)
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
@@ -749,7 +755,7 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     # ``max_num_actions`` exactly like ``loss_mask``. Carried through as ``base_action_log_probs``
     # (the same field RL uses for reference log-probs) and consumed by the ``asft`` loss. All-or-
     # nothing per batch, mirroring the image handling above.
-    num_with_ref = sum("ref_logprobs" in ex for ex in examples)
+    num_with_ref = sum(REF_LOGPROBS_KEY in ex for ex in examples)
     if num_with_ref not in (0, num_examples):
         raise ValueError(
             f"Mixed batches with/without 'ref_logprobs' are not supported: {num_with_ref}/{num_examples} "
@@ -768,7 +774,7 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         loss_mask_np[i, action_pad:] = ex["loss_mask"]
 
         if batch_has_ref:
-            ref = ex["ref_logprobs"]
+            ref = ex[REF_LOGPROBS_KEY]
             if len(ref) != ex["num_actions"]:
                 raise ValueError(
                     f"ref_logprobs length {len(ref)} != num_actions {ex['num_actions']} for example {i}; "
@@ -1078,8 +1084,11 @@ class SFTTrainer:
             )
             get_ray_pg_ready_with_timeout(ref_raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
             ref_pg = ResolvedPlacementGroup(ref_raw_pg)
+            # Forward-only: skip optimizer/scheduler construction on the reference.
+            ref_trainer_cfg = copy.deepcopy(self.cfg.trainer)
+            ref_trainer_cfg.policy.inference_only_init = True
             self.ref_actor_group = PPORayActorGroup(
-                self.cfg.trainer,
+                ref_trainer_cfg,
                 num_nodes=ref_num_nodes,
                 num_gpus_per_node=ref_num_gpus,
                 ray_actor_type=PolicyWorker,
@@ -1089,8 +1098,7 @@ class SFTTrainer:
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 record_memory=self.cfg.trainer.policy.record_memory,
             )
-            # Reference is the frozen base model; init from the same checkpoint, no optimizer steps
-            # are ever issued against it (we only ever call dispatch.forward("ref", ...)).
+            # Reference is the frozen base model, initialized from the same checkpoint.
             ray.get(self.ref_actor_group.async_init_model(self.sft_cfg.model.path))
             ray.get(
                 self.ref_actor_group.async_run_ray_method(
@@ -1818,15 +1826,15 @@ class SFTTrainer:
         base = torch.zeros_like(loss_mask, dtype=torch.float32)
         per_sample = output.loss_fn_outputs
 
-        n_missing = 0
+        if len(per_sample) != loss_mask.shape[0]:
+            raise ValueError(
+                f"ASFT live reference returned {len(per_sample)} samples for a batch of {loss_mask.shape[0]}."
+            )
         for i in range(loss_mask.shape[0]):
-            lp = per_sample[i].get("logprobs") if i < len(per_sample) else None
+            lp = per_sample[i].get("logprobs")
             if not lp:
-                # A wholly-missing sample stays at zero and would anchor against a
-                # phantom log p_ref = 0 (p_ref = 1.0); warned below. Rare -- the
-                # forward returns one row per sample.
-                n_missing += 1
-                continue
+                # A zero-filled row would anchor against a phantom p_ref = 1.0 and saturate k3.
+                raise ValueError(f"ASFT live reference returned no log-probs for sample {i}.")
             lp_t = torch.tensor(lp, dtype=torch.float32, device=base.device)
             n = lp_t.shape[0]
             if n == width:
@@ -1849,12 +1857,6 @@ class SFTTrainer:
                     f"window is only {width} wide; cannot align to loss_mask."
                 )
 
-        if n_missing:
-            logger.warning(
-                f"ASFT live reference: {n_missing}/{loss_mask.shape[0]} samples returned no "
-                "log-probs; those rows keep base_action_log_probs=0, which anchors them to a "
-                "phantom p_ref=1.0 and can blow up the k3 estimator."
-            )
         batch["base_action_log_probs"] = base
 
     def _asft_kl_coef_for_step(self, step: int) -> Optional[float]:
@@ -1873,15 +1875,10 @@ class SFTTrainer:
         """
         if self.sft_cfg.loss_type not in {"asft", "kl_reg_sft"}:
             return None
-        # Read from ``sft_cfg`` -- the SFT-native config the trainer is built
-        # with. ``self.cfg`` is a SkyRLTrainConfig and has no ``algorithm``
-        # attribute (that lives at ``cfg.trainer.algorithm``, and is populated
-        # FROM these same sft_cfg fields by build_skyrl_config_for_sft).
-        warmup = int(getattr(self.sft_cfg, "kl_warmup_steps", 0) or 0)
+        warmup = self.sft_cfg.kl_warmup_steps
         if warmup <= 0:
             return None
-        base = float(getattr(self.sft_cfg, "kl_loss_coef", 0.0))
-        return base * min(1.0, (step + 1) / warmup)
+        return self.sft_cfg.kl_loss_coef * min(1.0, (step + 1) / warmup)
 
     def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
         """Execute a single training step: forward_backward + optim_step.

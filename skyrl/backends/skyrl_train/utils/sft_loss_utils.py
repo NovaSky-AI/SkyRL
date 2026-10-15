@@ -43,6 +43,8 @@ from skyrl.train.config import AlgorithmConfig
 # Losses whose signature accepts ``base_log_probs``; the workers only forward the
 # frozen-reference log-probs for these, so every other loss keeps its existing signature.
 LOSSES_WITH_BASE_LOGPROBS = frozenset({PolicyLossType.ASFT, PolicyLossType.KL_REG_SFT})
+# Losses that take the workers' SFT path (no RL entropy/KL terms).
+SFT_LOSSES = frozenset({PolicyLossType.CROSS_ENTROPY, PolicyLossType.DFT}) | LOSSES_WITH_BASE_LOGPROBS
 
 
 @register_policy_loss(PolicyLossType.CROSS_ENTROPY)
@@ -170,9 +172,11 @@ def _anchored_loss(
             zero = torch.zeros((), dtype=log_ratio.dtype, device=log_ratio.device)
             stacked = torch.stack(
                 [
-                    (kl * loss_mask).sum() / loss_mask.sum().clamp(min=1),  # asft_kl
+                    # Unscaled mask: loss_mask is pre-scaled by 1/total_nonpad, and these
+                    # metrics are mean-reduced across micro-batches.
+                    (kl * mf).sum() / n,  # asft_kl
                     (log_ratio * mf).sum() / n,  # r_mean
-                    (log_ratio * mf + (mf - 1) * 1e9).max(),  # r_max (masked)
+                    torch.where(mf > 0, log_ratio, torch.finfo(log_ratio.dtype).min).max(),  # r_max (masked)
                     ((log_ratio > 5).to(log_ratio.dtype) * mf).sum() / n,  # r_gt5_frac
                     # Masked like the rest: the fraction of TRAINED tokens beyond the clamp.
                     ((clamped_hits.to(log_ratio.dtype) * mf).sum() / n) if clamped_hits is not None else zero,

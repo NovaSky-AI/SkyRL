@@ -239,7 +239,7 @@ class SFTConfig(BaseConfig):
     learning new/hard in-mixture capability that DFT would suppress while still anchoring
     in-distribution retention). ``"asft"``/``"kl_reg_sft"`` use the same KL-anchor knobs
     (``kl_loss_coef``, ``kl_estimator``, ``kl_clamp``, ``kl_warmup_steps``, ``ref_source``) and the
-    same precomputed reference log-prob column (``ref_logprobs_key``); without a reference both
+    same precomputed ``ref_logprobs`` dataset column; without a reference both
     raise rather than silently training a different objective -- use ``"dft"`` or
     ``"cross_entropy"`` to opt out of the anchor explicitly."""
     kl_loss_coef: float = 0.03
@@ -256,15 +256,11 @@ class SFTConfig(BaseConfig):
     ``algorithm.asft_kl_warmup_steps``). Absorbs the reference-vs-policy transient at step 1."""
     ref_source: str = "precomputed"
     """Where ASFT's reference log-probs come from:
-    ``"precomputed"`` -- read from the dataset's ``ref_logprobs`` column (run
-    ``precompute_ref_logprobs.py`` offline; zero train-time overhead), or
+    ``"precomputed"`` -- read from a pretokenized dataset's ``ref_logprobs`` column (computed
+    offline; zero train-time overhead), or
     ``"live"`` -- stand up a frozen reference model group and run a no-grad forward each step
     (no precompute, but ~2x model memory + an extra forward; requires its own GPUs today).
-    Ignored unless ``loss_type="asft"``."""
-    ref_logprobs_key: str = "ref_logprobs"
-    """Dataset column carrying precomputed frozen-reference gold-token log-probs (one list per
-    example, aligned to the assistant/response tokens). Consumed only when ``loss_type="asft"``
-    and ``ref_source="precomputed"``."""
+    Ignored unless ``loss_type`` is ``"asft"`` or ``"kl_reg_sft"``."""
     ref_placement_num_nodes: Optional[int] = None
     """Nodes for the live reference group (``ref_source="live"``); ``None`` mirrors the policy.
 
@@ -630,6 +626,14 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         raise ValueError(f"dummy_run_max_steps must be > 0, got {cfg.dummy_run_max_steps}")
     if cfg.max_training_steps is not None and cfg.max_training_steps <= 0:
         raise ValueError(f"max_training_steps must be > 0, got {cfg.max_training_steps}")
+    # Workers build the LR scheduler before the dataset is loaded, so an epoch-derived step count
+    # can't reach it; decaying schedules need the horizon up front.
+    horizon_known = cfg.dummy_run_full_ctx or cfg.num_steps is not None or cfg.max_training_steps is not None
+    if cfg.optimizer_config.scheduler not in {"constant", "constant_with_warmup"} and not horizon_known:
+        raise ValueError(
+            f"optimizer_config.scheduler={cfg.optimizer_config.scheduler!r} needs a known training "
+            "horizon; set num_steps (or max_training_steps) instead of relying on num_epochs."
+        )
 
     # Dataloader / sampler config
     if cfg.sampler not in _VALID_SAMPLERS:

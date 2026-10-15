@@ -203,10 +203,15 @@ class TestOptimizerConfigOverrides:
         ],
     )
     def test_optimizer_fields(self, field, value, expected):
-        cfg = _sft_cfg_from_overrides([f"optimizer_config.{field}={value}"])
+        # Decaying schedulers need an explicit horizon (see validate_sft_cfg).
+        cfg = _sft_cfg_from_overrides([f"optimizer_config.{field}={value}", "num_steps=10"])
         skyrl_cfg = build_skyrl_config_for_sft(cfg)
         actual = getattr(skyrl_cfg.trainer.policy.optimizer_config, field)
         assert actual == expected
+
+    def test_decaying_scheduler_requires_horizon(self):
+        with pytest.raises(ValueError, match="needs a known training horizon"):
+            build_skyrl_config_for_sft(_sft_cfg_from_overrides(["optimizer_config.scheduler=cosine", "num_epochs=2"]))
 
 
 class TestLoraConfigOverrides:

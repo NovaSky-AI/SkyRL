@@ -44,14 +44,14 @@ import pyarrow.compute as pc
 from datasets import Dataset, concatenate_datasets, load_dataset
 from loguru import logger
 
-from skyrl.train.dataset.sft_dataset import SFTDataset
+from skyrl.train.dataset.sft_dataset import REF_LOGPROBS_KEY, SFTDataset
 
 # Keys consumed (and re-emitted in normalized form) by the lazy row transform.
 # ``num_actions`` and ``labels`` are consumed-but-dropped: ``num_actions`` is
 # always re-inferred from ``loss_mask``, and HF-style ``labels`` are not a
 # supported loss target (convert to a 0/1 ``loss_mask`` offline). All other
 # columns pass through untouched (e.g. ``pixel_values`` / ``image_grid_thw``).
-_CONSUMED_KEYS = frozenset({"input_ids", "attention_mask", "loss_mask", "num_actions", "labels", "ref_logprobs"})
+_CONSUMED_KEYS = frozenset({"input_ids", "attention_mask", "loss_mask", "num_actions", "labels", REF_LOGPROBS_KEY})
 
 _VLM_KEYS = ("pixel_values", "image_grid_thw")
 
@@ -292,7 +292,7 @@ class _NormalizeTransform:
         # ASFT/kl_reg_sft reference log-probs: stored full-sequence (length == len(input_ids),
         # position-aligned). Window + truncate them in lockstep with loss_mask so the KL anchor
         # stays aligned; emitted in the same trailing-window form (length == num_actions).
-        ref_list = batch.get("ref_logprobs")
+        ref_list = batch.get(REF_LOGPROBS_KEY)
         ref_out = [] if ref_list is not None else None
         for i, (input_ids, loss_mask) in enumerate(zip(batch["input_ids"], batch["loss_mask"])):
             first = loss_mask.index(1)
@@ -325,7 +325,7 @@ class _NormalizeTransform:
             }
         )
         if ref_out is not None:
-            out["ref_logprobs"] = ref_out
+            out[REF_LOGPROBS_KEY] = ref_out
         return out
 
 

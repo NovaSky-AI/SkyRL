@@ -51,7 +51,10 @@ from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 
 # Importing this registers the SFT objectives (cross_entropy/dft/asft/kl_reg_sft) into
 # PolicyLossRegistry, which is looked up by name below.
-from skyrl.backends.skyrl_train.utils.sft_loss_utils import LOSSES_WITH_BASE_LOGPROBS
+from skyrl.backends.skyrl_train.utils.sft_loss_utils import (
+    LOSSES_WITH_BASE_LOGPROBS,
+    SFT_LOSSES,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -1167,7 +1170,7 @@ class PolicyWorkerBase(Worker):
             )
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
-        if resolved_loss_name == "cross_entropy":
+        if resolved_loss_name in SFT_LOSSES:
             # Policy loss masks are pre-scaled to achieve the correct reduction
             # when summing across the entire minibatch (see `DefaultCollator`).
             # FSDP averages loss value over DP ranks by default,
@@ -1223,6 +1226,8 @@ class PolicyWorkerBase(Worker):
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
             }
+            for k, v in loss_metrics.items():
+                status["loss_metrics/" + k] = v
         else:
             # RL path: add optional KL/entropy terms
             # entropy loss

@@ -100,12 +100,11 @@ Flat SFT-config keys (each maps onto the corresponding `algorithm.asft_*` field)
 | `kl_clamp` | `10.0` | Bound on `\|r\|`; 0 disables |
 | `kl_warmup_steps` | `0` | Linear coefficient ramp |
 | `ref_source` | `precomputed` | `precomputed` \| `live` |
-| `ref_logprobs_key` | `ref_logprobs` | Dataset column name |
 
 Example:
 
 ```bash
-uv run --isolated --extra dev --extra megatron -m skyrl.train.entrypoints.main_base \
+uv run --isolated --extra dev --extra megatron -m skyrl.train.main_sft \
   strategy=megatron \
   loss_type=kl_reg_sft \
   kl_loss_coef=0.01 \
@@ -113,8 +112,8 @@ uv run --isolated --extra dev --extra megatron -m skyrl.train.entrypoints.main_b
   kl_clamp=10.0 \
   kl_warmup_steps=20 \
   ref_source=precomputed \
-  ref_logprobs_key=ref_logprobs \
   pretokenized_dataset_paths="['/shared/datasets/my_mix_with_ref_logprobs']" \
+  num_steps=1000 \
   optimizer_config.scheduler=cosine \
   ...
 ```

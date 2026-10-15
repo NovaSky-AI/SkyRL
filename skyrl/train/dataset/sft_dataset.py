@@ -16,6 +16,9 @@ from typing import Iterable, Sequence
 
 import torch.utils.data
 
+# Precomputed frozen-reference gold-token log-probs column (anchored SFT losses).
+REF_LOGPROBS_KEY = "ref_logprobs"
+
 
 class SFTDataset(torch.utils.data.Dataset, abc.ABC):
     """Base map-style dataset for SFT training.

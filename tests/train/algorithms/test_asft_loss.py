@@ -212,3 +212,20 @@ def test_kl_reg_sft_gradient_only_through_policy():
     loss.backward()
     assert log_probs.grad is not None
     assert base.grad is None or torch.allclose(base.grad, torch.zeros_like(base))
+
+
+def test_asft_kl_metric_is_token_mean_under_scaled_mask():
+    """Collators pre-scale loss_mask by 1/total_nonpad; the KL metrics must stay a per-token mean."""
+    log_probs = torch.tensor([[-0.5, -1.0, -2.0]])
+    base_log_probs = torch.tensor([[-0.7, -0.4, -9.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 0.0]])
+    _, m = asft_loss(log_probs, None, None, config=_cfg(), loss_mask=loss_mask, base_log_probs=base_log_probs)
+    _, m_scaled = asft_loss(
+        log_probs, None, None, config=_cfg(), loss_mask=loss_mask / 64, base_log_probs=base_log_probs
+    )
+
+    r = (base_log_probs - log_probs)[0, :2]
+    assert m["asft_kl"] == pytest.approx((torch.expm1(r) - r).mean().item())
+    assert m_scaled["asft_kl"] == pytest.approx(m["asft_kl"])
+    # The masked-out third token (r=-7) must not leak into r_max.
+    assert m_scaled["asft_r_max"] == pytest.approx(r.max().item())
