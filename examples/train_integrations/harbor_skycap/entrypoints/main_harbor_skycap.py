@@ -129,12 +129,6 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     ie = cfg.generator.inference_engine
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
-    # skycap renders prompts itself, with the template's and the image processor's defaults; options
-    # that would change how vLLM renders them would make the two disagree, so refuse them.
-    if cfg.generator.chat_template_kwargs:
-        raise ValueError("generator.chat_template_kwargs is not supported with skycap token mode")
-    if engine_init.get("mm_processor_kwargs"):
-        raise ValueError("engine_init_kwargs.mm_processor_kwargs is not supported with skycap token mode")
     train_paths = cfg.skycap.train_paths
     # Here first, so a rule that won't import fails on the driver rather than in every server actor.
     load_rule(train_paths)

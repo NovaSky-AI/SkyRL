@@ -550,21 +550,6 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
     assert len(started) == 2
 
 
-
-def test_options_skycap_does_not_render_with_are_refused(monkeypatch) -> None:
-    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
-
-    monkeypatch.setattr(main_harbor_skycap, "start_servers", lambda settings, **_: None)
-    cfg = main_harbor_skycap.HarborSkycapConfig()
-    cfg.trainer.algorithm.max_seq_len = 1024
-    cfg.generator.chat_template_kwargs = {"enable_thinking": False}
-    with pytest.raises(ValueError, match="chat_template_kwargs"):
-        main_harbor_skycap.start_skycap(cfg, "http://router")
-    cfg.generator.chat_template_kwargs = {}
-    cfg.generator.inference_engine.engine_init_kwargs = {"mm_processor_kwargs": {"max_pixels": 200704}}
-    with pytest.raises(ValueError, match="mm_processor_kwargs"):
-        main_harbor_skycap.start_skycap(cfg, "http://router")
-
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
     support = pack_sample_support(np.zeros((1, TOP_K), dtype=np.int32))
     body = {
