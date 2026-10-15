@@ -129,6 +129,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         packed_seq_params=None,
         sequence_len_offset: Optional[Tensor] = None,
         padding_mask: Optional[Tensor] = None,
+        input_ids: Optional[Tensor] = None,
         mhc_recompute_manager=None,
         **kwargs,
     ):
@@ -176,10 +177,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pre_mlp_layernorm_output = self._reject_residual_returning_norm(
             self.pre_mlp_layernorm(aggregated), "pre_mlp_layernorm"
         )
-        pre_mlp_layernorm_output, moe_padding_mask, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
-            pre_mlp_layernorm_output, padding_mask, packed_seq_params
+        pre_mlp_layernorm_output, moe_padding_mask, moe_input_ids, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
+            pre_mlp_layernorm_output, padding_mask, input_ids, packed_seq_params
         )
-        mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=moe_padding_mask)
+        # Token ids are only consumed by hash-routed MoE layers, as in ``TransformerLayer._run_mlp``.
+        moe_kwargs = {"input_ids": moe_input_ids} if self.is_moe_layer and moe_input_ids is not None else {}
+        mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=moe_padding_mask, **moe_kwargs)
         if moe_unflatten_mbs is not None:
             mlp_output, mlp_bias = mlp_output_with_bias
             mlp_output = self._maybe_reflatten_from_moe(mlp_output, packed_seq_params, moe_unflatten_mbs)

@@ -92,7 +92,10 @@ Two pieces, which may land separately.
   - Delete `mcore_ext/hyper_connection.py`.
 
 **b) MoE sub-layers in the mHC layer**
-- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
+- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`). Its
+  `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
+  `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
+  `TransformerLayer._forward_mlp`.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
   no `NotImplementedError` for MoE.
 - **Remove:**
