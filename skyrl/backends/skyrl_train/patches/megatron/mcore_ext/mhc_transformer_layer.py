@@ -129,6 +129,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         packed_seq_params=None,
         sequence_len_offset: Optional[Tensor] = None,
         padding_mask: Optional[Tensor] = None,
+        input_ids: Optional[Tensor] = None,
         mhc_recompute_manager=None,
         **kwargs,
     ):
@@ -176,13 +177,18 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pre_mlp_layernorm_output = self._reject_residual_returning_norm(
             self.pre_mlp_layernorm(aggregated), "pre_mlp_layernorm"
         )
-        pre_mlp_layernorm_output, moe_padding_mask, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
-            pre_mlp_layernorm_output, padding_mask, packed_seq_params
+        pre_mlp_layernorm_output, moe_padding_mask, moe_input_ids, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
+            pre_mlp_layernorm_output, padding_mask, input_ids, packed_seq_params
         )
         # Also in eval mode (megatron-core chunks only in training): eval and logprob forwards see the
         # same per-rank routing spikes, and without chunking they ran out of memory first.
+        # Token ids are only consumed by hash-routed MoE layers, as in ``TransformerLayer._forward_mlp``.
         mlp_output_with_bias = chunked_mlp(
-            self.mlp, pre_mlp_layernorm_output, moe_padding_mask, self.config.mlp_chunks_for_training
+            self.mlp,
+            pre_mlp_layernorm_output,
+            moe_padding_mask,
+            self.config.mlp_chunks_for_training,
+            input_ids=moe_input_ids if self.is_moe_layer else None,
         )
         if moe_unflatten_mbs is not None:
             mlp_output, mlp_bias = mlp_output_with_bias
@@ -203,7 +209,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         return output, None
 
 
-def chunked_mlp(mlp, hidden_states: Tensor, padding_mask: Optional[Tensor], num_chunks: int):
+def chunked_mlp(
+    mlp,
+    hidden_states: Tensor,
+    padding_mask: Optional[Tensor],
+    num_chunks: int,
+    input_ids: Optional[Tensor] = None,
+):
     """Run ``mlp`` over ``num_chunks`` sequence chunks of ``hidden_states`` ([s, b, h]).
 
     megatron-core's ``TransformerLayer._forward_mlp`` does this for ``mlp_chunks_for_training``; this
@@ -214,7 +226,13 @@ def chunked_mlp(mlp, hidden_states: Tensor, padding_mask: Optional[Tensor], num_
     """
     num_chunks = min(num_chunks, hidden_states.shape[0])
     if num_chunks <= 1:
-        return mlp(hidden_states, padding_mask=padding_mask)
+        kwargs = {"input_ids": input_ids} if input_ids is not None else {}
+        return mlp(hidden_states, padding_mask=padding_mask, **kwargs)
     masks = padding_mask.chunk(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
-    outputs = [mlp(chunk, padding_mask=mask) for chunk, mask in zip(hidden_states.chunk(num_chunks, dim=0), masks)]
+    # input_ids is [b, s] while hidden_states is [s, b, h], so it is chunked along dim 1.
+    id_chunks = input_ids.chunk(num_chunks, dim=1) if input_ids is not None else [None] * num_chunks
+    outputs = [
+        mlp(chunk, padding_mask=mask, **({"input_ids": ids} if ids is not None else {}))
+        for chunk, mask, ids in zip(hidden_states.chunk(num_chunks, dim=0), masks, id_chunks)
+    ]
     return torch.cat([out for out, _ in outputs], dim=0), outputs[0][1]

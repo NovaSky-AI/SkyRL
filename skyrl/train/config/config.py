@@ -455,7 +455,10 @@ class MegatronLoraConfig(BaseConfig):
     folds ``rank / effective_rank`` into the reduced-rank ``lora_B`` tensors
     before writing them (``fold_lora_rank_scale_for_vllm``) so the sampled
     policy matches the trained one. The synced adapter is a vLLM-layout
-    artifact, not a loadable HF PEFT checkpoint."""
+    artifact, not a loadable HF PEFT checkpoint.
+
+    With ``merge_lora=False``, set ``generator.inference_engine.scale_moe_lora_rank=true`` to size the
+    inference engine's expert LoRA slots at the reduced expert rank."""
     sequence_parallel_input_regather: bool = True
     """Maps to Megatron-Bridge ``LoRA(sequence_parallel_input_regather=...)``. Only used with
     ``lora_type="lora"`` (``CanonicalLoRA`` does not take it), and only has an effect with sequence parallelism
@@ -1276,6 +1279,11 @@ class InferenceEngineConfig(BaseConfig):
     Enabling this trades performance for stability; leaving it off (the default) is faster but may affect convergence
     for long-running or long-context training jobs."""
     fully_sharded_loras: bool = False
+    scale_moe_lora_rank: bool = False
+    """Size the inference engine's MoE expert LoRA slots at the expert rank the trainer exports:
+    ``rank // top_k``, rounded up to a multiple of the expert tensor parallel size. Other LoRA slots keep
+    ``trainer.policy.model.lora.rank``. Requires ``trainer.strategy="megatron"``, ``lora.rank > 0``,
+    ``megatron_config.lora_config.merge_lora=false`` and ``megatron_config.lora_config.normalize_moe_lora=true``."""
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8

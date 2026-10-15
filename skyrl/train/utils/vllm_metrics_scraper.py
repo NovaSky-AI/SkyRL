@@ -311,7 +311,7 @@ class VLLMMetricsScraper:
             resp.raise_for_status()
             return resp.text
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.debug(f"VLLMMetricsScraper: failed to scrape {url}: {e}")
+            logger.warning(f"VLLMMetricsScraper: failed to scrape {url}: {e}")
             return ""
 
     async def _fetch_all(self) -> ParsedSamples:

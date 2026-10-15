@@ -344,8 +344,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"is_sleeping": False}
 
     @app.post("/sleep")
-    async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
-        return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
+    async def sleep(level: int = 2, mode: str = "abort", tags: Optional[List[str]] = Query(None)):
+        return {"status": "sleeping", "server_id": server_id, "level": level, "mode": mode, "tags": tags}
 
     @app.post("/wake_up")
     async def wake_up(tags: Optional[List[str]] = Query(None)):
@@ -947,6 +947,9 @@ class TestControlPlane:
         assert len(result) == 2
         for url, response in result.items():
             assert response["body"]["level"] == 2
+            # In-flight requests are aborted by a separate /pause first, so /sleep itself
+            # pauses in "keep" mode (required by vLLM with routed-experts capture enabled).
+            assert response["body"]["mode"] == "keep"
             assert response["body"]["tags"] is None
 
     @pytest.mark.asyncio

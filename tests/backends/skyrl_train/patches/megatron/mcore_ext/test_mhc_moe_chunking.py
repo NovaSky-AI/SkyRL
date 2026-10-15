@@ -79,3 +79,35 @@ def test_chunked_matches_single_call(seq, num_chunks, with_mask):
     assert sum(shape[0] for shape, _ in mlp.calls) == seq
     for shape, mask_shape in mlp.calls:
         assert mask_shape == (None if mask is None else (2, shape[0]))
+
+
+class IdRecordingMLP(torch.nn.Module):
+    """Records the ``input_ids`` each call receives (hash-routed MoE layers take token ids)."""
+
+    def __init__(self):
+        super().__init__()
+        self.input_ids = []
+
+    def forward(self, x, padding_mask=None, input_ids=None):
+        self.input_ids.append(input_ids)
+        return x, None
+
+
+@pytest.mark.parametrize("num_chunks", [1, 4])
+def test_chunked_mlp_splits_input_ids_with_tokens(num_chunks):
+    seq, b = 8, 2
+    x = torch.randn(seq, b, H)
+    input_ids = torch.arange(b * seq).view(b, seq)  # [b, s], while x is [s, b, h]
+    mlp = IdRecordingMLP()
+
+    chunked_mlp(mlp, x, None, num_chunks, input_ids=input_ids)
+
+    assert len(mlp.input_ids) == num_chunks
+    torch.testing.assert_close(torch.cat(mlp.input_ids, dim=1), input_ids)
+    assert all(ids.shape == (b, seq // num_chunks) for ids in mlp.input_ids)
+
+
+def test_chunked_mlp_omits_input_ids_when_unset():
+    # MLPs that do not take ``input_ids`` (dense and ordinary MoE layers) must not receive it.
+    out, _ = chunked_mlp(ToyMoE(), torch.randn(8, 2, H), None, 4)
+    assert out.shape == (8, 2, H)

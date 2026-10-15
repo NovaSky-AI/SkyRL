@@ -98,6 +98,9 @@ Two pieces, which may land separately.
     so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
     data, routing sends some expert ranks several times their share of tokens; chunking bounds their
     dispatch/expert/combine buffers.
+  - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
+    `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
+    `TransformerLayer._forward_mlp`.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
   no `NotImplementedError` for MoE. Check that it honors `mlp_chunks_for_training` before switching.
 - **Remove:**

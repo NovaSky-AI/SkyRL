@@ -714,6 +714,18 @@ async def _build_and_serve_vllm_server(
     cli_args.enable_scale_out = True
     app = build_app(cli_args)
 
+    if getattr(cli_args, "enable_return_routed_experts", False) and cli_args.pipeline_parallel_size > 1:
+        from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+            PP_RELAY_ENV,
+            apply_pp_relay_config_patch,
+        )
+
+        # R3 with PP > 1: lift vLLM's rejection before the engine config is validated here. The engine core
+        # validates the config again in its own process; the env var makes SkyRL's `vllm.general_plugins`
+        # entry point install the same patch there. The workers install the relay itself.
+        os.environ[PP_RELAY_ENV] = "1"
+        apply_pp_relay_config_patch()
+
     # Initialize the engine (this loads the model - takes time)
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
     # Standalone parsing can leave the CUDA worker class unresolved.
