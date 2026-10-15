@@ -362,6 +362,18 @@ class TestGetPDCLIArgs:
         out = get_pd_cli_args(args, role="decode", role_init_kwargs=role_kwargs)
         assert out.kv_transfer_config["kv_role"] == "kv_consumer"
 
+    @pytest.mark.parametrize("role_additional_config", [{"other": 1}, '{"other": 1}'])
+    def test_role_additional_config_merges_with_base(self, role_additional_config):
+        # The base args carry the derived MoE expert LoRA slot rank; a role's own
+        # additional_config must not drop it.
+        args = Namespace(
+            additional_config={"max_expert_lora_rank": 8},
+            kv_transfer_config={"kv_connector": "NixlConnector"},
+        )
+        out = get_pd_cli_args(args, role="decode", role_init_kwargs={"additional_config": role_additional_config})
+        assert out.additional_config == {"max_expert_lora_rank": 8, "other": 1}
+        assert args.additional_config == {"max_expert_lora_rank": 8}
+
     def test_missing_kv_transfer_config_raises(self):
         args = Namespace()
         with pytest.raises(ValueError, match="kv_transfer_config must be set when enable_pd=True"):

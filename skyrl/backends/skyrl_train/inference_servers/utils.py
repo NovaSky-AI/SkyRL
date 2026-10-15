@@ -390,6 +390,15 @@ def get_pd_p2p_connector_name(kv_config: Dict[str, Any]) -> str:
     )
 
 
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """Return a vLLM dict-valued engine arg as a dict (it may also arrive as a JSON string)."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        return json.loads(value)
+    return dict(value)
+
+
 def get_pd_cli_args(
     cli_args: Namespace,
     role: str = "prefill",
@@ -400,7 +409,8 @@ def get_pd_cli_args(
     Applies *role_init_kwargs* (``prefill_init_kwargs`` / ``decode_init_kwargs``
     pass-through, mutually exclusive with ``engine_init_kwargs``) on top of the
     base args, then reads ``kv_transfer_config`` from the resulting namespace.
-    Sets ``kv_role=kv_both`` if `kv_role` is not set.
+    A role ``additional_config`` is merged into the base one rather than
+    replacing it. Sets ``kv_role=kv_both`` if `kv_role` is not set.
 
     Args:
         cli_args: Base CLI args from :func:`build_vllm_cli_args`.
@@ -417,6 +427,10 @@ def get_pd_cli_args(
     if role_init_kwargs:
         _validate_logprobs_mode(role_init_kwargs, context=f"generator.inference_engine.{role}_init_kwargs")
         for key, value in role_init_kwargs.items():
+            if key == "additional_config":
+                # Merge instead of replacing: the base dict carries keys SkyRL derives itself
+                # (e.g. the MoE expert LoRA slot rank), which role kwargs cannot set.
+                value = {**_as_dict(getattr(args, "additional_config", None)), **_as_dict(value)}
             setattr(args, key, value)
 
     kv_config = getattr(args, "kv_transfer_config", None)
