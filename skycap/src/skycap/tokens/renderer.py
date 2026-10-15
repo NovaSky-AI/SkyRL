@@ -96,15 +96,14 @@ class TokenRenderer(Protocol):
 
 
 def normalize_tools(tools: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """The request's tools as sent, OpenAI's ``{"type": "function", "function": {...}}`` wrapper kept.
-
-    Chat templates that print the tool list (Qwen's ``tool | tojson``) print what the server passes
-    them, and vLLM passes the request's tools as they came. The renderers that read a tool's
-    fields unwrap the envelope themselves.
-    """
+    """OpenAI's ``{"type": "function", "function": {...}}`` wrapper, flattened."""
     if not tools:
         return None
-    return [dict(tool) for tool in tools]
+    flat = []
+    for tool in tools:
+        function = tool.get("function") if tool.get("type") == "function" else None
+        flat.append(dict(function) if isinstance(function, Mapping) else dict(tool))
+    return flat
 
 
 def join_pieces(pieces: Sequence[str]) -> tuple[str, list[int]]:

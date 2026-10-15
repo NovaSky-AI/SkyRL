@@ -26,10 +26,7 @@ network, and ``create`` adds the trajectory's route on the exposed URL,
 With a ``record_dir``, a trajectory is written when it ends -- by ``finish``,
 by the idle TTL (as ``abandoned``), or by a graceful shutdown (as ``open``) --
 and then dropped from memory; reads of it are served from disk. Without one,
-ended trajectories stay in memory, which is only for tests and development,
-unless ``keep_unrecorded=False``: then a trajectory is dropped once it ends,
-and the reply to its ``finish`` is the only copy of its samples. That is for a
-trainer that keeps no record.
+ended trajectories stay in memory, which is only for tests and development.
 
 With a ``record_mirror`` as well, each written record is then copied to that
 URL in the background (``skycap.mirror``). The copy fails open: a slow or
@@ -112,13 +109,9 @@ class CaptureServer:
         ttl: float = 3600.0,
         sweep_interval: float = 60.0,
         path_rules: Mapping[str, PathRule | str] | None = None,
-        keep_unrecorded: bool = True,
         require_api_key: bool = False,
     ) -> None:
-        if record_dir is not None and not keep_unrecorded:
-            raise ValueError("keep_unrecorded=False is for a server with no record_dir")
         self.backend = backend
-        self.keep_unrecorded = keep_unrecorded
         #: Whether the harness routes check the trajectory's own key.
         self.require_api_key = require_api_key
         #: The rules ``finish`` accepts, by name: the built-in ones plus ``path_rules``, each given as a
@@ -236,9 +229,6 @@ class CaptureServer:
         unwritten = self.trajectories.get(trajectory.id) is trajectory
         recorded_now = not recorded and trajectory.samples is not None
         if (ended_now or unwritten or recorded_now) and await self._persist(trajectory):
-            self.trajectories.pop(trajectory.id, None)
-        elif not self.keep_unrecorded and error is None:
-            # A rule that raised keeps the trajectory, so a later finish can run it again.
             self.trajectories.pop(trajectory.id, None)
         if error is not None:
             raise error

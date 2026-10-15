@@ -21,7 +21,6 @@ SAMPLING_KEYS = (
     "min_p",
     "max_tokens",
     "max_completion_tokens",
-    "min_tokens",
     "seed",
     "stop",
     "presence_penalty",
