@@ -169,7 +169,7 @@ class RenderersRenderer:
         tools: Sequence[Mapping[str, Any]] | None,
         prompt_ids: Sequence[int] | None = None,
     ) -> dict[str, Any]:
-        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text.
+        """Pass identifiable calls to the harness for validation; keep unparseable attempts as text.
 
         ``prompt_ids`` is the prompt the completion was sampled from. The parser reads its tail to
         tell whether the template already opened the reasoning block: Qwen3.5 with thinking on ends
@@ -189,11 +189,20 @@ class RenderersRenderer:
             message["reasoning_content"] = parsed.reasoning_content
         calls = []
         for index, call in enumerate(getattr(parsed, "tool_calls", None) or ()):
-            if call.status != ToolCallParseStatus.OK or not call.name:
+            if not call.name or call.status in (
+                ToolCallParseStatus.UNCLOSED_BLOCK,
+                ToolCallParseStatus.MISSING_NAME,
+                ToolCallParseStatus.MALFORMED_STRUCTURE,
+            ):
+                # Parsers extract even failed attempts from content. Restore their raw text;
+                # a partial argument dict from broken framing must not become an executable call.
+                message["content"] = "\n".join(part for part in (message["content"], call.raw) if part)
                 continue
+            # INVALID_JSON can still carry a name and arguments (e.g. an XML number parsed
+            # as a string). Argument and tool-name validation belong to the harness.
             arguments = call.arguments
             if not isinstance(arguments, str):
-                arguments = json.dumps(arguments or {}, separators=(",", ":"), ensure_ascii=False)
+                arguments = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
             calls.append(
                 {
                     "id": call.id or tool_call_id(completion_ids, index),

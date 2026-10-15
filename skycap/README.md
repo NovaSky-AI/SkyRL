@@ -34,7 +34,14 @@ The engine is vLLM, over its own `/inference/v1/generate`. Another engine's wire
 is a subclass of `skycap.tokens.engine.VLLMEngine`.
 
 By default a reply is parsed: a thinking model's reasoning comes back as
-`reasoning_content`, and tool calls as `tool_calls`. Add `--use-raw-content`
+`reasoning_content`, and tool calls as `tool_calls`. Identifiable tool calls
+are returned even when their arguments are invalid or their names are unknown;
+the harness validates them and supplies any correction feedback. Attempts with
+missing names or broken framing are retained as raw text in `content`, rather
+than silently discarded or turned into executable partial calls. The harness
+decides how to handle that text; capture does not repair the call or retry it.
+
+Add `--use-raw-content`
 when the harness was written against a vLLM server with no reasoning or tool
 parser. Replies then match that server's: the completion's own text as
 `content`, with thinking inline and tool calls unparsed, and
