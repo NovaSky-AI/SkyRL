@@ -217,6 +217,7 @@ all ranks            engine.send_weights()                       the ordinary NC
 worker               start:  no layerwise reload (the base model is untouched)
                      receive: staging proxy over self.model -> private GPU clone per tensor
                      finish: expand_lora_aliases -> stage_in_memory_adapter(name, tensors, config)
+                             then skyrl_release_receive_buffers (IPC: close the packed-buffer importer)
 rank 0               POST /skyrl/v1/load_lora_adapter {lora_name, in_memory: true}
 API server           add_lora(LoRARequest(lora_path="skyrl-memory://<name>", load_inplace=True))
 worker (patched)     WorkerLoRAManager._load_adapter -> from_lora_tensors(device=GPU) from the stage
@@ -224,6 +225,11 @@ worker (patched)     WorkerLoRAManager._load_adapter -> from_lora_tensors(device
 
 Arming lasts exactly one round — `finish_weight_update` disarms — so a missing or failed
 arm can never apply an adapter stream to the base model, or the reverse.
+
+An armed round skips vLLM's `finish_weight_update`, which on the IPC engine also closes
+the `PackedBufferImporter`: the worker's mapping of the trainer's packed staging buffer.
+The trainer frees that buffer (`ipc_collect`) only after the mapping is released, so
+the LoRA finish calls `skyrl_release_receive_buffers` instead, even when staging fails.
 
 The vLLM side is a runtime patch, `patches/vllm/patch_lora_in_memory.py`, applied by the
 worker-extension import like the other vLLM patches: stock vLLM can only load an
