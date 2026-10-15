@@ -972,7 +972,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             is_vlm=self.is_vlm,
         )
 
-        self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
+        megatron_config = self.cfg.policy.megatron_config
+        self.empty_cuda_cache = megatron_config.empty_cuda_cache is not False
+        self.empty_cuda_cache_after_backward = megatron_config.empty_cuda_cache_after_backward()
 
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.
@@ -1237,7 +1239,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return_per_token_outputs=return_per_token_outputs,
         )
 
-        if self.empty_cuda_cache:
+        if self.empty_cuda_cache_after_backward:
             torch.cuda.empty_cache()
 
         # Aggregate metrics across micro-batches

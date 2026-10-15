@@ -584,9 +584,15 @@ class MegatronConfig(BaseConfig):
     here directly overrides them. The block-scale env contract
     (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
     validated per architecture at startup and forwarded to all Ray actors."""
-    empty_cuda_cache: Optional[bool] = True
+    empty_cuda_cache: Optional[bool] = None
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
-    This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
+    This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer.
+
+    ``None`` (default) empties it unless the optimizer is fully offloaded to CPU
+    (``optimizer_cpu_offload=True`` with ``optimizer_offload_fraction=1.0``): the optimizer step then
+    allocates little GPU memory, and under ``expandable_segments`` the empty releases every cached page
+    to the driver, which the next forward pass maps again (seconds per step at high memory use).
+    ``True`` / ``False`` force it on / off. Forward-only passes empty the cache unless this is ``False``."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use
@@ -665,6 +671,15 @@ class MegatronConfig(BaseConfig):
             self.optimizer_config_kwargs = {}
         for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
             self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
+
+    def empty_cuda_cache_after_backward(self) -> bool:
+        """Whether to empty the CUDA cache after the forward/backward pass (resolves ``empty_cuda_cache=None``)."""
+        if self.empty_cuda_cache is not None:
+            return self.empty_cuda_cache
+        optimizer_on_cpu = bool(self.optimizer_config_kwargs.get("optimizer_cpu_offload")) and (
+            float(self.optimizer_config_kwargs.get("optimizer_offload_fraction") or 0.0) >= 1.0
+        )
+        return not optimizer_on_cpu
 
 
 # ---------------------------------------------------------------------------

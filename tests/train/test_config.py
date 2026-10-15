@@ -410,6 +410,38 @@ def test_megatron_explicit_transformer_config_kwargs_override_top_level_fp8_fiel
     assert cfg.transformer_config_kwargs["fp8"] == "e4m3"
 
 
+@pytest.mark.parametrize(
+    "empty_cuda_cache, optimizer_kwargs, expected",
+    [
+        (None, {}, True),  # GPU optimizer
+        (None, {"optimizer_cpu_offload": True, "optimizer_offload_fraction": 1.0}, False),
+        (None, {"optimizer_cpu_offload": True, "optimizer_offload_fraction": 0.5}, True),  # part of it on GPU
+        (None, {"optimizer_cpu_offload": False, "optimizer_offload_fraction": 1.0}, True),
+        (True, {"optimizer_cpu_offload": True, "optimizer_offload_fraction": 1.0}, True),
+        (False, {}, False),
+    ],
+)
+def test_megatron_empty_cuda_cache_after_backward(empty_cuda_cache, optimizer_kwargs, expected):
+    """``empty_cuda_cache=None`` skips the post-backward empty only when the whole optimizer runs on CPU;
+    an explicit bool always wins."""
+    from skyrl.train.config.config import MegatronConfig
+
+    cfg = MegatronConfig(empty_cuda_cache=empty_cuda_cache, optimizer_config_kwargs=optimizer_kwargs)
+    assert cfg.empty_cuda_cache_after_backward() is expected
+
+
+def test_megatron_empty_cuda_cache_from_cli_override():
+    """The CLI form used by launch scripts resolves the same way as the dataclass."""
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true",
+            "trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0",
+        ]
+    )
+    assert cfg.trainer.policy.megatron_config.empty_cuda_cache is None
+    assert cfg.trainer.policy.megatron_config.empty_cuda_cache_after_backward() is False
+
+
 def test_megatron_validation_allows_inference_only_fp8_param_without_gather():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
