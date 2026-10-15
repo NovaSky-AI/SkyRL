@@ -63,6 +63,37 @@ from skyrl.env_vars import (
 logger = logging.getLogger(__name__)
 
 
+def _multimodal_prompt(token_ids: List[int], features: dict, cache_salt: Optional[str]):
+    """The engine input for a token prompt with multimodal ``features``.
+
+    ``features`` is vLLM's ``MultiModalFeatures`` (per-modality ``mm_hashes``, ``mm_placeholders`` and
+    serialized ``kwargs_data``), as ``/inference/v1/generate`` takes it; this builds the engine input the
+    same way that endpoint does (vllm/entrypoints/scale_out/token_in_token_out/serving.py), so a caller can
+    send images to ``/skyrl/v1/generate`` and keep its routed experts and sample support.
+    """
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+        mm_kwargs_from_features,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        MultiModalFeatures,
+    )
+    from vllm.inputs import mm_input
+    from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+
+    parsed = MultiModalFeatures.model_validate(features)
+    placeholders = {
+        modality: [PlaceholderRange(offset=p.offset, length=p.length) for p in ranges]
+        for modality, ranges in parsed.mm_placeholders.items()
+    }
+    return mm_input(
+        prompt_token_ids=token_ids,
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs_from_features(parsed)),
+        mm_hashes=parsed.mm_hashes,
+        mm_placeholders=placeholders,
+        cache_salt=cache_salt,
+    )
+
+
 def _sample_support_from_flat_logprobs(
     logprobs: FlatLogprobs,
     top_k: int,
@@ -559,7 +590,11 @@ class VLLMServerActor(ServerActorProtocol):
         # TODO (sumanthrh): Migrate back to /inference/v1/generate once flashinfer is supported with returning top-k logprobs.
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
-            """SkyRL generate endpoint that returns routed_experts alongside token output."""
+            """SkyRL generate endpoint that returns routed_experts alongside token output.
+
+            Like ``/inference/v1/generate``, a request may carry multimodal ``features`` (images) for its
+            token prompt.
+            """
             body = await request.json()
 
             # Resolve `model` to a loaded LoRA adapter, as the native endpoint does
@@ -599,7 +634,13 @@ class VLLMServerActor(ServerActorProtocol):
                     sampling_params_dict.setdefault("detokenize", False)
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
-            if cache_salt is not None:
+            features = body.get("features")
+            if features:
+                try:
+                    prompt = _multimodal_prompt(token_ids, features, cache_salt)
+                except ValueError as error:  # pydantic's ValidationError, or a malformed item
+                    raise HTTPException(status_code=400, detail=f"invalid features: {error}") from error
+            elif cache_salt is not None:
                 prompt = TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)
             else:
                 prompt = TokensPrompt(prompt_token_ids=token_ids)
