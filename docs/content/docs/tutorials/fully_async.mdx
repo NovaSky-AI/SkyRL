@@ -146,6 +146,29 @@ Because no models are built, `simulate_training=true` requires `trainer.eval_int
 `trainer.ckpt_interval`, and `trainer.hf_save_interval` to all be `<= 0`,
 `trainer.update_ref_every_epoch=false`, and resumption to be disabled.
 
+### Callbacks
+
+`FullyAsyncRayPPOTrainer` fires the same [training callback](/docs/api-ref/skyrl/callbacks) events as the
+synchronous trainer. Pass callbacks through the trainer's `callbacks` argument or register them with
+`trainer.add_callback(...)`. Because generation overlaps training, some events mean something slightly different:
+
+- `on_step_start` fires when the trainer starts collecting the next mini-batch, whose groups may have been
+  generated during earlier steps.
+- `on_step_end` carries the trained `batch`, the training `metrics`, and the `trajectory_ids` of the batch rows in
+  row order. Groups dropped by `trainer.fully_async.sample_full_batch` are never part of the batch.
+- A step abandoned because the epoch ran out of prompts mid mini-batch fires `on_step_start` but no `on_step_end`.
+  The end-of-epoch checkpoint it saves (when checkpointing is enabled) still fires `on_save`, and the epoch then
+  ends normally.
+- Each step fires `on_step_start` → `on_step_end` → `on_eval_start`/`on_eval_end` → `on_save` → `on_log`. Eval
+  runs before the checkpoint save, the reverse of the synchronous trainer.
+- `on_log` receives the step's full payload (training metrics and timings) right before it is logged, so keys a
+  callback adds are logged too.
+
+Callbacks run synchronously on the trainer's asyncio event loop, which the generation workers share, so a slow
+callback pauses generation. Hand slow work to a thread the callback owns, as
+[`SkycapRecordIndex`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train_integrations/harbor_skycap/record_index.py)
+does.
+
 ## III. Design and Implementation of Fully Async Training in SkyRL
 
 ### 0. Overview
