@@ -148,6 +148,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import ( 
 
 apply_per_block_fp8_param_patch()
 
+# Full-weight syncs go through vLLM's layerwise reload, which buffers each incoming tensor at
+# its unsharded size until the whole layer has arrived (~19 GiB per GLM-5.3 MoE layer on every
+# TP rank). Load them into the local shard as they arrive instead.
+from skyrl.backends.skyrl_train.patches.vllm.patch_layerwise_reload_eager import (  # noqa: E402
+    apply_layerwise_reload_eager_patch,
+)
+
+apply_layerwise_reload_eager_patch()
+
 # R3 on monolithic MoE kernels (FlashInfer TRT-LLM FP8): the routed-experts capture callback is
 # bound once at startup and lost when a weight sync rebuilds the kernel (vllm#59449 / #59455).
 from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import (  # noqa: E402
@@ -155,6 +164,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import 
 )
 
 apply_routed_experts_rebind_patch()
+
+# DeepSeek-V3.2-family models (GLM-5.3) call FlashInfer's fused all-reduce + RMSNorm in every
+# layer; on a TP group spanning nodes without multi-node NVLink its workspace setup times out on
+# every call. Fall back to NCCL all-reduce + RMSNorm there.
+from skyrl.backends.skyrl_train.patches.vllm.patch_multinode_fused_allreduce_norm import (  # noqa: E402
+    apply_multinode_fused_allreduce_norm_patch,
+)
+
+apply_multinode_fused_allreduce_norm_patch()
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
