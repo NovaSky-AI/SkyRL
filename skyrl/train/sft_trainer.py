@@ -324,16 +324,26 @@ def _load_lazy_vlm_index(index_path: str, num_rows: int) -> Optional[tuple[list[
     """Load a lazy VLM index written by :func:`_save_lazy_vlm_index`.
 
     Returns ``(indices, lengths)``, or ``None`` when the file is missing,
-    unreadable, or was built over a source with a different row count (the
-    same guard the eager cache lacks; the cache key does not see the data).
+    unreadable, malformed (non-integer entries, mismatched list lengths,
+    indices outside ``[0, num_rows)``, non-positive lengths) or built over a
+    source with a different row count (the same guard the eager cache lacks;
+    the cache key does not see the data). Every one of those rebuilds the
+    index instead of failing startup.
     """
     if not os.path.isfile(index_path):
         return None
     try:
         with open(index_path) as f:
             meta = json.load(f)
-        indices, lengths = list(meta["indices"]), list(meta["lengths"])
-        if meta.get("num_rows") != num_rows or len(indices) != len(lengths) or (indices and max(indices) >= num_rows):
+        indices = [int(i) for i in meta["indices"]]
+        lengths = [int(n) for n in meta["lengths"]]
+        valid = (
+            meta.get("num_rows") == num_rows
+            and len(indices) == len(lengths)
+            and all(0 <= i < num_rows for i in indices)
+            and all(n > 0 for n in lengths)
+        )
+        if not valid:
             logger.warning(f"Ignoring lazy VLM index {index_path}: it does not match the dataset ({num_rows} rows)")
             return None
         return indices, lengths
@@ -343,18 +353,26 @@ def _load_lazy_vlm_index(index_path: str, num_rows: int) -> Optional[tuple[list[
 
 
 def _save_lazy_vlm_index(index_path: str, num_rows: int, indices: list[int], lengths: list[int]) -> None:
-    """Write a lazy VLM index atomically (temp file + rename, NFS-safe like
-    :func:`_save_to_cache`). Failures are logged, never raised: the index is
-    an optimization for the next run."""
+    """Write a lazy VLM index atomically: a per-writer temp file in the same
+    directory, then ``os.replace`` onto ``index_path`` (NFS-safe like
+    :func:`_save_to_cache`; concurrent jobs sharing a cache never see a partial
+    file or each other's temp file). Failures are logged, never raised: the
+    index is an optimization for the next run."""
+    temp_path = None
     try:
-        os.makedirs(os.path.dirname(index_path), exist_ok=True)
-        temp_path = index_path + ".tmp"
-        with open(temp_path, "w") as f:
+        cache_dir = os.path.dirname(index_path) or "."
+        os.makedirs(cache_dir, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(prefix=os.path.basename(index_path) + ".", suffix=".tmp", dir=cache_dir)
+        with os.fdopen(fd, "w") as f:
             json.dump({"num_rows": num_rows, "indices": indices, "lengths": lengths}, f)
         os.replace(temp_path, index_path)
+        temp_path = None
         logger.info(f"Saved lazy VLM index ({len(indices)} examples) to {index_path}")
     except Exception as e:
         logger.warning(f"Failed to save lazy VLM index to {index_path}: {e}")
+    finally:
+        if temp_path is not None and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 @functools.lru_cache(maxsize=512)

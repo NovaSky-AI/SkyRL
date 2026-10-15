@@ -18,7 +18,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import AutoProcessor, AutoTokenizer
 
 from skyrl.train.config.sft_config import SFTConfig
 from skyrl.train.dataset.sft_dataset import (
@@ -27,6 +26,7 @@ from skyrl.train.dataset.sft_dataset import (
     TextDataset,
 )
 from skyrl.train.sft_trainer import SFTTrainer
+from skyrl.utils.tok import get_processor, get_tokenizer
 
 # NOTE: These tests require torchvision (the Qwen3-VL processor) and thus the
 # fsdp extra -- the vllm marker runs them with the appropriate extras, as for
@@ -39,18 +39,12 @@ ROW_KEYS = ("input_ids", "attention_mask", "num_actions", "loss_mask", "pixel_va
 
 @pytest.fixture(scope="module")
 def vlm_processor():
-    proc = AutoProcessor.from_pretrained(MODEL)
-    if proc.tokenizer.pad_token is None:
-        proc.tokenizer.pad_token = proc.tokenizer.eos_token
-    return proc
+    return get_processor(MODEL, use_fast=True, padding_side="left")
 
 
 @pytest.fixture(scope="module")
 def vlm_tokenizer():
-    tok = AutoTokenizer.from_pretrained(MODEL)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
-    return tok
+    return get_tokenizer(MODEL, use_fast=True, padding_side="left")
 
 
 # ---------------------------------------------------------------------------
@@ -326,12 +320,23 @@ def test_lazy_index_cache_roundtrip(image_dataset, vlm_tokenizer, vlm_processor,
     with open(os.path.join(cache_dir, index_files[0])) as f:
         assert json.load(f)["num_rows"] == 6
 
-    # A corrupt index is ignored too.
-    with open(os.path.join(cache_dir, index_files[0]), "w") as f:
-        f.write("{not json")
-    calls["n"] = 0
-    fifth = trainer._load_and_tokenize(dataset_dir, "train")
-    assert calls["n"] == 6 and fifth.source_indices == kept
+    # Malformed indexes are ignored and rebuilt rather than failing startup:
+    # corrupt JSON, a negative index, a non-integer entry, a zero length, a
+    # length/index count mismatch.
+    for bad in (
+        "{not json",
+        json.dumps({"num_rows": 6, "indices": [-1, 0, 1, 4], "lengths": [10, 10, 10, 10]}),
+        json.dumps({"num_rows": 6, "indices": [0, "x", 1, 4], "lengths": [10, 10, 10, 10]}),
+        json.dumps({"num_rows": 6, "indices": [0, 1, 4, 5], "lengths": [10, 0, 10, 10]}),
+        json.dumps({"num_rows": 6, "indices": [0, 1, 4, 5], "lengths": [10, 10]}),
+    ):
+        with open(os.path.join(cache_dir, index_files[0]), "w") as f:
+            f.write(bad)
+        calls["n"] = 0
+        rebuilt = trainer._load_and_tokenize(dataset_dir, "train")
+        assert calls["n"] == 6 and rebuilt.source_indices == kept, bad
+    # No temp files are left behind by the writes.
+    assert not [f for f in os.listdir(cache_dir) if ".tmp" in f]
 
 
 def test_lazy_disable_cache_writes_nothing(image_dataset, vlm_tokenizer, vlm_processor, tmp_path):
@@ -406,6 +411,14 @@ def test_lazy_dataset_nondeterministic_tokenize_fn_raises():
     dataset = LazyVLMDataset(["a", "b"], [0, 1], [1, 1], lambda ex: None)
     with pytest.raises(RuntimeError, match="deterministic"):
         dataset[0]
+
+
+def test_lazy_dataset_batched_fetch_on_plain_sequence():
+    """Sources without batched indexing fall back to row-wise fetches; bad indices raise."""
+    dataset = LazyVLMDataset(["a", "b", "c"], [2, 0], [1, 1], lambda ex: {"input_ids": [ord(ex)]})
+    assert dataset.__getitems__([1, 0, -1]) == [{"input_ids": [97]}, {"input_ids": [99]}, {"input_ids": [97]}]
+    with pytest.raises(IndexError):
+        dataset.__getitems__([2])
 
 
 # ---------------------------------------------------------------------------

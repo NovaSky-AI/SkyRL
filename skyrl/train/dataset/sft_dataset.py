@@ -112,8 +112,28 @@ class LazyVLMDataset(SFTDataset):
             idx += len(self._indices)
         if not 0 <= idx < len(self._indices):
             raise IndexError(f"index {idx} out of range for LazyVLMDataset of length {len(self._indices)}")
-        row = self._indices[idx]
-        example = self._tokenize_fn(self._dataset[row])
+        return self._fetch(self._indices[idx])
+
+    def __getitems__(self, indices: list) -> list:
+        """Batched fetch: one gather on the arrow-backed source for the whole
+        batch (``dataset[[rows]]`` returns columns), then one ``tokenize_fn``
+        call per row. Sources without batched indexing (plain sequences) fall
+        back to row-wise fetches."""
+        rows = []
+        for idx in indices:
+            idx = int(idx)
+            if idx < 0:
+                idx += len(self._indices)
+            if not 0 <= idx < len(self._indices):
+                raise IndexError(f"index {idx} out of range for LazyVLMDataset of length {len(self._indices)}")
+            rows.append(self._indices[idx])
+        if not hasattr(self._dataset, "column_names"):
+            return [self._fetch(row) for row in rows]
+        columns = self._dataset[rows]
+        return [self._fetch(row, {k: v[j] for k, v in columns.items()}) for j, row in enumerate(rows)]
+
+    def _fetch(self, row: int, source_row: Optional[dict] = None) -> dict:
+        example = self._tokenize_fn(self._dataset[row] if source_row is None else source_row)
         if example is None:
             raise RuntimeError(
                 f"Source row {row} tokenized to a row on load but to None on fetch; tokenize_fn must be deterministic"
