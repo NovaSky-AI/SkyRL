@@ -193,6 +193,13 @@ class TokensBackend:
         sampling.setdefault("stop_token_ids", self.renderer.stop_token_ids())
 
         routes_from = turn.routes_from(graph, planned)
+        features = None
+        if planned.media:
+            try:
+                features = await asyncio.to_thread(self.renderer.features, planned.media)
+            except Exception as error:  # noqa: BLE001 - the renderer's encoder, whatever it raises
+                logger.exception("trajectory %s: encoding the prompt's media failed", trajectory.id)
+                return _error(f"encoding the prompt's media: {error}", 500, kind="api_error")
         body = self.engine.request(
             prompt_ids=planned.prompt_ids,
             sampling=sampling,
@@ -200,6 +207,7 @@ class TokensBackend:
             cache_salt=chat.body.get("cache_salt"),
             sampling_mask=self.sampling_mask,
             routes_from=routes_from,
+            features=features,
         )
         try:
             async with self.session.post(

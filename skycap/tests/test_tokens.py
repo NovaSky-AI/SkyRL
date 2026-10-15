@@ -799,3 +799,13 @@ def test_a_node_with_no_tokens_keeps_the_paths_routed_experts() -> None:
     empty = routing.slice(3, 0)
 
     assert empty is not None and empty.shape == (0, 2, 2)
+
+
+def test_a_client_node_without_images_keeps_its_delta_hash() -> None:
+    from skycap.hashing import client_token_delta_hash
+    from skycap.tokens.renderer import Media
+
+    assert client_token_delta_hash("m", [1, 2]) == client_token_delta_hash("m", [1, 2], [])
+    assert client_token_delta_hash("m", [1, 2], [Media("image", 0, 2, "a")]) != client_token_delta_hash(
+        "m", [1, 2], [Media("image", 0, 2, "b")]
+    )

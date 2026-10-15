@@ -72,6 +72,7 @@ class VLLMEngine:
         cache_salt: str | None,
         sampling_mask: bool,
         routes_from: int = 0,
+        features: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The generate request body for one turn.
 
@@ -84,6 +85,8 @@ class VLLMEngine:
                 the server runs with ``return_sampling_mask``; a subclass may request it here.
             routes_from: The first sequence position whose routed experts the turn needs. Sent as
                 ``routed_experts_prompt_start`` when ``routes_from_supported`` and nonzero.
+            features: The prompt's multimodal items in vLLM's ``MultiModalFeatures`` shape
+                (``TokenRenderer.features``), or None for a text-only prompt.
 
         Returns:
             The JSON body to POST to ``generate_path``.
@@ -97,6 +100,8 @@ class VLLMEngine:
             body["model"] = model
         if cache_salt:
             body["cache_salt"] = cache_salt
+        if features:
+            body["features"] = dict(features)
         return body
 
     def parse(self, body: Any, *, routes_from: int = 0) -> EngineOutput:
