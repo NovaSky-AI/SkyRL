@@ -43,8 +43,10 @@ def test_a_fence_inside_the_thinking_does_not_count():
         "Done thinking.\n</think>\n\n```mswea_bash_comand\nls\n```",
         # No command at all.
         "Done thinking.\n</think>\n\nI think the fix is in utils.js.",
+        # A fence inside the command: it must not run cut short at the inner fence.
+        "Done thinking.\n</think>\n\n```bash\ncat > notes.md <<'EOF'\n```python\nprint(1)\n```\nEOF\nrm -rf build\n```",
     ],
-    ids=["open-think", "two-commands", "misspelled-tag", "no-command"],
+    ids=["open-think", "two-commands", "misspelled-tag", "no-command", "inner-fence"],
 )
 def test_malformed_replies_are_format_errors(reply):
     assert len(actions(reply)) != 1

@@ -55,6 +55,18 @@ def snapshot_prefix(cpus: int, memory_gb: int, disk_gb: int) -> str:
     return f"swebm-c{cpus}m{memory_gb}d{disk_gb}-"
 
 
+async def settled_state(daytona, name: str, timeout: float = 900.0, interval: float = 10.0) -> str:
+    """The snapshot's state once it leaves ``pending`` (or the last one seen, after ``timeout`` seconds)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        snapshot = await daytona.snapshot.get(name)
+        state = str(getattr(snapshot.state, "value", snapshot.state))
+        if state != "pending" or loop.time() >= deadline:
+            return state
+        await asyncio.sleep(interval)
+
+
 async def build(daytona, name: str, image: str, resources, gate: asyncio.Semaphore, attempts: int) -> str:
     from daytona import CreateSnapshotParams
 
@@ -69,7 +81,11 @@ async def build(daytona, name: str, image: str, resources, gate: asyncio.Semapho
         # Daytona deactivates a snapshot left unused; it starts no sandboxes until activated again.
         if state == "inactive":
             await daytona.snapshot.activate(existing)
-            return f"{name}: reactivated"
+            # Activating only starts it: the snapshot stays pending until its runners have it.
+            state = await settled_state(daytona, name)
+            if state == "active":
+                return f"{name}: reactivated"
+            return f"{name}: NOT READY ({state}) after reactivating; run again once it settles"
         # building, pending, pulling: another build of it is under way.
         if state not in ("error", "build_failed"):
             return f"{name}: NOT READY ({state}); run again once it settles"

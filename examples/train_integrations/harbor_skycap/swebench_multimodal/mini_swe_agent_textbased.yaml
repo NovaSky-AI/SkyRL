@@ -125,7 +125,9 @@ model:
   # the policy to stop closing its thinking. Here such a turn is a format error, and so are two commands.
   # The fence is ```bash, the model's own habit; mini-swe-agent's ```mswea_bash_command still counts. With
   # that tag only, the policy drifted back to ```bash or garbled the tag, about 15% of calls by step 24.
-  action_regex: '</think>(?:(?!```(?:mswea_bash_command|bash|sh)\b).)*```(?:mswea_bash_command|bash|sh)\b[^\n]*\n((?:(?!```).)*?)\n```(?!.*```(?:mswea_bash_command|bash|sh)\b)'
+  # The closing fence must be a bare ``` line, and the command can't contain ```, so a command with an inner
+  # fence (a heredoc writing markdown) is a format error rather than run cut short at the inner fence.
+  action_regex: '</think>(?:(?!```(?:mswea_bash_command|bash|sh)\b).)*```(?:mswea_bash_command|bash|sh)\b[^\n]*\n((?:(?!```).)*?)\n```[ \t]*(?=\n|$)(?!.*```(?:mswea_bash_command|bash|sh)\b)'
   # mini-swe-agent's default pattern: the image tags prepare_tasks.py writes become image_url parts.
   multimodal_regex: '(?s)<MSWEA_MULTIMODAL_CONTENT><CONTENT_TYPE>(.+?)</CONTENT_TYPE>(.+?)</MSWEA_MULTIMODAL_CONTENT>'
   observation_template: |
