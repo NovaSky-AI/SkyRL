@@ -111,10 +111,9 @@ uv run --isolated --extra harbor python -m examples.train_integrations.harbor_sk
 
 `skycap.include_images=true` trains a vision-language model on tasks whose prompts carry
 images: skycap renders them with the model's processor and its default settings
-(so the engine takes no `mm_processor_kwargs`), calls the engine on
-`/inference/v1/generate`, which keeps them, and each row carries its path's
-`pixel_values` and `image_grid_thw`. That route returns no packed side channels,
-so R3 and sampler support are off. [`swebench_multimodal/`](swebench_multimodal)
+(so the engine takes no `mm_processor_kwargs`), sends them to the engine with
+each prompt (the multimodal `/skyrl/v1/generate`, #2501), and each row carries
+its path's `pixel_values` and `image_grid_thw`. [`swebench_multimodal/`](swebench_multimodal)
 is a recipe: SWE-bench Multimodal with mini-swe-agent, the issue's screenshots
 inline.
 

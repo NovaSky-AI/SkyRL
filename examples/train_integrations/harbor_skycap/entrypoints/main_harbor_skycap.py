@@ -109,9 +109,8 @@ class SkycapConfig:
     include_images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
     with the model's processor and its default settings (so the engine takes no ``mm_processor_kwargs``),
-    calls the engine on the route that keeps them, and each row carries its path's
-    ``pixel_values`` and ``image_grid_thw`` to training. That route has no packed side channels, so R3 and
-    sampler support are off."""
+    sends them to the engine with each prompt (needs #2501's multimodal ``/skyrl/v1/generate``), and each row
+    carries its path's ``pixel_values`` and ``image_grid_thw`` to training."""
     require_api_key: Optional[bool] = None
     """Whether a trajectory's harness routes answer only its own key, which the generator hands its agent. ``None``
     (default): whenever ``skycap.exposure`` is set, so routes reachable from outside the cluster can't be written to
@@ -163,7 +162,6 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         ttl=cfg.skycap.ttl,
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
-        include_images=cfg.skycap.include_images,
     )
 
 
@@ -171,16 +169,6 @@ def _require_api_key(cfg: Any) -> bool:
     """``skycap.require_api_key``, on by default whenever the servers are exposed."""
     required = cfg.skycap.require_api_key
     return cfg.skycap.exposure.type != "none" if required is None else bool(required)
-
-
-def _validate_images(cfg: Any) -> None:
-    """``skycap.include_images`` rules out what only the packed engine route carries."""
-    if not cfg.skycap.include_images:
-        return
-    ie = cfg.generator.inference_engine
-    for flag in ("enable_return_routed_experts", "enable_return_sample_support_set"):
-        if getattr(ie, flag, False):
-            raise ValueError(f"skycap.include_images needs generator.inference_engine.{flag}=false")
 
 
 def _exposure(cfg: Any) -> Optional[str]:
@@ -246,7 +234,6 @@ def main() -> None:
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
     _exposure(cfg)
-    _validate_images(cfg)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)
