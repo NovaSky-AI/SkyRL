@@ -67,29 +67,6 @@ def test_identical_reply_is_one_node_with_two_calls() -> None:
     assert len(h.graph.nodes[first.output].calls) == 2
 
 
-def test_text_mode_follows_the_conversation_below_a_client_copy_the_model_later_samples() -> None:
-    h = Harness()
-    # The client sends "a" as history before the model samples it, and the conversation goes on below that copy.
-    first = h.call([user("q"), assistant("a"), user("q2")], assistant("a2"))
-    sample = h.call([user("q")], assistant("a")).output
-    turn = h.call([user("q"), assistant("a"), user("q2"), assistant("a2"), user("q3")], assistant("a3"))
-
-    # The model sample is the chosen sibling, but the conversation continues below the copy, with a2 on its path.
-    assert h.graph.child(0, h.graph.nodes[sample].match_hash) == sample
-    assert first.output in h.graph.path_to(turn.output)
-    # With nothing below the copy to match, the chosen sibling (the sample) wins the tie.
-    assert h.graph.path_to(h.call([user("q"), assistant("a"), user("q4")], assistant("a4")).output)[1] == sample
-
-
-def test_a_long_history_matches_without_recursion() -> None:
-    h = Harness()
-    history = [user(f"q{i}") if i % 2 == 0 else assistant(f"a{i}") for i in range(3001)]
-    h.call(history, assistant("end"))
-    turn = h.call([*history, assistant("end"), user("more")], assistant("done"))
-
-    assert turn.matched == 3002
-
-
 def test_different_reply_forks() -> None:
     h = Harness()
     h.call([user("q")], assistant("a"))
@@ -151,7 +128,8 @@ def test_the_sibling_not_picked_is_shadowed_but_still_trains() -> None:
     assert h.graph.paths() == [[0, 1], [0, 2]]
 
 
-def test_a_model_sibling_is_preferred_over_a_later_client_copy() -> None:
+def test_a_later_client_copy_is_preferred_over_a_model_sibling() -> None:
+    # A trajectory goes on from its newest branch, e.g. the client twins a token-mode full render stores.
     graph = MessageGraph()
     root, _ = graph.add(
         None, role="user", author="client", message=user("q"), match_hash="q", delta_hash="q", created_at=0.0
@@ -175,9 +153,9 @@ def test_a_model_sibling_is_preferred_over_a_later_client_copy() -> None:
         created_at=2.0,
     )
 
-    assert graph.match_deepest(["q", "a"]) == [root.id, sample.id]
-    assert graph.shadowed_by(copy.id) == sample.id
-    assert graph.shadowed_by(sample.id) is None
+    assert graph.match(["q", "a"]) == [root.id, copy.id]
+    assert graph.shadowed_by(sample.id) == copy.id
+    assert graph.shadowed_by(copy.id) is None
 
 
 def test_with_no_model_sibling_the_latest_client_one_is_picked() -> None:
@@ -189,7 +167,7 @@ def test_with_no_model_sibling_the_latest_client_one_is_picked() -> None:
         None, role="user", author="client", message=user("q"), match_hash="q", delta_hash="q2", created_at=1.0
     )
 
-    assert graph.match_deepest(["q"]) == [second.id]
+    assert graph.match(["q"]) == [second.id]
     assert graph.shadowed_by(first.id) == second.id
 
 
@@ -365,37 +343,3 @@ def test_add_rejects_an_unknown_parent() -> None:
     graph = MessageGraph()
     with pytest.raises(KeyError):
         graph.add(7, role="user", author="client", message=user("q"), match_hash="m", delta_hash="m", created_at=0.0)
-
-
-def test_matching_goes_through_whichever_same_hash_sibling_continues_furthest() -> None:
-    graph = MessageGraph()
-    root, _ = graph.add(
-        None, role="user", author="client", message=user("q"), match_hash="q", delta_hash="q", created_at=0.0
-    )
-    sample, _ = graph.add(
-        root.id,
-        role="assistant",
-        author="model",
-        message=assistant("a"),
-        match_hash="a",
-        delta_hash="a/model",
-        created_at=1.0,
-    )
-    twin, _ = graph.add(
-        root.id,
-        role="assistant",
-        author="client",
-        message=assistant("a"),
-        match_hash="a",
-        delta_hash="a/client",
-        created_at=2.0,
-    )
-    follow_up, _ = graph.add(
-        twin.id, role="user", author="client", message=user("q2"), match_hash="q2", delta_hash="q2", created_at=3.0
-    )
-
-    # The model sample stays the chosen sibling, but the conversation went on below its twin.
-    assert graph.child(root.id, "a") == sample.id
-    assert graph.match_deepest(["q", "a", "q2"]) == [root.id, twin.id, follow_up.id]
-    # With nothing below either, the chosen sibling wins the tie.
-    assert graph.match_deepest(["q", "a"]) == [root.id, sample.id]

@@ -495,8 +495,8 @@ async def test_token_history_continues_from_the_shadowed_sibling_whose_tokens_th
 
         sample, replay = graph.children(0)
         assert (graph.nodes[sample].author, graph.nodes[replay].author) == ("model", "client")
-        assert graph.shadowed_by(replay) == sample
-        # Matching picks the sample, but its tokens aren't the render's, so both later calls fork to the replay.
+        assert graph.shadowed_by(sample) == replay
+        # The replay is the latest sibling and holds the render's tokens, so both later calls continue from it.
         later = [node.id for node in graph if node.author == "model" and node.id != sample]
         assert len(later) == 2 and all(replay in graph.path_to(node) for node in later)
 
@@ -527,7 +527,7 @@ async def test_token_history_never_continues_from_a_shadowed_model_sample() -> N
         assert graph.nodes[fork].author == "client"
         older_tokens = graph.nodes[older].tokens.token_ids
         assert graph.nodes[fork].tokens.token_ids[: len(older_tokens)] == older_tokens
-        assert graph.shadowed_by(fork) == latest
+        assert graph.shadowed_by(fork) is None and graph.shadowed_by(latest) == fork
         later = next(node.id for node in graph if node.author == "model" and node.id not in (older, latest))
         assert fork in graph.path_to(later) and older not in graph.path_to(later)
 

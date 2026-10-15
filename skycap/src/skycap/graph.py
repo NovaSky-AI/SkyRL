@@ -28,9 +28,9 @@ Identical outputs under the same conditions are one node that records every
 call that produced it. Rarely, several siblings share a match hash but differ
 in delta: the same text sampled under two ``top_p`` values, a harness-written
 message equal to a sample, or (token mode) the same text tokenized two ways.
-A later request's matching message is then matched to the latest
-model-authored one, or the latest client-authored one if there is no model
-sibling. The others are ``shadowed_by`` it: still valid nodes whose paths train
+A later request's matching message is then matched to the latest of them,
+whatever its author: a trajectory goes on from its newest branch, e.g. the
+client twins a full render stores in token mode. The others are ``shadowed_by`` it: still valid nodes whose paths train
 normally. In text mode, history continues from the chosen sibling. In token
 mode, a turn continues from it only if the turn reuses its tokens, and
 otherwise from a client sibling with exactly the rendered tokens: a shadowed
@@ -135,8 +135,8 @@ class MessageGraph:
         self.tools: dict[str, list[dict[str, Any]]] = {}
         #: (parent id, delta hash) -> node id. How ``add`` finds a node it already made.
         self._by_delta: dict[tuple[int | None, str], int] = {}
-        #: (parent id, match hash) -> node id: the latest model-authored such sibling,
-        #: else the latest client-authored one. How ``match`` walks a request's history.
+        #: (parent id, match hash) -> node id: the latest such sibling. How ``match`` walks a
+        #: request's history.
         self._by_match: dict[tuple[int | None, str], int] = {}
         #: parent id (``None`` for roots) -> child node ids, in creation order.
         self._children: dict[int | None, list[int]] = {}
@@ -186,9 +186,7 @@ class MessageGraph:
         )
         self.nodes.append(node)
         self._by_delta[(parent, delta_hash)] = node.id
-        chosen = self._by_match.get((parent, match_hash))
-        if chosen is None or author == "model" or self.nodes[chosen].author == "client":
-            self._by_match[(parent, match_hash)] = node.id
+        self._by_match[(parent, match_hash)] = node.id
         self._children.setdefault(parent, []).append(node.id)
         return node, True
 
@@ -207,50 +205,16 @@ class MessageGraph:
             raise ValueError(f"node {node} is not a child of {parent}")
         self._by_match.setdefault((parent, match_hash), node)
 
-    def match_deepest(self, match_hashes: Sequence[str], parent: int | None = None) -> list[int]:
-        """The longest prefix of ``match_hashes`` already in the graph below ``parent``, as node ids.
-
-        A parent can have several children with the same match hash and different delta hashes: the same
-        message stored with different tokens, such as a token-mode client twin that a full render gave a
-        history the model's own tokens no longer reproduce. The conversation may go on below any of them, so
-        every such child is explored and the path matching the most messages wins; on a tie, the chosen one
-        (``child``: model-authored, then latest). In text mode, same-hash siblings hold the same text, so this
-        only differs from following the chosen child when the conversation already went on below another one:
-        e.g. a client copy of a reply the model samples later. Following that conversation keeps its model
-        turns on the path, where following the chosen sibling would re-add them as client copies below it.
-        """
-
-        def candidates(node: int | None, depth: int) -> list[int]:
-            if depth == len(match_hashes):
-                return []
-            chosen = self.child(node, match_hashes[depth])
-            twins = [c for c in self.children(node) if c != chosen and self.nodes[c].match_hash == match_hashes[depth]]
-            return ([chosen] if chosen is not None else []) + twins
-
-        # Iterative, so a long history doesn't hit the recursion limit. Each node is reached by one path, so
-        # it is visited once; after its candidates, ``reach`` is how many messages its best continuation
-        # matches and ``best`` that continuation's next node (the first candidate on a tie: the chosen one).
-        reach: dict[int, int] = {}
-        best: dict[int, int] = {}
-        top = candidates(parent, 0)
-        stack: list[tuple[int, int, list[int] | None]] = [(c, 1, None) for c in top]
-        while stack:
-            node, depth, below = stack.pop()
-            if below is None:
-                below = candidates(node, depth)
-                stack.append((node, depth, below))
-                stack.extend((c, depth + 1, None) for c in below)
-                continue
-            reach[node] = depth
-            for c in below:
-                if reach[c] > reach[node]:
-                    reach[node], best[node] = reach[c], c
-        path: list[int] = []
-        node = max(top, key=reach.__getitem__, default=None)
-        while node is not None:
-            path.append(node)
-            node = best.get(node)
-        return path
+    def match(self, match_hashes: Sequence[str], parent: int | None = None) -> list[int]:
+        """The longest prefix of ``match_hashes`` already in the graph below ``parent``, as node ids."""
+        matched: list[int] = []
+        for match in match_hashes:
+            node = self.child(parent, match)
+            if node is None:
+                break
+            matched.append(node)
+            parent = node
+        return matched
 
     def commit_text(
         self,
@@ -277,7 +241,7 @@ class MessageGraph:
         call.tools = tools_key or None
         key = hashing.MatchKey.text(tools_key, model)
         matches = [key(message) for message in messages]
-        matched = self.match_deepest(matches)
+        matched = self.match(matches)
         parent = matched[-1] if matched else None
         created: list[int] = []
         for message, match in zip(messages[len(matched) :], matches[len(matched) :], strict=True):
