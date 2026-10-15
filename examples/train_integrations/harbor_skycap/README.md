@@ -109,7 +109,7 @@ uv run --isolated --extra harbor python -m examples.train_integrations.harbor_sk
 
 ## Images
 
-`skycap.images=true` trains a vision-language model on tasks whose prompts carry
+`skycap.include_images=true` trains a vision-language model on tasks whose prompts carry
 images: skycap renders them with the model's processor and its default settings
 (so the engine takes no `mm_processor_kwargs`), calls the engine on
 `/inference/v1/generate`, which keeps them, and each row carries its path's

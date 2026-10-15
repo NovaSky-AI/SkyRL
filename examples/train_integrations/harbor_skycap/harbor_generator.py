@@ -69,7 +69,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         inference_engine_client: Any = None,
         train_paths: str = "all",
         records: Optional[RecordLog] = None,
-        images: bool = False,
+        include_images: bool = False,
     ) -> None:
         """
         Args:
@@ -80,7 +80,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
-            images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
+            include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -118,7 +118,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         kwargs = agent.setdefault("kwargs", {})
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
-        self.images = images
+        self.include_images = include_images
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
         if remote_sandboxes(self._template) and not max_concurrency(getattr(generator_cfg, "rate_limit", None)):
             # A provider's sandboxes count against an account quota others share, and every trial of a batch
@@ -180,7 +180,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
-            images=self.images,
+            include_images=self.include_images,
         )
         output["rollout_metrics"].update(trial_metrics(attempts))
         return output

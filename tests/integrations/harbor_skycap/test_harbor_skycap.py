@@ -688,7 +688,7 @@ def test_with_images_each_row_carries_its_paths_vision_features_and_a_masked_row
     trained = TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
     masked = TrialOutcome(trajectory_id=TrajectoryID("b", 0), stop_reason="error")
 
-    out = compose([trained, masked], overlong_filtering=False, images=True)
+    out = compose([trained, masked], overlong_filtering=False, include_images=True)
 
     assert [tuple(t.shape) for t in out["pixel_values"]] == [(12, 4), (0, 4)]
     assert out["pixel_values"][0][:8].eq(1).all() and out["pixel_values"][0][8:].eq(4).all()

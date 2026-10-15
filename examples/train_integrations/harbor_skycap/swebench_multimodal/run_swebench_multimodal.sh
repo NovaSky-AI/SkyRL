@@ -249,7 +249,7 @@ uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap \
   harbor_trial_config.environment.override_cpus="$SANDBOX_CPUS" \
   harbor_trial_config.environment.override_memory_mb="$SANDBOX_MEMORY_MB" \
   harbor_trial_config.environment.override_storage_mb="$SANDBOX_STORAGE_MB" \
-  skycap.images=true \
+  skycap.include_images=true \
   skycap.record_dir="$RUN_DIR/skycap" \
   skycap.num_servers="$SKYCAP_SERVERS" \
   skycap.exposure.type=cloudflare \

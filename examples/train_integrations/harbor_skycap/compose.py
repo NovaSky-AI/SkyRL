@@ -20,7 +20,7 @@ The masking policy is the sibling's: an instance with any rollout that timed
 out or failed is masked whole, and a trial that hit the context limit trains
 with its reward unless overlong filtering is on.
 
-With ``images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
+With ``include_images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
 placeholder order. A row without images (a masked rollout's placeholder) carries zero-row tensors, as the
 trainer pads a batch.
 
@@ -121,13 +121,13 @@ def compose(
     top_k: int = -1,
     sample_support: bool = False,
     routed_experts: bool = False,
-    images: bool = False,
+    include_images: bool = False,
 ) -> GeneratorOutput:
     """``top_k`` sets the width of sampler-support rows, as SkyRL's own capture pads them.
 
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries padded support rows, as every other batch will. ``routed_experts`` says the same
-    of routes (R3); every trained row must then have them. ``images`` adds each row's vision features.
+    of routes (R3); every trained row must then have them. ``include_images`` adds each row's vision features.
     """
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
 
@@ -176,7 +176,7 @@ def compose(
             out["is_last_step"].append(last)
             times.append(outcome.e2e_time)
 
-    vision = _vision_rows(groups) if images else {}
+    vision = _vision_rows(groups) if include_images else {}
     return GeneratorOutput(
         **out,
         **vision,

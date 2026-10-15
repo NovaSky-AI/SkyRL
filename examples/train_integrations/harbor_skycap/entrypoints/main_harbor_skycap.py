@@ -106,7 +106,7 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
-    images: bool = False
+    include_images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
     with the model's processor and its default settings (so the engine takes no ``mm_processor_kwargs``),
     calls the engine on the route that keeps them, and each row carries its path's
@@ -163,7 +163,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         ttl=cfg.skycap.ttl,
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
-        images=cfg.skycap.images,
+        include_images=cfg.skycap.include_images,
     )
 
 
@@ -174,13 +174,13 @@ def _require_api_key(cfg: Any) -> bool:
 
 
 def _validate_images(cfg: Any) -> None:
-    """``skycap.images`` rules out what only the packed engine route carries."""
-    if not cfg.skycap.images:
+    """``skycap.include_images`` rules out what only the packed engine route carries."""
+    if not cfg.skycap.include_images:
         return
     ie = cfg.generator.inference_engine
     for flag in ("enable_return_routed_experts", "enable_return_sample_support_set"):
         if getattr(ie, flag, False):
-            raise ValueError(f"skycap.images needs generator.inference_engine.{flag}=false")
+            raise ValueError(f"skycap.include_images needs generator.inference_engine.{flag}=false")
 
 
 def _exposure(cfg: Any) -> Optional[str]:
@@ -213,7 +213,7 @@ class HarborSkycapExp(HarborExp):
             inference_engine_client=inference_engine_client,
             train_paths=cfg.skycap.train_paths,
             records=self.records,
-            images=cfg.skycap.images,
+            include_images=cfg.skycap.include_images,
         )
         return self.generator
 
