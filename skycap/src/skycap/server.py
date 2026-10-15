@@ -382,11 +382,12 @@ class CaptureServer:
             message = f"path rule {paths!r} failed: {type(error).__name__}: {error}"
             return _json({"error": message, "code": PATH_RULE_FAILED}, 500)
         if popped and any(sample.media for sample in samples):
-            # The samples were rebuilt from the record. That's complete for text, but a record keeps only an
-            # image's placeholders and hash, not the processed arrays (pixel_values, image_grid_thw) the
-            # trainer needs, so a sample with images can't be rebuilt. Answer with none; the caller drops
-            # the trajectory. It's rare: a repeat, a retry after a failed rule, or a finish after the TTL or a
-            # shutdown wrote it.
+            # The samples were rebuilt from the record, which keeps an image's placeholders and hash but not its
+            # processed arrays (pixel_values, image_grid_thw; see record._Columns.add): they are large, and they
+            # duplicate the image in the node's message, from which the processor can recompute them. So a sample
+            # with images is incomplete: answer with none, and the caller drops the trajectory. This is rare: a
+            # repeat, a retry after a failed rule, or a finish after the TTL or a shutdown wrote it. If these drops
+            # matter, recompute the arrays from the messages here instead.
             logger.warning(
                 "%s: a finish answered from the record of a trajectory with images has no samples", trajectory.id
             )
