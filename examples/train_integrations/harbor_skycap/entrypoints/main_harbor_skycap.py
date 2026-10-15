@@ -106,13 +106,10 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
-    renderer: Optional[str] = None
-    """The ``renderers`` renderer skycap renders with, e.g. ``qwen3.5``. By default it is looked up from the
-    model's Hugging Face name; set it for a local checkpoint, a fine-tune or a name the library doesn't list."""
     images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
-    with the model's processor (``skycap.renderer``, and the engine's
-    ``mm_processor_kwargs``), calls the engine on the route that keeps them, and each row carries its path's
+    with the model's processor and its default settings (so the engine takes no ``mm_processor_kwargs``),
+    calls the engine on the route that keeps them, and each row carries its path's
     ``pixel_values`` and ``image_grid_thw`` to training. That route has no packed side channels, so R3 and
     sampler support are off."""
     require_api_key: Optional[bool] = None
@@ -132,6 +129,12 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     ie = cfg.generator.inference_engine
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
+    # skycap renders prompts itself, with the template's and the image processor's defaults; options
+    # that would change how vLLM renders them would make the two disagree, so refuse them.
+    if cfg.generator.chat_template_kwargs:
+        raise ValueError("generator.chat_template_kwargs is not supported with skycap token mode")
+    if engine_init.get("mm_processor_kwargs"):
+        raise ValueError("engine_init_kwargs.mm_processor_kwargs is not supported with skycap token mode")
     train_paths = cfg.skycap.train_paths
     # Here first, so a rule that won't import fails on the driver rather than in every server actor.
     load_rule(train_paths)
@@ -156,11 +159,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
         "record_mirror": cfg.skycap.record_mirror,
         "record_mirror_config": dict(cfg.skycap.record_mirror_config or {}) or None,
-        "renderer_name": cfg.skycap.renderer,
-        "chat_template_kwargs": dict(cfg.generator.chat_template_kwargs or {}) or None,
     }
-    if cfg.skycap.images:
-        settings["processor_kwargs"] = engine_init.get("mm_processor_kwargs")
     return start_servers(
         settings,
         num_servers=cfg.skycap.num_servers,

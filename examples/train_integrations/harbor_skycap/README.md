@@ -110,8 +110,8 @@ uv run --isolated --extra harbor python -m examples.train_integrations.harbor_sk
 ## Images
 
 `skycap.images=true` trains a vision-language model on tasks whose prompts carry
-images: skycap renders them with the model's processor (`skycap.renderer` and the
-engine's `mm_processor_kwargs` must match vLLM's), calls the engine on
+images: skycap renders them with the model's processor and its default settings
+(so the engine takes no `mm_processor_kwargs`), calls the engine on
 `/inference/v1/generate`, which keeps them, and each row carries its path's
 `pixel_values` and `image_grid_thw`. That route returns no packed side channels,
 so R3 and sampler support are off. [`swebench_multimodal/`](swebench_multimodal)
