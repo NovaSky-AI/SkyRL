@@ -29,7 +29,10 @@ def test_save_uses_native_checkpoint_signature_and_queue(tmp_path, monkeypatch, 
     native_save = create_autospec(strategy.dist_checkpointing.save, return_value=request)
     monkeypatch.setattr(strategy.dist_checkpointing, "save", native_save)
     owner = strategy.MegatronStrategy.__new__(strategy.MegatronStrategy)
-    owner.megatron_config = SimpleNamespace(async_dist_ckpt_save=asynchronous, async_save_prestage_to_cpu=False)
+    owner.megatron_config = SimpleNamespace(
+        async_dist_ckpt_save=asynchronous, async_save_prestage_to_cpu=False, async_save_streaming_write=False
+    )
+    owner._streaming_write = None
     owner.is_lora = False
     owner.is_rank_0 = Mock(return_value=False)
     owner.get_rng_state = Mock(return_value={})
