@@ -16,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Union
+from typing import Optional, Union
 
 import torch
 from megatron.core.optimizer import OptimizerConfig
@@ -28,6 +28,10 @@ from omegaconf import DictConfig
 
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_dtype import (
     coerce_optimizer_dtype_kwargs,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+    OffloadToDiskSettings,
+    build_optimizer_offloaded_to_disk,
 )
 from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
 
@@ -58,7 +62,11 @@ def init_megatron_optim_config(
 def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
+    offload_to_disk: Optional[OffloadToDiskSettings] = None,
 ):
+    """Build Megatron's optimizer; with ``offload_to_disk`` its state lives on node-local disk."""
+    if offload_to_disk is not None:
+        return build_optimizer_offloaded_to_disk(model, config, offload_to_disk)
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,

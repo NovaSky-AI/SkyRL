@@ -1840,6 +1840,7 @@ class SFTTrainer:
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
 
+        self.dispatch.release_optimizer_state_files("policy")
         logger.info("Dummy SFT training complete!")
 
     @staticmethod
@@ -2190,6 +2191,7 @@ class SFTTrainer:
                     )
 
         self._fire("on_train_end")
+        self.dispatch.release_optimizer_state_files("policy")
         logger.info("SFT training complete!")
 
     def save_checkpoint(self) -> str:
