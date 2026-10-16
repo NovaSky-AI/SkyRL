@@ -132,6 +132,33 @@ def _flatten(batches) -> list:
     return out
 
 
+def test_shutdown_stops_train_and_eval_dataloader_workers() -> None:
+    def make_dataloader() -> StatefulDataLoader:
+        return StatefulDataLoader(
+            list(range(8)),
+            batch_size=2,
+            num_workers=1,
+            multiprocessing_context="spawn",
+        )
+
+    train_dataloader = make_dataloader()
+    eval_dataloader = make_dataloader()
+    next(iter(train_dataloader))
+    next(iter(eval_dataloader))
+    workers = [*train_dataloader._iterator._workers, *eval_dataloader._iterator._workers]
+
+    trainer = object.__new__(SFTTrainer)
+    trainer.train_dataloader = train_dataloader
+    trainer.eval_dataloaders = [("validation", eval_dataloader)]
+    trainer._ray_gpu_monitor = None
+    trainer.tracker = None
+
+    trainer.shutdown()
+    trainer.shutdown()
+
+    assert all(not worker.is_alive() for worker in workers)
+
+
 # ---------------------------------------------------------------------------
 # StatefulSequentialSampler (core)
 # ---------------------------------------------------------------------------
