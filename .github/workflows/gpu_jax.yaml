@@ -50,7 +50,14 @@ concurrency:
 jobs:
   skyrl_jax_gpu_tests:
     # Forks inherit these workflows but not the secrets they need -- only run upstream.
-    if: github.repository == 'NovaSky-AI/SkyRL'
+    # A pull request from a fork runs in the upstream repository, but GitHub does not
+    # pass secrets to it, so the Anyscale login fails. Skip the job for those too.
+    if: >
+      github.repository == 'NovaSky-AI/SkyRL' &&
+      (
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
     runs-on: ubuntu-latest
     defaults:
       run:
