@@ -328,12 +328,11 @@ class FSDPStrategy(DistributedStrategy):
 
     def _save_lora_adapters(self, model, ckpt_dir):
         """Save LoRA adapters in HuggingFace PEFT format"""
-        from dataclasses import asdict
-
         from safetensors.torch import save_file
 
         from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
             layered_summon_lora_params,
+            serialize_peft_config,
         )
 
         lora_save_path = os.path.join(ckpt_dir, "lora_adapter")
@@ -341,11 +340,7 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.is_rank_0():
             io.makedirs(lora_save_path, exist_ok=True)
-            peft_config = asdict(model.peft_config.get("default", {}))
-            if peft_config:
-                peft_config["task_type"] = peft_config["task_type"].value
-                peft_config["peft_type"] = peft_config["peft_type"].value
-                peft_config["target_modules"] = list(peft_config["target_modules"])
+            peft_config = serialize_peft_config(model.peft_config["default"])
 
         lora_params = layered_summon_lora_params(model)
 
