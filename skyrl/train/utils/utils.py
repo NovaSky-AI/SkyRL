@@ -743,6 +743,20 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
+    if lora_cfg.max_lora_rank is not None and lora_cfg.max_lora_rank < lora_cfg.rank:
+        raise ValueError(
+            f"trainer.policy.model.lora.max_lora_rank={lora_cfg.max_lora_rank} must be >= lora.rank={lora_cfg.rank}"
+        )
+    if lora_cfg.init_adapter_path:
+        if lora_cfg.rank <= 0:
+            raise ValueError("trainer.policy.model.lora.init_adapter_path requires lora.rank > 0 (the adapter's r)")
+        if cfg.trainer.strategy != "fsdp":
+            raise ValueError(
+                f"trainer.policy.model.lora.init_adapter_path is only supported with trainer.strategy=fsdp, "
+                f"got {cfg.trainer.strategy!r}"
+            )
+    if cfg.trainer.critic.model.lora.init_adapter_path:
+        raise ValueError("lora.init_adapter_path is only supported for the policy, not trainer.critic")
 
     if ie_cfg.scale_moe_lora_rank:
         megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config

@@ -141,6 +141,22 @@ class SkyRLLoraConfig(BaseConfig):
     ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
     >= ``max_loras`` if explicitly set."""
 
+    init_adapter_path: Optional[str] = None
+    """HuggingFace PEFT LoRA adapter directory that initializes the policy's adapter weights.
+    The directory (local or cloud) holds ``adapter_config.json`` and ``adapter_model.safetensors``,
+    e.g. a SkyRL ``lora_adapter`` checkpoint export or a Tinker sampler checkpoint converted with
+    ``tinker_cookbook.weights.build_lora_adapter``. ``rank`` and ``alpha`` must match the adapter's
+    ``r`` and ``lora_alpha``; with ``target_modules="all-linear"`` the targets are taken from the
+    adapter, otherwise the given list must cover every module the adapter trains. The optimizer and
+    LR schedule start fresh. PEFT ``rank_pattern`` / ``alpha_pattern`` are honored. Tinker's
+    ``linear_attn.in_proj_q/k/v`` keys are folded into one block-diagonal ``in_proj_qkv`` adapter at
+    the sum of their ranks. FSDP only."""
+
+    max_lora_rank: Optional[int] = None
+    """vLLM ``max_lora_rank`` for adapter-only weight sync; defaults to ``rank``. Must be at least
+    the largest per-module rank, which exceeds ``rank`` when ``init_adapter_path`` carries a
+    ``rank_pattern``. vLLM accepts 8, 16, 32, 64, 128, 256, 320 or 512."""
+
 
 @dataclass
 class FakeInt4QatConfig(BaseConfig):
