@@ -74,13 +74,38 @@ def get_megatron_optimizer_param_scheduler(
     """
     Get the optimizer parameter scheduler for Megatron.
     """
-    # TODO: support other schedulers for Megatron
-    if getattr(config, "scheduler", "constant_with_warmup") != "constant_with_warmup":
-        raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
+    # Map the SkyRL scheduler name to a Megatron ``lr_decay_style``. Decaying schedules
+    # (cosine/linear) decay ``lr`` -> ``min_lr`` over ``lr_decay_steps`` after the warmup.
+    _SCHEDULER_TO_DECAY_STYLE = {
+        "constant": "constant",
+        "constant_with_warmup": "constant",
+        "cosine": "cosine",
+        "cosine_with_warmup": "cosine",
+        "linear": "linear",
+        "linear_with_warmup": "linear",
+    }
+    scheduler_name = getattr(config, "scheduler", "constant_with_warmup")
+    if scheduler_name not in _SCHEDULER_TO_DECAY_STYLE:
+        raise ValueError(
+            f"Unsupported scheduler {scheduler_name!r} for Megatron; expected one of "
+            f"{sorted(_SCHEDULER_TO_DECAY_STYLE)}."
+        )
+    lr_decay_style = _SCHEDULER_TO_DECAY_STYLE[scheduler_name]
+
+    # Decay over the whole run unless an explicit ``lr_decay_steps`` is given.
+    lr_decay_steps = getattr(config, "lr_decay_steps", None)
+    if lr_decay_steps is None:
+        lr_decay_steps = num_training_steps
+    # A decaying schedule needs the real horizon at init. Epoch-based SFT passes ``None`` (the
+    # dataset isn't loaded yet), and the 1e9 default would leave the LR ~flat.
+    if lr_decay_style != "constant" and (lr_decay_steps is None or lr_decay_steps >= 1e9):
+        raise ValueError(
+            f"scheduler={scheduler_name!r} needs a finite training horizon, got "
+            f"lr_decay_steps={lr_decay_steps}. Set num_steps explicitly (epoch-derived step "
+            "counts are not known when the optimizer is built)."
+        )
 
     lr_warmup_steps = config.num_warmup_steps
-    if getattr(config, "lr_decay_steps", None) is None:
-        lr_decay_steps = num_training_steps
     if getattr(config, "lr_warmup_steps_ratio", None) is not None and (
         getattr(config, "lr_warmup_steps", None) is None or getattr(config, "lr_warmup_steps", None) <= 0
     ):
@@ -93,7 +118,7 @@ def get_megatron_optimizer_param_scheduler(
         min_lr=getattr(config, "min_lr", 0.0),
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
-        lr_decay_style="constant",
+        lr_decay_style=lr_decay_style,
         start_wd=config.weight_decay,
         end_wd=config.weight_decay,
         wd_incr_steps=num_training_steps,
