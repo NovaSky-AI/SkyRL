@@ -22,9 +22,8 @@ If you already have a SkyRL checkout, run `git fetch origin beam-release && git 
 </Callout>
 
 <Callout type="info">
-The examples need 2 to 8 nodes of 8 x B200 GPUs. We recommend the SkyRL Beam image
-(`novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron-beam`); see [Troubleshooting](#troubleshooting) for
-running without Docker.
+The examples need 2 to 8 nodes of 8 x B200 GPUs and the SkyRL Beam image
+(`novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron-beam`).
 </Callout>
 
 ## Before you start
@@ -75,7 +74,7 @@ mounted at the same path everywhere:
 
 ```bash
 # Beam checkpoint (~1 TB in bf16)
-huggingface-cli download reflection/Beam-1.0-501B-A23B --local-dir /path/to/models/Beam-1.0-501B-A23B
+hf download reflection/Beam-1.0-501B-A23B --local-dir /path/to/models/Beam-1.0-501B-A23B
 
 # DAPO-Math-17K, AIME24 and AIME25: writes dapo-math-17k-cleaned.parquet,
 # aime-2024-cleaned.parquet and aime-2025-cleaned.parquet into DATA_DIR
@@ -223,9 +222,6 @@ AIME25 metrics are logged as `eval/aime-2025/*`. Because of its dataset label, A
 - **A weight sync stalls.** vLLM's `gpu_memory_utilization` (0.7 for LoRA, 0.6 for bf16 full fine-tuning, 0.55 for
   MXFP8) leaves room for Megatron state that stays on the GPU around the sync. Check the vLLM worker logs for an
   out-of-memory error and lower `INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION`.
-- **Running without Docker.** Place the two wheels at `/opt/skyrl-wheels` on every node, and set
-  `FLASHINFER_CUBIN_DIR` to a node-local copy of the `flashinfer-cubin==0.7.0.post1` cubins. Without it,
-  tensor-parallel workers compiling FlashInfer's MoE kernels at the same time can race and hang the engine at start-up.
 
 ## Learn more
 
