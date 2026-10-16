@@ -36,6 +36,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.trainable_params import (
+    lora_checkpoint_state_dict,
+)
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
@@ -448,15 +451,14 @@ class MegatronStrategy(DistributedStrategy):
 
         assert isinstance(model, nn.Module), "Model must be a nn.Module"
 
-        model_state_dict = {}
-        for name, param in model.named_parameters():
-            if ".adapter" in name.lower():
-                model_state_dict[name] = param.data
+        # Adapters plus any base parameter kept trainable by the VLM freeze flags (e.g. a fully
+        # trained vision projection next to LM adapters); _load_lora_adapters restores both by name.
+        model_state_dict = lora_checkpoint_state_dict(model.named_parameters())
 
         with io.local_work_dir(ckpt_dir) as work_dir:
             adapter_path = self._get_rank_path(work_dir)
             torch.save({"model_state_dict": model_state_dict}, adapter_path)
-            self.print(f"Saved {len(model_state_dict)} LoRA adapter parameters to {adapter_path}")
+            self.print(f"Saved {len(model_state_dict)} LoRA adapter (and trainable base) parameters to {adapter_path}")
 
     def load_checkpoint(
         self,

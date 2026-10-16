@@ -45,6 +45,7 @@ from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
     SkyRLTrainConfig,
     get_config_as_dict,
+    validate_megatron_vlm_freeze,
 )
 from skyrl.train.utils import deadline
 
@@ -231,6 +232,13 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     policy_cfg = cfg.trainer.policy
+    validate_megatron_vlm_freeze(
+        policy_cfg.megatron_config,
+        strategy=cfg.trainer.strategy,
+        lora_enabled=policy_cfg.model.lora.rank > 0,
+        adapter_only_sync=not policy_cfg.megatron_config.lora_config.merge_lora,
+        language_model_only=policy_cfg.language_model_only,
+    )
     policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))
     if (
         policy_fp8_param

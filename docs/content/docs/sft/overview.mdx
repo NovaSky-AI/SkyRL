@@ -225,6 +225,33 @@ image(s) in the chat `messages` format. See
 and
 [`prepare_cauldron_vlm.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/sft/prepare_cauldron_vlm.py).
 
+### Choosing what trains
+
+Three `megatron_config` flags select which parts of a vision-language model
+train: `freeze_language_model`, `freeze_vision_model` and
+`freeze_vision_projection` (the projection maps vision features into the
+language model; for Qwen3-VL it is the patch merger plus the DeepStack
+mergers). They are forwarded to the Megatron-Bridge model provider, which
+applies them through the model's own `freeze()`, so they work for every
+Bridge VLM whose provider supports freezing (Qwen-VL, GLM-4.5V, Kimi K2.5-VL,
+Gemma-VL, Nemotron-VL, Ernie-VL) without naming parameters. A model whose
+provider lacks them fails at build time.
+
+| Recipe | Flags |
+|---|---|
+| Projection only (e.g. a perception-alignment stage) | `freeze_language_model=true freeze_vision_model=true` |
+| Language model and projection, vision encoder frozen | `freeze_vision_model=true` |
+| Language model only | `freeze_vision_model=true freeze_vision_projection=true` |
+| LoRA on the language model, projection trained at full rank | `freeze_language_model=true freeze_vision_model=true` plus `model.lora.rank>0` with `*language_model*` targets |
+| LoRA only | no flags, or all three set |
+
+With LoRA, the parameters the flags leave trainable keep training at full
+rank next to the adapters; they are saved in LoRA checkpoints and included in
+merged HF exports. RL runs with `megatron_config.lora_config.merge_lora=false`
+(adapter-only weight sync) reject that combination, because the inference
+engines would never receive the full-rank updates. The trainable and total
+parameter counts per top-level module are logged at startup.
+
 ## Key configuration
 
 See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft/sft_config)

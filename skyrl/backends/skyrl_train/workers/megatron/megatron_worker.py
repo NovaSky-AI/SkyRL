@@ -49,6 +49,12 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     validate_concrete_fp8_recipe,
     validate_mxfp8_gdn_tp_alignment,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.trainable_params import (
+    VLM_FREEZE_FIELDS,
+    apply_vlm_freeze_to_provider,
+    make_keep_trainable_hooks,
+    summarize_trainable_parameters,
+)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -343,6 +349,12 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
+        # Vision-language freeze flags are fields of the Megatron-Bridge VLM providers, applied by the
+        # model's own freeze() inside provide(); set after the pass-through kwargs so the explicit
+        # megatron_config fields win. Raises if the provider does not support them.
+        if apply_vlm_freeze_to_provider(provider, megatron_config):
+            logger.info("VLM freeze: " + ", ".join(f"{name}={getattr(provider, name)}" for name in VLM_FREEZE_FIELDS))
+
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
         # the residual it would re-materialize is the n-stream tensor consumed by the mHC
         # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
@@ -572,7 +584,16 @@ class MegatronWorker:
 
                 return lora_model
 
+            # PEFT freezes every base parameter; with the VLM freeze flags set, re-enable the base
+            # parameters they left trainable (e.g. the vision projection) so they train at full rank
+            # next to the adapters, and keep them in PEFT's params_to_save.
+            keep_trainable = any(getattr(self.provider, name, False) for name in VLM_FREEZE_FIELDS)
+            if keep_trainable:
+                record_hook, restore_hook = make_keep_trainable_hooks(on_restore=self.lora_cls.set_params_to_save)
+                self.provider.register_pre_wrap_hook(record_hook)
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
+            if keep_trainable:
+                self.provider.register_pre_wrap_hook(restore_hook)
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
@@ -929,6 +950,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
+            for line in summarize_trainable_parameters(self.actor_module):
+                logger.info(line)
 
         # Created only on profiled ranks.
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
