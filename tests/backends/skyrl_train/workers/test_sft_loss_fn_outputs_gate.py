@@ -1,7 +1,7 @@
 """CPU coverage for the per-request ``return_per_token_outputs`` gate.
 
 These tests drive worker loss-build methods with CPU mocks and pin default,
-skip, config-pop, and RL-ungated behavior. GPU parity lives in
+skip, and config-pop behavior on the SFT and RL paths. GPU parity lives in
 ``tests/backends/skyrl_train/gpu/gpu_ci/test_training_step.py``.
 """
 
@@ -110,7 +110,7 @@ def _run_forward_micro_with_loss(return_per_token_outputs=True, loss_fn_config=N
 
 
 def _run_forward_backward_micro_rl(return_per_token_outputs=True):
-    """Drive the PPO path, which must ignore the SFT-only gate."""
+    """Drive the PPO train build on CPU."""
     worker = _make_cpu_policy_worker()
     worker.cfg.algorithm.policy_loss_type = "regular"
     # Disable extra PPO terms so this test isolates loss_fn_outputs.
@@ -200,7 +200,7 @@ class TestForwardMicroWithLossGate:
         assert kept["response_length"] == skipped["response_length"]
 
 
-class TestForwardBackwardMicroRLPathUngated:
+class TestForwardBackwardMicroRLGate:
     def test_rl_builds_logprobs_with_flag_true(self):
         status = _run_forward_backward_micro_rl(return_per_token_outputs=True)
         outputs = status["loss_fn_outputs"]
@@ -208,16 +208,16 @@ class TestForwardBackwardMicroRLPathUngated:
         for out in outputs:
             assert len(out["logprobs"]) == NUM_ACTIONS
 
-    def test_rl_builds_logprobs_even_when_flag_false(self):
-        """The SFT-only gate must not empty PPO outputs."""
+    def test_rl_false_skips_per_token_outputs(self):
+        """False: one empty dict per sequence, as on the SFT path."""
         status = _run_forward_backward_micro_rl(return_per_token_outputs=False)
-        outputs = status["loss_fn_outputs"]
-        assert len(outputs) == BATCH_SIZE
-        for out in outputs:
-            assert len(out["logprobs"]) == NUM_ACTIONS
+        assert status["loss_fn_outputs"] == [{} for _ in range(BATCH_SIZE)]
 
-    def test_rl_loss_fn_outputs_identical_across_flag(self):
+    def test_rl_metrics_identical_across_flag(self):
+        """Skipping per-token outputs must not perturb the scalar metrics."""
         kept = _run_forward_backward_micro_rl(return_per_token_outputs=True)
         skipped = _run_forward_backward_micro_rl(return_per_token_outputs=False)
-        assert kept["loss_fn_outputs"] == skipped["loss_fn_outputs"]
-        assert kept["final_loss"] == skipped["final_loss"]
+        kept.pop("loss_fn_outputs")
+        skipped.pop("loss_fn_outputs")
+        assert kept == skipped
+        assert {"final_loss", "policy_loss", "policy_entropy"} <= set(kept)
