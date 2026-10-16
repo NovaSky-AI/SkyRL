@@ -111,16 +111,13 @@ def test_all_triton_entrypoints_use_bucketed_cached_autotune() -> None:
         assert "COMPUTE_ENTROPY" in keys
 
 
-def test_skyrl_adapter_disables_unused_entropy() -> None:
+def test_skyrl_adapter_gates_entropy_work() -> None:
     module = ast.parse(_kernel_source())
     adapter = next(
         node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "FusedLinearLogprobTriton"
     )
     methods = {node.name: node for node in adapter.body if isinstance(node, ast.FunctionDef)}
-    expected_calls = {
-        "forward": "efficient_entropy_forward",
-        "backward": "efficient_entropy_backward",
-    }
+    expected_calls = {"forward": "efficient_entropy_forward", "backward": "efficient_entropy_backward"}
     for method_name, call_name in expected_calls.items():
         calls = [
             node
@@ -129,8 +126,11 @@ def test_skyrl_adapter_disables_unused_entropy() -> None:
         ]
         assert len(calls) == 1
         keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
-        assert isinstance(keywords["compute_entropy"], ast.Constant)
-        assert keywords["compute_entropy"].value is False
+        gate = keywords["compute_entropy"]
+        if method_name == "forward":
+            assert isinstance(gate, ast.Name) and gate.id == "compute_entropy"
+        else:
+            assert isinstance(gate, ast.Attribute) and gate.attr == "entropy_requires_grad"
 
 
 def test_autotuned_epilogues_do_not_overwrite_inputs() -> None:
@@ -188,6 +188,41 @@ def _direct_fused_logprobs(hidden, weight_shard, target_shifted, vstart, vend, c
     )
     lp.backward(grad_seed.clone())
     return lp.detach(), leaf_h.grad.detach(), leaf_w.grad.detach()
+
+
+def test_adapter_entropy_loss_gradients_match_materialized_reference() -> None:
+    device = torch.device("cuda")
+    num_tokens, hidden_size, vocab_size = 257, 128, 2048
+    generator = torch.Generator(device=device).manual_seed(123)
+    hidden = torch.randn(1, num_tokens, hidden_size, dtype=torch.float32, device=device, generator=generator)
+    weight = (
+        torch.randn(vocab_size, hidden_size, dtype=torch.float32, device=device, generator=generator)
+        * hidden_size**-0.5
+    )
+    target = torch.randint(0, vocab_size, (1, num_tokens), device=device, generator=generator)
+
+    leaf_hidden = hidden.clone().requires_grad_(True)
+    leaf_weight = weight.clone().requires_grad_(True)
+    logprobs, entropy = FusedLinearLogprobTriton.apply(
+        leaf_hidden, leaf_weight, target, 0, vocab_size, num_tokens, None, False, True, True
+    )
+    logprob_seed = torch.linspace(0.5, 1.5, num_tokens, device=device).unsqueeze(0)
+    entropy_seed = torch.linspace(-0.25, 0.75, num_tokens, device=device).unsqueeze(0)
+    ((logprobs * logprob_seed).sum() + (entropy * entropy_seed).sum()).backward()
+
+    reference_hidden = hidden.clone().requires_grad_(True)
+    reference_weight = weight.clone().requires_grad_(True)
+    reference_logits = reference_hidden @ reference_weight.T
+    reference_log_probs = torch.log_softmax(reference_logits, dim=-1)
+    reference_selected = reference_log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    reference_entropy = -(reference_log_probs.exp() * reference_log_probs).sum(dim=-1)
+    ((reference_selected * logprob_seed).sum() + (reference_entropy * entropy_seed).sum()).backward()
+
+    assert entropy.requires_grad
+    torch.testing.assert_close(logprobs, reference_selected, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(entropy, reference_entropy, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(leaf_hidden.grad, reference_hidden.grad, atol=3e-3, rtol=3e-3)
+    torch.testing.assert_close(leaf_weight.grad, reference_weight.grad, atol=3e-3, rtol=3e-3)
 
 
 def _stock_shifted(hidden, weight_shard, target_shifted, vstart, vend, chunk_size):

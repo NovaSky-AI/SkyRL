@@ -68,6 +68,31 @@ def _fused_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
     return out.detach(), h.grad.detach(), w.grad.detach()
 
 
+def _fused_entropy_loss_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
+    """Return fused log-prob, entropy, and their combined gradients."""
+    h = hidden.detach().clone().requires_grad_(True)
+    w = weight.detach().clone().requires_grad_(True)
+    out, entropy = FusedLinearChunkedDistributedLogprob.apply(
+        h, w, target, vstart, vend, chunk_size, tp_group, False, True, True
+    )
+    entropy_seed = torch.linspace(-0.25, 0.75, steps=entropy.numel(), device=entropy.device).reshape(entropy.shape)
+    ((out * _grad_seed(out)).sum() + (entropy * entropy_seed).sum()).backward()
+    return out.detach(), entropy.detach(), h.grad.detach(), w.grad.detach()
+
+
+def _materialized_entropy_loss_fb(hidden, weight, target):
+    """Full-vocabulary autograd reference for the entropy-loss path."""
+    h = hidden.detach().clone().requires_grad_(True)
+    w = weight.detach().clone().requires_grad_(True)
+    logits = torch.matmul(h.to(w.dtype), w.t()).float()
+    log_probs = torch.log_softmax(logits, dim=-1)
+    out = log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+    entropy_seed = torch.linspace(-0.25, 0.75, steps=entropy.numel(), device=entropy.device).reshape(entropy.shape)
+    ((out * _grad_seed(out)).sum() + (entropy * entropy_seed).sum()).backward()
+    return out.detach(), entropy.detach(), h.grad.detach(), w.grad.detach()
+
+
 def _reference_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
     """Materialize logits = hidden @ weightᵀ then the validated ChunkedDistributedLogprob.
 
@@ -163,6 +188,22 @@ def test_fused_forward_matches_liger_flce(tp_group):
     torch.testing.assert_close(out_f.reshape(-1), (-ce).float(), atol=1e-2, rtol=1e-2)
 
 
+def test_fused_entropy_loss_matches_materialized_logits(tp_group):
+    device = torch.device("cuda")
+    torch.manual_seed(123)
+    B, S, V = 2, 31, 4096
+    hidden = torch.randn(B, S, H, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(V, H, dtype=torch.bfloat16, device=device) * (H**-0.5)
+    target = torch.randint(0, V, (B, S), device=device, dtype=torch.long)
+
+    actual = _fused_entropy_loss_fb(hidden, weight, target, 0, V, tp_group, 7)
+    expected = _materialized_entropy_loss_fb(hidden, weight, target)
+    torch.testing.assert_close(actual[0], expected[0], atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(actual[1], expected[1], atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(actual[2], expected[2], atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(actual[3].float(), expected[3].float(), atol=4e-2, rtol=4e-2)
+
+
 # ---------------------------------------------------------------------------
 # TP>1: vocab-parallel correctness via torchrun (spawned as a subprocess).
 # ---------------------------------------------------------------------------
@@ -199,6 +240,15 @@ def _distributed_main():
         torch.testing.assert_close(out_f, out_r, atol=1e-4, rtol=1e-4)
         torch.testing.assert_close(gh_f, gh_r, atol=5e-3, rtol=5e-3)
         torch.testing.assert_close(gw_f.float(), gw_r.float(), atol=5e-3, rtol=5e-3)
+
+        out_el, entropy_el, gh_el, gw_el = _fused_entropy_loss_fb(
+            hidden, weight, target, vstart, vend, tp_group, chunk_size
+        )
+        out_er, entropy_er, gh_er, gw_er = _materialized_entropy_loss_fb(hidden, w_full.to(dev), target)
+        torch.testing.assert_close(out_el, out_er, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(entropy_el, entropy_er, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(gh_el, gh_er, atol=5e-3, rtol=5e-3)
+        torch.testing.assert_close(gw_el.float(), gw_er[vstart:vend].float(), atol=5e-3, rtol=5e-3)
 
     ok = torch.tensor([1.0], device=dev)
     dist.all_reduce(ok, op=dist.ReduceOp.MIN)
