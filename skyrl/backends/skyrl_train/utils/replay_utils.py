@@ -141,11 +141,31 @@ def _get_local_router_layer_indices(model_config, global_num_layers: int, instan
                 layer_index = local_layer_offset + local_router_index + (local_num_layers - len(instances))
             layer_indices.append(layer_index)
 
+    layer_indices = _hybrid_to_decoder_layer_indices(model_config, global_num_layers, layer_indices)
     if any(layer_index < 0 or layer_index >= global_num_layers for layer_index in layer_indices):
         raise ValueError(
             f"Router replay layer indices {layer_indices} out of range for data with {global_num_layers} layers"
         )
     return layer_indices
+
+
+def _hybrid_to_decoder_layer_indices(model_config, global_num_layers: int, layer_indices: list[int]) -> list[int]:
+    """Map HybridModel layer indices to the inference engine's decoder-layer indices.
+
+    Router ``layer_number`` counts hybrid layers, and vLLM returns routed experts per HF decoder
+    layer. Models whose decoder layers are single hybrid layers (e.g. Nemotron-H) need no mapping.
+    Models whose decoder layer is an attention layer followed by its MLP/MoE layer (e.g. Beam:
+    ``*-*-*E*E...``) have one decoder layer per attention symbol: hybrid layer ``h`` belongs to
+    decoder layer ``count('*' in pattern[:h + 1]) - 1``.
+    """
+    # megatron-core's hybrid_layer_allocation.Symbols: ATTENTION "*", PIPE "|", MTP_SEPARATOR "/".
+    pattern = getattr(model_config, "hybrid_layer_pattern", None)
+    if not pattern:
+        return layer_indices
+    flat = pattern.split("/")[0].replace("|", "")
+    if global_num_layers == len(flat) or global_num_layers != flat.count("*"):
+        return layer_indices
+    return [flat[: h + 1].count("*") - 1 for h in layer_indices]
 
 
 def setup_per_microbatch_replay_forward(

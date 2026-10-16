@@ -39,6 +39,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
+    OffloadToDiskSettings,
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
@@ -130,6 +131,26 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
+
+
+def _default_beam_cp_comm_type(config) -> None:
+    """Beam: default ``cp_comm_type`` to ``"a2a"`` under context parallelism with sliding-window attention.
+
+    Transformer Engine has no ``"p2p"`` (or ``"a2a+p2p"``) context-parallel path for sliding-window
+    attention, and megatron-core falls back to ``"p2p"`` when ``cp_comm_type`` is unset, so Beam's
+    sliding-window layers would fail at the first forward. Pick ``"a2a"`` when nothing is set and reject an
+    explicit ring-based choice up front. ``"a2a"`` needs the per-TP-rank query and KV head counts divisible
+    by the context-parallel size.
+    """
+    if (getattr(config, "context_parallel_size", 1) or 1) <= 1 or getattr(config, "window_size", None) is None:
+        return
+    if config.cp_comm_type is None:
+        config.cp_comm_type = "a2a"
+    elif isinstance(config.cp_comm_type, str) and config.cp_comm_type in ("p2p", "a2a+p2p"):
+        raise ValueError(
+            f"cp_comm_type={config.cp_comm_type!r} does not support sliding-window attention under "
+            "context parallelism; use 'a2a' or 'all_gather'."
+        )
 
 
 class MegatronWorker:
@@ -421,6 +442,9 @@ class MegatronWorker:
                 "(native process_mtp_loss disabled)"
             )
 
+        if getattr(hf_config, "model_type", None) == "beam":
+            _default_beam_cp_comm_type(provider)
+
         provider.finalize()
 
         self.provider = provider
@@ -496,6 +520,7 @@ class MegatronWorker:
                 experts_shared_outer_loras=experts_shared_outer_loras,
                 normalize_moe_lora=normalize_moe_lora,
                 share_expert_adapters=lora_config.share_expert_adapters,
+                sequence_parallel_input_regather=self.cfg.policy.megatron_config.lora_config.sequence_parallel_input_regather,
             )
         elif lora_type == "canonical_lora":
             if experts_shared_outer_loras:
@@ -939,7 +964,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
-            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+            offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
+            offload_to_disk = None
+            if offload_cfg.dir is not None:
+                if self._is_lora:
+                    raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+                offload_to_disk = OffloadToDiskSettings(
+                    dir=os.path.join(offload_cfg.dir, self.cfg.run_name),
+                    moment_storage_dtype=offload_cfg.moment_storage_dtype,
+                    staging_buffer_mb=offload_cfg.staging_buffer_mb,
+                )
+            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -1624,9 +1659,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from megatron.bridge.models.conversion.peft_bridge import (
             build_adapter_config_dict,
-            infer_target_modules_from_adapter_weights,
         )
         from safetensors.torch import save_file
+
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            adapter_target_modules,
+        )
 
         # Every rank must participate in the bridge's collective export, but only
         # the writer ranks materialize the gathered tensors: with MoE expert
@@ -1685,9 +1723,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 adapter_state, num_moe_experts=getattr(self.provider, "num_moe_experts", None)
             )
 
-            target_modules = sorted(
-                set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}
-            )
+            target_modules = adapter_target_modules(self.bridge, adapter_state.keys())
             base_model_name_or_path = str(
                 getattr(self, "_logical_model_path", "")
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")

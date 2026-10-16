@@ -33,6 +33,13 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # 4-layer GLM-5.3-Flash slice (2 KDA + 2 NoPE-MLA/DSA, 3 MoE layers x 288 experts, mHC
 # residuals) -- the same checkpoint the megatron parity rows use.
 GLM5_3_FLASH_MODEL_NAME = "eatang/GLM-5.3-Flash-4layer"
+# Beam 6-layer slice (SKYRL_BEAM_SLICE_PATH; same slice as the Beam parity rows). Rows skip without it.
+BEAM_SLICE = os.environ.get("SKYRL_BEAM_SLICE_PATH", "")
+_BEAM_MARKS = [
+    pytest.mark.megatron,
+    pytest.mark.h100,
+    pytest.mark.skipif(not os.path.isdir(BEAM_SLICE), reason="Beam slice not on disk"),
+]
 NUM_GPUS = 2
 
 
@@ -106,6 +113,22 @@ def get_test_trainer_config(
         cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
         cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
         cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "none"
+
+    if "beam" in model_name.lower():
+        # Beam (HybridModel bridge): attention/dense on TP2, 256-expert MoE on EP4, on the H100 CI's
+        # 4 GPUs. Full FT keeps the fp32 master + Adam state (~400 GB for the slice) on node-local
+        # disk with optimizer_offload_to_disk, as the Beam full-FT recipes do by default. The save and
+        # resume configs share the directory. It sits under $HOME because the store rejects tmpfs.
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
+        if not lora:
+            cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = os.path.expanduser(
+                "~/skyrl_test_beam_optimizer_state"
+            )
+        cfg.trainer.policy.megatron_config.moe_grouped_gemm = True
+        cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
 
     if lora:
         lora_cfg = cfg.trainer.policy.model.lora
@@ -203,12 +226,17 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         # optimizer sharding format. With LoRA only the adapter tensors are in the grad
         # buffer, which is why this row passes.
         pytest.param("megatron", False, True, GLM5_3_FLASH_MODEL_NAME, marks=pytest.mark.megatron),
+        # Beam 6-layer slice: LoRA (served unmerged) and full fine-tuning.
+        pytest.param("megatron", False, True, BEAM_SLICE, marks=_BEAM_MARKS),
+        pytest.param("megatron", False, False, BEAM_SLICE, marks=_BEAM_MARKS),
     ],
     ids=[
         "fsdp_no_lora",
         "fsdp_cpu_offload",
         "megatron_no_lora",
         "megatron_glm5_3_flash_lora",
+        "megatron_beam_lora",
+        "megatron_beam_fullft",
     ],
 )
 def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload, lora, model_name):

@@ -282,3 +282,21 @@ def test_router_replay_schedule_clears_after_exception(router_replay_module):
 
     assert router_replay_module.replay_backward_list == []
     assert router_replay_module.action is None
+
+
+@pytest.mark.parametrize(
+    "pattern, num_layers, hybrid, expected",
+    [
+        # Beam: decoder layer = attention + MLP/MoE pair; MoE routers at hybrid 7, 9, 11.
+        ("*-*-*-*E*E*E", 6, [7, 9, 11], [3, 4, 5]),
+        # Pipeline separators and MTP suffixes are ignored.
+        ("*-*-*-|*E*E*E/*E", 6, [7, 9, 11], [3, 4, 5]),
+        # Nemotron-H style: one decoder layer per hybrid layer, no remapping.
+        ("MEM*E", 5, [1, 4], [1, 4]),
+    ],
+)
+def test_hybrid_router_layers_map_to_decoder_layers(pattern, num_layers, hybrid, expected):
+    config = SimpleNamespace(hybrid_layer_pattern=pattern)
+    assert replay_utils._hybrid_to_decoder_layer_indices(config, num_layers, hybrid) == expected
+    # GPTModel configs have no hybrid pattern.
+    assert replay_utils._hybrid_to_decoder_layer_indices(SimpleNamespace(), num_layers, hybrid) == hybrid

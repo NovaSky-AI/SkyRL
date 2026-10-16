@@ -43,9 +43,12 @@ from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_models import (
+    _BEAM_H100_MARKS,
+    BEAM_SLICE,
     MAX_GENERATE_LENGTH,
     _engine_overrides_for_model,
     _extra_env_vars_for_model,
+    _is_beam,
     generate_with_vllm,
     get_test_actor_config,
 )
@@ -100,9 +103,15 @@ GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES = [
 # LoRA-B std of 0.008 the stale-sampler diff is about 0.155 (phase 2) and the updated adapter
 # still matches at about 0.062 (phase 3, same as the zero adapter).
 LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 8.0}
+# The Beam slice is far less sensitive than the default rows. On 4 x H100 (tp2_ep4) the zero adapter matches at
+# ~0.024 (phase 1) and the perturbed trainer moves by ~0.038 at the default LoRA-B std of 0.03 but ~0.086 at
+# std 0.12, so the Beam rows use std 0.12 with the 5e-2 threshold of the Beam parity rows.
+BEAM_LORA_B_MULTIPLIER = 120.0
 
 
 def _lora_b_multiplier(model_name: str) -> float:
+    if _is_beam(model_name):
+        return BEAM_LORA_B_MULTIPLIER
     for key, multiplier in LORA_B_MULTIPLIER_OVERRIDES.items():
         if key in model_name.lower():
             return multiplier
@@ -207,6 +216,15 @@ async def _sync_weights(policy, client, cfg, label: str):
             id="glm-5.3-flash-4layer_h100_tp2_ep4_adapter",
             marks=pytest.mark.h100,
         ),
+        # Beam 6-layer slice (local only; see test_megatron_models.BEAM_SLICE). Merged rows broadcast
+        # merged full weights; adapter rows need vLLM's Beam LoRA support (fused q/k/v/output
+        # gate via the variable-slice merged LoRA layer, MoE experts via FusedMoE LoRA).
+        pytest.param(
+            2, 1, 1, 4, 1, 4, 4, BEAM_SLICE, 5e-2, True, id="beam-6layer_h100_tp2_ep4_merged", marks=_BEAM_H100_MARKS
+        ),
+        pytest.param(
+            2, 1, 1, 4, 1, 4, 4, BEAM_SLICE, 5e-2, False, id="beam-6layer_h100_tp2_ep4_adapter", marks=_BEAM_H100_MARKS
+        ),
     ],
 )
 async def test_lora_logprobs_matching_roundtrip(
@@ -239,6 +257,20 @@ async def test_lora_logprobs_matching_roundtrip(
         engine_overrides = _engine_overrides_for_model(model_name)
         if lora_sync and "glm-5.3-flash" in model_name.lower():
             engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES)
+        if lora_sync and "beam" in model_name.lower():
+            # vLLM-side module names: q/k/v/output_gate pack into qkv_gate_proj when kv heads >= TP, else into
+            # qkv_proj + output_gate_proj; both are listed because vLLM silently skips adapter weights for
+            # unwrapped modules. "experts" makes vLLM wrap the MoE (supplying any list switches MoE LoRA
+            # wrapping to filtered).
+            engine_overrides["engine_init_kwargs"]["lora_target_modules"] = [
+                "qkv_gate_proj",
+                "qkv_proj",
+                "output_gate_proj",
+                "o_proj",
+                "gate_up_proj",
+                "down_proj",
+                "experts",
+            ]
         async with InferenceEngineState.create(
             cfg=cfg,
             model=model_name,

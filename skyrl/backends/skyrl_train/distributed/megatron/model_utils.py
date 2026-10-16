@@ -274,6 +274,21 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None
 
 
+def _capped_chunk_logits(
+    logits: torch.Tensor, softcap: Optional[float], temperature: float
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Apply a final logit softcap, then temperature, to fp32 chunk logits.
+
+    Returns ``(softcap * tanh(z / softcap) / temperature, tanh(z / softcap))``; the tanh is
+    what backward needs (``d/dz = (1 - tanh²) / temperature``). Without a softcap the
+    callers fold the temperature into the weight instead, and this is the identity.
+    """
+    if softcap is None:
+        return logits, None
+    tanh = torch.tanh(logits / softcap)
+    return tanh * (softcap / temperature), tanh
+
+
 class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
     """Fused LM-head + distributed token-logprob, chunked over the sequence.
 
@@ -299,6 +314,9 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         hidden: [B, S, H]                (decoder output, this CP/TP rank)
         weight: [V//TP, H]               (output-layer weight, this TP rank)
         target: [B, S]                   (already rolled by the caller)
+        softcap: final logit softcap (``softcap * tanh(logits / softcap)``, e.g. Beam), or None.
+        temperature: applied after the softcap; only used with a softcap (otherwise the
+            caller folds it into ``weight``).
     """
 
     @staticmethod
@@ -312,6 +330,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         chunk_size: int,
         tp_group: torch.distributed.ProcessGroup,
         inference_only: bool = False,
+        softcap: Optional[float] = None,
+        temperature: float = 1.0,
     ) -> torch.Tensor:
         target_mask = (target < vocab_start_index) | (target >= vocab_end_index)
         masked_target = target - vocab_start_index
@@ -333,6 +353,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             logits = torch.matmul(hidden[:, chunk_start:chunk_end, :].to(weight.dtype), weight.t()).to(
                 dtype=torch.float32
             )
+            logits, _ = _capped_chunk_logits(logits, softcap, temperature)
 
             log_probs = _compute_distributed_log_softmax(logits, group=tp_group)
             log_probs = torch.gather(log_probs, -1, masked_target[:, chunk_start:chunk_end].unsqueeze(-1)).squeeze(-1)
@@ -357,6 +378,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             ctx.save_for_backward(hidden, weight, target_mask, masked_target)
             ctx.chunk_size = chunk_size
             ctx.tp_group = tp_group
+            ctx.softcap = softcap
+            ctx.temperature = temperature
 
         return log_probs
 
@@ -390,6 +413,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
 
             h_chunk = hidden[:, chunk_start:chunk_end, :]
             logits = torch.matmul(h_chunk.to(weight.dtype), weight.t()).to(dtype=torch.float32)
+            logits, tanh = _capped_chunk_logits(logits, ctx.softcap, ctx.temperature)
             softmax_output = _compute_distributed_log_softmax(logits, group=tp_group).exp_()
 
             # Same memory-efficient scatter-add fast path as
@@ -411,6 +435,9 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             grad_logits.mul_(chunk_grad_output.unsqueeze(-1))
             grad_output_selected = chunk_grad_output.masked_select(valid_mask)
             grad_logits.view(-1).scatter_add_(0, flat_chosen, grad_output_selected)
+            if tanh is not None:
+                # Chain through the softcap and temperature: d/dz = (1 - tanh²) / T.
+                grad_logits.mul_(tanh.square_().neg_().add_(1.0).div_(ctx.temperature))
 
             grad_logits = grad_logits.to(dtype=weight.dtype)  # [B, cs, V//TP]
 
@@ -426,8 +453,9 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             # still happens in fp32.
             grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
 
-        # forward args: hidden, weight, target, vocab_start, vocab_end, chunk_size, tp_group, inference_only
-        return grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None
+        # forward args: hidden, weight, target, vocab_start, vocab_end, chunk_size, tp_group, inference_only,
+        # softcap, temperature
+        return grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None, None, None
 
 
 def _fused_lm_head_logprob_apply(
@@ -440,6 +468,8 @@ def _fused_lm_head_logprob_apply(
     chunk_size: int,
     tp_group: torch.distributed.ProcessGroup,
     inference_only: bool,
+    softcap: Optional[float] = None,
+    temperature: float = 1.0,
 ) -> torch.Tensor:
     """Dispatch the fused LM-head token-logprob to the requested backend.
 
@@ -447,6 +477,12 @@ def _fused_lm_head_logprob_apply(
     uses ``FusedLinearLogprobTriton`` when CUDA + triton are available and
     otherwise warns and falls back to torch. Both return TP-combined ``[B, S]``.
     """
+    if backend == "triton" and softcap is not None:
+        warnings.warn(
+            "fused_lm_head_logprob_backend='triton' has no final logit softcap; using the PyTorch backend.",
+            stacklevel=2,
+        )
+        backend = "torch"
     if backend == "triton":
         try:
             from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
@@ -483,6 +519,8 @@ def _fused_lm_head_logprob_apply(
         chunk_size,
         tp_group,
         inference_only,
+        softcap,
+        temperature,
     )
 
 
@@ -724,6 +762,7 @@ def from_parallel_hidden_to_logprobs(
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
     fused_backend: str = "torch",
+    softcap: Optional[float] = None,
 ) -> torch.Tensor:
     """Fused-LM-head variant of :func:`from_parallel_logits_to_logprobs`.
 
@@ -736,9 +775,10 @@ def from_parallel_hidden_to_logprobs(
     ``temperature`` scaling is applied by dividing the weight (``hidden @
     (W/T)ᵀ == logits/T``); autograd then chains the ``1/T`` factor onto both
     ``grad_hidden`` and ``grad_weight`` exactly, so the op itself stays
-    temperature-agnostic.
+    temperature-agnostic. With a final logit ``softcap`` the temperature has to
+    follow the cap, so the op applies both itself.
     """
-    if temperature != 1.0:
+    if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
@@ -761,6 +801,8 @@ def from_parallel_hidden_to_logprobs(
         eff_chunk,
         tp_group,
         inference_only,
+        softcap=softcap,
+        temperature=temperature,
     ).contiguous()
 
     if cp_size > 1:
@@ -788,6 +830,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     temperature: float = 1.0,
     fused_backend: str = "torch",
+    softcap: Optional[float] = None,
 ) -> torch.Tensor:
     """Fused-LM-head variant of
     :func:`from_parallel_logits_to_logprobs_packed_sequences`.
@@ -798,7 +841,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     ``temperature`` is applied by dividing the weight (see
     ``from_parallel_hidden_to_logprobs``).
     """
-    if temperature != 1.0:
+    if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
     hidden = hidden.squeeze(0)
     target = target.squeeze(0)
@@ -841,6 +884,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         eff_chunk,
         group,
         inference_only,
+        softcap=softcap,
+        temperature=temperature,
     ).contiguous()
 
     probs = probs.squeeze(0)
@@ -1095,6 +1140,7 @@ def _fused_vocab_parallel_entropy_from_hidden(
     tp_group: torch.distributed.ProcessGroup,
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
+    softcap: Optional[float] = None,
 ) -> torch.Tensor:
     """Per-token entropy from decoder ``hidden`` [B, S, H] + LM-head weight
     [V//TP, H], chunked over the sequence so the [B, S, V//TP] logits are never
@@ -1103,7 +1149,7 @@ def _fused_vocab_parallel_entropy_from_hidden(
     (``use_entropy_loss=False``); call it inside a ``no_grad``/grad-disabled
     context (the chunk loop recomputes logits and would otherwise build a graph).
     """
-    if temperature != 1.0:
+    if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
     B, S = int(hidden.shape[0]), int(hidden.shape[1])
     out = torch.empty((B, S), dtype=torch.float32, device=hidden.device)
@@ -1111,6 +1157,7 @@ def _fused_vocab_parallel_entropy_from_hidden(
     for c0 in range(0, S, eff):
         c1 = min(S, c0 + eff)
         logits = torch.matmul(hidden[:, c0:c1, :].to(lm_head_weight.dtype), lm_head_weight.t()).to(torch.float32)
+        logits, _ = _capped_chunk_logits(logits, softcap, temperature)
         logits_max = logits.max(dim=-1, keepdim=True).values
         torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
         exp = (logits - logits_max).exp_()
@@ -1136,6 +1183,7 @@ def from_parallel_hidden_to_entropy_packed_sequences(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
+    softcap: Optional[float] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused-LM-head variant of :func:`vocab_parallel_entropy_packed_sequences`.
 
@@ -1144,7 +1192,7 @@ def from_parallel_hidden_to_entropy_packed_sequences(
     a materialized [1, T, V//TP] logits tensor. No-grad (metric only).
     """
     entropy_tokens = _fused_vocab_parallel_entropy_from_hidden(
-        hidden, lm_head_weight, tp_group, chunk_size=chunk_size, temperature=temperature
+        hidden, lm_head_weight, tp_group, chunk_size=chunk_size, temperature=temperature, softcap=softcap
     ).squeeze(0)
     device = entropy_tokens.device
     dtype = entropy_tokens.dtype

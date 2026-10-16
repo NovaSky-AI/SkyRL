@@ -49,7 +49,11 @@ class DAPOTrainer(RayPPOTrainer):
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
 
-        assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
+        # Batched generation returns one reward per sequence; non-batched (e.g. with chat_template_kwargs)
+        # returns per-token rewards with the single-turn reward on the last token. Penalize that token.
+        token_level = isinstance(rewards[0], list)
+        if token_level:
+            assert self.cfg.generator.max_turns == 1, "overlong punishment assumes single-turn generation"
 
         # get the response length
         response_lengths = [len(response) for response in response_ids]
@@ -67,11 +71,14 @@ class DAPOTrainer(RayPPOTrainer):
                 exceed_length = response_length - max_exceed_length
                 penalty = exceed_length / overlong_buffer_len * overlong_buffer_penalty_factor
 
-                rewards[i] -= penalty
+                if token_level:
+                    rewards[i][-1] -= penalty
+                else:
+                    rewards[i] -= penalty
             # if the response is outside the overlong buffer, set the reward to 0
             elif response_length > max_response_length:
                 # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
-                rewards[i] = 0.0
+                rewards[i] = [0.0] * len(rewards[i]) if token_level else 0.0
 
         generator_output["rewards"] = rewards
 

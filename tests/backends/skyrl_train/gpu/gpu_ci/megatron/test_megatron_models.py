@@ -51,6 +51,29 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
+# Beam 6-layer slice (SKYRL_BEAM_SLICE_PATH): layers 0-5 of
+# the checkpoint (dense 0-2, MoE 3-5; sliding-window 0-4, full/NoPE+SSMax 5). Rows skip without it.
+BEAM_SLICE = os.environ.get("SKYRL_BEAM_SLICE_PATH", "")
+# The Beam rows run in the H100 CI (4 x H100), which builds the slice with ci/beam_slice.py.
+_BEAM_H100_MARKS = [
+    pytest.mark.h100,
+    pytest.mark.skipif(not os.path.isdir(BEAM_SLICE), reason="Beam slice not on disk"),
+]
+
+
+def _is_beam(model_name: str) -> bool:
+    """Beam checkpoints live at local paths that need not contain "beam" (SKYRL_BEAM_SLICE_PATH, the full model);
+    fall back to the checkpoint's model_type."""
+    if "beam" in model_name.lower() or os.path.realpath(model_name) == os.path.realpath(BEAM_SLICE):
+        return True
+    config_path = os.path.join(model_name, "config.json")
+    if os.path.isfile(config_path):
+        import json
+
+        with open(config_path) as f:
+            return json.load(f).get("model_type") == "beam"
+    return False
+
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -148,9 +171,13 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
+        or _is_beam(model_name)
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
+    # Opt-in: rerun a row through the fused LM-head log-prob path (e.g. Beam's softcapped logits).
+    if os.environ.get("SKYRL_TEST_FUSED_LM_HEAD") == "1":
+        cfg.trainer.fused_lm_head_logprob = True
     validate_cfg(cfg)
     return cfg
 
@@ -240,6 +267,12 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # colocated with the Megatron shard. The DSA indexer in vLLM needs DeepGEMM.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if _is_beam(model_name):
+        # Beam: 1M default context; the 6-layer slice is still ~33B params (256 experts x 3 MoE
+        # layers), colocated with the Megatron shard. vLLM needs ~16 GiB of weights per GPU at TP4;
+        # 0.35 of an 80 GiB H100 leaves headroom for the colocated Megatron shard during weight sync.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.35
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.
@@ -661,6 +694,26 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-35b-a3b_b200_tp1_ep8_mxfp8",
             marks=pytest.mark.b200,
         ),
+        # Beam 6-layer slice: gated GQA (sigmoid output gate + bias), 5:1 sliding-window(512)/full
+        # attention with NoPE + SSMax on the full layer, sandwich norms, depth-scaled residuals,
+        # grouped-sigmoid noaux_tc router, fp32-softcapped logits. Megatron side is Megatron-Bridge's
+        # Beam bridge (megatron.bridge.models.beam); vLLM side is vLLM's Beam model.
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            BEAM_SLICE,
+            5e-2,
+            1e-1,
+            None,
+            None,
+            id="beam-6layer_h100_tp2_ep4",
+            marks=_BEAM_H100_MARKS,
+        ),
     ],
 )
 async def test_logprobs_matching_roundtrip(
@@ -681,7 +734,7 @@ async def test_logprobs_matching_roundtrip(
     Check that logprob diff matches acrosss vllm and megatron.
     """
     # See the comparison branch at the end of the test.
-    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
+    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or _is_beam(model_name)
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which
@@ -874,7 +927,8 @@ async def test_logprobs_matching_roundtrip(
             # score different tokens and the diff is noise. FP8 rows ran on identical
             # synced weights (~0.14 positional vs ~1e-3 on prefixes); the Kimi slice
             # has a flat enough distribution that 53 of 80 sequences diverged
-            # (~0.93 positional vs ~0.008 on prefixes).
+            # (~0.93 positional vs ~0.008 on prefixes). The randomly initialized Beam slice is the same
+            # story (~0.157 positional with near-identical mean logprobs).
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]

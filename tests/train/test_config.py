@@ -450,6 +450,7 @@ def test_megatron_validation_rejects_mxfp8_before_blackwell(monkeypatch):
 
 def test_megatron_validation_rejects_mxfp8_with_fp8_param(monkeypatch):
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
+    monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: True)
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.megatron_config.transformer_config_kwargs["fp8"] = "e4m3"
@@ -1478,13 +1479,30 @@ class TestMegatronRouterReplayValidation:
         validate_inference_engine_cfg(cfg)
 
     @pytest.mark.parametrize("backend", ["mp", "ray"])
-    def test_routing_replay_refuses_inference_pipeline_parallelism(self, backend):
+    def test_routing_replay_refuses_inference_pipeline_parallelism_without_relay(self, backend, monkeypatch):
+        import skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay as relay
+
+        monkeypatch.setattr(relay, "_relay_status", lambda: "unsupported")
         cfg = self._cfg()
         cfg.generator.inference_engine.distributed_executor_backend = backend
         cfg.generator.inference_engine.pipeline_parallel_size = 2
 
         with pytest.raises(AssertionError, match="pipeline_parallel_size=1"):
             validate_inference_engine_cfg(cfg)
+
+    @pytest.mark.parametrize("status", ["native", "patchable"])
+    @pytest.mark.parametrize("backend", ["mp", "ray"])
+    def test_routing_replay_allows_inference_pipeline_parallelism_with_relay(self, backend, status, monkeypatch):
+        import skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay as relay
+
+        monkeypatch.setattr(relay, "_relay_status", lambda: status)
+        cfg = self._cfg()
+        cfg.generator.inference_engine.distributed_executor_backend = backend
+        cfg.generator.inference_engine.pipeline_parallel_size = 2
+        # The mp backend needs each engine's TP*PP workers on one node.
+        cfg.trainer.placement.policy_num_gpus_per_node = 8
+
+        validate_inference_engine_cfg(cfg)
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 try:
+    # Beam: Megatron-Bridge's HybridModel-based Beam bridge. Importing registers it for
+    # ``BeamForCausalLM`` -> HybridModel.
+    import megatron.bridge.models.beam  # noqa: F401
     from megatron.bridge.models.conversion.mapping_registry import (
         MegatronMappingRegistry,
     )

@@ -20,6 +20,16 @@ from loguru import logger
 _PATCHED = False
 
 
+def vllm_binds_capture_to_layer() -> bool:
+    """True when the installed vLLM binds routed-experts capture to the MoE layer (``RoutedExpertsSink``,
+    vllm-project/vllm#59455 as merged), which already survives kernel rebuilds."""
+    try:
+        from vllm.model_executor.layers.fused_moe import routed_experts_capturer
+    except ImportError:
+        return False
+    return hasattr(routed_experts_capturer, "RoutedExpertsSink")
+
+
 def apply_routed_experts_rebind_patch() -> bool:
     """Install the patch once per process. Returns True if installed."""
     global _PATCHED
@@ -34,6 +44,8 @@ def apply_routed_experts_rebind_patch() -> bool:
         return False
     if isinstance(FusedMoEMethodBase.__dict__.get("moe_kernel"), property):
         return False  # the pinned vLLM already has the fix
+    if vllm_binds_capture_to_layer():
+        return False  # #59455 as merged: the capture sink lives on the MoE layer, so rebuilds keep it
 
     def _monolithic_fused_experts(kernel):
         fused_experts = getattr(getattr(kernel, "impl", None), "fused_experts", None)

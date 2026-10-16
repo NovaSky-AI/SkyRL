@@ -23,6 +23,7 @@ against the registry, so a new name is all that is needed.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -32,6 +33,27 @@ logger = logging.getLogger(__name__)
 
 SKYRL_NCCL_BACKEND = "skyrl_nccl"
 SKYRL_IPC_BACKEND = "skyrl_ipc"
+
+
+def lora_stage_device() -> str:
+    """Where an in-memory LoRA round stages the received adapter (``SKYRL_LORA_STAGE_DEVICE``).
+
+    ``gpu_offload`` (default) stages and builds the adapter on the GPU, where vLLM's
+    MoE packing is fast, then moves the built adapter and the staged tensors to
+    pinned host memory once vLLM has copied them into its GPU slots
+    (``patch_lora_in_memory.offload_in_memory_adapter``). Only the sync itself
+    holds the unsharded adapter on the GPU.
+    ``gpu`` skips the offload: the whole unsharded adapter, plus vLLM's packed MoE
+    copy of it, stays resident on every worker through generation and training,
+    outside the sleep-mode pool.
+    ``cpu`` copies each chunk to pinned host memory as it arrives and lets vLLM
+    pack on the host: the lowest sync peak, but packing on the host is several
+    times slower.
+    """
+    device = os.environ.get("SKYRL_LORA_STAGE_DEVICE", "gpu_offload").lower()
+    if device not in ("cpu", "gpu", "gpu_offload"):
+        raise ValueError(f"SKYRL_LORA_STAGE_DEVICE must be 'cpu', 'gpu' or 'gpu_offload', got {device!r}")
+    return device
 
 
 def empty_cuda_cache_rocm() -> None:
@@ -195,17 +217,29 @@ class SkyrlLoraStagingMixin:
         if staged is None:
             raise RuntimeError("skyrl_begin_lora_update must run before receiving a LoRA stream.")
         model = self.model
+        to_host = lora_stage_device() == "cpu"
 
         def load_weights(weights: Any, **kwargs: Any) -> set:
             loaded = set()
+            pending_d2h = False
             for name, tensor in weights:
                 if name in staged:
                     raise ValueError(f"LoRA tensor {name!r} received twice in one weight update")
                 # The transport buffers (the IPC-mapped view, the packed NCCL
                 # buffer) are reused or freed right after the chunk, so the
                 # private copy is required, not an optimization.
-                staged[name] = tensor.detach().clone()
+                tensor = tensor.detach()
+                if to_host and tensor.is_cuda:
+                    host = torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True)
+                    host.copy_(tensor, non_blocking=True)
+                    staged[name] = host
+                    pending_d2h = True
+                else:
+                    staged[name] = tensor.clone()
                 loaded.add(name)
+            if pending_d2h:
+                # The chunk's buffer is released when this returns.
+                torch.cuda.current_stream().synchronize()
             return loaded
 
         # Restore the exact object found, so this composes with
@@ -276,6 +310,12 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
             # No layerwise finalize: an adapter update never writes to the base
             # model's parameters.
             self.skyrl_finish_lora_update()
+            # Still release the packed IPC import, as the base finish does (vLLM's
+            # PackedBufferImporter pairs one consumer release with each producer export);
+            # skipping it keeps the trainer's staging buffer alive past the sync.
+            importer = getattr(self, "_packed_importer", None)
+            if importer is not None:
+                importer.close()
             return
         with torch.device(self.device):
             super().finish_weight_update()

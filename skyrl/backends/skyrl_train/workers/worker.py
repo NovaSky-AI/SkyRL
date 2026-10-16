@@ -218,10 +218,19 @@ class DistributedTorchRayActor:
         LIBNUMA.numa_num_configured_nodes.argtypes = []
         LIBNUMA.numa_num_configured_nodes.restype = c_int
 
+        # SKYRL_NUMA_MEMBIND: "strict" (default) binds memory to the GPU's node; "preferred" prefers it
+        # but lets allocations spill to other nodes (needed when per-rank host state -- e.g. a CPU-offloaded
+        # optimizer on a TB-scale model -- exceeds one socket's share); "off" leaves the memory policy alone.
+        membind = os.environ.get("SKYRL_NUMA_MEMBIND", "strict")
+
         def numa_bind(nid: int):
             bitmask = LIBNUMA.numa_parse_nodestring(bytes(str(nid), "ascii"))
             LIBNUMA.numa_run_on_node_mask(bitmask)
-            LIBNUMA.numa_set_membind(bitmask)
+            if membind == "strict":
+                LIBNUMA.numa_set_membind(bitmask)
+            elif membind == "preferred":
+                LIBNUMA.numa_set_preferred.argtypes = [c_int]
+                LIBNUMA.numa_set_preferred(nid)
 
         # Only bind to NUMA nodes that actually have CPUs. On Grace-Blackwell (GB200),
         # GPU HBM is exposed as additional CPU-less NUMA nodes (e.g. 34 nodes total, only
@@ -687,6 +696,12 @@ class Worker(DistributedTorchRayActor):
         finalize = getattr(self.strategy, "finalize_pending_saves", None)
         if finalize is not None:
             finalize()
+
+    def release_optimizer_state_files(self):
+        """Delete optimizer state kept in files (Megatron ``optimizer_offload_to_disk``) at the end of training."""
+        release = getattr(self.strategy, "release_optimizer_state_files", None)
+        if release is not None and getattr(self, "optimizer", None) is not None:
+            release(self.optimizer)
 
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(

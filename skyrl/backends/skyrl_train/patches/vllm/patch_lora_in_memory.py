@@ -20,20 +20,26 @@ This patch adds the missing entry point without a fork:
   expert filtering under EP, ``hf_to_vllm_mapper``, ``lora_skip_prefixes``).
   Every other request goes to the original method untouched.
 
-The adapter is built on the GPU (``device=self.device``) rather than on CPU:
-the tensors already live there and, because the sender casts to ``lora_dtype``
-first, ``from_lora_tensors``'s per-key ``.to()`` returns the same tensor, so
-aliases created by :func:`expand_lora_aliases` keep sharing storage. Loading on
-CPU would pin a private copy per key and re-inflate a deduplicated adapter to
-its public size.
+The adapter is built on the device the receiver staged it on
+(``SKYRL_LORA_STAGE_DEVICE``, see ``weight_receivers.lora_stage_device``).
+By default (``gpu_offload``) that is the GPU: the sender casts to ``lora_dtype``
+first, so ``from_lora_tensors``'s per-key ``.to()`` returns the same tensor and
+aliases created by :func:`expand_lora_aliases` keep sharing storage. Once vLLM
+has activated the adapter (copied each worker's TP slice and local experts into
+its GPU slots), :func:`offload_in_memory_adapter` moves the ``LoRAModel`` and the
+staged tensors to pinned host memory, where vLLM re-activates from after an
+eviction, as for an adapter read from disk. With ``cpu`` staging the tensors
+arrive pinned on the host and vLLM packs them there (slow for MoE).
 
 ``add_lora`` still flows API server -> engine core -> every worker, so the
 adapter name in the OpenAI-compatible model registry stays correct and
 ``load_inplace=True`` replaces the previous generation exactly as the
-directory path does. Staged tensors stay registered after the load: the
-``LoRAModel`` shares their storage (same device and dtype), so this costs
-nothing, and it lets vLLM rebuild the adapter after an LRU eviction the way it
-would re-read a directory. The next sync for the same name replaces them;
+directory path does. Staged tensors stay registered after the load, so vLLM
+can rebuild the adapter after an LRU eviction the way it would re-read a
+directory. The ``LoRAModel`` shares their storage for dense modules, but vLLM
+stacks MoE expert factors into new tensors (``PackedLoRALayerWeights.pack_moe``),
+expanding shared-expert aliases to one copy per local expert; that is why they
+are moved off the GPU after activation. The next sync for the same name replaces them;
 ``discard_in_memory_adapter`` frees them on unload.
 
 Sharing storage has one consequence: vLLM applies ``lora_alpha / r`` by
@@ -47,6 +53,7 @@ Remove this module once vLLM ships a tensor-backed LoRA request.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping
 
@@ -59,6 +66,7 @@ from skyrl.backends.skyrl_train.weight_sync.lora_target import (
 
 _PATCHED = False
 _ORIGINAL_LOAD_ADAPTER = None
+_ORIGINAL_ADD_ADAPTER: Dict[type, Any] = {}
 
 
 @dataclass
@@ -177,11 +185,15 @@ def _load_in_memory_adapter(manager, lora_request, staged: StagedLoRAAdapter):
     if moe_ep_spec is not None:
         tensors = {k: v for k, v in tensors.items() if not _is_remote_expert_key(k, moe_ep_spec)}
 
+    # Build where the receiver staged the tensors (weight_receivers.lora_stage_device):
+    # on the host, vLLM packs the adapter there and copies only this worker's
+    # slice into the GPU slots, as for an adapter read from disk.
+    staged_on_host = next(iter(tensors.values())).device.type == "cpu"
     lora = manager._lora_model_cls.from_lora_tensors(
         lora_model_id=lora_request.lora_int_id,
         tensors=tensors,
         peft_helper=peft_helper,
-        device=manager.device,
+        device="cpu" if staged_on_host else manager.device,
         dtype=manager.lora_config.lora_dtype,
         model_vocab_size=manager.vocab_size,
         weights_mapper=weights_mapper,
@@ -205,6 +217,62 @@ def _patched_load_adapter(self, lora_request):
     return _load_in_memory_adapter(self, lora_request, staged)
 
 
+def _to_host(tensor, moved: Dict[int, torch.Tensor]):
+    """Pinned host copy of ``tensor``; tensors sharing storage keep sharing it."""
+    if tensor is None or not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+        return tensor
+    key = tensor.data_ptr()
+    host = moved.get(key)
+    if host is None or host.shape != tensor.shape or host.dtype != tensor.dtype:
+        host = torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True)
+        host.copy_(tensor, non_blocking=True)
+        moved[key] = host
+    return host
+
+
+def offload_in_memory_adapter(manager, lora_request) -> None:
+    """Move an activated in-memory adapter's tensors off the GPU (``SKYRL_LORA_STAGE_DEVICE=gpu_offload``).
+
+    Once ``activate_adapter`` has copied the adapter into vLLM's GPU slots, the
+    ``LoRAModel`` (with vLLM's packed MoE copy) and the staged tensors are only
+    needed to re-activate it after an eviction, which vLLM does from host memory
+    just as for an adapter read from disk. Without this they stay on the GPU,
+    outside the sleep-mode pool, through generation and training.
+    """
+    lora_model = manager._adapter_manager.get_adapter(lora_request.lora_int_id)
+    if lora_model is None:
+        return
+    moved: Dict[int, torch.Tensor] = {}
+    for weights in lora_model.loras.values():
+        for attr in ("lora_a", "lora_b"):
+            value = getattr(weights, attr, None)
+            if isinstance(value, list):
+                setattr(weights, attr, [_to_host(t, moved) for t in value])
+            else:
+                setattr(weights, attr, _to_host(value, moved))
+    staged = _STAGED.get(lora_request.lora_name)
+    if staged is not None:
+        staged.tensors = {k: _to_host(v, moved) for k, v in staged.tensors.items()}
+    if moved:
+        torch.cuda.current_stream().synchronize()
+        del moved
+        # Return the blocks to the driver: the colocated trainer is another process.
+        torch.cuda.empty_cache()
+
+
+def _make_patched_add_adapter(original):
+    def _patched_add_adapter(self, lora_request):
+        loaded = original(self, lora_request)
+        if (
+            lora_name_from_in_memory_path(getattr(lora_request, "lora_path", "") or "") is not None
+            and os.environ.get("SKYRL_LORA_STAGE_DEVICE", "gpu_offload").lower() == "gpu_offload"
+        ):
+            offload_in_memory_adapter(self, lora_request)
+        return loaded
+
+    return _patched_add_adapter
+
+
 def apply_lora_in_memory_patch() -> None:
     """Install the wrapper on ``WorkerLoRAManager`` (idempotent, worker-process local)."""
     global _PATCHED, _ORIGINAL_LOAD_ADAPTER
@@ -215,8 +283,13 @@ def apply_lora_in_memory_patch() -> None:
     except ModuleNotFoundError:
         # Trainer processes import the worker-extension module too.
         return
+    from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+
     _ORIGINAL_LOAD_ADAPTER = WorkerLoRAManager._load_adapter
     WorkerLoRAManager._load_adapter = _patched_load_adapter
+    for cls in (WorkerLoRAManager, LRUCacheWorkerLoRAManager):
+        _ORIGINAL_ADD_ADAPTER[cls] = cls.__dict__["add_adapter"]
+        cls.add_adapter = _make_patched_add_adapter(_ORIGINAL_ADD_ADAPTER[cls])
     _PATCHED = True
     logger.debug("in-memory LoRA patch installed on vllm WorkerLoRAManager._load_adapter")
 

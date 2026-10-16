@@ -168,6 +168,31 @@ def test_validate_consistency_for_latest_checkpoint():
         )
 
 
+def test_validate_consistency_for_latest_checkpoint_with_checkpointing_disabled():
+    """
+    Resuming with checkpointing disabled (``ckpt_interval=-1``) accepts a consistent folder and still rejects
+    a folder whose newest checkpoint is ahead of ``latest_ckpt_global_step.txt``.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        setup_mock_ckpts(tmpdir, checkpoint_steps=[3])
+        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
+        with open(latest_ckpt_file, "w") as f:
+            f.write("3")
+        validate_consistency_for_latest_checkpoint(
+            tmpdir, 3, os.path.join(tmpdir, "global_step_3"), latest_ckpt_file, save_interval=-1
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        setup_mock_ckpts(tmpdir, checkpoint_steps=[3, 4])
+        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
+        with open(latest_ckpt_file, "w") as f:
+            f.write("3")
+        with pytest.raises(ValueError, match="Inconsistent checkpoint folder"):
+            validate_consistency_for_latest_checkpoint(
+                tmpdir, 3, os.path.join(tmpdir, "global_step_3"), latest_ckpt_file, save_interval=-1
+            )
+
+
 def test_validate_consistency_for_latest_checkpoint_with_inconsistent_folder():
     """
     Verify that `validate_consistency_for_latest_checkpoint` correctly validates the checkpoint folder.

@@ -217,3 +217,56 @@ def test_fp8_hooks_bracket_only_full_weight_updates(monkeypatch, lora_armed):
     else:
         assert engine.calls == ["before", "start", "receive", "finish", "after", "empty_cache"]
         assert len(engine.loaded) == 1
+
+
+class TestStageDevice:
+    def test_defaults_to_gpu_then_offload(self, monkeypatch):
+        monkeypatch.delenv("SKYRL_LORA_STAGE_DEVICE", raising=False)
+        assert weight_receivers.lora_stage_device() == "gpu_offload"
+
+    def test_rejects_unknown_device(self, monkeypatch):
+        monkeypatch.setenv("SKYRL_LORA_STAGE_DEVICE", "nvme")
+        with pytest.raises(ValueError, match="SKYRL_LORA_STAGE_DEVICE"):
+            weight_receivers.lora_stage_device()
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="stages a CUDA chunk")
+    @pytest.mark.parametrize("stage_device", ["cpu", "gpu", "gpu_offload"])
+    def test_cuda_chunk_is_staged_on_the_chosen_device(self, monkeypatch, stage_device):
+        monkeypatch.setenv("SKYRL_LORA_STAGE_DEVICE", stage_device)
+        buffer = torch.arange(6, dtype=torch.bfloat16, device="cuda")
+        engine = _Engine([("a.lora_A.weight", buffer[:3]), ("a.lora_B.weight", buffer[3:])])
+        engine.skyrl_set_lora_receive_target(build_lora_receive_target("tenant", {"r": 1}, {}))
+        engine.start_weight_update()
+        engine.receive_weights(None)
+        buffer.fill_(-1.0)  # the transport buffer is reused right after the chunk
+        engine.finish_weight_update()
+
+        staged = patch._STAGED["tenant"].tensors
+        expected = torch.tensor([3.0, 4.0, 5.0], dtype=torch.bfloat16)
+        assert torch.equal(staged["a.lora_B.weight"].cpu(), expected)
+        if stage_device == "cpu":
+            assert staged["a.lora_B.weight"].device.type == "cpu"
+            assert staged["a.lora_B.weight"].is_pinned()
+            # vLLM's from_lora_tensors pins its CPU tensors; an already pinned one is not copied.
+            assert staged["a.lora_B.weight"].pin_memory().data_ptr() == staged["a.lora_B.weight"].data_ptr()
+        else:
+            assert staged["a.lora_B.weight"].is_cuda
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="offloads CUDA tensors")
+def test_gpu_offload_moves_the_built_adapter_and_stage_to_host():
+    shared = torch.ones(2, 3, device="cuda")
+    weights = SimpleNamespace(lora_a=[shared, shared], lora_b=torch.zeros(3, 2, device="cuda"))
+    lora_model = SimpleNamespace(loras={"layers.0.mlp.experts": weights})
+    manager = SimpleNamespace(_adapter_manager=SimpleNamespace(get_adapter=lambda _id: lora_model))
+    patch.stage_in_memory_adapter("t", {"a": shared, "b": shared}, {"r": 2})
+
+    patch.offload_in_memory_adapter(manager, SimpleNamespace(lora_int_id=1, lora_name="t"))
+
+    assert all(not t.is_cuda and t.is_pinned() for t in weights.lora_a)
+    assert not weights.lora_b.is_cuda
+    staged = patch._STAGED["t"].tensors
+    assert not staged["a"].is_cuda
+    # Tensors that shared storage on the GPU share one host copy.
+    assert weights.lora_a[0].data_ptr() == weights.lora_a[1].data_ptr() == staged["a"].data_ptr()
+    assert torch.equal(staged["b"], torch.ones(2, 3))

@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
+from loguru import logger
 from megatron.bridge.peft.utils import (
     enable_expert_parallel_grad_sync_in_finalize,
     finalize_model_grads_with_expert_adapter_sync,
@@ -220,6 +221,11 @@ class MegatronModelWrapper:
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
         self._fused_lm_head = bool(getattr(self.cfg, "fused_lm_head_logprob", False))
         self._fused_lm_head_backend = getattr(self.cfg, "fused_lm_head_logprob_backend", "torch")
+        # The fused path computes log-probs from the hidden states and head weight directly,
+        # bypassing the output layer's forward, so it applies any final logit softcap (Beam) itself.
+        self._logit_softcap = getattr(get_model_config(self.actor_module[0]), "final_logit_softcapping", None) or None
+        if self._fused_lm_head and self._logit_softcap:
+            logger.info(f"fused_lm_head_logprob: applying final logit softcap {self._logit_softcap} in the fused path")
         # Some models (e.g. Qwen3.5 via the VL bridge -> Qwen3VLModel) pack
         # sequences inside their own forward; SkyRL sample packing would then
         # double-pack and corrupt the GDN cu_seqlens, so refuse it. For Qwen3.5,
@@ -391,6 +397,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                 )
             elif fused_lm_head:
                 token_logprobs = from_parallel_hidden_to_logprobs(
@@ -405,6 +412,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                 )
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
@@ -735,6 +743,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                 )
             elif fused_lm_head:
                 token_logprobs = from_parallel_hidden_to_logprobs(
@@ -749,6 +758,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                 )
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
@@ -945,6 +955,7 @@ class MegatronModelWrapper:
                         sub_seq_lengths=data.get("sub_seq_lengths_list"),
                         chunk_size=self.cfg.logprobs_chunk_size,
                         temperature=temperature,
+                        softcap=self._logit_softcap,
                     )
                 elif fused_lm_head:
                     action_hidden = logits[:, -num_actions - 1 : -1, :]
@@ -954,6 +965,7 @@ class MegatronModelWrapper:
                         tp_grp,
                         chunk_size=self.cfg.logprobs_chunk_size,
                         temperature=temperature,
+                        softcap=self._logit_softcap,
                     )
                     entropy = masked_mean(entropy_BS, loss_mask)
                     entropy_for_loss = entropy

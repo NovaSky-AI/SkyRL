@@ -212,7 +212,8 @@ def validate_consistency_for_latest_checkpoint(
             max_global_step_in_folder = max(global_step_values)
             # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint
             # in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
-            if max_global_step_in_folder - ckpt_iteration > save_interval:
+            # A non-positive interval (checkpointing disabled for this run) allows no slack, not negative slack.
+            if max_global_step_in_folder - ckpt_iteration > max(save_interval, 0):
                 max_global_step_in_folder_path = os.path.join(
                     root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
                 )

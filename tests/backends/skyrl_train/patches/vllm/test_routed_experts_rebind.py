@@ -12,7 +12,15 @@ import torch
 
 pytest.importorskip("vllm")
 
-pytestmark = pytest.mark.vllm
+pytestmark = [
+    pytest.mark.vllm,
+    pytest.mark.skipif(
+        __import__(
+            "skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind", fromlist=["x"]
+        ).vllm_binds_capture_to_layer(),
+        reason="pinned vLLM already binds routed-experts capture to the MoE layer (vllm#59455)",
+    ),
+]
 
 
 @pytest.fixture(autouse=True)

@@ -106,6 +106,17 @@ class FsdpWeightSource(WeightSource):
             yield f"{self._prefix}{key}", full
 
 
+def _megatron_params_dtype(module: Any) -> Optional[torch.dtype]:
+    """``params_dtype`` of a Megatron model (a module or list of model chunks); ``None`` if unknown."""
+    chunk = module[0] if isinstance(module, (list, tuple)) and module else module
+    try:
+        from megatron.core.utils import get_attr_wrapped_model
+
+        return getattr(get_attr_wrapped_model(chunk, "config", allow_none=False), "params_dtype", None)
+    except Exception:
+        return None
+
+
 class MegatronWeightSource(WeightSource):
     """``WeightSource`` over a Megatron model, via Megatron-Bridge.
 
@@ -133,11 +144,15 @@ class MegatronWeightSource(WeightSource):
         module: Any,
         dtype: torch.dtype,
         param_filter: Optional[Callable[[str], bool]] = None,
+        params_dtype: Optional[torch.dtype] = None,
     ) -> None:
         self._bridge = bridge
         self._module = module
         self._dtype = dtype
         self._param_filter = param_filter
+        # The dtype the Megatron module stores its parameters in (``TransformerConfig.params_dtype``);
+        # read from the module when not given. See ``_wire_dtype``.
+        self._params_dtype = params_dtype if params_dtype is not None else _megatron_params_dtype(module)
         self._meta: Optional[List[ParamMeta]] = None
 
     def _export(self) -> Iterator[Tuple[str, torch.Tensor]]:
@@ -150,11 +165,28 @@ class MegatronWeightSource(WeightSource):
             ]
         return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
 
+    def _wire_dtype(self, name: str, tensor: torch.Tensor) -> torch.dtype:
+        """Keep fp32 for tensors the trainer deliberately holds in fp32; cast the rest.
+
+        In a low-precision Megatron module every parameter is stored in ``params_dtype`` (the fp32
+        masters live in the optimizer, not the module), so an exported fp32 tensor is one kept fp32
+        on purpose -- in practice the MoE router: Megatron-Core's ``expert_bias`` buffer (HF
+        ``e_score_correction_bias``, DeepSeek-V3-style routers) is always fp32, and some models keep
+        the router weight fp32 too. Rounding those to the wire dtype makes vLLM route with
+        different weights than the trainer after every sync. The rule is arch-agnostic (no name
+        list); vLLM's weight loaders copy into their own parameter dtype, so fp32 is safe on the
+        receiving side. When the module itself is fp32 (or its dtype is unknown) everything is
+        cast, so an fp32-trained model does not ship every weight in fp32.
+        """
+        if tensor.dtype == torch.float32 and self._params_dtype not in (None, torch.float32):
+            return torch.float32
+        return self._dtype
+
     def metadata(self) -> List[ParamMeta]:
         if self._meta is None:
             meta: List[ParamMeta] = []
             for name, tensor in self._export():
-                meta.append(ParamMeta(name, self._dtype, tuple(tensor.shape)))
+                meta.append(ParamMeta(name, self._wire_dtype(name, tensor), tuple(tensor.shape)))
                 del tensor
             self._meta = meta
         return self._meta
@@ -163,7 +195,9 @@ class MegatronWeightSource(WeightSource):
         # See FsdpWeightSource.__iter__ on the device.
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
         for name, tensor in self._export():
-            full = tensor.to(device=device, dtype=self._dtype, non_blocking=True).detach().contiguous()
+            full = (
+                tensor.to(device=device, dtype=self._wire_dtype(name, tensor), non_blocking=True).detach().contiguous()
+            )
             yield name, full
 
 
@@ -328,6 +362,24 @@ class LoraAdapterWeightSource(WeightSource):
             self._prepared = None
 
 
+def adapter_target_modules(bridge: Any, adapter_weight_names) -> List[str]:
+    """``target_modules`` for an exported PEFT adapter.
+
+    Uses the model bridge's ``_adapter_target_modules`` override when it has one. PEFT matches
+    ``target_modules`` by suffix, so leaf names are ambiguous when a leaf name is shared by modules
+    the adapter does not cover (Beam: attention ``self_attn.gate_proj`` vs MLP ``mlp.gate_proj``);
+    such bridges return full module paths. Otherwise falls back to leaf-name inference.
+    """
+    from megatron.bridge.models.conversion.peft_bridge import (
+        infer_target_modules_from_adapter_weights,
+    )
+
+    names = list(adapter_weight_names)
+    override = getattr(getattr(bridge, "_model_bridge", None), "_adapter_target_modules", None)
+    modules = override(names) if override is not None else infer_target_modules_from_adapter_weights(names)
+    return sorted(set(modules) - {"base_layer"})
+
+
 class MegatronLoraAdapterSource(LoraAdapterWeightSource):
     """LoRA adapter source for the Megatron backend.
 
@@ -370,7 +422,6 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         from megatron.bridge.models.conversion.peft_bridge import (
             build_adapter_config_dict,
-            infer_target_modules_from_adapter_weights,
         )
 
         from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
@@ -401,7 +452,7 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         # Fold that scale here and publish lora_alpha == r so vLLM's scale is 1.
         adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self._lora_cls.alpha)
         adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
-        target_modules = sorted(set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"})
+        target_modules = adapter_target_modules(self._bridge, adapter_state.keys())
         adapter_config = mark_alpha_folded(
             build_adapter_config_dict(
                 self._lora_cls,

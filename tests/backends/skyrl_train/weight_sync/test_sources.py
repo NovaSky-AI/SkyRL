@@ -138,6 +138,51 @@ class TestMegatronWeightSource:
         meta, pairs = _assert_channels_agree(MegatronWeightSource(bridge, object(), torch.bfloat16))
         assert [m.name for m in meta] == [n for n, _ in self._tensors()]
 
+    def _mixed_tensors(self):
+        """What a bf16 Megatron MoE exports: bf16 params plus the deliberately-fp32 router tensors,
+        named as in several architectures (the rule must not depend on names)."""
+        return [
+            ("model.embed_tokens.weight", torch.ones(4, 2, dtype=torch.bfloat16)),
+            ("model.layers.3.mlp.gate.weight", torch.ones(4, 2, dtype=torch.float32)),
+            ("model.layers.3.mlp.gate.e_score_correction_bias", torch.ones(4, dtype=torch.float32)),
+            ("model.layers.4.block_sparse_moe.gate.weight", torch.ones(4, 2, dtype=torch.float32)),
+            ("model.layers.5.mlp.gate.weight", torch.ones(4, 2, dtype=torch.bfloat16)),
+        ]
+
+    def test_fp32_tensors_of_a_low_precision_model_stay_fp32_on_the_wire(self):
+        """An fp32 router weight / expert bias in a bf16 model must not be rounded to the wire
+        dtype (vLLM would route with different weights than the trainer); bf16 params are sent
+        as bf16."""
+        source = MegatronWeightSource(
+            _FakeBridge(self._mixed_tensors()), object(), torch.bfloat16, params_dtype=torch.bfloat16
+        )
+        want = {
+            "model.embed_tokens.weight": torch.bfloat16,
+            "model.layers.3.mlp.gate.weight": torch.float32,
+            "model.layers.3.mlp.gate.e_score_correction_bias": torch.float32,
+            "model.layers.4.block_sparse_moe.gate.weight": torch.float32,
+            "model.layers.5.mlp.gate.weight": torch.bfloat16,
+        }
+        assert {m.name: m.dtype for m in source.metadata()} == want
+        assert {n: t.dtype for n, t in source} == want
+
+    @pytest.mark.parametrize("params_dtype", [torch.float32, None], ids=["fp32_model", "unknown"])
+    def test_casts_everything_when_the_model_is_fp32_or_unknown(self, params_dtype):
+        """An fp32-trained model must not ship every weight in fp32, and without the module's
+        params_dtype the source cannot tell deliberate fp32 from fp32 params: cast all."""
+        source = MegatronWeightSource(
+            _FakeBridge(self._mixed_tensors()), object(), torch.bfloat16, params_dtype=params_dtype
+        )
+        assert {m.dtype for m in source.metadata()} == {torch.bfloat16}
+        assert {t.dtype for _, t in source} == {torch.bfloat16}
+
+    def test_reads_params_dtype_from_the_module_config(self):
+        pytest.importorskip("megatron.core")
+        chunk = torch.nn.Module()
+        chunk.config = type("Cfg", (), {"params_dtype": torch.bfloat16})()
+        source = MegatronWeightSource(_FakeBridge(self._mixed_tensors()), [chunk], torch.bfloat16)
+        assert {m.name: m.dtype for m in source.metadata()}["model.layers.3.mlp.gate.weight"] == torch.float32
+
     def test_exports_the_whole_model_in_one_call(self):
         """`_accumulate_grouped_export` needs every task of a `group_key` in one
         call, or expert weights are silently never yielded."""

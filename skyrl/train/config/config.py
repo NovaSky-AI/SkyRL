@@ -428,6 +428,41 @@ class MegatronHFExportConfig(BaseConfig):
 
 
 @dataclass
+class MegatronOptimizerOffloadToDiskConfig(BaseConfig):
+    """Keep the distributed optimizer's fp32 main params and Adam moments on node-local disk.
+
+    Instead of 12 B/param of optimizer state per DP shard on the GPU (or in host RAM with
+    ``optimizer_cpu_offload``), the state lives in files and the optimizer step streams it through the GPU one
+    chunk at a time; the update itself still runs on the GPU. Requires the distributed optimizer, bf16 training,
+    ``grad_reduce_in_fp32=True``, ``optimizer_cpu_offload=False``, ``use_precision_aware_optimizer=False``, and no
+    fp8/fp4 params or LoRA. Checkpoints resume with the same parallelism only, from a local ``ckpt_path``.
+    Implementation: ``skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py``."""
+
+    dir: Optional[str] = None
+    """Node-local directory for the state files; ``None`` (default) disables the feature.
+
+    Use fast NVMe; tmpfs is refused. Each run uses ``<dir>/<trainer.run_name>/rank<global rank>/``, cleared at
+    startup and removed at the end of training; a killed run's files stay until a run with the same ``run_name``
+    starts. Needs about 12 B x (local params / DP size) per GPU, or 8 B with bf16 moments."""
+    moment_storage_dtype: str = "fp32"
+    """On-disk dtype of the Adam moments: ``"fp32"`` or ``"bf16"``.
+
+    ``"fp32"`` gives the same numerics as the regular optimizer; ``"bf16"`` reads and writes 8 instead of 12 B/param
+    per step and is not bit-identical. The main params are always stored in fp32, and the step always computes in
+    fp32."""
+    staging_buffer_mb: int = 256
+    """Size in MiB of the pinned host staging buffer for the disk <-> GPU transfers.
+
+    One buffer per rank and optimizer (MoE models have a dense and an expert optimizer)."""
+
+    def __post_init__(self) -> None:
+        if self.moment_storage_dtype not in ("fp32", "bf16"):
+            raise ValueError(f"moment_storage_dtype must be 'fp32' or 'bf16', got {self.moment_storage_dtype!r}")
+        if self.staging_buffer_mb < 1:
+            raise ValueError(f"staging_buffer_mb must be >= 1, got {self.staging_buffer_mb}")
+
+
+@dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
     """``"lora"`` or ``"canonical_lora"``.
@@ -456,6 +491,14 @@ class MegatronLoraConfig(BaseConfig):
     before writing them (``fold_lora_rank_scale_for_vllm``) so the sampled
     policy matches the trained one. The synced adapter is a vLLM-layout
     artifact, not a loadable HF PEFT checkpoint."""
+    sequence_parallel_input_regather: bool = False
+    """Re-gather the sequence-parallel LoRA-A input in backward instead of keeping the gathered copy.
+
+    Maps to Megatron-Bridge ``LoRA(sequence_parallel_input_regather=...)``; only used with
+    ``lora_type="lora"`` and TP > 1 (sequence parallel). With it on, the LoRA-A input on ``linear_qkv`` and
+    LayerNorm-fused ``linear_fc1`` keeps only the sequence-local LayerNorm output for backward and
+    re-gathers it there, instead of holding the TP-gathered output (saves S * H * 2 bytes per layer, at the
+    cost of one extra TP all-gather per layer in forward and backward)."""
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
@@ -536,6 +579,10 @@ class MegatronConfig(BaseConfig):
     https://docs.skyrl.ai/docs/examples/megatron for the accepted names and per-field checks.
     ``use_precision_aware_optimizer=True`` can cause checkpointing to fail
     (https://github.com/nvidia/megatron-lm/issues/1820); leaving it ``False`` is recommended."""
+    optimizer_offload_to_disk: MegatronOptimizerOffloadToDiskConfig = field(
+        default_factory=MegatronOptimizerOffloadToDiskConfig
+    )
+    """Hold the optimizer state on node-local disk; off unless ``optimizer_offload_to_disk.dir`` is set."""
     fp8: Optional[str] = None
     """TransformerEngine FP8 compute format for linear-layer GEMMs, e.g. ``"e4m3"`` or
     ``"hybrid"``. ``None`` (default) trains without FP8. Folded into

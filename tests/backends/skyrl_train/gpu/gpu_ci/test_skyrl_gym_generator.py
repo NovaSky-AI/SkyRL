@@ -383,6 +383,59 @@ async def test_generator_formatting_use_conversation_multi_turn(ray_init_fixture
             assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
 
 
+BEAM_SLICE = os.environ.get("SKYRL_BEAM_SLICE_PATH", "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.path.isdir(BEAM_SLICE), reason="Beam slice not on disk (SKYRL_BEAM_SLICE_PATH)")
+async def test_generator_formatting_use_conversation_multi_turn_beam(ray_init_fixture):
+    """Multi-turn conversation formatting for Beam (Harmony-style template): generation prompts and
+    observations are loss-masked out, assistant turns are masked in, and only assistant turns carry
+    Beam's end-of-turn tokens (``<|return|>`` / ``<|call|>``)."""
+    tokenizer = AutoTokenizer.from_pretrained(BEAM_SLICE)
+    generation_prompt = "<|start|>assistant"
+    end_of_turn_ids = {tokenizer.convert_tokens_to_ids(t) for t in ("<|return|>", "<|call|>")}
+    generator_output = await run_generator_end_to_end(
+        batched=False,
+        n_samples_per_prompt=1,
+        num_inference_engines=1,
+        tensor_parallel_size=1,
+        model=BEAM_SLICE,
+        max_prompt_length=3000,
+        max_input_length=10000,
+        max_generate_length=256,
+        env_class="test_env",
+        num_prompts=2,
+        max_turns=3,
+        use_conversation_multi_turn=True,
+    )
+
+    for i, resp_ids in enumerate(generator_output["response_ids"]):
+        loss_mask = generator_output["loss_masks"][i]
+        prompt_token_ids = generator_output["prompt_token_ids"][i]
+        stop_reason = generator_output["stop_reasons"][i]
+        assert len(loss_mask) == len(resp_ids)
+        masked_out_resp_str = tokenizer.decode([t for t, m in zip(resp_ids, loss_mask) if m == 0])
+        masked_in_ids = [t for t, m in zip(resp_ids, loss_mask) if m == 1]
+        masked_in_resp_str = tokenizer.decode(masked_in_ids)
+
+        assert tokenizer.decode(prompt_token_ids).endswith(generation_prompt)
+        assert generation_prompt not in masked_in_resp_str, "generation prompts should be loss masked out"
+        # The prompt has no assistant turn, so no end-of-turn token.
+        assert not end_of_turn_ids & set(prompt_token_ids)
+        # Observations render as Beam user turns and are masked out.
+        assert "<|start|>user<|message|>" not in masked_in_resp_str
+        if stop_reason == "stop":
+            for turn in (1, 2):
+                assert f"<|start|>user<|message|>{OBSERVATION_PROMPT} {turn}<|end|>" in masked_out_resp_str
+                assert f"{OBSERVATION_PROMPT} {turn}" not in masked_in_resp_str
+            # Each finished assistant turn ends in <|return|> or <|call|>; masked-out tokens never do.
+            assert sum(t in end_of_turn_ids for t in masked_in_ids) == 3
+            assert sum(t in end_of_turn_ids for t, m in zip(resp_ids, loss_mask) if m == 0) == 0
+        else:
+            logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]

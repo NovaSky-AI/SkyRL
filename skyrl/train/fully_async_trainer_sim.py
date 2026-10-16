@@ -48,6 +48,10 @@ class _SimDispatch:
         """The simulation has no model checkpoint writes to finish."""
         pass
 
+    def release_optimizer_state_files(self, model: str) -> None:
+        """The simulation builds no optimizer."""
+        pass
+
     async def save_weights_for_sampler(self):
         await self._client.pause_generation()
         try:

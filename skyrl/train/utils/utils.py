@@ -791,16 +791,21 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     if ie_cfg.enable_return_routed_experts:
-        # vLLM captures routes per worker, into a buffer covering only that worker's layers, and
-        # only the last pipeline stage returns model output. With inference PP > 1 the routes of
-        # every earlier stage's MoE layers are silently dropped (left as expert 0). This holds for
-        # both executor backends. The ray backend itself is fine: vLLM copies the routed-expert
-        # arrays out of Ray's shared-memory channel before the next read (v1/executor/ray_utils.py).
-        assert ie_cfg.pipeline_parallel_size == 1, (
-            "rollout router replay (r3) requires generator.inference_engine.pipeline_parallel_size=1: "
-            "vLLM returns routed experts only from the last pipeline stage, so earlier stages' routes "
-            "would be lost. Scale the inference engine with tensor/expert parallelism instead."
-        )
+        # Each vLLM PP stage captures only its own MoE layers, and only the last stage returns
+        # output, so stock vLLM rejects R3 with PP > 1. The PP relay (natively in a patched vLLM,
+        # or through patches/vllm/patch_routed_experts_pp_relay.py on AuxOutput-based builds)
+        # forwards each stage's routes to the next. Both executor backends use the same PP channel.
+        if ie_cfg.pipeline_parallel_size > 1:
+            from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+                vllm_supports_routed_experts_with_pp,
+            )
+
+            assert vllm_supports_routed_experts_with_pp(), (
+                "rollout router replay (r3) with generator.inference_engine.pipeline_parallel_size > 1 "
+                "needs a vLLM build with the AuxOutput connector (the PP relay patch targets it); the "
+                "installed vLLM is not one, so earlier stages' routes would be lost. Use "
+                "pipeline_parallel_size=1 and scale with tensor/expert parallelism instead."
+            )
         assert (
             cfg.trainer.strategy == "megatron"
         ), "rollout router replay (r3) is only supported with Megatron training backend"

@@ -169,6 +169,19 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
   - Delete `glm5_next/`.
 - **Verify:** the full [Verification](#verification) set.
 
+## Beam
+
+Beam (`BeamForCausalLM`, `model_type="beam"`) comes from the pinned Megatron-Bridge
+(`megatron.bridge.models.beam`, imported in `workers/megatron/model_bridges.py`).
+SkyRL still carries:
+
+- `../transformers/configuration_beam.py` (`BeamConfig` + `register_beam_config()`), because transformers
+  has no Beam config. It keeps the checkpoint's layer-type-keyed `rope_parameters`, which the Bridge requires.
+  **Remove** once transformers ships `transformers.models.beam`.
+- `_default_beam_cp_comm_type` in `workers/megatron/megatron_worker.py`: `cp_comm_type="a2a"` under CP with
+  sliding-window attention. **Remove** once the Bridge's Beam provider sets it.
+- **Verify:** `tests/backends/skyrl_train/beam/` (CPU).
+
 ## Standalone patches
 
 ### `patch_dsa_index_share.py` (+ `dsa_index_share_recompute.patch`): NVIDIA/Megatron-LM#6793
