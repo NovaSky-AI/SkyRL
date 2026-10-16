@@ -55,8 +55,10 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     shift_mask_for_mtp,
     unpadded_vocab_shard_width,
 )
-from skyrl.backends.skyrl_train.training_batch import TensorList
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.training_batch import (
+    PACKED_BATCH_FIELD_TYPES,
+    TensorList,
+)
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
@@ -66,7 +68,10 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_backward,
     setup_per_microbatch_replay_forward,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    PackedSampleSupport,
+)
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
     reject_unsupported_sample_support_packing,
@@ -152,7 +157,7 @@ def _build_packed_valid_mask(
 
 def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
     """Move all tensors in a nested microbatch to a CUDA device."""
-    if torch.is_tensor(value) or isinstance(value, (TensorList, PackedTensor)):
+    if torch.is_tensor(value) or isinstance(value, (TensorList, *PACKED_BATCH_FIELD_TYPES)):
         return value.to(device=device, non_blocking=True)
     if isinstance(value, dict):
         return {key: _copy_tensor_tree_to_device(item, device) for key, item in value.items()}
@@ -172,7 +177,7 @@ def _microbatch_sample_support(
     sub_seq_lengths: Optional[list[list[int]]],
     *,
     enabled: bool,
-) -> Optional[PackedTensor]:
+) -> Optional[PackedSampleSupport]:
     """Return this microbatch's recorded sampler support, rejecting layouts replay cannot score."""
     sample_support = batch.get(SAMPLE_SUPPORT_FIELD) if enabled else None
     if sample_support is not None:
@@ -183,7 +188,7 @@ def _microbatch_sample_support(
 def _build_replay_metadata_layout(
     attention_mask: torch.Tensor,
     rollout_expert_indices: Optional[torch.Tensor],
-    sample_support: Optional[PackedTensor],
+    sample_support: Optional[PackedSampleSupport],
     *,
     packed: bool,
     fp8_enabled: bool,
