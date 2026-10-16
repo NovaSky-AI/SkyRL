@@ -21,6 +21,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_ndarray,
     pack_routed_experts,
     pack_sample_support,
+    pack_sample_support_logprobs,
     unpack_ndarray,
 )
 from tests.backends.skyrl_train.sample_support_helpers import csr, dense
@@ -455,3 +456,52 @@ def test_load_packed_body_rejects_an_unterminated_blob():
 
     with pytest.raises(ValueError, match="unterminated"):
         load_packed_body(truncated)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[7, 152064, -1, -1], [-1, -1, -1, -1], [9, 10, 11, 12], [13, -1, -1, -1]],
+        np.empty((0, 4), dtype=np.int32),
+        [[-1, -1]],
+    ],
+)
+def test_packed_sample_support_logprobs_round_trip(rows):
+    rows = np.asarray(rows, dtype=np.int32)
+    support = csr(rows, logprobs=-0.5 * np.abs(rows).astype(np.float32))
+
+    decoded = decode_packed_sample_support(
+        orjson.loads(orjson.dumps(pack_sample_support(support))),
+        orjson.loads(orjson.dumps(pack_sample_support_logprobs(support))),
+    )
+
+    assert decoded.logprobs.dtype == np.float32
+    np.testing.assert_array_equal(decoded.logprobs, support.logprobs)
+    np.testing.assert_array_equal(decoded.token_ids, support.token_ids)
+
+
+def test_packed_sample_support_logprobs_decode_from_a_spliced_body():
+    support = csr([[1, 2], [-1, -1], [3, -1]], logprobs=[[-0.25, -1.5], [0, 0], [0.0, 0]])
+    raw = orjson.dumps(
+        _body(
+            rollout_sample_support=pack_sample_support(support),
+            rollout_sample_support_logprobs=pack_sample_support_logprobs(support),
+        )
+    )
+
+    choice = load_packed_body(raw)["choices"][0]
+    decoded = decode_packed_sample_support(
+        choice[PackedField.ROLLOUT_SAMPLE_SUPPORT], choice[PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS]
+    )
+
+    np.testing.assert_array_equal(decoded.logprobs, [-0.25, -1.5, 0.0])
+
+
+def test_sample_support_logprobs_must_match_the_members():
+    support = csr([[1, 2]], logprobs=[[-0.5, -1.0]])
+    short = pack_ndarray(np.zeros(1, dtype=np.float32), allowed_dtypes=frozenset({np.dtype(np.float32)}))
+
+    with pytest.raises(ValueError, match="columns must align"):
+        decode_packed_sample_support(pack_sample_support(support), short)
+    with pytest.raises(ValueError, match="carries no member logprobs"):
+        pack_sample_support_logprobs(csr([[1, 2]]))
