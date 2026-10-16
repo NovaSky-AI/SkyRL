@@ -750,10 +750,10 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     if lora_cfg.init_adapter_path:
         if lora_cfg.rank <= 0:
             raise ValueError("trainer.policy.model.lora.init_adapter_path requires lora.rank > 0 (the adapter's r)")
-        if cfg.trainer.strategy != "megatron":
+        if cfg.trainer.strategy not in ("fsdp", "megatron"):
             raise ValueError(
-                f"trainer.policy.model.lora.init_adapter_path is only supported with trainer.strategy=megatron, "
-                f"got {cfg.trainer.strategy!r}"
+                f"trainer.policy.model.lora.init_adapter_path is only supported with trainer.strategy fsdp or "
+                f"megatron, got {cfg.trainer.strategy!r}"
             )
         if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.megatron_config.lora_config.lora_type != "lora":
             raise ValueError(

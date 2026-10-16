@@ -44,6 +44,95 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
 )
 
 
+def load_peft_adapter(
+    model: nn.Module,
+    adapter_path: str,
+    *,
+    rank: int,
+    alpha: float,
+    dropout: float = 0.0,
+    target_modules=None,
+    exclude_modules=None,
+) -> nn.Module:
+    """Wrap ``model`` with the LoRA layers a PEFT adapter describes and load its tensors.
+
+    The adapter's ``r`` / ``lora_alpha`` must equal ``rank`` / ``alpha``; its
+    ``rank_pattern`` / ``alpha_pattern`` / ``use_rslora`` carry over so every module keeps
+    the scale it was trained with. ``target_modules="all-linear"`` (or None) adapts exactly
+    the modules the adapter trains; an explicit list must cover them and the extra modules
+    start as fresh zero adapters. Adapter keys are matched to the model by module path,
+    tolerating the ``model.layers`` / ``model.language_model.layers`` namespace difference
+    between a text-only model and a VL checkpoint. On a meta-device model (non-rank-0
+    under meta init) only the layers are built; the FSDP full-state broadcast fills them.
+    """
+    from peft import set_peft_model_state_dict
+
+    from skyrl.backends.skyrl_train.distributed.lora_import import (
+        LORA_A_SUFFIX,
+        LORA_B_SUFFIX,
+        PEFT_PREFIX,
+        check_adapter_matches_config,
+        normalize_peft_adapter,
+        read_peft_adapter,
+        remap_peft_state_dict,
+    )
+
+    adapter = normalize_peft_adapter(read_peft_adapter(adapter_path))
+    check_adapter_matches_config(adapter, rank, alpha)
+    adapted_leaves = adapter.leaf_modules()
+    if target_modules in (None, "all-linear"):
+        targets = adapted_leaves
+    else:
+        missing = [leaf for leaf in adapted_leaves if leaf not in target_modules]
+        if missing:
+            raise ValueError(
+                f"init_adapter_path: the adapter trains {missing} but trainer.policy.model.lora.target_modules="
+                f'{list(target_modules)} does not include them; add them or use target_modules="all-linear"'
+            )
+        targets = list(target_modules)
+
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=adapter.r,
+        lora_alpha=adapter.config["lora_alpha"],
+        rank_pattern=dict(adapter.config.get("rank_pattern") or {}),
+        alpha_pattern=dict(adapter.config.get("alpha_pattern") or {}),
+        use_rslora=bool(adapter.config.get("use_rslora", False)),
+        target_modules=targets,
+        exclude_modules=exclude_modules,
+        lora_dropout=dropout,
+        bias="none",
+        init_lora_weights=True,
+    )
+    peft_model = get_peft_model(model, lora_config)
+
+    if any(p.is_meta for p in peft_model.parameters()):
+        logger.info(f"init_adapter_path={adapter_path}: built LoRA layers on meta device; weights arrive by broadcast")
+        return peft_model
+
+    lora_modules = [
+        name[len(PEFT_PREFIX) :] if name.startswith(PEFT_PREFIX) else name
+        for name, module in peft_model.named_modules()
+        if isinstance(module, LoraLayer)
+    ]
+    state = {}
+    for module, piece in adapter.pieces.items():
+        state[f"{PEFT_PREFIX}{module}{LORA_A_SUFFIX}"] = piece.lora_a
+        state[f"{PEFT_PREFIX}{module}{LORA_B_SUFFIX}"] = piece.lora_b
+    state = remap_peft_state_dict(state, lora_modules)
+    load_result = set_peft_model_state_dict(peft_model, state)
+    unexpected = list(getattr(load_result, "unexpected_keys", []) or [])
+    if unexpected:
+        raise ValueError(
+            f"init_adapter_path: {len(unexpected)} adapter tensors did not match a LoRA layer: {unexpected[:8]}"
+        )
+    logger.info(
+        f"init_adapter_path={adapter_path}: loaded {len(adapter.pieces)} LoRA modules "
+        f"(r={adapter.r}, alpha={adapter.config['lora_alpha']}, targets={targets})"
+    )
+    return peft_model
+
+
 @dataclass(frozen=True)
 class _SampleSupportChannels:
     """Token-aligned metadata transformed alongside model inputs."""
@@ -113,6 +202,8 @@ class HFModelWrapper(nn.Module):
         lora_init_method (str, optional): Initialization method for LoRA layers. Defaults to "kaiming".
         target_modules (list, optional): List of target modules for applying LoRA. Defaults to None.
         exclude_modules (list, optional): List of modules to exclude from applying LoRA. Defaults to None.
+        lora_init_adapter_path (str, optional): PEFT adapter directory whose ``adapter_config.json`` defines the
+            LoRA layers (rank, alpha, targets, patterns) and whose tensors initialize them. Defaults to None.
         device_map (dict, optional): Device mapping for loading the model onto specific devices. Defaults to None.
         packing_samples (bool, optional): Whether to pack samples during training. Defaults to False.
         temperature (float, optional): Temperature for action selection. Defaults to 1.0.
@@ -132,6 +223,7 @@ class HFModelWrapper(nn.Module):
         lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
+        lora_init_adapter_path=None,
         device_map=None,
         temperature=1.0,
         use_liger_kernel=False,
@@ -249,17 +341,28 @@ class HFModelWrapper(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
-                lora_config = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    target_modules=target_modules,
-                    exclude_modules=exclude_modules,
-                    lora_dropout=lora_dropout,
-                    bias="none",
-                    init_lora_weights=True if lora_init_method == "kaiming" else lora_init_method,
-                )
-                self.model = get_peft_model(self.model, lora_config)
+                if lora_init_adapter_path:
+                    self.model = load_peft_adapter(
+                        self.model,
+                        lora_init_adapter_path,
+                        rank=lora_rank,
+                        alpha=lora_alpha,
+                        dropout=lora_dropout,
+                        target_modules=target_modules,
+                        exclude_modules=exclude_modules,
+                    )
+                else:
+                    lora_config = LoraConfig(
+                        task_type=TaskType.CAUSAL_LM,
+                        r=lora_rank,
+                        lora_alpha=lora_alpha,
+                        target_modules=target_modules,
+                        exclude_modules=exclude_modules,
+                        lora_dropout=lora_dropout,
+                        bias="none",
+                        init_lora_weights=True if lora_init_method == "kaiming" else lora_init_method,
+                    )
+                    self.model = get_peft_model(self.model, lora_config)
 
                 if load_in_4bit:
                     for name, module in self.model.named_modules():

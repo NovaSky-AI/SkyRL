@@ -151,7 +151,7 @@ class SkyRLLoraConfig(BaseConfig):
     module that fuses several adapted HF projections (``linear_qkv``, GatedDeltaNet ``in_proj``,
     ``linear_fc1``) is built at the sum of their ranks with a block-diagonal ``lora_B``, so it
     computes the same function as the separate adapters. Tinker's ``linear_attn.in_proj_q/k/v``
-    keys are folded into ``in_proj_qkv`` the same way. Megatron only."""
+    keys are folded into ``in_proj_qkv`` the same way."""
 
     max_lora_rank: Optional[int] = None
     """vLLM ``max_lora_rank`` for adapter-only weight sync; defaults to ``rank``. Must be at least
