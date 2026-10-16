@@ -1008,6 +1008,12 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
             with steps_lock:
                 steps_in_flight += 1
             try:
+                if not parallel_env_steps:
+                    if env_idx == 0:
+                        raise RuntimeError("step boom")
+                    return BaseTextEnvStepOutput(
+                        observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
+                    )
                 if env_idx == 0:
                     sibling_in_step.set()
                     failing_env_ready.wait(timeout=2.0)
