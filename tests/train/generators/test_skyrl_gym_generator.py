@@ -886,6 +886,7 @@ async def test_generate_batched_parallel_env_steps(
     mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg, parallel_env_steps
 ):
     """Sequential and parallel env.step paths produce identical batched outputs."""
+    envs_created = []
 
     def make_env():
         env = MagicMock()
@@ -895,6 +896,7 @@ async def test_generate_batched_parallel_env_steps(
         )
         env.close.return_value = None
         env.get_metrics.return_value = {}
+        envs_created.append(env)
         return env
 
     mock_make.side_effect = lambda *args, **kwargs: make_env()
@@ -926,14 +928,17 @@ async def test_generate_batched_parallel_env_steps(
     assert output["rewards"] == [1.0, 1.0]
     assert output["loss_masks"] == [[1] * len(MOCK_LLM_OUTPUT_IDS)] * 2
     assert output["stop_reasons"] == ["stop", "stop"]
+    assert len(envs_created) == 2
+    assert all(env.close.called for env in envs_created)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_env_steps", [False, True])
 @patch("skyrl_gym.make")
 async def test_generate_batched_parallel_env_steps_closes_on_bookkeep_failure(
-    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg, parallel_env_steps
 ):
-    """Parallel mode closes all envs even when bookkeeping fails mid-loop."""
+    """All envs are closed even when bookkeeping fails mid-loop."""
     envs_created = []
 
     def make_env():
@@ -951,7 +956,7 @@ async def test_generate_batched_parallel_env_steps_closes_on_bookkeep_failure(
         return env
 
     mock_make.side_effect = lambda *args, **kwargs: make_env()
-    mock_env_cfg.parallel_env_steps = True
+    mock_env_cfg.parallel_env_steps = parallel_env_steps
 
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,
@@ -978,11 +983,12 @@ async def test_generate_batched_parallel_env_steps_closes_on_bookkeep_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parallel_env_steps", [False, True])
 @patch("skyrl_gym.make")
 async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
-    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg
+    mock_make, mock_tokenizer, mock_llm, generator_cfg, mock_env_cfg, parallel_env_steps
 ):
-    """Parallel mode settles in-flight steps before closing envs when a step fails."""
+    """In-flight steps settle before closing envs when a step fails."""
     envs_created = []
     sibling_in_step = threading.Event()
     failing_env_ready = threading.Event()
@@ -1028,7 +1034,7 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
         return env
 
     mock_make.side_effect = lambda *args, **kwargs: make_env()
-    mock_env_cfg.parallel_env_steps = True
+    mock_env_cfg.parallel_env_steps = parallel_env_steps
     mock_env_cfg.max_env_workers = 2
 
     generator = SkyRLGymGenerator(
@@ -1051,7 +1057,8 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
     with pytest.raises(RuntimeError, match="step boom"):
         await generator.generate(input_batch)
 
-    assert close_during_step == [], f"close overlapped in-flight step on env(s) {close_during_step}"
+    if parallel_env_steps:
+        assert close_during_step == [], f"close overlapped in-flight step on env(s) {close_during_step}"
     assert len(envs_created) == 2
     assert all(env.close.called for env in envs_created)
 

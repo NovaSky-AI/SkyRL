@@ -922,6 +922,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         parallel_env_steps = self.skyrl_gym_cfg.parallel_env_steps
         env_step_outputs = None
         step_tasks: list[asyncio.Task] = []
+        closed_envs: set[int] = set()
         try:
             if parallel_env_steps:
                 step_tasks = [
@@ -955,17 +956,17 @@ class SkyRLGymGenerator(GeneratorInterface):
 
                 # Get environment-specific metrics
                 env_metrics.append(env.get_metrics())
-                # Close the environment
                 if not parallel_env_steps:
                     await self._run_in_executor_if_available(env.close)
+                    closed_envs.add(i)
         finally:
-            if parallel_env_steps:
-                if step_tasks:
-                    await asyncio.gather(*step_tasks, return_exceptions=True)
-                await asyncio.gather(
-                    *[self._run_in_executor_if_available(env.close) for env in envs],
-                    return_exceptions=True,
-                )
+            if step_tasks:
+                await asyncio.gather(*step_tasks, return_exceptions=True)
+            remaining_close_tasks = [
+                self._run_in_executor_if_available(env.close) for i, env in enumerate(envs) if i not in closed_envs
+            ]
+            if remaining_close_tasks:
+                await asyncio.gather(*remaining_close_tasks, return_exceptions=True)
 
         rollout_metrics = get_rollout_metrics(truncated_responses, rewards, env_metrics, env_classes, loss_masks)
 
