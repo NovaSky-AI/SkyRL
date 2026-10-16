@@ -45,8 +45,10 @@ def test_a_fence_inside_the_thinking_does_not_count():
         "Done thinking.\n</think>\n\nI think the fix is in utils.js.",
         # A fence inside the command: it must not run cut short at the inner fence.
         "Done thinking.\n</think>\n\n```bash\ncat > notes.md <<'EOF'\n```python\nprint(1)\n```\nEOF\nrm -rf build\n```",
+        # A second command after a later </think>: not just the last one.
+        "Done.\n</think>\n\n```bash\nls\n```\n<think>\nMore.\n</think>\n\n```bash\npwd\n```",
     ],
-    ids=["open-think", "two-commands", "misspelled-tag", "no-command", "inner-fence"],
+    ids=["open-think", "two-commands", "misspelled-tag", "no-command", "inner-fence", "second-think-block"],
 )
 def test_malformed_replies_are_format_errors(reply):
     assert len(actions(reply)) != 1
