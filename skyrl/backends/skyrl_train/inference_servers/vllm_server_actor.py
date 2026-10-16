@@ -635,10 +635,12 @@ class VLLMServerActor(ServerActorProtocol):
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
             features = body.get("features")
-            if features:
+            if features is not None:
                 try:
                     prompt = _multimodal_prompt(token_ids, features, cache_salt)
-                except ValueError as error:  # pydantic's ValidationError, or a malformed item
+                # pydantic's ValidationError and undecodable items are ValueErrors; an item that decodes to
+                # something other than a serialized MultiModalKwargsItem raises AttributeError or TypeError.
+                except (ValueError, TypeError, AttributeError) as error:
                     raise HTTPException(status_code=400, detail=f"invalid features: {error}") from error
             elif cache_salt is not None:
                 prompt = TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)

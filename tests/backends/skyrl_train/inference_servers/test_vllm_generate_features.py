@@ -96,10 +96,23 @@ def test_a_request_without_features_keeps_a_token_prompt():
     assert engine.prompt == {"prompt_token_ids": [1, 2]}
 
 
-def test_malformed_features_are_refused():
-    response, engine = _post(
-        {"token_ids": [1, 2], "sampling_params": {}, "features": {"mm_hashes": {"image": ["abc"]}}}
-    )
+@pytest.mark.parametrize(
+    "features",
+    [
+        {"mm_hashes": {"image": ["abc"]}},
+        [],
+        "",
+        {
+            "mm_hashes": {"image": ["abc"]},
+            "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+            # Valid base64, but not a serialized item.
+            "kwargs_data": {"image": ["aGVsbG8="]},
+        },
+    ],
+    ids=["no-placeholders", "empty-list", "empty-string", "not-an-item"],
+)
+def test_malformed_features_are_refused(features):
+    response, engine = _post({"token_ids": [1, 2], "sampling_params": {}, "features": features})
 
     assert response.status_code == 400
     assert "invalid features" in response.json()["detail"]
