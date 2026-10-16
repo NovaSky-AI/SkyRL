@@ -1610,3 +1610,97 @@ def test_validate_step_timeouts_warns_below_nccl_timeout():
         logger.remove(handler_id)
     (message,) = messages
     assert "trainer.weight_sync_timeout_s" in message and "NCCL watchdog" in message
+
+
+# ---------------------------------------------------------------------------
+# megatron_config.freeze_language_model / freeze_vision_model / freeze_vision_projection
+# ---------------------------------------------------------------------------
+
+
+def _vlm_freeze_cfg(*overrides):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    for key, value in overrides:
+        obj = cfg.trainer.policy
+        *path, leaf = key.split(".")
+        for part in path:
+            obj = getattr(obj, part)
+        setattr(obj, leaf, value)
+    return cfg
+
+
+def test_vlm_freeze_defaults_are_off():
+    megatron_config = SkyRLTrainConfig.from_cli_overrides([]).trainer.policy.megatron_config
+    assert not (
+        megatron_config.freeze_language_model
+        or megatron_config.freeze_vision_model
+        or megatron_config.freeze_vision_projection
+    )
+
+
+def test_vlm_freeze_cli_overrides_parse():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.megatron_config.freeze_language_model=true",
+            "trainer.policy.megatron_config.freeze_vision_model=true",
+        ]
+    )
+    assert cfg.trainer.policy.megatron_config.freeze_language_model is True
+    assert cfg.trainer.policy.megatron_config.freeze_vision_model is True
+    assert cfg.trainer.policy.megatron_config.freeze_vision_projection is False
+
+
+def test_vlm_freeze_projection_only_validates():
+    cfg = _vlm_freeze_cfg(
+        ("megatron_config.freeze_language_model", True), ("megatron_config.freeze_vision_model", True)
+    )
+    train_utils.validate_megatron_cfg(cfg)
+
+
+def test_vlm_freeze_with_lora_and_merged_sync_validates():
+    cfg = _vlm_freeze_cfg(
+        ("megatron_config.freeze_language_model", True),
+        ("megatron_config.freeze_vision_model", True),
+        ("model.lora.rank", 16),
+    )
+    assert cfg.trainer.policy.megatron_config.lora_config.merge_lora is True
+    train_utils.validate_megatron_cfg(cfg)
+
+
+def test_vlm_freeze_rejects_full_rank_base_with_adapter_only_sync():
+    cfg = _vlm_freeze_cfg(
+        ("megatron_config.freeze_language_model", True),
+        ("megatron_config.freeze_vision_model", True),
+        ("model.lora.rank", 16),
+        ("megatron_config.lora_config.merge_lora", False),
+    )
+    with pytest.raises(ValueError, match="syncs only the adapters"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+def test_vlm_freeze_all_three_with_adapter_only_sync_validates():
+    cfg = _vlm_freeze_cfg(
+        ("megatron_config.freeze_language_model", True),
+        ("megatron_config.freeze_vision_model", True),
+        ("megatron_config.freeze_vision_projection", True),
+        ("model.lora.rank", 16),
+        ("megatron_config.lora_config.merge_lora", False),
+    )
+    train_utils.validate_megatron_cfg(cfg)
+
+
+def test_vlm_freeze_rejects_all_three_without_lora():
+    cfg = _vlm_freeze_cfg(
+        ("megatron_config.freeze_language_model", True),
+        ("megatron_config.freeze_vision_model", True),
+        ("megatron_config.freeze_vision_projection", True),
+    )
+    with pytest.raises(ValueError, match="no parameter would train"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+def test_vlm_freeze_rejects_language_model_only():
+    cfg = _vlm_freeze_cfg(("megatron_config.freeze_vision_model", True), ("language_model_only", True))
+    with pytest.raises(ValueError, match="language_model_only"):
+        train_utils.validate_megatron_cfg(cfg)

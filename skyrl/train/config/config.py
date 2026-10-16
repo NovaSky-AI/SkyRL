@@ -491,6 +491,51 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
 }
 
 
+def validate_megatron_vlm_freeze(
+    megatron_config: "MegatronConfig",
+    *,
+    strategy: str,
+    lora_enabled: bool,
+    adapter_only_sync: bool,
+    language_model_only: bool,
+) -> None:
+    """Check ``megatron_config.freeze_language_model`` / ``freeze_vision_model`` /
+    ``freeze_vision_projection`` against the rest of the run (shared by the RL and SFT validators).
+
+    ``adapter_only_sync`` is True for RL runs whose weight sync ships LoRA adapters only
+    (``lora_config.merge_lora=false``): full-rank base parameters trained next to the adapters
+    would never reach the inference engines, so that combination is rejected.
+    """
+    flags = {
+        "freeze_language_model": megatron_config.freeze_language_model,
+        "freeze_vision_model": megatron_config.freeze_vision_model,
+        "freeze_vision_projection": megatron_config.freeze_vision_projection,
+    }
+    set_flags = [name for name, value in flags.items() if value]
+    if not set_flags:
+        return
+    if strategy != "megatron":
+        raise ValueError(f"megatron_config.{'/'.join(set_flags)} requires strategy=megatron, got {strategy!r}.")
+    if language_model_only:
+        raise ValueError(
+            f"megatron_config.{'/'.join(set_flags)} cannot be combined with language_model_only=true: the vision "
+            "tower is not built, so there is nothing to select between."
+        )
+    if all(flags.values()) and not lora_enabled:
+        raise ValueError(
+            "megatron_config.freeze_language_model, freeze_vision_model and freeze_vision_projection are all set "
+            "without LoRA: no parameter would train."
+        )
+    keeps_base_trainable = not all(flags.values())
+    if lora_enabled and adapter_only_sync and keeps_base_trainable:
+        raise ValueError(
+            f"megatron_config.{'/'.join(set_flags)} with LoRA keeps some base parameters training at full rank, but "
+            "megatron_config.lora_config.merge_lora=false syncs only the adapters to the inference engines, so the "
+            "rollout policy would not see those updates. Set merge_lora=true, or freeze all three components to "
+            "train adapters only."
+        )
+
+
 @dataclass
 class MegatronConfig(BaseConfig):
     """Megatron-Core backend configuration, used when ``trainer.strategy="megatron"``.
@@ -611,6 +656,22 @@ class MegatronConfig(BaseConfig):
     cannot receive a gradient; leaving them trainable trips Megatron's
     ``overlap_grad_reduce`` assert that every bucketed parameter's backward hook fired. No-op on
     models without a DSA indexer. Leave False when training the indexer with auxiliary loss."""
+    freeze_language_model: bool = False
+    """Vision-language models: freeze the language model. Forwarded to the Megatron-Bridge model
+    provider, which applies it through the model's own ``freeze()`` (supported by the Bridge VLM
+    providers: Qwen2.5/3/3.5-VL, GLM-4.5V, Kimi K2.5-VL, Gemma 3/4-VL, Nemotron-VL, Ernie 4.5-VL).
+    With all three ``freeze_*`` flags unset (default), nothing is frozen by this mechanism. A model
+    whose provider lacks the fields fails at build time. With LoRA, the parameters these flags leave
+    trainable keep training at full rank next to the adapters (e.g. ``freeze_language_model=true
+    freeze_vision_model=true`` + LM LoRA trains the adapters and the whole vision projection)."""
+    freeze_vision_model: bool = False
+    """Vision-language models: freeze the vision encoder. Unless ``freeze_vision_projection`` is
+    also set, the vision projection (the patch merger and, for Qwen3-VL, the DeepStack mergers) stays
+    trainable, so ``freeze_language_model=true freeze_vision_model=true`` trains the projection only.
+    See ``freeze_language_model``."""
+    freeze_vision_projection: bool = False
+    """Vision-language models: freeze the vision projection (the module mapping vision features into
+    the language model's embedding space). See ``freeze_language_model``."""
     mtp_num_layers: Optional[int] = None
     """Number of Multi-Token Prediction (MTP) heads to build. ``None`` honors the model's HF config
     (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are

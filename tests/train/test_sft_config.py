@@ -502,3 +502,35 @@ class TestMultiDatasetValidation:
         cfg = _sft_cfg_from_overrides(["eval_interval=5"])
         with pytest.raises(ValueError, match="requires eval_datasets"):
             validate_sft_cfg(cfg)
+
+
+class TestVLMFreeze:
+    """megatron_config.freeze_* flags are validated on the SFT path too."""
+
+    def _cfg(self, **overrides):
+        cfg = SFTConfig()
+        cfg.model.path = "test/my-model"
+        for key, value in overrides.items():
+            if key.startswith("freeze_"):
+                setattr(cfg.megatron_config, key, value)
+            else:
+                setattr(cfg, key, value)
+        return cfg
+
+    def test_projection_only_validates(self):
+        validate_sft_cfg(self._cfg(freeze_language_model=True, freeze_vision_model=True))
+
+    def test_lora_plus_projection_validates_even_with_merge_lora_false(self):
+        # SFT has no inference engines, so adapter-only sync does not apply.
+        cfg = self._cfg(freeze_language_model=True, freeze_vision_model=True)
+        cfg.model.lora.rank = 16
+        cfg.megatron_config.lora_config.merge_lora = False
+        validate_sft_cfg(cfg)
+
+    def test_rejects_fsdp(self):
+        with pytest.raises(ValueError, match="requires strategy=megatron"):
+            validate_sft_cfg(self._cfg(strategy="fsdp", freeze_vision_model=True))
+
+    def test_rejects_language_model_only(self):
+        with pytest.raises(ValueError, match="language_model_only"):
+            validate_sft_cfg(self._cfg(freeze_vision_model=True, language_model_only=True))
