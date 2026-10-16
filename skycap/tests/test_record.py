@@ -7,11 +7,13 @@ from pathlib import Path
 
 import numpy as np
 import openai
+import orjson
 import pytest
 import zstandard
 
 from skycap import record
 from skycap.graph import CallInfo, NodeTokens
+from skycap.samples import Sample, build_samples
 from skycap.trajectory import Failure, Trajectory
 from tests.conftest import Stack, openai_client, running_stack
 
@@ -66,6 +68,7 @@ def _token_trajectory() -> Trajectory:
             logprobs=[0.0, -0.5, -0.25, -1.0],
             routed_experts=np.full((4, 2, 2), 9, dtype=np.uint8),
             sampling_mask=[[5, 8], [6], [7, 1, 2]],
+            sampling_mask_logprobs=[[-0.25, -1.5], [0.0], [-0.5, -1.0, -2.0]],
             text=REPLY_TEXT,
             # The emoji takes two tokens; it belongs to the second, which
             # completes it, and the first has an empty span.
@@ -90,6 +93,7 @@ def test_a_token_trajectory_round_trips(tmp_path: Path) -> None:
         assert after.tokens.sampled_start == before.tokens.sampled_start
         assert after.tokens.logprobs == before.tokens.logprobs
         assert after.tokens.sampling_mask == before.tokens.sampling_mask
+        assert after.tokens.sampling_mask_logprobs == before.tokens.sampling_mask_logprobs
         assert after.tokens.text == before.tokens.text
         assert after.tokens.text_offsets == before.tokens.text_offsets
         np.testing.assert_array_equal(after.tokens.routed_experts, before.tokens.routed_experts)
@@ -119,6 +123,7 @@ def test_the_files_are_split_by_who_reads_them(tmp_path: Path) -> None:
         "experts_rows": 4,
         "mask_offset": 0,
         "mask_rows": 3,
+        "has_mask_logprobs": True,
     }
     assert list(record.list_ids(tmp_path)) == ["tr_tokens"]
 
@@ -321,6 +326,50 @@ async def test_models_on_an_ended_route_is_410(recorded_stack: Stack) -> None:
 
     async with recorded_stack.http.get(f"{created['base_url']}/models") as response:
         assert response.status == 410
+
+
+def test_sampling_mask_logprobs_round_trip_per_node(tmp_path: Path) -> None:
+    """A node captured without logprobs reads back without them, beside one captured with."""
+    trajectory = Trajectory(id="tr_mixed_mask")
+    first, _ = trajectory.graph.add(
+        None,
+        role="assistant",
+        author="model",
+        message={"role": "assistant", "content": "a"},
+        match_hash="m0",
+        delta_hash="d0",
+        created_at=0.0,
+        tokens=NodeTokens(token_ids=[1, 2], sampled_start=0, sampling_mask=[[1, 3], [2]]),
+    )
+    trajectory.graph.add(
+        first.id,
+        role="assistant",
+        author="model",
+        message={"role": "assistant", "content": "b"},
+        match_hash="m1",
+        delta_hash="d1",
+        created_at=1.0,
+        tokens=NodeTokens(
+            token_ids=[4], sampled_start=0, sampling_mask=[[4, 5]], sampling_mask_logprobs=[[-0.5, -1.0]]
+        ),
+    )
+    record.write(tmp_path, trajectory)
+    without, with_logprobs = record.load(tmp_path, "tr_mixed_mask").graph
+
+    assert without.tokens is not None and without.tokens.sampling_mask == [[1, 3], [2]]
+    assert without.tokens.sampling_mask_logprobs is None
+    assert with_logprobs.tokens is not None and with_logprobs.tokens.sampling_mask_logprobs == [[-0.5, -1.0]]
+
+
+def test_samples_carry_sampling_mask_logprobs_row_for_row() -> None:
+    graph = _token_trajectory().graph
+    (sample,) = build_samples(graph)
+
+    assert sample.sampling_mask == [[], [], [], [], [5, 8], [6], [7, 1, 2]]
+    assert sample.sampling_mask_logprobs == [[], [], [], [], [-0.25, -1.5], [0.0], [-0.5, -1.0, -2.0]]
+    restored = Sample.from_json(orjson.loads(orjson.dumps(sample.to_json())))
+    assert restored.sampling_mask == sample.sampling_mask
+    assert restored.sampling_mask_logprobs == sample.sampling_mask_logprobs
 
 
 def test_an_empty_sampling_mask_round_trips(tmp_path: Path) -> None:

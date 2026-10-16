@@ -157,6 +157,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         ttl=cfg.skycap.ttl,
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
+        sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
     )
 
 
