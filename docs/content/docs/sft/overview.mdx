@@ -252,6 +252,18 @@ merged HF exports. RL runs with `megatron_config.lora_config.merge_lora=false`
 engines would never receive the full-rank updates. The trainable and total
 parameter counts per top-level module are logged at startup.
 
+<Callout type="warn">
+Qwen3-VL's DeepStack mergers (part of the vision projection) currently receive
+no gradient under activation recompute (`recompute_granularity="full"`, the
+default): the projection then trains only its main patch merger. Until this
+is fixed in Megatron-Bridge, disable recompute for Qwen3-VL runs that train the
+projection:
+`megatron_config.transformer_config_kwargs.recompute_granularity=null`
+`megatron_config.transformer_config_kwargs.recompute_method=null`
+`megatron_config.transformer_config_kwargs.recompute_num_layers=null`
+(activation memory grows; a 4B model with a frozen language model fits a 48 GB GPU).
+</Callout>
+
 ## Key configuration
 
 See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft/sft_config)
