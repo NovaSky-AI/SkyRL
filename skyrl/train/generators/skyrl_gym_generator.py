@@ -960,13 +960,24 @@ class SkyRLGymGenerator(GeneratorInterface):
                     await self._run_in_executor_if_available(env.close)
                     closed_envs.add(i)
         finally:
-            if step_tasks:
+            if parallel_env_steps and step_tasks:
                 await asyncio.gather(*step_tasks, return_exceptions=True)
-            remaining_close_tasks = [
-                self._run_in_executor_if_available(env.close) for i, env in enumerate(envs) if i not in closed_envs
-            ]
-            if remaining_close_tasks:
-                await asyncio.gather(*remaining_close_tasks, return_exceptions=True)
+
+            if parallel_env_steps:
+                remaining_close_tasks = [
+                    self._run_in_executor_if_available(env.close) for i, env in enumerate(envs) if i not in closed_envs
+                ]
+                if remaining_close_tasks:
+                    await asyncio.gather(*remaining_close_tasks, return_exceptions=True)
+            else:
+                for i, env in enumerate(envs):
+                    if i not in closed_envs:
+                        try:
+                            await self._run_in_executor_if_available(env.close)
+                        except Exception:
+                            pass
+                        finally:
+                            closed_envs.add(i)
 
         rollout_metrics = get_rollout_metrics(truncated_responses, rewards, env_metrics, env_classes, loss_masks)
 
