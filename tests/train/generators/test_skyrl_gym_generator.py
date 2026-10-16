@@ -1051,9 +1051,7 @@ async def test_generate_batched_parallel_env_steps_closes_on_step_failure(
     with pytest.raises(RuntimeError, match="step boom"):
         await generator.generate(input_batch)
 
-    assert close_during_step == [], (
-        f"close overlapped in-flight step on env(s) {close_during_step}"
-    )
+    assert close_during_step == [], f"close overlapped in-flight step on env(s) {close_during_step}"
     assert len(envs_created) == 2
     assert all(env.close.called for env in envs_created)
 
