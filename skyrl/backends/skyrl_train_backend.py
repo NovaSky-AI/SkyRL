@@ -576,25 +576,29 @@ class SkyRLTrainBackend(AbstractBackend):
                 logger.info("Initializing Ray with runtime environment")
                 initialize_ray(self._cfg)
 
-            self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
+            try:
+                self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self.config.runtime_role == "inference":
-                PolicyWorker = None
-            elif self._cfg.trainer.strategy == "fsdp":
-                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
-                    PolicyWorker,
-                )
-            elif self._cfg.trainer.strategy == "megatron":
-                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                    PolicyWorker,
-                )
-            else:
-                raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-            if PolicyWorker is not None:
-                logger.info("Building models.")
-                self._build_policy(PolicyWorker, model_id=model_id)
-            if is_lora:
-                self._base_lora_signature = self._lora_signature_from(lora_config)
+                if self.config.runtime_role == "inference":
+                    PolicyWorker = None
+                elif self._cfg.trainer.strategy == "fsdp":
+                    from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                        PolicyWorker,
+                    )
+                elif self._cfg.trainer.strategy == "megatron":
+                    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                        PolicyWorker,
+                    )
+                else:
+                    raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
+                if PolicyWorker is not None:
+                    logger.info("Building models.")
+                    self._build_policy(PolicyWorker, model_id=model_id)
+                if is_lora:
+                    self._base_lora_signature = self._lora_signature_from(lora_config)
+            except Exception:
+                self._discard_failed_policy_runtime()
+                raise
         elif model_role == "critic":
             if model_role in self._model_ids_to_role.values():
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
@@ -628,10 +632,34 @@ class SkyRLTrainBackend(AbstractBackend):
         pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
 
         logger.info("Waiting for placement group to be ready...")
-        get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        try:
+            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        except Exception:
+            # The request stays queued in Ray, and would reserve the GPUs once they free up.
+            try:
+                ray.util.remove_placement_group(pg)
+            except Exception as e:
+                logger.warning(f"Failed to remove the colocate placement group that never became ready: {e}")
+            raise
         logger.info("Placement group ready!")
 
         return ResolvedPlacementGroup(pg)
+
+    def _discard_failed_policy_runtime(self) -> None:
+        """Undo a first policy model whose build failed before it was registered.
+
+        Removing the colocate placement group frees its GPUs and kills the workers scheduled on it,
+        so the next ``create_model`` can reserve them again.
+        """
+        pg = self._colocate_pg
+        self._cfg = None
+        self._dispatch = None
+        self._colocate_pg = None
+        if pg is not None:
+            try:
+                ray.util.remove_placement_group(pg.pg)
+            except Exception as e:
+                logger.warning(f"Failed to remove the colocate placement group after a failed model build: {e}")
 
     def _unload_inference_adapter(self, model_id: str) -> None:
         """Drop a deleted tenant's LoRA adapter from the inference engines.
