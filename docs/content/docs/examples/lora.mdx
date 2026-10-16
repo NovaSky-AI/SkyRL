@@ -140,7 +140,7 @@ We recommend looking at the blog [LoRA Without Regret](https://thinkingmachines.
 
 ## Initializing from a PEFT Adapter (Resuming a Tinker Run)
 
-`trainer.policy.model.lora.init_adapter_path` (Megatron) starts training from the weights of an existing HuggingFace PEFT
+`trainer.policy.model.lora.init_adapter_path` starts training from the weights of an existing HuggingFace PEFT
 LoRA adapter (`adapter_config.json` + `adapter_model.safetensors`, local or cloud path). The policy's adapters
 are built to match the adapter file, so the initial policy computes exactly what the adapter computed; the
 optimizer state and LR schedule start fresh. Use it to continue a run that was trained with
@@ -180,14 +180,14 @@ How the layouts are reconciled:
   adapter. SkyRL builds the fused module at the sum of the constituent ranks with a block-diagonal `lora_B`
   (rank 96 for three rank-32 adapters), which computes the same function as the three separate adapters. The
   same applies to GatedDeltaNet `in_proj` (`in_proj_qkv/z/b/a`) and `linear_fc1` (`gate_proj`/`up_proj`).
-  The trainable parameterization after
+  On FSDP, `peft` keeps the separate modules, so nothing is widened. The trainable parameterization after
   import is a superset of the original (the off-diagonal blocks of the widened `lora_B` can move), so the
   training trajectory is not bit-identical to continuing in Tinker, but the starting point is.
 - **Tinker's GatedDeltaNet keys.** The converter leaves `linear_attn.in_proj_q/k/v` as three modules that
   do not exist in HF's Qwen3.5/3.6 (`in_proj_qkv` is one linear). SkyRL folds them into one `in_proj_qkv`
   adapter of rank `3r`, recorded through `rank_pattern` / `alpha_pattern` so the scale is unchanged.
 - **PEFT patterns.** `rank_pattern`, `alpha_pattern` and `use_rslora` are honored per module. For
-  adapter-only weight sync (`merge_lora=false`) the per-module scales are folded into
+  adapter-only weight sync (FSDP, or Megatron `merge_lora=false`) the per-module scales are folded into
   `lora_B` before publishing, since vLLM applies a single `lora_alpha / r`; set
   `trainer.policy.model.lora.max_lora_rank` to a vLLM-accepted value at least as large as the widest module
   (Megatron fused projections run at a multiple of `rank`). Megatron's default `merge_lora=true` needs no
@@ -197,11 +197,12 @@ Resuming with `trainer.resume_mode` from a SkyRL checkpoint saved by such a run 
 the adapter file defines the module ranks, and the checkpoint then overrides the adapter weights, optimizer
 and schedule.
 
-Not supported yet: the FSDP backend, MoE expert adapters (dense models and attention/MLP adapters only), DoRA,
+Not supported yet: MoE expert adapters on Megatron (dense models and attention/MLP adapters only), DoRA,
 `modules_to_save`, `lora_type=canonical_lora`, and `trainer.fused_lm_head_logprob=true` together with an
 adapter on `lm_head` (the fused head reads the base `output_layer.weight` directly).
 
-`tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_lora_init_adapter.py` checks the import: a policy initialized from a Tinker-shaped adapter (separate q/k/v, `in_proj_q/k/v`, `lm_head`)
+`tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_lora_init_adapter.py` checks the import on both
+backends: a policy initialized from a Tinker-shaped adapter (separate q/k/v, `in_proj_q/k/v`, `lm_head`)
 scores fixed sequences within bf16 tolerance of HuggingFace + `peft` on the same adapter.
 
 ## Current Limitations

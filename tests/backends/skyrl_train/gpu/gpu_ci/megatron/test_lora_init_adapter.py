@@ -1,4 +1,4 @@
-"""``trainer.policy.model.lora.init_adapter_path``: a PEFT adapter resumes exactly on Megatron.
+"""``trainer.policy.model.lora.init_adapter_path``: a PEFT adapter resumes exactly on both backends.
 
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_lora_init_adapter.py
@@ -235,7 +235,7 @@ def _policy_logprobs(cfg: SkyRLTrainConfig, data: TrainingInputBatch) -> torch.T
         return _trainer_logprobs(policy, data)
 
 
-@pytest.mark.parametrize("strategy", ["megatron"])
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
 def test_policy_initialized_from_peft_adapter_matches_hf(strategy, adapter_dirs, reference):
     """The imported adapter adds no error beyond the backend's own bf16 noise against HF.
 
