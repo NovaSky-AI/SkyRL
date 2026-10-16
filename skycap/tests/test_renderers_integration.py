@@ -127,6 +127,33 @@ async def test_a_conversation_through_the_real_renderer(renderer: RenderersRende
         assert sum(sample.loss_mask) == 2 * len(reply)
 
 
+async def test_malformed_json_tool_attempt_is_text_without_promoting_finish_reason(renderer: RenderersRenderer) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(TOKENIZER)
+    attempt = '{"name": "search", "arguments":'
+    completion = tokenizer.encode(
+        f"<think>\nhmm\n</think>\n\n<tool_call>\n{attempt}\n</tool_call><|im_end|>",
+        add_special_tokens=False,
+    )
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.server.backend.renderer = renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        first = await client(created["base_url"]).chat.completions.create(
+            model="policy", messages=[user("q")], tools=tools
+        )
+
+        assert first.choices[0].finish_reason == "stop"
+        assert first.choices[0].message.tool_calls is None
+        assert first.choices[0].message.content == attempt
+        assert first.choices[0].message.reasoning_content == "hmm"
+        (sample,) = build_samples(stack.server.trajectories[created["id"]].graph)
+        assert sample.input_ids == stack.engine.requests[0]["token_ids"] + completion
+        assert sum(sample.loss_mask) == len(completion)
+
+
 def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: RenderersRenderer) -> None:
     from renderers.base import load_tokenizer
 
