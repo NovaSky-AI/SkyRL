@@ -169,7 +169,7 @@ class RenderersRenderer:
         tools: Sequence[Mapping[str, Any]] | None,
         prompt_ids: Sequence[int] | None = None,
     ) -> dict[str, Any]:
-        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text.
+        """Return extracted calls without schema validation; keep failed parses as text.
 
         ``prompt_ids`` is the prompt the completion was sampled from. The parser reads its tail to
         tell whether the template already opened the reasoning block: Qwen3.5 with thinking on ends
@@ -189,11 +189,18 @@ class RenderersRenderer:
             message["reasoning_content"] = parsed.reasoning_content
         calls = []
         for index, call in enumerate(getattr(parsed, "tool_calls", None) or ()):
-            if call.status != ToolCallParseStatus.OK or not call.name:
+            # XML parsers also use INVALID_JSON when an extracted parameter cannot be
+            # coerced to its declared type. Its argument object is still complete;
+            # vLLM's XML parser returns the original string for the caller to validate.
+            extracted_arguments = call.status == ToolCallParseStatus.INVALID_JSON and isinstance(call.arguments, dict)
+            if not call.name or (call.status != ToolCallParseStatus.OK and not extracted_arguments):
+                # Parsers extract even failed attempts from content. Restore their raw text;
+                # UNKNOWN_TOOL and structural failures must not become callable actions.
+                message["content"] = "\n".join(part for part in (message["content"], call.raw) if part)
                 continue
             arguments = call.arguments
             if not isinstance(arguments, str):
-                arguments = json.dumps(arguments or {}, separators=(",", ":"), ensure_ascii=False)
+                arguments = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
             calls.append(
                 {
                     "id": call.id or tool_call_id(completion_ids, index),
