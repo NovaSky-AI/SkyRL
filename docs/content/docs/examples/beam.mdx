@@ -1,8 +1,8 @@
 ---
-title: "Beam: math reasoning RL with LoRA, full fine-tuning and MXFP8"
+title: "Day 0 Support for Beam in SkyRL: LoRA, full fine-tuning and MXFP8"
 ---
 
-Train [Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B), Reflection AI's 501B-parameter mixture-of-experts
+Train the newly released model [Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B), Reflection's 501B-parameter mixture-of-experts
 model (23B active parameters), to solve math problems with reinforcement learning. Megatron trains
 the model and vLLM generates responses, sharing the same GPUs. The examples run DAPO on DAPO-Math-17K and evaluate on
 AIME24 and AIME25.
@@ -216,12 +216,6 @@ AIME25 metrics are logged as `eval/aime-2025/*`. Because of its dataset label, A
   rollouts. When a vLLM replica uses pipeline parallelism, SkyRL relays the routes from the last pipeline stage.
 - **Reasoning effort.** Beam's chat template takes a `reasoning_effort`, which the scripts pass through
   `generator.chat_template_kwargs`. The default, `minimal`, keeps responses well within the 8,192-token budget.
-
-## Troubleshooting
-
-- **A weight sync stalls.** vLLM's `gpu_memory_utilization` (0.7 for LoRA, 0.6 for bf16 full fine-tuning, 0.55 for
-  MXFP8) leaves room for Megatron state that stays on the GPU around the sync. Check the vLLM worker logs for an
-  out-of-memory error and lower `INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION`.
 
 ## Learn more
 
