@@ -36,7 +36,7 @@ Required `--backend-config` keys to run multi-tenant LoRA on Megatron:
 
 By default (`"keep_runtime_warm_on_last_unload": true`), the shared runtime (Ray, training workers, inference engines, and the base model) stays alive when the last registered model unloads. Set it to `false` to release all GPUs on the last unload instead (scale-to-zero); that teardown is also the only way to change the server's LoRA signature without restarting the service.
 
-All adapters must share the same `(rank, alpha, target_modules)` signature. Mismatches are hard-rejected at `create_model` with a `LoRA signature mismatch …` error.
+All adapters must share the same `(rank, alpha, train_attn, train_mlp)` signature. Mismatches are hard-rejected at `create_model` with a `LoRA signature mismatch …` error.
 
 The first `create_model` on a fresh server triggers the policy build and bootstraps the per-tenant adapter slot infrastructure; subsequent `create_model` calls register additional adapter slots and complete in milliseconds. Deleting a model removes its adapter slot and unregisters its adapter from vLLM; the shared runtime is untouched while other tenants remain.
 
@@ -165,7 +165,7 @@ You should see both clients' rewards trend upward independently in `rl_loop_a.lo
 
 ## Troubleshooting
 
-- **`LoRA signature mismatch`** — clients passed different `(rank, alpha, target_modules)`. All adapters on one server share a signature, captured from the first `create_model`.
+- **`LoRA signature mismatch`** — clients passed different `(rank, alpha, train_attn, train_mlp)`. All adapters on one server share a signature, captured from the first `create_model`.
 - **`sample()` 404 on `lora_name=…`** — either `save_sampler_checkpoint` wasn't called for that `model_id` before sampling, or `max_cpu_loras` is too low and vLLM evicted the adapter. Check the vLLM server log.
 - **Server hangs on the second `create_model`** — the first policy build hasn't finished. Wait for `init policy model done` before starting subsequent clients.
 - **CPU OOM on the Nth client** — each adapter slot holds LoRA params + fp32 main + Adam moments, roughly `~3× lora_param_bytes_per_DP_shard`. For Qwen3-4B-Instruct-2507 at rank 32 this is on the order of hundreds of MB per slot; for larger models scale accordingly. Reduce concurrent adapters or move to a host with more RAM.
