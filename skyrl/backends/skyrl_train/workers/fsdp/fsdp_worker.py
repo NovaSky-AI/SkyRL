@@ -78,6 +78,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_init_method=self.cfg.policy.model.lora.init_method,
             target_modules=self.cfg.policy.model.lora.target_modules,
             exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+            lora_init_adapter_path=self.cfg.policy.model.lora.init_adapter_path,
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
@@ -176,6 +177,17 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             peft_config["task_type"] = peft_config["task_type"].value
             peft_config["peft_type"] = peft_config["peft_type"].value
             peft_config["target_modules"] = list(peft_config["target_modules"])
+
+            # vLLM applies one `lora_alpha / r` to every module and ignores
+            # rank_pattern / alpha_pattern / use_rslora (set when the adapter was
+            # initialized from a PEFT adapter that carries them), so fold each
+            # module's own scale into its lora_B before publishing.
+            if peft_config.get("rank_pattern") or peft_config.get("alpha_pattern") or peft_config.get("use_rslora"):
+                from skyrl.backends.skyrl_train.distributed.lora_import import (
+                    fold_peft_patterns_for_vllm,
+                )
+
+                lora_params, peft_config = fold_peft_patterns_for_vllm(lora_params, peft_config)
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))

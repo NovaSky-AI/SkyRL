@@ -25,3 +25,13 @@ Default backend (`trainer.strategy=fsdp`). Uses PyTorch FSDP2 for distributed tr
 
 - Full fine-tuning: the policy loads in fp32 master weights and FSDP2's `MixedPrecisionPolicy` casts parameters to bf16 for compute (`fsdp_config.mixed_precision`, default param bf16 / reduce fp32).
 - LoRA: with `trainer.bf16=true` (default) the frozen base loads in bf16, as on Megatron. PEFT creates the adapters in fp32; FSDP2 only requires trainable parameters to share a dtype. `trainer.bf16=false` keeps the base in fp32.
+
+## LoRA adapter import (`lora.init_adapter_path`)
+
+`HFModelWrapper` calls `load_peft_adapter` (`workers/model_wrapper.py`): the PEFT `LoraConfig` is rebuilt from
+the adapter's `adapter_config.json` (after `normalize_peft_adapter`, which folds Tinker's `in_proj_q/k/v`
+into `in_proj_qkv` with `rank_pattern`/`alpha_pattern`), tensors are re-keyed onto the model's module names
+(`model.layers` vs `model.language_model.layers`) and loaded with `set_peft_model_state_dict`; on meta-init
+ranks only the layers are built and the FSDP full-state broadcast fills them. The adapter-only weight sync
+folds `rank_pattern`/`alpha_pattern` scales into `lora_B` (`fold_peft_patterns_for_vllm`) because vLLM
+ignores them; `lora.max_lora_rank` sizes vLLM for the widest module.
