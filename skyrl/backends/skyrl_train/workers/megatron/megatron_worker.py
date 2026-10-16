@@ -25,6 +25,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
     fold_lora_rank_scale_for_vllm,
     mark_alpha_folded,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.lora_output_layer import (
+    enable_output_layer_attr_passthrough,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
 )
@@ -565,6 +568,9 @@ class MegatronWorker:
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
                 self.lora_cls.set_params_to_save(lora_model)
+                # GPTModel reads/writes gather_output and sequence_parallel on its
+                # output_layer; an adapter-wrapped one must answer for its base linear.
+                enable_output_layer_attr_passthrough(lora_model)
 
                 return lora_model
 
