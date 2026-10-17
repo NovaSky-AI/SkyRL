@@ -44,6 +44,9 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
 MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 MAX_TOKENS_PER_MICROBATCH=8192
+# vLLM sizes its KV pool at engine start; the trainer's post-offload residual grows to ~24 GiB/GPU
+# after the first optimizer step, and 0.85 OOMed adding the adapter at step 2.
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 
 MEGATRON_TP=1
 MEGATRON_PP=1
@@ -53,11 +56,16 @@ MEGATRON_ETP=1
 
 if [ "$MODE" = "lora" ]; then
   # Frozen bf16 base ~25 GB/GPU (dense 10 + experts 15; the 6.4 GB PLE shard is in host memory).
+  # Adapter-only sync (merge_lora=false, in memory): merging needs vLLM's woken weights, a
+  # full-tensor receive buffer (the 1.27 GB embedding) and the merge temporaries resident at once,
+  # which does not fit at TP8/EP16. vLLM accepts ranks 1/8/16/32/..., and normalize_moe_lora needs
+  # rank % top-k(10) == 0, so expert adapters stay at the full rank.
   LR=1e-5
   MODE_ARGS=(
-    trainer.policy.model.lora.rank=32
-    trainer.policy.model.lora.alpha=32
-    trainer.policy.megatron_config.lora_config.merge_lora=true
+    trainer.policy.model.lora.rank=16
+    trainer.policy.model.lora.alpha=16
+    trainer.policy.model.lora.sync_mode=memory
+    trainer.policy.megatron_config.lora_config.merge_lora=false
   )
 else
   # Full FT: ~173B trainable params (PLE table and QSA indexer stay frozen). Expert DP is 1 at
@@ -123,7 +131,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.distributed_executor_backend="mp" \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
-  generator.inference_engine.gpu_memory_utilization=0.85 \
+  generator.inference_engine.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
   generator.inference_engine.engine_init_kwargs="$ENGINE_INIT_KWARGS" \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.batched=true \
