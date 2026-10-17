@@ -202,7 +202,7 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
 
 ## Qwen3.8-Flash-Next (`qwen4_exp`)
 
-### NVIDIA-NeMo/Megatron-Bridge#6123 / #6315 / #6354 (on NVIDIA/Megatron-LM#7393): the model
+### NVIDIA-NeMo/Megatron-Bridge#6123 / #6354 (on NVIDIA/Megatron-LM#7393 / #7553): the model
 
 - **Carried as:** `qwen4_exp/`: `modules.py` (gated low-rank hyper-connection, final mixer, PLE
   n-gram embedding, sigmoid-gated GDN, frozen QSA indexer weights), `layer_specs.py`,

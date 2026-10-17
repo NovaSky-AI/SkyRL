@@ -1,7 +1,7 @@
 """Qwen3.8-Flash-Next (HF ``qwen4_exp``) for the Megatron backend.
 
 No Megatron-Bridge release ships this model yet (open: NVIDIA-NeMo/Megatron-Bridge#6123 /
-#6315 / #6354, on top of the unmerged NVIDIA/Megatron-LM#7393). Shaped for an upstream home in
+#6354, on top of the unmerged NVIDIA/Megatron-LM#7393 / #7553). Shaped for an upstream home in
 Megatron-Bridge (``megatron/bridge/models/qwen/``):
 
 - ``modules``: gated low-rank hyper-connection, final mixer, PLE n-gram embedding (head-sharded
