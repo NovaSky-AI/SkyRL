@@ -13,6 +13,8 @@ the fused input-layernorm entries removed (Qwen4Exp has no ``input_layernorm`` /
 ``post_attention_layernorm`` / final ``norm``).
 """
 
+import copy
+
 from megatron.bridge.models.conversion.mapping_registry import MegatronMappingRegistry
 from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.bridge.models.conversion.param_mapping import ReplicatedMapping
@@ -73,8 +75,14 @@ class Qwen4ExpBridge(MegatronModelBridge):
         text = hf_config.text_config
         provider = super().provider_bridge(hf_pretrained)
 
-        _apply_qwen35_common_config(provider, text)
-        _apply_qwen35_moe_config(provider, text)
+        # transformers renames the dense-indexed attention layers to ``qwen_sparse_attention`` on
+        # load; megatron-bridge's Qwen3.5 helpers only know ``full_attention``.
+        qwen35_text = copy.copy(text)
+        qwen35_text.layer_types = [
+            "full_attention" if t == "qwen_sparse_attention" else t for t in (text.layer_types or [])
+        ]
+        _apply_qwen35_common_config(provider, qwen35_text)
+        _apply_qwen35_moe_config(provider, qwen35_text)
         provider.position_embedding_type = "rope"
         rope = getattr(text, "rope_parameters", None) or {}
         provider.rotary_base = rope.get("rope_theta", provider.rotary_base)

@@ -194,8 +194,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         # 600 s health-wait default; production stages the same ceiling. This
         # is a ceiling, not a duration — warm caches boot in minutes.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = "7200"
+    if "qwen3.8-flash-next" in model_name.lower():
+        # A cold node JIT-builds flashinfer's trtllm_mnnvl_comm (~8 min) at vLLM startup, past
+        # the 600 s health-wait default. A ceiling, not a duration.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = "1800"
     # fla's TileLang GDN backend aborts on Blackwell; fall back to Triton.
-    if "qwen3.5" in model_name.lower():
+    if "qwen3.5" in model_name.lower() or "qwen3.8-flash-next" in model_name.lower():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0" if is_blackwell_or_newer() else "1")
     # Same story for GLM-5.3-Flash's KDA layers, which run fla kernels too. Only forced on
     # Blackwell so the H100 rows keep whatever fla picks by default.
