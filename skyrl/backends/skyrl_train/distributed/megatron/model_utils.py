@@ -299,6 +299,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         hidden: [B, S, H]                (decoder output, this CP/TP rank)
         weight: [V//TP, H]               (output-layer weight, this TP rank)
         target: [B, S]                   (already rolled by the caller)
+        temperature: divides each FP32 chunk of logits after the projection
     """
 
     @staticmethod
@@ -312,6 +313,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         chunk_size: int,
         tp_group: torch.distributed.ProcessGroup,
         inference_only: bool = False,
+        temperature: float = 1.0,
     ) -> torch.Tensor:
         target_mask = (target < vocab_start_index) | (target >= vocab_end_index)
         masked_target = target - vocab_start_index
@@ -333,6 +335,9 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             logits = torch.matmul(hidden[:, chunk_start:chunk_end, :].to(weight.dtype), weight.t()).to(
                 dtype=torch.float32
             )
+
+            if temperature != 1.0:
+                logits.div_(temperature)
 
             log_probs = _compute_distributed_log_softmax(logits, group=tp_group)
             log_probs = torch.gather(log_probs, -1, masked_target[:, chunk_start:chunk_end].unsqueeze(-1)).squeeze(-1)
@@ -357,6 +362,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             ctx.save_for_backward(hidden, weight, target_mask, masked_target)
             ctx.chunk_size = chunk_size
             ctx.tp_group = tp_group
+            ctx.temperature = temperature
 
         return log_probs
 
@@ -369,6 +375,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         hidden, weight, target_mask, masked_target = ctx.saved_tensors
         chunk_size = ctx.chunk_size
         tp_group = ctx.tp_group
+        temperature = ctx.temperature
 
         partition_vocab_size = int(weight.shape[0])
         hidden_size = int(weight.shape[1])
@@ -390,6 +397,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
 
             h_chunk = hidden[:, chunk_start:chunk_end, :]
             logits = torch.matmul(h_chunk.to(weight.dtype), weight.t()).to(dtype=torch.float32)
+            if temperature != 1.0:
+                logits.div_(temperature)
             softmax_output = _compute_distributed_log_softmax(logits, group=tp_group).exp_()
 
             # Same memory-efficient scatter-add fast path as
@@ -412,6 +421,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             grad_output_selected = chunk_grad_output.masked_select(valid_mask)
             grad_logits.view(-1).scatter_add_(0, flat_chosen, grad_output_selected)
 
+            if temperature != 1.0:
+                grad_logits.div_(temperature)
             grad_logits = grad_logits.to(dtype=weight.dtype)  # [B, cs, V//TP]
 
             # Project chunk logit-grad back to hidden / weight grads.
@@ -426,8 +437,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             # still happens in fp32.
             grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
 
-        # forward args: hidden, weight, target, vocab_start, vocab_end, chunk_size, tp_group, inference_only
-        return grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None
+        # forward args: hidden, weight, target, vocab_start, vocab_end, chunk_size, tp_group, inference_only, temperature
+        return grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None, None
 
 
 def _fused_lm_head_logprob_apply(
@@ -440,12 +451,15 @@ def _fused_lm_head_logprob_apply(
     chunk_size: int,
     tp_group: torch.distributed.ProcessGroup,
     inference_only: bool,
+    temperature: float = 1.0,
 ) -> torch.Tensor:
     """Dispatch the fused LM-head token-logprob to the requested backend.
 
     ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; ``"triton"``
     uses ``FusedLinearLogprobTriton`` when CUDA + triton are available and
     otherwise warns and falls back to torch. Both return TP-combined ``[B, S]``.
+    The torch backend divides the FP32 logits by ``temperature``; the Triton
+    backend receives ``weight / temperature``.
     """
     if backend == "triton":
         try:
@@ -459,7 +473,7 @@ def _fused_lm_head_logprob_apply(
                 raise ImportError("triton is not installed or no CUDA device is available")
             return FusedLinearLogprobTriton.apply(  # type: ignore[no-any-return]
                 hidden,
-                weight,
+                weight / temperature if temperature != 1.0 else weight,
                 target,
                 vocab_start_index,
                 vocab_end_index,
@@ -483,6 +497,7 @@ def _fused_lm_head_logprob_apply(
         chunk_size,
         tp_group,
         inference_only,
+        temperature,
     )
 
 
@@ -730,16 +745,13 @@ def from_parallel_hidden_to_logprobs(
     Takes the decoder ``hidden`` states [B, S//CP, H] and the output-layer
     ``lm_head_weight`` [V//TP, H] instead of pre-computed vocab-parallel logits,
     and folds the output projection into the chunked logprob op so the full
-    logits tensor is never materialized. Numerically identical to
-    ``from_parallel_logits_to_logprobs((hidden @ lm_head_weightᵀ) / temperature, ...)``.
-
-    ``temperature`` scaling is applied by dividing the weight (``hidden @
-    (W/T)ᵀ == logits/T``); autograd then chains the ``1/T`` factor onto both
-    ``grad_hidden`` and ``grad_weight`` exactly, so the op itself stays
-    temperature-agnostic.
+    logits tensor is never materialized. With the torch backend, each chunk is
+    projected in the weight dtype, cast to FP32 and then divided by
+    ``temperature``, the same order as the unfused path
+    (``from_parallel_logits_to_logprobs(logits.float() / temperature, ...)``).
+    Backward applies the ``1/temperature`` factor to the FP32 logit gradient
+    before casting it to the weight dtype.
     """
-    if temperature != 1.0:
-        lm_head_weight = lm_head_weight / temperature
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     pad_len = hidden.shape[1] * cp_size - target.shape[1]
@@ -761,6 +773,7 @@ def from_parallel_hidden_to_logprobs(
         eff_chunk,
         tp_group,
         inference_only,
+        temperature,
     ).contiguous()
 
     if cp_size > 1:
@@ -795,11 +808,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     Identical packed-sequence / CP / scatter-back logic, but the output
     projection is fused into the chunked logprob op (``hidden`` [1, T//CP, H] +
     ``lm_head_weight`` [V//TP, H] instead of logits [1, T//CP, V//TP]).
-    ``temperature`` is applied by dividing the weight (see
-    ``from_parallel_hidden_to_logprobs``).
+    ``temperature`` is applied as in ``from_parallel_hidden_to_logprobs``.
     """
-    if temperature != 1.0:
-        lm_head_weight = lm_head_weight / temperature
     hidden = hidden.squeeze(0)
     target = target.squeeze(0)
 
@@ -841,6 +851,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         eff_chunk,
         group,
         inference_only,
+        temperature,
     ).contiguous()
 
     probs = probs.squeeze(0)
@@ -1103,14 +1114,14 @@ def _fused_vocab_parallel_entropy_from_hidden(
     (``use_entropy_loss=False``); call it inside a ``no_grad``/grad-disabled
     context (the chunk loop recomputes logits and would otherwise build a graph).
     """
-    if temperature != 1.0:
-        lm_head_weight = lm_head_weight / temperature
     B, S = int(hidden.shape[0]), int(hidden.shape[1])
     out = torch.empty((B, S), dtype=torch.float32, device=hidden.device)
     eff = chunk_size if (chunk_size is not None and chunk_size < S) else S
     for c0 in range(0, S, eff):
         c1 = min(S, c0 + eff)
         logits = torch.matmul(hidden[:, c0:c1, :].to(lm_head_weight.dtype), lm_head_weight.t()).to(torch.float32)
+        if temperature != 1.0:
+            logits.div_(temperature)
         logits_max = logits.max(dim=-1, keepdim=True).values
         torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
         exp = (logits - logits_max).exp_()
