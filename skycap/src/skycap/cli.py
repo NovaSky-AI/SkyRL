@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="SKYCAP_UPSTREAM_API_KEY",
         help="environment variable holding the upstream API key (default: %(default)s)",
     )
+    serve.add_argument(
+        "--length-as-completed",
+        action="store_true",
+        help="report a length cut-off to Responses clients as `completed`, not `incomplete`, for clients that "
+        "resample on `incomplete` (Codex); the record keeps finish_reason `length`",
+    )
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8080)
     tokens = serve.add_argument_group("tokens mode")
@@ -153,6 +159,7 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         sampling_mask=args.sampling_mask,
         logprobs_mode=args.logprobs_mode,
         use_raw_content=args.use_raw_content,
+        length_as_completed=args.length_as_completed,
     )
     rules: dict[str, str] = {}
     for spec in args.path_rule:

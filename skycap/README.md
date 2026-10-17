@@ -43,6 +43,23 @@ parser. Replies then match that server's: the completion's own text as
 turn back unchanged, and a thinking model's history stays one path. With parsed
 replies, every replayed turn would lose its thinking and fork the graph.
 
+### APIs
+
+A trajectory serves two OpenAI APIs, each at its own path under its base URL:
+Chat Completions (`/chat/completions`) and Responses (`/responses`), the API
+Codex speaks. Text mode forwards a call to the same path on the upstream. In
+token mode, Responses items are regrouped into chat-template turns by vLLM's
+rule and the reply goes back as items (`skycap.dialects.openai_responses`);
+`--use-raw-content` is refused there, since a Responses client acts only on
+parsed items. A `developer` message is folded into the leading `system` message
+when the tokenizer's chat template has no such role, as vLLM does, for either
+API. Each call records its API as `calls[].dialect`.
+
+A Responses client may treat a length cut-off (`status: "incomplete"`) as a
+failure: Codex resamples it up to five times. `--length-as-completed` reports
+the cut-off as `completed` instead, in either mode. The record still says
+`finish_reason: "length"`.
+
 ## Embed a server
 
 A trainer can run a server in its own process instead, from the same options
@@ -69,7 +86,7 @@ subclass), which is the one piece an embedder supplies.
 A harness that runs outside the server's network, such as an agent inside a
 remote sandbox (Daytona, Modal), can't reach the server's own URL. With an
 exposure, the server listens a second time with the harness routes alone
-(`/t/{id}/v1/chat/completions` and `/models`; no control plane is routed
+(`/t/{id}/v1/chat/completions`, `/responses` and `/models`; no control plane is routed
 there), and the exposure makes that listener reachable:
 
 ```bash

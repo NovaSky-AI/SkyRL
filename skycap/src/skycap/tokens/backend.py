@@ -23,9 +23,10 @@ import orjson
 from aiohttp import web
 
 from skycap import hashing, retry
+from skycap.dialects.base import CallRequest, Dialect, Turn, error_body
 from skycap.graph import CallInfo
-from skycap.openai_chat import ChatRequest, error_body
-from skycap.tokens import response, turn
+from skycap.tokens import turn
+from skycap.tokens.developer import fold_developer
 from skycap.tokens.engine import EngineError, VLLMEngine
 from skycap.tokens.renderer import TokenRenderer
 from skycap.trajectory import Failure, Trajectory
@@ -53,12 +54,17 @@ class TokensBackend:
         sampling_mask: bool = False,
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
+        length_as_completed: bool = False,
     ) -> None:
         """
         ``use_raw_content`` answers with the completion's own text as ``content``, as vLLM does with no
         reasoning or tool-call parser: a thinking model's reasoning stays inline, and tool calls
         stay text. For a harness written against such a server, which replays ``content`` and
         drops ``reasoning_content``; with parsed replies it would edit every turn it replays.
+
+        ``length_as_completed`` reports a length cut-off to the client as completed where the API would
+        say otherwise (a Responses ``incomplete``), for a client that treats that as a failure and
+        resamples (Codex). The call is still recorded with ``finish_reason: "length"``.
         """
         self.engine_url = engine_url.rstrip("/")
         self.renderer = renderer
@@ -70,6 +76,9 @@ class TokensBackend:
         self.sampling_mask = sampling_mask
         self.logprobs_mode = logprobs_mode
         self.use_raw_content = use_raw_content
+        self.length_as_completed = length_as_completed
+        #: The chat template ``developer`` messages are folded for, if the renderer exposes one.
+        self.chat_template: str | None = getattr(renderer, "chat_template", None)
         self._locks: dict[str, asyncio.Lock] = {}
         self._session: aiohttp.ClientSession | None = None
 
@@ -81,6 +90,8 @@ class TokensBackend:
             "logprobs_mode": self.logprobs_mode,
             "sampling_overrides": self.sampling_overrides,
             "use_raw_content": self.use_raw_content,
+            # Recorded only when on: it departs from the API, and older records never had it.
+            **({"length_as_completed": True} if self.length_as_completed else {}),
         }
 
     async def start(self) -> None:
@@ -149,16 +160,26 @@ class TokensBackend:
             return _error(f"engine: {error}", 502, kind="api_error")
 
     async def chat(
-        self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
+        self, trajectory: Trajectory, request: web.Request, chat: CallRequest, raw: bytes
     ) -> web.StreamResponse:
+        dialect = chat.dialect.get_dialect()
         lock = self._locks.setdefault(trajectory.id, asyncio.Lock())
         async with lock:
             if not trajectory.is_open:
-                return _error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
-            return await self._turn(trajectory, request, chat)
+                return dialect.error(chat, f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
+            return await self._turn(trajectory, request, chat, dialect)
 
-    async def _turn(self, trajectory: Trajectory, request: web.Request, chat: ChatRequest) -> web.StreamResponse:
+    async def _turn(
+        self, trajectory: Trajectory, request: web.Request, chat: CallRequest, dialect: Dialect
+    ) -> web.StreamResponse:
         started = time.time()
+        if self.use_raw_content and not dialect.raw_content:
+            return dialect.error(chat, "this server answers with raw content, which this API can't carry", 400)
+        refused = dialect.unsupported_in_token_mode(chat)
+        if refused is not None:
+            return dialect.error(chat, refused, 400)
+        # The turns as the template renders them: matched, rendered and committed in this form.
+        messages = fold_developer(chat.messages, self.chat_template)
         model = self.model or chat.model
         graph = trajectory.graph
         tools_key = hashing.tools_hash(chat.tools)
@@ -166,13 +187,13 @@ class TokensBackend:
             graph.tools.setdefault(tools_key, [dict(tool) for tool in chat.tools])
         key = hashing.MatchKey.tokens(tools_key, model)
         try:
-            planned = await asyncio.to_thread(turn.plan, graph, self.renderer, chat.messages, chat.tools, key)
+            planned = await asyncio.to_thread(turn.plan, graph, self.renderer, messages, chat.tools, key)
             # A first call has nothing to extend; after that, not extending is worth reporting.
             # A call commits its messages and its reply together (``turn.commit``), so the graph
             # has nodes exactly when an earlier call went through.
             follows_a_call = bool(graph.nodes)
         except turn.TokenError as error:
-            return _error(str(error), 400)
+            return dialect.error(chat, str(error), 400)
 
         # `max_completion_tokens` is an alias of `max_tokens`; resolving it on each side before
         # merging is what lets an override win over a caller's alias.
@@ -181,7 +202,8 @@ class TokensBackend:
         if self.max_model_len is not None:
             room = self.max_model_len - len(planned.prompt_ids)
             if room <= 0:
-                return _error(
+                return dialect.error(
+                    chat,
                     f"prompt of {len(planned.prompt_ids)} tokens leaves no room within max_model_len="
                     f"{self.max_model_len}",
                     400,
@@ -214,7 +236,8 @@ class TokensBackend:
                 raw = await up.read()
                 if up.status != 200:
                     self._fail(trajectory, up.status, raw.decode(errors="replace")[:2000])
-                    return _error(
+                    return dialect.error(
+                        chat,
                         f"engine returned HTTP {up.status}",
                         502 if up.status < 500 else up.status,
                         kind="api_error",
@@ -222,7 +245,7 @@ class TokensBackend:
                 output = self.engine.parse(orjson.loads(raw), routes_from=routes_from)
         except (aiohttp.ClientError, EngineError, orjson.JSONDecodeError) as error:
             self._fail(trajectory, None, f"engine: {error}")
-            return _error(f"engine: {error}", 502, kind="api_error")
+            return dialect.error(chat, f"engine: {error}", 502, kind="api_error")
 
         if self.use_raw_content:
             reply = await asyncio.to_thread(self._raw_reply, output.completion_ids, planned.prompt_ids)
@@ -230,7 +253,20 @@ class TokensBackend:
             reply = await asyncio.to_thread(
                 self.renderer.parse, output.completion_ids, chat.tools, prompt_ids=planned.prompt_ids
             )
-        reason = response.finish_reason(output.finish_reason, reply)
+        reason = _finish_reason(output.finish_reason, reply)
+        sampled = Turn(
+            message=reply,
+            finish_reason=reason,
+            model=chat.model or model,
+            prompt_tokens=len(planned.prompt_ids),
+            completion_tokens=len(output.completion_ids),
+            key=hashing.digest([len(planned.prompt_ids), output.completion_ids]),
+            raw_content=self.use_raw_content,
+            length_as_completed=self.length_as_completed,
+        )
+        # The reply as the client's replay of it will be read back, which is what the next call
+        # matches: stored as the node's message and hashed for its match hash.
+        replay = dialect.replayed(sampled)
         call = CallInfo(
             t_start=started,
             t_end=time.time(),
@@ -240,6 +276,7 @@ class TokensBackend:
             finish_reason=reason,
             tools=tools_key or None,
             bridged=planned.bridged if follows_a_call else None,
+            dialect=chat.dialect.value,
         )
         status = "ok"
         recorded = False
@@ -248,9 +285,9 @@ class TokensBackend:
                 turn.commit(
                     graph,
                     planned,
-                    messages=chat.messages,
-                    reply=reply,
-                    reply_match=key(reply),
+                    messages=messages,
+                    reply=replay,
+                    reply_match=key(replay),
                     output=output,
                     call=call,
                 )
@@ -260,15 +297,7 @@ class TokensBackend:
                 self._fail(trajectory, None, f"token attribution: {error}")
                 trajectory.seal("failed", cancel=False)
                 status = "failed"
-        body_out = response.completion(
-            # vLLM with no reasoning parser still sends `reasoning_content: null`, and clients rely on
-            # it: LiteLLM splits `<think>` out of `content` only when the field is absent.
-            {**reply, "reasoning_content": None} if self.use_raw_content else reply,
-            model=chat.model or model,
-            reason=reason,
-            prompt_tokens=len(planned.prompt_ids),
-            completion_tokens=len(output.completion_ids),
-        )
+        body_out = dialect.reply(chat, sampled)
         headers = {STATUS_HEADER: status}
         if not chat.stream:
             out = web.Response(body=orjson.dumps(body_out), content_type="application/json", headers=headers)
@@ -276,7 +305,7 @@ class TokensBackend:
             # The whole completion exists already, so the stream is one buffered
             # body: identical to the client, and replayable for a retry.
             out = web.Response(
-                body=b"".join(response.stream_frames(body_out)),
+                body=b"".join(dialect.stream(body_out)),
                 content_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", **headers},
             )
@@ -312,6 +341,13 @@ class TokensBackend:
     def _fail(trajectory: Trajectory, status: int | None, error: str) -> None:
         if trajectory.is_open:
             trajectory.failures.append(Failure(t=time.time(), status=status, error=error))
+
+
+def _finish_reason(engine_reason: str, message: dict[str, Any]) -> str:
+    """The engine never says ``tool_calls``; a parsed tool call makes a stop one."""
+    if engine_reason == "stop" and message.get("tool_calls"):
+        return "tool_calls"
+    return engine_reason
 
 
 def _resolve_max_tokens(sampling: Mapping[str, Any]) -> dict[str, Any]:
