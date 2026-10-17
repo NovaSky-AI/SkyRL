@@ -17,7 +17,7 @@ import copy
 
 from megatron.bridge.models.conversion.mapping_registry import MegatronMappingRegistry
 from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
-from megatron.bridge.models.conversion.param_mapping import ReplicatedMapping
+from megatron.bridge.models.conversion.param_mapping import AutoMapping, ReplicatedMapping
 from megatron.bridge.models.conversion.utils import moe_experts_stored_packed
 from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
 from megatron.bridge.models.qwen.qwen35_bridge import (
@@ -127,6 +127,8 @@ class Qwen4ExpBridge(MegatronModelBridge):
             )
             if m.megatron_param not in _DROPPED_MEGATRON_PARAMS
         ]
+        # Parallelism is detected by module class name; Qwen3.5 registers only ``GatedDeltaNet``.
+        AutoMapping.register_module_type("Qwen4ExpGatedDeltaNet", "column")
         layer, hf_layer = "decoder.layers.*", f"{HF_PREFIX}layers.*"
         for site in ("attn_hyper_connection", "mlp_hyper_connection"):
             for name in (*_HC, "block_inject_weight.weight"):
