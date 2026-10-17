@@ -14,7 +14,7 @@ set -x
 # Megatron support is SkyRL's own (skyrl/backends/skyrl_train/patches/megatron/qwen4_exp), which
 # constrains the recipe:
 #   - TP=CP=PP=1; scale is expert parallelism. EP=16 also shards the frozen ~51B-parameter PLE
-#     n-gram table by head (16 heads -> one per rank, ~6.4 GB each).
+#     n-gram table by head (16 heads -> one per rank, ~6.4 GB each, kept in pinned host memory).
 #   - Text only (language_model_only) and packed sequences (remove_microbatch_padding).
 #   - Sequences must stay within the QSA indexer budget (2048 + 3 tokens), where the indexer
 #     selects every key and attention is exactly dense; longer sequences raise. Hence the
@@ -52,7 +52,7 @@ MEGATRON_EP=16
 MEGATRON_ETP=1
 
 if [ "$MODE" = "lora" ]; then
-  # Frozen bf16 base ~31 GB/GPU (dense 10 + experts 15 + PLE shard 6.4); adapters on all linears.
+  # Frozen bf16 base ~25 GB/GPU (dense 10 + experts 15; the 6.4 GB PLE shard is in host memory).
   LR=1e-5
   MODE_ARGS=(
     trainer.policy.model.lora.rank=32

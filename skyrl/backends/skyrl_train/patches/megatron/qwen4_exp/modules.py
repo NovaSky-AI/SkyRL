@@ -119,7 +119,8 @@ class Qwen4ExpPLE(nn.Module):
     The hashed n-gram table (``ple_embedding.ngram_embedding``, ~51B parameters) is frozen. It is
     sharded by n-gram head across ``shard_group`` (the expert-parallel group, whose ranks already
     run every forward in lockstep for the MoE all-to-all) and is loaded straight from the HF
-    safetensors shards rather than through the bridge, which would materialize all of it.
+    safetensors shards rather than through the bridge, which would materialize all of it. The
+    shard lives in pinned host memory and is looked up on the CPU (a few MB per micro-batch).
 
     Forward expects ``set_tokens(input_ids, cu_seqlens)`` to have been called for the current
     micro-batch (a forward pre-hook on the GPTModel does it, see ``provider.py``).
@@ -185,7 +186,9 @@ class Qwen4ExpPLE(nn.Module):
             (k for k in weight_map if k.startswith(prefix + "ngram_embedding.shard_")),
             key=lambda k: int(k.split("shard_")[1].split(".")[0]),
         )
-        table = torch.empty(row_hi - row_lo, self.head_dim, dtype=torch.bfloat16, device=dev)
+        # Pinned host memory, as vLLM does: the shard (~6.4 GB/rank at EP=16) is frozen and is not a
+        # parameter, so model offload would never move it off the GPU during rollout / weight sync.
+        table = torch.empty(row_hi - row_lo, self.head_dim, dtype=torch.bfloat16, pin_memory=True)
         start = 0
         for name in shard_names:
             with safe_open(os.path.join(self._hf_path, weight_map[name]), framework="pt") as f:
@@ -193,7 +196,7 @@ class Qwen4ExpPLE(nn.Module):
                 rows = sl.get_shape()[0]
                 lo, hi = max(start, row_lo), min(start + rows, row_hi)
                 if lo < hi:
-                    table[lo - row_lo : hi - row_lo] = sl[lo - start : hi - start].to(dev, torch.bfloat16)
+                    table[lo - row_lo : hi - row_lo] = sl[lo - start : hi - start].to(torch.bfloat16)
                 start += rows
         self.set_table(table, row_lo, multipliers.to(dev), sizes.to(dev), offsets.to(dev))
 
@@ -237,11 +240,15 @@ class Qwen4ExpPLE(nn.Module):
             blocks.append(torch.remainder(mixed.unsqueeze(-1), sizes) + self.head_offsets[lo : lo + self.heads_per_ngram])
         return torch.cat(blocks, dim=-1)  # [T, heads] global row ids
 
+    def _embed(self, local_ids: Tensor) -> Tensor:
+        """Rows of the local (possibly host-resident) table, on ``local_ids``' device."""
+        return F.embedding(local_ids.to(self._table.device), self._table).to(local_ids.device)
+
     def _lookup(self, ids: Tensor) -> Tensor:
         """Embed ``ids`` ([T, heads]) with the head-sharded table; returns [T, heads * head_dim]."""
         size = dist.get_world_size(self._group) if self._group is not None else 1
         if size == 1:
-            return F.embedding(ids - self.row_lo, self._table).flatten(-2)
+            return self._embed(ids - self.row_lo).flatten(-2)
         rank = dist.get_rank(self._group)
         # Every rank needs its own tokens' rows from every head; exchange ids, look up the local
         # heads, then all-to-all the embeddings back. Lengths differ per rank: pad to the max.
@@ -256,7 +263,7 @@ class Qwen4ExpPLE(nn.Module):
         hp = self.heads_per_rank
         local = gathered[:, rank * hp : (rank + 1) * hp] - self.row_lo
         local = local.clamp(0, self._table.shape[0] - 1)
-        emb = F.embedding(local, self._table)  # [size * tmax, hp, d], chunk r belongs to rank r
+        emb = self._embed(local)  # [size * tmax, hp, d], chunk r belongs to rank r
         out = torch.empty_like(emb)
         dist.all_to_all_single(out, emb.contiguous(), group=self._group)
         # out chunk r = rank r's heads for our tokens
