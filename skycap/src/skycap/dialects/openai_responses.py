@@ -74,7 +74,11 @@ TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed
 class ResponsesDialect(Dialect):
     type = DialectType.OPENAI_RESPONSES
     path = "/responses"
-    # A Responses client acts only on structured items: raw text with inline tool calls would never run one.
+    # `use_raw_content` is for chat harnesses that parse the reply text themselves and replay only `content`
+    # (Terminus-2): the whole turn, reasoning included, then comes back unchanged. A Responses client acts only on
+    # structured items, so raw text with inline tool calls would never run one, and it replays reasoning as its
+    # own item, so parsed replies already come back unchanged. A call on a raw-content server is refused (400)
+    # rather than answered against the server's setting; the chat route still serves such harnesses.
     raw_content = False
 
     def parse_request(self, body: Any) -> CallRequest:
