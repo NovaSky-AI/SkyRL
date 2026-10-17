@@ -122,3 +122,18 @@ def test_ple_packed_matches_hf_per_sequence():
         ours.set_tokens(tokens[None], cu)
         got = ours(torch.cat(hidden, dim=1).transpose(0, 1))[:, 0]
     torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_bridge_provider_accepts_qwen_sparse_attention(tmp_path):
+    """transformers loads ``full_attention`` as ``qwen_sparse_attention``; the bridge still maps the pattern."""
+    from megatron.bridge import AutoBridge
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpConfig
+
+    import skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.bridge  # noqa: F401
+
+    text = _hf_config().to_dict()
+    text.update(output_gate_type="sigmoid", num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32, shared_expert_intermediate_size=32)
+    Qwen4ExpConfig(text_config=text, architectures=["Qwen4ExpForConditionalGeneration"]).save_pretrained(tmp_path)
+    provider = AutoBridge.from_hf_pretrained(str(tmp_path)).to_megatron_provider(load_weights=False)
+    assert list(provider.linear_attention_freq) == [1, 1, 1, 0]
+    assert provider.qwen4_ple_hf_prefix == "model.language_model.layers.1.ple."

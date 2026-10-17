@@ -93,8 +93,10 @@ class Qwen4ExpBridge(MegatronModelBridge):
         # mcore's fused gated norm hardcodes the SiLU gate; Qwen4Exp's GDN gate is sigmoid.
         provider.gdn_gated_output_norm_fusion = False
 
-        if getattr(text, "output_gate_type", "sigmoid") != "sigmoid":
-            raise NotImplementedError(f"Qwen4Exp GDN output_gate_type={text.output_gate_type!r} is not supported.")
+        # HF falls back to ``hidden_act`` when ``output_gate_type`` is unset.
+        gate = getattr(text, "output_gate_type", None) or text.hidden_act
+        if gate != "sigmoid":
+            raise NotImplementedError(f"Qwen4Exp GDN output gate {gate!r} is not supported (only sigmoid).")
         provider.qwen4_hc_count = text.hc_count
         provider.qwen4_hc_lowrank = text.hc_lowrank
         provider.qwen4_ple_layer_ids = list(text.ple_layer_ids or [])
