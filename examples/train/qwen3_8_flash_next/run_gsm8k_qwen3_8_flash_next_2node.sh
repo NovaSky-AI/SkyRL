@@ -21,6 +21,10 @@ set -x
 #     512 + 1024 length caps.
 #   - MTP is not trained (mtp_num_layers=0); vLLM's drafter keeps the base MTP weights, so do
 #     not enable MTP speculative decoding for long runs.
+#   - The PLE n-gram table is frozen by construction (a plain tensor, not a parameter): never
+#     trained, never weight-synced, so rollout and policy always agree on it. The PLE
+#     projections/norms/conv and the hyper-connections train in full FT and are synced. The QSA
+#     indexer weights stay frozen. LoRA (all-linear) adapts only the attention/GDN/MoE linears.
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"

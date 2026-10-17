@@ -729,7 +729,9 @@ async def test_logprobs_matching_roundtrip(
     Check that logprob diff matches acrosss vllm and megatron.
     """
     # See the comparison branch at the end of the test.
-    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
+    compare_common_prefix = (
+        bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or "qwen3.8-flash-next" in model_name.lower()
+    )
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which
@@ -922,7 +924,9 @@ async def test_logprobs_matching_roundtrip(
             # score different tokens and the diff is noise. FP8 rows ran on identical
             # synced weights (~0.14 positional vs ~1e-3 on prefixes); the Kimi slice
             # has a flat enough distribution that 53 of 80 sequences diverged
-            # (~0.93 positional vs ~0.008 on prefixes).
+            # (~0.93 positional vs ~0.008 on prefixes). So does the 4-of-48-layer
+            # Qwen3.8-Flash-Next slice, whose greedy output differs between two
+            # unsynced runs of the same engine.
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
