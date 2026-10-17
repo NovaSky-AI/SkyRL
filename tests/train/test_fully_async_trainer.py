@@ -1,12 +1,11 @@
 """
-CPU unit tests for fully-async trainer building blocks that back `sample_full_batch`:
-the staleness manager's filtered-rollout accounting, the dataloader's trained-vs-filtered
-UID tracking, and the consumer's exhaustion-aware buffer drain.
+CPU unit tests for fully-async trainer building blocks: staleness-manager capacity and
+notifications, filtered-rollout accounting, dataloader UID tracking, and buffer draining.
 """
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -31,6 +30,105 @@ def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncData
 # --------------------------------------------------------------------------------------
 # _AsyncStalenessManager
 # --------------------------------------------------------------------------------------
+
+
+async def _wait_for_staleness_waiters(mgr: _AsyncStalenessManager, count: int) -> None:
+    async with asyncio.timeout(1):
+        while sum(not waiter.done() for waiter in mgr._cond._waiters) != count:
+            await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_staleness_steps", [0, 1])
+async def test_staleness_manager_acceptance_does_not_wake_staleness_waiters(max_staleness_steps):
+    mini_batch_size = 2
+    capacity = (max_staleness_steps + 1) * mini_batch_size
+    mgr = _AsyncStalenessManager(capacity, mini_batch_size, max_staleness_steps)
+    for _ in range(capacity):
+        await mgr.acquire_submission_slot()
+
+    waiters = []
+    try:
+        with (
+            patch.object(mgr._cond, "wait", wraps=mgr._cond.wait) as wait,
+            patch.object(mgr._cond, "notify_all", wraps=mgr._cond.notify_all) as notify,
+        ):
+            for _ in range(capacity):
+                await mgr.on_rollout_accepted()
+                waiters.append(asyncio.create_task(mgr.acquire_submission_slot()))
+                await _wait_for_staleness_waiters(mgr, len(waiters))
+
+            # Each producer should park once, not wake and re-park after sibling completions.
+            notify.assert_not_called()
+            assert wait.await_count == capacity
+            assert all(not task.done() for task in waiters)
+            assert mgr._stat.accepted == mgr._stat.submitted == capacity
+            assert mgr._stat.running == 0
+            assert mgr._stat.filtered == 0
+            assert mgr._compute_capacity_unlocked() == 0
+    finally:
+        for task in waiters:
+            task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_staleness_manager_acceptance_wakes_survivor_after_notified_waiter_cancel():
+    mgr = _AsyncStalenessManager(max_concurrent_generation_groups=1, mini_batch_size=1, max_staleness_steps=2)
+    await mgr.acquire_submission_slot()
+    waiters = []
+    try:
+        for _ in range(2):
+            waiters.append(asyncio.create_task(mgr.acquire_submission_slot()))
+            await _wait_for_staleness_waiters(mgr, len(waiters))
+        with patch.object(mgr._cond, "notify_all", wraps=mgr._cond.notify_all) as notify:
+            await mgr.on_rollout_accepted()
+            waiters[0].cancel()
+            await asyncio.gather(waiters[0], return_exceptions=True)
+            await asyncio.wait_for(waiters[1], timeout=1)
+
+            # Python 3.12 does not hand a canceled waiter's single notification to its peers.
+            notify.assert_called_once()
+            assert waiters[0].cancelled()
+            assert mgr._stat.submitted == 2
+            assert mgr._stat.accepted == mgr._stat.running == 1
+    finally:
+        for task in waiters:
+            task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacity_change", ["training", "filtered", "rejected"])
+async def test_staleness_manager_capacity_changes_wake_blocked_producers(capacity_change):
+    mgr = _AsyncStalenessManager(max_concurrent_generation_groups=2, mini_batch_size=1, max_staleness_steps=1)
+    for _ in range(2):
+        await mgr.acquire_submission_slot()
+    await mgr.on_rollout_accepted()
+    assert mgr._compute_capacity_unlocked() == 0
+
+    waiters = [asyncio.create_task(mgr.acquire_submission_slot()) for _ in range(2)]
+    try:
+        await _wait_for_staleness_waiters(mgr, len(waiters))
+        if capacity_change == "training":
+            await mgr.notify_capacity_change(2)
+        elif capacity_change == "filtered":
+            await mgr.on_rollout_filtered()
+        else:
+            await mgr.on_rollout_rejected()
+
+        done, pending = await asyncio.wait(waiters, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+        assert len(done) == len(pending) == 1
+        done.pop().result()
+        assert mgr._stat.submitted == 3
+        assert mgr._stat.running == (1 if capacity_change == "rejected" else 2)
+        assert mgr._stat.accepted == (0 if capacity_change == "filtered" else 1)
+        assert mgr._stat.filtered == (1 if capacity_change == "filtered" else 0)
+        assert mgr._compute_capacity_unlocked() == 0
+    finally:
+        for task in waiters:
+            task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
 
 
 @pytest.mark.asyncio
