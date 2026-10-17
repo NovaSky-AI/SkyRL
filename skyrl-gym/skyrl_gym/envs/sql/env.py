@@ -12,6 +12,12 @@ from dataclasses import dataclass
 @dataclass
 class Text2SQLEnvConfig:
     db_path: str = "/home/ray/default/sql_data"
+    # If True, a prediction whose result set matches an *empty* gold result set
+    # still receives reward 1.0 (pre-#2451 behavior). By default (False) such a
+    # match earns 0.0 because any query returning no rows would match, which
+    # makes the task trivially reward-hackable. See
+    # https://github.com/NovaSky-AI/SkyRL/issues/2451
+    reward_empty_gold: bool = False
 
 
 class SQLEnv(BaseTextEnv):
@@ -28,6 +34,9 @@ class SQLEnv(BaseTextEnv):
         assert "data" in extras, "data field is required"
 
         self.db_path = env_config.db_path
+        # Works for both Text2SQLEnvConfig and DictConfig (missing key -> the
+        # config default, keeping a single source of truth for the default).
+        self.reward_empty_gold = bool(getattr(env_config, "reward_empty_gold", Text2SQLEnvConfig.reward_empty_gold))
         self.db_id = extras["db_id"]
         self.gold_sql = extras["reward_spec"]["ground_truth"]
         self.task = extras["data"]
@@ -85,7 +94,9 @@ class SQLEnv(BaseTextEnv):
         if done:
             # Concat all chat history into a single string and compute reward
             chat_history_str = "".join([item["content"] for item in self.chat_history])
-            return compute_score_single(chat_history_str, self.gold_sql, self.db_file)
+            return compute_score_single(
+                chat_history_str, self.gold_sql, self.db_file, reward_empty_gold=self.reward_empty_gold
+            )
         else:
             # No reward for intermediate steps for SQL tasks
             return 0
