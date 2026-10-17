@@ -11,6 +11,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 from skyrl.train.config import (
     AlgorithmConfig,
     CISPOConfig,
@@ -231,6 +232,53 @@ def test_policy_loss_cispo_ratio_min_max_ignore_masked_tokens():
     assert metrics["cispo/ratio_min"] > 0.0
     assert metrics["cispo/ratio_min"] == pytest.approx(active_ratio.min().item(), rel=1e-3)
     assert metrics["cispo/ratio_max"] == pytest.approx(active_ratio.max().item(), rel=1e-3)
+
+
+def test_policy_loss_cispo_support_sums_add_across_micro_batches():
+    """Summed support metrics give token-weighted CISPO ratio statistics over micro-batches of different sizes."""
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2, cispo_anchor="old"),
+        policy_loss_type="cispo",
+        max_seq_len=4,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+    loss_fn = PolicyLossRegistry.get("cispo")
+    old_log_probs = torch.zeros(1, 4)
+    # (ratios, loss_mask, advantages) per micro-batch; the last one has no active tokens.
+    micro_batches = [
+        ([0.5, 1.0, 2.0, 1.0], [1.0, 1.0, 1.0, 0.0], [1.0, 0.0, -1.0, 1.0]),
+        ([4.0, 1.0, 1.0, 1.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0]),
+        ([1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0]),
+    ]
+
+    reports = []
+    for ratios, loss_mask, advantages in micro_batches:
+        _, metrics = loss_fn(
+            log_probs=torch.log(torch.tensor([ratios])),
+            old_log_probs=old_log_probs,
+            advantages=torch.tensor([advantages]),
+            config=config,
+            loss_mask=torch.tensor([loss_mask]),
+        )
+        reports.append(metrics)
+    reduced = reduce_metrics({key: [report[key] for report in reports] for key in reports[0]})
+
+    support = {key.removeprefix("cispo/support/"): value for key, value in reduced.items() if "support" in key}
+    assert support["ratio_sum"] / support["mask_weight_sum"] == pytest.approx((0.5 + 1.0 + 2.0 + 4.0) / 4)
+    assert support["clamped_ratio_sum"] == pytest.approx(0.8 + 1.0 + 1.2 + 1.2)
+    assert support == pytest.approx(
+        {
+            "mask_weight_sum": 4.0,
+            "ratio_sum": 7.5,
+            "clamped_ratio_sum": 4.2,
+            "cap_hit_weight_sum": 3.0,
+            "active_tokens_sum": 4.0,
+            "advantage_nonzero_tokens_sum": 3.0,
+            "nonfinite_ratio_tokens_sum": 0.0,
+            "empty_reports_sum": 1.0,
+            "reports_sum": 3.0,
+        }
+    )
 
 
 def test_policy_loss_cispo_rollout_anchor_requires_rollout_logprobs():

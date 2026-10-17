@@ -45,6 +45,13 @@ class TestReduceMetrics:
         result = reduce_metrics(metrics, sum_loss_metrics=True)
         assert result["policy_loss"] == 6.0
 
+    @pytest.mark.parametrize("sum_loss_metrics", [True, False])
+    def test_reduce_metrics_sum_suffix(self, sum_loss_metrics):
+        """Keys ending in _sum are summed whether or not loss metrics are summed."""
+        metrics = {"cispo/support/ratio_sum": [1.5, 2.5, 3.0]}
+        result = reduce_metrics(metrics, sum_loss_metrics=sum_loss_metrics)
+        assert result["cispo/support/ratio_sum"] == 7.0
+
     def test_reduce_metrics_mixed(self):
         """Test mixed metric types are reduced correctly."""
         metrics = {
@@ -147,6 +154,19 @@ class TestAllReduceMetrics:
         # Verify max metrics
         max_call = [c for c in ops_and_keys if c[0] == "max"][0]
         assert max_call[1] == {"is_ratio_max"}
+
+    @pytest.mark.parametrize("sum_loss_metrics", [True, False])
+    def test_all_reduce_metrics_sums_sum_suffix(self, sum_loss_metrics):
+        """Keys ending in _sum are all-reduced with sum whether or not loss metrics are summed."""
+        strategy = MagicMock()
+        strategy.all_reduce.side_effect = lambda d, op, group=None: dict(d)
+
+        metrics = {"cispo/support/ratio_sum": 2.0, "entropy": 0.5}
+        _ = all_reduce_metrics(metrics, strategy, sum_loss_metrics=sum_loss_metrics)
+
+        keys_by_op = {kwargs["op"]: set(args[0]) for args, kwargs in strategy.all_reduce.call_args_list}
+        assert keys_by_op["sum"] == {"cispo/support/ratio_sum"}
+        assert keys_by_op["mean"] == {"entropy"}
 
     def test_all_reduce_metrics_average_loss_metrics(self):
         """Verify _loss keys are averaged when sum_loss_metrics=False."""
