@@ -2,11 +2,14 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+import os
+import pickle
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
+from fsspec.implementations.memory import MemoryFileSystem
 from jaxtyping import Float, Integer
 from pytest import approx
 
@@ -314,6 +317,46 @@ def test_flush_pending_metrics_logs_and_clears(dummy_config):
     # Second call is a no-op once the accumulators are empty.
     trainer.flush_pending_metrics()
     trainer.tracker.log.assert_called_once()
+
+
+class _MemoryBucket(MemoryFileSystem):
+    """In-memory object store that accepts ``s3://`` paths."""
+
+    store = {}
+    pseudo_dirs = [""]
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        if path.startswith("s3://"):
+            path = path[len("s3://") :]
+        return super()._strip_protocol(path)
+
+
+def test_dump_data_writes_to_cloud_export_path(dummy_config, monkeypatch, tmp_path):
+    """With a bucket ``export_path``, the batch dump is written to the bucket, not the local disk."""
+    monkeypatch.setattr(_MemoryBucket, "store", {})
+    monkeypatch.setattr(_MemoryBucket, "pseudo_dirs", [""])
+    bucket = _MemoryBucket(skip_instance_cache=True)
+    monkeypatch.setattr("skyrl.backends.skyrl_train.utils.io.io._get_filesystem", lambda path: bucket)
+    monkeypatch.chdir(tmp_path)
+    dummy_config.trainer.export_path = "s3://bucket/exports"
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    batch = TrainingInputBatch({"sequences": torch.tensor([[1, 2, 3]])})
+
+    trainer.dump_data(batch, "global_step_1_training_input")
+
+    with bucket.open("bucket/exports/dumped_data/global_step_1_training_input.pkl", "rb") as f:
+        dumped = pickle.load(f)
+    assert torch.equal(dumped["sequences"], batch["sequences"])
+    assert os.listdir(tmp_path) == []
 
 
 def test_flush_pending_metrics_swallows_tracker_errors(dummy_config):

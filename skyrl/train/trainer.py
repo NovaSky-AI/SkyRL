@@ -1,6 +1,7 @@
 import asyncio
 import math
 import os
+import pickle
 import shutil
 from collections import defaultdict
 from dataclasses import asdict
@@ -1307,9 +1308,10 @@ class RayPPOTrainer:
         """
         Dump data to pickle file
         """
-        data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
-        data_save_dir.mkdir(parents=True, exist_ok=True)
-        data.save(data_save_dir / f"{file_name}.pkl")
+        data_save_dir = os.path.join(self.cfg.trainer.export_path, "dumped_data")
+        io.makedirs(data_save_dir, exist_ok=True)
+        with io.open_file(os.path.join(data_save_dir, f"{file_name}.pkl"), "wb") as f:
+            pickle.dump(data, f)
 
     def _execute_forward_pass(
         self,
