@@ -1108,7 +1108,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
             List of decoded texts.
         """
         if self.tokenizer is not None:
-            return self.tokenizer.batch_decode(token_ids)
+            # ``responses`` must not carry special tokens such as the eos (see the contract in
+            # inference_servers/base.py); generators re-render this text into the next prompt.
+            return self.tokenizer.batch_decode(token_ids, skip_special_tokens=True)
 
         url = f"{self.proxy_url}/detokenize"
 

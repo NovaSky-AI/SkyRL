@@ -273,3 +273,54 @@ async def test_vlm_obs_tokens_match_expected(mock_decode):
         assert (
             obs_text in decoded
         ), f"Obs segment {seg_idx}: expected '{obs_text}' in decoded obs tokens, got '{decoded}'"
+
+
+@pytest.mark.asyncio
+@patch("skyrl.train.generators.skyrl_vlm_generator.decode_mm_kwargs")
+async def test_vlm_assistant_turn_is_rerendered_without_trailing_eos(mock_decode):
+    """A response text that ends with the eos string must not be fed back into the next render,
+    or the chat template adds a second eos at every turn boundary."""
+    mock_decode.return_value = {"pixel_values": None, "image_grid_thw": None}
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    response_text = "b"
+
+    generator = _build_vlm_generator(tokenizer)
+    rendered_conversations = []
+    inner_render = _make_mock_renderer(tokenizer)
+
+    async def recording_render(request_payload):
+        rendered_conversations.append(request_payload["json"]["messages"])
+        return await inner_render(request_payload)
+
+    generator.inference_engine_client.render_chat_completion = AsyncMock(side_effect=recording_render)
+
+    async def generate_with_eos_text(input_batch, model=None):
+        num_prompts = len(input_batch["prompt_token_ids"])
+        text_with_eos = response_text + tokenizer.eos_token
+        ids = tokenizer.encode(text_with_eos, add_special_tokens=False)
+        return {
+            "responses": [text_with_eos] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            "response_logprobs": None,
+            "response_ids": [ids] * num_prompts,
+        }
+
+    generator.inference_engine_client.generate = AsyncMock(side_effect=generate_with_eos_text)
+
+    input_batch: GeneratorInput = {
+        "prompts": [[{"role": "user", "content": "a"}]],
+        "env_extras": [{"answer": "4"}],
+        "env_classes": ["cpu_vlm_test_env"],
+    }
+    output: GeneratorOutput = await generator.generate(input_batch)
+
+    assistant_turns = [m for conv in rendered_conversations for m in conv if m["role"] == "assistant"]
+    assert assistant_turns, "expected at least one re-render containing an assistant turn"
+    for turn in assistant_turns:
+        assert not turn["content"].endswith(tokenizer.eos_token), turn["content"]
+        assert turn["content"] == response_text
+
+    eos_id = tokenizer.eos_token_id
+    ids = output["response_ids"][0]
+    assert all(not (a == eos_id and b == eos_id) for a, b in zip(ids, ids[1:])), "doubled eos in response_ids"
