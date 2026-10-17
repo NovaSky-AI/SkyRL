@@ -236,7 +236,8 @@ class MegatronModelWrapper:
             getattr(getattr(chunk, "ddp_config", None), "overlap_grad_reduce", False) for chunk in self.actor_module
         ):
             # _per_token_grad_scaling rescales the grad buffers between calls, which would race
-            # with reductions still in flight.
+            # with reductions still in flight. validate_megatron_cfg refuses this config up front;
+            # this also covers entry points that don't run it (the Tinker backend).
             raise ValueError("calculate_per_token_loss (VLM context parallelism) requires overlap_grad_reduce=false")
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across
@@ -357,17 +358,9 @@ class MegatronModelWrapper:
                 "Megatron-Bridge's Qwen3VLModel (Qwen3-VL, Qwen3.5-VL), which rebuilds mRoPE positions per "
                 f"packed sample; got {model_cls}. Set trainer.remove_microbatch_padding=false."
             )
-        cp_size = mpu.get_context_parallel_world_size()
-        if cp_size > 1:
-            # Packing is required for CP, so the check above already limits VLM CP to models that
-            # apply the CP split themselves (shard_for_cp=False below relies on it).
-            if not self.remove_microbatch_padding:
-                raise ValueError("VLM context parallelism requires trainer.remove_microbatch_padding=true")
-            if getattr(get_model_config(self.actor_module[0]), "mtp_num_layers", None):
-                # SkyRL's decoupled MTP draft loss rolls teacher logits and labels with a plain
-                # torch.roll, which isn't CP-aware, so MTP requires CP=1 for every model (see the
-                # assert in forward_backward_mini_batch). Raise early with a VLM-specific message.
-                raise ValueError("VLM context parallelism with MTP is not supported")
+        # CP needs packing (validate_megatron_cfg), so the check above also limits VLM CP to models that
+        # apply the CP split themselves (shard_for_cp=False below relies on it). MTP with CP is refused in
+        # validate_megatron_cfg too.
         assert (
             mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
         ), "VLM + sequence parallelism unsupported"

@@ -1517,3 +1517,32 @@ def test_validate_step_timeouts_warns_below_nccl_timeout():
         logger.remove(handler_id)
     (message,) = messages
     assert "trainer.weight_sync_timeout_s" in message and "NCCL watchdog" in message
+
+
+def _cp2_megatron_config():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.remove_microbatch_padding = True
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    return cfg
+
+
+@pytest.mark.parametrize("vlm", [True, False])
+def test_megatron_validation_refuses_overlap_grad_reduce_for_a_vlm_under_cp(monkeypatch, vlm):
+    monkeypatch.setattr(train_utils, "_has_vision_tower", lambda config: vlm)
+    cfg = _cp2_megatron_config()
+    cfg.trainer.policy.megatron_config.ddp_config.overlap_grad_reduce = True
+
+    if vlm:
+        with pytest.raises(ValueError, match="overlap_grad_reduce=false"):
+            train_utils.validate_megatron_cfg(cfg)
+    else:
+        train_utils.validate_megatron_cfg(cfg)
+
+
+def test_megatron_validation_refuses_mtp_with_cp():
+    cfg = _cp2_megatron_config()
+    cfg.trainer.mtp.enabled = True
+
+    with pytest.raises(ValueError, match="mtp.enabled=true is not supported with context_parallel_size > 1"):
+        train_utils.validate_megatron_cfg(cfg)
