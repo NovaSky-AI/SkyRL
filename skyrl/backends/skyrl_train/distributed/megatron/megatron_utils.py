@@ -675,6 +675,7 @@ def preprocess_packed_seqs(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     fp8_enabled: bool = False,
     fp8_recipe: Optional[str] = None,
+    shard_for_cp: bool = True,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences.
@@ -697,6 +698,11 @@ def preprocess_packed_seqs(
     gets first and last chunks, GPU1 gets second and second last chunks,
     and so on), this is for load balancing with causal masking.
     See https://github.com/NVIDIA/TransformerEngine/issues/1368
+
+    ``shard_for_cp=False`` keeps the full packed stream on every CP rank (each
+    sub-sequence still padded to the CP alignment) for models that apply the CP
+    split themselves, such as Megatron-Bridge's Qwen3VLModel: its mRoPE positions
+    and image-feature placement need the whole stream.
     """
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
@@ -759,8 +765,10 @@ def preprocess_packed_seqs(
     # Pure Python int calculation to avoid further synchronization
     max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
 
+    # Ranks the stream is split across here (1 when the model applies the CP split itself).
+    shard_cp_size = cp_size if shard_for_cp else 1
     shape = list(input_ids.shape[1:])
-    shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
+    shape[0] = sum(seqlens_in_batch_padded_cpu) // shard_cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
         for i in range(num_subseqs):
@@ -773,7 +781,7 @@ def preprocess_packed_seqs(
                 seqlen = seqlens_in_batch_cpu[i]
                 seq_tokens = input_ids[i, attention_mask[i]]
 
-            if cp_size <= 1:
+            if shard_cp_size <= 1:
                 start_idx = cu_seqlens_padded_cpu[i]
                 input_ids_rmpad[start_idx : start_idx + seqlen] = seq_tokens
                 continue
