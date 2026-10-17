@@ -1527,19 +1527,6 @@ def _cp2_megatron_config():
     return cfg
 
 
-@pytest.mark.parametrize("vlm", [True, False])
-def test_megatron_validation_refuses_overlap_grad_reduce_for_a_vlm_under_cp(monkeypatch, vlm):
-    monkeypatch.setattr(train_utils, "_has_vision_tower", lambda config: vlm)
-    cfg = _cp2_megatron_config()
-    cfg.trainer.policy.megatron_config.ddp_config.overlap_grad_reduce = True
-
-    if vlm:
-        with pytest.raises(ValueError, match="overlap_grad_reduce=false"):
-            train_utils.validate_megatron_cfg(cfg)
-    else:
-        train_utils.validate_megatron_cfg(cfg)
-
-
 def test_megatron_validation_refuses_mtp_with_cp():
     cfg = _cp2_megatron_config()
     cfg.trainer.mtp.enabled = True

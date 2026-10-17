@@ -236,8 +236,7 @@ class MegatronModelWrapper:
             getattr(getattr(chunk, "ddp_config", None), "overlap_grad_reduce", False) for chunk in self.actor_module
         ):
             # _per_token_grad_scaling rescales the grad buffers between calls, which would race
-            # with reductions still in flight. validate_megatron_cfg refuses this config up front;
-            # this also covers entry points that don't run it (the Tinker backend).
+            # with reductions still in flight.
             raise ValueError("calculate_per_token_loss (VLM context parallelism) requires overlap_grad_reduce=false")
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across

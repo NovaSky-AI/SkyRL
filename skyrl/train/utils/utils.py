@@ -219,17 +219,6 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     )
 
 
-def _has_vision_tower(config) -> bool:
-    """Whether a worker trains a vision-language model: its HF config has a ``vision_config`` and the worker
-    doesn't skip the vision tower (``language_model_only``). Mirrors ``MegatronWorker``'s detection."""
-    if getattr(config, "language_model_only", False):
-        return False
-    from transformers import AutoConfig
-
-    hf_config = AutoConfig.from_pretrained(config.model.path, trust_remote_code=True)
-    return getattr(hf_config, "vision_config", None) is not None
-
-
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
@@ -319,13 +308,6 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             assert (
                 cfg.trainer.remove_microbatch_padding
             ), "context parallel is only supported with remove_microbatch_padding"
-            # A VLM under CP runs in Megatron's per-token loss mode (Megatron-Bridge's Qwen-VL providers
-            # force it), whose per-call gradient rescaling would race with reductions still in flight.
-            if config.megatron_config.ddp_config.overlap_grad_reduce and _has_vision_tower(config):
-                raise ValueError(
-                    f"{worker_type}: a vision-language model with context_parallel_size > 1 needs "
-                    f"{worker_type}.megatron_config.ddp_config.overlap_grad_reduce=false"
-                )
         # check that sequence parallel is not configured outside of megatron
         assert config.sequence_parallel_size == 1, (
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence "
