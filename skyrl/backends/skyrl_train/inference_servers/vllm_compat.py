@@ -241,3 +241,69 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
     if patched_any:
         logger.info("Patched vLLM KV-cache methods to normalize FP8 scales at boot (pre-capture)")
     return patched_any
+
+
+def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
+    """CPU copies of the tensors on the runner's ``model_state``, for a level-2 sleep.
+
+    Model Runner V2 keeps per-model input state (``model_state``) next to the model, and it is
+    allocated in the weights pool, so a level-2 sleep discards it. vLLM restores the model's
+    buffers on wake but not these: Qwen4Exp's constant ``ngram_context_offsets`` came back as
+    zeros, corrupting every later PLE n-gram context. The per-step tensors there are rewritten
+    before use, so restoring them too is harmless.
+    """
+    state = getattr(model_runner, "model_state", None)
+    if state is None:
+        return {}
+    return {
+        name: value.cpu().clone()
+        for name, value in vars(state).items()
+        if isinstance(value, torch.Tensor)
+    }
+
+
+def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor]) -> int:
+    """Copy :func:`save_model_state_tensors` contents back after the weights pool wakes."""
+    state = getattr(model_runner, "model_state", None)
+    if state is None or not saved:
+        return 0
+    for name, value in saved.items():
+        getattr(state, name).copy_(value)
+    return len(saved)
+
+
+def patch_vllm_level2_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
+    """Carry ``model_runner.model_state`` tensors across ``Worker.sleep(level=2)``."""
+    if worker_cls is None:
+        try:
+            from vllm.v1.worker.gpu_worker import Worker
+        except ImportError:
+            return False
+        worker_cls = Worker
+
+    original_sleep: Callable[..., Any] | None = getattr(worker_cls, "sleep", None)
+    original_wake: Callable[..., Any] | None = getattr(worker_cls, "wake_up", None)
+    if not callable(original_sleep) or not callable(original_wake):
+        return False
+    if getattr(original_sleep, "_skyrl_saves_model_state", False):
+        return False
+
+    @wraps(original_sleep)
+    def _patched_sleep(self: Any, level: int = 1) -> Any:
+        if level == 2:
+            self._skyrl_saved_model_state = save_model_state_tensors(self.model_runner)
+        return original_sleep(self, level)
+
+    @wraps(original_wake)
+    def _patched_wake_up(self: Any, tags: list[str] | None = None) -> Any:
+        result = original_wake(self, tags)
+        if tags is None or "weights" in tags:
+            restore_model_state_tensors(self.model_runner, getattr(self, "_skyrl_saved_model_state", {}))
+            self._skyrl_saved_model_state = {}
+        return result
+
+    setattr(_patched_sleep, "_skyrl_saves_model_state", True)
+    worker_cls.sleep = _patched_sleep
+    worker_cls.wake_up = _patched_wake_up
+    logger.info("Patched vLLM level-2 sleep to preserve model_runner.model_state tensors")
+    return True
