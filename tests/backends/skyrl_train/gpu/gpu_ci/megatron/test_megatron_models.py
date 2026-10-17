@@ -51,6 +51,10 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
+# 4-layer slice of Qwen/Qwen3.8-Flash-Next (layers 0-3: GDN x3 + full attention, PLE on layer 1,
+# the full PLE n-gram table, no MTP); not published, build it with the qwen3_8_flash_next example's
+# make_slice.py and point this at it.
+QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "Qwen3.8-Flash-Next-4layer")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -109,6 +113,13 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # max_num_seqs=1024 and 64 heads that is 65536 > 65535 and the CUDA-graph capture / profile
         # run fails with "Triton Error [CUDA]: invalid argument". Stay below the limit.
         cfg.generator.inference_engine.max_num_seqs = 512
+    if "qwen3.8-flash-next" in model_name.lower():
+        # VL checkpoint; patches/megatron/qwen4_exp bridges the language model only, and PLE
+        # needs packed (thd) sequences.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
     if "kimi-k2.5" in model_name.lower():
         # Unified VL checkpoint with a DeepSeek-V3 language model under a
         # `language_model.` prefix; MegatronWorker refuses it without
@@ -147,6 +158,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
+        or ("qwen3.8-flash-next" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -245,6 +257,11 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
     if "glm-5.3-flash" in model_name.lower():
         # 1M default context; the 4-layer slice is still ~24B params (288 experts x 3 MoE layers),
         # colocated with the Megatron shard. The DSA indexer in vLLM needs DeepGEMM.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+    if "qwen3.8-flash-next" in model_name.lower():
+        # 262k default context; the slice still carries the ~51B-parameter PLE table (sharded
+        # over TP in vLLM and over EP in Megatron) next to 4 x 512-expert MoE layers.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     if "kimi-k2.5" in model_name.lower():
@@ -545,6 +562,26 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             None,
             id="qwen3.5-35b-a3b_h100_tp4_ep4",
+            marks=pytest.mark.h100,
+        ),
+        # Qwen3.8-Flash-Next, 4-layer slice of the real checkpoint (QWEN38_4LAYER): GDN with a
+        # sigmoid output gate, gated attention with the QSA indexer (dense regime: sequences stay
+        # under indexer_budget), 512-expert shared-expert MoE, gated low-rank hyper-connections,
+        # the PLE n-gram embedding sharded over EP=8, and the final hyper-connection mixer.
+        pytest.param(
+            1,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            QWEN38_4LAYER,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="qwen3.8-flash-next-4layer_h100_ep8",
             marks=pytest.mark.h100,
         ),
         # Full-FP8 rows: blockwise FP8 Megatron compute + FP8 vLLM rollout fed

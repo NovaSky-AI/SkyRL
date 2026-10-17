@@ -163,6 +163,22 @@ def _moe_router_topk(model_path: str) -> Optional[int]:
     return None
 
 
+def _model_type(model_path: str) -> Optional[str]:
+    """HF ``model_type`` of the checkpoint, or None if its config cannot be read."""
+    from transformers import AutoConfig
+
+    try:
+        return getattr(AutoConfig.from_pretrained(model_path, trust_remote_code=True), "model_type", None)
+    except Exception:  # an unreadable config is not this helper's error to report
+        return None
+
+
+# Models whose vLLM custom all-reduce fails under sleep mode: registering the CUDA-graph
+# buffers over CUDA IPC hits "custom_all_reduce.cuh:164 'invalid argument'" on memory from
+# sleep mode's cumem (VMM) allocator, killing every TP worker at engine start.
+_NO_CUSTOM_ALL_REDUCE_WITH_SLEEP_MODE = ("qwen4_exp",)
+
+
 def _resolve_max_expert_lora_rank(cfg: SkyRLTrainConfig) -> Optional[int]:
     """vLLM MoE expert LoRA slot rank, or None to keep ``max_lora_rank`` for the experts.
 
@@ -330,6 +346,15 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         spec_cfg = get_config_as_dict(ie_cfg.speculative_config)
         args.speculative_config = spec_cfg
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
+
+    if (
+        args.enable_sleep_mode
+        and ie_cfg.tensor_parallel_size > 1
+        and _model_type(cfg.trainer.policy.model.path) in _NO_CUSTOM_ALL_REDUCE_WITH_SLEEP_MODE
+    ):
+        # Overridable via engine_init_kwargs below.
+        args.disable_custom_all_reduce = True
+        logger.info("Disabling vLLM custom all-reduce: incompatible with sleep mode for this model.")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
     _validate_logprobs_mode(engine_kwargs, context="generator.inference_engine.engine_init_kwargs")
