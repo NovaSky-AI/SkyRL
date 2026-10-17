@@ -485,6 +485,9 @@ class MegatronWorker:
                 lora_config.train_mlp,
                 include_gdn_in_proj=gdn_in_proj_lora_is_safe(self.bridge),
             )
+            if not (lora_config.train_attn and lora_config.train_mlp) and self._rank == 0:
+                group = "attn" if lora_config.train_attn else "mlp"
+                logger.info(f"LoRA restricted to {group} modules: {target_modules}")
         else:
             target_modules = lora_config.target_modules
 
