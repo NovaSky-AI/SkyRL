@@ -47,6 +47,9 @@ class MockResponses:
         self.eol = b"\n"
         #: Seconds to keep a streamed reply's connection open after its last event.
         self.linger = 0.0
+        #: The final event's type; by default `response.<status>`, as the API sends it. vLLM 0.31 sends
+        #: `response.completed` whatever the status.
+        self.final: str | None = None
         #: The bytes of the last streamed reply, as sent.
         self.sent = b""
 
@@ -72,7 +75,7 @@ class MockResponses:
         for index, item in enumerate(self.output):
             frames.append({"type": "response.output_item.added", "output_index": index, "item": item})
             frames.append({"type": "response.output_item.done", "output_index": index, "item": item})
-        frames.append({"type": f"response.{self.status}", "response": self.response()})
+        frames.append({"type": self.final or f"response.{self.status}", "response": self.response()})
         eol = self.eol
         return b"".join(
             b"event: "
@@ -200,9 +203,13 @@ async def test_a_stream_reaches_the_client_byte_for_byte_and_the_sdk_reads_it() 
 
 # -- a length cut-off ------------------------------------------------------------------------------------
 @pytest.mark.parametrize("stream", [False, True])
-async def test_without_the_option_a_cut_off_reaches_the_client_as_the_upstream_sent_it(stream: bool) -> None:
+@pytest.mark.parametrize("final", [None, "response.completed"], ids=["api", "vllm"])
+async def test_without_the_option_a_cut_off_reaches_the_client_as_the_upstream_sent_it(
+    stream: bool, final: str | None
+) -> None:
     async with responses_stack() as stack:
         stack.upstream.status, stack.upstream.reason = "incomplete", "max_output_tokens"
+        stack.upstream.final = final
         created = await stack.create()
         _, body = await stack.call(created, {"model": "policy", "input": "q", "stream": stream})
         document = await stack.document(created)
@@ -212,10 +219,13 @@ async def test_without_the_option_a_cut_off_reaches_the_client_as_the_upstream_s
 
 
 @pytest.mark.parametrize("chunk", [1, 7, 100_000])
-async def test_with_the_option_a_cut_off_stream_ends_completed_and_is_recorded_as_length(chunk: int) -> None:
+@pytest.mark.parametrize("final", [None, "response.completed"], ids=["api", "vllm"])
+async def test_with_the_option_a_cut_off_stream_ends_completed_and_is_recorded_as_length(
+    chunk: int, final: str | None
+) -> None:
     async with responses_stack(length_as_completed=True) as stack:
         stack.upstream.status, stack.upstream.reason = "incomplete", "max_output_tokens"
-        stack.upstream.chunk = chunk
+        stack.upstream.chunk, stack.upstream.final = chunk, final
         created = await stack.create()
         _, body = await stack.call(created, {"model": "policy", "input": "q", "stream": True})
         document = await stack.document(created)

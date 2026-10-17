@@ -253,15 +253,17 @@ class ResponsesDialect(Dialect):
         return ResponsesAssembler()
 
     def length_as_completed(self, payload: bytes, *, event: bool) -> bytes:
-        """A cut-off reply or ``response.incomplete`` event, reported as completed.
+        """A cut-off reply or final event, reported as completed.
 
-        Only a ``max_output_tokens`` cut-off changes; any other incomplete reason is kept.
+        Only a ``max_output_tokens`` cut-off changes; any other incomplete reason is kept. The final event is
+        read by its response's status, not its type: the API ends a cut-off stream with ``response.incomplete``,
+        but vLLM (0.31) with ``response.completed`` carrying ``status: "incomplete"``.
         """
         if not event:
             body = orjson.loads(payload)
             return orjson.dumps(_completed(body)) if _cut_off(body) else payload
         frame = sse_json(payload)
-        if not isinstance(frame, dict) or frame.get("type") != "response.incomplete":
+        if not isinstance(frame, dict) or frame.get("type") not in ("response.incomplete", "response.completed"):
             return payload
         response = frame.get("response")
         if not isinstance(response, dict) or not _cut_off(response):

@@ -930,10 +930,12 @@ def test_any_other_json_reply_is_left_byte_for_byte(body: dict) -> None:
 
 
 @pytest.mark.parametrize("separator", [b"\n\n", b"\r\n\r\n"])
-def test_a_cut_off_final_event_is_rewritten_as_completed_keeping_its_separator(separator: bytes) -> None:
+# The API ends a cut-off stream with `response.incomplete`; vLLM 0.31 with `response.completed`, status incomplete.
+@pytest.mark.parametrize("kind", ["response.incomplete", "response.completed"])
+def test_a_cut_off_final_event_is_rewritten_as_completed_keeping_its_separator(separator: bytes, kind: str) -> None:
     event = sse(
         {
-            "type": "response.incomplete",
+            "type": kind,
             "sequence_number": 9,
             "response": response_object([said("a")], "incomplete", "max_output_tokens"),
         },
