@@ -85,14 +85,14 @@ class Qwen4ExpFinalMixer(Qwen4ExpGatedResidual):
 class Qwen4ExpGatedDeltaNet(GatedDeltaNet):
     """megatron-core GDN with a sigmoid output gate.
 
-    megatron-core gates the GDN output with ``config.activation_func``, which is also the MLP
-    activation (SiLU here); Qwen4Exp's ``output_gate_type`` is ``sigmoid``.
+    megatron-core uses ``config.activation_func`` (SiLU here) both for the short conv and for the
+    output gate. Qwen4Exp keeps SiLU on the conv but gates with ``output_gate_type`` (sigmoid), so
+    only the unfused gated norm is overridden (the bridge disables the fused one).
     """
 
-    def __init__(self, config: TransformerConfig, *args, **kwargs):
-        super().__init__(config, *args, **kwargs)
-        self.act_fn = torch.sigmoid
-        self.activation = "sigmoid"
+    def _apply_gated_norm_unfused(self, x: Tensor, gate: Tensor) -> Tensor:
+        y = self.out_norm(x.reshape(-1, x.shape[-1])).reshape(x.shape)
+        return (y * torch.sigmoid(gate.float())).to(x.dtype)
 
 
 # ------------------------------------------------------------------------------------------------
