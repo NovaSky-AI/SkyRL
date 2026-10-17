@@ -255,11 +255,7 @@ def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
     state = getattr(model_runner, "model_state", None)
     if state is None:
         return {}
-    return {
-        name: value.cpu().clone()
-        for name, value in vars(state).items()
-        if isinstance(value, torch.Tensor)
-    }
+    return {name: value.cpu().clone() for name, value in vars(state).items() if isinstance(value, torch.Tensor)}
 
 
 def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor]) -> int:

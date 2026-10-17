@@ -92,7 +92,9 @@ def test_gated_residual_matches_hf(use_combine):
 
 
 def test_ple_packed_matches_hf_per_sequence():
-    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import Qwen4ExpPLE
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+        Qwen4ExpPLE,
+    )
 
     c = _hf_config()
     ref = hf.Qwen4ExpTextPLELayer(c, layer_idx=1, ple_layer_index=0)
@@ -132,7 +134,13 @@ def test_bridge_provider_accepts_qwen_sparse_attention(tmp_path):
     import skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.bridge  # noqa: F401
 
     text = _hf_config().to_dict()
-    text.update(output_gate_type="sigmoid", num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32, shared_expert_intermediate_size=32)
+    text.update(
+        output_gate_type="sigmoid",
+        num_experts=8,
+        num_experts_per_tok=2,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+    )
     Qwen4ExpConfig(text_config=text, architectures=["Qwen4ExpForConditionalGeneration"]).save_pretrained(tmp_path)
     provider = AutoBridge.from_hf_pretrained(str(tmp_path)).to_megatron_provider(load_weights=False)
     assert list(provider.linear_attention_freq) == [1, 1, 1, 0]

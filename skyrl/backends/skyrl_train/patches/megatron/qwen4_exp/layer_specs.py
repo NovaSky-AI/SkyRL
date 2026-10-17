@@ -55,7 +55,9 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
     with ``x += PLE(x, input_ids)`` before the attention site on the PLE layers.
     """
 
-    def __init__(self, config: TransformerConfig, submodules: TransformerLayerSubmodules, layer_number: int = 1, **kwargs):
+    def __init__(
+        self, config: TransformerConfig, submodules: TransformerLayerSubmodules, layer_number: int = 1, **kwargs
+    ):
         super().__init__(config=config, submodules=submodules, layer_number=layer_number, **kwargs)
         if not isinstance(self.cross_attention, IdentityOp):
             raise ValueError("Qwen4ExpTransformerLayer does not support cross-attention.")

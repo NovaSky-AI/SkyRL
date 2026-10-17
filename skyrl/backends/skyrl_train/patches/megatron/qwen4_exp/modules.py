@@ -237,7 +237,9 @@ class Qwen4ExpPLE(nn.Module):
             for p in range(1, ngram):
                 mixed = torch.bitwise_xor(mixed, shifted[p] * self.layer_multipliers[p])
             sizes = self.head_vocab_sizes[lo : lo + self.heads_per_ngram]
-            blocks.append(torch.remainder(mixed.unsqueeze(-1), sizes) + self.head_offsets[lo : lo + self.heads_per_ngram])
+            blocks.append(
+                torch.remainder(mixed.unsqueeze(-1), sizes) + self.head_offsets[lo : lo + self.heads_per_ngram]
+            )
         return torch.cat(blocks, dim=-1)  # [T, heads] global row ids
 
     def _embed(self, local_ids: Tensor) -> Tensor:
