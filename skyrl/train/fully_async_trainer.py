@@ -21,6 +21,7 @@ from typing import Any, Iterable, List, Optional, Set, Tuple
 
 import torch
 from loguru import logger
+from torch.utils.data import DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
@@ -265,13 +266,19 @@ class _AsyncDataloader:
         self._consumed_data_uids = consumed_data_uids_set
         self._filtered_data_uids = filtered_data_uids_set if filtered_data_uids_set is not None else set()
 
-        # Reset in case the dataloader loaded the state from the checkpoint, which we do not want.
+    def start_epoch(self, epoch: int) -> None:
+        """Restart iteration at the beginning of this epoch's order.
+
+        Discards any loader position, including one loaded from a checkpoint; consumed UIDs are
+        still skipped. Call before the epoch's generation workers start.
+        """
         self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)
+        if isinstance(self._train_dataloader.sampler, DistributedSampler):
+            self._train_dataloader.sampler.set_epoch(epoch)
+        self._iter = enumerate(self._train_dataloader)
 
     async def reset_at_epoch_end(self) -> None:
         async with self._lock:
-            self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
-            self._iter = enumerate(self._train_dataloader)
             self._consumed_data_uids.clear()
             self._filtered_data_uids.clear()
             self._exhausted = False
@@ -503,6 +510,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
                 self.epoch = epoch
                 # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
+                self.async_train_dataloader.start_epoch(epoch)
 
                 # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
                 generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize)
