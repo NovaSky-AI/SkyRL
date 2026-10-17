@@ -1140,6 +1140,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if forwarded:
         logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
     env_vars.update(forwarded)
+    # Same for NCCL_* tuning (e.g. NCCL_NVLS_ENABLE=0, whose NVLink-SHARP buffers stay resident on
+    # every GPU through offload and sleep); values SkyRL pins above win.
+    nccl = {k: v for k, v in os.environ.items() if k.startswith("NCCL_") and k not in env_vars}
+    if nccl:
+        logger.info(f"Exporting NCCL_* overrides to ray runtime env: {sorted(nccl)}")
+    env_vars.update(nccl)
 
     # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32
     # scales; Blackwell (SM100+) defaults to power-of-two scales, the only mode TE
