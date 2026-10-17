@@ -10,6 +10,7 @@ uv run --isolated --extra dev --extra skyrl-train pytest tests/backends/skyrl_tr
 from types import SimpleNamespace
 from typing import List
 
+import pytest
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
@@ -33,6 +34,22 @@ from skyrl.train.dataset.bin_packing import make_seq_packer
 def balanced_binpacking(token_counts: List[int], max_tokens_per_microbatch: int) -> List[List[int]]:
     """Pack via the shared Balanced SeqPacker (soft-cap semantics, as the iterator uses)."""
     return make_seq_packer("balanced", bin_capacity=max_tokens_per_microbatch).pack(token_counts)
+
+
+# Lengths that packing permutes at LOSS_FORWARD_MAX_TOKENS; sample 0 exceeds the budget on its own.
+LOSS_FORWARD_SEQ_LENS = [12, 2, 6, 3, 5]
+LOSS_FORWARD_MAX_TOKENS = 8
+MARKER_BASE = 1000
+
+
+def _import_megatron_worker():
+    try:
+        from skyrl.backends.skyrl_train.workers.megatron import megatron_worker
+    except ModuleNotFoundError as e:
+        if not e.name or (e.name != "megatron" and not e.name.startswith("megatron.")):
+            raise
+        pytest.skip(f"megatron unavailable: {e}")
+    return megatron_worker
 
 
 class TestBalancedBinpacking:
@@ -366,6 +383,167 @@ class TestTokenBasedBatchIterator:
         worker = _StubWorker(SimpleNamespace(micro_train_batch_size_per_gpu=2, max_tokens_per_microbatch=8))
         output = worker.forward_backward(batch, loss_fn="cross_entropy")
         assert output.loss_fn_outputs == []
+
+    def _make_marked_loss_forward_batch(self):
+        """Batch whose first token identifies each sample, plus a check that packing permutes it."""
+        seq_lens = LOSS_FORWARD_SEQ_LENS
+        batch = self._make_batch(seq_lens)
+        for i, seq_len in enumerate(seq_lens):
+            batch["sequences"][i, :seq_len] = MARKER_BASE + i
+        reference = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=LOSS_FORWARD_MAX_TOKENS)
+        packed_order = [i for mb in reference._microbatches for i in mb]
+        assert packed_order != list(range(len(seq_lens))), "packing no longer permutes; pick new seq_lens"
+        return batch
+
+    @staticmethod
+    def _expected_marker_outputs():
+        return [{"logprobs": [float(MARKER_BASE + i)]} for i in range(len(LOSS_FORWARD_SEQ_LENS))]
+
+    @staticmethod
+    def _assert_within_token_budget(attention_mask: torch.Tensor):
+        """A microbatch stays within the budget unless it holds one oversized sample."""
+        tokens = int(attention_mask.sum())
+        assert tokens <= LOSS_FORWARD_MAX_TOKENS or attention_mask.shape[0] == 1, (
+            f"{attention_mask.shape[0]} samples with {tokens} tokens exceed "
+            f"max_tokens_per_microbatch={LOSS_FORWARD_MAX_TOKENS}"
+        )
+
+    def test_worker_loss_forward_honors_token_budget(self, monkeypatch):
+        """Base (FSDP) ``forward(loss_fn=...)`` packs by token budget, drops the padding
+        microbatch's outputs, and returns per-sample outputs and metrics that match
+        sample-based chunking."""
+        batch = self._make_marked_loss_forward_batch()
+        # Force one padding microbatch, as a DP peer with more microbatches would.
+        monkeypatch.setattr(
+            TokenBasedBatchIterator,
+            "_sync_num_microbatches",
+            lambda self: len(self._microbatches) + 1,
+        )
+        monkeypatch.setattr(
+            "skyrl.backends.skyrl_train.workers.worker.all_reduce_metrics",
+            lambda metrics, strategy, group=None, sum_loss_metrics=False: metrics,
+        )
+
+        class _StubWorker(PolicyWorkerBase):
+            def __init__(self, cfg):
+                self.cfg = cfg
+                self.strategy = None
+                self.device_mesh = SimpleNamespace(get_group=lambda name: None)
+                self.microbatches = []
+
+            def _forward_micro_with_loss(self, experience, loss_fn, loss_fn_config=None, return_per_token_outputs=True):
+                self.microbatches.append(experience)
+                markers = experience.sequences[:, 0].tolist()
+                return {
+                    "loss": float(experience.loss_mask.sum()),
+                    "response_length": experience.num_actions,
+                    "loss_fn_outputs": [{"logprobs": [float(m)]} for m in markers],
+                }
+
+        token_worker = _StubWorker(
+            SimpleNamespace(micro_forward_batch_size_per_gpu=2, max_tokens_per_microbatch=LOSS_FORWARD_MAX_TOKENS)
+        )
+        token_output = token_worker.forward(batch, loss_fn="cross_entropy")
+
+        assert token_output.loss_fn_outputs == self._expected_marker_outputs()
+        padding = [e for e in token_worker.microbatches if e.metadata.get("is_padding_batch")]
+        real = [e for e in token_worker.microbatches if not e.metadata.get("is_padding_batch")]
+        assert len(padding) == 1
+        for experience in real:
+            self._assert_within_token_budget(experience.attention_mask)
+
+        # Unset budget keeps fixed sample-count chunking in input order.
+        sample_worker = _StubWorker(SimpleNamespace(micro_forward_batch_size_per_gpu=2, max_tokens_per_microbatch=-1))
+        sample_output = sample_worker.forward(batch, loss_fn="cross_entropy")
+
+        assert [e.sequences.shape[0] for e in sample_worker.microbatches] == [2, 2, 1]
+        assert sample_output.loss_fn_outputs == self._expected_marker_outputs()
+        assert token_output.metrics == sample_output.metrics
+
+    @pytest.mark.megatron
+    def test_megatron_worker_loss_forward_honors_token_budget(self, monkeypatch):
+        """Megatron ``forward(loss_fn=...)`` packs by token budget, pads microbatches to a
+        uniform size, and excludes padding rows and padding microbatches from outputs
+        and metrics."""
+        megatron_worker = _import_megatron_worker()
+        batch = self._make_marked_loss_forward_batch()
+        monkeypatch.setattr(
+            TokenBasedBatchIterator,
+            "_sync_num_microbatches",
+            lambda self: len(self._microbatches) + 1,
+        )
+        monkeypatch.setattr(
+            megatron_worker,
+            "all_reduce_metrics",
+            lambda metrics, strategy, group=None, sum_loss_metrics=False: metrics,
+        )
+        monkeypatch.setattr(
+            megatron_worker,
+            "mpu",
+            SimpleNamespace(
+                get_pipeline_model_parallel_rank=lambda: 0,
+                get_data_parallel_group=lambda with_context_parallel=False: None,
+            ),
+        )
+
+        class _StubModel:
+            def __init__(self):
+                self.calls = []
+
+            def eval(self):
+                pass
+
+            def forward_backward_mini_batch(self, micro_batches, seq_len, micro_batch_size, forward_only, **kwargs):
+                assert forward_only
+                self.calls.append((micro_batches, micro_batch_size))
+                return [
+                    {
+                        "loss": float(mb["loss_mask"].sum()),
+                        # Mean-reduced; a padding microbatch would pull it off 1.0.
+                        "policy_entropy": 100.0 if mb.get("is_padding_batch") else 1.0,
+                        "loss_fn_outputs": [{"logprobs": [float(m)]} for m in mb["sequences"][:, 0].tolist()],
+                    }
+                    for mb in micro_batches
+                ]
+
+        def _run(max_tokens_per_microbatch):
+            worker = megatron_worker.MegatronPolicyWorkerBase.__new__(megatron_worker.MegatronPolicyWorkerBase)
+            worker.cfg = SimpleNamespace(
+                micro_forward_batch_size_per_gpu=2,
+                max_tokens_per_microbatch=max_tokens_per_microbatch,
+                algorithm=SimpleNamespace(temperature=1.0),
+            )
+            worker.model = _StubModel()
+            worker.strategy = None
+            worker.enable_router_replay = False
+            worker.enable_sample_support_replay = False
+            worker.empty_cuda_cache = False
+            output = worker.forward(batch, loss_fn="cross_entropy")
+            assert len(worker.model.calls) == 1
+            return output, *worker.model.calls[0]
+
+        token_output, micro_batches, micro_batch_size = _run(LOSS_FORWARD_MAX_TOKENS)
+
+        assert token_output.loss_fn_outputs == self._expected_marker_outputs()
+        assert all(mb["sequences"].shape[0] == micro_batch_size for mb in micro_batches)
+        assert [mb["is_padding_batch"] for mb in micro_batches].count(True) == 1
+        assert all(mb["num_microbatches"] == len(micro_batches) for mb in micro_batches)
+        assert all(mb["num_real_microbatches"] == len(micro_batches) - 1 for mb in micro_batches)
+        for mb in micro_batches:
+            if not mb["is_padding_batch"]:
+                real_rows = mb["loss_mask"].sum(dim=1) > 0
+                self._assert_within_token_budget(mb["attention_mask"][real_rows])
+        assert token_output.metrics["policy_entropy"] == 1.0
+
+        # Unset budget keeps fixed sample-count chunking with no padding.
+        sample_output, micro_batches, micro_batch_size = _run(-1)
+
+        assert micro_batch_size == 2
+        assert [mb["sequences"].shape[0] for mb in micro_batches] == [2, 2, 1]
+        assert not any(mb["is_padding_batch"] for mb in micro_batches)
+        assert all(mb["num_real_microbatches"] == mb["num_microbatches"] for mb in micro_batches)
+        assert sample_output.loss_fn_outputs == self._expected_marker_outputs()
+        assert token_output.metrics == sample_output.metrics
 
     def test_multimodal_tensorlist_microbatching(self):
         """Token-based microbatching must gather TensorList fields (multi-modal pixel_values /
