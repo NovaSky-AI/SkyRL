@@ -173,3 +173,27 @@ async def test_reasoning_is_split_when_the_prompt_opened_the_think_block(
     message = reply.choices[0].message.model_dump(exclude_none=True)
     assert message["content"] == "hello"
     assert message["reasoning_content"] == "hmm"
+
+
+def test_qwen35_refuses_developer_messages_and_renders_them_folded(prefilling_renderer: RenderersRenderer) -> None:
+    """Why token mode folds ``developer`` (``tokens.developer``): Qwen3.5's template has no such role, and its
+    renderer raises on one, and on a system message that isn't first. Codex opens with several."""
+    from skycap.tokens.developer import fold_developer, template_knows_developer
+
+    messages = [
+        {"role": "system", "content": "You are Codex."},
+        {"role": "developer", "content": "Sandbox: workspace-write."},
+        {"role": "developer", "content": "Approvals: never."},
+        user("hi"),
+    ]
+
+    assert prefilling_renderer.chat_template is not None
+    assert not template_knows_developer(prefilling_renderer.chat_template)
+    with pytest.raises(ValueError):
+        prefilling_renderer.render(messages, None)
+    folded = fold_developer(messages, prefilling_renderer.chat_template)
+    assert folded[0] == {
+        "role": "system",
+        "content": "You are Codex.\n\nSandbox: workspace-write.\n\nApprovals: never.",
+    }
+    assert prefilling_renderer.render(folded, None).token_ids

@@ -58,14 +58,17 @@ def build_backend(
     sampling_mask: bool = False,
     logprobs_mode: str = "processed_logprobs",
     use_raw_content: bool = False,
+    length_as_completed: bool = False,
 ) -> Backend:
     """What ``skycap serve`` and ``CaptureService`` run, from the options they share.
 
     Token mode renders with ``tokenizer`` through ``renderers``, or with ``renderer`` when one is given
-    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default.
+    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default. ``length_as_completed`` reports a
+    length cut-off to the client as completed where the API says ``incomplete`` (Responses), in either mode;
+    the record keeps ``finish_reason: "length"``.
     """
     if mode == "text":
-        return TextBackend(upstream_url, api_key=api_key)
+        return TextBackend(upstream_url, api_key=api_key, length_as_completed=length_as_completed)
     if mode != "tokens":
         raise ValueError(f"mode must be 'text' or 'tokens', not {mode!r}")
     if (tokenizer is None) == (renderer is None):
@@ -87,6 +90,7 @@ def build_backend(
         sampling_mask=sampling_mask,
         logprobs_mode=logprobs_mode,
         use_raw_content=use_raw_content,
+        length_as_completed=length_as_completed,
     )
 
 
@@ -121,6 +125,7 @@ class CaptureService:
         sampling_mask: bool = False,
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
+        length_as_completed: bool = False,
         record_dir: str | None = None,
         record_mirror: str | RecordMirror | None = None,
         record_mirror_config: Mapping[str, Any] | None = None,
@@ -147,6 +152,7 @@ class CaptureService:
             sampling_mask=sampling_mask,
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
+            length_as_completed=length_as_completed,
         )
         self.server = CaptureServer(
             backend,
