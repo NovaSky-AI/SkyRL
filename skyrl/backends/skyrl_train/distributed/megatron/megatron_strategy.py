@@ -13,9 +13,11 @@ import torch
 import torch.nn as nn
 from jaxtyping import Float
 from megatron.core import dist_checkpointing
+from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
+    load_sharded_metadata,
 )
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
@@ -23,6 +25,7 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 )
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
 from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncCallsQueue
 from torch import distributed as dist
 from torch import optim
@@ -318,6 +321,29 @@ class MegatronStrategy(DistributedStrategy):
             if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
 
+    def _sharded_rng_state(self) -> ShardedObject:
+        """Return this rank's RNG state, including Megatron's CUDA RNG tracker, as its own checkpoint shard.
+
+        The shard grid is (PP, TP, DP with CP), as in Megatron-LM's ``get_rng_state``: tracker
+        streams are seeded per rank, so every rank in that grid saves and restores its own state.
+        """
+        rng_state = self.get_rng_state()
+        rng_state["cuda_rng_tracker"] = get_cuda_rng_tracker().get_states()
+        return ShardedObject(
+            "rng",
+            rng_state,
+            (
+                mpu.get_pipeline_model_parallel_world_size(),
+                mpu.get_tensor_model_parallel_world_size(),
+                mpu.get_data_parallel_world_size(with_context_parallel=True),
+            ),
+            (
+                mpu.get_pipeline_model_parallel_rank(),
+                mpu.get_tensor_model_parallel_rank(),
+                mpu.get_data_parallel_rank(with_context_parallel=True),
+            ),
+        )
+
     def save_checkpoint(
         self,
         model: MegatronModelWrapper,
@@ -359,8 +385,8 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        # Save RNG state.
-        sharded_state_dict["rng"] = self.get_rng_state()
+        # Save each rank's RNG state.
+        sharded_state_dict["rng"] = self._sharded_rng_state()
 
         # Save the checkpoint across ranks in parallel.
         save_strategy = get_default_save_sharded_strategy("torch_dist")
@@ -499,14 +525,7 @@ class MegatronStrategy(DistributedStrategy):
         if io.is_cloud_path(ckpt_dir):
             state_dict = self._load_dist_checkpoint_from_cloud(ckpt_dir, sharded_state_dict)
         else:
-            # Load from local filesystem with full parallel strategy.
-            load_strategy = get_default_load_sharded_strategy(ckpt_dir)
-            load_strategy = FullyParallelLoadStrategyWrapper(
-                load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-            )
-            state_dict = dist_checkpointing.load(
-                sharded_state_dict=sharded_state_dict, checkpoint_dir=ckpt_dir, sharded_strategy=load_strategy
-            )
+            state_dict = self._load_dist_checkpoint(ckpt_dir, sharded_state_dict)
 
         if not self.is_lora:
             # Load the model, optimizer, and scheduler state dicts.
@@ -533,11 +552,34 @@ class MegatronStrategy(DistributedStrategy):
             scheduler.load_state_dict(state_dict["lr_scheduler"])
             self.print("Loaded LR scheduler state dict.")
 
-        # Load RNG state, if present.
-        if "rng" in state_dict:
-            self.load_rng_state(state_dict["rng"])
+        rng_state = state_dict.get("rng")
+        if rng_state is None:
+            self.print("Checkpoint has no RNG state for this parallel layout; keeping the current RNG state.")
+        else:
+            self.load_rng_state(rng_state)
+            if "cuda_rng_tracker" in rng_state:
+                get_cuda_rng_tracker().set_states(rng_state["cuda_rng_tracker"])
+            else:
+                self.print("Checkpoint predates per-rank RNG state; restoring rank 0's RNG state on every rank.")
 
         return ckpt_dir, {}
+
+    def _load_dist_checkpoint(self, checkpoint_dir: str, sharded_state_dict: dict) -> dict:
+        """Load a local torch_dist checkpoint, reading shards in parallel across the DP group.
+
+        Requests this rank's RNG shard only when the checkpoint has one for the current parallel
+        layout. Older checkpoints keep rank 0's RNG state in their common state instead.
+        """
+        load_strategy = get_default_load_sharded_strategy(checkpoint_dir)
+        rng_state = self._sharded_rng_state()
+        if rng_state.unique_key in load_sharded_metadata(checkpoint_dir, load_strategy):
+            sharded_state_dict = {**sharded_state_dict, "rng": rng_state}
+        load_strategy = FullyParallelLoadStrategyWrapper(
+            load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+        )
+        return dist_checkpointing.load(
+            sharded_state_dict=sharded_state_dict, checkpoint_dir=checkpoint_dir, sharded_strategy=load_strategy
+        )
 
     _SHARD_FILE_PATTERN = re.compile(r"__(\d+)_\d+\.distcp$")
 
@@ -599,15 +641,7 @@ class MegatronStrategy(DistributedStrategy):
 
             self.print(f"All ranks downloaded checkpoint shards from {ckpt_dir}")
 
-            load_strategy = get_default_load_sharded_strategy(local_dir)
-            load_strategy = FullyParallelLoadStrategyWrapper(
-                load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-            )
-            return dist_checkpointing.load(
-                sharded_state_dict=sharded_state_dict,
-                checkpoint_dir=local_dir,
-                sharded_strategy=load_strategy,
-            )
+            return self._load_dist_checkpoint(local_dir, sharded_state_dict)
         finally:
             dist.barrier()
             if node_local_rank == 0:
