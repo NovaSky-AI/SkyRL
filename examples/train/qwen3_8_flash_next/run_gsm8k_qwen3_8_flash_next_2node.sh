@@ -45,7 +45,8 @@ MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 MAX_TOKENS_PER_MICROBATCH=8192
 # vLLM sizes its KV pool at engine start; the trainer's post-offload residual grows to ~24 GiB/GPU
-# after the first optimizer step, and 0.85 OOMed adding the adapter at step 2.
+# after the first optimizer step, and 0.85 OOMed adding the adapter at step 2. At 0.6 vLLM has
+# ~950 GDN state blocks, one per running sequence, so max_num_seqs is capped below the 1024 default.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 
 MEGATRON_TP=1
@@ -132,6 +133,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   generator.inference_engine.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
+  generator.inference_engine.max_num_seqs=512 \
   generator.inference_engine.engine_init_kwargs="$ENGINE_INIT_KWARGS" \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.batched=true \
