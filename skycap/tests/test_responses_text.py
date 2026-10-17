@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -42,6 +43,10 @@ class MockResponses:
         self.status = "completed"
         self.reason: str | None = None
         self.chunk = 7
+        #: The line ending of every line, and so (twice) of every event.
+        self.eol = b"\n"
+        #: Seconds to keep a streamed reply's connection open after its last event.
+        self.linger = 0.0
         #: The bytes of the last streamed reply, as sent.
         self.sent = b""
 
@@ -68,8 +73,15 @@ class MockResponses:
             frames.append({"type": "response.output_item.added", "output_index": index, "item": item})
             frames.append({"type": "response.output_item.done", "output_index": index, "item": item})
         frames.append({"type": f"response.{self.status}", "response": self.response()})
+        eol = self.eol
         return b"".join(
-            b"event: " + frame["type"].encode() + b"\ndata: " + orjson.dumps({**frame, "sequence_number": n}) + b"\n\n"
+            b"event: "
+            + frame["type"].encode()
+            + eol
+            + b"data: "
+            + orjson.dumps({**frame, "sequence_number": n})
+            + eol
+            + eol
             for n, frame in enumerate(frames)
         )
 
@@ -83,6 +95,7 @@ class MockResponses:
         self.sent = self.events()
         for start in range(0, len(self.sent), self.chunk):
             await response.write(self.sent[start : start + self.chunk])
+        await asyncio.sleep(self.linger)
         await response.write_eof()
         return response
 
@@ -128,7 +141,8 @@ def calls(document: dict) -> list[dict]:
 
 
 def last_event(body: bytes) -> dict:
-    return orjson.loads([line for line in body.split(b"\n") if line.startswith(b"data: ")][-1][6:])
+    lines = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+    return orjson.loads([line for line in lines if line.startswith(b"data: ")][-1][6:])
 
 
 # -- forwarding and recording ---------------------------------------------------------------------------
@@ -279,3 +293,22 @@ async def test_what_the_dialect_refuses_never_reaches_the_upstream(fields: dict)
         status, _ = await stack.call(created, {"model": "policy", "input": "q", **fields})
 
     assert status == 400 and stack.upstream.requests == []
+
+
+@pytest.mark.parametrize("eol", [b"\r", b"\r\n"])
+async def test_a_stream_with_bare_cr_or_crlf_lines_is_relayed_without_waiting_for_the_upstream_to_close(
+    eol: bytes,
+) -> None:
+    """The relay ends at the final event, not at EOF: an upstream that keeps the connection open must not stall."""
+    async with responses_stack(length_as_completed=True) as stack:
+        stack.upstream.eol, stack.upstream.linger, stack.upstream.chunk = eol, 30.0, 3
+        stack.upstream.status, stack.upstream.reason = "incomplete", "max_output_tokens"
+        created = await stack.create()
+        status, body = await asyncio.wait_for(
+            stack.call(created, {"model": "policy", "input": "q", "stream": True}), timeout=5
+        )
+        document = await stack.document(created)
+
+    assert status == 200
+    assert last_event(body)["type"] == "response.completed"
+    assert [call["finish_reason"] for call in calls(document)] == ["length"]

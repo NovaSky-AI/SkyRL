@@ -14,6 +14,7 @@ in an ``Assembler``.
 from __future__ import annotations
 
 import functools
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -230,11 +231,48 @@ class Dialect(ABC):
         return payload
 
 
+#: An SSE line ending: CRLF, LF or a bare CR, mixed freely within one stream.
+_LINE_BREAK = re.compile(rb"\r\n|\r|\n")
+
+
+def sse_data(event: bytes) -> bytes | None:
+    """An SSE event's data as the SSE spec reads it: its ``data`` fields joined with a newline, or None
+    when it has none. A line starting with ``:`` is a comment, and one space after the colon is dropped."""
+    data = []
+    for line in _LINE_BREAK.split(event):
+        name, colon, value = line.partition(b":")
+        if name != b"data":
+            continue
+        if colon and value.startswith(b" "):
+            value = value[1:]
+        data.append(value)
+    return b"\n".join(data) if data else None
+
+
+def sse_json(event: bytes) -> Any:
+    """An SSE event's data decoded as JSON, or None when it has no data or the data isn't JSON."""
+    data = sse_data(event)
+    if data is None:
+        return None
+    try:
+        return orjson.loads(data)
+    except orjson.JSONDecodeError:
+        return None
+
+
 def _event_end(buffer: bytes) -> tuple[int, int] | None:
-    """Where the first complete SSE event ends: (end of event, start of next)."""
-    best: tuple[int, int] | None = None
-    for separator in (b"\n\n", b"\r\n\r\n"):
-        index = buffer.find(separator)
-        if index != -1 and (best is None or index < best[0]):
-            best = (index, index + len(separator))
-    return best
+    """Where the first complete SSE event ends: (end of event, start of next), or None until one has.
+
+    An event ends at a blank line, and lines end in CRLF, LF or a bare CR. A CR at the end of the buffer may
+    be the first half of a CRLF, so a line it ends waits for the next byte. When it ends the blank line, the
+    event is over either way: it is returned at once, and a LF that follows reads as an empty event.
+    """
+    line_start = 0
+    while (match := _LINE_BREAK.search(buffer, line_start)) is not None:
+        start, end = match.span()
+        if start == line_start:
+            return start, end
+        if end == len(buffer) and buffer[start:end] == b"\r":
+            return None
+        line_start = end
+    return None

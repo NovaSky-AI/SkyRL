@@ -30,6 +30,7 @@ from skycap.dialects.base import (
     Reply,
     RequestError,
     Turn,
+    sse_data,
 )
 
 
@@ -119,19 +120,18 @@ class StreamAssembler(Assembler):
         return self.saw_done
 
     def event(self, event: bytes) -> None:
-        for line in event.splitlines():
-            if not line.startswith(b"data:"):
-                continue
-            data = line[5:].strip()
-            if data == b"[DONE]":
-                self.saw_done = True
-                continue
-            try:
-                payload = orjson.loads(data)
-            except orjson.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                self._payload(payload)
+        data = sse_data(event)
+        if data is None:
+            return
+        if data.strip() == b"[DONE]":
+            self.saw_done = True
+            return
+        try:
+            payload = orjson.loads(data)
+        except orjson.JSONDecodeError:
+            return
+        if isinstance(payload, dict):
+            self._payload(payload)
 
     def _payload(self, payload: dict[str, Any]) -> None:
         if isinstance(payload.get("usage"), dict):

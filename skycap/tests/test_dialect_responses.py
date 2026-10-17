@@ -13,7 +13,8 @@ import orjson
 import pytest
 
 from skycap.dialects import CallRequest, DialectType, RequestError, Turn
-from skycap.dialects.openai_chat import ChatDialect
+from skycap.dialects.base import sse_data
+from skycap.dialects.openai_chat import ChatDialect, StreamAssembler
 from skycap.dialects.openai_responses import (
     ResponsesAssembler,
     ResponsesDialect,
@@ -869,7 +870,8 @@ def test_the_assembler_reads_a_stream_in_any_chunking(size: int, separator: byte
     assert assembler.flush() == b""
 
     assert b"".join(raw for raw, _ in events) == data
-    assert [ending for _, ending in events] == [False] * 5 + [True]
+    # A chunk that ends on the CR of a CRLF blank line ends the event at once; its LF is an empty event.
+    assert [ending for raw, ending in events if raw.strip()] == [False] * 5 + [True]
     assert assembler.done
     assert assembler.reply().message == {"role": "assistant", "content": "a", "tool_calls": [tool_call("c1")]}
 
@@ -1008,3 +1010,138 @@ def test_the_chat_dialect_marks_a_raw_reply_with_null_reasoning_and_responses_ta
         "reasoning_content": None,
     }
     assert chat.raw_content is True and RESPONSES.raw_content is False
+
+
+# -- SSE framing (dialects.base): line endings and multi-line data, for both dialects -----------------------------
+
+#: Every blank-line separator the SSE spec allows: a line's ending, then the blank line's.
+SEPARATORS = [b"\n\n", b"\r\n\r\n", b"\r\r", b"\n\r\n", b"\r\n\n", b"\r\n\r", b"\n\r", b"\r\r\n"]
+
+
+def framed(*payloads: dict, separators: list[bytes], eol: bytes = b"\n") -> bytes:
+    """One event per payload, its separator taken in turn from ``separators``."""
+    return b"".join(
+        b"event: "
+        + payload["type"].encode()
+        + eol
+        + b"data: "
+        + orjson.dumps(payload)
+        + separators[i % len(separators)]
+        for i, payload in enumerate(payloads)
+    )
+
+
+def feed_all(assembler: Any, data: bytes, size: int) -> list[tuple[bytes, bool]]:
+    events = []
+    for start in range(0, len(data), size):
+        events += assembler.feed(data[start : start + size])
+    return events
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 5, 10_000])
+@pytest.mark.parametrize(
+    "separators, eol",
+    [([separator], separator[:1] if separator != b"\r\n\r\n" else b"\r\n") for separator in SEPARATORS]
+    + [(SEPARATORS, b"\r")],
+    ids=[repr(s) for s in SEPARATORS] + ["mixed"],
+)
+def test_every_line_ending_the_spec_allows_splits_events_in_any_chunking(
+    separators: list[bytes], eol: bytes, size: int
+) -> None:
+    data = framed(*UPSTREAM_STREAM, separators=separators, eol=eol)
+    assembler = ResponsesAssembler()
+    events = feed_all(assembler, data, size)
+    rest = assembler.flush()
+
+    assert b"".join(raw for raw, _ in events) + rest == data
+    endings = [ending for raw, ending in events if sse_data(raw) is not None]
+    assert endings == [False] * 5 + [True]
+    assert assembler.reply().message == {"role": "assistant", "content": "a", "tool_calls": [tool_call("c1")]}
+
+
+@pytest.mark.parametrize("separator", [b"\r\r", b"\n\r", b"\r\n\r"])
+def test_a_final_event_ending_in_a_bare_cr_is_read_without_waiting_for_more(separator: bytes) -> None:
+    """The blank line has begun, so the event is over whether a LF follows or not: an upstream that keeps the
+    connection open after it must not stall the relay."""
+    assembler = ResponsesAssembler()
+    events = assembler.feed(framed(UPSTREAM_STREAM[-1], separators=[separator]))
+
+    assert len(events) == 1 and events[0][1] and assembler.done
+
+
+def test_a_crlf_split_across_chunks_does_not_end_the_event_early() -> None:
+    assembler = ResponsesAssembler()
+    payload = b"data: " + orjson.dumps(UPSTREAM_STREAM[-1])
+
+    assert assembler.feed(payload + b"\r") == []
+    events = assembler.feed(b"\n\r\n")
+
+    assert [raw for raw, _ in events] == [payload + b"\r\n\r\n"] and assembler.done
+
+
+def multi_line(payload: dict, eol: bytes = b"\n") -> bytes:
+    """``payload`` pretty-printed over several data lines, as the SSE spec allows."""
+    text = orjson.dumps(payload, option=orjson.OPT_INDENT_2)
+    return (
+        b"event: "
+        + payload["type"].encode()
+        + eol
+        + b"".join(b"data: " + line + eol for line in text.splitlines())
+        + eol
+    )
+
+
+CUT_OFF_EVENT = {
+    "type": "response.incomplete",
+    "response": response_object([said("a")], "incomplete", "max_output_tokens"),
+}
+
+
+@pytest.mark.parametrize("eol", [b"\n", b"\r\n", b"\r"])
+def test_data_split_over_lines_is_joined_before_it_is_decoded(eol: bytes) -> None:
+    assembler = ResponsesAssembler()
+    assembler.feed(multi_line(CUT_OFF_EVENT, eol))
+
+    reply = assembler.reply()
+    assert reply.finish_reason == "length" and reply.message == {"role": "assistant", "content": "a"}
+
+
+@pytest.mark.parametrize("eol", [b"\n", b"\r\n", b"\r"])
+def test_a_cut_off_event_with_data_over_several_lines_is_rewritten(eol: bytes) -> None:
+    rewritten = RESPONSES.length_as_completed(multi_line(CUT_OFF_EVENT, eol), event=True)
+
+    assert rewritten.endswith(eol + eol)
+    payload = orjson.loads(sse_data(rewritten))
+    assert payload["type"] == "response.completed" and payload["response"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "event, data",
+    [
+        (b"data: a\ndata: b", b"a\nb"),
+        (b"data:a", b"a"),
+        (b"data:  two", b" two"),
+        (b"data", b""),
+        (b": keepalive\ndata: x", b"x"),
+        (b"event: e\rid: 1\rdata: x\r\ndata: y", b"x\ny"),
+        (b": only a comment", None),
+        (b"event: e", None),
+        (b"", None),
+    ],
+)
+def test_sse_data_reads_an_event_as_the_spec_does(event: bytes, data: bytes | None) -> None:
+    assert sse_data(event) == data
+
+
+@pytest.mark.parametrize("separator", [b"\n\n", b"\r\r", b"\r\n\r\n"])
+def test_the_chat_assembler_reads_bare_cr_streams_and_multi_line_data(separator: bytes) -> None:
+    chunk = {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]}
+    text = orjson.dumps(chunk, option=orjson.OPT_INDENT_2)
+    eol = separator[: len(separator) // 2]
+    data = b"".join(b"data: " + line + eol for line in text.splitlines()) + eol + b"data: [DONE]" + separator
+    assembler = StreamAssembler()
+    events = feed_all(assembler, data, 3)
+
+    assert b"".join(raw for raw, _ in events) == data
+    assert assembler.done
+    assert assembler.reply().message == {"role": "assistant", "content": "hi"}

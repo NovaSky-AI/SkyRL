@@ -56,6 +56,7 @@ from skycap.dialects.base import (
     Reply,
     RequestError,
     Turn,
+    sse_json,
 )
 
 #: Request fields refused in both modes: they ask for state skycap doesn't keep.
@@ -255,22 +256,15 @@ class ResponsesDialect(Dialect):
         if not event:
             body = orjson.loads(payload)
             return orjson.dumps(_completed(body)) if _cut_off(body) else payload
-        stripped = payload.rstrip(b"\r\n")
-        separator = payload[len(stripped) :]
-        lines = stripped.splitlines()
-        data = next((line for line in lines if line.startswith(b"data:")), None)
-        if data is None:
-            return payload
-        try:
-            frame = orjson.loads(data[5:].strip())
-        except orjson.JSONDecodeError:
-            return payload
+        frame = sse_json(payload)
         if not isinstance(frame, dict) or frame.get("type") != "response.incomplete":
             return payload
         response = frame.get("response")
         if not isinstance(response, dict) or not _cut_off(response):
             return payload
         frame = {**frame, "type": "response.completed", "response": _completed(response)}
+        # The event's own line endings after its last line, whatever they were.
+        separator = payload[len(payload.rstrip(b"\r\n")) :]
         return b"event: response.completed\ndata: " + orjson.dumps(frame) + (separator or b"\n\n")
 
 
@@ -292,22 +286,16 @@ class ResponsesAssembler(Assembler):
         return self.response is not None
 
     def event(self, event: bytes) -> None:
-        for line in event.splitlines():
-            if not line.startswith(b"data:"):
-                continue
-            try:
-                payload = orjson.loads(line[5:].strip())
-            except orjson.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            kind = payload.get("type")
-            if kind == "response.output_item.done" and isinstance(payload.get("item"), dict):
-                self.items[int(payload.get("output_index") or 0)] = payload["item"]
-            elif kind in TERMINAL_EVENTS and isinstance(payload.get("response"), dict):
-                self.response = payload["response"]
-            elif kind == "error":
-                self.response = {"status": "failed", "error": payload}
+        payload = sse_json(event)
+        if not isinstance(payload, dict):
+            return
+        kind = payload.get("type")
+        if kind == "response.output_item.done" and isinstance(payload.get("item"), dict):
+            self.items[int(payload.get("output_index") or 0)] = payload["item"]
+        elif kind in TERMINAL_EVENTS and isinstance(payload.get("response"), dict):
+            self.response = payload["response"]
+        elif kind == "error":
+            self.response = {"status": "failed", "error": payload}
 
     def reply(self) -> Reply:
         if self.response is None:
