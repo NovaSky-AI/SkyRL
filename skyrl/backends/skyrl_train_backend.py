@@ -36,7 +36,12 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
-from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.tinker.config import validate_skyrl_train_backend_config
+from skyrl.train.config import (
+    OptimizerConfig,
+    SkyRLTrainConfig,
+    get_config_as_yaml_str,
+)
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
@@ -48,6 +53,34 @@ from skyrl.utils.tok import get_tokenizer
 # Prefix the policy workers put on every loss-function metric (see
 # `worker.py`, which writes `status["loss_metrics/" + k]`).
 LOSS_METRICS_PREFIX = "loss_metrics/"
+
+# torch.optim.AdamW and Megatron's OptimizerConfig both default eps to 1e-8, and SkyRL-Train
+# does not set it.
+_OPTIMIZER_EPS = 1e-8
+
+
+def _unapplied_adam_params(adam_params: types.AdamParams, optimizer_config: OptimizerConfig, role: str) -> list[str]:
+    """Describe each AdamParams field whose value differs from the optimizer the workers built.
+
+    Only ``learning_rate`` is applied per step; betas, weight decay and gradient clipping come
+    from ``optimizer_config`` and eps is fixed.
+    """
+    prefix = f"trainer.{role}.optimizer_config"
+    beta1, beta2 = optimizer_config.adam_betas
+    fields = [
+        ("beta1", adam_params.beta1, beta1, f"{prefix}.adam_betas"),
+        ("beta2", adam_params.beta2, beta2, f"{prefix}.adam_betas"),
+        ("eps", adam_params.eps, _OPTIMIZER_EPS, None),
+        ("weight_decay", adam_params.weight_decay, optimizer_config.weight_decay, f"{prefix}.weight_decay"),
+        ("grad_clip_norm", adam_params.grad_clip_norm, optimizer_config.max_grad_norm, f"{prefix}.max_grad_norm"),
+    ]
+    unapplied = []
+    for name, requested, used, key in fields:
+        if math.isclose(requested, used):
+            continue
+        source = f"set by {key}" if key is not None else "not configurable"
+        unapplied.append(f"{name}={requested!r} (the optimizer uses {used!r}, {source})")
+    return unapplied
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -92,21 +125,18 @@ def _build_skyrl_train_config(
         lora_config: LoRA configuration if using LoRA
     """
 
+    # The Tinker server runs the same check when it parses --backend-config; this covers
+    # callers that build the backend directly.
+    validate_skyrl_train_backend_config(
+        overrides.model_extra,
+        backend=overrides.strategy,
+        runtime_role=overrides.runtime_role,
+        base_model=base_model,
+    )
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
     if overrides.runtime_role != "combined":
         user_overrides["trainer.placement.colocate_all"] = False
-    # The Tinker path drives profiling through /start_profiling, which builds the
-    # profiler at request time. A static config here would fight it over the single
-    # `worker.profiler` slot, so reject it rather than letting both sources win
-    # unpredictably.
-    profiler_keys = [k for k in user_overrides if k.startswith("trainer.policy.torch_profiler_config")]
-    if profiler_keys:
-        raise ValueError(
-            f"`backend_config` may not set {sorted(profiler_keys)}. The Tinker server controls "
-            f"torch profiling at runtime: start the server with --torch-profiler to enable the "
-            f"endpoints, then call /start_profiling and /stop_profiling."
-        )
     # override base model path
     # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
     # that resolves other config derived from the policy model path.
@@ -179,6 +209,8 @@ class SkyRLTrainBackend(AbstractBackend):
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
+        # Models whose first optim_step has been compared against the optimizer config.
+        self._adam_params_checked: set[str] = set()
 
         # New inference infrastructure
         self._server_groups: list = []
@@ -1239,9 +1271,20 @@ class SkyRLTrainBackend(AbstractBackend):
             raise RuntimeError("Training is unavailable in an inference-only runtime")
         role = self._get_role(model_id)
 
-        # Apply learning rate from AdamParams before optimizer step
-        # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
+        # Apply learning rate from AdamParams before optimizer step. The other AdamParams fields
+        # are fixed when the optimizer is created; a model's first step logs the ones that differ.
         adam_params = request_data.adam_params
+        if model_id not in self._adam_params_checked:
+            self._adam_params_checked.add(model_id)
+            optimizer_config = getattr(self._cfg.trainer, role).optimizer_config
+            unapplied = _unapplied_adam_params(adam_params, optimizer_config, role)
+            if unapplied:
+                logger.warning(
+                    "optim_step for model %s: SkyRL-Train applies only AdamParams.learning_rate, "
+                    "so these request values are not used: %s",
+                    model_id,
+                    "; ".join(unapplied),
+                )
         self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
 
         grad_norm = self._dispatch.optim_step(role, model_id=model_id)

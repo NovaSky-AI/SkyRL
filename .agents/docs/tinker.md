@@ -8,7 +8,7 @@ SkyRL's implementation of the [Tinker API](https://tinker-docs.thinkingmachines.
 - **`skyrl/tinker/proto_serialization.py`** -- Proto wire-format conversion. The tinker SDK (`>=0.25.0,<0.28.0` in `pyproject.toml`; see *SDK compatibility* below) sends `forward_backward` request bodies as protobuf (forward-only passes use the same endpoint with a `forward_only` flag; JSON bodies are rejected with 415) and requires proto-serialized `SampleResponse`/`ForwardBackwardOutput` results from `retrieve_future`. Mirrors the SDK's `tinker/proto/{request,response}_conv.py`; round-trip tested in `tests/tinker/test_proto_serialization.py`.
 - **`skyrl/tinker/engine.py`** -- Background subprocess (`TinkerEngine`). Polls DB, batches compatible requests, dispatches to backend.
 - **`skyrl/tinker/types.py`** -- Internal Pydantic models (distinct from API request/response models in `api.py`). `LOSS_TYPES` dict defines valid loss functions.
-- **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields.
+- **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields. `validate_skyrl_train_backend_config()` holds the table of `backend_config` keys the server sets itself.
 - **`skyrl/tinker/db_models.py`** -- SQLModel tables: `FutureDB`, `ModelDB`, `CheckpointDB`, `SessionDB`, `SamplingSessionDB`.
 - **`skyrl/tinker/loss_fns.py`** -- JAX loss function implementations (cross_entropy, importance_sampling, ppo, cispo). Only used by the JAX backend.
 - **`skyrl/tinker/extra/`** -- `ExternalInferenceClient` for offloading sampling to external vLLM.
@@ -22,6 +22,20 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
 ```
 
 The API process spawns the engine as a child subprocess (via `uv run -m skyrl.tinker.engine`). If the engine crashes, the API server auto-terminates.
+
+### backend_config on the SkyRL-Train backends
+
+`--backend-config` reaches `SkyRLTrainConfig` only at the first `create_model`
+(`_build_skyrl_train_config`), but `EngineConfig` validation checks it at startup
+against `validate_skyrl_train_backend_config()` in `skyrl/tinker/config.py`. Keys the
+server sets itself (model paths, strategy, optimizer lr/scheduler, LoRA rank, ...) are
+rejected when their value differs from the server's; nested spellings are flattened
+first. The API's own reads of `backend_config` (`colocate_all`,
+`fsdp_config.cpu_offload`) go through `flatten_backend_config()` for the same reason.
+When the server starts overriding another key, add it to that table.
+
+Only `AdamParams.learning_rate` is applied per `optim_step`; the backend logs once per
+model which other `AdamParams` fields differ from `trainer.<role>.optimizer_config`.
 
 ## Key API Endpoints
 
