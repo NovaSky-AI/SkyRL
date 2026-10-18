@@ -231,8 +231,57 @@ def chunked_mlp(
     masks = padding_mask.chunk(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
     # input_ids is [b, s] while hidden_states is [s, b, h], so it is chunked along dim 1.
     id_chunks = input_ids.chunk(num_chunks, dim=1) if input_ids is not None else [None] * num_chunks
-    outputs = [
-        mlp(chunk, padding_mask=mask, **({"input_ids": ids} if ids is not None else {}))
-        for chunk, mask, ids in zip(hidden_states.chunk(num_chunks, dim=0), masks, id_chunks)
-    ]
+    chunks = hidden_states.chunk(num_chunks, dim=0)
+    replay = _ChunkedRouterReplay(mlp, [c.shape[0] * c.shape[1] for c in chunks])
+    outputs = []
+    for i, (chunk, mask, ids) in enumerate(zip(chunks, masks, id_chunks)):
+        replay.before_chunk(i)
+        outputs.append(mlp(chunk, padding_mask=mask, **({"input_ids": ids} if ids is not None else {})))
+        replay.after_chunk()
+    replay.finish()
     return torch.cat([out for out, _ in outputs], dim=0), outputs[0][1]
+
+
+class _ChunkedRouterReplay:
+    """Keeps megatron-core router replay (R3) per token when the MoE runs on sequence chunks.
+
+    ``RouterReplay`` holds one [tokens, topk] tensor per router call: ``target_topk_idx`` for the
+    forward, a FIFO ``replay_backward_list`` for activation recompute, and ``recorded_topk_idx``
+    when recording. A chunked MLP calls the router once per chunk, so each call gets its slice of
+    the micro-batch's indices (tokens are [s, b] flattened, and chunks are contiguous in s), and a
+    recording is reassembled from the chunks.
+    """
+
+    def __init__(self, mlp, chunk_tokens):
+        from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+        router = getattr(mlp, "router", None)
+        self.replay = getattr(router, "router_replay", None)
+        self.action = self.replay.router_replay_action if self.replay is not None else None
+        self.bounds = [0]
+        for n in chunk_tokens:
+            self.bounds.append(self.bounds[-1] + n)
+        self.recorded = []
+        self.target = None
+        if self.action == RouterReplayAction.REPLAY_FORWARD:
+            self.target = self.replay.target_topk_idx
+        elif self.action == RouterReplayAction.REPLAY_BACKWARD and self.replay.replay_backward_list:
+            full = self.replay.replay_backward_list.pop(0)
+            self.replay.replay_backward_list[0:0] = [
+                full[lo:hi] for lo, hi in zip(self.bounds[:-1], self.bounds[1:])
+            ]
+        self._record = self.action == RouterReplayAction.RECORD
+
+    def before_chunk(self, i):
+        if self.target is not None:
+            self.replay.target_topk_idx = self.target[self.bounds[i] : self.bounds[i + 1]]
+
+    def after_chunk(self):
+        if self._record and self.replay.recorded_topk_idx is not None:
+            self.recorded.append(self.replay.recorded_topk_idx.clone())
+
+    def finish(self):
+        if self.target is not None:
+            self.replay.target_topk_idx = self.target
+        if self._record and self.recorded:
+            self.replay.recorded_topk_idx = torch.cat(self.recorded, dim=0)
