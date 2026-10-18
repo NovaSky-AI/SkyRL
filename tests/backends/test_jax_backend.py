@@ -292,7 +292,13 @@ def test_micro_batch_grad_accumulation():
     }
 
     # Run 1: micro-batching enabled
-    backend_micro.forward_backward(prepare_model_pass_batch(reqs))
+    outputs = backend_micro.forward_backward(prepare_model_pass_batch(reqs))
+
+    # The SDK's custom-loss path (>= 0.31) pops "loss:sum": the per-request sum of
+    # the elementwise losses it also receives.
+    for request_id, output in outputs.items():
+        expected = sum(sum(datum["elementwise_loss"]["data"]) for datum in output.loss_fn_outputs)
+        assert output.metrics["loss:sum"] == pytest.approx(expected, rel=1e-5), request_id
 
     adapter1_idx = backend_micro.models[adapter1_id].adapter_index
     adapter2_idx = backend_micro.models[adapter2_id].adapter_index

@@ -1,10 +1,11 @@
 """Proto wire-format conversion for the Tinker SDK's binary paths.
 
 Two directions, both required by tinker SDK >= 0.25.0 (older SDKs negotiate
-these via server-side client_config flags and fall back to JSON). Written
-against the SDK's ``tinker_public.proto`` as of 0.27.x; 0.28.0 renamed
-``TopkPromptLogprobs`` to ``TopkLogprobs`` (``prompt_length`` -> ``length``),
-which the top-k serializer below does not yet handle:
+these via server-side client_config flags and fall back to JSON). The server
+encodes with whichever SDK's ``tinker_public_pb2`` is installed, so schema
+changes across SDK lines (``loss_fn_config_v2`` in 0.27, the
+``TopkPromptLogprobs`` -> ``TopkLogprobs`` rename in 0.28) are feature-detected
+below rather than assumed:
 
 - **Responses**: the SDK retrieves ``sample``, ``forward``, and
   ``forward_backward`` results as protobuf (``Accept: application/x-protobuf``
@@ -64,6 +65,11 @@ _PROTO_DTYPE_TO_NUMPY = {pb.DTYPE_FLOAT32: np.float32, pb.DTYPE_INT64: np.int64}
 # SDK >= 0.27 schemas carry the tagged loss_fn_config_v2 map; the server runs
 # against whichever SDK is installed, so feature-detect it.
 _HAS_LOSS_FN_CONFIG_V2 = "loss_fn_config_v2" in pb.ForwardBackwardRequest.DESCRIPTOR.fields_by_name
+
+# SDK >= 0.28 renamed the top-k matrix message (and its row-count field) when
+# it started reusing it for per-sequence sampled top-k.
+_TOPK_MESSAGE = getattr(pb, "TopkLogprobs", None) or pb.TopkPromptLogprobs
+_TOPK_LENGTH_FIELD = "length" if "length" in _TOPK_MESSAGE.DESCRIPTOR.fields_by_name else "prompt_length"
 
 
 def parse_forward_backward_request(body: bytes) -> tuple[dict, bool]:
@@ -194,7 +200,7 @@ def serialize_sample_output(
     if topk_prompt_logprobs is not None:
         rows = topk_prompt_logprobs
         # k is not recorded in the result, so recover it from the widest row.
-        # With every row undefined, use k=1 so prompt_length stays encoded
+        # With every row undefined, use k=1 so the row count stays encoded
         # (the client maps fully-masked rows back to None).
         k = max((len(row) for row in rows if row), default=1)
         token_ids = np.full((len(rows), k), _TOPK_MASK_TOKEN_ID, dtype=np.int32)
@@ -204,11 +210,11 @@ def serialize_sample_output(
                 token_ids[i, j] = token_id
                 logprobs[i, j] = logprob
         proto.topk_prompt_logprobs.CopyFrom(
-            pb.TopkPromptLogprobs(
-                prompt_length=len(rows),
+            _TOPK_MESSAGE(
                 k=k,
                 token_ids=token_ids.tobytes(),
                 logprobs=logprobs.tobytes(),
+                **{_TOPK_LENGTH_FIELD: len(rows)},
             )
         )
 

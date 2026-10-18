@@ -757,11 +757,13 @@ class JaxBackendImpl(AbstractBackend):
         # Compute per-request results
         for request_id, _, start_idx, end_idx in request_batch_slices:
             loss_fn_outputs = []
+            loss_sum = 0.0
             # Compute per-example losses
             for i in range(start_idx, end_idx):
                 # Extract losses for this example's tokens
                 token_losses = token_losses_out[i]
                 token_logprobs = logprobs_out[i]
+                loss_sum += float(token_losses.sum())
                 loss_fn_outputs.append(
                     {
                         "elementwise_loss": {
@@ -780,7 +782,9 @@ class JaxBackendImpl(AbstractBackend):
             results[request_id] = types.ForwardBackwardOutput(
                 loss_fn_output_type="scalar",
                 loss_fn_outputs=loss_fn_outputs,
-                metrics={},
+                # The SDK's custom-loss path (>= 0.31) pops "loss:sum" from the
+                # result to report the surrogate loss.
+                metrics={"loss:sum": loss_sum},
             )
 
         return results

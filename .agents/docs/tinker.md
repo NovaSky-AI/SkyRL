@@ -44,13 +44,15 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 
 ## SDK compatibility
 
-`pyproject.toml` pins `tinker>=0.25.0,<0.28.0`; `uv.lock` resolves 0.27.2. Verified against 0.25.0, 0.27.0 and 0.27.2. What each SDK line needs from the server:
+`pyproject.toml` pins `tinker>=0.25.0,<0.34.0`; `uv.lock` resolves 0.33.1. The server encodes/decodes with whichever SDK's `tinker_public_pb2` is installed, so `proto_serialization.py` feature-detects schema changes instead of assuming one line. What each SDK line needs from the server:
 
 - **0.25**: proto `forward_backward` bodies and proto `retrieve_future` results (`proto_serialization.py`).
-- **0.26/0.27**: `asample` must return `sample_sequence_ids`, one per `num_samples` (`SampleFutureResponse`); the SDK stamps them onto `SampledSequence.sequence_id` client-side, so the proto result does not carry them. `forward_backward` requests dual-write `loss_fn_config` into a legacy float map and `loss_fn_config_v2` (number/text union); the parser prefers v2 so string values reach the API model (which rejects them, since no SkyRL loss takes a string).
-- **0.28 is not supported yet**: it renames the proto `TopkPromptLogprobs` message to `TopkLogprobs` (`prompt_length` -> `length`), which breaks `serialize_sample_output` for `topk_prompt_logprobs > 0`, and adds `save_weights_external`.
+- **0.26/0.27**: `asample` must return `sample_sequence_ids`, one per `num_samples` (`SampleFutureResponse`); the SDK stamps them onto `SampledSequence.sequence_id` client-side. `forward_backward` requests dual-write `loss_fn_config` into a legacy float map and `loss_fn_config_v2` (number/text union); the parser prefers v2 so string values reach the API model (which rejects them, since no SkyRL loss takes a string).
+- **0.28**: proto `TopkPromptLogprobs` renamed to `TopkLogprobs` (`prompt_length` -> `length`); the top-k serializer picks whichever the installed SDK has.
+- **0.31+**: `forward_backward_custom` pops `loss:sum` from the result metrics (the Tinker service's name for the training loss). Both backends emit it: `skyrl_train_backend._extract_metrics` mirrors `total_loss:sum`, the JAX backend sums the per-token losses.
+- **0.32**: optimizer families. `create_model`/`load_weights` carry `optimizer_config` and `optim_step` sends non-Adam params under `optimizer_params` instead of `adam_params`; anything but Adam is a 422. New `SampleRequest` options the engines do not produce (`topk_sample_logprobs`, `target_prompt_logprobs`, `prompt_alt_tokens_k`, and 0.33's `prompt_logprobs_last_n`) are rejected rather than silently ignored.
 
-0.27 client features that are opt-in behind server-driven flags and that SkyRL leaves off (the stub `/api/v1/client/config` returns defaults): `sample_use_retrieve_futures` (`/api/v1/retrieve_futures` session poller), `sample_cancel_enabled` (`/api/v1/cancel_future`). Not implemented and ignored: `copy_weights`, checkpoint `user_metadata`, `Datum` provenance spans, `SampleRequest.record_stability_info`.
+Client features that are opt-in behind server-driven flags and that SkyRL leaves off (the stub `/api/v1/client/config` returns defaults): `sample_use_retrieve_futures` (`/api/v1/retrieve_futures` session poller), `sample_join_sampling_session` (`/api/v1/join_sampling_session`), dynamic-config `sample_cancel_enabled` (`/api/v1/cancel_future`). Not implemented: `copy_weights`, `save_weights_external` and external weights URLs, checkpoint `user_metadata`, `Datum` provenance spans, `SampleRequest.record_stability_info`, the checkpoint billing route.
 
 ## Concurrency and Batching
 
