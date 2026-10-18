@@ -428,18 +428,29 @@ def test_delete_then_train_remaining(service_client):
     tok = a.get_tokenizer()
     data = [_make_datum(tok, "Q?", " a")]
 
-    # Delete A via the unload_model endpoint (Tinker exposes this as the
-    # public deletion path).
+    # The SDK no longer exposes models.unload, but the server endpoint remains.
     async def _unload(model_id: str):
         async with tinker._client.AsyncTinker(  # type: ignore[attr-defined]
             api_key=TINKER_API_KEY, base_url=f"http://0.0.0.0:{TEST_PORT}/"
         ) as client:
-            future = await client.models.unload(request=tinker_types.UnloadModelRequest(model_id=model_id))
-            return await client.futures.retrieve(
-                request=tinker_types.FutureRetrieveRequest(request_id=future.request_id)
+            future = await client.post(
+                "/api/v1/unload_model",
+                body=tinker_types.UnloadModelRequest(model_id=model_id).model_dump(mode="json"),
+                cast_to=tinker_types.UntypedAPIFuture,
             )
+            async with asyncio.timeout(60):
+                while True:
+                    response = await client.futures.with_raw_response.retrieve(
+                        request=tinker_types.FutureRetrieveRequest(request_id=future.request_id)
+                    )
+                    result = await response.json()
+                    if result.get("type") != "try_again":
+                        return result
+                    await asyncio.sleep(0.1)
 
-    asyncio.run(_unload(a.model_id))
+    result = asyncio.run(_unload(a.model_id))
+    assert result["type"] == "unload_model"
+    assert result["model_id"] == a.model_id
 
     # B should still train successfully — backend should NOT have done a
     # ray.shutdown when only A was deleted.

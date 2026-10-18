@@ -165,8 +165,8 @@ def _candidates(
     A child qualifies if its fields equal the message's once empty strings are
     dropped too, and it was matched by this call's key: the same tools and
     model. Siblings with the same match hash render alike, so only one is
-    tried: the one history continues from (model-authored, then latest), as
-    in ``MessageGraph.add``.
+    tried: the latest, the one history continues from, as in
+    ``MessageGraph.add``.
     """
     loose = _loose(message, key)
     found: list[int] = []
@@ -178,11 +178,8 @@ def _candidates(
             continue
         found.append(node_id)
 
-    def preference(node_id: int) -> tuple[bool, int]:
-        return graph.nodes[node_id].author == "model", node_id
-
     by_spelling: dict[str, int] = {}
-    for node_id in sorted(found, key=preference, reverse=True):
+    for node_id in sorted(found, reverse=True):
         by_spelling.setdefault(graph.nodes[node_id].match_hash, node_id)
     return list(by_spelling.values())
 

@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
     fold_lora_alpha_for_vllm,
     fold_lora_rank_scale_for_vllm,
     mark_alpha_folded,
+    normalized_moe_expert_lora_rank,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
@@ -460,7 +461,7 @@ class MegatronWorker:
                 f"normalize_moe_lora requires lora.rank divisible by moe_router_topk; "
                 f"got rank={lora_config.rank}, topk={topk}"
             )
-            expert_rank = -(-(lora_config.rank // topk) // etp) * etp
+            expert_rank = normalized_moe_expert_lora_rank(lora_config.rank, topk, etp)
             assert expert_rank <= lora_config.rank, (
                 f"normalize_moe_lora: expert rank {lora_config.rank // topk} (rank {lora_config.rank} // topk "
                 f"{topk}) rounds up to {expert_rank} for expert_tensor_parallel_size={etp}, exceeding the "
@@ -500,6 +501,9 @@ class MegatronWorker:
                 experts_shared_outer_loras=experts_shared_outer_loras,
                 normalize_moe_lora=normalize_moe_lora,
                 share_expert_adapters=lora_config.share_expert_adapters,
+                sequence_parallel_input_regather=(
+                    self.cfg.policy.megatron_config.lora_config.sequence_parallel_input_regather
+                ),
             )
         elif lora_type == "canonical_lora":
             if experts_shared_outer_loras:
@@ -979,7 +983,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             is_vlm=self.is_vlm,
         )
 
-        self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
+        megatron_config = self.cfg.policy.megatron_config
+        self.empty_cuda_cache = megatron_config.empty_cuda_cache is not False
+        self.empty_cuda_cache_after_backward = megatron_config.empty_cuda_cache_after_backward()
 
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.
@@ -1276,7 +1282,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return_per_token_outputs=return_per_token_outputs,
         )
 
-        if self.empty_cuda_cache:
+        if self.empty_cuda_cache_after_backward:
             torch.cuda.empty_cache()
 
         # Aggregate metrics across micro-batches
