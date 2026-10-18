@@ -10,7 +10,7 @@ from typing import Optional
 from skyrl.train.config import SkyRLTrainConfig, AlgorithmConfig
 from skyrl.train.utils import initialize_ray
 from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
-from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
+from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry, reduce_loss
 
 
 # Example of custom policy loss: "reinforce"
@@ -20,12 +20,13 @@ def compute_reinforce_policy_loss(
     advantages: torch.Tensor,
     config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
 ):
     """
     Simple REINFORCE baseline - basic policy gradient that will enable learning.
     """
     # Classic REINFORCE: minimize -log_prob * advantage
-    loss = (-log_probs * advantages).mean()
+    loss = reduce_loss(-log_probs * advantages, loss_mask)
 
     # Return loss and dummy clip_ratio (no clipping in REINFORCE)
     return loss, {"clip_ratio": 0.0}
