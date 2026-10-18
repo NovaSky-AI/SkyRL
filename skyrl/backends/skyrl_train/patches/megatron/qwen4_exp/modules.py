@@ -9,11 +9,13 @@ contiguous token stream of every packed sequence.
 import json
 import math
 import os
-from typing import Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet
 from megatron.core.transformer.transformer_config import TransformerConfig
 from safetensors import safe_open
@@ -317,22 +319,235 @@ class Qwen4ExpPLE(nn.Module):
         return out.view(s, b, nc)
 
 
-class Qwen4ExpIndexerParams(nn.Module):
-    """Frozen holder for the QSA indexer weights of a full-attention layer.
+# ------------------------------------------------------------------------------------------------
+# QSA (Qwen sparse attention) indexer and the attention over its selection
+# ------------------------------------------------------------------------------------------------
 
-    The indexer only selects which keys a query may attend to (block top-k over pooled keys,
-    non-differentiable). With at most ``indexer_budget`` (+ compress_ratio - 1) visible tokens per
-    query it selects every key, so attention is exactly dense; the provider enforces that bound.
-    The weights are kept so checkpoints round-trip.
+# Query rows per chunk of the indexer scores ([rows, heads, blocks] fp32) and of the masked
+# attention ([heads, rows, keys]): bounds peak memory independently of the sequence length.
+QSA_INDEXER_CHUNK = 1024
+QSA_ATTENTION_CHUNK = 512
+# CUDA fast path for sequences in the sparse regime: FlexAttention with the QSA selection as its
+# mask (~3x faster than the chunked SDPA path at 8K tokens, which only gets SDPA's math kernel for
+# head_dim 256 with a boolean mask). Sequences are padded to a multiple of QSA_FLEX_PAD so the
+# compiled kernel sees few distinct shapes. SKYRL_QWEN4_QSA_FLEX=0 forces the SDPA path.
+QSA_FLEX_PAD = 2048
+_QSA_FLEX = os.environ.get("SKYRL_QWEN4_QSA_FLEX", "1") != "0"
+_flex_attention = None
+
+
+def _rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    """HF ``apply_rotary_pos_emb``: rotate-half RoPE on the leading ``cos.shape[-1]`` dims."""
+    d = cos.shape[-1]
+    x_rot, x_pass = x[..., :d], x[..., d:]
+    x1, x2 = x_rot.chunk(2, dim=-1)
+    return torch.cat((x_rot * cos + torch.cat((-x2, x1), dim=-1) * sin, x_pass), dim=-1)
+
+
+@dataclass
+class QSASequenceSelection:
+    """The keys every query of one packed sequence attends to.
+
+    ``block_mask[t, b]`` is True iff key block ``b`` (tokens ``[b*r, (b+1)*r)`` of the sequence)
+    is selected for query ``t``; query ``t`` also always sees its incomplete tail
+    ``[((t+1)//r)*r, t]``. ``None`` means every visible key is selected (causal dense).
+    """
+
+    start: int  # first token in the packed stream
+    length: int  # real (unpadded) tokens
+    block_mask: Optional[Tensor]  # [length, length // r] bool
+
+
+@dataclass
+class QSASelection:
+    sequences: List[QSASequenceSelection]
+    compress_ratio: int
+
+
+class Qwen4ExpQSAIndexer(nn.Module):
+    """HF ``Qwen4ExpTextQSAIndexer``: selects, per query, the keys of a full-attention layer.
+
+    For query ``t`` of a sequence (0-based, causal), the visible tokens ``0..t`` split into
+    ``(t+1)//r`` complete blocks of ``r = indexer_compress_ratio`` tokens plus an incomplete tail.
+    Each block is pooled (fp32 mean of the raw indexer keys, ``k_layernorm``, RoPE at the block's
+    first position) and scored as ``sum_h relu(q_h . k_block) / sqrt(d)``; the top
+    ``indexer_budget // r`` blocks and the tail are selected. With at most ``indexer_budget // r``
+    complete blocks every key is selected, so sequences of up to ``indexer_budget + r - 1`` tokens
+    are exactly dense (``select`` returns None and the layer keeps the fused dense kernel). Note the
+    query itself is only seen when it is in the tail or in a selected block, as in HF.
+
+    The weights are frozen and the selection is non-differentiable (as in HF); gradients flow
+    through the attention over the selected keys (``qsa_sparse_attention``).
     """
 
     def __init__(self, config: TransformerConfig):
         super().__init__()
         d = config.qwen4_indexer_head_dim
-        self.index_qk_proj = nn.Linear(
-            config.hidden_size, (config.qwen4_indexer_n_heads + config.qwen4_indexer_kv_heads) * d, bias=False
-        )
+        if config.qwen4_indexer_kv_heads != 1:
+            raise ValueError("The Qwen4Exp QSA indexer requires indexer_kv_heads=1 (as HF).")
+        self.n_heads, self.head_dim = config.qwen4_indexer_n_heads, d
+        self.compress_ratio = config.qwen4_indexer_compress_ratio
+        self.block_topk = config.qwen4_indexer_budget // self.compress_ratio
+        self.max_dense_length = config.qwen4_indexer_budget + self.compress_ratio - 1
+        self.index_qk_proj = nn.Linear(config.hidden_size, (self.n_heads + 1) * d, bias=False)
         self.q_layernorm = ZeroCenteredRMSNorm(d, eps=config.layernorm_epsilon)
         self.k_layernorm = ZeroCenteredRMSNorm(d, eps=config.layernorm_epsilon)
         for p in self.parameters():
             p.requires_grad_(False)
+
+    @torch.no_grad()
+    def select_sequence(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+        """Block mask ([L, L // r] bool) of one sequence; ``x`` is [L, C], cos/sin [L, rot] in x's dtype."""
+        length, r, d = x.shape[0], self.compress_ratio, self.head_dim
+        q, k = F.linear(x, self.index_qk_proj.weight).split([self.n_heads * d, d], dim=-1)
+        q = _rope(self.q_layernorm(q.reshape(length, self.n_heads, d)), cos.unsqueeze(1), sin.unsqueeze(1))
+        nb = length // r
+        pooled = k[: nb * r].reshape(nb, r, d).float().mean(dim=1).to(k.dtype)
+        keys = _rope(self.k_layernorm(pooled), cos[: nb * r : r], sin[: nb * r : r]).float()
+
+        blocks = torch.arange(nb, device=x.device)
+        block_mask = torch.empty(length, nb, dtype=torch.bool, device=x.device)
+        for c0 in range(0, length, QSA_INDEXER_CHUNK):
+            c1 = min(length, c0 + QSA_INDEXER_CHUNK)
+            visible = (torch.arange(c0, c1, device=x.device) + 1) // r  # complete blocks per query
+            complete = blocks < visible.unsqueeze(-1)
+            if c1 // r > self.block_topk:  # some query in the chunk sees more blocks than the budget
+                scores = torch.matmul(q[c0:c1].float(), keys.T).relu_().sum(dim=1) / math.sqrt(d)
+                # Incomplete blocks score -inf; every relu score is >= 0, so they are never picked.
+                top = scores.masked_fill_(~complete, float("-inf")).topk(self.block_topk, dim=-1).indices
+                selected = torch.zeros_like(complete).scatter_(-1, top, True)
+                complete = torch.where((visible > self.block_topk).unsqueeze(-1), selected, complete)
+            block_mask[c0:c1] = complete
+        return block_mask
+
+    @torch.no_grad()
+    def select(self, hidden_states: Tensor, rotary_pos_emb, packed_seq_params) -> Optional[QSASelection]:
+        """Selection for the attention input ``hidden_states`` ([T, 1, C] packed), or None if dense.
+
+        ``rotary_pos_emb`` is megatron-core's RoPE angle table ([>=L, 1, 1, rot], or a (q, k) pair
+        of them); positions restart at 0 in every packed sequence, as in the main attention.
+        """
+        s, b, _ = hidden_states.shape
+        if packed_seq_params is not None:
+            cu = packed_seq_params.cu_seqlens_q
+            cu_padded = packed_seq_params.cu_seqlens_q_padded
+            cu_padded = cu if cu_padded is None else cu_padded
+            starts, lengths = cu_padded[:-1].tolist(), (cu[1:] - cu[:-1]).tolist()
+        else:
+            starts, lengths = [0], [s]
+        if max(lengths) <= self.max_dense_length:
+            return None
+        if b != 1:
+            raise NotImplementedError(
+                f"Qwen4Exp QSA sparse attention (sequences over {self.max_dense_length} tokens) needs packed "
+                "sequences (remove_microbatch_padding=true)."
+            )
+        if rotary_pos_emb is None:
+            raise NotImplementedError("Qwen4Exp QSA sparse attention needs the RoPE angle table (rotary_pos_emb).")
+        freqs = rotary_pos_emb[0] if isinstance(rotary_pos_emb, tuple) else rotary_pos_emb
+        freqs = freqs.reshape(freqs.shape[0], -1)
+        if freqs.shape[0] < max(lengths):
+            raise ValueError(f"RoPE table of {freqs.shape[0]} positions for a {max(lengths)}-token sequence.")
+        x = hidden_states.reshape(s, -1)
+        sequences = []
+        for start, length in zip(starts, lengths):
+            block_mask = None
+            if length > self.max_dense_length:
+                f = freqs[:length].float()
+                # HF casts cos/sin to the activation dtype before applying them.
+                block_mask = self.select_sequence(x[start : start + length], f.cos().to(x.dtype), f.sin().to(x.dtype))
+            sequences.append(QSASequenceSelection(start, length, block_mask))
+        return QSASelection(sequences, self.compress_ratio)
+
+
+def _qsa_token_mask(block_mask: Optional[Tensor], c0: int, c1: int, r: int, device) -> Tensor:
+    """[c1 - c0, c1] bool: keys ``0..c1-1`` of the sequence each query ``c0..c1-1`` attends to."""
+    rows = torch.arange(c0, c1, device=device).unsqueeze(-1)
+    cols = torch.arange(c1, device=device)
+    causal = cols <= rows
+    if block_mask is None:
+        return causal
+    tail = cols >= (rows + 1) // r * r
+    nb = block_mask.shape[-1]
+    in_block = block_mask[c0:c1][:, (cols // r).clamp_max(nb - 1)] & (cols < nb * r)
+    return causal & (in_block | tail)
+
+
+def _masked_attention(q: Tensor, k: Tensor, v: Tensor, mask: Tensor, scale: float) -> Tensor:
+    """Softmax attention of q ([Q, np, d]) over k / v ([np, K, d]) under ``mask`` ([Q, K])."""
+    out = F.scaled_dot_product_attention(q.transpose(0, 1), k, v, attn_mask=mask, scale=scale)
+    return out.transpose(0, 1)
+
+
+def _compiled_flex_attention():
+    global _flex_attention
+    if _flex_attention is None:
+        import torch._dynamo
+        from torch.nn.attention.flex_attention import flex_attention
+
+        # One compiled graph per padded length (QSA_FLEX_PAD steps).
+        torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 32)
+        _flex_attention = torch.compile(flex_attention, dynamic=False)
+    return _flex_attention
+
+
+def _flex_sequence_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor, r: int, scale: float) -> Tensor:
+    """``qsa_sparse_attention`` of one sequence (q [L, np, d], k / v [L, ng, d]) with FlexAttention."""
+    from torch.nn.attention.flex_attention import create_block_mask
+
+    length, nb = q.shape[0], block_mask.shape[1]
+    padded = -(-length // QSA_FLEX_PAD) * QSA_FLEX_PAD
+    pad = padded - length
+    # Padded queries keep key 0 (so no softmax row is empty); their outputs are dropped.
+    bm = F.pad(block_mask, (0, padded // r - nb, 0, pad))
+
+    def mask_mod(b, h, qi, kv):
+        tail = (kv >= (qi + 1) // r * r) & (kv < length)
+        in_block = bm[qi, kv // r] & (kv < nb * r)
+        return ((kv <= qi) & (in_block | tail)) | ((qi >= length) & (kv == 0))
+
+    mask = create_block_mask(mask_mod, None, None, padded, padded, device=q.device)
+    q, k, v = (F.pad(t, (0, 0, 0, 0, 0, pad)).transpose(0, 1).unsqueeze(0) for t in (q, k, v))
+    out = _compiled_flex_attention()(q, k, v, block_mask=mask, scale=scale, enable_gqa=True)
+    return out[0, :, :length].transpose(0, 1)
+
+
+def qsa_sparse_attention(query: Tensor, key: Tensor, value: Tensor, selection: QSASelection, scale: float) -> Tensor:
+    """Causal attention restricted to the QSA selection, for packed (THD) q / k / v.
+
+    ``query`` is [T, np, d] and ``key`` / ``value`` [T, ng, d]; returns [T, np * d] (zeros on the
+    padding between sequences; [T, 1, ...] in and out for one unpacked sequence). Queries are processed in chunks of ``QSA_ATTENTION_CHUNK`` over
+    the keys before the chunk end, each chunk recomputed in backward (non-reentrant checkpoint),
+    so the [heads, chunk, keys] scores of only one chunk are alive at a time. The selection never
+    leaves a query without keys (at least one block or the tail), so no softmax row is empty.
+    """
+    batched = query.dim() == 4  # [T, 1, np, d]: unpacked single sequence
+    if batched:
+        query, key, value = (t.squeeze(1) for t in (query, key, value))
+    num_tokens, num_heads, _ = query.shape
+    out_dim = value.shape[-1]
+    checkpoint = torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value))
+    pieces, pos = [], 0
+    for seq in selection.sequences:
+        if seq.start > pos:
+            pieces.append(query.new_zeros(seq.start - pos, num_heads, out_dim))
+        q, k, v = (t[seq.start : seq.start + seq.length] for t in (query, key, value))
+        if _QSA_FLEX and query.is_cuda and seq.block_mask is not None:
+            pieces.append(_flex_sequence_attention(q, k, v, seq.block_mask, selection.compress_ratio, scale))
+            pos = seq.start + seq.length
+            continue
+        # GQA: query head h reads key group h // (np / ng) (megatron-core and HF ``repeat_kv``).
+        k, v = (t.repeat_interleave(num_heads // t.shape[1], dim=1).transpose(0, 1).contiguous() for t in (k, v))
+        for c0 in range(0, seq.length, QSA_ATTENTION_CHUNK):
+            c1 = min(seq.length, c0 + QSA_ATTENTION_CHUNK)
+            mask = _qsa_token_mask(seq.block_mask, c0, c1, selection.compress_ratio, query.device)
+            args = (q[c0:c1], k[:, :c1], v[:, :c1], mask, scale)
+            if checkpoint:
+                pieces.append(torch.utils.checkpoint.checkpoint(_masked_attention, *args, use_reentrant=False))
+            else:
+                pieces.append(_masked_attention(*args))
+        pos = seq.start + seq.length
+    if pos < num_tokens:
+        pieces.append(query.new_zeros(num_tokens - pos, num_heads, out_dim))
+    out = torch.cat(pieces).reshape(num_tokens, num_heads * out_dim)
+    return out.unsqueeze(1) if batched else out

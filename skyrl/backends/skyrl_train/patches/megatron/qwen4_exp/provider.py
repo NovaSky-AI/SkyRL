@@ -59,24 +59,12 @@ class Qwen4ExpModelProvider(GPTModelProvider):
         for ple in ples:
             ple.load_table(group)
 
-        max_visible = self.qwen4_indexer_budget + self.qwen4_indexer_compress_ratio - 1
-
         def _stash_tokens(module, args, kwargs):
             input_ids = args[0] if args else kwargs.get("input_ids")
             packed = kwargs.get("packed_seq_params")
             cu = None
             if packed is not None:
                 cu = packed.cu_seqlens_q_padded if packed.cu_seqlens_q_padded is not None else packed.cu_seqlens_q
-                seqlens = packed.cu_seqlens_q[1:] - packed.cu_seqlens_q[:-1]
-                longest = int(seqlens.max())
-            else:
-                longest = input_ids.shape[-1]
-            if longest > max_visible:
-                # Beyond this the QSA indexer drops keys; this backend runs dense attention.
-                raise NotImplementedError(
-                    f"Qwen4Exp sequence of {longest} tokens exceeds the QSA indexer budget ({max_visible}); "
-                    "sparse indexer attention is not implemented on the Megatron backend."
-                )
             for ple in ples:
                 ple.set_tokens(input_ids, cu)
 

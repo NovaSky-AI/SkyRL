@@ -10,7 +10,10 @@ layer expands the embedding by replication and the block's final "layer norm" is
 import copy
 from typing import Optional
 
-from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
+from megatron.core.extensions.transformer_engine import (
+    TEColumnParallelLinear,
+    TEDotProductAttention,
+)
 from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
@@ -41,9 +44,28 @@ from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
     Qwen4ExpFinalMixer,
     Qwen4ExpGatedDeltaNet,
     Qwen4ExpGatedResidual,
-    Qwen4ExpIndexerParams,
     Qwen4ExpPLE,
+    Qwen4ExpQSAIndexer,
+    qsa_sparse_attention,
 )
+
+
+class Qwen4ExpCoreAttention(TEDotProductAttention):
+    """TE core attention that switches to the QSA sparse attention when a selection is set.
+
+    The layer sets ``qsa_selection`` from the indexer right before the attention call: None
+    (every packed sequence within the exactly-dense bound) keeps the fused TE kernel, otherwise
+    attention runs over the selected keys (``qsa_sparse_attention``, torch SDPA with a mask).
+    """
+
+    qsa_selection = None
+
+    def forward(self, query, key, value, attention_mask, *args, **kwargs):
+        selection = self.qsa_selection
+        if selection is None:
+            return super().forward(query, key, value, attention_mask, *args, **kwargs)
+        scale = getattr(self, "softmax_scale", None) or query.shape[-1] ** -0.5
+        return qsa_sparse_attention(query, key, value, selection, scale)
 
 
 class Qwen4ExpTransformerLayer(TransformerLayer):
@@ -71,8 +93,9 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
             # HF: layer ``i`` has PLE iff ``i + 1`` is in ``ple_layer_ids``.
             self.ple = Qwen4ExpPLE(config, ple_ids.index(global_idx + 1)) if global_idx + 1 in ple_ids else None
             if not self._qwen4_is_gdn:
-                self.self_attention.indexer = Qwen4ExpIndexerParams(config)
-        for module in (self.attn_hyper_connection, self.mlp_hyper_connection, self.ple):
+                self.self_attention.indexer = Qwen4ExpQSAIndexer(config)
+        indexer = None if self._qwen4_is_gdn else self.self_attention.indexer
+        for module in (self.attn_hyper_connection, self.mlp_hyper_connection, self.ple, indexer):
             if module is not None and config.params_dtype is not None:
                 module.to(config.params_dtype)
         self.expand_input = global_idx == 0
@@ -105,6 +128,11 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
 
         # Attention / GDN site.
         attn_in, inject = self.attn_hyper_connection(hidden_states)
+        if not self._qwen4_is_gdn:
+            core_attention = self.self_attention.core_attention
+            core_attention.qsa_selection = self.self_attention.indexer.select(
+                attn_in, rotary_pos_emb, packed_seq_params
+            )
         attn_out, attn_bias = self.self_attention(
             attn_in,
             attention_mask=attention_mask,
@@ -117,6 +145,9 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
+        if not self._qwen4_is_gdn and not self.self_attention.checkpoint_core_attention:
+            # Kept only when selective core-attention recompute replays the attention in backward.
+            core_attention.qsa_selection = None
         if attn_bias is not None:
             attn_out = attn_out + attn_bias
         hidden_states = Qwen4ExpGatedResidual.inject(hidden_states, attn_out, inject)
@@ -154,6 +185,7 @@ def build_qwen4_exp_layer_spec(config: TransformerConfig, vp_stage: Optional[int
     gdn_spec = _without_input_layernorm(get_gated_delta_net_module_spec(config, backend), "in_proj")
     gdn_spec.module = Qwen4ExpGatedDeltaNet
     attn_spec = _without_input_layernorm(_get_self_attention_module_spec(config, backend), "linear_qkv")
+    attn_spec.submodules.core_attention = Qwen4ExpCoreAttention
     moe_spec = get_moe_module_spec_for_backend(
         backend,
         num_experts=config.num_moe_experts,
