@@ -29,8 +29,10 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
+| `patches/megatron/test_hybrid_optimizer_cpu_masters.py` (CPU) | `patch_hybrid_optimizer_cpu_masters.py`: real `HybridDeviceOptimizer` step on fake-GPU params, no GPU main params from `_build_model_and_main_param_groups` |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF |
+| `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -205,7 +207,8 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
 ### NVIDIA-NeMo/Megatron-Bridge#6123 / #6354 (on NVIDIA/Megatron-LM#7393 / #7553): the model
 
 - **Carried as:** `qwen4_exp/`: `modules.py` (gated low-rank hyper-connection, final mixer, PLE
-  n-gram embedding, sigmoid-gated GDN, frozen QSA indexer weights), `layer_specs.py`,
+  n-gram embedding, sigmoid-gated GDN, the frozen QSA indexer and its sparse attention:
+  chunked SDPA, or FlexAttention on CUDA), `layer_specs.py`,
   `provider.py`, and `bridge.py` (`Qwen4ExpBridge`, registered for
   `Qwen4ExpForConditionalGeneration` on import).
 - **Landed?** Megatron-Bridge registers a bridge for `Qwen4ExpForConditionalGeneration` /
@@ -217,10 +220,12 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
     against what upstream builds.
   - Before deleting, compare with upstream: PLE table sharding (here: by n-gram head over the EP
     group, loaded outside the bridge, never exported), packed-sequence boundary handling in PLE,
-    the dense-only QSA path, and the unexported MTP head.
+    QSA top-k block selection past `indexer_budget + compress_ratio - 1` tokens (ties, dtype of
+    the indexer scores), and the unexported MTP head.
   - Delete `qwen4_exp/` and `tests/.../patches/megatron/qwen4_exp/`.
-- **Verify:** `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py`; the
-  `qwen3.8-flash-next-4layer_*` row of `gpu_ci/megatron/test_megatron_models.py`.
+- **Verify:** `patches/megatron/qwen4_exp/test_qwen4_exp_{modules,qsa}.py`; the
+  `qwen3.8-flash-next-4layer_*` rows of `gpu_ci/megatron/test_megatron_{,lora_}models.py` and
+  `gpu_ci/megatron/test_qwen38_qsa_long_context.py` (~8K tokens, sparse regime).
 
 ## Standalone patches
 
@@ -258,6 +263,33 @@ patches that replace dispatcher methods can't drop it. Applied unconditionally i
 - **Landed?** megatron-core's dispatcher clears `self.probs` after the combine (or stops storing it).
 - **Remove:** the module, its call in `make_megatron_module`, and
   `patches/megatron/test_moe_release_dispatcher_probs.py`.
+
+### `patch_hybrid_optimizer_cpu_masters.py`: no upstream PR yet
+
+Full fine-tuning with the optimizer fully on the host (`optimizer_cpu_offload=true`,
+`optimizer_offload_fraction=1.0`). Without it, `DistributedOptimizer._build_model_and_main_param_groups`
+builds FP32 main-param shards on the GPU (`shard_model_param.clone().float()`) and the
+`HybridDeviceOptimizer` (HDO) only copies them to the host: 4 bytes per owned parameter stay on
+the GPU for the run, plus an FP32 grad copy per step. At expert-DP 1 (Qwen3.8-Flash-Next, EP16)
+that is ~31 GB/GPU and init OOMs at 70.8 GiB (`logs/grpo_fullft_1.log`). Three pieces:
+- `route_main_params_to_hybrid_optimizer(config)`: sets the derived
+  `use_precision_aware_optimizer_no_fp8_or_ds_fp8` flag, megatron-core's own path for
+  precision-aware + CPU offload. No GPU main params; the HDO gets the BF16 param-buffer shards and
+  BF16 grad views (`decoupled_grad`) and owns the FP32 masters on the host. Applied by
+  `megatron_worker.init_model` for full FT only (the LoRA adapter store snapshots
+  `shard_fp32_from_float16_groups`, which are `None` on this path).
+- `HybridDeviceOptimizer._get_sub_optimizer_param_groups`: one pinned FP32 host tensor per master
+  (chunked D2H cast), instead of a GPU clone + pinned BF16 copy + pageable FP32 + pinned FP32.
+- The HDO `get_megatron_optimizer` builds over the full model params before the
+  DistributedOptimizer replaces it is not materialized (its host copies of every param were
+  dropped into PyTorch's pinned-host cache).
+- **Landed?** megatron-core builds host masters without the BF16 detour in
+  `cpu_offloading/hybrid_optimizer.py`, and `get_megatron_optimizer` no longer constructs an HDO
+  over the model params when a DistributedOptimizer follows. The routing part is not a bug fix:
+  keep it (or set `use_precision_aware_optimizer=true` in recipes instead) as long as
+  megatron-core defaults to GPU main params with CPU offload.
+- **Remove:** the call in `MegatronPolicyWorkerBase.init_model`, the module, its CPU test, and the
+  `shard_float16_groups` pair in `mtp/grad_clip.py` if nothing else routes masters to the optimizer.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

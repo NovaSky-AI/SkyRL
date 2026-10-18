@@ -23,6 +23,10 @@ from megatron.core.optimizer.clip_grads import (
 # param_groups hold main params whose identities no longer match the model's).
 _MODEL_TO_MAIN_GROUPS = (
     ("model_float16_groups", "shard_fp32_from_float16_groups"),  # DistributedOptimizer
+    # DistributedOptimizer whose inner optimizer owns the masters (precision-aware, or fully CPU-
+    # offloaded: patches/megatron/patch_hybrid_optimizer_cpu_masters.py): the FP32 shards above
+    # are None and the optimizer's params are the BF16 param-buffer shards.
+    ("model_float16_groups", "shard_float16_groups"),
     ("model_fp32_groups", "shard_fp32_groups"),
     ("float16_groups", "fp32_from_float16_groups"),  # Float16OptimizerWithFloat16Params
     ("fp32_from_fp32_groups", "fp32_from_fp32_groups"),  # fp32 params are their own main param
@@ -63,7 +67,7 @@ def _mtp_main_params(sub_opt, mtp_model_ids: set) -> List[torch.nn.Parameter]:
             continue
         for model_group, main_group in zip(model_groups, main_groups):
             for model_param, main_param in zip(model_group, main_group):
-                if id(model_param) in mtp_model_ids and id(main_param) not in seen:
+                if main_param is not None and id(model_param) in mtp_model_ids and id(main_param) not in seen:
                     seen.add(id(main_param))
                     found.append(main_param)
     return found

@@ -950,6 +950,23 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
+            # Optimizer CPU offload: one host copy per FP32 master, and no throwaway HDO over the
+            # full model. With full offload and full fine-tuning, the HDO also owns the masters,
+            # so none are built on the GPU. LoRA keeps megatron's default ownership: the adapter
+            # store snapshots the DistributedOptimizer's FP32 shards, and they are small anyway.
+            from skyrl.backends.skyrl_train.patches.megatron.patch_hybrid_optimizer_cpu_masters import (
+                apply_hybrid_optimizer_cpu_masters_patch,
+                route_main_params_to_hybrid_optimizer,
+            )
+
+            if optim_config.optimizer_cpu_offload:
+                apply_hybrid_optimizer_cpu_masters_patch()
+            if not self._is_lora and route_main_params_to_hybrid_optimizer(optim_config):
+                if self._rank == 0:
+                    logger.info(
+                        "Optimizer fully offloaded: FP32 masters live only in the HybridDeviceOptimizer's "
+                        "host memory (no GPU main params; grads reach it as BF16 decoupled_grad views)"
+                    )
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
             # create scheduler
