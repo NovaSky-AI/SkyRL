@@ -51,10 +51,11 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
-# 4-layer slice of Qwen/Qwen3.8-Flash-Next (layers 0-3: GDN x3 + full attention, PLE on layer 1,
-# the full PLE n-gram table, no MTP); not published, build it with the qwen3_8_flash_next example's
-# make_slice.py and point this at it.
-QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "Qwen3.8-Flash-Next-4layer")
+# 4-layer slice of Qwen/Qwen3.8-Flash-Next (layers 0-3: GDN x3 + gated attention with the QSA
+# indexer, PLE on layer 1, no MTP) built by examples/train/qwen3_8_flash_next/make_slice.py. The
+# released ~51B-parameter PLE n-gram table is replaced by a small random one (ngram_vocab_size_base
+# 2048), which HF, vLLM and the Megatron bridge all hash into the same way.
+QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xinyuangui2/Qwen3.8-Flash-Next-4layer")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -264,8 +265,8 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     if "qwen3.8-flash-next" in model_name.lower():
-        # 262k default context; the slice still carries the ~51B-parameter PLE table (sharded
-        # over TP in vLLM and over EP in Megatron) next to 4 x 512-expert MoE layers.
+        # 262k default context; the slice is ~11B params (4 x 512-expert MoE layers, the embedding
+        # and LM head), colocated with the Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     if "kimi-k2.5" in model_name.lower():
@@ -568,24 +569,25 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-35b-a3b_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
-        # Qwen3.8-Flash-Next, 4-layer slice of the real checkpoint (QWEN38_4LAYER): GDN with a
-        # sigmoid output gate, gated attention with the QSA indexer (dense regime: sequences stay
-        # under indexer_budget), 512-expert shared-expert MoE, gated low-rank hyper-connections,
-        # the PLE n-gram embedding sharded over EP=8, and the final hyper-connection mixer.
+        # Qwen3.8-Flash-Next 4-layer slice (QWEN38_4LAYER) on 4xH100-80G: GDN with a sigmoid output
+        # gate, gated attention with the QSA indexer (dense regime: sequences stay under
+        # indexer_budget), 512-expert shared-expert MoE, gated low-rank hyper-connections, the PLE
+        # n-gram embedding sharded over EP=4, and the final hyper-connection mixer. The bridge
+        # supports TP=1 only, so EP is the training axis; vLLM runs TP=4.
         pytest.param(
             1,
             1,
             1,
-            8,
+            4,
             1,
-            8,
-            8,
+            4,
+            4,
             QWEN38_4LAYER,
             3e-1,
             1e-1,
             None,
             None,
-            id="qwen3.8-flash-next-4layer_h100_ep8",
+            id="qwen3.8-flash-next-4layer_h100_ep4",
             marks=pytest.mark.h100,
         ),
         # Full-FP8 rows: blockwise FP8 Megatron compute + FP8 vLLM rollout fed

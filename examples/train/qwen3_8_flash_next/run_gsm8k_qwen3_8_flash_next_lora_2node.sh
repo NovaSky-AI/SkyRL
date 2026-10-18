@@ -1,12 +1,11 @@
 set -x
 
-# Colocated GRPO for Qwen3.8-Flash-Next (HF qwen4_exp, ~180B MoE) on GSM8K with Megatron.
-# Two nodes of 8xH100-80G (16 GPUs).
+# Colocated GRPO for Qwen3.8-Flash-Next (HF qwen4_exp, ~180B MoE) on GSM8K with Megatron + LoRA.
+# Two nodes of 8xH100-80G (16 GPUs). Full fine-tuning: run_gsm8k_qwen3_8_flash_next_fullft_*node.sh.
 #
 #   uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 #   export WANDB_API_KEY=<your_key_here>   # or leave LOGGER=console
-#   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_gsm8k_qwen3_8_flash_next_2node.sh
-#   MODE=fullft bash ...   # full fine-tune (optimizer state on CPU), default MODE=lora
+#   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_gsm8k_qwen3_8_flash_next_lora_2node.sh
 #
 # Put MODEL_PATH on node-local disk (same path on every node): every vLLM TP rank and every
 # trainer rank reads the 360 GB checkpoint at startup.
@@ -33,7 +32,6 @@ export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"
-MODE="${MODE:-lora}"
 LOGGER="${LOGGER:-console}"  # change to "wandb" to log to wandb
 
 NUM_NODES=2
@@ -60,29 +58,21 @@ MEGATRON_CP=1
 MEGATRON_EP=16
 MEGATRON_ETP=1
 
-if [ "$MODE" = "lora" ]; then
-  # Frozen bf16 base ~25 GB/GPU (dense 10 + experts 15; the 6.4 GB PLE shard is in host memory).
-  # Adapter-only sync (merge_lora=false, in memory): merging needs vLLM's woken weights, a
-  # full-tensor receive buffer (the 1.27 GB embedding) and the merge temporaries resident at once,
-  # which does not fit at TP8/EP16. vLLM accepts ranks 1/8/16/32/..., and normalize_moe_lora needs
-  # rank % top-k(10) == 0, so expert adapters stay at the full rank.
-  LR=1e-5
-  MODE_ARGS=(
-    trainer.policy.model.lora.rank=16
-    trainer.policy.model.lora.alpha=16
-    trainer.policy.model.lora.sync_mode=memory
-    trainer.policy.megatron_config.lora_config.merge_lora=false
-  )
-else
-  # Full FT: ~173B trainable params (PLE table and QSA indexer stay frozen). Expert DP is 1 at
-  # EP=16, so each rank holds ~7.5B expert params' fp32 master + Adam moments (~90 GB): the
-  # optimizer must live on CPU (~720 GB per node).
-  LR=1e-6
-  MODE_ARGS=()
-fi
+# Frozen bf16 base ~25 GB/GPU (dense 10 + experts 15; the 6.4 GB PLE shard is in host memory).
+# Adapter-only sync (merge_lora=false, in memory): merging needs vLLM's woken weights, a
+# full-tensor receive buffer (the 1.27 GB embedding) and the merge temporaries resident at once,
+# which does not fit at TP8/EP16. vLLM accepts ranks 1/8/16/32/..., and normalize_moe_lora needs
+# rank % top-k(10) == 0, so expert adapters stay at the full rank.
+LR=1e-5
+LORA_ARGS=(
+  trainer.policy.model.lora.rank=16
+  trainer.policy.model.lora.alpha=16
+  trainer.policy.model.lora.sync_mode=memory
+  trainer.policy.megatron_config.lora_config.merge_lora=false
+)
 
 ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"'}'
-RUN_NAME="qwen3_8_flash_next_gsm8k_${MODE}_ep${MEGATRON_EP}"
+RUN_NAME="qwen3_8_flash_next_gsm8k_lora_ep${MEGATRON_EP}"
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -147,5 +137,5 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3_8_flash_next_gsm8k" \
   trainer.run_name="$RUN_NAME" \
-  "${MODE_ARGS[@]}" \
+  "${LORA_ARGS[@]}" \
   "$@"
