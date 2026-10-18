@@ -1454,7 +1454,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
 
-        source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
+        param_filter = None
+        if self._is_lora and self.cfg.policy.megatron_config.lora_config.merge_lora:
+            if self.cfg.policy.megatron_config.lora_config.sync_lora_targets_only:
+                # Merged LoRA changes only the wrapped modules; vLLM keeps its checkpoint copies of
+                # the frozen rest (sleep is forced to level 1, see _uses_partial_weight_sync).
+                from skyrl.backends.skyrl_train.weight_sync.merged_lora_filter import (
+                    MergedLoraSyncFilter,
+                )
+
+                param_filter = MergedLoraSyncFilter(self.bridge, self.actor_module)
+        source = MegatronWeightSource(self.bridge, self.actor_module, dtype, param_filter=param_filter)
         if self._serialized_fp8_config is not None:
             from skyrl.backends.skyrl_train.weight_sync.sources import (
                 SerializedFp8WeightSource,

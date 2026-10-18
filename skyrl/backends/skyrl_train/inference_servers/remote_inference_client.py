@@ -521,6 +521,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
     and LoRA-only broadcasts cannot repopulate it. Must be kept in sync with the same gate vLLM
     uses for `enable_lora` (see `_uses_lora_weight_sync` in inference_servers/utils.py)."""
 
+    keep_weights_on_sleep: bool = False
+    """True when weight syncs send only part of the base model (Megatron merged LoRA with
+    ``lora_config.sync_lora_targets_only``, see `_uses_partial_weight_sync`): the unsent weights
+    must survive sleep, so `sleep()` is forced to level=1 as for adapter sync."""
+
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
@@ -532,6 +537,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
     # Monotonic counter of weight syncs (see `increment_weight_version`); source of the prefix-cache salt.
     _weight_version: int = field(default=0, repr=False)
+
+    @property
+    def sleep_keeps_weights(self) -> bool:
+        """Whether `sleep()` keeps a CPU backup of the weights (level 1) instead of discarding them."""
+        return self.uses_lora_weight_sync or self.keep_weights_on_sleep
 
     @property
     def weight_version(self) -> int:
@@ -1267,11 +1277,15 @@ class RemoteInferenceClient(InferenceEngineInterface):
             Dict mapping server_url to response.
         """
         # Mirror BaseVLLMInferenceEngine.sleep: when the trainer syncs LoRA adapters
-        # only, force level=1 so the base model survives via CPU backup. level=2
-        # discards weights with no source to restore from on wake_up(["weights"]).
-        if self.uses_lora_weight_sync and level != 1:
+        # only, or only the modules LoRA changes, force level=1 so the base model
+        # survives via CPU backup. level=2 discards weights with no source to
+        # restore from on wake_up(["weights"]).
+        if self.sleep_keeps_weights and level != 1:
             logger.info(
-                "Forcing sleep level=1 (uses_lora_weight_sync=True); requested level=%d would discard the base model.",
+                "Forcing sleep level=1 (uses_lora_weight_sync=%s, keep_weights_on_sleep=%s); "
+                "requested level=%d would discard the base model.",
+                self.uses_lora_weight_sync,
+                self.keep_weights_on_sleep,
                 level,
             )
             level = 1
