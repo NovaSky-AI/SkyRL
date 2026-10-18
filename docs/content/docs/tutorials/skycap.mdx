@@ -1,0 +1,215 @@
+---
+title: "Trajectory Capture with skycap"
+---
+
+[skycap](https://github.com/NovaSky-AI/SkyRL/tree/main/skycap) is a capture proxy for agentic RL rollouts. An agent harness points its unchanged OpenAI client at a per-trajectory URL. skycap records every model call into a context graph, with one node per message, and when the trajectory finishes it returns training samples: by default one per root-to-leaf path of the graph.
+
+skycap is its own package in the SkyRL repository and does not depend on `skyrl`. This page covers how to run it and how to train with it in SkyRL. For the full reference, see the [skycap README](https://github.com/NovaSky-AI/SkyRL/blob/main/skycap/README.md) and the [record format spec](https://github.com/NovaSky-AI/SkyRL/blob/main/skycap/docs/format.md).
+
+## When to use skycap
+
+Use skycap when you want to train on an existing agent harness without changing it, and still get the exact tokens and logprobs the inference engine sampled.
+
+- **[Re-tokenization](agent-integration)** works with any harness, but the training tokens can drift from the sampled ones.
+- **[Step-wise training](step-wise-training)** with token-in-token-out gets the exact tokens, but the generator has to collect per-turn token ids from the harness.
+- **skycap** gets the exact tokens without the harness knowing about tokens. In token mode it renders each request itself and calls the engine with token ids. A rewritten history (summarization, dropped thinking, a resampled reply, a subagent) becomes a new branch of the graph instead of breaking the trajectory.
+
+## How it works
+
+The life of one trajectory:
+
+1. The trainer creates a trajectory on a skycap server and gets its `base_url` (`http://<server>/t/<id>/v1`) and an API key.
+2. The trainer hands `base_url` to the harness, which calls `/chat/completions` on it with any OpenAI client.
+3. For each call, skycap matches the request's messages against the trajectory's graph, one message at a time.
+4. In **token mode**, skycap renders the prompt through [`renderers`](https://github.com/PrimeIntellect-ai/renderers) and calls vLLM's token-in/token-out endpoint (`/inference/v1/generate`). When the matched history contains an earlier model call, skycap *bridges* from it: the prompt extends that call's exact prompt and completion tokens with the new messages, instead of re-rendering what the model sampled. If it cannot, it renders in full and keeps only the prefix of the graph whose tokens reproduce the render exactly; the rest is a fork.
+5. skycap returns an OpenAI chat completion to the harness. A thinking model's reasoning comes back as `reasoning_content`, and tool calls as `tool_calls`.
+6. The trainer calls `finish` with annotations such as the reward. skycap writes the trajectory's record and returns one sample per root-to-leaf path, each with `input_ids`, `loss_mask`, `logprobs`, `routed_experts` and `sampling_mask`.
+
+```
+trainer ── create ──▶ skycap ◀── /chat/completions ── harness (unchanged OpenAI client)
+   │                    │
+   │                    └── token ids ──▶ vLLM /inference/v1/generate
+   │
+   └── finish(reward) ──▶ samples: one per root-to-leaf path
+```
+
+A model message is a training target in exactly one sample, so a node shared by several paths trains once. If a turn cannot be attributed exactly, the trajectory's status is `failed` rather than training on tokens that disagree with what inference received.
+
+## Installation
+
+<Callout type="info">
+skycap (version 0.0.1) is not on PyPI yet; a PyPI release is coming. For now, install it from the SkyRL repository.
+</Callout>
+
+In SkyRL, the `skycap` extra installs skycap with token-mode support (`skycap[tokens]`) from the repository's `skycap/` directory:
+
+```bash
+uv run --isolated --extra fsdp --extra skycap ...
+```
+
+To work on skycap on its own, sync its environment inside the package directory:
+
+```bash
+cd skycap
+uv sync --extra tokens   # token mode; add --extra remote for the record mirror
+```
+
+## Quick start
+
+### Start a server in token mode
+
+Token mode needs vLLM's token-in/token-out endpoint, `/inference/v1/generate`. With `vllm serve`, that endpoint is registered only when the server is started with `--enable-scale-out`:
+
+```bash
+vllm serve Qwen/Qwen3-8B --port 8000 --enable-scale-out
+```
+
+Then start skycap in front of it:
+
+```bash
+cd skycap && uv sync --extra tokens
+uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
+  --tokenizer Qwen/Qwen3-8B --max-model-len 32768 \
+  --sampling-overrides '{"top_k": 50}' --sampling-mask --record-dir ./record
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--mode` | `text` (default) or `tokens` |
+| `--upstream-url` | text mode: an OpenAI-compatible base URL (`http://host:8000/v1`); token mode: the engine or router root |
+| `--tokenizer` | Hugging Face tokenizer name, rendered through `renderers`. Required in token mode |
+| `--max-model-len` | clamp `max_tokens` to fit this context |
+| `--sampling-overrides` | JSON sampling params imposed on every call, e.g. `'{"top_k": 50}'` |
+| `--sampling-mask` | record each sampled token's support (start vLLM with `return_sampling_mask`) |
+| `--use-raw-content` | answer with the completion's text as `content`, with reasoning inline and tool calls unparsed, as vLLM does with no parsers |
+| `--record-dir` | where ended trajectories are written; without it they stay in memory (development only) |
+| `--ttl` | seconds an open trajectory may be idle before it is written as abandoned (default 3600) |
+| `--host`, `--port` | where the server listens (default `0.0.0.0:8080`) |
+
+Run `uv run skycap serve --help` for the full list. A trainer can also run a server in its own process with `skycap.CaptureService`, which takes the same options; see [Embed a server](https://github.com/NovaSky-AI/SkyRL/blob/main/skycap/README.md#embed-a-server).
+
+Use `--use-raw-content` when the harness was written against a vLLM server with no reasoning or tool parser. A harness that replays `content` and drops `reasoning_content` (Terminus-2 through LiteLLM, for example) then sends each turn back unchanged, and a thinking model's history stays one path. With parsed replies, every replayed turn would lose its thinking and fork the graph.
+
+### Capture a rollout
+
+On the trainer side, `CapturePool` creates trajectories and finishes them:
+
+```python
+from skycap import CapturePool
+
+pool = CapturePool(["http://capture-0:8080", "http://capture-1:8080"])
+async with pool.trajectory({"task": "t1", "step": 3}) as trajectory:
+    run_harness(base_url=trajectory.base_url, api_key=trajectory.api_key)  # any OpenAI client
+    result = await trajectory.finish({"reward": 1.0})
+
+result.status          # "finished", or "failed" if a turn couldn't be attributed exactly
+for sample in result.samples:
+    sample.input_ids, sample.loss_mask, sample.logprobs
+    sample.routed_experts, sample.sampling_mask
+```
+
+`pool.trajectory(...)` always finishes the trajectory: if the block raises before `finish`, the trajectory is finished with `{"error": ...}`. An SDK retry (`x-stainless-retry-count`) gets the original call's reply rather than a second sample.
+
+### Which paths train
+
+`finish` returns a sample per root-to-leaf path by default (`paths="all"`). `finish(..., paths="final")` returns only the path to the reply of the trajectory's last model call; branches off it, such as a reply the harness discarded and asked for again, don't train. A custom rule is a function of the graph that returns rows (a path and the model nodes on it to train), registered with `skycap serve --path-rule NAME=module:function`. See [Which paths train](https://github.com/NovaSky-AI/SkyRL/blob/main/skycap/README.md#which-paths-train).
+
+## Text mode
+
+Text mode (the default) forwards each request unchanged to any OpenAI-compatible server and records what it sees. It builds the same message graph, but records no tokens, so it is for inspecting and recording rollouts rather than for exact-token training:
+
+```bash
+cd skycap && uv sync
+uv run skycap serve --upstream-url http://engine:8000/v1 --record-dir ./record
+```
+
+## Training with SkyRL
+
+The SkyRL integration lives in [`examples/train_integrations/harbor_skycap/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train_integrations/harbor_skycap). It runs [Harbor](../harbor) unmodified, in text space: each trial's agent is pointed at its own skycap trajectory URL, skycap renders every prompt and calls SkyRL's router with token ids, and training gets the exact tokens and logprobs the engine sampled. Unlike the plain Harbor integration, summarization is allowed, since a rewritten history is a new branch of the graph.
+
+```bash
+uv run --isolated --extra fsdp --extra harbor --extra skycap \
+  -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \
+  trainer.policy.model.path=Qwen/Qwen3-8B \
+  generator.inference_engine.served_model_name=policy \
+  generator.step_wise_trajectories=true generator.merge_stepwise_output=false \
+  trainer.algorithm.max_seq_len=32768 \
+  data.train_data="['/path/to/harbor/tasks']"
+```
+
+`generator.step_wise_trajectories=true` and `generator.merge_stepwise_output=false` are required: each path of a trial becomes one step-wise row under the trial's `TrajectoryID`, and the last one carries the reward. For a full recipe (CodeContests on Daytona or Modal), see [`run_codecontests.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train_integrations/harbor_skycap/run_codecontests.sh).
+
+The `skycap.*` config group sets the record directory (default `{trainer.export_path}/skycap`), the idle TTL, the renderer pool size, which paths train (`skycap.train_paths`: `all`, `final` or `pkg.module:function`) and how agents inside remote sandboxes reach skycap (`skycap.exposure`). The integration imposes `generator.sampling_params` on every call, forwards a `cache_salt` derived from the policy's weight version, and sends the trajectory id to the router as `X-Session-ID`.
+
+R3 (rollout routing replay) works as with SkyRL's own generator: set `generator.inference_engine.enable_return_routed_experts=true` and `trainer.policy.megatron_config.moe_enable_routing_replay=true`, with Megatron and vLLM's `mp` backend.
+
+See the [integration README](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train_integrations/harbor_skycap/README.md) for masking rules, custom path rules and tests.
+
+## Records
+
+Each trajectory is written once, when it ends (by `finish`, the idle TTL or a graceful shutdown), to `--record-dir`:
+
+| File | Holds |
+| --- | --- |
+| `{id}.json.zst` | the document: the graph, metadata, annotations and which paths trained |
+| `{id}.tokens.zst` | token mode only: token ids, logprobs and the text they decode to |
+| `{id}.experts.zst` | routed experts, when captured (R3) |
+| `{id}.sampling_mask.zst` | per sampled token, the ids it could have been drawn from |
+
+Every file is a single zstd frame, and the sidecars are written before the document, so a document never points at a missing sidecar. `result.record` from `finish` says where the record is. The format is specified in [`skycap/docs/format.md`](https://github.com/NovaSky-AI/SkyRL/blob/main/skycap/docs/format.md), which is what any reader implements.
+
+### Mirror records to object storage
+
+`--record-mirror URL` copies each record, once written to `--record-dir`, to an fsspec URL in the background. Install the `remote` extra and the store's fsspec implementation:
+
+```bash
+uv sync --extra remote && uv pip install s3fs     # or gcsfs for gs://
+uv run skycap serve ... --record-dir ./record --record-mirror s3://bucket/run-7 \
+  --record-mirror-config '{"exclude": ["experts", "sampling_mask"]}'
+```
+
+The mirror fails open: it never fails a trajectory. Records it couldn't copy are logged and counted under `record_mirror` in `/healthz`, and the local record is always complete. `exclude` leaves sidecar kinds out of the remote copy, e.g. routed experts when the mirror is for reading rather than retraining. In the Harbor integration, set `skycap.record_mirror` and `skycap.record_mirror_config`.
+
+### W&B record index
+
+With `trainer.logger=wandb`, the Harbor integration indexes each step as a version of the W&B artifact `skycap-records-train-<run id>`, aliased `train-step-N` and `latest`. It holds the step's run index (`step.json`, a row per trajectory opened in the step) and, for mirrored records, W&B references to the record's files in the mirror (no bytes are copied). `skycap.wandb.phases=[train,eval]` also indexes eval; `skycap.wandb.enabled=false` turns the index off.
+
+`record_index pull` turns a run's artifact back into plain record directories, reading the record files straight from the mirror with your own credentials:
+
+```bash
+uv run --isolated --extra skyrl-train --extra harbor --extra skycap \
+  python -m examples.train_integrations.harbor_skycap.record_index \
+  pull my-team/my-project/skycap-records-train-<run id>:train-step-3 ./run-records
+```
+
+### Viewer
+
+[skycap-viewer](https://github.com/NovaSky-AI/skycap-viewer) is a separate viewer for skycap records. It reads record directories through the format spec, with no Python and no tokenizer.
+
+## Running at scale
+
+- **Multiple servers.** `CapturePool` takes a list of server URLs and creates trajectories round-robin from a random starting point, skipping a server that is unreachable or answers 5xx. Each trajectory's URL names its server, so no router or load balancer is needed in front of skycap. The Harbor integration runs one server per Ray actor.
+- **Session routing.** In token mode, skycap sends the trajectory id to the engine as `X-Session-ID`, so a router can keep a trajectory's calls on one engine.
+- **Remote harnesses.** An agent inside a remote sandbox (Daytona, Modal) can't reach the server's own URL. With `--expose`, the server listens a second time with only the harness routes (no control plane), and `create` returns an `exposed_base_url` beside `base_url`:
+
+  | `--expose` | Reached at | Limits |
+  | --- | --- | --- |
+  | `cloudflare` | a random `https://*.trycloudflare.com` URL | development only: at most 200 requests in flight per tunnel, a response that hasn't started within ~125 s fails, no SLA |
+  | `external_host` | `http://{host}:{port}` from `--expose-kwargs` | plain HTTP; the address has to route to this node |
+  | `pkg.module:Class` | whatever the class returns | a `skycap.exposure.Exposure` subclass, built with `--expose-kwargs` |
+
+  ```bash
+  uv run skycap serve --upstream-url http://engine:8000/v1 \
+    --expose external_host --expose-kwargs '{"host": "203.0.113.7", "port": 11500}'
+  ```
+
+  In the Harbor integration, set `skycap.exposure.type` and `skycap.exposure.kwargs`.
+- **Per-trajectory API keys.** `create` mints an API key for each trajectory. With `--require-api-key`, a trajectory's harness routes answer only calls that carry its key as `Authorization: Bearer <key>`, which is what an OpenAI client sends with its `api_key`. Use it when the routes are reachable from outside the trainer's network. Keys live only in memory and are never written to the record. The control plane is not keyed.
+
+## Current limitations
+
+- **OpenAI Chat Completions only.** Harnesses must call `/v1/chat/completions`.
+- **Token mode targets vLLM**, over its `/inference/v1/generate` endpoint (start `vllm serve` with `--enable-scale-out`). Another engine needs a subclass of `skycap.tokens.engine.VLLMEngine`.
+- **Text only.** Image inputs are not supported.
+- **No W&B record index under the fully-async trainer**, which fires no callbacks.
+- **Not on PyPI yet.** Install from the repository, as above.
