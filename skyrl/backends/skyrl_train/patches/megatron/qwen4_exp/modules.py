@@ -500,11 +500,15 @@ def _flex_sequence_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor
     pad = padded - length
     # Padded queries keep key 0 (so no softmax row is empty); their outputs are dropped.
     bm = F.pad(block_mask, (0, padded // r - nb, 0, pad))
+    # Per-sequence sizes enter the mask as tensors, not Python ints: torch.compile would guard on
+    # (and recompile for) every distinct int captured by mask_mod.
+    real_len = torch.tensor(length, device=q.device)
+    block_end = torch.tensor(nb * r, device=q.device)
 
     def mask_mod(b, h, qi, kv):
-        tail = (kv >= (qi + 1) // r * r) & (kv < length)
-        in_block = bm[qi, kv // r] & (kv < nb * r)
-        return ((kv <= qi) & (in_block | tail)) | ((qi >= length) & (kv == 0))
+        tail = (kv >= (qi + 1) // r * r) & (kv < real_len)
+        in_block = bm[qi, kv // r] & (kv < block_end)
+        return ((kv <= qi) & (in_block | tail)) | ((qi >= real_len) & (kv == 0))
 
     mask = create_block_mask(mask_mod, None, None, padded, padded, device=q.device)
     q, k, v = (F.pad(t, (0, 0, 0, 0, 0, pad)).transpose(0, 1).unsqueeze(0) for t in (q, k, v))
