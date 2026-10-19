@@ -149,7 +149,10 @@ class ReplayMoE(torch.nn.Module):
 @pytest.mark.parametrize("batch", [1, 2])
 def test_chunked_router_replay(batch, seq):
     """R3: each chunk replays its own tokens' indices, forward and recompute; recording is whole."""
-    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+    from megatron.core.transformer.moe.router_replay import (
+        RouterReplay,
+        RouterReplayAction,
+    )
 
     torch.manual_seed(0)
     num_chunks = 4

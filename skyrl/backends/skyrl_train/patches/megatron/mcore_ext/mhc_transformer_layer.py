@@ -281,9 +281,7 @@ class _ChunkedRouterReplay:
             self.target = self._pad(self.saved_target, pad_tokens)
         elif self.action == RouterReplayAction.REPLAY_BACKWARD and self.replay.replay_backward_list:
             full = self._pad(self.replay.replay_backward_list.pop(0), pad_tokens)
-            self.replay.replay_backward_list[0:0] = [
-                full[lo:hi] for lo, hi in zip(self.bounds[:-1], self.bounds[1:])
-            ]
+            self.replay.replay_backward_list[0:0] = [full[lo:hi] for lo, hi in zip(self.bounds[:-1], self.bounds[1:])]
         self._record = self.action == RouterReplayAction.RECORD
 
     @staticmethod
