@@ -288,6 +288,35 @@ def test_fold_tinker_gdn_aliases_builds_in_proj_qkv_block_adapter():
     assert fold_tinker_gdn_aliases(adapter) is adapter
 
 
+@pytest.mark.parametrize("use_rslora", [False, True])
+def test_fold_tinker_gdn_aliases_overrides_win_over_broad_patterns(use_rslora):
+    """A broad existing pattern key such as ".*" must not shadow the fused in_proj_qkv entries."""
+    prefix = "m.layers.0.linear_attn"
+    state = _state(*(_lora(f"{prefix}.in_proj_{p}", 8, seed=i) for i, p in enumerate("qkv")))
+    state.update(_lora("m.layers.0.self_attn.o_proj", 8, seed=9))
+    config = _config(rank_pattern={".*": R}, alpha_pattern={".*": 2 * ALPHA}, use_rslora=use_rslora)
+    original = parse_peft_adapter(config, state)
+    folded = fold_tinker_gdn_aliases(original)
+
+    fused = folded.pieces[f"{prefix}.in_proj_qkv"]
+    assert fused.rank == 3 * R and fused.scale == original.pieces[f"{prefix}.in_proj_q"].scale
+    # The returned config must describe the folded tensors: re-parsing them succeeds and gives
+    # every module the scale it had before the fold.
+    reparsed = parse_peft_adapter(
+        folded.config,
+        _state(
+            *(
+                {f"{PEFT_PREFIX}{m}{LORA_A_SUFFIX}": p.lora_a, f"{PEFT_PREFIX}{m}{LORA_B_SUFFIX}": p.lora_b}
+                for m, p in folded.pieces.items()
+            )
+        ),
+    )
+    assert reparsed.pieces[f"{prefix}.in_proj_qkv"].scale == pytest.approx(fused.scale)
+    o_proj = "m.layers.0.self_attn.o_proj"
+    assert reparsed.pieces[o_proj].scale == original.pieces[o_proj].scale
+    assert list(folded.config["rank_pattern"]) == ["in_proj_qkv", ".*"]
+
+
 def test_fold_tinker_gdn_aliases_requires_all_three():
     state = _state(_lora("m.layers.0.linear_attn.in_proj_q", 8), _lora("m.layers.0.linear_attn.in_proj_k", 8, seed=1))
     with pytest.raises(ValueError, match=r"lacks \['in_proj_v'\]"):

@@ -397,13 +397,20 @@ def fold_tinker_gdn_aliases(adapter: PeftLoraAdapter) -> PeftLoraAdapter:
             f"rank_pattern entry cannot describe them: {sorted(folded_ranks)}"
         )
     (rank, scale), *_ = folded_ranks
-    config["rank_pattern"] = {k: v for k, v in config["rank_pattern"].items() if k not in _TINKER_GDN_QKV}
-    config["alpha_pattern"] = {k: v for k, v in config["alpha_pattern"].items() if k not in _TINKER_GDN_QKV}
     if config.get("use_rslora", False):
-        config["alpha_pattern"]["in_proj_qkv"] = _integral(scale * math.sqrt(rank))
+        fused_alpha = _integral(scale * math.sqrt(rank))
     else:
-        config["alpha_pattern"]["in_proj_qkv"] = _integral(scale * rank)
-    config["rank_pattern"]["in_proj_qkv"] = rank
+        fused_alpha = _integral(scale * rank)
+    # Pattern lookups take the first matching key (as in peft), so the in_proj_qkv entries go first:
+    # a broader existing key such as ".*" would otherwise shadow them.
+    config["rank_pattern"] = {
+        "in_proj_qkv": rank,
+        **{k: v for k, v in config["rank_pattern"].items() if k not in _TINKER_GDN_QKV + ("in_proj_qkv",)},
+    }
+    config["alpha_pattern"] = {
+        "in_proj_qkv": fused_alpha,
+        **{k: v for k, v in config["alpha_pattern"].items() if k not in _TINKER_GDN_QKV + ("in_proj_qkv",)},
+    }
     targets = config.get("target_modules")
     if isinstance(targets, (list, tuple, set)):
         kept = [t for t in targets if t not in _TINKER_GDN_QKV]
