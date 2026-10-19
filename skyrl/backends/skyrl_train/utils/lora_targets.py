@@ -160,6 +160,23 @@ def resolve_critic_lora_target_modules(
 
     The value head is in neither group. ``"all-linear"`` adapts it, and without an adapter it
     would stay frozen at its initial weights.
+
+    Args:
+        model: The loaded critic, inspected to discover its linear layers.
+        target_modules: The configured value. Must be ``"all-linear"`` when narrowing.
+        train_attn: Whether to adapt attention projections.
+        train_mlp: Whether to adapt MLP projections.
+        value_head_name: Attribute name of the critic's value head (``value_head_prefix`` in
+            ``get_llm_for_sequence_regression``). Appended to the targets only when exactly one
+            of ``train_attn`` / ``train_mlp`` is set; with both set ``"all-linear"`` already
+            covers it.
+
+    Returns:
+        ``target_modules`` unchanged when both flags are set, otherwise the selected group's
+        leaf names followed by ``value_head_name``.
+
+    Raises:
+        ValueError: On the same conditions as :func:`resolve_lora_target_modules`.
     """
     targets = resolve_lora_target_modules(model, target_modules, train_attn, train_mlp)
     if train_attn and train_mlp:
