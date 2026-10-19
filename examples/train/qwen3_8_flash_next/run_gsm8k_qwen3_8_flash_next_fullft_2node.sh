@@ -13,6 +13,12 @@ set -x
 # no FP32 masters on the GPU). The colocated weight sync needs vLLM's TP8 weights (~40 GiB) awake
 # next to the trainer weights and the largest fused expert tensor's receive buffer (~3.1 GiB):
 # ~85 GiB, which does not fit 80 GB H100s but does fit B200s.
+#
+# Host RAM is the tight resource: the optimizer's FP32 masters, FP32 grad copies and Adam moments
+# (16 B/param, the last two allocated at the first optimizer step) plus the pinned bf16 weight
+# offload and PLE shards peak at ~1.62 TB of the 1.76 TB per node. The host optimizer buffers are
+# pageable (pin_cpu_grads/pin_cpu_params=false): torch's pinned-host allocator rounds each block up
+# to a power of two, and pinned buffers pushed the node past Ray's 95% memory-monitor threshold.
 
 # NVLink-SHARP buffers are cudaMalloc'd per NCCL communicator (SkyRL pins NCCL_CUMEM_ENABLE=0) and
 # stay resident through offload and sleep: ~24 GiB/GPU of trainer residual with NVLS, ~12.5 without,
@@ -81,6 +87,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
   trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
   trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.pin_cpu_grads=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.pin_cpu_params=false \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.remove_microbatch_padding=true \

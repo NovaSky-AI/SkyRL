@@ -105,6 +105,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
   trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
   trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.pin_cpu_grads=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.pin_cpu_params=false \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
