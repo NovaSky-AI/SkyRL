@@ -1,0 +1,224 @@
+---
+title: "Day 0 Support for Beam in SkyRL: LoRA, full fine-tuning and MXFP8"
+---
+
+Train the newly released model [Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B), Reflection's 501B-parameter mixture-of-experts
+model (23B active parameters), to solve math problems with reinforcement learning. Megatron trains
+the model and vLLM generates responses, sharing the same GPUs. The examples run DAPO on DAPO-Math-17K and evaluate on
+AIME24 and AIME25.
+
+<Callout type="warn">
+Beam support currently lives on the
+[`beam-release`](https://github.com/NovaSky-AI/SkyRL/tree/beam-release) branch, not on `main`. The example scripts,
+the Beam patches and the `pyproject.toml` that installs the Beam builds of vLLM and Megatron-Bridge are only on that
+branch. Check it out before running anything on this page:
+
+```bash
+git clone -b beam-release https://github.com/NovaSky-AI/SkyRL.git
+cd SkyRL
+```
+
+If you already have a SkyRL checkout, run `git fetch origin beam-release && git checkout beam-release` instead.
+</Callout>
+
+<Callout type="info">
+The examples need 2 to 8 nodes of 8 x B200 GPUs and the SkyRL Beam image
+(`novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron-beam`).
+</Callout>
+
+## Before you start
+
+You need the [Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B) checkpoint, a SkyRL
+checkout of the `beam-release` branch (see above), the Beam builds of vLLM and Megatron-Bridge, and GPUs.
+
+The example scripts are in
+[`examples/train/models/reflection/beam/`](https://github.com/NovaSky-AI/SkyRL/tree/beam-release/examples/train/models/reflection/beam)
+on the `beam-release` branch. All commands on this page run from the root of that checkout.
+
+### Docker image
+
+The SkyRL Beam image ships the Beam builds of vLLM and Megatron-Bridge as wheels under `/opt/skyrl-wheels`, along with
+prebuilt FlashInfer kernels. SkyRL's
+[`pyproject.toml`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/pyproject.toml) on the `beam-release` branch
+installs both from that path.
+
+Start one container per node with host networking and access to the GPUs and RDMA devices. Mount the SkyRL checkout,
+the model and the data at the same paths on every node:
+
+```bash
+docker run -d --name skyrl-beam --gpus all --network host --ipc host --shm-size 64g \
+  --device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 \
+  -v /path/to/SkyRL:/path/to/SkyRL -v /path/to/models:/path/to/models -v $HOME/data:$HOME/data \
+  novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron-beam sleep infinity
+```
+
+### Ray cluster
+
+Start Ray inside the containers, then launch every script from the head node's container:
+
+```bash
+# head node
+docker exec skyrl-beam ray start --head --port=6379 --num-gpus=8
+# every other node
+docker exec skyrl-beam ray start --address=<head-ip>:6379 --num-gpus=8
+```
+
+Put your NCCL settings for the cluster fabric (InfiniBand, RoCE or EFA), together with `WANDB_API_KEY` and
+`HF_TOKEN`, in an env file. Pass it to the scripts with `ENV_FILE=/path/to/.env`. The env file must be at the same path
+on every node, because Ray replays the `uv run --env-file` command on each worker.
+
+### Model and data
+
+Every Ray worker reads the model and data from local paths. Download both on every node, or onto a shared filesystem
+mounted at the same path everywhere:
+
+```bash
+# Beam checkpoint (~1 TB in bf16)
+hf download reflection/Beam-1.0-501B-A23B --local-dir /path/to/models/Beam-1.0-501B-A23B
+
+# DAPO-Math-17K, AIME24 and AIME25: writes dapo-math-17k-cleaned.parquet,
+# aime-2024-cleaned.parquet and aime-2025-cleaned.parquet into DATA_DIR
+DATA_DIR=$HOME/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+```
+
+The scripts read `MODEL_PATH` (default `reflection/Beam-1.0-501B-A23B`) and `DATA_DIR` (default `$HOME/data/dapo`).
+
+## Configurations
+
+LoRA runs on as few as 2 nodes. You can use a different setup by adjusting the parallelism and memory settings in the
+scripts.
+
+| Configuration | Hardware | How it runs | Script |
+|---|---|---|---|
+| LoRA | 2 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_2node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_lora_2node.sh) |
+| LoRA | 4 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_lora_4node.sh) |
+| Full fine-tuning | 8 nodes x 8 B200 GPUs | Training and generation share the GPUs; the full model is trained | [`run_dapo_beam_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_fullft_8node.sh) |
+| MXFP8 full fine-tuning | 8 nodes x 8 B200 GPUs | MXFP8 training and MXFP8 rollouts; the full model is trained | [`run_dapo_beam_fp8_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_fp8_fullft_8node.sh) |
+
+All scripts use these settings:
+
+- **Algorithm:** GRPO with clip-higher, the DAPO overlong-response penalty, and no dynamic sampling.
+- **Batch:** 64 prompts x 8 responses per step, in two mini-batches (the 2-node script uses 32 prompts in one
+  mini-batch).
+- **Token budget:** up to 2,048 prompt tokens and 8,192 response tokens.
+- **Generation:** temperature `1.0`, top-p `1.0`, and `minimal` reasoning effort.
+- **Routing:** Rollout Routing Replay (R3) enabled.
+- **Schedule:** 50 training steps (`MAX_TRAINING_STEPS`), with an evaluation every 5 steps. Evaluation samples eight
+  responses per problem.
+
+### 32 B200 GPUs LoRA
+
+Train rank-64 adapters with alpha 64 on all linear layers, keeping the base model frozen. Each of the 256 experts gets
+its own adapter. The learning rate is `1e-5`.
+
+Megatron uses tensor parallelism 4, expert parallelism 8, and pipeline parallelism 2. vLLM uses two replicas, each with
+tensor parallelism 8 and pipeline parallelism 2.
+
+```bash
+MODEL_PATH=/path/to/models/Beam-1.0-501B-A23B ENV_FILE=/path/to/.env \
+  bash examples/train/models/reflection/beam/run_dapo_beam_lora_4node.sh
+```
+
+### Minimal setup: 16 B200 GPUs LoRA
+
+The 2-node script keeps the same Megatron layout, with one vLLM replica of tensor parallelism 8 and pipeline
+parallelism 2. It halves the batch to 32 prompts x 8 responses and keeps the mini-batch size of 32 prompts, so each
+training step is one optimizer update:
+
+```bash
+MODEL_PATH=/path/to/models/Beam-1.0-501B-A23B ENV_FILE=/path/to/.env \
+  bash examples/train/models/reflection/beam/run_dapo_beam_lora_2node.sh
+```
+
+The LoRA scripts also turn on these throughput and memory optimizations:
+
+- **MoE LoRA slots sized at the expert rank.** With `normalize_moe_lora=true`, each expert adapter has rank
+  `rank / top_k` (8 for rank 64). The scripts pass `additional_config.max_expert_lora_rank` so that vLLM sizes its MoE
+  LoRA slots at that rank instead of the full rank. This speeds up decoding and leaves more memory for the KV cache.
+- **Pinned host staging for the in-memory adapter sync** (`SKYRL_LORA_STAGE_DEVICE=gpu_offload`).
+- **LoRA sequence-parallel input regathering** (`lora_config.sequence_parallel_input_regather=true`), which keeps only
+  each rank's shard of the LayerNorm output for the LoRA backward pass.
+- **Fused LM-head log-probabilities with logit softcapping** (`trainer.fused_lm_head_logprob=true`).
+
+### 64 B200 GPUs full fine-tuning
+
+Update the full model with a learning rate of `1e-6`.
+
+Megatron uses tensor parallelism 4, expert parallelism 8, and pipeline parallelism 4, with full activation
+recomputation. vLLM uses four replicas, each with tensor parallelism 8 and pipeline parallelism 2.
+
+```bash
+MODEL_PATH=/path/to/models/Beam-1.0-501B-A23B ENV_FILE=/path/to/.env \
+  OPTIMIZER_STATE_DISK_DIR=/local/nvme/skyrl_optimizer_state \
+  bash examples/train/models/reflection/beam/run_dapo_beam_fullft_8node.sh
+```
+
+The fp32 master weights and Adam moments are kept on node-local NVMe and streamed through the GPU one chunk at a time,
+using about 0.7 TB per node. Set `OPTIMIZER_STATE_DISK_DIR` to a fast local disk (NVMe RAID0) on every node. To use the
+CPU optimizer instead, set `OPTIMIZER_STATE_DISK_DIR=` (empty); it needs about 1.7 TB of host memory per node.
+
+### 64 B200 GPUs MXFP8 full fine-tuning
+
+The MXFP8 script trains the full model with MXFP8 matrix multiplications in Megatron and generates rollouts with MXFP8
+weights in vLLM. Layer norms and router parameters keep their original precision. MXFP8 rollouts speed up decoding
+substantially, with similar reward and evaluation accuracy to bf16.
+
+- **Training:** MXFP8 matrix multiplications with bf16 primary weights. Megatron uses tensor parallelism 4, expert
+  parallelism 8, and pipeline parallelism 8.
+- **Rollouts:** weights are synced to vLLM in MXFP8. vLLM runs eight single-node replicas, each with tensor
+  parallelism 8 and expert parallelism 8.
+- **KV cache:** bf16 by default. `KV_CACHE_DTYPE=fp8_e4m3` decodes faster at high concurrency, but increases the
+  rollout and training log-probability difference by about 0.01.
+- **Off-policy correction:** MXFP8 rollouts raise the log-probability difference to about 0.03 with R3, compared with
+  about 0.008 for bf16 rollouts. The script enables geometric sequence masking, which drops sequences whose
+  geometric-mean probability ratio falls outside [0.99, 1.01].
+
+```bash
+MODEL_PATH=/path/to/models/Beam-1.0-501B-A23B ENV_FILE=/path/to/.env \
+  OPTIMIZER_STATE_DISK_DIR=/local/nvme/skyrl_optimizer_state \
+  bash examples/train/models/reflection/beam/run_dapo_beam_fp8_fullft_8node.sh
+```
+
+FlashInfer tunes the MXFP8 MoE kernels the first time they run, which can take several minutes.
+
+## Checkpoints and resuming
+
+Each script writes checkpoints to `CKPT_PATH` (default `$HOME/ckpts/<run name>`), and exports and evaluation dumps to
+`EXPORT_PATH` (default `$HOME/exports/<run name>`).
+
+- **LoRA** saves the adapters every 10 steps (`CKPT_INTERVAL`). To resume, rerun the same command with
+  `RESUME_MODE=latest`.
+- **Full fine-tuning (bf16 and MXFP8)** saves every 25 steps and resumes from the latest checkpoint in `CKPT_PATH` by
+  default. A full checkpoint is about 7 TB (about 0.9 TB per node), so make sure each node has room for every
+  checkpoint you keep. `CKPT_INTERVAL=0` turns saving off.
+
+To resume from a specific checkpoint, pass `RESUME_MODE=from_path` with the override
+`trainer.resume_path=<checkpoint dir>`.
+
+## Customizing a run
+
+- `MAX_TRAINING_STEPS`, `REASONING_EFFORT` (`minimal`, `low`, `medium`, `high`, `xhigh` or `max`), `LOGGER` (`wandb`
+  or `console`), `RUN_NAME` and `PROJECT_NAME` change the run without editing the script.
+- `LOG_PATH` sets where infrastructure logs are written.
+- Any Hydra override can be appended to the command, for example `trainer.eval_interval=10`.
+
+AIME25 metrics are logged as `eval/aime-2025/*`. Because of its dataset label, AIME24 is logged as `eval/math_dapo/*`.
+
+## How it works
+
+- **Beam builds of vLLM and Megatron-Bridge.** The image ships vLLM `0.1.0+beam2` and Megatron-Bridge `0.7.0+beam1`.
+  Megatron-Bridge builds Beam as a megatron-core `HybridModel`, with sandwich norms, hybrid sliding-window and NoPE
+  attention with SSMax, per-head Q/K norms, an output gate, a final logit softcap and an FP32 MoE router.
+- **Colocated training and generation.** The trainer and the vLLM replicas share the GPUs, and SkyRL syncs weights in
+  memory after each step. The FP32 router weights stay FP32 through the sync.
+- **Rollout Routing Replay (R3).** vLLM returns the experts it routed each token to, and the trainer replays them. This
+  reduces the difference between rollout and training log-probabilities from about 0.02 to about 0.008 for bf16
+  rollouts. When a vLLM replica uses pipeline parallelism, SkyRL relays the routes from the last pipeline stage.
+- **Reasoning effort.** Beam's chat template takes a `reasoning_effort`, which the scripts pass through
+  `generator.chat_template_kwargs`. The default, `minimal`, keeps responses well within the 8,192-token budget.
+
+## Learn more
+
+See the [recipe README](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/README.md)
+on the `beam-release` branch for the full list of script variables, and the
+[SkyRL blog post](https://blog.skyrl.ai/blog/day-0-beam) for how Beam support was built and validated.

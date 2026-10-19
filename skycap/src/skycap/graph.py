@@ -28,9 +28,9 @@ Identical outputs under the same conditions are one node that records every
 call that produced it. Rarely, several siblings share a match hash but differ
 in delta: the same text sampled under two ``top_p`` values, a harness-written
 message equal to a sample, or (token mode) the same text tokenized two ways.
-A later request's matching message is then matched to the latest
-model-authored one, or the latest client-authored one if there is no model
-sibling. The others are ``shadowed_by`` it: still valid nodes whose paths train
+A later request's matching message is then matched to the latest of them,
+whatever its author: a trajectory goes on from its newest branch, e.g. the
+client twins a full render stores in token mode. The others are ``shadowed_by`` it: still valid nodes whose paths train
 normally. In text mode, history continues from the chosen sibling. In token
 mode, a turn continues from it only if the turn reuses its tokens, and
 otherwise from a client sibling with exactly the rendered tokens: a shadowed
@@ -135,8 +135,8 @@ class MessageGraph:
         self.tools: dict[str, list[dict[str, Any]]] = {}
         #: (parent id, delta hash) -> node id. How ``add`` finds a node it already made.
         self._by_delta: dict[tuple[int | None, str], int] = {}
-        #: (parent id, match hash) -> node id: the latest model-authored such sibling,
-        #: else the latest client-authored one. How ``match`` walks a request's history.
+        #: (parent id, match hash) -> node id: the latest such sibling. How ``match`` walks a
+        #: request's history.
         self._by_match: dict[tuple[int | None, str], int] = {}
         #: parent id (``None`` for roots) -> child node ids, in creation order.
         self._children: dict[int | None, list[int]] = {}
@@ -186,9 +186,7 @@ class MessageGraph:
         )
         self.nodes.append(node)
         self._by_delta[(parent, delta_hash)] = node.id
-        chosen = self._by_match.get((parent, match_hash))
-        if chosen is None or author == "model" or self.nodes[chosen].author == "client":
-            self._by_match[(parent, match_hash)] = node.id
+        self._by_match[(parent, match_hash)] = node.id
         self._children.setdefault(parent, []).append(node.id)
         return node, True
 

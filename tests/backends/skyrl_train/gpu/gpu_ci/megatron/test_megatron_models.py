@@ -87,10 +87,9 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
             cfg.trainer.remove_microbatch_padding = False
     if "qwen3.5" in model_name.lower():
         # Qwen3.5 hybrid GDN checkpoints report a ...ForConditionalGeneration arch
-        # and auto-dispatch to the VL bridge -> Qwen3VLModel, which self-packs and
-        # double-packs against SkyRL's sample packing (corrupting the GDN
-        # cu_seqlens). language_model_only routes them to the native GPTModel + GDN
-        # thd path instead, which supports packed sequences directly.
+        # and auto-dispatch to the VL bridge -> Qwen3VLModel. language_model_only
+        # routes them to the native GPTModel + GDN thd path, which is what this
+        # text-only test exercises.
         cfg.trainer.remove_microbatch_padding = True
         cfg.trainer.policy.language_model_only = True
         cfg.trainer.ref.language_model_only = True
@@ -190,6 +189,14 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     # Blackwell so the H100 rows keep whatever fla picks by default.
     if "glm-5.3-flash" in model_name.lower() and is_blackwell_or_newer():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0")
+    if "glm-5.3-flash" in model_name.lower():
+        # On cold kernel caches the vLLM server JIT-compiles the TileLang mHC / fla KDA / DSA
+        # kernels during CUDA-graph capture, then runs the JIT kernel warmup and the FlashInfer
+        # MoE autotune: ~490 s to healthy on B200, and a cold H100 CI runner exceeded the 600 s
+        # default. Warm caches boot in ~2 min.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
     return env or None
 
 

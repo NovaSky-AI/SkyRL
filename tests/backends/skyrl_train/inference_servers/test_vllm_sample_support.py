@@ -155,6 +155,29 @@ def test_skyrl_generate_returns_packed_sample_support():
     np.testing.assert_array_equal(decode_packed_sample_support(packed), [[7, 8]])
 
 
+@pytest.mark.parametrize(
+    "extra_params, expected_detokenize",
+    [({}, False), ({"stop": ["</answer>"]}, True), ({"detokenize": True}, True)],
+)
+def test_skyrl_generate_skips_detokenize_for_sample_support(extra_params, expected_detokenize):
+    app = FastAPI()
+    engine = FakeEngine()
+    VLLMServerActor._add_custom_endpoints(app, engine, SimpleNamespace(enable_lora=False))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={
+                "token_ids": [1, 2],
+                "sampling_params": {"temperature": 1.0, "top_k": 2, **extra_params},
+                "return_sample_support": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert engine.sampling_params.detokenize is expected_detokenize
+
+
 class FakeLoraEngine(FakeEngine):
     async def generate(self, prompt, sampling_params, request_id, lora_request=None):
         self.sampling_params = sampling_params
