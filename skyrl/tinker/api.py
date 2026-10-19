@@ -534,7 +534,11 @@ class LoRAConfig(BaseModel):
     # Defaults mirror tinker.types.LoraConfig, including train_unembed=True --
     # the SDK sends it on every request, so a server-side default of False would
     # never apply and would misrepresent what clients actually ask for.
-    train_unembed: bool = Field(default=True, description="Whether to add LoRA to the unembedding layer.")
+    train_unembed: bool = Field(
+        default=True,
+        description="Whether to add LoRA to the unembedding layer. Not supported: True is accepted with a "
+        "warning and treated as False.",
+    )
 
     def to_types(self, *, seed: int, alpha: float) -> types.LoraConfig:
         """Convert to the internal type, resolving the server-chosen values.
