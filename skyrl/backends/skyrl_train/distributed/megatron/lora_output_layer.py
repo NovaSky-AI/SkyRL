@@ -1,4 +1,4 @@
-"""Attribute passthrough for a LoRA-wrapped Megatron ``output_layer``.
+"""Attribute forwarding for a LoRA-wrapped Megatron ``output_layer``.
 
 ``GPTModel._postprocess`` reads ``self.output_layer.gather_output`` and toggles
 ``self.output_layer.sequence_parallel`` on whatever module sits at ``output_layer``.
@@ -9,59 +9,36 @@ as ``to_wrap`` and do not proxy its attributes, so a LoRA target list that inclu
 Kept free of megatron imports so the class rewrite is unit-testable on CPU.
 """
 
-from typing import Dict, Iterable, Union
+from functools import cache
+from typing import Iterable, Union
 
 import torch
 
-_PASSTHROUGH_CLASSES: Dict[type, type] = {}
+
+class _OutputLayerAttrs:
+    """Forwards the base-linear attributes ``GPTModel`` uses on ``output_layer`` to ``to_wrap``."""
+
+    @property
+    def gather_output(self):
+        return self.to_wrap.gather_output
+
+    @property
+    def sequence_parallel(self):
+        return self.to_wrap.sequence_parallel
+
+    @sequence_parallel.setter
+    def sequence_parallel(self, value):
+        self.to_wrap.sequence_parallel = value
 
 
+@cache
 def attr_passthrough_class(wrapper_cls: type) -> type:
-    """Subclass of an adapter wrapper that forwards unknown attributes to ``to_wrap``.
-
-    Reads of attributes the wrapper does not own resolve on the base linear; writes to
-    an attribute the base linear has (and the wrapper does not) land on the base linear
-    instead of shadowing it on the wrapper, so ``sequence_parallel = False`` followed by
-    a read sees the base linear's state.
-    """
-    cached = _PASSTHROUGH_CLASSES.get(wrapper_cls)
-    if cached is not None:
-        return cached
-
-    def __getattr__(self, name):
-        try:
-            return super(subclass, self).__getattr__(name)
-        except AttributeError:
-            to_wrap = self.__dict__.get("_modules", {}).get("to_wrap")
-            if to_wrap is None or name == "to_wrap":
-                raise
-            return getattr(to_wrap, name)
-
-    def __setattr__(self, name, value):
-        to_wrap = self.__dict__.get("_modules", {}).get("to_wrap")
-        owned = (
-            name in self.__dict__
-            or name in self.__dict__.get("_parameters", {})
-            or name in self.__dict__.get("_buffers", {})
-            or name in self.__dict__.get("_modules", {})
-        )
-        if (
-            to_wrap is not None
-            and not owned
-            and not isinstance(value, (torch.nn.Module, torch.nn.Parameter))
-            and hasattr(to_wrap, name)
-        ):
-            setattr(to_wrap, name, value)
-            return
-        super(subclass, self).__setattr__(name, value)
-
-    subclass = type(
-        f"SkyRLAttrPassthrough{wrapper_cls.__name__}",
-        (wrapper_cls,),
-        {"__getattr__": __getattr__, "__setattr__": __setattr__},
+    """``wrapper_cls`` with :class:`_OutputLayerAttrs` mixed in (one class per wrapper class)."""
+    return type(
+        f"SkyRLOutputLayer{wrapper_cls.__name__}",
+        (_OutputLayerAttrs, wrapper_cls),
+        {},
     )
-    _PASSTHROUGH_CLASSES[wrapper_cls] = subclass
-    return subclass
 
 
 def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
@@ -86,7 +63,7 @@ def enable_output_layer_attr_passthrough(model_chunks: Union[torch.nn.Module, It
         submodules = output_layer._modules
         if "to_wrap" not in submodules or "adapter" not in submodules:
             continue
-        if type(output_layer) in _PASSTHROUGH_CLASSES.values():
+        if isinstance(output_layer, _OutputLayerAttrs):
             continue
         output_layer.__class__ = attr_passthrough_class(type(output_layer))
         changed += 1

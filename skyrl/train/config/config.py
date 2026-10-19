@@ -1686,6 +1686,18 @@ class TrainerConfig(BaseConfig):
                 "fused_lm_head_logprob=True is only supported with the Megatron backend, "
                 f"got strategy={self.strategy!r}."
             )
+        lora = self.policy.model.lora
+        if (
+            self.fused_lm_head_logprob
+            and lora.rank > 0
+            and isinstance(lora.target_modules, (list, tuple))
+            and "output_layer" in lora.target_modules
+        ):
+            raise ValueError(
+                "fused_lm_head_logprob=True reads output_layer.weight directly and would skip the LoRA "
+                "adapter on output_layer; remove output_layer from trainer.policy.model.lora.target_modules "
+                "or disable fused_lm_head_logprob."
+            )
         if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
             raise ValueError(
                 "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
