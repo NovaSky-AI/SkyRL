@@ -298,6 +298,95 @@ def test_a_name_shared_across_groups_is_rejected() -> None:
         resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)
 
 
+def _gpt2() -> nn.Module:
+    """`mlp` parent, but its projections are ``Conv1D``, not ``nn.Linear``."""
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    return GPT2LMHeadModel(GPT2Config(n_layer=1, n_embd=32, n_head=4, vocab_size=64, n_positions=32))
+
+
+def _gpt_neox() -> nn.Module:
+    """Attention lives under `attention`."""
+    from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
+
+    return GPTNeoXForCausalLM(
+        GPTNeoXConfig(num_hidden_layers=1, hidden_size=32, num_attention_heads=4, intermediate_size=64, vocab_size=64)
+    )
+
+
+def _falcon() -> nn.Module:
+    """Attention lives under `self_attention`."""
+    from transformers import FalconConfig, FalconForCausalLM
+
+    return FalconForCausalLM(FalconConfig(num_hidden_layers=1, hidden_size=32, num_attention_heads=4, vocab_size=64))
+
+
+def _llama4() -> nn.Module:
+    """The MLP lives under `feed_forward`, with routed experts fused and a `shared_expert`."""
+    from transformers import Llama4ForCausalLM, Llama4TextConfig
+
+    return Llama4ForCausalLM(
+        Llama4TextConfig(
+            num_hidden_layers=1,
+            hidden_size=32,
+            intermediate_size=64,
+            intermediate_size_mlp=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            num_local_experts=2,
+            vocab_size=64,
+        )
+    )
+
+
+def _qwen2_5_vl() -> nn.Module:
+    """A vision tower beside the language model, with leaf names the two share."""
+    from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
+
+    return Qwen2_5_VLForConditionalGeneration(
+        Qwen2_5_VLConfig(
+            text_config=dict(
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                vocab_size=64,
+            ),
+            vision_config=dict(
+                depth=1,
+                hidden_size=32,
+                intermediate_size=64,
+                num_heads=4,
+                out_hidden_size=32,
+                fullatt_block_indexes=[0],
+            ),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("build", "train_attn", "train_mlp", "match"),
+    [
+        pytest.param(_gpt2, False, True, "No mlp linear layers found", id="gpt2_conv1d"),
+        pytest.param(_gpt_neox, True, False, "No attn linear layers found", id="gpt_neox_attention"),
+        pytest.param(_falcon, True, False, "No attn linear layers found", id="falcon_self_attention"),
+        pytest.param(_llama4, False, True, "No mlp linear layers found", id="llama4_feed_forward"),
+        pytest.param(_qwen2_5_vl, True, False, "vision-language", id="qwen2_5_vl_attn"),
+        pytest.param(_qwen2_5_vl, False, True, "vision-language", id="qwen2_5_vl_mlp"),
+    ],
+)
+def test_unsupported_architectures_raise(build, train_attn: bool, train_mlp: bool, match: str) -> None:
+    """Real models outside Llama/Qwen-style naming raise rather than build a wrong or empty adapter.
+
+    Each error names `target_modules` as the way out.
+    """
+    with pytest.raises(ValueError, match=match) as exc:
+        resolve_lora_target_modules(build(), "all-linear", train_attn, train_mlp)
+    assert "target_modules" in str(exc.value)
+
+
 def test_all_linear_is_matched_in_any_case() -> None:
     """PEFT accepts the shorthand in any case, so narrowing must too."""
     resolved = resolve_lora_target_modules(_CausalLM(), "ALL-LINEAR", train_attn=True, train_mlp=False)
