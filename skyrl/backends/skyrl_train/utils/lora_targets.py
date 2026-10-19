@@ -9,6 +9,8 @@ from typing import Optional, Union
 import torch.nn as nn
 from loguru import logger
 
+from skyrl.utils.tok import check_is_vlm
+
 # Parent module names that identify which part of a transformer block a linear
 # layer belongs to, in Llama/Qwen-style naming. The JAX backend's `filter_lora`
 # (skyrl/tx/utils/models.py) uses the same names, except `linear_attn`.
@@ -110,7 +112,7 @@ def resolve_lora_target_modules(
     check_lora_group_flags(target_modules, train_attn, train_mlp)
     # Vision towers and mergers reuse the language model's leaf names and use other
     # parent names, so the narrowed list would adapt modules outside the group.
-    if getattr(getattr(model, "config", None), "vision_config", None) is not None:
+    if check_is_vlm(getattr(model, "config", None)):
         raise ValueError(
             f"`train_attn`/`train_mlp` narrowing is not supported for vision-language models "
             f"({type(model).__name__}). Set both to True and name the modules to adapt in "
