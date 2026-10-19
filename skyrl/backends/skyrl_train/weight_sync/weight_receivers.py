@@ -271,11 +271,23 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
         with torch.device(self.device), self.skyrl_checkpoint_load():
             super().receive_weights(update_info)
 
+    def skyrl_release_receive_buffers(self) -> None:
+        """Release receive buffers the vLLM engine holds until the end of a round.
+
+        vLLM's ``finish_weight_update`` releases them after its layerwise
+        finalize. For an adapter round, ``finish_weight_update`` calls this hook
+        in place of vLLM's. No-op for transports whose receive buffers do not
+        outlive ``receive_weights``.
+        """
+
     def finish_weight_update(self) -> None:
         if self.skyrl_lora_armed():
             # No layerwise finalize: an adapter update never writes to the base
             # model's parameters.
-            self.skyrl_finish_lora_update()
+            try:
+                self.skyrl_finish_lora_update()
+            finally:
+                self.skyrl_release_receive_buffers()
             return
         with torch.device(self.device):
             super().finish_weight_update()
@@ -297,6 +309,12 @@ def _build_skyrl_ipc_engine() -> type:
 
     class SkyrlIPCWeightTransferEngine(SkyrlReceiveLifecycleMixin, IPCWeightTransferEngine):
         """vLLM's CUDA IPC receive engine plus SkyRL receive targets."""
+
+        def skyrl_release_receive_buffers(self) -> None:
+            # The importer holds this worker's mapping of the trainer's packed
+            # IPC buffer. Closing it once per export releases the producer-side
+            # refcount, so the trainer's ``ipc_collect`` can free the buffer.
+            self._packed_importer.close()
 
     return SkyrlIPCWeightTransferEngine
 

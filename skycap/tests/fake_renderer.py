@@ -76,6 +76,9 @@ class FakeRenderer:
         self.bridged_media: list[list[Media]] = []
         #: Appended to every image's hash: the same message's image, processed to different content.
         self.image_salt = ""
+        #: Set to drop ``THINK:...|`` from assistant content before the last user message in a full render, as
+        #: Qwen's templates drop historical reasoning: a bridged history then no longer re-renders the same.
+        self.drop_history_thinking = False
 
     def _message(self, message: Mapping[str, Any], start: int) -> tuple[list[int], list[Media]]:
         tokens = [START, *encode(str(message.get("role"))), NL]
@@ -95,6 +98,16 @@ class FakeRenderer:
 
     def render(self, messages: Sequence[Mapping[str, Any]], tools: Any) -> Rendered:
         self.renders += 1
+        if self.drop_history_thinking:
+            last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+            messages = [
+                (
+                    {**m, "content": m["content"].split("|", 1)[-1]}
+                    if i < last_user and m.get("role") == "assistant" and str(m.get("content", "")).startswith("THINK:")
+                    else m
+                )
+                for i, m in enumerate(messages)
+            ]
         return self._render(messages, tools)
 
     def _render(self, messages: Sequence[Mapping[str, Any]], tools: Any, start: int = 0) -> Rendered:

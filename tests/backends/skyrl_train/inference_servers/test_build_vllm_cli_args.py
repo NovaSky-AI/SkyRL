@@ -176,6 +176,81 @@ def test_sample_support_uses_processed_top_k_logprobs():
     assert args.logprobs_mode == "processed_logprobs"
 
 
+def _megatron_lora_cfg(*overrides):
+    return SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.lora.rank=64",
+            "trainer.policy.megatron_config.lora_config.merge_lora=false",
+            *overrides,
+        ]
+    )
+
+
+_SCALE = "generator.inference_engine.scale_moe_lora_rank=true"
+_NORMALIZE = "trainer.policy.megatron_config.lora_config.normalize_moe_lora=true"
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "overrides,topk,expected",
+    [
+        # 64 // top-8.
+        ([_SCALE, _NORMALIZE], 8, 8),
+        # Rounded up to the expert tensor parallel size, which defaults to the TP size.
+        ([_SCALE, _NORMALIZE, "trainer.policy.megatron_config.tensor_model_parallel_size=16"], 8, 16),
+        ([_SCALE, _NORMALIZE, "trainer.policy.megatron_config.expert_tensor_parallel_size=64"], 8, None),
+        # No top-k in the HF config: the experts keep max_lora_rank.
+        ([_SCALE, _NORMALIZE], None, None),
+        # Off by default.
+        ([_NORMALIZE], 8, None),
+    ],
+)
+def test_scale_moe_lora_rank_is_passed_through_additional_config(monkeypatch, overrides, topk, expected):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_moe_router_topk", lambda _model_path: topk)
+    args = build_vllm_cli_args(_megatron_lora_cfg(*overrides))
+
+    assert args.enable_lora and args.max_lora_rank == 64
+    assert (args.additional_config or {}).get("max_expert_lora_rank") == expected
+
+
+@pytest.mark.vllm
+def test_scale_moe_lora_rank_merges_with_engine_additional_config(monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_moe_router_topk", lambda _model_path: 8)
+    cfg = _megatron_lora_cfg(_SCALE, _NORMALIZE)
+    cfg.generator.inference_engine.engine_init_kwargs = {"additional_config": {"other": 1}}
+    args = build_vllm_cli_args(cfg)
+
+    assert args.additional_config == {"other": 1, "max_expert_lora_rank": 8}
+
+
+@pytest.mark.parametrize(
+    "hf_config,expected",
+    [
+        ({"num_experts_per_tok": 8}, 8),
+        ({"text_config": {"num_experts_per_tok": 4}}, 4),
+        ({"moe_topk": [6]}, 6),
+        ({"hidden_size": 16}, None),
+    ],
+)
+def test_moe_router_topk_reads_hf_config(monkeypatch, hf_config, expected):
+    import transformers
+
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    def from_pretrained(*_args, **_kwargs):
+        text_config = hf_config.get("text_config")
+        fields = {k: v for k, v in hf_config.items() if k != "text_config"}
+        return SimpleNamespace(**fields, text_config=SimpleNamespace(**text_config) if text_config else None)
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", from_pretrained)
+    assert inference_utils._moe_router_topk("model") == expected
+
+
 def test_resolve_policy_model_name_uses_served_model_name():
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = "base-model"
@@ -286,6 +361,18 @@ class TestGetPDCLIArgs:
         role_kwargs = {"kv_transfer_config": {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}}
         out = get_pd_cli_args(args, role="decode", role_init_kwargs=role_kwargs)
         assert out.kv_transfer_config["kv_role"] == "kv_consumer"
+
+    @pytest.mark.parametrize("role_additional_config", [{"other": 1}, '{"other": 1}'])
+    def test_role_additional_config_merges_with_base(self, role_additional_config):
+        # The base args carry the derived MoE expert LoRA slot rank; a role's own
+        # additional_config must not drop it.
+        args = Namespace(
+            additional_config={"max_expert_lora_rank": 8},
+            kv_transfer_config={"kv_connector": "NixlConnector"},
+        )
+        out = get_pd_cli_args(args, role="decode", role_init_kwargs={"additional_config": role_additional_config})
+        assert out.additional_config == {"max_expert_lora_rank": 8, "other": 1}
+        assert args.additional_config == {"max_expert_lora_rank": 8}
 
     def test_missing_kv_transfer_config_raises(self):
         args = Namespace()
