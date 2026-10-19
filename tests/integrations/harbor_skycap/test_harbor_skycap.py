@@ -36,7 +36,10 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
-from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
+from skyrl.train.generators.utils import (  # noqa: E402
+    concatenate_generator_outputs,
+    get_metrics_from_generator_output,
+)
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     AGENT,
@@ -158,7 +161,7 @@ async def generator(skycap):
     """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
     made = []
 
-    def make(train_paths: str = "all", **cfg) -> HarborSkycapGenerator:
+    def make(train_paths: str = "all", unbridged_policy: str = "allow", **cfg) -> HarborSkycapGenerator:
         made.append(
             HarborSkycapGenerator(
                 generator_cfg(**cfg),
@@ -166,6 +169,7 @@ async def generator(skycap):
                 [skycap.url],
                 SimpleNamespace(weight_version=7),
                 train_paths=train_paths,
+                unbridged_policy=unbridged_policy,
             )
         )
         return made[-1]
@@ -237,6 +241,158 @@ async def test_a_summarizing_trial_emits_one_row_per_path_grouped_under_its_id(s
     # The rewritten history couldn't extend the tokens before it: one call, in one trajectory.
     assert out["rollout_metrics"]["generate/skycap/num_unbridged_trajectories"] == 1
     assert out["rollout_metrics"]["generate/skycap/num_unbridged_calls"] == 1
+
+
+@pytest.mark.parametrize(
+    "policy, rewards, last_steps",
+    [
+        ("allow", [1.0, 1.0, 1.0], [False, True, True]),
+        ("zero_reward", [0.0, 0.0, 1.0], [False, True, True]),
+        ("mask_instance", [0.0, 0.0], [True, True]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unbridged_policy_applies_to_the_group_without_retrying(
+    policy, rewards, last_steps, skycap, trials, generator
+) -> None:
+    inputs = batch("summarize", "linear")
+    inputs["trajectory_ids"] = [TrajectoryID("same", 0), TrajectoryID("same", 1)]
+    out = await generator(unbridged_policy=policy).generate(inputs, disable_tqdm=True)
+    validate_generator_output(2, out, step_wise=True)
+
+    assert out["rewards"] == rewards
+    assert out["is_last_step"] == last_steps
+    assert len(trials.configs) == 2
+    metrics = out["rollout_metrics"]
+    assert metrics["generate/skycap/num_unbridged_trajectories"] == 1
+    assert metrics["generate/skycap/num_unbridged_calls"] == 1
+    assert metrics["generate/skycap/num_error_trajectories"] == 0
+    assert metrics["generate/skycap/num_masked_instances"] == (policy == "mask_instance")
+    assert metrics["generate/harbor/num_retried_attempts"] == 0
+    if policy == "mask_instance":
+        assert out["loss_masks"] == [[0], [0]]
+        assert out["stop_reasons"] == ["error", "error"]
+    else:
+        assert all(any(mask) for mask in out["loss_masks"])
+        assert out["stop_reasons"] == ["complete"] * 3
+    # Capture keeps what the verifier returned, independently of the training policy.
+    for trajectory_id in record.list_ids(skycap.server.record_dir):
+        document = record.read_document(skycap.server.record_dir, trajectory_id)
+        assert document["annotations"] == {"reward": 1.0, "stop_reason": "complete"}
+
+
+@pytest.mark.parametrize("policy", ["zero_reward", "mask_instance"])
+@pytest.mark.asyncio
+async def test_unbridged_policy_keeps_other_instances_and_side_channels(policy, trials, generator) -> None:
+    inputs = batch("summarize", "linear", "linear")
+    inputs["trajectory_ids"] = [TrajectoryID("same", 0), TrajectoryID("same", 1), TrajectoryID("other", 0)]
+    out = await generator(unbridged_policy=policy, inference_engine=R3).generate(inputs, disable_tqdm=True)
+    validate_generator_output(3, out, step_wise=True, routes_expected=True)
+
+    other = out["trajectory_ids"].index(TrajectoryID("other", 0))
+    assert out["rewards"][other] == 1.0 and any(out["loss_masks"][other])
+    assert out["stop_reasons"][other] == "complete"
+    assert len(trials.configs) == 3
+    for response, mask, support in zip(out["response_ids"], out["loss_masks"], out["rollout_sample_support"]):
+        assert support.shape == (len(response), TOP_K)
+        for token, trained, row in zip(response, mask, support):
+            assert (row[0] == token) if trained else (row == -1).all()
+    if policy == "mask_instance":
+        assert out["loss_masks"][:2] == [[0], [0]]
+        assert out["rewards"] == [0.0, 0.0, 1.0]
+        assert all(
+            routes.tolist() == [[list(range(EXPERTS_PER_TOKEN))] * LAYERS]
+            for routes in out["rollout_expert_indices"][:2]
+        )
+    else:
+        assert out["rewards"] == [0.0, 0.0, 1.0, 1.0]
+        assert_routes_are_the_rows_own(out)
+
+
+@pytest.mark.asyncio
+async def test_all_unbridged_masked_rows_keep_expected_support_without_routes(trials, generator) -> None:
+    engine = SimpleNamespace(
+        served_model_name="policy", enable_return_routed_experts=True, enable_return_sample_support_set=True
+    )
+    out = await generator(unbridged_policy="mask_instance", inference_engine=engine).generate(
+        batch("summarize", repetitions=2), disable_tqdm=True
+    )
+
+    assert out["loss_masks"] == [[0], [0]] and out["rewards"] == [0.0, 0.0]
+    assert out["rollout_expert_indices"] is None
+    assert [support.shape for support in out["rollout_sample_support"]] == [(1, TOP_K), (1, TOP_K)]
+    assert all((support == -1).all() for support in out["rollout_sample_support"])
+
+
+def test_zero_reward_preserves_outcomes_and_default_composition() -> None:
+    sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
+    sample.logprobs = [0.0, -1.0, -1.0]
+    outcomes = [
+        TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=2.0, unbridged_calls=1),
+        TrialOutcome(trajectory_id=TrajectoryID("a", 1), samples=[sample], reward=3.0),
+    ]
+    before = compose(outcomes, overlong_filtering=False)
+    zeroed = compose(outcomes, overlong_filtering=False, unbridged_policy="zero_reward")
+
+    assert zeroed["rewards"] == [0.0, 3.0]
+    assert zeroed["loss_masks"] == before["loss_masks"] == [[1, 1], [1, 1]]
+    assert get_metrics_from_generator_output(zeroed, ["a", "a"])["avg_score"] == 1.5
+    assert zeroed["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 3
+    assert [outcome.reward for outcome in outcomes] == [2.0, 3.0]
+    assert compose(outcomes, overlong_filtering=False) == before
+    assert compose(outcomes, overlong_filtering=False, unbridged_policy="allow") == before
+
+
+@pytest.mark.parametrize("policy", ["allow", "zero_reward", "mask_instance"])
+def test_unbridged_policy_preserves_timeout_and_overlong_masking(policy) -> None:
+    sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
+    outcomes = [
+        TrialOutcome(trajectory_id=TrajectoryID("timeout", 0), samples=[sample], stop_reason="agent_timeout"),
+        TrialOutcome(trajectory_id=TrajectoryID("timeout", 1), samples=[sample], reward=1.0, unbridged_calls=1),
+        TrialOutcome(trajectory_id=TrajectoryID("long", 0), samples=[sample], stop_reason="context_length"),
+    ]
+
+    out = compose(outcomes, overlong_filtering=True, unbridged_policy=policy)
+
+    assert out["loss_masks"] == [[0], [0], [0, 0]]
+    assert out["stop_reasons"] == ["error", "error", "context_length"]
+    assert out["rollout_metrics"]["generate/skycap/num_masked_instances"] == 1
+
+
+@pytest.mark.parametrize("policy", ["", "mask", None])
+def test_invalid_unbridged_policy_fails_before_resources_are_created(policy, monkeypatch) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    def unexpected_resource(*args, **kwargs):
+        pytest.fail("invalid policy created a capture resource")
+
+    monkeypatch.setattr(harbor_generator, "CapturePool", unexpected_resource)
+    monkeypatch.setattr(main_harbor_skycap, "start_servers", unexpected_resource)
+    with pytest.raises(ValueError, match="skycap.unbridged_policy"):
+        HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], unbridged_policy=policy)
+    cfg = main_harbor_skycap.HarborSkycapConfig()
+    cfg.skycap.unbridged_policy = policy
+    with pytest.raises(ValueError, match="skycap.unbridged_policy"):
+        main_harbor_skycap.start_skycap(cfg, "http://router")
+    with pytest.raises(ValueError, match="skycap.unbridged_policy"):
+        compose([], overlong_filtering=False, unbridged_policy=policy)
+
+
+@pytest.mark.parametrize("policy", ["allow", "zero_reward", "mask_instance"])
+def test_configured_unbridged_policy_reaches_the_generator(policy, monkeypatch) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    cfg = main_harbor_skycap.HarborSkycapConfig.from_cli_overrides([f"skycap.unbridged_policy={policy}"])
+    cfg.skycap.wandb.enabled = False
+    created = []
+    monkeypatch.setattr(main_harbor_skycap, "HarborSkycapGenerator", lambda **kwargs: created.append(kwargs))
+    experiment = object.__new__(main_harbor_skycap.HarborSkycapExp)
+    experiment.skycap = SimpleNamespace(urls=["http://capture"])
+    experiment.records = None
+
+    experiment.get_generator(cfg, None, None)
+
+    assert created[0]["unbridged_policy"] == policy
 
 
 def trained_text(out: dict, row: int) -> str:

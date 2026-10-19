@@ -33,10 +33,10 @@ from harbor.models.agent.name import AgentName
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
-from skycap import CapturePool, PathRuleError
-from skycap.paths import load_rule
 from tqdm import tqdm
 
+from skycap import CapturePool, PathRuleError
+from skycap.paths import load_rule
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -48,7 +48,7 @@ from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
-from .compose import TrialOutcome, compose, split
+from .compose import TrialOutcome, compose, split, validate_unbridged_policy
 from .record_index import RecordLog
 
 litellm.suppress_debug_info = True
@@ -69,6 +69,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         inference_engine_client: Any = None,
         train_paths: str = "all",
         records: Optional[RecordLog] = None,
+        unbridged_policy: str = "allow",
     ) -> None:
         """
         Args:
@@ -79,7 +80,11 @@ class HarborSkycapGenerator(GeneratorInterface):
             train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
+            unbridged_policy: how to train on a rollout whose history was re-rendered: ``allow``,
+                ``zero_reward``, or ``mask_instance`` (all repetitions of the same instance).
         """
+        validate_unbridged_policy(unbridged_policy)
+        self.unbridged_policy = unbridged_policy
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
         self.train_paths = train_paths
@@ -169,6 +174,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
+            unbridged_policy=self.unbridged_policy,
         )
         output["rollout_metrics"].update(trial_metrics(attempts))
         return output
