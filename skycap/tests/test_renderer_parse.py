@@ -43,12 +43,19 @@ def test_extracted_argument_object_preserves_schema_invalid_value() -> None:
     assert finish_reason("length", message) == "length"
 
 
-@pytest.mark.parametrize("arguments", [None, [], False, 0, "", '{"volume":'])
+@pytest.mark.parametrize("arguments", [[], False, 0, "", '{"volume":'])
 def test_invalid_argument_shapes_are_not_replaced_with_an_empty_object(arguments: object) -> None:
     message = parse(ParsedToolCall(raw="original call", name="run_well", arguments=arguments))
 
     encoded = message["tool_calls"][0]["function"]["arguments"]
     assert encoded == (arguments if isinstance(arguments, str) else json.dumps(arguments))
+
+
+def test_missing_arguments_are_an_empty_object() -> None:
+    # Harnesses and chat templates index into the decoded arguments, so `null` would break them.
+    message = parse(ParsedToolCall(raw="original call", name="run_well", arguments=None))
+
+    assert message["tool_calls"][0]["function"]["arguments"] == "{}"
 
 
 def test_parser_rejected_unknown_tool_is_not_promoted() -> None:

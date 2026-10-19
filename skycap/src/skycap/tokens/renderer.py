@@ -200,7 +200,9 @@ class RenderersRenderer:
                 continue
             arguments = call.arguments
             if not isinstance(arguments, str):
-                arguments = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
+                arguments = json.dumps(
+                    {} if arguments is None else arguments, separators=(",", ":"), ensure_ascii=False
+                )
             calls.append(
                 {
                     "id": call.id or tool_call_id(completion_ids, index),
