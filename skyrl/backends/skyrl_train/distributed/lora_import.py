@@ -356,6 +356,13 @@ def fold_tinker_gdn_aliases(adapter: PeftLoraAdapter) -> PeftLoraAdapter:
             groups.setdefault(match.group("prefix"), {})[match.group("proj")] = piece
     if not groups:
         return adapter
+    for prefix, group in groups.items():
+        missing = [proj for proj in _TINKER_GDN_QKV if proj not in group]
+        if missing:
+            raise ValueError(
+                f"init_adapter_path: {prefix} has {sorted(group)} adapters but lacks {missing}; "
+                "in_proj_q/k/v must all be present to fold into in_proj_qkv"
+            )
 
     config = dict(adapter.config)
     config["rank_pattern"] = dict(config.get("rank_pattern") or {})
@@ -371,9 +378,6 @@ def fold_tinker_gdn_aliases(adapter: PeftLoraAdapter) -> PeftLoraAdapter:
         group = groups[prefix]
         if match.group("proj") != _TINKER_GDN_QKV[0]:
             continue  # emitted together with in_proj_q
-        missing = [proj for proj in _TINKER_GDN_QKV if proj not in group]
-        if missing:
-            raise ValueError(f"init_adapter_path: {prefix} has in_proj_q/k/v adapters but lacks {missing}")
         fused_module = f"{prefix}.in_proj_qkv"
         if fused_module in adapter.pieces:
             raise ValueError(f"init_adapter_path: {prefix} has both in_proj_qkv and in_proj_q/k/v adapters")

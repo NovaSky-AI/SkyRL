@@ -294,6 +294,19 @@ def test_fold_tinker_gdn_aliases_requires_all_three():
         fold_tinker_gdn_aliases(parse_peft_adapter(_config(), state))
 
 
+def test_fold_tinker_gdn_aliases_rejects_a_layer_without_q_next_to_a_complete_one():
+    """A layer missing in_proj_q must raise even when another layer folds cleanly."""
+    state = _state(
+        _lora("m.layers.0.linear_attn.in_proj_q", 8, seed=1),
+        _lora("m.layers.0.linear_attn.in_proj_k", 8, seed=2),
+        _lora("m.layers.0.linear_attn.in_proj_v", 8, seed=3),
+        _lora("m.layers.1.linear_attn.in_proj_k", 8, seed=4),
+        _lora("m.layers.1.linear_attn.in_proj_v", 8, seed=5),
+    )
+    with pytest.raises(ValueError, match=r"m\.layers\.1\.linear_attn .* lacks \['in_proj_q'\]"):
+        fold_tinker_gdn_aliases(parse_peft_adapter(_config(), state))
+
+
 # ---------------------------------------------------------------------------
 # vLLM sync
 # ---------------------------------------------------------------------------
