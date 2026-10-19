@@ -93,8 +93,9 @@ def resolve_lora_target_modules(
 
     Args:
         model: The loaded model, inspected to discover its linear layers.
-        target_modules: The configured value. Must be ``"all-linear"`` when narrowing, since
-            intersecting an explicit list is ambiguous.
+        target_modules: The configured value. Must be ``"all-linear"`` when narrowing to one
+            group with ``train_attn`` or ``train_mlp``, since intersecting an explicit list is
+            ambiguous.
         train_attn: Whether to adapt attention projections.
         train_mlp: Whether to adapt MLP projections (and expert projections, where the
             architecture exposes them as ``nn.Linear``).
@@ -165,7 +166,8 @@ def resolve_critic_lora_target_modules(
 
     Args:
         model: The loaded critic, inspected to discover its linear layers.
-        target_modules: The configured value. Must be ``"all-linear"`` when narrowing.
+        target_modules: The configured value. Must be ``"all-linear"`` when narrowing to one
+            group with ``train_attn`` or ``train_mlp``.
         train_attn: Whether to adapt attention projections.
         train_mlp: Whether to adapt MLP projections.
         value_head_name: Attribute name of the critic's value head (``value_head_prefix`` in
