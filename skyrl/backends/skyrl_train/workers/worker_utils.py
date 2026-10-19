@@ -74,6 +74,33 @@ def compute_minibatch_rollout_logprob_diff_metrics(
     }
 
 
+ADVANTAGE_SPLIT_LOGRATIO_KEYS = ("adv_pos_logratio", "adv_neg_logratio")
+
+
+@torch.no_grad()
+def compute_advantage_split_logratio_metrics(
+    action_log_probs: torch.Tensor,
+    old_action_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_mask: Optional[torch.Tensor],
+) -> Dict[str, float]:
+    """Mean log-ratio ``logp - old_logp`` over tokens with positive and with negative advantage.
+
+    A direction check for multi-epoch updates on one batch (``update_epochs_per_batch > 1``):
+    ``old_logp`` is the pre-update policy, so the first epoch reads ~0 and a correct update makes
+    ``adv_pos_logratio`` rise and ``adv_neg_logratio`` fall. Only the sign of the (possibly
+    pre-scaled) advantages is used. A micro-batch with no such tokens contributes 0, so the keys
+    are present on every DP rank.
+    """
+    logratio = action_log_probs - old_action_log_probs
+    mask = torch.ones_like(logratio) if loss_mask is None else loss_mask
+    pos_key, neg_key = ADVANTAGE_SPLIT_LOGRATIO_KEYS
+    return {
+        pos_key: masked_mean(logratio, mask * (advantages > 0)).item(),
+        neg_key: masked_mean(logratio, mask * (advantages < 0)).item(),
+    }
+
+
 def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:
     """Reduce scalar metrics from a list of entries per key with the appropriate reduction.
 
