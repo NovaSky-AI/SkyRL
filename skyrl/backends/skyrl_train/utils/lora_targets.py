@@ -63,6 +63,7 @@ def check_lora_group_flags(
             "no module would be adapted and there would be nothing to train."
         )
     if strategy == "megatron":
+        # TODO: honour train_attn/train_mlp on Megatron (https://github.com/NovaSky-AI/SkyRL/issues/2511).
         raise NotImplementedError(
             "`train_attn`/`train_mlp` are only supported on the FSDP backend; the Megatron "
             "backend always adapts both attention and MLP. Use `trainer.strategy=fsdp`, or "
