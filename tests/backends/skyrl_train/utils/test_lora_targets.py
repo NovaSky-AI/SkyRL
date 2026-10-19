@@ -161,6 +161,28 @@ def test_groups_are_disjoint_and_cover_every_linear() -> None:
     assert attn | mlp == all_linears
 
 
+class _Linear4bit(nn.Linear):
+    """Stand-in for ``bitsandbytes.nn.Linear4bit``.
+
+    bitsandbytes declares ``Linear4bit`` and ``Linear8bitLt`` as ``nn.Linear``
+    subclasses (checked against 0.50.2), but it is not a SkyRL dependency, so the
+    real classes cannot be imported here.
+    """
+
+
+def test_quantized_linear_subclasses_are_selected() -> None:
+    """A 4-bit model's projections are ``nn.Linear`` subclasses, so narrowing still finds them."""
+    model = _CausalLM()
+    for parent in list(model.modules()):
+        for child_name, child in list(parent.named_children()):
+            if type(child) is nn.Linear:
+                setattr(parent, child_name, _Linear4bit(child.in_features, child.out_features, bias=False))
+    assert not [m for m in model.modules() if type(m) is nn.Linear]
+
+    assert resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=False) == ATTN_NAMES
+    assert resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True) == MLP_NAMES
+
+
 def test_both_flags_false_is_rejected() -> None:
     """With both groups off there is nothing to train, so the request raises."""
     with pytest.raises(ValueError, match="at least one of `train_attn` or `train_mlp`"):
