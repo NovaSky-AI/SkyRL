@@ -1,6 +1,7 @@
-# mini-swe-agent 2.x's own mini_textbased.yaml, for SWE-bench Multimodal through skycap:
-# - model_class litellm_textbased and multimodal_regex (below), so the issue's screenshots reach the model;
-# - step_limit 50, cost_limit 0 (skycap's model has no price).
+# mini-swe-agent 2.4.6's own mini_textbased.yaml, unchanged except for:
+# - model_class litellm_textbased: the command is parsed out of the reply's text, as skycap returns it;
+# - multimodal_regex: the image tags prepare_tasks.py writes become image_url parts, so the screenshots reach the model;
+# - step_limit 50, cost_limit 0 (skycap's model has no price), mode yolo (no confirmation).
 # Harbor runs it as `-c mini -c <this file>`, so every key mini.yaml sets that this config replaces is here.
 agent:
   system_template: |
@@ -13,7 +14,7 @@ agent:
     <format_example>
     Your reasoning and analysis here. Explain why you want to perform the action.
 
-    ```bash
+    ```mswea_bash_command
     your_command_here
     ```
     </format_example>
@@ -54,7 +55,7 @@ agent:
     <example_response>
     THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
 
-    ```bash
+    ```mswea_bash_command
     ls -la
     ```
     </example_response>
@@ -63,7 +64,7 @@ agent:
 
     ### Create a new file:
 
-    ```bash
+    ```mswea_bash_command
     cat <<'EOF' > newfile.py
     import numpy as np
     hello = "world"
@@ -79,7 +80,7 @@ agent:
     </important>
     {%- endif -%}
 
-    ```bash
+    ```mswea_bash_command
     # Replace all occurrences
     sed -i 's/old_string/new_string/g' filename.py
 
@@ -95,14 +96,14 @@ agent:
 
     ### View file content:
 
-    ```bash
+    ```mswea_bash_command
     # View specific lines with numbers
     nl -ba filename.py | sed -n '10,20p'
     ```
 
     ### Any other command you want to run
 
-    ```bash
+    ```mswea_bash_command
     anything
     ```
   step_limit: 50
@@ -116,20 +117,7 @@ environment:
     PIP_PROGRESS_BAR: 'off'
     TQDM_DISABLE: '1'
 model:
-  # Text-based: the command is parsed out of the reply's text, so skycap answers with the completion as is
-  # (skycap.use_raw_content, a thinking model's reasoning inline) and no tool-call parser is involved.
   model_class: litellm_textbased
-  # The command counts only after the thinking closes, as with a reasoning parser, where thinking goes to
-  # reasoning_content and is never searched. mini-swe-agent's default searches the whole raw text, so a
-  # turn that ends still thinking, command included, runs as if it were well formed, and RL then teaches
-  # the policy to stop closing its thinking. Here such a turn is a format error, and so are two commands.
-  # The fence is ```bash, the model's own habit; mini-swe-agent's ```mswea_bash_command still counts. With
-  # that tag only, the policy drifted back to ```bash or garbled the tag, about 15% of calls by step 24.
-  # The closing fence must be a bare ``` line, and the command can't contain ```, so a command with an inner
-  # fence (a heredoc writing markdown) is a format error rather than run cut short at the inner fence. The
-  # match starts at the first </think>, so a second command after a later </think> is a format error too.
-  action_regex: '^(?:(?!</think>).)*</think>(?:(?!```(?:mswea_bash_command|bash|sh)\b).)*```(?:mswea_bash_command|bash|sh)\b[^\n]*\n((?:(?!```).)*?)\n```[ \t]*(?=\n|$)(?!.*```(?:mswea_bash_command|bash|sh)\b)'
-  # mini-swe-agent's default pattern: the image tags prepare_tasks.py writes become image_url parts.
   multimodal_regex: '(?s)<MSWEA_MULTIMODAL_CONTENT><CONTENT_TYPE>(.+?)</CONTENT_TYPE>(.+?)</MSWEA_MULTIMODAL_CONTENT>'
   observation_template: |
     {% if output.exception_info -%}
@@ -174,14 +162,13 @@ model:
     Here is general guidance on how to format your response:
 
     Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
-    Finish your thinking first: the action must come after </think>, not inside your thinking.
 
     Please format your action in triple backticks as shown in <response_example>.
 
     <response_example>
     Here are some thoughts about why you want to perform the action.
 
-    ```bash
+    ```mswea_bash_command
     <action>
     ```
     </response_example>
