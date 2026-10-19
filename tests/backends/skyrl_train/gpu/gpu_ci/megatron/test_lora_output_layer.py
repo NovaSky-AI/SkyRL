@@ -7,8 +7,8 @@ uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_tr
 ``output_layer.sequence_parallel``; Megatron-Bridge's adapter wrapper does not proxy them,
 so without the passthrough the first forward raises
 ``'LoRALinear' object has no attribute 'gather_output'``. The test runs a forward with the
-fresh (zero) adapter, perturbs every LoRA B including the output layer's, and checks the
-logprobs move, so the output-layer adapter is on the compute path.
+fresh (zero) adapters, perturbs only the output layer's LoRA B (every other adapter stays at
+zero), and checks the logprobs move, so the output-layer adapter itself is on the compute path.
 """
 
 import pytest
@@ -38,11 +38,12 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 class _PerturbPolicyWorkerBase(MegatronPolicyWorkerBase):
-    def perturb_lora_b(self, multiplier: float) -> dict:
+    def perturb_output_layer_lora_b(self, multiplier: float) -> dict:
         named_parameters = (
             (f"chunk{index}.{name}", parameter)
             for index, chunk in enumerate(self.actor_module)
             for name, parameter in chunk.named_parameters()
+            if "output_layer" in name
         )
         return perturb_lora_b(named_parameters, multiplier=multiplier)
 
@@ -58,7 +59,7 @@ class _PerturbPolicyWorkerBase(MegatronPolicyWorkerBase):
 _PerturbPolicyWorker = ray.remote(num_gpus=1)(_PerturbPolicyWorkerBase)
 
 
-def test_lora_on_output_layer_forwards_and_trains():
+def test_lora_on_output_layer_changes_logprobs():
     cfg = get_test_actor_config(MODEL_NAME)
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.model.lora = SkyRLLoraConfig(
@@ -74,9 +75,13 @@ def test_lora_on_output_layer_forwards_and_trains():
         assert any(name.endswith("linear_out.weight") for name in adapter_params), adapter_params
 
         before = _trainer_logprobs(policy, data)
-        ray.get(policy.async_run_ray_method("pass_through", "perturb_lora_b", 30.0))
+        perturbed = ray.get(policy.async_run_ray_method("pass_through", "perturb_output_layer_lora_b", 30.0))[0]
         after = _trainer_logprobs(policy, data)
 
+    # Only the output layer's B was changed; every other adapter is still zero.
+    assert perturbed["changed_tensors"] == 1, perturbed
     moved = (before - after).abs().mean().item()
-    print(f"output_layer LoRA: {len(adapter_params)} adapter params; perturbation moved logprobs by {moved:.4f}")
-    assert moved > 1e-3, "perturbing the adapters (including output_layer's) must change the logprobs"
+    print(
+        f"output_layer LoRA: {len(adapter_params)} adapter params; perturbing only its B moved logprobs by {moved:.4f}"
+    )
+    assert moved > 1e-3, "perturbing only the output_layer adapter must change the logprobs"
