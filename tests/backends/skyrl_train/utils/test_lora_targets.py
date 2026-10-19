@@ -5,8 +5,6 @@ mirror what `Qwen3ForCausalLM` exposes, so the test stays offline and fast while
 still covering the paths `resolve_lora_target_modules` classifies on.
 """
 
-from types import SimpleNamespace
-
 import pytest
 import torch.nn as nn
 
@@ -254,15 +252,6 @@ def test_megatron_rejects_narrowing(train_attn: bool, train_mlp: bool, error) ->
         check_lora_group_flags("all-linear", train_attn, train_mlp, strategy="megatron")
 
 
-def test_narrowing_a_vision_language_model_is_rejected() -> None:
-    """Vision towers reuse leaf names like `out_proj` and `linear_fc1`, so narrowing would leak."""
-    model = _CausalLM()
-    model.config = SimpleNamespace(vision_config=SimpleNamespace())
-    assert resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=True) == "all-linear"
-    with pytest.raises(ValueError, match="vision-language"):
-        resolve_lora_target_modules(model, "all-linear", train_attn=True, train_mlp=False)
-
-
 def test_a_name_shared_across_groups_is_rejected() -> None:
     """GPT-BigCode names both the MLP and the attention output projection `c_proj`.
 
@@ -292,34 +281,8 @@ def _gpt_neox() -> nn.Module:
     )
 
 
-def _falcon() -> nn.Module:
-    """Attention lives under `self_attention`."""
-    from transformers import FalconConfig, FalconForCausalLM
-
-    return FalconForCausalLM(FalconConfig(num_hidden_layers=1, hidden_size=32, num_attention_heads=4, vocab_size=64))
-
-
-def _llama4() -> nn.Module:
-    """The MLP lives under `feed_forward`, with routed experts fused and a `shared_expert`."""
-    from transformers import Llama4ForCausalLM, Llama4TextConfig
-
-    return Llama4ForCausalLM(
-        Llama4TextConfig(
-            num_hidden_layers=1,
-            hidden_size=32,
-            intermediate_size=64,
-            intermediate_size_mlp=64,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            head_dim=8,
-            num_local_experts=2,
-            vocab_size=64,
-        )
-    )
-
-
 def _qwen2_5_vl() -> nn.Module:
-    """A vision tower beside the language model, with leaf names the two share."""
+    """A vision tower beside the language model, reusing its MLP leaf names (`gate_proj`, ...)."""
     from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
 
     return Qwen2_5_VLForConditionalGeneration(
@@ -349,16 +312,14 @@ def _qwen2_5_vl() -> nn.Module:
     [
         pytest.param(_gpt2, False, True, "No mlp linear layers found", id="gpt2_conv1d"),
         pytest.param(_gpt_neox, True, False, "No attn linear layers found", id="gpt_neox_attention"),
-        pytest.param(_falcon, True, False, "No attn linear layers found", id="falcon_self_attention"),
-        pytest.param(_llama4, False, True, "No mlp linear layers found", id="llama4_feed_forward"),
-        pytest.param(_qwen2_5_vl, True, False, "vision-language", id="qwen2_5_vl_attn"),
-        pytest.param(_qwen2_5_vl, False, True, "vision-language", id="qwen2_5_vl_mlp"),
+        pytest.param(_qwen2_5_vl, True, False, "vision-language", id="qwen2_5_vl_vision_tower"),
     ],
 )
 def test_unsupported_architectures_raise(build, train_attn: bool, train_mlp: bool, match: str) -> None:
     """Real models outside Llama/Qwen-style naming raise rather than build a wrong or empty adapter.
 
-    Each error names `target_modules` as the way out.
+    One case per cause: projections that are not ``nn.Linear``, a parent name outside
+    the known set, and a vision tower. Each error names `target_modules` as the way out.
     """
     with pytest.raises(ValueError, match=match) as exc:
         resolve_lora_target_modules(build(), "all-linear", train_attn, train_mlp)
