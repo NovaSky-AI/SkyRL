@@ -181,6 +181,38 @@ def test_offloaded_hdo_has_one_host_master_per_param_and_steps(patched, no_cuda_
     assert all("master_param" in hdo.state[p] and "exp_avg" in hdo.state[p] for p in (a, b))
 
 
+@pytest.mark.parametrize("fused", [False, True])
+def test_state_exists_before_first_step_and_first_step_is_unchanged(patched, no_cuda_streams, fused):
+    """A checkpoint saved before any step needs ``master_param`` and the moments in the HDO state.
+
+    megatron-core builds the CPU AdamW with ``fused=True``, and the DistributedOptimizer round-trips
+    ``load_state_dict(state_dict())`` right after constructing the HDO.
+    """
+    patched.apply_hybrid_optimizer_cpu_masters_patch()
+    init_a = [0.5, -1.0, 2.0, 0.25]
+    a = _fake_gpu_param(init_a)
+    hdo = _hdo([a], fused=fused)
+    hdo.load_state_dict(hdo.state_dict())
+
+    master = hdo.param_to_fp32_param[a]
+    state = hdo.state[a]
+    assert state["master_param"] is master
+    assert torch.equal(state["exp_avg"], torch.zeros_like(master))
+    assert torch.equal(state["exp_avg_sq"], torch.zeros_like(master))
+    assert float(state["step"]) == 0.0
+
+    grad_a = torch.tensor([0.1, -0.2, 0.3, 0.4])
+    a.decoupled_grad = grad_a.to(torch.bfloat16).as_subclass(FakeCuda)
+    hdo.step()
+
+    ref_a = torch.tensor(init_a, dtype=torch.bfloat16).float().requires_grad_()
+    ref = torch.optim.AdamW([ref_a], lr=0.1, weight_decay=0.01, betas=(0.9, 0.999), eps=1e-8, fused=fused)
+    ref_a.grad = grad_a.to(torch.bfloat16).float()
+    ref.step()
+    assert torch.allclose(hdo.param_to_fp32_param[a], ref_a.detach(), atol=0, rtol=0)
+    assert float(hdo.state[a]["step"]) == 1.0
+
+
 def test_partial_offload_keeps_upstream_split(patched, no_cuda_streams):
     patched.apply_hybrid_optimizer_cpu_masters_patch()
     params = [_fake_gpu_param([1.0, 2.0]), _fake_gpu_param([3.0, 4.0]), _fake_gpu_param([5.0, 6.0])]

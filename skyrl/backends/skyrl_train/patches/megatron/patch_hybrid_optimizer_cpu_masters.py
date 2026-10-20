@@ -148,6 +148,44 @@ def _get_sub_optimizer_param_groups(self, offload_fraction: float) -> Tuple[List
     return cpu_param_groups, gpu_param_groups, gpu_params_map_cpu_copy, cpu_copys_map_gpu_param, param_to_fp32_param
 
 
+def init_cpu_optimizer_state(hdo: Any) -> int:
+    """Create the host Adam state the first ``step()`` would create, and expose it on the HDO.
+
+    torch's Adam/AdamW allocate ``step``/``exp_avg``/``exp_avg_sq`` lazily at the first step, so
+    until then the HDO's ``state`` is empty, and the distributed optimizer's checkpoint path
+    (``_get_main_param_and_optimizer_states``, precision-aware branch) fails on the missing
+    ``master_param``. The state built here is exactly the lazy one (zero moments, ``step`` 0), so the
+    first step is unchanged; the moments are only allocated earlier. Returns the params initialized.
+    """
+    from torch.optim.optimizer import _get_scalar_dtype
+
+    initialized = 0
+    for optimizer in getattr(hdo, "cpu_optimizers", None) or []:
+        if not isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
+            continue
+        for group in optimizer.param_groups:
+            # Same placement as torch's lazy init (Adam._init_group); megatron-core builds the CPU
+            # AdamW with fused=True.
+            on_param_device = bool(group.get("capturable") or group.get("fused"))
+            for param in group["params"]:
+                state = optimizer.state[param]
+                if state:
+                    continue
+                state["step"] = (
+                    torch.zeros((), dtype=_get_scalar_dtype(is_fused=group.get("fused")), device=param.device)
+                    if on_param_device
+                    else torch.tensor(0.0, dtype=_get_scalar_dtype())
+                )
+                state["exp_avg"] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                state["exp_avg_sq"] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                if group.get("amsgrad"):
+                    state["max_exp_avg_sq"] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                initialized += 1
+    if initialized:
+        hdo._sync_sub_optimizers_state_to_hdo()
+    return initialized
+
+
 def complete_deferred_init(optimizer: Any) -> int:
     """Build the sub-optimizers of every HDO under ``optimizer`` whose construction was deferred."""
     completed = 0
@@ -195,6 +233,7 @@ def apply_hybrid_optimizer_cpu_masters_patch() -> bool:
             return
         self._skyrl_init_deferred = False
         init_sub_optimizers(self)
+        init_cpu_optimizer_state(self)
 
     HybridDeviceOptimizer._init_sub_optimizers = _init_sub_optimizers
 
