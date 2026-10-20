@@ -19,7 +19,14 @@ from sqlmodel import Session, create_engine, func, select, update
 from skyrl.backends.utils import log_timing
 from skyrl.env_vars import SKYRL_TINKER_CONTINUOUS_SAMPLING
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, TinkerTorchProfilerConfig, add_model
+from skyrl.tinker.config import (
+    EngineConfig,
+    TinkerTorchProfilerConfig,
+    add_model,
+    backend_config_conflicts,
+    flatten_backend_config,
+    raise_backend_config_problems,
+)
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
@@ -367,6 +374,24 @@ class TinkerEngine:
         backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
         backend_overrides = dict(config.backend_config)
         if config.backend in ("fsdp", "megatron"):
+            # Values the engine sets on the backend overrides itself. A backend_config value that
+            # differs would be overwritten here, so it is rejected instead.
+            engine_values = {
+                "strategy": (config.backend, "set by --backend"),
+                "runtime_role": (config.runtime_role, "set by --runtime-role"),
+            }
+            if config.base_model_checkpoint_path is not None:
+                engine_values["generator.inference_engine.served_model_name"] = (
+                    config.base_model,
+                    "set to --base-model when --base-model-checkpoint-path is given",
+                )
+            raise_backend_config_problems(
+                backend_config_conflicts(
+                    flatten_backend_config(backend_overrides),
+                    engine_values,
+                    unused_keys={"use_ray": "only read by the jax backend"},
+                )
+            )
             backend_overrides["runtime_role"] = config.runtime_role
             if config.base_model_checkpoint_path is not None:
                 backend_overrides["generator.inference_engine.served_model_name"] = config.base_model

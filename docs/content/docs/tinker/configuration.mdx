@@ -42,14 +42,18 @@ For large models that don't fit on a single GPU for inference, increase `generat
 
 ### Keys the server sets
 
-The server sets some SkyRL-Train config values itself, from its flags or from each client request. The server stops at startup with an error that lists each offending key when `--backend-config` sets one of these keys to a value the server would not use. Nested spellings such as `{"trainer.policy.optimizer_config": {"lr": 1e-5}}` are checked the same way.
+The server sets some SkyRL-Train config values itself, from its flags or from each client request. Setting one of these keys in `--backend-config` to a value the server would not use is an error that lists each offending key. Nested spellings such as `{"trainer.policy.optimizer_config": {"lr": 1e-5}}` are checked the same way.
+
+- `strategy`, `runtime_role`, `served_model_name` and `use_ray` stop the server at startup.
+- The other keys are checked when the first `create_model` builds the SkyRL-Train config (on an inference-only runtime, at the first sample). The request fails with the error, which also appears in the server log.
+- Any other `--backend-config` value that does not hold in the built config is rejected at the same point.
 
 | Key | Set by | Rejected when |
 |-----|--------|---------------|
 | `strategy`, `trainer.strategy` | `--backend` | the value differs from `--backend` |
 | `runtime_role` | `--runtime-role` | the value differs from `--runtime-role` |
 | `trainer.policy.model.path`, `trainer.critic.model.path` | `--base-model` (or `--base-model-checkpoint-path`) | the value differs |
-| `trainer.policy.model.lora.rank` | the LoRA rank the client passes to `create_model` | always, except with `--runtime-role inference`, where it enables LoRA on the inference engines |
+| `trainer.{policy,critic}.model.lora.rank` | the LoRA rank the client passes to `create_model` | the value differs from the client's rank. With `--runtime-role inference` the policy rank is used as given: it enables LoRA on the inference engines |
 | `trainer.{policy,critic}.optimizer_config.lr` | `AdamParams.learning_rate` on every `optim_step` | always |
 | `trainer.{policy,critic}.optimizer_config.scheduler`, `…num_warmup_steps` | the client, which schedules the learning rate | the value is not `constant_with_warmup` / `0` |
 | `trainer.algorithm.use_kl_loss` | not supported by the Tinker server | the value is `true` |
@@ -130,7 +134,7 @@ Only one profiling session runs at a time server-wide — a second `/start_profi
 On the FSDP backend with `colocate_all: true`, profiling requires `trainer.policy.fsdp_config.cpu_offload: true`. The policy is offloaded to CPU between requests, and the default manual offload path moves parameters with `torch.utils.swap_tensors`, which fails while the profiler holds references to them.
 </Callout>
 
-Only policy workers are profiled; inference engines are not. Setting `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at startup (see [Keys the server sets](#keys-the-server-sets)) — static config would compete with these endpoints for the same profiler.
+Only policy workers are profiled; inference engines are not. Setting `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected (see [Keys the server sets](#keys-the-server-sets)) — static config would compete with these endpoints for the same profiler.
 
 See [`examples/tinker/torch_profiling/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/torch_profiling) for a runnable client.
 

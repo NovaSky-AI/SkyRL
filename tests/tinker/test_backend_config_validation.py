@@ -1,147 +1,34 @@
-"""Tests for the startup checks on ``--backend-config`` for the SkyRL-Train backends."""
+"""Torch-free tests for the ``--backend-config`` checks on the SkyRL-Train backends.
+
+The checks against the built SkyRL-Train config live in
+``tests/tinker/skyrl_train/test_backend_config_checks.py``.
+"""
 
 import re
+from dataclasses import dataclass
+from enum import Enum
 
 import pytest
-from pydantic import ValidationError
 
-from skyrl.tinker.config import EngineConfig, flatten_backend_config
+from skyrl.tinker.config import (
+    EngineConfig,
+    backend_config_conflicts,
+    flatten_backend_config,
+    same_config_value,
+)
+from skyrl.tinker.engine import TinkerEngine
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
 
 
-def _engine_config(backend_config: dict, backend: str = "fsdp", **kwargs) -> EngineConfig:
-    return EngineConfig(base_model=BASE_MODEL, backend=backend, backend_config=backend_config, **kwargs)
+class _Color(str, Enum):
+    RED = "red"
 
 
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("trainer.policy.optimizer_config.lr", 1e-5),
-        ("trainer.critic.optimizer_config.lr", 1e-5),
-        ("trainer.policy.model.lora.rank", 32),
-        ("use_ray", False),
-        ("trainer.policy.torch_profiler_config.enable", True),
-    ],
-)
-def test_keys_the_server_always_replaces_are_rejected(key, value):
-    """No value of these keys is ever used, so any value is rejected."""
-    with pytest.raises(ValidationError, match=re.escape(key)):
-        _engine_config({key: value})
-
-
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("strategy", "megatron"),
-        ("trainer.strategy", "megatron"),
-        ("runtime_role", "trainer"),
-        ("trainer.policy.model.path", "Qwen/Qwen3-1.7B"),
-        ("trainer.critic.model.path", "Qwen/Qwen3-1.7B"),
-        ("trainer.policy.optimizer_config.scheduler", "cosine"),
-        ("trainer.critic.optimizer_config.num_warmup_steps", 10),
-        ("trainer.algorithm.use_kl_loss", True),
-        ("trainer.algorithm.policy_loss_type", "gspo"),
-    ],
-)
-def test_values_that_differ_from_the_servers_are_rejected(key, value):
-    """A value other than the one the server sets would be silently replaced."""
-    with pytest.raises(ValidationError, match=re.escape(f"{key}={value!r}")):
-        _engine_config({key: value})
-
-
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("strategy", "fsdp"),
-        ("trainer.strategy", "fsdp"),
-        ("runtime_role", "combined"),
-        ("trainer.critic.model.path", BASE_MODEL),
-        ("trainer.policy.optimizer_config.scheduler", "constant_with_warmup"),
-        ("trainer.policy.optimizer_config.num_warmup_steps", 0),
-        ("trainer.algorithm.use_kl_loss", False),
-        ("trainer.algorithm.policy_loss_type", "regular"),
-        ("trainer.algorithm.policy_loss_type", "dual_clip"),
-    ],
-)
-def test_values_equal_to_the_servers_are_accepted(key, value):
-    """Redundant keys have the effect the user expects, so they stay allowed."""
-    _engine_config({key: value})
-
-
-def test_nested_spellings_are_checked_as_dot_keys():
-    """``from_cli_overrides`` reads a nested mapping the same as the dotted key."""
-    with pytest.raises(ValidationError, match=re.escape("trainer.policy.optimizer_config.lr=1e-05")):
-        _engine_config({"trainer.policy": {"optimizer_config": {"lr": 1e-5}}})
-    with pytest.raises(ValidationError, match=re.escape("trainer.policy.torch_profiler_config.enable")):
-        _engine_config({"trainer.policy": {"torch_profiler_config": {"enable": True}}})
-
-
-def test_error_lists_every_rejected_key():
-    """One error names every rejected key, so the launch command is fixed in one pass."""
-    with pytest.raises(ValidationError) as excinfo:
-        _engine_config({"trainer.strategy": "megatron", "trainer.policy.optimizer_config.lr": 1e-5})
-    message = str(excinfo.value)
-    assert "trainer.strategy='megatron': set by --backend ('fsdp')" in message
-    assert "trainer.policy.optimizer_config.lr=1e-05: replaced by AdamParams.learning_rate" in message
-
-
-def test_lora_rank_is_accepted_on_an_inference_runtime():
-    """An inference-only runtime builds its config without a client LoRA config, so the rank enables vLLM LoRA."""
-    _engine_config({"trainer.policy.model.lora.rank": 32}, runtime_role="inference")
-
-
-@pytest.mark.parametrize("runtime_role", ["trainer", "inference"])
-def test_colocate_all_true_is_rejected_on_a_single_role_runtime(runtime_role):
-    """Single-role runtimes force colocate_all=False."""
-    with pytest.raises(ValidationError, match=re.escape("trainer.placement.colocate_all=True")):
-        _engine_config({"trainer.placement.colocate_all": True}, runtime_role=runtime_role)
-    _engine_config({"trainer.placement.colocate_all": False}, runtime_role=runtime_role)
-
-
-def test_colocate_all_is_free_on_a_combined_runtime():
-    """The combined runtime uses colocate_all as given."""
-    _engine_config({"trainer.placement.colocate_all": True})
-    _engine_config({"trainer.placement.colocate_all": False})
-
-
-def test_checkpoint_path_sets_model_path_and_served_model_name():
-    """With --base-model-checkpoint-path, model paths follow it and the served name follows --base-model."""
-    checkpoint = "/models/custom"
-    _engine_config(
-        {
-            "trainer.policy.model.path": checkpoint,
-            "generator.inference_engine.served_model_name": BASE_MODEL,
-        },
-        base_model_checkpoint_path=checkpoint,
-    )
-    with pytest.raises(ValidationError, match=re.escape("generator.inference_engine.served_model_name='custom'")):
-        _engine_config(
-            {"generator.inference_engine.served_model_name": "custom"},
-            base_model_checkpoint_path=checkpoint,
-        )
-    _engine_config({"generator.inference_engine.served_model_name": "custom"})
-
-
-def test_jax_backend_is_not_checked():
-    """The table describes the SkyRL-Train backends only."""
-    _engine_config({"trainer.policy.optimizer_config.lr": 1e-5, "use_ray": True}, backend="jax")
-
-
-def test_server_settings_of_the_example_scripts_are_accepted():
-    """Keys from examples/tinker/{dapo,ppo}/run_tinker_server.sh that the server also sets."""
-    _engine_config(
-        {
-            "trainer.strategy": "megatron",
-            "trainer.algorithm.policy_loss_type": "dual_clip",
-            "trainer.algorithm.use_kl_loss": False,
-            "trainer.policy.optimizer_config.weight_decay": 0.1,
-            "trainer.policy.optimizer_config.max_grad_norm": 1.0,
-            "trainer.policy.model.lora.alpha": 128,
-        },
-        backend="megatron",
-    )
-    _engine_config({"trainer.critic.model.path": BASE_MODEL, "trainer.placement.colocate_all": True})
+@dataclass
+class _Server:
+    host: str
+    port: int
 
 
 def test_flatten_backend_config():
@@ -158,3 +45,116 @@ def test_flatten_backend_config():
         "trainer.policy.optimizer_config.adam_betas": [0.9, 0.95],
         "generator.inference_engine.engine_init_kwargs": {},
     }
+
+
+@pytest.mark.parametrize(
+    ("requested", "actual"),
+    [
+        (4, 4.0),
+        ("4", 4),
+        ("1e-5", 1e-5),
+        ("true", True),
+        ([0.9, 0.95], (0.9, 0.95)),
+        ("red", _Color.RED),
+        ([{"host": "a", "port": 1}], [_Server("a", 1)]),
+        ({"max_model_len": 4096}, {"max_model_len": 4096, "enforce_eager": True}),
+    ],
+)
+def test_same_config_value_allows_type_conversion(requested, actual):
+    """OmegaConf converts values to the field's type, which must not count as a change."""
+    assert same_config_value(requested, actual)
+
+
+@pytest.mark.parametrize(
+    ("requested", "actual"),
+    [
+        (4, 5),
+        ("Qwen/Qwen3-0.6B", "qwen/qwen3-0.6b"),
+        ("false", True),
+        ([0.9, 0.95], [0.9, 0.999]),
+        ({"max_model_len": 4096}, {"max_model_len": 2048}),
+    ],
+)
+def test_same_config_value_detects_changes(requested, actual):
+    """Different values stay different, and strings compare case-sensitively."""
+    assert not same_config_value(requested, actual)
+
+
+def test_backend_config_conflicts():
+    """Differing server-set values and unused keys are reported; equal values are not."""
+    problems = backend_config_conflicts(
+        {
+            "trainer.strategy": "megatron",
+            "runtime_role": "combined",
+            "trainer.policy.torch_profiler_config.enable": True,
+        },
+        {"trainer.strategy": ("fsdp", "set by --backend"), "runtime_role": ("combined", "set by --runtime-role")},
+        unused_keys={"trainer.policy.torch_profiler_config": "use /start_profiling"},
+    )
+
+    assert problems == [
+        "trainer.policy.torch_profiler_config.enable=True: use /start_profiling",
+        "trainer.strategy='megatron': set by --backend ('fsdp')",
+    ]
+
+
+def _start_engine(monkeypatch, backend_config: dict, **kwargs) -> dict:
+    """Construct a TinkerEngine with a stub backend and return the overrides it passed on."""
+    captured = {}
+
+    class BackendConfig:
+        def __init__(self, **overrides):
+            captured.update(overrides)
+
+    class Backend:
+        def __init__(self, _model, _config):
+            pass
+
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_args, **_kwargs: (Backend, BackendConfig))
+    TinkerEngine(
+        EngineConfig(
+            base_model=BASE_MODEL,
+            backend=kwargs.pop("backend", "fsdp"),
+            backend_config=backend_config,
+            database_url="sqlite:///:memory:",
+            **kwargs,
+        )
+    )
+    return captured
+
+
+@pytest.mark.parametrize(
+    ("backend_config", "kwargs", "expected"),
+    [
+        ({"strategy": "megatron"}, {}, "strategy='megatron': set by --backend ('fsdp')"),
+        ({"runtime_role": "trainer"}, {}, "runtime_role='trainer': set by --runtime-role ('combined')"),
+        ({"use_ray": False}, {}, "use_ray=False: only read by the jax backend"),
+        (
+            {"generator.inference_engine": {"served_model_name": "custom"}},
+            {"base_model_checkpoint_path": "/models/custom"},
+            "generator.inference_engine.served_model_name='custom'",
+        ),
+    ],
+)
+def test_engine_rejects_values_it_would_overwrite(monkeypatch, backend_config, kwargs, expected):
+    """The engine sets these on the backend overrides itself, so a different value stops it at startup."""
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        _start_engine(monkeypatch, backend_config, **kwargs)
+
+
+def test_engine_accepts_values_equal_to_its_own(monkeypatch):
+    """Redundant keys have the effect the user expects, so they stay allowed."""
+    captured = _start_engine(
+        monkeypatch,
+        {"strategy": "fsdp", "runtime_role": "trainer", "generator.inference_engine.served_model_name": BASE_MODEL},
+        runtime_role="trainer",
+        base_model_checkpoint_path="/models/custom",
+    )
+
+    assert captured["runtime_role"] == "trainer"
+    assert captured["generator.inference_engine.served_model_name"] == BASE_MODEL
+
+
+def test_engine_does_not_check_the_jax_backend(monkeypatch):
+    """use_ray selects the Ray JAX backend, so it is a valid jax key."""
+    _start_engine(monkeypatch, {"use_ray": True}, backend="jax")

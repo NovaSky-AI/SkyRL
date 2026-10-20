@@ -1,24 +1,17 @@
 """Configuration for the Tinker engine."""
 
 import argparse
+import dataclasses
 import json
+import math
 import os
+from collections.abc import Mapping, Sequence
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
 from cloudpathlib import AnyPath
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-SKYRL_TRAIN_BACKENDS = ("fsdp", "megatron")
-
-# Marks a server-controlled key that no `backend_config` value can match.
-_ALWAYS_REJECTED = object()
-
-_TORCH_PROFILER_CONFIG_KEY = "trainer.policy.torch_profiler_config"
-
-# The request's `loss_fn` picks the policy loss function. `policy_loss_type` is still read by
-# `ppo_policy_loss`, where "dual_clip" enables dual-clip PPO and any other value fails an assert.
-_TINKER_POLICY_LOSS_TYPES = ("regular", "dual_clip")
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def flatten_backend_config(backend_config: dict) -> dict[str, Any]:
@@ -38,82 +31,71 @@ def flatten_backend_config(backend_config: dict) -> dict[str, Any]:
     return flat
 
 
-def validate_skyrl_train_backend_config(
-    backend_config: dict,
-    *,
-    backend: str,
-    runtime_role: str,
-    base_model: str,
-    base_model_checkpoint_path: str | None = None,
-) -> None:
-    """Reject ``backend_config`` values the Tinker server overrides on the SkyRL-Train backends.
+def same_config_value(requested: Any, actual: Any) -> bool:
+    """Whether a ``backend_config`` value equals the config value it was applied as.
 
-    A key the server sets itself is rejected when its value differs from the one the server uses;
-    keys with no fixed server value (such as the learning rate, which every ``optim_step`` replaces)
-    are rejected for any value.
+    OmegaConf converts values to the field's type, so ``"4"`` becomes ``4`` for an int field and an
+    enum field holds the member rather than the string.
+    """
+    if isinstance(actual, Enum):
+        return same_config_value(requested, actual.value) or requested == actual.name
+    if dataclasses.is_dataclass(actual) and not isinstance(actual, type):
+        actual = dataclasses.asdict(actual)
+    if isinstance(requested, Mapping) and isinstance(actual, Mapping):
+        # A merge keeps the keys the request leaves out, so only the requested keys must match.
+        return all(key in actual and same_config_value(value, actual[key]) for key, value in requested.items())
+    if requested == actual:
+        return True
+    if isinstance(requested, str) == isinstance(actual, str):
+        if isinstance(requested, Sequence) and isinstance(actual, Sequence) and not isinstance(requested, str):
+            return len(requested) == len(actual) and all(map(same_config_value, requested, actual))
+        return False
+    # Exactly one side is a string, so OmegaConf may have converted it to or from the field's type.
+    text, other = (requested, actual) if isinstance(requested, str) else (actual, requested)
+    if isinstance(other, bool):
+        return text.strip().lower() == str(other).lower()
+    if isinstance(other, (int, float)):
+        try:
+            return math.isclose(float(text), float(other))
+        except ValueError:
+            return False
+    return text == str(other)
+
+
+def backend_config_conflicts(
+    user_values: dict[str, Any],
+    server_values: dict[str, tuple[Any, str]],
+    unused_keys: dict[str, str] | None = None,
+) -> list[str]:
+    """Describe each ``backend_config`` key the server sets itself to another value, or never uses.
 
     Args:
-        backend_config: The ``--backend-config`` dict. Nested mappings are checked as dot-keys.
-        backend: ``fsdp`` or ``megatron``.
-        runtime_role: ``trainer``, ``inference`` or ``combined``.
-        base_model: The ``--base-model`` value.
-        base_model_checkpoint_path: The ``--base-model-checkpoint-path`` value, if any.
+        user_values: The flattened ``backend_config`` (see ``flatten_backend_config``).
+        server_values: Key to (the value the server sets, what sets it).
+        unused_keys: Key or key prefix to why no ``backend_config`` value for it is used.
 
-    Raises:
-        ValueError: Listing every rejected key and what sets its value instead.
+    Returns:
+        One line per offending key, sorted by key.
     """
-    model_path = base_model_checkpoint_path or base_model
-    controlled: dict[str, tuple[Any, str]] = {
-        "strategy": (backend, f"set by --backend ({backend!r})"),
-        "trainer.strategy": (backend, f"set by --backend ({backend!r})"),
-        "runtime_role": (runtime_role, f"set by --runtime-role ({runtime_role!r})"),
-        "use_ray": (_ALWAYS_REJECTED, "only read by the jax backend"),
-        "trainer.policy.model.path": (model_path, f"set by --base-model ({model_path!r})"),
-        "trainer.critic.model.path": (model_path, f"set by --base-model ({model_path!r})"),
-        "trainer.algorithm.use_kl_loss": (False, "the Tinker server does not support a KL loss"),
-    }
-    for role in ("policy", "critic"):
-        prefix = f"trainer.{role}.optimizer_config"
-        controlled[f"{prefix}.lr"] = (
-            _ALWAYS_REJECTED,
-            "replaced by AdamParams.learning_rate before every optim_step",
-        )
-        schedule_reason = "the client schedules the learning rate through AdamParams.learning_rate"
-        controlled[f"{prefix}.scheduler"] = ("constant_with_warmup", schedule_reason)
-        controlled[f"{prefix}.num_warmup_steps"] = (0, schedule_reason)
-    if runtime_role != "inference":
-        # An inference-only runtime builds its config without a client LoRA config, so there the
-        # rank is what enables LoRA on the inference engines.
-        controlled["trainer.policy.model.lora.rank"] = (
-            _ALWAYS_REJECTED,
-            "set by the LoRA rank the client passes to create_model",
-        )
-    if runtime_role != "combined":
-        controlled["trainer.placement.colocate_all"] = (False, f"a {runtime_role}-only runtime never colocates")
-    if base_model_checkpoint_path is not None:
-        controlled["generator.inference_engine.served_model_name"] = (
-            base_model,
-            f"set to --base-model ({base_model!r}) when --base-model-checkpoint-path is given",
-        )
-
     problems = []
-    for key, value in sorted(flatten_backend_config(backend_config).items()):
-        if key == _TORCH_PROFILER_CONFIG_KEY or key.startswith(_TORCH_PROFILER_CONFIG_KEY + "."):
-            problems.append(
-                f"{key}: torch profiling is controlled at runtime; start the server with --torch-profiler "
-                "and call /start_profiling and /stop_profiling"
-            )
-        elif key in controlled:
-            server_value, reason = controlled[key]
-            if server_value is _ALWAYS_REJECTED or value != server_value:
-                problems.append(f"{key}={value!r}: {reason}")
-        elif key == "trainer.algorithm.policy_loss_type" and value not in _TINKER_POLICY_LOSS_TYPES:
-            problems.append(
-                f"{key}={value!r}: must be 'regular' or 'dual_clip'; the request's loss_fn picks the loss function"
-            )
+    for key, value in sorted(user_values.items()):
+        unused = next(
+            (reason for prefix, reason in (unused_keys or {}).items() if key == prefix or key.startswith(prefix + ".")),
+            None,
+        )
+        if unused is not None:
+            problems.append(f"{key}={value!r}: {unused}")
+        elif key in server_values and not same_config_value(value, server_values[key][0]):
+            server_value, reason = server_values[key]
+            problems.append(f"{key}={value!r}: {reason} ({server_value!r})")
+    return problems
+
+
+def raise_backend_config_problems(problems: list[str]) -> None:
+    """Raise one error that lists every offending ``backend_config`` key."""
     if problems:
         raise ValueError(
-            "--backend-config sets keys the Tinker server controls or does not support:\n"
+            "--backend-config sets keys the Tinker server sets itself or does not use:\n"
             + "\n".join(f"  {problem}" for problem in problems)
         )
 
@@ -230,20 +212,6 @@ class EngineConfig(BaseModel):
     `field.annotation is dict` to JSON-serialize this for the engine subprocess; a BaseModel
     annotation falls through to `str(value)` and the engine gets a repr `json.loads` cannot
     read. Validate into the model at the point of use instead."""
-
-    @model_validator(mode="after")
-    def _check_skyrl_train_backend_config(self) -> "EngineConfig":
-        # Runs in the API process before the engine subprocess starts, so a rejected key stops
-        # the server at launch.
-        if self.backend in SKYRL_TRAIN_BACKENDS:
-            validate_skyrl_train_backend_config(
-                self.backend_config,
-                backend=self.backend,
-                runtime_role=self.runtime_role,
-                base_model=self.base_model,
-                base_model_checkpoint_path=self.base_model_checkpoint_path,
-            )
-        return self
 
 
 class TinkerTorchProfilerConfig(BaseModel):
