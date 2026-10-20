@@ -279,6 +279,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
+    # The decoupled MTP draft loss rolls logits and labels without context parallelism (see the CP=1
+    # assert in MegatronModelWrapper), for every model.
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is not None and mtp.enabled and cfg.trainer.policy.megatron_config.context_parallel_size > 1:
+        raise ValueError("trainer.mtp.enabled=true is not supported with context_parallel_size > 1")
+
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
         # Megatron's fused top-k returns before compute_topk consults router_replay

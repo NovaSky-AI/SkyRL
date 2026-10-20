@@ -253,7 +253,7 @@ class TokensBackend:
             reply = await asyncio.to_thread(
                 self.renderer.parse, output.completion_ids, chat.tools, prompt_ids=planned.prompt_ids
             )
-        reason = _finish_reason(output.finish_reason, reply)
+        reason = finish_reason(output.finish_reason, reply)
         sampled = Turn(
             message=reply,
             finish_reason=reason,
@@ -343,7 +343,7 @@ class TokensBackend:
             trajectory.failures.append(Failure(t=time.time(), status=status, error=error))
 
 
-def _finish_reason(engine_reason: str, message: dict[str, Any]) -> str:
+def finish_reason(engine_reason: str, message: dict[str, Any]) -> str:
     """The engine never says ``tool_calls``; a parsed tool call makes a stop one."""
     if engine_reason == "stop" and message.get("tool_calls"):
         return "tool_calls"

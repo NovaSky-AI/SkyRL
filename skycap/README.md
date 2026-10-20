@@ -34,7 +34,16 @@ The engine is vLLM, over its own `/inference/v1/generate`. Another engine's wire
 is a subclass of `skycap.tokens.engine.VLLMEngine`.
 
 By default a reply is parsed: a thinking model's reasoning comes back as
-`reasoning_content`, and tool calls as `tool_calls`. Add `--use-raw-content`
+`reasoning_content`, and extracted tool calls as `tool_calls`. As with OpenAI
+chat completions, receiving a tool call does not guarantee schema-valid
+arguments. An XML argument that fails numeric conversion stays a string in the
+extracted argument object, matching vLLM's Qwen-style parser. The caller decides
+how to validate and handle it. Calls rejected by the parser as unknown tools,
+unparseable JSON, missing names, or broken framing are retained as raw attempt
+text in `content`; they do not become `tool_calls` or promote the finish reason.
+Skycap does not repair calls, supply feedback, or retry them.
+
+Add `--use-raw-content`
 when the harness was written against a vLLM server with no reasoning or tool
 parser. Replies then match that server's: the completion's own text as
 `content`, with thinking inline and tool calls unparsed, and
