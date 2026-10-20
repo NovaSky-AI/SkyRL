@@ -14,6 +14,17 @@ drops the message, and Qwen3.5's raises on it. vLLM's rule
 A template that names the role (gpt-oss) gets the messages untouched. Token
 mode runs this before matching, for every dialect, so the graph stores the turns
 as rendered and a replay converts to the same turns.
+
+The merge assumes ``developer`` messages come only at the start. One that
+arrives mid-session rewrites the leading message, so the next call can't extend
+the previous call's tokens: it is re-rendered, and the trajectory splits into
+another sample. That's faithful to vLLM, but each such message costs RL a
+re-render and a split. Codex sends one only when a setting changes mid-session
+(approval policy, model or collaboration mode, its tool list, or the off-by-default
+time-reminder and token-budget features). Checked on 2026-10-17 on 64 ``codex exec``
+rollouts (Codex 0.154.0, 604 calls, 11 compactions): one developer message per
+session, before the first model call, and none after, compactions included
+(Codex rebuilds the new window with the same leading message).
 """
 
 from __future__ import annotations
