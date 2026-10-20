@@ -16,16 +16,8 @@ from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
 )
 
 
-class Qwen4ExpModelState(types.SimpleNamespace):
-    """Stands in for vLLM's class of the same name (matched by class name)."""
-
-
-class MambaHybridModelState(types.SimpleNamespace):
-    """Any other model's state."""
-
-
-def _runner(state_cls=Qwen4ExpModelState):
-    state = state_cls(ngram_context_offsets=torch.arange(-2, 0), ngram_context_len=2, scratch=torch.ones(3))
+def _runner():
+    state = types.SimpleNamespace(ngram_context_offsets=torch.arange(-2, 0), ngram_context_len=2, scratch=torch.ones(3))
     return types.SimpleNamespace(model_state=state)
 
 
@@ -54,7 +46,7 @@ def test_save_restore_round_trip():
 
 
 def test_other_models_are_untouched():
-    runner = _runner(MambaHybridModelState)
+    runner = types.SimpleNamespace(model_state=types.SimpleNamespace(scratch=torch.ones(3)))
     assert save_model_state_tensors(runner) == {}
     assert restore_model_state_tensors(runner, save_model_state_tensors(runner)) == 0
 

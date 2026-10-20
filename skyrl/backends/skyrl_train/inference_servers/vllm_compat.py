@@ -243,31 +243,19 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
     return patched_any
 
 
-# Model Runner V2 ``model_state`` constants lost by a level-2 sleep, by ``model_state`` class.
-# Only these are carried across, so every other model is untouched.
-_LEVEL2_SLEEP_MODEL_STATE_CONSTANTS: dict[str, tuple[str, ...]] = {
-    # vllm-project/vllm#60009 lists it as not fixed ("held by non-module objects").
-    "Qwen4ExpModelState": ("ngram_context_offsets",),
-}
-
-
 def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
-    """CPU copies of the known ``model_state`` constants that a level-2 sleep discards.
+    """CPU copy of Qwen4Exp's ``model_state.ngram_context_offsets``, for a level-2 sleep.
 
     Model Runner V2 keeps per-model input state (``model_state``) next to the model, and it is
     allocated in the weights pool, so a level-2 sleep discards it. vLLM restores the model's
-    buffers on wake but not these: Qwen4Exp's constant ``ngram_context_offsets`` came back as
-    zeros, corrupting every later PLE n-gram context. Returns {} for any ``model_state`` class not
-    in ``_LEVEL2_SLEEP_MODEL_STATE_CONSTANTS``.
+    buffers on wake but not this constant, which came back as zeros and corrupted every later
+    PLE n-gram context (vllm-project/vllm#60009 lists it as not fixed). Other models have no
+    such attribute, so this is a no-op for them.
     """
-    state = getattr(model_runner, "model_state", None)
-    names = _LEVEL2_SLEEP_MODEL_STATE_CONSTANTS.get(type(state).__name__, ())
-    saved = {}
-    for name in names:
-        value = getattr(state, name, None)
-        if isinstance(value, torch.Tensor):
-            saved[name] = value.cpu().clone()
-    return saved
+    offsets = getattr(getattr(model_runner, "model_state", None), "ngram_context_offsets", None)
+    if not isinstance(offsets, torch.Tensor):
+        return {}
+    return {"ngram_context_offsets": offsets.cpu().clone()}
 
 
 def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor]) -> int:
@@ -281,10 +269,7 @@ def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor
 
 
 def patch_vllm_level2_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
-    """Carry known ``model_runner.model_state`` constants across ``Worker.sleep(level=2)``.
-
-    A no-op for models without an entry in ``_LEVEL2_SLEEP_MODEL_STATE_CONSTANTS``.
-    """
+    """Carry Qwen4Exp's ``model_state.ngram_context_offsets`` across ``Worker.sleep(level=2)``."""
     if worker_cls is None:
         try:
             from vllm.v1.worker.gpu_worker import Worker
