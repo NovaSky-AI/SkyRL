@@ -34,8 +34,9 @@ def flatten_backend_config(backend_config: dict) -> dict[str, Any]:
 def same_config_value(requested: Any, actual: Any) -> bool:
     """Whether a ``backend_config`` value equals the config value it was applied as.
 
-    OmegaConf converts values to the field's type, so ``"4"`` becomes ``4`` for an int field and an
-    enum field holds the member rather than the string.
+    The two can differ in type without differing in meaning: ``"4"`` and ``4``, ``"true"`` and
+    ``True``, a list and a tuple, an enum member and its value, or a mapping and a dataclass that
+    holds those fields.
     """
     if isinstance(actual, Enum):
         return same_config_value(requested, actual.value) or requested == actual.name

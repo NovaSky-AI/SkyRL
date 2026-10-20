@@ -60,8 +60,8 @@ def test_flatten_backend_config():
         ({"max_model_len": 4096}, {"max_model_len": 4096, "enforce_eager": True}),
     ],
 )
-def test_same_config_value_allows_type_conversion(requested, actual):
-    """OmegaConf converts values to the field's type, which must not count as a change."""
+def test_same_config_value_ignores_type_only_differences(requested, actual):
+    """A value given in another JSON type than the config holds must not count as a change."""
     assert same_config_value(requested, actual)
 
 

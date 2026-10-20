@@ -19,7 +19,7 @@ from skyrl.backends.skyrl_train_backend import (  # noqa: E402
     _unapplied_adam_params,
 )
 from skyrl.tinker import types  # noqa: E402
-from skyrl.tinker.config import flatten_backend_config  # noqa: E402
+from skyrl.tinker.config import flatten_backend_config, same_config_value  # noqa: E402
 from skyrl.train.config import OptimizerConfig, SkyRLTrainConfig  # noqa: E402
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
@@ -148,13 +148,14 @@ def test_a_new_server_write_cannot_go_unnoticed(monkeypatch):
         _build({"trainer.micro_train_batch_size_per_gpu": 4})
 
 
-def test_converted_types_are_not_reported_as_changes():
-    """OmegaConf converts "4" to 4 for an int field; the value still holds."""
+def test_values_in_another_json_type_are_not_reported_as_changes():
+    """A string for an int field or a list for a list field still counts as applied."""
     cfg = _build(
         {"trainer.micro_train_batch_size_per_gpu": "4", "trainer.policy.optimizer_config.adam_betas": [0.9, 0.95]}
     )
 
-    assert cfg.trainer.micro_train_batch_size_per_gpu == 4
+    assert same_config_value("4", cfg.trainer.micro_train_batch_size_per_gpu)
+    assert list(cfg.trainer.policy.optimizer_config.adam_betas) == [0.9, 0.95]
 
 
 def test_build_config_merges_nested_spelling_like_dot_keys():
