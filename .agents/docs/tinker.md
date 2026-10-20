@@ -8,7 +8,7 @@ SkyRL's implementation of the [Tinker API](https://tinker-docs.thinkingmachines.
 - **`skyrl/tinker/proto_serialization.py`** -- Proto wire-format conversion. The tinker SDK (`>=0.25.0,<0.28.0` in `pyproject.toml`; see *SDK compatibility* below) sends `forward_backward` request bodies as protobuf (forward-only passes use the same endpoint with a `forward_only` flag; JSON bodies are rejected with 415) and requires proto-serialized `SampleResponse`/`ForwardBackwardOutput` results from `retrieve_future`. Mirrors the SDK's `tinker/proto/{request,response}_conv.py`; round-trip tested in `tests/tinker/test_proto_serialization.py`.
 - **`skyrl/tinker/engine.py`** -- Background subprocess (`TinkerEngine`). Polls DB, batches compatible requests, dispatches to backend.
 - **`skyrl/tinker/types.py`** -- Internal Pydantic models (distinct from API request/response models in `api.py`). `LOSS_TYPES` dict defines valid loss functions.
-- **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields. Also the torch-free `backend_config` helpers (`flatten_backend_config`, `backend_config_conflicts`).
+- **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields.
 - **`skyrl/tinker/db_models.py`** -- SQLModel tables: `FutureDB`, `ModelDB`, `CheckpointDB`, `SessionDB`, `SamplingSessionDB`.
 - **`skyrl/tinker/loss_fns.py`** -- JAX loss function implementations (cross_entropy, importance_sampling, ppo, cispo). Only used by the JAX backend.
 - **`skyrl/tinker/extra/`** -- `ExternalInferenceClient` for offloading sampling to external vLLM.
@@ -25,26 +25,23 @@ The API process spawns the engine as a child subprocess (via `uv run -m skyrl.ti
 
 ### backend_config on the SkyRL-Train backends
 
-`--backend-config` reaches `SkyRLTrainConfig` only at the first `create_model`
-(`_build_skyrl_train_config`; on an inference-only runtime, the first sample). A key the
-server would override is rejected rather than silently replaced, at three points:
+The server sets some SkyRL-Train config values itself: from its own flags (`--backend`,
+`--base-model`, `--runtime-role`) and from each client request (the LoRA rank in
+`create_model`, the learning rate in every `optim_step`). A `--backend-config` value that the
+server would replace is an error instead of being silently ignored:
 
-- **Engine startup** (`TinkerEngine.__init__`): keys the engine sets on the backend overrides
-  (`strategy`, `runtime_role`, `served_model_name` with a checkpoint path) and `use_ray`.
-- **Config build** (`_build_skyrl_train_config` in `skyrl/backends/skyrl_train_backend.py`):
-  `_server_values()` lists every value the server sets, with the reason, and a different
-  `backend_config` value is an error. Keys no value of which is used are declared next to the
-  code that replaces them (`SkyRLTrainBackend.REPLACED_PER_REQUEST`, `PROFILER_CONFIG_KEY`,
-  `TINKER_POLICY_LOSS_TYPES`).
-- **After the build** (`_check_backend_config_applied`): every `backend_config` value must hold
-  in the built config. This catches overrides nobody listed, so put a new server-set value in
-  `_server_values()` (for the reason in the error), but a missing entry still fails loudly.
+- A conflicting `strategy`, `runtime_role` or `served_model_name` stops the server at startup.
+- Everything else is checked when the first `create_model` request sets up training (on an
+  inference-only runtime, the first sample request). That request fails with one error that
+  lists every offending key and the value the server uses.
+- Values equal to the server's are accepted, and nested spellings
+  (`{"trainer.policy": {"optimizer_config": {"lr": 1e-5}}}`) are checked like dotted keys.
 
-Nested spellings are flattened first (`flatten_backend_config()`); the API's own reads of
-`backend_config` (`colocate_all`, `fsdp_config.cpu_offload`) use the same flattened view.
+The full list is under "Keys the server sets" in `docs/content/docs/tinker/configuration.mdx`.
 
-Only `AdamParams.learning_rate` is applied per `optim_step`; the backend logs once per
-model which other `AdamParams` fields differ from `trainer.<role>.optimizer_config`.
+Only `AdamParams.learning_rate` is applied per `optim_step`. Betas, eps, weight decay and
+gradient clipping come from `trainer.<role>.optimizer_config`, and the server logs once per
+model which request values it does not use.
 
 ## Key API Endpoints
 

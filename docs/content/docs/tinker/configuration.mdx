@@ -44,9 +44,9 @@ For large models that don't fit on a single GPU for inference, increase `generat
 
 The server sets some SkyRL-Train config values itself, from its flags or from each client request. Setting one of these keys in `--backend-config` to a value the server would not use is an error that lists each offending key. Nested spellings such as `{"trainer.policy.optimizer_config": {"lr": 1e-5}}` are checked the same way.
 
-- `strategy`, `runtime_role`, `served_model_name` and `use_ray` stop the server at startup.
-- The other keys are checked when the first `create_model` builds the SkyRL-Train config (on an inference-only runtime, at the first sample). The request fails with the error, which also appears in the server log.
-- Any other `--backend-config` value that does not hold in the built config is rejected at the same point.
+- `strategy`, `runtime_role` and `served_model_name` stop the server at startup.
+- The other keys are checked when the first `create_model` request sets up training (on an inference-only runtime, at the first sample request). That request fails with the error, which also appears in the server log.
+- Any other `--backend-config` value that the server ends up not using as given is rejected at the same point, with the value the server uses instead.
 
 | Key | Set by | Rejected when |
 |-----|--------|---------------|

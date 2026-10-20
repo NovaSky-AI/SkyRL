@@ -104,10 +104,11 @@ def test_backend_config_alpha_takes_precedence():
         ({"trainer.critic": {"optimizer_config": {"lr": 1e-5}}}, "trainer.critic.optimizer_config.lr=1e-05"),
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, "--torch-profiler"),
         ({"trainer.algorithm.policy_loss_type": "gspo"}, "must be 'regular' or 'dual_clip'"),
+        ({"use_ray": False}, "use_ray"),
     ],
 )
 def test_keys_with_no_effect_are_rejected(backend_config, expected):
-    """Keys a request replaces, the profiler config and loss types ppo_policy_loss rejects."""
+    """Keys a request replaces, the profiler config, loss types ppo_policy_loss rejects, and use_ray."""
     with pytest.raises(ValueError, match=re.escape(expected)):
         _build(backend_config)
 
@@ -127,7 +128,7 @@ def test_values_replaced_outside_the_server_table_are_rejected():
     ``log_example_interval`` is a deprecated name that ``__post_init__`` copies over
     ``print_example_interval``.
     """
-    with pytest.raises(ValueError, match=re.escape("trainer.print_example_interval=2: the built config has 5")):
+    with pytest.raises(ValueError, match=re.escape("trainer.print_example_interval=2: the server uses 5")):
         _build({"trainer.print_example_interval": 2, "trainer.log_example_interval": 5})
 
 
@@ -142,9 +143,7 @@ def test_a_new_server_write_cannot_go_unnoticed(monkeypatch):
 
     monkeypatch.setattr(SkyRLTrainConfig, "from_cli_overrides", staticmethod(build_then_override))
 
-    with pytest.raises(
-        ValueError, match=re.escape("trainer.micro_train_batch_size_per_gpu=4: the built config has 99")
-    ):
+    with pytest.raises(ValueError, match=re.escape("trainer.micro_train_batch_size_per_gpu=4: the server uses 99")):
         _build({"trainer.micro_train_batch_size_per_gpu": 4})
 
 

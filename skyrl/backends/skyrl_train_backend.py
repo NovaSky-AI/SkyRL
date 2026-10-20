@@ -151,11 +151,12 @@ def _check_backend_config_applied(cfg: SkyRLTrainConfig, user_values: dict[str, 
             continue
         actual = _config_value(cfg, key)
         if actual is not _MISSING and not same_config_value(value, actual):
-            replaced.append(f"{key}={value!r}: the built config has {actual!r}")
+            replaced.append(f"{key}={value!r}: the server uses {actual!r}")
     if replaced:
         raise ValueError(
-            "--backend-config values were replaced while building the SkyRL-Train config:\n"
+            "--backend-config sets values the Tinker server does not use as given:\n"
             + "\n".join(f"  {line}" for line in replaced)
+            + "\nRemove these keys from --backend-config or set them to the value the server uses."
         )
 
 

@@ -386,11 +386,7 @@ class TinkerEngine:
                     "set to --base-model when --base-model-checkpoint-path is given",
                 )
             raise_backend_config_problems(
-                backend_config_conflicts(
-                    flatten_backend_config(backend_overrides),
-                    engine_values,
-                    unused_keys={"use_ray": "only read by the jax backend"},
-                )
+                backend_config_conflicts(flatten_backend_config(backend_overrides), engine_values)
             )
             backend_overrides["runtime_role"] = config.runtime_role
             if config.base_model_checkpoint_path is not None:

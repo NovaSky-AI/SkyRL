@@ -128,7 +128,6 @@ def _start_engine(monkeypatch, backend_config: dict, **kwargs) -> dict:
     [
         ({"strategy": "megatron"}, {}, "strategy='megatron': set by --backend ('fsdp')"),
         ({"runtime_role": "trainer"}, {}, "runtime_role='trainer': set by --runtime-role ('combined')"),
-        ({"use_ray": False}, {}, "use_ray=False: only read by the jax backend"),
         (
             {"generator.inference_engine": {"served_model_name": "custom"}},
             {"base_model_checkpoint_path": "/models/custom"},
@@ -156,5 +155,5 @@ def test_engine_accepts_values_equal_to_its_own(monkeypatch):
 
 
 def test_engine_does_not_check_the_jax_backend(monkeypatch):
-    """use_ray selects the Ray JAX backend, so it is a valid jax key."""
-    _start_engine(monkeypatch, {"use_ray": True}, backend="jax")
+    """The engine sets nothing on the jax backend's config, so any key passes through."""
+    _start_engine(monkeypatch, {"use_ray": True, "strategy": "megatron"}, backend="jax")
