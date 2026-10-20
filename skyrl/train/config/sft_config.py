@@ -313,7 +313,12 @@ class SFTConfig(BaseConfig):
     path is affected; evaluation keeps its configured chunk size.
     """
     packing_batch_size_allowed_variation: float = 0.05
-    """Maximum fractional variation from ``batch_size`` when aligning packed bins to DP."""
+    """Maximum fractional variation from ``batch_size`` when aligning packed bins to DP.
+
+    Not enforced at the end of an epoch: the final step takes the remainder, and
+    steps before it may shrink to leave each remaining step one real example per
+    DP rank.
+    """
 
     # ---- Dummy run / benchmarking ----
     dummy_run_full_ctx: bool = False  # Skip real data; fabricate full-context sequences

@@ -218,7 +218,9 @@ class _DPAlignedPackingBatchSamplerIterator(Iterator[List[int]], Stateful):
             remaining_samples = len(self.batch_sampler.sampler) - self.samples_emitted
             # Reserve a real row per DP rank in each future step when the
             # epoch has enough examples; otherwise reserve one per step and
-            # let the collator supply zero-loss rows on short tails.
+            # let the collator supply zero-loss rows on short tails. The
+            # reserve outranks the variation bound, so steps near the epoch's
+            # end may fall below nominal - max_variation.
             future_steps = total_batches - self.batch_index - 1
             reserve = (
                 future_steps * self.batch_sampler.dp_size
