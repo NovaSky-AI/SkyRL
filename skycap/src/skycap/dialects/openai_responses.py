@@ -8,9 +8,9 @@ vLLM's rule (``vllm/entrypoints/openai/responses/utils.py``,
 ``message`` item fills that field of the previous turn if the previous turn is
 an assistant turn and the field is still empty, else starts a new assistant
 turn; a ``function_call`` is appended to the previous assistant turn's calls,
-else starts one. Items with a role (user, system, developer) are turns of that
-role, and ``instructions`` is a leading ``system`` turn. Roles are left alone:
-``developer`` reaches the token backend as ``developer``.
+else starts one. Items with a role are turns of that role, and ``instructions``
+is a leading ``system`` turn. (Note that later on in the renderer, ``developer``
+role items may be converted to ``system`` role items.)
 
 skycap is stricter than vLLM where vLLM would drop part of the input and so
 change what the model sees: a non-function tool, a second content part in a
