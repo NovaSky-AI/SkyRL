@@ -243,19 +243,31 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
     return patched_any
 
 
+# Model Runner V2 ``model_state`` constants lost by a level-2 sleep, by ``model_state`` class.
+# Only these are carried across, so every other model is untouched.
+_LEVEL2_SLEEP_MODEL_STATE_CONSTANTS: dict[str, tuple[str, ...]] = {
+    # vllm-project/vllm#60009 lists it as not fixed ("held by non-module objects").
+    "Qwen4ExpModelState": ("ngram_context_offsets",),
+}
+
+
 def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
-    """CPU copies of the tensors on the runner's ``model_state``, for a level-2 sleep.
+    """CPU copies of the known ``model_state`` constants that a level-2 sleep discards.
 
     Model Runner V2 keeps per-model input state (``model_state``) next to the model, and it is
     allocated in the weights pool, so a level-2 sleep discards it. vLLM restores the model's
     buffers on wake but not these: Qwen4Exp's constant ``ngram_context_offsets`` came back as
-    zeros, corrupting every later PLE n-gram context. The per-step tensors there are rewritten
-    before use, so restoring them too is harmless.
+    zeros, corrupting every later PLE n-gram context. Returns {} for any ``model_state`` class not
+    in ``_LEVEL2_SLEEP_MODEL_STATE_CONSTANTS``.
     """
     state = getattr(model_runner, "model_state", None)
-    if state is None:
-        return {}
-    return {name: value.cpu().clone() for name, value in vars(state).items() if isinstance(value, torch.Tensor)}
+    names = _LEVEL2_SLEEP_MODEL_STATE_CONSTANTS.get(type(state).__name__, ())
+    saved = {}
+    for name in names:
+        value = getattr(state, name, None)
+        if isinstance(value, torch.Tensor):
+            saved[name] = value.cpu().clone()
+    return saved
 
 
 def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor]) -> int:
@@ -269,7 +281,10 @@ def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor
 
 
 def patch_vllm_level2_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
-    """Carry ``model_runner.model_state`` tensors across ``Worker.sleep(level=2)``."""
+    """Carry known ``model_runner.model_state`` constants across ``Worker.sleep(level=2)``.
+
+    A no-op for models without an entry in ``_LEVEL2_SLEEP_MODEL_STATE_CONSTANTS``.
+    """
     if worker_cls is None:
         try:
             from vllm.v1.worker.gpu_worker import Worker
@@ -301,5 +316,5 @@ def patch_vllm_level2_sleep_model_state(worker_cls: type[Any] | None = None) -> 
     setattr(_patched_sleep, "_skyrl_saves_model_state", True)
     worker_cls.sleep = _patched_sleep
     worker_cls.wake_up = _patched_wake_up
-    logger.info("Patched vLLM level-2 sleep to preserve model_runner.model_state tensors")
+    logger.info("Patched vLLM level-2 sleep to preserve Qwen4Exp model_runner.model_state constants")
     return True
