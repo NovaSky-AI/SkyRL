@@ -25,10 +25,11 @@ set -x
 #     projections/norms/conv and the hyper-connections train in full FT and are synced. The QSA
 #     indexer weights stay frozen. LoRA (all-linear) adapts only the attention/GDN/MoE linears.
 
-# NVLink-SHARP buffers are cudaMalloc'd per NCCL communicator (SkyRL pins NCCL_CUMEM_ENABLE=0) and
-# stay resident through offload and sleep: ~24 GiB/GPU of trainer residual with NVLS, ~12.5 without,
-# which is what leaves vLLM room to load the adapter. No measurable step-time cost here.
-export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
+# On 80 GB GPUs (H100), set NCCL_NVLS_ENABLE=0 in the Ray worker environment (cluster/container
+# env; SkyRL does not forward it from this shell). NVLink-SHARP buffers are cudaMalloc'd per NCCL
+# communicator (SkyRL pins NCCL_CUMEM_ENABLE=0) and stay resident through offload and sleep:
+# ~24 GiB/GPU of trainer residual with NVLS, ~12.5 without, which is what leaves vLLM room to
+# load the adapter.
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"

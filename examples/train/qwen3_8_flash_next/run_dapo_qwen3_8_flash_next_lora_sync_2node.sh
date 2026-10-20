@@ -12,7 +12,6 @@ set -x
 # response budget, which runs the QSA indexer in its sparse regime (sequences past
 # indexer_budget + compress_ratio - 1 = 2051 tokens), and rollout router replay (R3).
 
-export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
 export SKYRL_GENERATE_CONCURRENCY_PER_ENGINE=128
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
