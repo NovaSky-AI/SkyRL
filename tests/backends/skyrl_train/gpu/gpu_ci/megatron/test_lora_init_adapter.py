@@ -316,3 +316,122 @@ def test_megatron_merged_export_matches_peft_merge(adapter_dirs):
         f"megatron merged export: {len(adapted_bases)} adapted base weights match peft merge; "
         f"max abs diff on the other {len(exported) - len(adapted_bases)} tensors {worst_other:.5f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Resumed training: the imported (widened) adapters train, the base stays frozen
+# ---------------------------------------------------------------------------
+
+# Large enough that one Adam step visibly moves bf16 adapter weights.
+TRAIN_LR = 1e-3
+
+
+class _TrainProbePolicyWorkerBase(MegatronPolicyWorkerBase):
+    def _named_parameters(self):
+        for index, chunk in enumerate(self.actor_module):
+            for name, parameter in chunk.named_parameters():
+                yield f"chunk{index}.{name}", parameter
+
+    def snapshot_parameters(self) -> dict:
+        """``{name: (requires_grad, cpu copy)}`` for every parameter."""
+        return {
+            name: (parameter.requires_grad, parameter.detach().float().cpu().clone())
+            for name, parameter in self._named_parameters()
+        }
+
+    def adapter_grad_norms(self) -> dict:
+        """Gradient norm per adapter parameter, read from the DDP grad buffer before ``optim_step``."""
+        norms = {}
+        for name, parameter in self._named_parameters():
+            if ".adapter." not in name:
+                continue
+            grad = getattr(parameter, "main_grad", None)
+            if grad is None:
+                grad = parameter.grad
+            norms[name] = None if grad is None else grad.float().norm().item()
+        return norms
+
+
+_TrainProbePolicyWorker = ray.remote(num_gpus=1)(_TrainProbePolicyWorkerBase)
+
+
+def _adapter_target(name: str) -> str:
+    """``chunk0.module.decoder.layers.0.self_attention.linear_qkv.adapter.linear_in.weight`` -> ``linear_qkv``."""
+    return name.split(".adapter.", 1)[0].rsplit(".", 1)[-1]
+
+
+def _sft_batch(data: TrainingInputBatch) -> TrainingInputBatch:
+    zeros = torch.zeros(BATCH_SIZE, RESPONSE_LEN)
+    batch = TrainingInputBatch(
+        {
+            **{key: data[key] for key in ("sequences", "attention_mask", "loss_mask", "response_mask")},
+            "action_log_probs": zeros,
+            "base_action_log_probs": zeros,
+            "rollout_logprobs": zeros,
+            "advantages": zeros,
+        }
+    )
+    batch.metadata = {**data.metadata, "global_step": 0}
+    return batch
+
+
+def test_megatron_trains_imported_adapter(adapter_dirs, reference):
+    """One SFT step on the imported adapter: every widened adapter (incl. ``output_layer``) gets a
+    finite non-zero gradient and moves, the frozen base does not, and the trained tokens gain logprob.
+    """
+    tinker_style, _ = adapter_dirs
+    data, _, _ = reference
+    cfg = _policy_config("megatron", tinker_style)
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.policy.optimizer_config.lr = TRAIN_LR
+    cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+    validate_cfg(cfg)
+
+    with ray_init():
+        policy = init_worker_with_type("policy", cfg=cfg, num_gpus_per_node=1, worker_cls=_TrainProbePolicyWorker)
+        before = ray.get(policy.async_run_ray_method("pass_through", "snapshot_parameters"))[0]
+        logprobs_before = _trainer_logprobs(policy, data)
+
+        results = ray.get(
+            policy.async_run_ray_method("mesh", "forward_backward", _sft_batch(data), loss_fn="cross_entropy")
+        )
+        grad_norms = ray.get(policy.async_run_ray_method("pass_through", "adapter_grad_norms"))[0]
+        ray.get(policy.async_run_ray_method("pass_through", "optim_step"))
+
+        after = ray.get(policy.async_run_ray_method("pass_through", "snapshot_parameters"))[0]
+        logprobs_after = _trainer_logprobs(policy, data)
+
+    assert all(torch.isfinite(torch.tensor(r.metrics["loss"])) for r in results), [r.metrics for r in results]
+
+    adapter_names = sorted(name for name in before if ".adapter." in name)
+    targets = {_adapter_target(name) for name in adapter_names}
+    # Tinker's module set lands on these fused / renamed Megatron leaves.
+    expected_targets = {"linear_qkv", "linear_proj", "in_proj", "out_proj", "linear_fc1", "linear_fc2", "output_layer"}
+    assert expected_targets <= targets, f"missing adapter targets: {sorted(expected_targets - targets)}"
+
+    not_trainable = [name for name in adapter_names if not before[name][0]]
+    assert not not_trainable, f"adapter parameters frozen: {not_trainable[:8]}"
+    trainable_base = [name for name, (requires_grad, _) in before.items() if requires_grad and ".adapter." not in name]
+    assert not trainable_base, f"base parameters trainable under LoRA: {trainable_base[:8]}"
+
+    bad_grads = [name for name in adapter_names if grad_norms.get(name) is None or not grad_norms[name] > 0.0]
+    assert not bad_grads, f"adapter parameters without a finite non-zero gradient: {bad_grads[:8]}"
+    nonfinite = [name for name in adapter_names if not torch.isfinite(torch.tensor(grad_norms[name]))]
+    assert not nonfinite, f"adapter parameters with non-finite gradients: {nonfinite[:8]}"
+
+    unchanged = [name for name in adapter_names if torch.equal(before[name][1], after[name][1])]
+    assert not unchanged, f"adapter parameters the optimizer step left unchanged: {unchanged[:8]}"
+    nonfinite_weights = [name for name in adapter_names if not torch.isfinite(after[name][1]).all()]
+    assert not nonfinite_weights, f"adapter parameters non-finite after the step: {nonfinite_weights[:8]}"
+
+    moved_base = [
+        name for name in before if ".adapter." not in name and not torch.equal(before[name][1], after[name][1])
+    ]
+    assert not moved_base, f"frozen base parameters changed: {moved_base[:8]}"
+
+    gain = (logprobs_after - logprobs_before).mean().item()
+    print(
+        f"megatron resumed training: {len(adapter_names)} adapter params over {sorted(targets)} trained, "
+        f"{len(before) - len(adapter_names)} base params frozen; mean response logprob gain {gain:.4f}"
+    )
+    assert gain > 0, f"one SFT step did not raise the trained tokens' logprobs: {gain:.4f}"
