@@ -954,6 +954,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # full model. With full offload and full fine-tuning, the HDO also owns the masters,
             # so none are built on the GPU. LoRA keeps megatron's default ownership: the adapter
             # store snapshots the DistributedOptimizer's FP32 shards, and they are small anyway.
+            # MTP models also keep it: mtp/grad_clip.py finds the head's masters in the FP32 shards.
             from skyrl.backends.skyrl_train.patches.megatron.patch_hybrid_optimizer_cpu_masters import (
                 apply_hybrid_optimizer_cpu_masters_patch,
                 route_main_params_to_hybrid_optimizer,
@@ -961,7 +962,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             if optim_config.optimizer_cpu_offload:
                 apply_hybrid_optimizer_cpu_masters_patch()
-            if not self._is_lora and route_main_params_to_hybrid_optimizer(optim_config):
+            if (
+                not self._is_lora
+                and not getattr(self.provider, "mtp_num_layers", None)
+                and route_main_params_to_hybrid_optimizer(optim_config)
+            ):
                 if self._rank == 0:
                     logger.info(
                         "Optimizer fully offloaded: FP32 masters live only in the HybridDeviceOptimizer's "
@@ -1454,17 +1459,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
 
-        param_filter = None
-        if self._is_lora and self.cfg.policy.megatron_config.lora_config.merge_lora:
-            if self.cfg.policy.megatron_config.lora_config.sync_lora_targets_only:
-                # Merged LoRA changes only the wrapped modules; vLLM keeps its checkpoint copies of
-                # the frozen rest (sleep is forced to level 1, see _uses_partial_weight_sync).
-                from skyrl.backends.skyrl_train.weight_sync.merged_lora_filter import (
-                    MergedLoraSyncFilter,
-                )
-
-                param_filter = MergedLoraSyncFilter(self.bridge, self.actor_module)
-        source = MegatronWeightSource(self.bridge, self.actor_module, dtype, param_filter=param_filter)
+        source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
         if self._serialized_fp8_config is not None:
             from skyrl.backends.skyrl_train.weight_sync.sources import (
                 SerializedFp8WeightSource,

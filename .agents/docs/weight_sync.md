@@ -113,17 +113,6 @@ there first.
 - `MegatronWeightSource` — `bridge.export_hf_weights(conversion_tasks=None)`, a lazy
   generator in HF-canonical order that gathers TP/PP/EP internally. `metadata()` must
   materialize once to learn shapes, so it runs a dry export and caches.
-  With Megatron `merge_lora=true` and `lora_config.sync_lora_targets_only=true` it carries a
-  `param_filter` (`merged_lora_filter.MergedLoraSyncFilter`): only the `layers.<i>.<block>.`
-  units (`self_attention`, `mlp`, ...) that hold a LoRA-wrapped (`.to_wrap.`) or trainable param
-  or a buffer are sent; frozen units (embedding, LM head, final norm, hyper-connections) are not.
-  The unit is a whole block because vLLM's layerwise reload rebuilds any module that receives
-  *part* of its tensors with the rest uninitialized, and vLLM fuses across Megatron modules
-  (`FusedMoE` = every expert's fc1 + fc2). Correct only while vLLM keeps the checkpoint copies:
-  the client forces sleep level 1 (`keep_weights_on_sleep`; level 2 discards weights), and
-  validation rejects `load_format=dummy` / FP8 serialized sync / `sharded_rdt` / `delta`. The
-  packed buffer is still floored at the checkpoint's largest tensor, so the receive-side peak only
-  drops when the biggest tensors are frozen (not for all-linear LoRA on fused-expert checkpoints).
 - `LoraAdapterWeightSource` / `MegatronLoraAdapterSource` — a PEFT adapter rather than the
   model, for `lora.sync_mode=memory` (see *Targets* below). The one source that must be
   **prepared before the send**: the dedupe decides which keys exist, so one export has to

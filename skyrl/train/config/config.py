@@ -435,18 +435,6 @@ class MegatronLoraConfig(BaseConfig):
     See https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html"""
     merge_lora: bool = True
     """Merge LoRA weights into the base weights during weight sync."""
-    sync_lora_targets_only: bool = False
-    """With ``merge_lora=True``, send only what training changes: the LoRA-wrapped modules (merged
-    base + adapter), any other trainable parameter or buffer, and the frozen siblings vLLM may fuse
-    with them (the whole ``layers.<i>.<block>`` they sit in, e.g. ``self_attention`` or ``mlp``).
-    Frozen weights elsewhere (embedding, LM head, final norm, hyper-connections, ...) are not sent:
-    vLLM keeps the copies it loaded from the checkpoint, which equal the trainer's.
-
-    That holds only while vLLM's weights survive sleep, so this forces sleep level 1 (CPU backup
-    of the weights; host memory for one copy of each engine's weights) instead of level 2, which
-    discards them. Rejected when vLLM boots without checkpoint weights
-    (``fp8_weight_sync_mode`` or ``load_format="dummy"``), and with the ``sharded_rdt`` and
-    ``delta`` backends."""
     experts_shared_outer_loras: bool = False
     """Shared-outer grouped-expert LoRA for MoE models: the fc1 (gate_up) lora_A and
     fc2 (down) lora_B matrices are shared across all experts, while the inner matrices

@@ -24,7 +24,6 @@ from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
 from .utils import (
     _uses_lora_weight_sync,
-    _uses_partial_weight_sync,
     build_router_args,
     build_vllm_cli_args,
     get_pd_cli_args,
@@ -340,7 +339,6 @@ def build_new_inference_client(
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
-        keep_weights_on_sleep=_uses_partial_weight_sync(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,
     )

@@ -276,8 +276,8 @@ that is ~31 GB/GPU and init OOMs at 70.8 GiB (`logs/grpo_fullft_1.log`). Three p
   `use_precision_aware_optimizer_no_fp8_or_ds_fp8` flag, megatron-core's own path for
   precision-aware + CPU offload. No GPU main params; the HDO gets the BF16 param-buffer shards and
   BF16 grad views (`decoupled_grad`) and owns the FP32 masters on the host. Applied by
-  `megatron_worker.init_model` for full FT only (the LoRA adapter store snapshots
-  `shard_fp32_from_float16_groups`, which are `None` on this path).
+  `megatron_worker.init_model` for full FT without MTP only (the LoRA adapter store and
+  `mtp/grad_clip.py` read `shard_fp32_from_float16_groups`, which are `None` on this path).
 - `HybridDeviceOptimizer._get_sub_optimizer_param_groups`: one pinned FP32 host tensor per master
   (chunked D2H cast), instead of a GPU clone + pinned BF16 copy + pageable FP32 + pinned FP32.
 - The HDO `get_megatron_optimizer` builds over the full model params before the
@@ -288,8 +288,7 @@ that is ~31 GB/GPU and init OOMs at 70.8 GiB (`logs/grpo_fullft_1.log`). Three p
   over the model params when a DistributedOptimizer follows. The routing part is not a bug fix:
   keep it (or set `use_precision_aware_optimizer=true` in recipes instead) as long as
   megatron-core defaults to GPU main params with CPU offload.
-- **Remove:** the call in `MegatronPolicyWorkerBase.init_model`, the module, its CPU test, and the
-  `shard_float16_groups` pair in `mtp/grad_clip.py` if nothing else routes masters to the optimizer.
+- **Remove:** the call in `MegatronPolicyWorkerBase.init_model`, the module, and its CPU test.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

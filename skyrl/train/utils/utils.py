@@ -744,35 +744,6 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
 
-    if cfg.trainer.policy.megatron_config.lora_config.sync_lora_targets_only:
-        # Skipping the frozen weights is correct only if vLLM's copies of them are the checkpoint's
-        # and stay so: its sleep is forced to level 1 (see _uses_partial_weight_sync).
-        if cfg.trainer.strategy != "megatron" or lora_cfg.rank <= 0:
-            raise ValueError(
-                "megatron_config.lora_config.sync_lora_targets_only requires Megatron LoRA (lora.rank > 0)"
-            )
-        if not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
-            raise ValueError(
-                "megatron_config.lora_config.sync_lora_targets_only applies to merge_lora=true; "
-                "merge_lora=false already syncs the adapter only"
-            )
-        if ie_cfg.fp8_weight_sync_mode is not None:
-            raise ValueError(
-                "megatron_config.lora_config.sync_lora_targets_only is incompatible with fp8_weight_sync_mode: "
-                "vLLM boots with load_format='dummy', so every weight must be sent"
-            )
-        for kwargs_name in ("engine_init_kwargs", "prefill_init_kwargs", "decode_init_kwargs"):
-            if str((getattr(ie_cfg, kwargs_name) or {}).get("load_format", "")).lower() == "dummy":
-                raise ValueError(
-                    f"megatron_config.lora_config.sync_lora_targets_only is incompatible with "
-                    f"generator.inference_engine.{kwargs_name}.load_format='dummy': every weight must be sent"
-                )
-        if ie_cfg.weight_sync_backend in {"sharded_rdt", "delta"}:
-            raise ValueError(
-                "megatron_config.lora_config.sync_lora_targets_only requires weight_sync_backend='nccl' "
-                f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
-            )
-
     if ie_cfg.scale_moe_lora_rank:
         megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
         if cfg.trainer.strategy != "megatron" or lora_cfg.rank <= 0 or megatron_lora_cfg.merge_lora:
@@ -1099,11 +1070,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if os.environ.get("WANDB_API_KEY"):
         logger.info("Exporting wandb api key to ray runtime env")
         env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
-    # A key scoped to a team cannot write to the account's default entity.
-    for var_name in ["WANDB_ENTITY", "WANDB_BASE_URL"]:
-        if value := os.environ.get(var_name):
-            logger.info(f"Exporting {var_name} to ray runtime env")
-            env_vars[var_name] = value
 
     if os.environ.get("MLFLOW_TRACKING_URI"):
         logger.info("Exporting mlflow tracking uri to ray runtime env")

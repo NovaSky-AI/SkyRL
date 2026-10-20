@@ -54,7 +54,6 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     BatchIterator,
     TokenBasedBatchIterator,
     all_reduce_metrics,
-    compute_advantage_split_logratio_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
     reduce_metrics,
@@ -1285,9 +1284,6 @@ class PolicyWorkerBase(Worker):
                 status["policy_kl"] = kl_loss.item()
             status.update(
                 compute_minibatch_rollout_logprob_diff_metrics(action_log_probs, rollout_action_logprobs, loss_mask)
-            )
-            status.update(
-                compute_advantage_split_logratio_metrics(action_log_probs, old_action_log_probs, advantages, loss_mask)
             )
 
         return status

@@ -52,10 +52,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.backends.skyrl_train.workers.worker_utils import (
-    ADVANTAGE_SPLIT_LOGRATIO_KEYS,
-    reduce_metrics,
-)
+from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
@@ -1614,7 +1611,6 @@ class RayPPOTrainer:
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            epoch_start = {k: len(v) for k, v in all_metrics.items()}
             for chunk_refs in all_chunk_refs:
                 status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
                 for k, v in status.metrics.items():
@@ -1624,15 +1620,6 @@ class RayPPOTrainer:
                 grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
-            if self.cfg.trainer.update_epochs_per_batch > 1:
-                # Per-epoch direction check: on a correct update the positive-advantage log-ratio rises
-                # and the negative-advantage one falls from epoch to epoch.
-                epoch_means = {
-                    k: float(np.mean(all_metrics[k][epoch_start.get(k, 0) :]))
-                    for k in (*ADVANTAGE_SPLIT_LOGRATIO_KEYS, "policy_loss", "grad_norm")
-                    if len(all_metrics.get(k, [])) > epoch_start.get(k, 0)
-                }
-                logger.info(f"{model} epoch {_epoch}: {epoch_means}")
 
         # Reduce metrics across all mini-batches and epochs
         reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)

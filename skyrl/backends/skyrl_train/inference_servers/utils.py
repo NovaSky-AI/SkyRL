@@ -150,20 +150,6 @@ def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
     return True
 
 
-def _uses_partial_weight_sync(cfg: SkyRLTrainConfig) -> bool:
-    """Return True when a weight sync does not resend every base-model weight.
-
-    Megatron merged-LoRA sync with ``lora_config.sync_lora_targets_only`` sends only the modules
-    training changes; the frozen rest must stay as vLLM loaded it from the checkpoint, so the
-    engines must not discard their weights on sleep (level 2). Validated in
-    ``validate_inference_engine_cfg``.
-    """
-    if cfg.trainer.strategy != "megatron" or cfg.trainer.policy.model.lora.rank <= 0:
-        return False
-    lora_config = cfg.trainer.policy.megatron_config.lora_config
-    return bool(lora_config.merge_lora and lora_config.sync_lora_targets_only)
-
-
 def _moe_router_topk(model_path: str) -> Optional[int]:
     """Number of experts routed per token from the HF config, or None for a dense model."""
     from transformers import AutoConfig

@@ -73,7 +73,6 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
-    compute_advantage_split_logratio_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
 )
 from skyrl.train.config import TrainerConfig
@@ -1066,9 +1065,6 @@ class MegatronModelWrapper:
                 metrics["loss_metrics/" + k] = v
             metrics.update(
                 compute_minibatch_rollout_logprob_diff_metrics(action_log_probs, rollout_action_logprobs, loss_mask)
-            )
-            metrics.update(
-                compute_advantage_split_logratio_metrics(action_log_probs, old_action_log_probs, advantages, loss_mask)
             )
             return loss, metrics
 
