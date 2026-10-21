@@ -50,8 +50,6 @@ The default server binds to `0.0.0.0:9000` and uses:
 - `INFERENCE_NUM_ENGINES=6`
 - `INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND=mp`
 
-The launcher sets `NUM_GPUS` to the visible PyTorch GPU count so Ray can
-schedule both policy and inference workers. Override `NUM_GPUS` if needed.
 The `mp` executor keeps each vLLM engine on one node and avoids nested Ray
 GPU mask remapping on ROCm.
 

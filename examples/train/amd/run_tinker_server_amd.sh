@@ -8,8 +8,6 @@ cd "${REPO_ROOT}"
 export HOME="${SKYRL_HOME:-/tmp}"
 export SKYRL_RAY_NUM_CPUS="${SKYRL_RAY_NUM_CPUS:-64}"
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/usr}"
-# ROCm Ray must advertise GPUs for both the policy and inference workers.
-export NUM_GPUS="${NUM_GPUS:-$(python -c 'import torch; print(torch.cuda.device_count())')}"
 
 UV_ARGS=(--active --no-sync --extra tinker --extra fsdp)
 
