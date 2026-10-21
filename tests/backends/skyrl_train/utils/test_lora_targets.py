@@ -302,7 +302,7 @@ def test_megatron_narrowing_keeps_one_group(
 def test_megatron_unknown_lora_type_is_rejected() -> None:
     """A lora_type with no name list raises instead of returning an empty target list."""
     with pytest.raises(ValueError, match="Unknown Megatron lora_type"):
-        megatron_all_linear_target_modules("dora", True, True, True)
+        megatron_all_linear_target_modules("artur", True, True, True)
 
 
 @pytest.mark.parametrize(

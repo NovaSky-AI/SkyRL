@@ -83,7 +83,6 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.lora_targets import (
     check_lora_group_flags,
     check_megatron_lora_group_support,
-    is_all_linear,
     megatron_all_linear_target_modules,
 )
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
@@ -478,7 +477,8 @@ class MegatronWorker:
                 f"LoRA rank {lora_config.rank} that vLLM max_lora_rank is sized from"
             )
 
-        if is_all_linear(lora_config.target_modules):
+        target_modules = lora_config.target_modules
+        if isinstance(target_modules, str) and target_modules.lower() == "all-linear":
             target_modules = megatron_all_linear_target_modules(
                 lora_type,
                 lora_config.train_attn,
@@ -488,8 +488,6 @@ class MegatronWorker:
             if not (lora_config.train_attn and lora_config.train_mlp) and self._rank == 0:
                 group = "attn" if lora_config.train_attn else "mlp"
                 logger.info(f"LoRA restricted to {group} modules: {target_modules}")
-        else:
-            target_modules = lora_config.target_modules
 
         if lora_type == "lora":
             self.lora_cls = LoRA(

@@ -69,11 +69,6 @@ def lora_module_group(module_name: str) -> Optional[str]:
     return None
 
 
-def is_all_linear(target_modules: Union[str, list[str], None]) -> bool:
-    """Whether ``target_modules`` asks for every linear layer (``"all-linear"``, any case)."""
-    return isinstance(target_modules, str) and target_modules.lower() == "all-linear"
-
-
 def check_lora_group_flags(
     target_modules: Union[str, list[str], None],
     train_attn: bool,
@@ -94,7 +89,7 @@ def check_lora_group_flags(
             "LoRA requires at least one of `train_attn` or `train_mlp` to be True; with both False "
             "no module would be adapted and there would be nothing to train."
         )
-    if not is_all_linear(target_modules):
+    if not (isinstance(target_modules, str) and target_modules.lower() == "all-linear"):
         raise ValueError(
             f"`train_attn`/`train_mlp` narrow `target_modules='all-linear'`, but it is set to "
             f"{target_modules!r}. Name the modules in `target_modules` directly, or leave it at "
