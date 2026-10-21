@@ -279,6 +279,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
+    # The decoupled MTP draft loss rolls logits and labels without context parallelism (see the CP=1
+    # assert in MegatronModelWrapper), for every model.
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is not None and mtp.enabled and cfg.trainer.policy.megatron_config.context_parallel_size > 1:
+        raise ValueError("trainer.mtp.enabled=true is not supported with context_parallel_size > 1")
+
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
         # Megatron's fused top-k returns before compute_topk consults router_replay
@@ -744,6 +750,26 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
 
+    if ie_cfg.scale_moe_lora_rank:
+        megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
+        if cfg.trainer.strategy != "megatron" or lora_cfg.rank <= 0 or megatron_lora_cfg.merge_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires trainer.strategy='megatron', "
+                "lora.rank > 0 and megatron_config.lora_config.merge_lora=false"
+            )
+        if not megatron_lora_cfg.normalize_moe_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires "
+                "megatron_config.lora_config.normalize_moe_lora=true: otherwise the experts train at lora.rank"
+            )
+    for kwargs_name in ("engine_init_kwargs", "prefill_init_kwargs", "decode_init_kwargs"):
+        additional_config = (getattr(ie_cfg, kwargs_name) or {}).get("additional_config") or {}
+        if "max_expert_lora_rank" in additional_config:
+            raise ValueError(
+                f"generator.inference_engine.{kwargs_name}.additional_config.max_expert_lora_rank is set by "
+                "SkyRL; use generator.inference_engine.scale_moe_lora_rank=true instead"
+            )
+
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
         assert (
@@ -791,16 +817,21 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     if ie_cfg.enable_return_routed_experts:
-        # vLLM captures routes per worker, into a buffer covering only that worker's layers, and
-        # only the last pipeline stage returns model output. With inference PP > 1 the routes of
-        # every earlier stage's MoE layers are silently dropped (left as expert 0). This holds for
-        # both executor backends. The ray backend itself is fine: vLLM copies the routed-expert
-        # arrays out of Ray's shared-memory channel before the next read (v1/executor/ray_utils.py).
-        assert ie_cfg.pipeline_parallel_size == 1, (
-            "rollout router replay (r3) requires generator.inference_engine.pipeline_parallel_size=1: "
-            "vLLM returns routed experts only from the last pipeline stage, so earlier stages' routes "
-            "would be lost. Scale the inference engine with tensor/expert parallelism instead."
-        )
+        # Each vLLM PP stage captures only its own MoE layers, and only the last stage returns
+        # output, so stock vLLM rejects R3 with PP > 1. The PP relay (natively in a patched vLLM,
+        # or through patches/vllm/patch_routed_experts_pp_relay.py on AuxOutput-based builds)
+        # forwards each stage's routes to the next. Both executor backends use the same PP channel.
+        if ie_cfg.pipeline_parallel_size > 1:
+            from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+                vllm_supports_routed_experts_with_pp,
+            )
+
+            assert vllm_supports_routed_experts_with_pp(), (
+                "rollout router replay (r3) with generator.inference_engine.pipeline_parallel_size > 1 "
+                "needs a vLLM build with the AuxOutput connector (the PP relay patch targets it); the "
+                "installed vLLM is not one, so earlier stages' routes would be lost. Use "
+                "pipeline_parallel_size=1 and scale with tensor/expert parallelism instead."
+            )
         assert (
             cfg.trainer.strategy == "megatron"
         ), "rollout router replay (r3) is only supported with Megatron training backend"
@@ -1233,8 +1264,11 @@ def configure_ray_worker_logging() -> None:
     # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
     class _InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
+            level_name = record.levelname
+            if record.levelno == logging.INFO and (record.name == "httpx" or record.name.startswith("httpx.")):
+                level_name = "DEBUG"
             try:
-                level = logger.level(record.levelname).name
+                level = logger.level(level_name).name
             except ValueError:
                 level = record.levelno
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())

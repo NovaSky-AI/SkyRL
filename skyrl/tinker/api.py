@@ -871,6 +871,10 @@ class FutureResponse(BaseModel):
     request_id: str
 
 
+class SampleFutureResponse(FutureResponse):
+    sample_sequence_ids: list[str]
+
+
 class TelemetryEvent(BaseModel):
     event: str
     event_id: str
@@ -1678,7 +1682,7 @@ async def validate_sampler_checkpoint_once(
         validated.add(key)
 
 
-@app.post("/api/v1/asample", response_model=FutureResponse)
+@app.post("/api/v1/asample", response_model=SampleFutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
     if request.sampling_session_id is not None and ":" in request.sampling_session_id:
@@ -1739,7 +1743,12 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         )
         await session.commit()
 
-    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+    return SampleFutureResponse(
+        future_id=str(request_id),
+        status="pending",
+        request_id=str(request_id),
+        sample_sequence_ids=[uuid4().hex for _ in range(request.num_samples)],
+    )
 
 
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
