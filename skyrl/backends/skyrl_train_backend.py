@@ -186,9 +186,9 @@ def _server_values(
         values[f"{prefix}.num_warmup_steps"] = (0, schedule)
     if overrides.runtime_role != "combined":
         values["trainer.placement.colocate_all"] = (False, f"a {overrides.runtime_role}-only runtime never colocates")
-    # An inference-only runtime builds without a client LoRA config; there the backend_config rank
-    # is what enables LoRA on the inference engines.
-    if lora_config is not None:
+    # An inference-only runtime trains nothing: its create_model only registers a base-model alias
+    # with rank 0, and the backend_config rank is what enables LoRA on the inference engines.
+    if lora_config is not None and overrides.runtime_role != "inference":
         values["trainer.policy.model.lora.rank"] = (
             lora_config.rank,
             "set by the LoRA rank the client passes to create_model",

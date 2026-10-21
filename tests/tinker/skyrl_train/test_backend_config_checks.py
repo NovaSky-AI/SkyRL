@@ -62,8 +62,13 @@ def test_rejected(backend_config, kwargs, expected):
         ({"trainer.strategy": "fsdp", "trainer.algorithm.use_kl_loss": False}, {}, "trainer.strategy", "fsdp"),
         ({"trainer.algorithm.policy_loss_type": "dual_clip"}, {}, "trainer.algorithm.policy_loss_type", "dual_clip"),
         ({"trainer.policy.model.lora.rank": 8}, LORA, "trainer.policy.model.lora.rank", 8),
-        # Without a client LoRA config (inference-only runtime) the rank is what enables vLLM LoRA.
-        ({"trainer.policy.model.lora.rank": 32}, {"runtime_role": "inference"}, "trainer.policy.model.lora.rank", 32),
+        # On an inference-only runtime, create_model's rank-0 alias keeps the rank that enables vLLM LoRA.
+        (
+            {"trainer.policy.model.lora.rank": 32},
+            {"runtime_role": "inference", **FULL_FT},
+            "trainer.policy.model.lora.rank",
+            32,
+        ),
         # The Tinker SDK cannot send alpha, so backend_config's alpha wins over the API placeholder.
         ({"trainer.policy.model.lora": {"alpha": 128}}, LORA, "trainer.policy.model.lora.alpha", 128),
         ({"trainer.placement": {"policy_num_gpus_per_node": 2}}, {}, "trainer.placement.policy_num_gpus_per_node", 2),
