@@ -243,20 +243,25 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
     return patched_any
 
 
-def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
-    """CPU copies of every tensor on the runner's ``model_state``, taken before a sleep.
+# ``model_runner.model_state`` tensors that vLLM's wake path does not restore and that are not
+# rewritten before use, by attribute name. Model Runner V2 allocates ``model_state`` in the weights
+# pool, but waking restores only the model's parameters and buffers. Add a model's lost tensor here.
+MODEL_STATE_TENSORS_LOST_ON_SLEEP = (
+    # Qwen4Exp's constant n-gram offsets (arange(-2, 0)) come back as zeros, which corrupts every
+    # later PLE n-gram context (vllm-project/vllm#60009).
+    "ngram_context_offsets",
+)
 
-    Model Runner V2 keeps per-model input state (``model_state``) next to the model, allocated in
-    the weights pool, but vLLM's wake path restores only the model's parameters and buffers, so
-    these tensors can come back as garbage. Qwen4Exp is one case: its constant
-    ``ngram_context_offsets`` came back as zeros after a level-2 sleep and corrupted every later
-    PLE n-gram context (vllm-project/vllm#60009). Per-step tensors there are rewritten before use,
-    so restoring them too is harmless.
-    """
+
+def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
+    """CPU copies of the ``MODEL_STATE_TENSORS_LOST_ON_SLEEP`` tensors the runner's ``model_state`` has."""
     state = getattr(model_runner, "model_state", None)
-    if state is None:
-        return {}
-    return {name: value.cpu().clone() for name, value in vars(state).items() if isinstance(value, torch.Tensor)}
+    saved = {}
+    for name in MODEL_STATE_TENSORS_LOST_ON_SLEEP:
+        value = getattr(state, name, None)
+        if isinstance(value, torch.Tensor):
+            saved[name] = value.cpu().clone()
+    return saved
 
 
 def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor]) -> int:
@@ -270,7 +275,7 @@ def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor
 
 
 def patch_vllm_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
-    """Carry ``model_runner.model_state`` tensors across ``Worker.sleep`` / ``Worker.wake_up``.
+    """Carry the ``MODEL_STATE_TENSORS_LOST_ON_SLEEP`` tensors across ``Worker.sleep`` / ``wake_up``.
 
     Saved on every sleep (any level) and restored when the weights wake.
     """
@@ -304,5 +309,5 @@ def patch_vllm_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
     setattr(_patched_sleep, "_skyrl_saves_model_state", True)
     worker_cls.sleep = _patched_sleep
     worker_cls.wake_up = _patched_wake_up
-    logger.info("Patched vLLM worker sleep/wake to preserve model_runner.model_state tensors")
+    logger.info("Patched vLLM worker sleep/wake to preserve model_runner.model_state tensors lost on sleep")
     return True

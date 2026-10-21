@@ -1,8 +1,9 @@
-"""CPU tests for carrying ``model_runner.model_state`` tensors across a vLLM worker sleep.
+"""CPU tests for carrying lost ``model_runner.model_state`` tensors across a vLLM worker sleep.
 
 Model Runner V2's per-model input state lives in the weights pool, but vLLM's wake path restores
 only the model's parameters and buffers. Qwen4Exp's ``ngram_context_offsets`` came back as zeros
-after a level-2 sleep. Fake workers stand in for vLLM so no GPU is needed.
+after a level-2 sleep; only the tensors listed in ``MODEL_STATE_TENSORS_LOST_ON_SLEEP`` are
+carried. Fake workers stand in for vLLM so no GPU is needed.
 """
 
 import types
@@ -37,15 +38,19 @@ def _fake_worker_cls():
     return Worker
 
 
-def test_save_restore_round_trip_covers_every_tensor():
+def test_save_restore_round_trip_covers_only_listed_tensors():
     runner = _runner()
     saved = save_model_state_tensors(runner)
-    assert sorted(saved) == ["ngram_context_offsets", "scratch"]  # non-tensors are skipped
+    assert list(saved) == ["ngram_context_offsets"]  # scratch is not listed
     runner.model_state.ngram_context_offsets.zero_()
-    runner.model_state.scratch.zero_()
-    assert restore_model_state_tensors(runner, saved) == 2
+    assert restore_model_state_tensors(runner, saved) == 1
     assert runner.model_state.ngram_context_offsets.tolist() == [-2, -1]
-    assert runner.model_state.scratch.tolist() == [1.0, 1.0, 1.0]
+
+
+def test_models_without_listed_tensors_are_untouched():
+    runner = types.SimpleNamespace(model_state=types.SimpleNamespace(scratch=torch.ones(3)))
+    assert save_model_state_tensors(runner) == {}
+    assert restore_model_state_tensors(runner, save_model_state_tensors(runner)) == 0
 
 
 def test_runner_without_model_state_is_a_no_op():
@@ -65,7 +70,7 @@ def test_sleep_patch_restores_on_weights_wake():
         assert worker.model_runner.model_state.ngram_context_offsets.tolist() == [0, 0]
         worker.wake_up(tags=["weights"])
         assert worker.model_runner.model_state.ngram_context_offsets.tolist() == [-2, -1]
-        assert worker.model_runner.model_state.scratch.tolist() == [1.0, 1.0, 1.0]
+        assert worker.model_runner.model_state.scratch.tolist() == [0.0, 0.0, 0.0]  # not carried
 
 
 def test_full_wake_restores():
