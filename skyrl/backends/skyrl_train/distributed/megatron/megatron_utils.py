@@ -386,6 +386,20 @@ def load_megatron_grads_to_gpu(models):
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
 
 
+def megatron_grad_buffers_resident(models) -> bool:
+    """Whether the grad buffers are on the GPU (not released by :func:`offload_megatron_grads_to_cpu`)."""
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                if buffer.grad_data is not None and buffer.grad_data.untyped_storage().size() == 0:
+                    return False
+        else:
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None and not param.grad.is_cuda:
+                    return False
+    return True
+
+
 # Frozen (requires_grad=False, non-adapter) weights are immutable for the
 # whole run, so their CPU offload copies can live in file-backed mmap storage
 # instead of RAM: the pages are then *clean page cache* the kernel can evict
