@@ -467,7 +467,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 num_policy_gpus == num_critic_gpus
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
-        _apply_critic_lora(cfg, lora_config, flatten_backend_config(self.config.model_extra))
+        _apply_critic_lora(cfg, lora_config, flatten_backend_config(self.config.model_extra or {}))
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,
