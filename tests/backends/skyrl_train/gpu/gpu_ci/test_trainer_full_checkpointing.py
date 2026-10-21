@@ -123,13 +123,6 @@ def get_test_trainer_config(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
         cfg.trainer.policy.megatron_config.mtp_num_layers = 0
         cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
-        if not lora:
-            # ~11B params on 4 GPUs with expert-DP 1: fp32 masters + Adam live on the CPU.
-            optimizer_kwargs = cfg.trainer.policy.megatron_config.optimizer_config_kwargs
-            optimizer_kwargs["optimizer_cpu_offload"] = True
-            optimizer_kwargs["optimizer_offload_fraction"] = 1.0
-            optimizer_kwargs["overlap_cpu_optimizer_d2h_h2d"] = False
-            optimizer_kwargs["use_precision_aware_optimizer"] = False
 
     if lora:
         lora_cfg = cfg.trainer.policy.model.lora
