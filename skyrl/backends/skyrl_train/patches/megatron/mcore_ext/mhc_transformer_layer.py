@@ -255,13 +255,13 @@ def chunked_mlp(
 
 
 class _ChunkedRouterReplay:
-    """Keeps megatron-core router replay (R3) per token when the MoE runs on sequence chunks.
+    """Router replay (R3) for ``chunked_mlp``.
 
-    ``RouterReplay`` holds one [tokens, topk] tensor per router call: ``target_topk_idx`` for the
-    forward, a FIFO ``replay_backward_list`` for activation recompute, and ``recorded_topk_idx``
-    when recording. A chunked MLP calls the router once per chunk, so each call gets its slice of
-    the micro-batch's indices (tokens are [s, b] flattened, and chunks are contiguous in s), and a
-    recording is reassembled from the chunks.
+    The router uses ``replay.target_topk_idx`` as its routing result, but that holds the top-k of
+    the whole micro-batch as one tensor, while ``chunked_mlp`` calls the router once per chunk. So
+    each chunk gets its slice in ``target_topk_idx`` before its call, and the full tensor is put
+    back after the last one. The same goes for ``replay_backward_list`` (activation recompute):
+    its entry is split into one per chunk. Recorded top-k is concatenated back into one tensor.
     """
 
     def __init__(self, mlp, chunk_tokens, pad_tokens=0):
