@@ -231,18 +231,6 @@ def _measure(
     return sum(times) / len(times), sum(peaks) / len(peaks)
 
 
-def _active_modes():
-    modes = list(MODES)
-    from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
-        TRITON_AVAILABLE,
-        is_cuda_available,
-    )
-
-    if not (TRITON_AVAILABLE and is_cuda_available):
-        modes.remove("triton")
-    return modes
-
-
 def _correctness(modes, vocab_local, tp_group, device):
     """Validate loss and both gradients on every TP rank before timing."""
     tp_rank = dist.get_rank(tp_group)
@@ -637,7 +625,7 @@ def _run_backend_comparison(args) -> None:
     rank0 = dist.get_rank() == 0
 
     vocab_shards = [args.vocab // world] if args.vocab else VOCAB_SHARDS
-    modes = _active_modes()
+    modes = list(MODES)
     if rank0:
         print(
             f"Device {torch.cuda.get_device_name(device)} | TP(world)={world} | hidden={HIDDEN} | chunk={args.chunk_size}"
@@ -648,8 +636,6 @@ def _run_backend_comparison(args) -> None:
             "liger = FusedLinearChunkedDistributedLogprob (no logits) | "
             "triton = FusedLinearLogprobTriton (no logits)"
         )
-        if "triton" not in modes:
-            print("triton mode unavailable; skipping")
         print("all: hidden+weight -> per-token CE -> sum -> backward\n")
         print("correctness (TP=%d, vocab=%d):" % (world, vocab_shards[0] * world))
     correctness = _correctness(modes, vocab_shards[0], tp_group, device)
