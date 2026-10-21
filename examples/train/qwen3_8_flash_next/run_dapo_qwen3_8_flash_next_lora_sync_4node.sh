@@ -65,7 +65,10 @@ EVAL_TOP_P=0.7
 LR="${LR:-3e-4}"
 
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
-ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"'}'
+# vLLM's custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's cumem
+# allocator (colocate_all=true, TP>1): every TP worker dies at engine start with
+# custom_all_reduce.cuh:164 'invalid argument'.
+ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "disable_custom_all_reduce": true}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 RUN_NAME="${RUN_NAME:-qwen3_8_flash_next_dapo_sync_lora_r16_8k_ep16}"

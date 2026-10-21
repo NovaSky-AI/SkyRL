@@ -269,6 +269,9 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # and LM head), colocated with the Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+        # Custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's
+        # cumem allocator at TP>1 (custom_all_reduce.cuh:164 'invalid argument' at engine start).
+        overrides["engine_init_kwargs"]["disable_custom_all_reduce"] = True
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.

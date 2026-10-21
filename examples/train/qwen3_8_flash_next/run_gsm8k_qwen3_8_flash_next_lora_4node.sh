@@ -73,7 +73,10 @@ LORA_ARGS=(
   trainer.policy.megatron_config.lora_config.merge_lora=false
 )
 
-ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"'}'
+# vLLM's custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's cumem
+# allocator (colocate_all=true, TP>1): every TP worker dies at engine start with
+# custom_all_reduce.cuh:164 'invalid argument'.
+ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "disable_custom_all_reduce": true}'
 RUN_NAME="qwen3_8_flash_next_gsm8k_lora_ep${MEGATRON_EP}"
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
