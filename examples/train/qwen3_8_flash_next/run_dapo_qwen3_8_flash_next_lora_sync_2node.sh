@@ -1,7 +1,8 @@
 set -x
 
 # Colocated sync DAPO for Qwen3.8-Flash-Next (HF qwen4_exp, ~180B MoE) with Megatron + LoRA.
-# Two nodes of 8xH100-80G (16 GPUs). Stops after MAX_TRAINING_STEPS.
+# Two nodes of 8 GPUs (16 GPUs; settings validated on 8xB200, the parallelism also on 8xH100-80G).
+# Stops after MAX_TRAINING_STEPS.
 #
 #   bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 #   export WANDB_API_KEY=<key>
@@ -29,19 +30,22 @@ NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="${LOGGER:-wandb}"
 
-MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-20}"
+MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-30}"
 
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=8192
 INFERENCE_ENGINE_MAX_MODEL_LEN=10752         # prompt + response + chat-template headroom
 OVERLONG_BUFFER_LEN=2048                     # penalty starts at 6144
-OVERLONG_BUFFER_PENALTY_FACTOR=1.0
+# Half-strength soft overlong penalty. At 1.0, full FT learned to cut its reasoning short: by step 20,
+# held-out AIME accuracy on finished responses fell to 0.86 (0.99 at 0.5) with 33/240 finished-wrong.
+OVERLONG_BUFFER_PENALTY_FACTOR="${OVERLONG_BUFFER_PENALTY_FACTOR:-0.5}"
 
 # dp = 16 (TP=PP=CP=1), so (mini_batch * n_samples) % 16 == 0.
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
-MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-32}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
+MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-16}"   # 2 optimizer steps per batch
 N_SAMPLES_PER_PROMPT=8
-EVAL_N_SAMPLES_PER_PROMPT=8
+EVAL_N_SAMPLES_PER_PROMPT=12
+EVAL_INTERVAL="${EVAL_INTERVAL:-5}"   # held-out AIME-2024 at steps 0, 5, 10, ...
 MAX_TOKENS_PER_MICROBATCH=10752  # must hold one full sequence
 
 # Rollout router replay (R3): vLLM returns the experts each token was routed to and Megatron
@@ -56,7 +60,9 @@ APPLY_OVERLONG_FILTERING=true
 TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
-LR=1e-5
+# LoRA needs a much larger LR than full FT: at 1e-5 / 3e-5 the per-step update was ~1e-4 nats/token
+# and runs stayed flat; 3e-4 with alpha 32 learns (held-out AIME 0.45 -> 0.85 in 10 steps).
+LR="${LR:-3e-4}"
 
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"'}'
@@ -103,7 +109,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
   trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
   trainer.policy.model.lora.rank=16 \
-  trainer.policy.model.lora.alpha=16 \
+  trainer.policy.model.lora.alpha=32 \
   trainer.policy.model.lora.sync_mode=memory \
   trainer.policy.megatron_config.lora_config.merge_lora=false \
   trainer.policy.optimizer_config.lr=$LR \
@@ -123,8 +129,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.max_training_steps=$MAX_TRAINING_STEPS \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   trainer.eval_batch_size=128 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=-1 \
+  trainer.eval_before_train=true \
+  trainer.eval_interval=$EVAL_INTERVAL \
   trainer.ckpt_interval=10 \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_PATH" \
