@@ -244,18 +244,19 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
 
 
 def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
-    """CPU copy of Qwen4Exp's ``model_state.ngram_context_offsets``, for a level-2 sleep.
+    """CPU copies of every tensor on the runner's ``model_state``, taken before a sleep.
 
-    Model Runner V2 keeps per-model input state (``model_state``) next to the model, and it is
-    allocated in the weights pool, so a level-2 sleep discards it. vLLM restores the model's
-    buffers on wake but not this constant, which came back as zeros and corrupted every later
-    PLE n-gram context (vllm-project/vllm#60009 lists it as not fixed). Other models have no
-    such attribute, so this is a no-op for them.
+    Model Runner V2 keeps per-model input state (``model_state``) next to the model, allocated in
+    the weights pool, but vLLM's wake path restores only the model's parameters and buffers, so
+    these tensors can come back as garbage. Qwen4Exp is one case: its constant
+    ``ngram_context_offsets`` came back as zeros after a level-2 sleep and corrupted every later
+    PLE n-gram context (vllm-project/vllm#60009). Per-step tensors there are rewritten before use,
+    so restoring them too is harmless.
     """
-    offsets = getattr(getattr(model_runner, "model_state", None), "ngram_context_offsets", None)
-    if not isinstance(offsets, torch.Tensor):
+    state = getattr(model_runner, "model_state", None)
+    if state is None:
         return {}
-    return {"ngram_context_offsets": offsets.cpu().clone()}
+    return {name: value.cpu().clone() for name, value in vars(state).items() if isinstance(value, torch.Tensor)}
 
 
 def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor]) -> int:
@@ -268,8 +269,11 @@ def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor
     return len(saved)
 
 
-def patch_vllm_level2_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
-    """Carry Qwen4Exp's ``model_state.ngram_context_offsets`` across ``Worker.sleep(level=2)``."""
+def patch_vllm_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
+    """Carry ``model_runner.model_state`` tensors across ``Worker.sleep`` / ``Worker.wake_up``.
+
+    Saved on every sleep (any level) and restored when the weights wake.
+    """
     if worker_cls is None:
         try:
             from vllm.v1.worker.gpu_worker import Worker
@@ -285,21 +289,20 @@ def patch_vllm_level2_sleep_model_state(worker_cls: type[Any] | None = None) -> 
         return False
 
     @wraps(original_sleep)
-    def _patched_sleep(self: Any, level: int = 1) -> Any:
-        if level == 2:
-            self._skyrl_saved_model_state = save_model_state_tensors(self.model_runner)
-        return original_sleep(self, level)
+    def _patched_sleep(worker: Any, level: int = 1) -> Any:
+        worker._skyrl_saved_model_state = save_model_state_tensors(worker.model_runner)
+        return original_sleep(worker, level)
 
     @wraps(original_wake)
-    def _patched_wake_up(self: Any, tags: list[str] | None = None) -> Any:
-        result = original_wake(self, tags)
+    def _patched_wake_up(worker: Any, tags: list[str] | None = None) -> Any:
+        result = original_wake(worker, tags)
         if tags is None or "weights" in tags:
-            restore_model_state_tensors(self.model_runner, getattr(self, "_skyrl_saved_model_state", {}))
-            self._skyrl_saved_model_state = {}
+            restore_model_state_tensors(worker.model_runner, getattr(worker, "_skyrl_saved_model_state", {}))
+            worker._skyrl_saved_model_state = {}
         return result
 
     setattr(_patched_sleep, "_skyrl_saves_model_state", True)
     worker_cls.sleep = _patched_sleep
     worker_cls.wake_up = _patched_wake_up
-    logger.info("Patched vLLM level-2 sleep to preserve Qwen4Exp model_runner.model_state constants")
+    logger.info("Patched vLLM worker sleep/wake to preserve model_runner.model_state tensors")
     return True
