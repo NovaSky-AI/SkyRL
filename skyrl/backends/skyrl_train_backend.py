@@ -220,7 +220,7 @@ def _build_skyrl_train_config(
         "fsdp",
         "megatron",
     ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
-    user_overrides = dict(overrides.model_extra)
+    user_overrides = dict(overrides.model_extra or {})
     user_values = flatten_backend_config(user_overrides)
     server_values = _server_values(base_model, overrides, lora_config, user_values)
     unused_keys = dict(SkyRLTrainBackend.REPLACED_PER_REQUEST)
