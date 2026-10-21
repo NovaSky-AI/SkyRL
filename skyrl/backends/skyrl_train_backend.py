@@ -769,6 +769,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
+        self._adam_params_checked.discard(model_id)
 
         # Inference-only model IDs are aliases for the same base-model runtime.
         # Keep that runtime alive while another alias is still registered.
