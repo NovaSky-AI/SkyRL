@@ -42,6 +42,9 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
+from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
+    sync_params_for_export,
+)
 
 # Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
 _PP_SEED_OFFSET = 100
@@ -331,6 +334,7 @@ class MegatronStrategy(DistributedStrategy):
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
+        sync_params_for_export(model, optimizer)
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
         unwrapped_model = model[0]
         while hasattr(unwrapped_model, "module"):
