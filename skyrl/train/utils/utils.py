@@ -45,6 +45,7 @@ from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
     SkyRLTrainConfig,
     get_config_as_dict,
+    validate_megatron_vlm_freeze,
 )
 from skyrl.train.utils import deadline
 
@@ -219,6 +220,18 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     )
 
 
+def validate_policy_vlm_freeze(cfg: SkyRLTrainConfig):
+    """Check the policy's megatron_config.freeze_* flags. Runs for every strategy, so a non-Megatron run
+    that sets them fails instead of silently training everything."""
+    policy_cfg = cfg.trainer.policy
+    validate_megatron_vlm_freeze(
+        policy_cfg.megatron_config,
+        strategy=cfg.trainer.strategy,
+        lora_enabled=policy_cfg.model.lora.rank > 0,
+        language_model_only=policy_cfg.language_model_only,
+    )
+
+
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
@@ -231,6 +244,7 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     policy_cfg = cfg.trainer.policy
+    validate_policy_vlm_freeze(cfg)
     policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))
     if (
         policy_fp8_param
@@ -662,6 +676,8 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
+    else:
+        validate_policy_vlm_freeze(cfg)
     if cfg.generator.use_conversation_multi_turn:
         if (
             cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None

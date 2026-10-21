@@ -23,7 +23,10 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
     TorchProfilerConfig,
 )
-from skyrl.train.config.config import overrides_dict_to_dotlist
+from skyrl.train.config.config import (
+    overrides_dict_to_dotlist,
+    validate_megatron_vlm_freeze,
+)
 
 # ---------------------------------------------------------------------------
 # TrainOnWhat enum
@@ -611,6 +614,13 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
             f"parallel is not supported for megatron"
         )
+
+    validate_megatron_vlm_freeze(
+        cfg.megatron_config,
+        strategy=cfg.strategy,
+        lora_enabled=cfg.model.lora.rank > 0,
+        language_model_only=cfg.language_model_only,
+    )
 
     # ---- sequence packing checks ----
     if cfg.use_sequence_packing:
