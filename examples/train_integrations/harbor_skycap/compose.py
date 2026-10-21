@@ -26,12 +26,12 @@ was never forwarded, so its row is left out; the trainer pads it, as it does for
 SkyRL's own trace.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from skycap import Sample
 
+from skycap import Sample
 from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertIndices,
     compact_routed_expert_indices,
@@ -44,6 +44,13 @@ from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics
 
 MASKED_STOP_REASONS = frozenset({"agent_timeout", "error"})
+UNBRIDGED_POLICIES = ("allow", "zero_reward", "mask_instance")
+
+
+def validate_unbridged_policy(policy: str) -> None:
+    """Reject an unknown policy before a rollout or capture server starts."""
+    if policy not in UNBRIDGED_POLICIES:
+        raise ValueError(f"skycap.unbridged_policy must be one of {UNBRIDGED_POLICIES}, got {policy!r}")
 
 
 @dataclass
@@ -114,14 +121,21 @@ def compose(
     top_k: int = -1,
     sample_support: bool = False,
     routed_experts: bool = False,
+    unbridged_policy: str = "allow",
 ) -> GeneratorOutput:
     """``top_k`` sets the width of sampler-support rows, as SkyRL's own capture pads them.
 
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries padded support rows, as every other batch will. ``routed_experts`` says the same
-    of routes (R3); every trained row must then have them.
+    of routes (R3); every trained row must then have them. ``unbridged_policy`` can keep
+    re-rendered rollouts, zero their reward, or mask all repetitions of their instance.
     """
+    validate_unbridged_policy(unbridged_policy)
+    if unbridged_policy == "zero_reward":
+        outcomes = [replace(o, reward=0.0) if o.unbridged_calls > 0 else o for o in outcomes]
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
+    if unbridged_policy == "mask_instance":
+        masked_instances.update(o.trajectory_id.instance_id for o in outcomes if o.unbridged_calls > 0)
 
     groups: List[List[_Row]] = []
     trained: List[TrialOutcome] = []

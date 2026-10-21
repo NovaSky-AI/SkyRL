@@ -21,9 +21,9 @@ from typing import Any, Dict, List, Optional
 import ray
 import yaml
 from loguru import logger
+
 from skycap.exposure import load_exposure
 from skycap.paths import BUILTIN_RULES, load_rule
-
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 
@@ -33,6 +33,7 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
+from ..compose import validate_unbridged_policy
 from ..harbor_generator import HarborSkycapGenerator
 from ..record_index import RecordLog, SkycapRecordIndex
 from ..servers import SkycapServers, exposure_for, start_servers
@@ -105,6 +106,11 @@ class SkycapConfig:
     conversation the harness ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
+    unbridged_policy: str = "allow"
+    """How to train on a rollout with a re-rendered history. ``allow`` preserves its reward and paths;
+    ``zero_reward`` trains the same tokens with reward zero; ``mask_instance`` masks every repetition
+    of its instance. Re-rendering is expected for summarizing harnesses, so opt in only when the
+    harness should preserve history. The policy never retries a trial."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
     require_api_key: Optional[bool] = None
     """Whether a trajectory's harness routes answer only its own key, which the generator hands its agent. ``None``
@@ -120,6 +126,7 @@ class HarborSkycapConfig(HarborSkyRLConfig):
 
 def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     """skycap servers in token mode, in front of SkyRL's router."""
+    validate_unbridged_policy(cfg.skycap.unbridged_policy)
     ie = cfg.generator.inference_engine
     sampling = cfg.generator.sampling_params
     engine_init = dict(ie.engine_init_kwargs or {})
@@ -196,6 +203,7 @@ class HarborSkycapExp(HarborExp):
             inference_engine_client=inference_engine_client,
             train_paths=cfg.skycap.train_paths,
             records=self.records,
+            unbridged_policy=cfg.skycap.unbridged_policy,
         )
         return self.generator
 
@@ -227,6 +235,7 @@ def main() -> None:
         defaults = yaml.safe_load(f)
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
+    validate_unbridged_policy(cfg.skycap.unbridged_policy)
     _exposure(cfg)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")

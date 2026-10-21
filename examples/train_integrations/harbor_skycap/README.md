@@ -30,6 +30,30 @@ Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/defaul
 the idle TTL, the renderer pool size, which paths train and how agents inside
 remote sandboxes reach skycap ([below](#agents-inside-remote-sandboxes)).
 
+## Re-rendered histories
+
+A call is unbridged when skycap re-renders the prompt instead of extending the
+previous sampled tokens. Summarization and deliberate history edits can cause
+this; it does not by itself mean the captured tokens are wrong. For a harness
+that should preserve its history, `skycap.unbridged_policy` controls how these
+rollouts train:
+
+- `allow` (default): keep the rollout's reward and train its selected paths.
+- `zero_reward`: train the same tokens with reward zero. Other repetitions of
+  the instance keep their own rewards, so the group advantage reflects the
+  affected rollout as a failed attempt.
+- `mask_instance`: mask every repetition of the affected instance in the
+  generated batch, using the same placeholder rows as timeout/error masking.
+  This keeps a partly removed group out of the advantage calculation.
+
+The policy runs after the trial finishes and never retries it. Existing
+timeout/error masking and overlong filtering still apply. Raw capture records
+keep the verifier's reward; the generator's output and reward metrics use the
+policy's reward. `generate/skycap/num_unbridged_trajectories` and
+`generate/skycap/num_unbridged_calls` count the re-rendered histories under all
+three policies, and `generate/skycap/num_masked_instances` includes instances
+masked by this policy.
+
 ## Which paths train
 
 `skycap.train_paths` picks the rows of each rollout:
