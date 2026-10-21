@@ -323,6 +323,10 @@ class Qwen4ExpPLE(nn.Module):
 # QSA (Qwen sparse attention) indexer and the attention over its selection
 # ------------------------------------------------------------------------------------------------
 
+# TODO: replace the indexer and ``qsa_sparse_attention`` (FlexAttention / chunked SDPA, ~6x the cost
+# of dense attention at 8K) with megatron-core's QSA kernel once the Megatron team implements it
+# (NVIDIA/Megatron-LM#7393 / #7553).
+
 # Query rows per chunk of the indexer scores ([rows, heads, blocks] fp32) and of the masked
 # attention ([heads, rows, keys]): bounds peak memory independently of the sequence length.
 QSA_INDEXER_CHUNK = 1024
