@@ -53,7 +53,7 @@ COPY . /workspace/SkyRL
 # Constrain transitive dependencies too: newer runtime packages can otherwise
 # replace the installed ROCm torch and Triton with CUDA wheels.
 RUN cp docker/pyproject.amd.toml pyproject.toml \
-    && python -c "from importlib.metadata import version; from pathlib import Path; packages = ['torch', 'torchvision', 'torchaudio', 'triton', 'vllm', 'flash-attn', 'ray', 'boto3', 'botocore', 's3transfer']; Path('/tmp/skyrl-rocm-constraints.txt').write_text(''.join(f'{name}=={version(name)}\n' for name in packages))" \
+    && python -c "import re; from importlib.metadata import version, distributions; from pathlib import Path; installed = {re.sub(r'[-_.]+', '-', d.name).lower() for d in distributions()}; packages = ['torch', 'torchvision', 'torchaudio', 'triton', 'vllm', 'flash-attn', 'ray', 'boto3', 'botocore', 's3transfer']; Path('/tmp/skyrl-rocm-constraints.txt').write_text(''.join(f'{name}=={version(name)}\n' for name in packages if name in installed))" \
     && uv pip install --system --no-cache-dir --constraint /tmp/skyrl-rocm-constraints.txt -e ".[fsdp,tinker]" \
     && python -c "import ray, torch, vllm; import skyrl.tinker.api; assert torch.version.hip is not None; print('ray', ray.__version__); print('vllm', vllm.__version__); print('torch', torch.__version__, 'hip', torch.version.hip)"
 
