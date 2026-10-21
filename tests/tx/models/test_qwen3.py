@@ -75,7 +75,8 @@ def test_qwen3_moe_layer(ep: int, tp: int):
     config = Qwen3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
 
     hf_moe_layer = hf_model.model.layers[0].mlp
-    x = torch.randn(4, 2, config.hidden_size)
+    # Exercise a near-zero router logit.
+    x = torch.randn(4, 2, config.hidden_size, generator=torch.Generator().manual_seed(84))
     with torch.no_grad():
         hf_final_hidden_states = hf_moe_layer.forward(x)
         hf_router_logits = torch.nn.functional.linear(x.view(-1, config.hidden_size), hf_moe_layer.gate.weight)
@@ -87,7 +88,8 @@ def test_qwen3_moe_layer(ep: int, tp: int):
 
         final_hidden_states, router_logits = moe_layer(x.numpy(), return_router_logits=True)
 
-        assert np.allclose(hf_router_logits, router_logits, rtol=1e-4)
+        # Allow float32 round-off near zero across PyTorch and JAX.
+        assert np.allclose(hf_router_logits, router_logits, rtol=1e-4, atol=1e-6)
         assert np.allclose(hf_final_hidden_states, final_hidden_states, rtol=5e-2, atol=1e-2)
 
 
