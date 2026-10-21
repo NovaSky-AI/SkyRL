@@ -590,6 +590,8 @@ class MegatronWorker:
         )
 
         load_peft_adapter_into_megatron(self.bridge, model, self._lora_import_plan, self.lora_cls)
+        # The plan's pieces hold full (unsharded) CPU copies of every adapter tensor; nothing reads them after the load.
+        self._lora_import_plan = None
         self._lora_import_adapter = None
         torch.distributed.barrier()
 

@@ -351,6 +351,10 @@ class _TrainProbePolicyWorkerBase(MegatronPolicyWorkerBase):
             norms[name] = None if grad is None else grad.float().norm().item()
         return norms
 
+    def lora_import_state(self) -> tuple:
+        """The import plan / adapter the worker still holds (both hold full CPU adapter tensors)."""
+        return self._lora_import_plan, self._lora_import_adapter
+
 
 _TrainProbePolicyWorker = ray.remote(num_gpus=1)(_TrainProbePolicyWorkerBase)
 
@@ -389,6 +393,7 @@ def test_megatron_trains_imported_adapter(adapter_dirs, reference):
 
     with ray_init():
         policy = init_worker_with_type("policy", cfg=cfg, num_gpus_per_node=1, worker_cls=_TrainProbePolicyWorker)
+        import_state = ray.get(policy.async_run_ray_method("pass_through", "lora_import_state"))[0]
         before = ray.get(policy.async_run_ray_method("pass_through", "snapshot_parameters"))[0]
         logprobs_before = _trainer_logprobs(policy, data)
 
@@ -401,6 +406,7 @@ def test_megatron_trains_imported_adapter(adapter_dirs, reference):
         after = ray.get(policy.async_run_ray_method("pass_through", "snapshot_parameters"))[0]
         logprobs_after = _trainer_logprobs(policy, data)
 
+    assert import_state == (None, None), "the worker keeps the imported adapter tensors after loading them"
     assert all(torch.isfinite(torch.tensor(r.metrics["loss"])) for r in results), [r.metrics for r in results]
 
     adapter_names = sorted(name for name in before if ".adapter." in name)
