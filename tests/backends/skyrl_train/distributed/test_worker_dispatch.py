@@ -310,6 +310,52 @@ class TestSaveWeights:
 
         assert events == ["broadcast_done", "resumed"]
 
+    @pytest.mark.asyncio
+    async def test_cancellation_survives_a_failed_transfer(self):
+        """A transfer that fails after the cancellation arrived must not replace the cancellation."""
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.3)
+            raise RuntimeError("broadcast failed")
+
+        dispatch = self._nccl_dispatch(broadcast)
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        sync.cancel()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await sync
+
+        assert isinstance(raised.value.__cause__, RuntimeError)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel, expected", [(False, RuntimeError), (True, asyncio.CancelledError)])
+    async def test_offload_kv_wakes_kv_cache_before_resuming(self, cancel, expected):
+        """However the sync is interrupted, generation must not resume onto a sleeping KV cache."""
+        events = []
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.2)
+            events.append("broadcast_done")
+            if not cancel:
+                raise RuntimeError("broadcast failed")
+
+        dispatch = self._nccl_dispatch(broadcast)
+        dispatch.cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+        dispatch.cfg.trainer.fully_async = SimpleNamespace(enabled=True, clear_kv_cache_on_weight_sync=False)
+        client = dispatch._inference_engine_client
+        client.wake_for_weight_sync.side_effect = lambda tags: events.append(f"wake_{tags[0]}")
+        client.resume_generation.side_effect = lambda: events.append("resumed")
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        if cancel:
+            sync.cancel()
+        with pytest.raises(expected):
+            await sync
+
+        assert events == ["wake_weights", "broadcast_done", "wake_kv_cache", "resumed"]
+
 
 def _adapter_sync_dispatch(*, model_on_gpu: bool, optimizer_on_gpu: bool = False):
     """Dispatch wired for the colocated adapter-only sync path

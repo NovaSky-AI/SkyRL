@@ -809,8 +809,9 @@ class WorkerDispatch:
             The transfer blocks on ``ray.get`` for the whole broadcast, so it runs in a
             worker thread: on the event loop it would stall every coroutine sharing the
             loop (the fully-async generators) and expire their timeouts. A cancellation
-            waits for the transfer to finish before propagating, so the enclosing resume
-            bracket never resumes generation onto partially transferred weights.
+            waits for the transfer to finish before propagating (chained to the transfer's
+            error, if any), so the enclosing resume bracket never resumes generation onto
+            partially transferred weights.
 
             ``last_weight_sync_seconds`` is surfaced as
             ``timing/sync_weights_only_transfer`` via :meth:`get_timing_metrics`,
@@ -823,13 +824,11 @@ class WorkerDispatch:
                 cancelled = False
                 while not transfer.done():
                     try:
-                        await asyncio.shield(transfer)
+                        await asyncio.wait({transfer})
                     except asyncio.CancelledError:
                         cancelled = True
                 if cancelled:
-                    if transfer.exception() is not None:
-                        logger.warning(f"Weight transfer failed while cancelled: {transfer.exception()!r}")
-                    raise asyncio.CancelledError
+                    raise asyncio.CancelledError() from transfer.exception()
                 transfer.result()
             self.last_weight_sync_seconds = time.perf_counter() - start
 
@@ -865,9 +864,14 @@ class WorkerDispatch:
                         self._inference_engine_client.resume_generation, "resume_generation"
                     ):
                         await self._inference_engine_client.sleep_for_weight_sync(offload_kv=offload_kv)
-                        await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
-                        await _broadcast_and_finish()
-                        await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
+                        # Wake the KV cache even if the sync fails, so the resume above never
+                        # schedules the frozen requests onto a sleeping KV cache.
+                        async with cleanup_preserving_primary(
+                            lambda: self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"]),
+                            "wake_for_weight_sync(kv_cache)",
+                        ):
+                            await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
+                            await _broadcast_and_finish()
                 else:
                     # Synchronous trainer: generation is complete at sync time, so there
                     # are no in-flight requests to preserve. A plain sleep (discards KV,
