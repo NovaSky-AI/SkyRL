@@ -8,6 +8,8 @@ cd "${REPO_ROOT}"
 export HOME="${SKYRL_HOME:-/tmp}"
 export SKYRL_RAY_NUM_CPUS="${SKYRL_RAY_NUM_CPUS:-64}"
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/usr}"
+# ROCm Ray must advertise GPUs for both the policy and inference workers.
+export NUM_GPUS="${NUM_GPUS:-$(python -c 'import torch; print(torch.cuda.device_count())')}"
 
 UV_ARGS=(--active --no-sync --extra tinker --extra fsdp)
 
@@ -68,6 +70,8 @@ MICRO_TRAIN_BATCH_SIZE_PER_GPU="${MICRO_TRAIN_BATCH_SIZE_PER_GPU:-32}"
 MICRO_FORWARD_BATCH_SIZE_PER_GPU="${MICRO_FORWARD_BATCH_SIZE_PER_GPU:-32}"
 
 INFERENCE_NUM_ENGINES="${INFERENCE_NUM_ENGINES:-6}"
+# Each engine runs on this node; avoid nested Ray GPU mask remapping on ROCm.
+INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND="${INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 INFERENCE_TENSOR_PARALLEL_SIZE="${INFERENCE_TENSOR_PARALLEL_SIZE:-1}"
 INFERENCE_MAX_NUM_BATCHED_TOKENS="${INFERENCE_MAX_NUM_BATCHED_TOKENS:-32768}"
 INFERENCE_MAX_NUM_SEQS="${INFERENCE_MAX_NUM_SEQS:-256}"
@@ -84,6 +88,7 @@ BACKEND_CONFIG="${BACKEND_CONFIG:-$(cat <<JSON
     "trainer.micro_forward_batch_size_per_gpu": ${MICRO_FORWARD_BATCH_SIZE_PER_GPU},
 
     "generator.inference_engine.num_engines": ${INFERENCE_NUM_ENGINES},
+    "generator.inference_engine.distributed_executor_backend": "${INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND}",
     "generator.inference_engine.tensor_parallel_size": ${INFERENCE_TENSOR_PARALLEL_SIZE},
     "generator.inference_engine.max_num_batched_tokens": ${INFERENCE_MAX_NUM_BATCHED_TOKENS},
     "generator.inference_engine.enable_ray_prometheus_stats": ${INFERENCE_ENABLE_RAY_PROMETHEUS_STATS},
