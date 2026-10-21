@@ -6,6 +6,7 @@ optimizer-offload policy applied before and after the sync. CPU-only: the
 dispatch is built via ``__new__`` with mocked actor groups and client.
 """
 
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -258,6 +259,56 @@ class TestSaveWeights:
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
+
+    @staticmethod
+    def _nccl_dispatch(broadcast):
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = False
+        dispatch.cfg = _fft_dispatch_cfg()
+        dispatch._inference_engine_client = AsyncMock()
+        dispatch._inference_engine_client.increment_weight_version = MagicMock()
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=broadcast)
+        dispatch._prepare_for_weight_sync = AsyncMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+        return dispatch
+
+    @pytest.mark.asyncio
+    async def test_broadcast_does_not_block_event_loop(self):
+        """The broadcast blocks on ``ray.get``. A timeout armed by a coroutine sharing the
+        loop (a fully-async generator's HTTP request) must not expire because of it."""
+        dispatch = self._nccl_dispatch(lambda *args, **kwargs: time.sleep(0.5))
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        async with asyncio.timeout(0.2):
+            await asyncio.sleep(0.05)
+        assert not sync.done()
+        await sync
+
+        dispatch._broadcast_to_inference_engines.assert_called_once()
+        assert dispatch.last_weight_sync_seconds >= 0.5
+
+    @pytest.mark.asyncio
+    async def test_cancellation_waits_for_the_transfer_before_resuming(self):
+        """A cancellation mid-broadcast must not resume generation onto partially transferred weights."""
+        events = []
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.3)
+            events.append("broadcast_done")
+
+        dispatch = self._nccl_dispatch(broadcast)
+        dispatch._inference_engine_client.resume_generation.side_effect = lambda: events.append("resumed")
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        sync.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sync
+
+        assert events == ["broadcast_done", "resumed"]
 
 
 def _adapter_sync_dispatch(*, model_on_gpu: bool, optimizer_on_gpu: bool = False):
