@@ -6,6 +6,8 @@ local Hugging Face cache); skipped otherwise.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("renderers")
@@ -125,6 +127,33 @@ async def test_a_conversation_through_the_real_renderer(renderer: RenderersRende
         assert sum(sample.loss_mask) == 2 * len(reply)
 
 
+async def test_malformed_json_tool_attempt_is_text_without_promoting_finish_reason(renderer: RenderersRenderer) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(TOKENIZER)
+    attempt = '{"name": "search", "arguments":'
+    completion = tokenizer.encode(
+        f"<think>\nhmm\n</think>\n\n<tool_call>\n{attempt}\n</tool_call><|im_end|>",
+        add_special_tokens=False,
+    )
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.server.backend.renderer = renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        first = await client(created["base_url"]).chat.completions.create(
+            model="policy", messages=[user("q")], tools=tools
+        )
+
+        assert first.choices[0].finish_reason == "stop"
+        assert first.choices[0].message.tool_calls is None
+        assert first.choices[0].message.content == attempt
+        assert first.choices[0].message.reasoning_content == "hmm"
+        (sample,) = build_samples(stack.server.trajectories[created["id"]].graph)
+        assert sample.input_ids == stack.engine.requests[0]["token_ids"] + completion
+        assert sum(sample.loss_mask) == len(completion)
+
+
 def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: RenderersRenderer) -> None:
     from renderers.base import load_tokenizer
 
@@ -139,3 +168,109 @@ def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: Ren
     spans = [data[start:end] for start, end in zip(bounds, bounds[1:])]
     assert all("\ufffd" not in span.decode() for span in spans)
     assert b"".join(spans) == data
+
+
+PREFILLING_TOKENIZER = "Qwen/Qwen3.5-0.8B"
+
+
+@pytest.fixture(scope="module")
+def prefilling_renderer() -> RenderersRenderer:
+    try:
+        # Thinking is off by default below 4B; on, the template prefills the reasoning block.
+        return RenderersRenderer(PREFILLING_TOKENIZER, size=1, chat_template_kwargs={"enable_thinking": True})
+    except Exception as error:  # noqa: BLE001 - no network and no cache
+        pytest.skip(f"tokenizer unavailable: {error}")
+
+
+async def test_reasoning_is_split_when_the_prompt_opened_the_think_block(
+    prefilling_renderer: RenderersRenderer,
+) -> None:
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(PREFILLING_TOKENIZER)
+    # Qwen3.5 with thinking on ends the generation prompt in `<think>\n`, so the model's
+    # completion starts inside the reasoning block and never samples the opening tag.
+    prompt = prefilling_renderer.render([{"role": "user", "content": "hi"}], None).token_ids
+    assert tokenizer.decode(prompt).endswith("<think>\n")
+    completion = tokenizer.encode("hmm\n</think>\n\nhello<|im_end|>", add_special_tokens=False)
+
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.server.backend.renderer = prefilling_renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        reply = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
+
+    message = reply.choices[0].message.model_dump(exclude_none=True)
+    assert message["content"] == "hello"
+    assert message["reasoning_content"] == "hmm"
+
+
+@pytest.fixture(scope="module", params=[PREFILLING_TOKENIZER, "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"])
+def xml_renderer(request: pytest.FixtureRequest) -> RenderersRenderer:
+    try:
+        return RenderersRenderer(request.param, size=1, chat_template_kwargs={"enable_thinking": True})
+    except Exception as error:  # noqa: BLE001 - no network and no cache
+        pytest.skip(f"tokenizer unavailable: {error}")
+
+
+async def test_invalid_numeric_tool_argument_can_be_corrected_without_losing_sampled_tokens(
+    xml_renderer: RenderersRenderer,
+) -> None:
+    from renderers import ToolCallParseStatus
+    from renderers.base import load_tokenizer
+
+    tokenizer = load_tokenizer(xml_renderer.name)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_well",
+                "parameters": {"type": "object", "properties": {"Xylene": {"type": "number"}}},
+            },
+        }
+    ]
+    messages = [user("Run a well.")]
+    prompt = xml_renderer.render(messages, tools).token_ids
+    assert tokenizer.decode(prompt).rstrip().endswith("<think>")
+    completion_text = (
+        "Let me run the first well.\n</think>\n"
+        "<tool_call>\n<function=run_well>\n<parameter=Xylene>\n"
+        "120 plus the remaining volume\n</parameter>\n</function>\n</tool_call><|im_end|>"
+    )
+    completion = tokenizer.encode(completion_text, add_special_tokens=False)
+    correction = tokenizer.encode(
+        completion_text.replace("120 plus the remaining volume", "120"), add_special_tokens=False
+    )
+    with xml_renderer._checkout() as (parser, _):
+        parsed = parser.parse_response(completion, tools=tools, prompt_ids=prompt)
+    assert parsed.content == ""
+    assert parsed.tool_calls[0].status == ToolCallParseStatus.INVALID_JSON
+
+    completions = iter([completion, correction])
+    async with token_stack(completion=lambda prompt, sampling: next(completions)) as stack:
+        stack.server.backend.renderer = xml_renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        llm = client(created["base_url"])
+        first = await llm.chat.completions.create(model="policy", messages=messages, tools=tools)
+        reply = first.choices[0].message.model_dump(exclude_none=True)
+
+        assert first.choices[0].finish_reason == "tool_calls"
+        assert reply["content"] == ""
+        assert reply["reasoning_content"] == "Let me run the first well."
+        (call,) = reply["tool_calls"]
+        assert call["function"]["name"] == "run_well"
+        assert json.loads(call["function"]["arguments"]) == {"Xylene": "120 plus the remaining volume"}
+
+        messages += [
+            reply,
+            {"role": "tool", "tool_call_id": call["id"], "content": "Invalid arguments: Xylene must be a number."},
+        ]
+        second = await llm.chat.completions.create(model="policy", messages=messages, tools=tools)
+        assert json.loads(second.choices[0].message.tool_calls[0].function.arguments) == {"Xylene": 120}
+
+        first_request, second_request = stack.engine.requests
+        exact_prefix = first_request["token_ids"] + completion
+        assert second_request["token_ids"][: len(exact_prefix)] == exact_prefix
+        (sample,) = build_samples(stack.server.trajectories[created["id"]].graph)
+        assert sample.input_ids == second_request["token_ids"] + correction
+        assert sum(sample.loss_mask) == len(completion) + len(correction)
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 0

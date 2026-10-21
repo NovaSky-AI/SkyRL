@@ -63,6 +63,37 @@ from skyrl.env_vars import (
 logger = logging.getLogger(__name__)
 
 
+def _multimodal_prompt(token_ids: List[int], features: dict, cache_salt: Optional[str]):
+    """The engine input for a token prompt with multimodal ``features``.
+
+    ``features`` is vLLM's ``MultiModalFeatures`` (per-modality ``mm_hashes``, ``mm_placeholders`` and
+    serialized ``kwargs_data``), as ``/inference/v1/generate`` takes it; this builds the engine input the
+    same way that endpoint does (vllm/entrypoints/scale_out/token_in_token_out/serving.py), so a caller can
+    send images to ``/skyrl/v1/generate`` and keep its routed experts and sample support.
+    """
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+        mm_kwargs_from_features,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        MultiModalFeatures,
+    )
+    from vllm.inputs import mm_input
+    from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+
+    parsed = MultiModalFeatures.model_validate(features)
+    placeholders = {
+        modality: [PlaceholderRange(offset=p.offset, length=p.length) for p in ranges]
+        for modality, ranges in parsed.mm_placeholders.items()
+    }
+    return mm_input(
+        prompt_token_ids=token_ids,
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs_from_features(parsed)),
+        mm_hashes=parsed.mm_hashes,
+        mm_placeholders=placeholders,
+        cache_salt=cache_salt,
+    )
+
+
 def _sample_support_from_flat_logprobs(
     logprobs: FlatLogprobs,
     top_k: int,
@@ -559,7 +590,11 @@ class VLLMServerActor(ServerActorProtocol):
         # TODO (sumanthrh): Migrate back to /inference/v1/generate once flashinfer is supported with returning top-k logprobs.
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
-            """SkyRL generate endpoint that returns routed_experts alongside token output."""
+            """SkyRL generate endpoint that returns routed_experts alongside token output.
+
+            Like ``/inference/v1/generate``, a request may carry multimodal ``features`` (images) for its
+            token prompt.
+            """
             body = await request.json()
 
             # Resolve `model` to a loaded LoRA adapter, as the native endpoint does
@@ -592,9 +627,22 @@ class VLLMServerActor(ServerActorProtocol):
                     )
                 sampling_params_dict["flat_logprobs"] = True
                 sampling_params_dict["logprobs"] = top_k
+                # This endpoint returns token ids only, so the API-server process need not detokenize
+                # the k + 1 candidates per token; that work otherwise starves the event loop that also
+                # serves pause/weight-sync. Stop strings still need the decoded text.
+                if not sampling_params_dict.get("stop"):
+                    sampling_params_dict.setdefault("detokenize", False)
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
-            if cache_salt is not None:
+            features = body.get("features")
+            if features is not None:
+                try:
+                    prompt = _multimodal_prompt(token_ids, features, cache_salt)
+                # pydantic's ValidationError and undecodable items are ValueErrors; an item that decodes to
+                # something other than a serialized MultiModalKwargsItem raises AttributeError or TypeError.
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise HTTPException(status_code=400, detail=f"invalid features: {error}") from error
+            elif cache_salt is not None:
                 prompt = TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)
             else:
                 prompt = TokensPrompt(prompt_token_ids=token_ids)
@@ -713,6 +761,18 @@ async def _build_and_serve_vllm_server(
     # SkyRL uses the scale-out token-in/token-out endpoint for generation.
     cli_args.enable_scale_out = True
     app = build_app(cli_args)
+
+    if getattr(cli_args, "enable_return_routed_experts", False) and cli_args.pipeline_parallel_size > 1:
+        from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+            PP_RELAY_ENV,
+            apply_pp_relay_config_patch,
+        )
+
+        # R3 with PP > 1: lift vLLM's rejection before the engine config is validated here. The engine core
+        # validates the config again in its own process; the env var makes SkyRL's `vllm.general_plugins`
+        # entry point install the same patch there. The workers install the relay itself.
+        os.environ[PP_RELAY_ENV] = "1"
+        apply_pp_relay_config_patch()
 
     # Initialize the engine (this loads the model - takes time)
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
