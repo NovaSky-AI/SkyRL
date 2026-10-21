@@ -1,43 +1,27 @@
 set -x
 
-# Colocated GRPO for Qwen3.8-Flash-Next (HF qwen4_exp, ~180B MoE) on GSM8K with Megatron + LoRA.
-# Two nodes of 8xH100-80G (16 GPUs). Full fine-tuning: run_gsm8k_qwen3_8_flash_next_fullft_*node.sh.
+# Colocated GRPO for Qwen3.8-Flash-Next (HF qwen4_exp, ~180B MoE) on GSM8K with Megatron, full
+# fine-tuning. Four nodes of 8xB200 (32 GPUs, ~178 GiB usable each).
+# LoRA: run_gsm8k_qwen3_8_flash_next_lora_4node.sh (constraints listed there).
 #
 #   uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 #   export WANDB_API_KEY=<your_key_here>   # or leave LOGGER=console
-#   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_gsm8k_qwen3_8_flash_next_lora_2node.sh
+#   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_gsm8k_qwen3_8_flash_next_fullft_4node.sh
 #
-# Put MODEL_PATH on node-local disk (same path on every node): every vLLM TP rank and every
-# trainer rank reads the 360 GB checkpoint at startup.
-#
-# Megatron support is SkyRL's own (skyrl/backends/skyrl_train/patches/megatron/qwen4_exp), which
-# constrains the recipe:
-#   - TP=CP=PP=1; scale is expert parallelism. EP=16 also shards the frozen ~51B-parameter PLE
-#     n-gram table by head (16 heads -> one per rank, ~6.4 GB each, kept in pinned host memory).
-#   - Text only (language_model_only) and packed sequences (remove_microbatch_padding).
-#   - Sequences must stay within the QSA indexer budget (2048 + 3 tokens), where the indexer
-#     selects every key and attention is exactly dense; longer sequences raise. Hence the
-#     512 + 1024 length caps.
-#   - MTP is not trained (mtp_num_layers=0); vLLM's drafter keeps the base MTP weights, so do
-#     not enable MTP speculative decoding for long runs.
-#   - The PLE n-gram table is frozen by construction (a plain tensor, not a parameter): never
-#     trained, never weight-synced, so rollout and policy always agree on it. The PLE
-#     projections/norms/conv and the hyper-connections train in full FT and are synced. The QSA
-#     indexer weights stay frozen. LoRA (all-linear) adapts only the attention/GDN/MoE linears.
-
-# On 80 GB GPUs (H100), set NCCL_NVLS_ENABLE=0 in the Ray worker environment (cluster/container
-# env; SkyRL does not forward it from this shell). NVLink-SHARP buffers are cudaMalloc'd per NCCL
-# communicator (SkyRL pins NCCL_CUMEM_ENABLE=0) and stay resident through offload and sleep:
-# ~24 GiB/GPU of trainer residual with NVLS, ~12.5 without, which is what leaves vLLM room to
-# load the adapter.
+# Memory (per GPU): EP16 over 32 GPUs gives expert-DP 2, so the distributed optimizer shards the
+# expert state over 2 ranks and the dense state over 32. The optimizer stays on the GPU (no CPU
+# offload): bf16 weights ~25 GB + bf16 grads ~25 GB (grad_reduce_in_fp32=false) + FP32 masters
+# and Adam moments. Colocated with vLLM: SkyRL offloads the trainer's weights, grads and optimizer
+# state to the host while vLLM generates. The weight sync needs vLLM's TP8 weights (~40 GiB) awake
+# next to the trainer weights and the largest fused expert tensor's receive buffer (~3.1 GiB).
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"
 LOGGER="${LOGGER:-console}"  # change to "wandb" to log to wandb
 
-NUM_NODES=2
+NUM_NODES=4
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=2
+NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 
 MAX_PROMPT_LENGTH=512
@@ -47,7 +31,7 @@ INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
 MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
-MAX_TOKENS_PER_MICROBATCH=8192
+MAX_TOKENS_PER_MICROBATCH=4096
 # vLLM sizes its KV pool at engine start; the trainer's post-offload residual grows to ~24 GiB/GPU
 # after the first optimizer step, and 0.85 OOMed adding the adapter at step 2. At 0.6 vLLM has
 # ~950 GDN state blocks, one per running sequence, so max_num_seqs is capped below the 1024 default.
@@ -59,21 +43,10 @@ MEGATRON_CP=1
 MEGATRON_EP=16
 MEGATRON_ETP=1
 
-# Frozen bf16 base ~25 GB/GPU (dense 10 + experts 15; the 6.4 GB PLE shard is in host memory).
-# Adapter-only sync (merge_lora=false, in memory): merging needs vLLM's woken weights, a
-# full-tensor receive buffer (the 1.27 GB embedding) and the merge temporaries resident at once,
-# which does not fit at TP8/EP16. vLLM accepts ranks 1/8/16/32/..., and normalize_moe_lora needs
-# rank % top-k(10) == 0, so expert adapters stay at the full rank.
-LR=1e-5
-LORA_ARGS=(
-  trainer.policy.model.lora.rank=16
-  trainer.policy.model.lora.alpha=16
-  trainer.policy.model.lora.sync_mode=memory
-  trainer.policy.megatron_config.lora_config.merge_lora=false
-)
+LR=1e-6
 
 ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"'}'
-RUN_NAME="qwen3_8_flash_next_gsm8k_lora_ep${MEGATRON_EP}"
+RUN_NAME="qwen3_8_flash_next_gsm8k_fullft_ep${MEGATRON_EP}"
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -99,10 +72,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
   trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=8 \
-  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true \
-  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0 \
-  trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
-  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
+  trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32=false \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.remove_microbatch_padding=true \
@@ -138,5 +108,4 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3_8_flash_next_gsm8k" \
   trainer.run_name="$RUN_NAME" \
-  "${LORA_ARGS[@]}" \
   "$@"

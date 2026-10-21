@@ -1,14 +1,14 @@
 set -x
 
 # Colocated sync DAPO for Qwen3.8-Flash-Next (HF qwen4_exp, ~180B MoE) with Megatron, full
-# fine-tuning. Two nodes of 8xB200 (16 GPUs). Stops after MAX_TRAINING_STEPS.
+# fine-tuning. Four nodes of 8xB200 (32 GPUs). Stops after MAX_TRAINING_STEPS.
 #
 #   bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 #   export WANDB_API_KEY=<key>
-#   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_fullft_sync_2node.sh
+#   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_fullft_sync_4node.sh
 #
-# Per-setting reasoning lives in run_gsm8k_qwen3_8_flash_next_lora_2node.sh (parallelism, vLLM
-# memory, NVLS, frozen modules) and run_gsm8k_qwen3_8_flash_next_fullft_2node.sh (host-resident
+# Per-setting reasoning lives in run_gsm8k_qwen3_8_flash_next_lora_4node.sh (parallelism, vLLM
+# memory, NVLS, frozen modules) and run_gsm8k_qwen3_8_flash_next_fullft_4node.sh (GPU-resident
 # optimizer, weight-sync memory). What differs here: the stock DAPO 2k prompt / 8k
 # response budget, which runs the QSA indexer in its sparse regime (sequences past
 # indexer_budget + compress_ratio - 1 = 2051 tokens), and rollout router replay (R3).
@@ -24,9 +24,9 @@ DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 
-NUM_NODES=2
+NUM_NODES=4
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=2
+NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="${LOGGER:-wandb}"
 
@@ -40,7 +40,7 @@ OVERLONG_BUFFER_LEN=2048                     # penalty starts at 6144
 # held-out AIME accuracy on finished responses fell to 0.86 (0.99 at 0.5) with 33/240 finished-wrong.
 OVERLONG_BUFFER_PENALTY_FACTOR="${OVERLONG_BUFFER_PENALTY_FACTOR:-0.5}"
 
-# dp = 16 (TP=PP=CP=1), so (mini_batch * n_samples) % 16 == 0.
+# dp = 32 (TP=PP=CP=1), so (mini_batch * n_samples) % 32 == 0.
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
 MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-16}"   # 2 optimizer steps per batch
 N_SAMPLES_PER_PROMPT=8
@@ -103,13 +103,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
   trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=8 \
-  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=true \
-  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=1.0 \
-  trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
-  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
   trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32=false \
-  trainer.policy.megatron_config.optimizer_config_kwargs.pin_cpu_grads=false \
-  trainer.policy.megatron_config.optimizer_config_kwargs.pin_cpu_params=false \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
