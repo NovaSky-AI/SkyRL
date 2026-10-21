@@ -82,10 +82,13 @@ class Experience:
     # Per-row sub-sequence lengths for sequence packing (one 1-D int tensor per
     # packed row); ``None`` when packing is off.
     sub_seq_lengths: Optional[TensorList] = None
+    real_sample_mask: Optional[Bool[torch.Tensor, "batch"]] = None  # noqa: F821
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
         self.sequences = to(self.sequences, device)
+        if self.real_sample_mask is not None:
+            self.real_sample_mask = self.real_sample_mask.to(device)
         if self.action_log_probs is not None:
             self.action_log_probs = to(self.action_log_probs, device)
         if self.base_action_log_probs is not None:
@@ -119,6 +122,8 @@ class Experience:
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
+        if self.real_sample_mask is not None:
+            self.real_sample_mask = self.real_sample_mask.pin_memory()
         if self.action_log_probs is not None:
             self.action_log_probs = pin_memory(self.action_log_probs)
         if self.base_action_log_probs is not None:
