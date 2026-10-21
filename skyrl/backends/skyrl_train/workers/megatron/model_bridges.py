@@ -95,10 +95,9 @@ try:
 
     # Qwen3.5 (language-model-only) -> GPTModel.
     #
-    # Qwen3.5 checkpoints dispatch to the VL bridge -> Qwen3VLModel, which packs
-    # sequences inside its own forward and breaks under SkyRL sample packing. When
-    # only the LM is wanted (language_model_only=True), route to the native
-    # GPTModel + GDN thd path instead. The stock text bridges assume a flat text
+    # Qwen3.5 checkpoints dispatch to the VL bridge -> Qwen3VLModel, which builds
+    # the vision tower. When only the LM is wanted (language_model_only=True),
+    # route to the native GPTModel + GDN path instead. The stock text bridges assume a flat text
     # checkpoint (top-level config, hf_prefix="model."); these subclasses adapt
     # them to the unified VL checkpoint (text_config, model.language_model.*),
     # like Qwen35VLBridge but targeting GPTModel.

@@ -4,6 +4,7 @@ uv run --isolated --extra dev --extra skyrl-train  pytest tests/train/utils/test
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
@@ -150,8 +151,6 @@ class TestRayGpuMonitorCollect:
         assert "node.1.gpu.0.util" in result
 
     def test_collect_tolerates_http_error(self):
-        import httpx
-
         monitor = RayGpuMonitor()
         monitor._urls = ["http://10.0.0.1:8080/metrics"]
 
@@ -160,6 +159,24 @@ class TestRayGpuMonitorCollect:
 
         result = monitor._collect(mock_client)
         assert result == {}
+
+    @pytest.mark.parametrize("status_code", [200, 503])
+    def test_collect_reports_failed_response(self, status_code):
+        monitor = RayGpuMonitor()
+        monitor._urls = ["http://test/metrics"]
+
+        transport = httpx.MockTransport(lambda request: httpx.Response(status_code, text=_PROMETHEUS_TEXT))
+        with patch("skyrl.train.utils.ray_gpu_monitor.logger") as mock_logger:
+            with httpx.Client(transport=transport) as client:
+                result = monitor._collect(client)
+
+        if status_code == 503:
+            assert result == {}
+            mock_logger.warning.assert_called_once()
+            assert "503" in mock_logger.warning.call_args.args[0]
+        else:
+            assert result["node.0.gpu.0.util"] == pytest.approx(75.5)
+            mock_logger.warning.assert_not_called()
 
 
 class TestRayGpuMonitorFlush:

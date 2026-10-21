@@ -592,6 +592,11 @@ class VLLMServerActor(ServerActorProtocol):
                     )
                 sampling_params_dict["flat_logprobs"] = True
                 sampling_params_dict["logprobs"] = top_k
+                # This endpoint returns token ids only, so the API-server process need not detokenize
+                # the k + 1 candidates per token; that work otherwise starves the event loop that also
+                # serves pause/weight-sync. Stop strings still need the decoded text.
+                if not sampling_params_dict.get("stop"):
+                    sampling_params_dict.setdefault("detokenize", False)
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
             if cache_salt is not None:
@@ -714,6 +719,18 @@ async def _build_and_serve_vllm_server(
     cli_args.enable_scale_out = True
     app = build_app(cli_args)
 
+    if getattr(cli_args, "enable_return_routed_experts", False) and cli_args.pipeline_parallel_size > 1:
+        from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+            PP_RELAY_ENV,
+            apply_pp_relay_config_patch,
+        )
+
+        # R3 with PP > 1: lift vLLM's rejection before the engine config is validated here. The engine core
+        # validates the config again in its own process; the env var makes SkyRL's `vllm.general_plugins`
+        # entry point install the same patch there. The workers install the relay itself.
+        os.environ[PP_RELAY_ENV] = "1"
+        apply_pp_relay_config_patch()
+
     # Initialize the engine (this loads the model - takes time)
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
     # Standalone parsing can leave the CUDA worker class unresolved.
@@ -778,6 +795,8 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+    from skyrl.backends.skyrl_train.inference_servers.utils import VLLM_LOGPROBS_MODE
+
     # See build_vllm_cli_args: pin the device type so arg parsing's DeviceConfig
     # autodetection succeeds even before CUDA is fully initialized.
     if not current_platform.device_type:
@@ -788,7 +807,12 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = _AsyncEngineArgs.add_cli_args(parser)
-    return parser.parse_args(argv)
+    # Matches build_vllm_cli_args: logprobs are computed from the sampling distribution.
+    parser.set_defaults(logprobs_mode=VLLM_LOGPROBS_MODE)
+    args = parser.parse_args(argv)
+    if args.logprobs_mode != VLLM_LOGPROBS_MODE:
+        parser.error(f"--logprobs-mode must be {VLLM_LOGPROBS_MODE!r}, got {args.logprobs_mode!r}.")
+    return args
 
 
 def main(argv: Optional[List[str]] = None) -> None:

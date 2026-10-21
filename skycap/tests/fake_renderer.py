@@ -50,6 +50,11 @@ class FakeRenderer:
         self.empty_content = ""
         #: Full renders requested (``render``); bridges don't count.
         self.renders = 0
+        #: Set to decline every bridge, so each call renders in full.
+        self.no_bridge = False
+        #: Set to drop ``THINK:...|`` from assistant content before the last user message in a full render, as
+        #: Qwen's templates drop historical reasoning: a bridged history then no longer re-renders the same.
+        self.drop_history_thinking = False
 
     def _message(self, message: Mapping[str, Any]) -> list[int]:
         body = _body(message, self.empty_content)
@@ -57,6 +62,16 @@ class FakeRenderer:
 
     def render(self, messages: Sequence[Mapping[str, Any]], tools: Any) -> Rendered:
         self.renders += 1
+        if self.drop_history_thinking:
+            last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+            messages = [
+                (
+                    {**m, "content": m["content"].split("|", 1)[-1]}
+                    if i < last_user and m.get("role") == "assistant" and str(m.get("content", "")).startswith("THINK:")
+                    else m
+                )
+                for i, m in enumerate(messages)
+            ]
         return self._render(messages, tools)
 
     def _render(self, messages: Sequence[Mapping[str, Any]], tools: Any) -> Rendered:
@@ -80,7 +95,7 @@ class FakeRenderer:
         new_messages: Sequence[Mapping[str, Any]],
         tools: Any,
     ) -> Rendered | None:
-        if not previous_completion or previous_completion[-1] != END or self.corrupt:
+        if not previous_completion or previous_completion[-1] != END or self.corrupt or self.no_bridge:
             return None
         if any(m.get("role") == "assistant" for m in new_messages):
             return None
@@ -89,7 +104,9 @@ class FakeRenderer:
         indices = [-1, *tail.tail_indices]
         return Rendered(token_ids=tokens, tail_indices=indices, reused=len(previous_prompt) + len(previous_completion))
 
-    def parse(self, completion_ids: Sequence[int], tools: Any) -> dict[str, Any]:
+    def parse(
+        self, completion_ids: Sequence[int], tools: Any, prompt_ids: Sequence[int] | None = None
+    ) -> dict[str, Any]:
         text = decode([t for t in completion_ids if t != END])
         message: dict[str, Any] = {"role": "assistant", "content": text}
         reasoning_content = None
