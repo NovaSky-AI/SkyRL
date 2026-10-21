@@ -20,7 +20,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 |---|---|
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
 | `patches/megatron/mcore_ext/test_hyper_connection_proj_rms.py` (CPU) | `mcore_ext/hyper_connection.py` projection: bitwise vs plain autograd, no saved FP32 copy |
-| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection |
+| `patches/megatron/mcore_ext/test_mhc_moe_chunking.py` (CPU) | `mcore_ext/mhc_transformer_layer.py` `chunked_mlp`: chunked MLP/MoE matches one call |
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection, query chunking |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
@@ -28,6 +29,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -92,8 +94,15 @@ Two pieces, which may land separately.
 
 **b) MoE sub-layers in the mHC layer**
 - **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
+  - The layer replaces megatron-core's `_forward_mlp`, where `mlp_chunks_for_training` is applied,
+    so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
+    data, routing sends some expert ranks several times their share of tokens; chunking bounds their
+    dispatch/expert/combine buffers.
+  - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
+    `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
+    `TransformerLayer._forward_mlp`.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
-  no `NotImplementedError` for MoE.
+  no `NotImplementedError` for MoE. Check that it honors `mlp_chunks_for_training` before switching.
 - **Remove:**
   - `glm5_next/layer_specs.py`: build the specs on megatron-core's layer.
   - `workers/megatron/megatron_worker.py`: the `enable_mhc_connections` block in `init_configs`
@@ -105,7 +114,8 @@ Two pieces, which may land separately.
     full recompute with mHC. SkyRL's default config is full recompute, and the GLM roundtrip
     tests run on defaults.
   - Delete `mcore_ext/mhc_transformer_layer.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`,
+  `patches/megatron/mcore_ext/test_mhc_moe_chunking.py`; the GLM roundtrip rows.
   These run with the default full recompute, so they exercise the worker block above.
 
 ### NVIDIA/Megatron-LM#7522: k-pool DSA indexer
@@ -114,7 +124,24 @@ This is the riskiest entry. A wrong k-pool selection doesn't raise. It silently 
 different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (2048).
 
 - **Carried as:**
-  - `mcore_ext/dsa_kpool.py`: the six k-pool kernels, copied verbatim from #7522.
+  - `mcore_ext/dsa_kpool.py`: the six k-pool kernels, copied from #7522. One deliberate
+    deviation: `fused_qk_topk_kpool` scores and selects in query chunks. Verbatim, it
+    materializes FP32 `[sq, b, heads, sq / kpool]` per-head scores (32 GiB/GPU at 32k), so
+    GLM-5.3-Flash can't train past ~16k. Top-k is per query row, so chunking is exact
+    (`test_kpool_query_chunking_is_exact`); `SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS` sets the chunk
+    cap (default 2 GiB of FP32 scores). Past one chunk the loop follows #7522 @ `b27efd8`, which
+    now chunks too: no-grad, in-place ReLU and head weighting, one FP32 cast of the pooled keys, a
+    preallocated selection. Upstream's cap is a fixed 256 MiB; at 512k (65,536 query rows per TP8
+    rank x 131,072 pools, one B200) one selection takes 3.31 s there vs 2.64 s at 2 GiB and
+    2.60 s at 8 GiB, with peak extra memory 0.6 / 2.4 / 8.6 GiB. When removing, carry the
+    configurable cap over unless upstream's default has grown.
+    Second deviation, opt-in with `SKYRL_DSA_INDEXER_TP_SHARD=1` (wired in `glm5_next/dsa.py`):
+    `query_shard_group` splits the query rows across the tensor-parallel group, whose ranks all
+    score the same gathered sequence with the same frozen indexer weights, and all-gathers the
+    pool selections. The scoring is O(sq^2) (every query scores every pool) and was redundant on
+    every TP rank: at 512k tokens, TP8, 64 B200 (TCP NCCL) sharding cut warm fwd+bwd 1545 -> 1094 s,
+    i.e. ~1/3 of the step was replicated indexer scoring. Bitwise-identical selections
+    (`test_dsa_kpool_tp_shard.py`).
   - `glm5_next/dsa.py`:
     - `Glm5NextDSAIndexer`: k-pool gate/ape parameters and the gate score, hand-merged onto the
       pinned `DSAIndexer`;

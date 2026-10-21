@@ -73,7 +73,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=self.cfg.policy.inference_only_init or quantization.enabled,
+            # A LoRA base uses bf16 when requested; 4-bit loading always requires bf16.
+            bf16=self.cfg.policy.inference_only_init or quantization.enabled or (self._is_lora and self.cfg.bf16),
             load_in_4bit=quantization.enabled,
             bnb_4bit_quant_type=quantization.quant_type,
             bnb_4bit_use_double_quant=quantization.use_double_quant,
