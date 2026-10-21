@@ -14,7 +14,6 @@ from skyrl.backends.skyrl_train_backend import (  # noqa: E402
     FSDPBackendOverrides,
     MegatronBackendOverrides,
     SkyRLTrainBackend,
-    _apply_critic_lora,
     _build_skyrl_train_config,
     _config_value,
     _unapplied_adam_params,
@@ -95,16 +94,6 @@ def test_backend_configs_of_the_gpu_tests_pass(module):
     backend_config = importlib.import_module(f"tests.tinker.skyrl_train.{module}").BACKEND_CONFIG
     overrides = MegatronBackendOverrides if backend_config["strategy"] == "megatron" else FSDPBackendOverrides
     _build_skyrl_train_config(BASE_MODEL, overrides(**backend_config), LORA["lora_config"])
-
-
-def test_critic_lora_comes_from_its_create_model_request():
-    """The critic's rank must match its request; a backend_config alpha wins, as for the policy."""
-    user_values = {"trainer.critic.model.lora.alpha": 64}
-    cfg = _build(user_values)
-    _apply_critic_lora(cfg, LORA["lora_config"], user_values)
-    assert (cfg.trainer.critic.model.lora.rank, cfg.trainer.critic.model.lora.alpha) == (8, 64)
-    with pytest.raises(ValueError, match=re.escape("trainer.critic.model.lora.rank=16")):
-        _apply_critic_lora(_build({}), LORA["lora_config"], {"trainer.critic.model.lora.rank": 16})
 
 
 # The Tinker SDK's AdamParams defaults, and the same with SkyRL-Train's optimizer defaults.

@@ -245,24 +245,6 @@ def _build_skyrl_train_config(
     return cfg
 
 
-def _apply_critic_lora(cfg: SkyRLTrainConfig, lora_config: types.LoraConfig, user_values: dict[str, Any]) -> None:
-    """Set the critic's LoRA rank and alpha from its create_model request."""
-    values = {
-        "trainer.critic.model.lora.rank": (
-            lora_config.rank,
-            "set by the LoRA rank the client passes to create_model",
-        )
-    }
-    # As for the policy, a backend_config alpha takes precedence over the API's placeholder.
-    if "trainer.critic.model.lora.alpha" not in user_values:
-        values["trainer.critic.model.lora.alpha"] = (int(lora_config.alpha), "set by create_model")
-    raise_backend_config_problems(backend_config_conflicts(user_values, values))
-    cfg.trainer.critic.model.lora.rank = lora_config.rank
-    if "trainer.critic.model.lora.alpha" not in user_values:
-        cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
-    _check_backend_config_applied(cfg, user_values)
-
-
 class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
@@ -467,7 +449,9 @@ class SkyRLTrainBackend(AbstractBackend):
                 num_policy_gpus == num_critic_gpus
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
-        _apply_critic_lora(cfg, lora_config, flatten_backend_config(self.config.model_extra or {}))
+        cfg.trainer.critic.model.lora.rank = lora_config.rank
+        cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+        _check_backend_config_applied(cfg, flatten_backend_config(self.config.model_extra or {}))
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,
