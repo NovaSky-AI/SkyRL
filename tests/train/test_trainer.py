@@ -149,6 +149,89 @@ def test_convert_to_training_input_records_sample_support_metrics(dummy_config, 
     assert trainer.all_metrics["generate/sample_support_full_fraction"] == 0.25
 
 
+def _vlm_trainer(dummy_config, dummy_tokenizer, dummy_generator, batch_size):
+    dummy_config.trainer.policy_mini_batch_size = batch_size
+    dummy_config.trainer.train_batch_size = batch_size
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=dummy_tokenizer,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.get_lcm_dp_size.return_value = 1
+    return trainer
+
+
+def _vlm_generator_output(pixel_values, image_grid_thw):
+    n = len(pixel_values)
+    return {
+        "prompt_token_ids": [[1, 2]] * n,
+        "response_ids": [[4, 5, 6]] * n,
+        "rewards": [[0.0, 0.0, 1.0]] * n,
+        "loss_masks": [[1, 1, 1]] * n,
+        "pixel_values": pixel_values,
+        "image_grid_thw": image_grid_thw,
+    }
+
+
+def test_convert_to_training_input_fills_empty_image_rows_for_mixed_batch(
+    dummy_config, dummy_tokenizer, dummy_generator
+):
+    """A text-only trajectory in a VLM batch gets an empty (0, D) pixel row and a (0, 3) long grid."""
+    dummy_config.trainer.strategy = "megatron"
+    trainer = _vlm_trainer(dummy_config, dummy_tokenizer, dummy_generator, batch_size=3)
+    t0, t2 = torch.randn(4, 6), torch.randn(8, 6)
+    g0, g2 = torch.tensor([[1, 2, 2]]), torch.tensor([[1, 2, 4]])
+
+    batch = trainer.convert_to_training_input(_vlm_generator_output([t0, None, t2], [g0, None, g2]), ["a", "b", "c"])
+
+    pixels, grids = batch["pixel_values"], batch["image_grid_thw"]
+    assert len(pixels) == 3 and len(grids) == 3
+    assert torch.equal(pixels[0], t0) and torch.equal(pixels[2], t2)
+    assert pixels[1].shape == (0, 6) and pixels[1].dtype == t0.dtype
+    assert grids[1].shape == (0, 3) and grids[1].dtype == torch.long
+    assert torch.equal(grids[0], g0) and torch.equal(grids[2], g2)
+
+
+def test_convert_to_training_input_rejects_mixed_batch_on_fsdp(dummy_config, dummy_tokenizer, dummy_generator):
+    """On FSDP a text-only micro-batch skips the sharded vision tower and deadlocks the other ranks."""
+    dummy_config.trainer.strategy = "fsdp"
+    trainer = _vlm_trainer(dummy_config, dummy_tokenizer, dummy_generator, batch_size=3)
+    t0, t2 = torch.randn(4, 6), torch.randn(8, 6)
+    g0, g2 = torch.tensor([[1, 2, 2]]), torch.tensor([[1, 2, 4]])
+
+    with pytest.raises(ValueError, match="1 of 3 trajectories have no images"):
+        trainer.convert_to_training_input(_vlm_generator_output([t0, None, t2], [g0, None, g2]), ["a", "b", "c"])
+
+
+def test_convert_to_training_input_drops_image_fields_when_no_row_has_images(
+    dummy_config, dummy_tokenizer, dummy_generator
+):
+    trainer = _vlm_trainer(dummy_config, dummy_tokenizer, dummy_generator, batch_size=2)
+
+    batch = trainer.convert_to_training_input(_vlm_generator_output([None, None], [None, None]), ["a", "b"])
+
+    assert batch.get("pixel_values") is None
+    assert batch.get("image_grid_thw") is None
+
+
+def test_convert_to_training_input_keeps_all_image_batch_unchanged(dummy_config, dummy_tokenizer, dummy_generator):
+    trainer = _vlm_trainer(dummy_config, dummy_tokenizer, dummy_generator, batch_size=2)
+    pixels_in = [torch.randn(4, 6), torch.randn(8, 6)]
+    grids_in = [torch.tensor([[1, 2, 2]]), torch.tensor([[1, 2, 4]])]
+
+    batch = trainer.convert_to_training_input(_vlm_generator_output(pixels_in, grids_in), ["a", "b"])
+
+    for got, want in zip(batch["pixel_values"].tensors, pixels_in):
+        assert torch.equal(got, want)
+    for got, want in zip(batch["image_grid_thw"].tensors, grids_in):
+        assert torch.equal(got, want)
+
+
 def test_calculate_kl_create_experience_batched(dummy_config):
     trainer = RayPPOTrainer(
         cfg=dummy_config,
