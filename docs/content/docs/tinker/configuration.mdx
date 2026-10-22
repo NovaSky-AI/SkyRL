@@ -67,7 +67,7 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 
 ### Optimizer settings
 
-The SkyRL-Train backends apply only `learning_rate` from each `optim_step`'s `AdamParams`. Betas, weight decay and gradient clipping come from `trainer.policy.optimizer_config` (`adam_betas`, `weight_decay`, `max_grad_norm`), and eps is fixed at `1e-8`. The server logs a warning on a model's first `optim_step` when the request's `beta1`, `beta2`, `eps`, `weight_decay` or `grad_clip_norm` differ from those values. Set the optimizer values in `--backend-config` to match what the client sends.
+The SkyRL-Train backends apply only `learning_rate` from each `optim_step`'s `AdamParams`. Betas, weight decay and gradient clipping come from `trainer.policy.optimizer_config` (`adam_betas`, `weight_decay`, `max_grad_norm`), and eps is `1e-8`. On Megatron, `trainer.policy.megatron_config.optimizer_config_kwargs` takes precedence for the keys it sets (`adam_beta1`, `adam_beta2`, `adam_eps`, `weight_decay`, `clip_grad`), so eps can be changed there; on FSDP it is fixed. The server logs a warning on a model's first `optim_step` when the request's `beta1`, `beta2`, `eps`, `weight_decay` or `grad_clip_norm` differ from the values in use, naming the key that sets each one. Set those keys in `--backend-config` to match what the client sends.
 
 ## LoRA
 
