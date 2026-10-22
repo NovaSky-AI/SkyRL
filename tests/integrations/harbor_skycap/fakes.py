@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_routed_experts,
     pack_sample_support,
 )
+from tests.backends.skyrl_train.sample_support_helpers import csr
 
 START, END, NL = 1, 2, 3
 SETUP, AGENT, VERIFY, START_TIMEOUT = 5.0, 10.0, 2.0, 600.0
@@ -72,7 +73,9 @@ class FakeRenderer:
             reused=len(previous_prompt) + len(previous_completion),
         )
 
-    def parse(self, completion_ids: Sequence[int], tools: Any) -> dict[str, Any]:
+    def parse(
+        self, completion_ids: Sequence[int], tools: Any, prompt_ids: Sequence[int] | None = None
+    ) -> dict[str, Any]:
         return {"role": "assistant", "content": decode([t for t in completion_ids if t != END])}
 
     def stop_token_ids(self) -> list[int]:
@@ -122,7 +125,7 @@ class MockRouter:
             support = np.full((len(completion), TOP_K), -1, dtype=np.int32)
             support[:, 0] = completion
             support[:, 1] = np.asarray(completion) + 1
-            choice["rollout_sample_support"] = pack_sample_support(support)
+            choice["rollout_sample_support"] = pack_sample_support(csr(support))
         return web.Response(body=orjson.dumps({"choices": [choice]}), content_type="application/json")
 
     async def finish_session(self, request: web.Request) -> web.Response:

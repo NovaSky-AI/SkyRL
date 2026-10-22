@@ -12,7 +12,7 @@ This turns ``FusedMoEMethodBase.moe_kernel`` into a property whose setter carrie
 over to the rebuilt monolithic experts (and raises if the new kernel cannot capture). Install
 before any MoE layer is built.
 
-Remove once the pinned vLLM includes #59455 (merged upstream 2026-10-02; not in 0.30.0).
+Remove once the pinned vLLM includes #59455 (merged upstream 2026-10-02; not in 0.31.0).
 """
 
 from loguru import logger
