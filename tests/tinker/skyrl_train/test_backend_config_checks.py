@@ -111,6 +111,7 @@ MATCHING_ADAM = SDK_ADAM.model_copy(update={"beta2": 0.999, "eps": 1e-8, "weight
 def test_unapplied_adam_params():
     """Each field that differs from the optimizer names the value in use and the key that sets it."""
     assert _unapplied_adam_params(MATCHING_ADAM, OptimizerConfig(), "critic") == []
+    assert _unapplied_adam_params(MATCHING_ADAM, OptimizerConfig(adam_betas=[0.9, 0.999, 0.5]), "critic") == []
     assert _unapplied_adam_params(SDK_ADAM, OptimizerConfig(), "critic") == [
         "beta2=0.95 (the optimizer uses 0.999, set by trainer.critic.optimizer_config.adam_betas)",
         "eps=1e-12 (the optimizer uses 1e-08, not configurable)",

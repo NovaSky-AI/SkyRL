@@ -87,7 +87,8 @@ def _unapplied_adam_params(
     ``megatron_config.optimizer_config_kwargs``) overrides them and can also set eps.
     """
     prefix = f"trainer.{role}.optimizer_config"
-    beta1, beta2 = optimizer_config.adam_betas
+    # Read like init_megatron_optim_config does, so extra entries don't fail optim_step here.
+    beta1, beta2 = optimizer_config.adam_betas[0], optimizer_config.adam_betas[1]
     fields = {
         "beta1": (beta1, f"{prefix}.adam_betas"),
         "beta2": (beta2, f"{prefix}.adam_betas"),
