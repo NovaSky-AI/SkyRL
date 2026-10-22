@@ -119,19 +119,34 @@ def test_unapplied_adam_params():
     ]
 
 
-def test_optim_step_warns_once_per_model(monkeypatch):
-    """Only a model's first optim_step with differing AdamParams warns; the learning rate is always applied."""
+def _stub_backend(monkeypatch, strategy: str = "fsdp", optimizer_config_kwargs: dict | None = None):
+    """A backend with two policy models and a stub dispatch; returns it and its mocked logger."""
     logger = Mock()
     monkeypatch.setattr(skyrl_train_backend, "logger", logger)
     backend = object.__new__(SkyRLTrainBackend)
     backend.config = FSDPBackendOverrides()
-    backend._cfg = SimpleNamespace(trainer=SimpleNamespace(policy=SimpleNamespace(optimizer_config=OptimizerConfig())))
+    megatron_config = SimpleNamespace(optimizer_config_kwargs=optimizer_config_kwargs or {})
+    policy = SimpleNamespace(optimizer_config=OptimizerConfig(), megatron_config=megatron_config)
+    backend._cfg = SimpleNamespace(trainer=SimpleNamespace(strategy=strategy, policy=policy))
     backend._model_ids_to_role = {"a": "policy", "b": "policy"}
     backend._adam_params_checked = set()
     backend._dispatch = Mock(**{"optim_step.return_value": 0.5})
+    return backend, logger
 
+
+def test_optim_step_warns_once_per_model(monkeypatch):
+    """Only a model's first optim_step with differing AdamParams warns; the learning rate is always applied."""
+    backend, logger = _stub_backend(monkeypatch)
     for model_id, adam_params in [("a", MATCHING_ADAM), ("b", SDK_ADAM), ("b", SDK_ADAM)]:
         backend.optim_step(model_id, types.OptimStepInput(adam_params=adam_params))
 
     assert logger.warning.call_count == 1 and "b" in logger.warning.call_args.args
     backend._dispatch.set_lr.assert_called_with("policy", 1e-4, model_id="b")
+
+
+def test_megatron_optimizer_kwargs_are_what_the_optimizer_uses(monkeypatch):
+    """On Megatron, optimizer_config_kwargs override optimizer_config, so a request matching them is not warned about."""
+    kwargs = {"adam_beta2": 0.95, "adam_eps": 1e-12, "weight_decay": 0.0, "clip_grad": 0.0}
+    backend, logger = _stub_backend(monkeypatch, strategy="megatron", optimizer_config_kwargs=kwargs)
+    backend.optim_step("a", types.OptimStepInput(adam_params=SDK_ADAM))
+    logger.warning.assert_not_called()

@@ -63,23 +63,45 @@ LOSS_METRICS_PREFIX = "loss_metrics/"
 _OPTIMIZER_EPS = 1e-8
 
 
-def _unapplied_adam_params(adam_params: types.AdamParams, optimizer_config: OptimizerConfig, role: str) -> list[str]:
+# AdamParams fields that Megatron's optimizer_config_kwargs can set, by their Megatron name. They
+# take precedence over optimizer_config (init_megatron_optim_config applies them last).
+_MEGATRON_ADAM_KWARGS = {
+    "beta1": "adam_beta1",
+    "beta2": "adam_beta2",
+    "eps": "adam_eps",
+    "weight_decay": "weight_decay",
+    "grad_clip_norm": "clip_grad",
+}
+
+
+def _unapplied_adam_params(
+    adam_params: types.AdamParams,
+    optimizer_config: OptimizerConfig,
+    role: str,
+    megatron_kwargs: dict[str, Any] | None = None,
+) -> list[str]:
     """Describe each AdamParams field whose value differs from the optimizer the workers built.
 
     Only ``learning_rate`` is applied per step; betas, weight decay and gradient clipping come
-    from ``optimizer_config`` and eps is fixed.
+    from ``optimizer_config`` and eps is fixed. On Megatron, ``megatron_kwargs`` (the role's
+    ``megatron_config.optimizer_config_kwargs``) overrides them and can also set eps.
     """
     prefix = f"trainer.{role}.optimizer_config"
     beta1, beta2 = optimizer_config.adam_betas
-    fields = [
-        ("beta1", adam_params.beta1, beta1, f"{prefix}.adam_betas"),
-        ("beta2", adam_params.beta2, beta2, f"{prefix}.adam_betas"),
-        ("eps", adam_params.eps, _OPTIMIZER_EPS, None),
-        ("weight_decay", adam_params.weight_decay, optimizer_config.weight_decay, f"{prefix}.weight_decay"),
-        ("grad_clip_norm", adam_params.grad_clip_norm, optimizer_config.max_grad_norm, f"{prefix}.max_grad_norm"),
-    ]
+    fields = {
+        "beta1": (beta1, f"{prefix}.adam_betas"),
+        "beta2": (beta2, f"{prefix}.adam_betas"),
+        "eps": (_OPTIMIZER_EPS, None),
+        "weight_decay": (optimizer_config.weight_decay, f"{prefix}.weight_decay"),
+        "grad_clip_norm": (optimizer_config.max_grad_norm, f"{prefix}.max_grad_norm"),
+    }
+    for name, megatron_name in _MEGATRON_ADAM_KWARGS.items():
+        if megatron_name in (megatron_kwargs or {}):
+            key = f"trainer.{role}.megatron_config.optimizer_config_kwargs.{megatron_name}"
+            fields[name] = (megatron_kwargs[megatron_name], key)
     unapplied = []
-    for name, requested, used, key in fields:
+    for name, (used, key) in fields.items():
+        requested = getattr(adam_params, name)
         if math.isclose(requested, used):
             continue
         source = f"set by {key}" if key is not None else "not configurable"
@@ -1322,8 +1344,11 @@ class SkyRLTrainBackend(AbstractBackend):
         adam_params = request_data.adam_params
         if model_id not in self._adam_params_checked:
             self._adam_params_checked.add(model_id)
-            optimizer_config = getattr(self._cfg.trainer, role).optimizer_config
-            unapplied = _unapplied_adam_params(adam_params, optimizer_config, role)
+            role_cfg = getattr(self._cfg.trainer, role)
+            megatron_kwargs = (
+                role_cfg.megatron_config.optimizer_config_kwargs if self._cfg.trainer.strategy == "megatron" else None
+            )
+            unapplied = _unapplied_adam_params(adam_params, role_cfg.optimizer_config, role, megatron_kwargs)
             if unapplied:
                 logger.warning(
                     "optim_step for model %s: SkyRL-Train applies only AdamParams.learning_rate, "
