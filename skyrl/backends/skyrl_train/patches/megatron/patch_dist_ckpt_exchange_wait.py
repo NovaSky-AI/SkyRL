@@ -78,6 +78,9 @@ def apply_dist_ckpt_exchange_wait_patch() -> None:
     from megatron.core.dist_checkpointing import exchange_utils
 
     original = exchange_utils.exchange_loaded_tensors_broadcast
+    if original is _exchange_loaded_tensors_broadcast:  # already installed
+        _APPLIED = True
+        return
     try:
         already_waits = ".wait()" in inspect.getsource(original)
     except (OSError, TypeError):  # source unavailable
