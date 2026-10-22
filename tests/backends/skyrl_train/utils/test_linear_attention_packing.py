@@ -1,5 +1,6 @@
 """Unit tests for packed-sequence boundary kwargs handed to Gated DeltaNet layers."""
 
+import inspect
 import sys
 import types
 
@@ -84,19 +85,19 @@ def test_boundary_dtype_and_device_follow_position_ids(fla_with_varlen):
     assert kwargs["seq_idx"].device == position_ids.device
 
 
-def test_returns_every_boundary_aware_layer(fla_with_varlen):
+def test_finds_layers_without_importing_kernels():
     gdn = [BoundaryAwareGatedDeltaNet(), BoundaryAwareGatedDeltaNet()]
 
     assert gated_delta_net_layers(_model(*gdn)) == gdn
 
 
-def test_returns_nothing_for_models_without_gated_delta_net(fla_with_varlen):
+def test_returns_nothing_for_models_without_gated_delta_net():
     assert gated_delta_net_layers(_model()) == []
 
 
 def test_rejects_forward_that_ignores_boundaries(fla_with_varlen):
     with pytest.raises(RuntimeError, match="does not read cu_seq_lens_q"):
-        gated_delta_net_layers(_model(LeakyGatedDeltaNet()))
+        check_boundaries_consumed(LeakyGatedDeltaNet())
 
 
 @pytest.mark.parametrize("module", ["fla.ops.gated_delta_rule", "causal_conv1d"])
@@ -104,7 +105,7 @@ def test_rejects_missing_kernel_package(monkeypatch, fla_with_varlen, module):
     monkeypatch.setitem(sys.modules, module, None)
 
     with pytest.raises(RuntimeError, match=f"{module}.* is required"):
-        gated_delta_net_layers(_model(BoundaryAwareGatedDeltaNet()))
+        check_boundaries_consumed(BoundaryAwareGatedDeltaNet())
 
 
 def test_rejects_delta_rule_without_varlen_support(monkeypatch, fla_with_varlen):
@@ -114,7 +115,7 @@ def test_rejects_delta_rule_without_varlen_support(monkeypatch, fla_with_varlen)
     monkeypatch.setitem(sys.modules, "fla.ops.gated_delta_rule", _fla(chunk_gated_delta_rule))
 
     with pytest.raises(RuntimeError, match="no cu_seqlens support"):
-        gated_delta_net_layers(_model(BoundaryAwareGatedDeltaNet()))
+        check_boundaries_consumed(BoundaryAwareGatedDeltaNet())
 
 
 def test_rejects_conv_without_sequence_index_support(monkeypatch, fla_with_varlen):
@@ -124,7 +125,7 @@ def test_rejects_conv_without_sequence_index_support(monkeypatch, fla_with_varle
     monkeypatch.setitem(sys.modules, "causal_conv1d", _conv(causal_conv1d_fn))
 
     with pytest.raises(RuntimeError, match="no seq_idx support"):
-        gated_delta_net_layers(_model(BoundaryAwareGatedDeltaNet()))
+        check_boundaries_consumed(BoundaryAwareGatedDeltaNet())
 
 
 def test_accepts_kwarg_read_with_explicit_default(fla_with_varlen):
@@ -133,3 +134,20 @@ def test_accepts_kwarg_read_with_explicit_default(fla_with_varlen):
             return hidden_states, kwargs.pop("cu_seq_lens_q", None)
 
     check_boundaries_consumed(DefaultedGatedDeltaNet())
+
+
+def test_boundary_check_does_not_read_source_files(monkeypatch, fla_with_varlen):
+    def unavailable(*args, **kwargs):
+        raise OSError("source not available")
+
+    monkeypatch.setattr(inspect, "getsource", unavailable)
+
+    # The guard reads the compiled code object, so a stripped-source environment still checks.
+    check_boundaries_consumed(BoundaryAwareGatedDeltaNet())
+
+
+def test_packed_sequence_kwargs_rejects_non_zero_start():
+    # position_ids always restart at 0 on the packed path (derived from the attention mask); a
+    # non-zero start would produce a malformed cu_seqlens, so fail loudly instead of guessing.
+    with pytest.raises(ValueError, match="start at 0"):
+        packed_sequence_kwargs(torch.tensor([[10, 11, 12, 0, 1, 2]]))

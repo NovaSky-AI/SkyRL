@@ -25,6 +25,8 @@ def packed_sequence_kwargs(position_ids: torch.Tensor) -> dict[str, Any]:
     restarts at 0 and the zeros mark the boundaries.
     """
     flat = position_ids.reshape(-1)
+    if flat.numel() == 0 or flat[0] != 0:
+        raise ValueError(f"packed_sequence_kwargs expects position_ids that start at 0; got {flat[:1].tolist()}")
     starts = (flat == 0).nonzero().view(-1).to(torch.int32)
     total = torch.tensor([flat.numel()], dtype=torch.int32, device=flat.device)
     cu_seqlens = torch.cat([starts, total])
@@ -59,8 +61,11 @@ def check_boundaries_consumed(gdn: torch.nn.Module) -> None:
     stops consuming ``cu_seq_lens_q``, or a missing varlen kernel that falls back to the
     boundary-blind torch path, would silently reintroduce the cross-sequence leak.
     """
-    source = inspect.getsource(type(gdn).forward)
-    if f'kwargs.pop("{CU_SEQ_LENS_KWARG}"' not in source:
+    # Read the kwarg from the compiled code object rather than the source file: source may be
+    # unavailable (compiled, frozen, or exec'd classes), and skipping the check there would
+    # silently disable this guard.
+    consts = getattr(getattr(type(gdn).forward, "__code__", None), "co_consts", ())
+    if CU_SEQ_LENS_KWARG not in consts:
         raise RuntimeError(
             f"{type(gdn).__name__}.forward does not read {CU_SEQ_LENS_KWARG}; packed sequences "
             "would leak recurrent state across trajectories"
@@ -78,8 +83,9 @@ def check_boundaries_consumed(gdn: torch.nn.Module) -> None:
 
 
 def gated_delta_net_layers(model: torch.nn.Module) -> list[torch.nn.Module]:
-    """Return the model's Gated DeltaNet modules, verifying they honour packed-sequence boundaries."""
-    layers = [module for module in model.modules() if _is_gated_delta_net(module)]
-    for gdn in layers:
-        check_boundaries_consumed(gdn)
-    return layers
+    """Return the model's Gated DeltaNet modules.
+
+    This only finds the layers; it does not import the kernels. Callers that will pass packed
+    boundaries must additionally call ``check_boundaries_consumed`` on each layer.
+    """
+    return [module for module in model.modules() if _is_gated_delta_net(module)]
