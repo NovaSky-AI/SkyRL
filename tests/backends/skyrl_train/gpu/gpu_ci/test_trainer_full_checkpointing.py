@@ -222,9 +222,14 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         pytest.param("megatron", False, True, GLM5_3_FLASH_MODEL_NAME, marks=pytest.mark.megatron),
         # Qwen3.8-Flash-Next (qwen4_exp) slice, LoRA and full fine-tuning. Checkpoints the
         # hyper-connection and PLE projection params (the frozen PLE n-gram table is a plain
-        # tensor and is not saved) and 512-expert MoE layers sharded over EP=4.
-        pytest.param("megatron", False, True, QWEN3_8_FLASH_NEXT_MODEL_NAME, marks=pytest.mark.megatron),
-        pytest.param("megatron", False, False, QWEN3_8_FLASH_NEXT_MODEL_NAME, marks=pytest.mark.megatron),
+        # tensor and is not saved) and 512-expert MoE layers sharded over EP=4. H100-only: the
+        # full-FT row keeps the optimizer on the GPU (~44 GB/GPU), like the 4-node recipes.
+        pytest.param(
+            "megatron", False, True, QWEN3_8_FLASH_NEXT_MODEL_NAME, marks=[pytest.mark.megatron, pytest.mark.h100]
+        ),
+        pytest.param(
+            "megatron", False, False, QWEN3_8_FLASH_NEXT_MODEL_NAME, marks=[pytest.mark.megatron, pytest.mark.h100]
+        ),
     ],
     ids=[
         "fsdp_no_lora",
