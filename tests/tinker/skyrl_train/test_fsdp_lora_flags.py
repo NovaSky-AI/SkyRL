@@ -1,9 +1,11 @@
 """Tinker's train_attn / train_mlp must change which modules get an adapter.
 
-The assertion is structural, not statistical: with ``train_mlp=False`` the MLP
-LoRA tensors are absent from the exported adapter, so comparing key sets proves
-the flags reached PEFT exactly. Mirrors the acceptance criteria of the
-tinker-cookbook's own ``tests/weights/test_partial_lora_lifecycle.py``.
+The adapter is read back the way a user exports their LoRA: save sampler weights,
+download the checkpoint archive through the REST API, and read its
+``adapter_config.json``. Its ``target_modules`` lists the modules PEFT adapted, so
+comparing them to the expected group proves the flags reached PEFT exactly. Mirrors
+the acceptance criteria of the tinker-cookbook's own
+``tests/weights/test_partial_lora_lifecycle.py``.
 
 The marker sets below are written out rather than imported from
 ``skyrl.backends.skyrl_train.utils.lora_targets`` on purpose: a test that
@@ -12,7 +14,7 @@ if that helper were wrong.
 
 FSDP serves exactly one adapter per server lifetime (multi-tenant LoRA is
 Megatron-only), so each case gets its own server. Needs 2 GPUs: one for the FSDP
-policy worker, one for the vLLM engine that the adapter export syncs into. Run:
+policy worker, one for the vLLM engine the sampler weights sync into. Run:
   uv run --isolated --extra tinker --extra fsdp --with pytest \\
     pytest -s tests/tinker/skyrl_train/test_fsdp_lora_flags.py
 """
@@ -22,9 +24,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
+import tarfile
 import tempfile
-from contextlib import contextmanager
+import urllib.request
+from urllib.parse import urlparse
 
 import pytest
 
@@ -42,10 +45,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 tinker = pytest.importorskip("tinker")
-from safetensors.torch import load_file  # noqa: E402
 from tinker import types as tinker_types  # noqa: E402
 
-from tests.tinker.conftest import wait_for_condition  # noqa: E402
+from tests.tinker.conftest import start_api_server  # noqa: E402
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 TINKER_API_KEY = "tml-dummy"
@@ -56,57 +58,24 @@ LORA_RANK = 8
 ATTN_LEAVES = {"q_proj", "k_proj", "v_proj", "o_proj"}
 MLP_LEAVES = {"gate_proj", "up_proj", "down_proj"}
 
-
-@contextmanager
-def _api_server(port: int, lora_sync_path: str):
-    backend_config = {
-        "strategy": "fsdp",
-        "trainer.placement.policy_num_gpus_per_node": 1,
-        "trainer.placement.policy_num_nodes": 1,
-        "trainer.placement.colocate_all": False,
-        "trainer.policy.model.lora.lora_sync_path": lora_sync_path,
-    }
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        log_path = os.path.join(tmp_dir, "server.log")
-        db_path = os.path.join(tmp_dir, "server.db")
-        cmd = [
-            "uv", "run", "--isolated",
-            "--extra", "tinker",
-            "--extra", "fsdp",
-            "-m", "skyrl.tinker.api",
-            "--host", "0.0.0.0",
-            "--port", str(port),
-            "--base-model", BASE_MODEL,
-            "--backend", "fsdp",
-            "--backend-config", json.dumps(backend_config),
-            "--database-url", f"sqlite:///{db_path}",
-        ]  # fmt: skip
-        with open(log_path, "w") as log_file:
-            proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
-            try:
-                ok = wait_for_condition(lambda: _server_is_up(port), timeout_sec=180, poll_interval_sec=2)
-                if not ok:
-                    with open(log_path) as f:
-                        print(f"=== Server failed to start ===\n{f.read()}")
-                    pytest.fail("Tinker API server did not come up in time")
-                yield
-            finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+BACKEND_CONFIG = {
+    "strategy": "fsdp",
+    "trainer.placement.policy_num_gpus_per_node": 1,
+    "trainer.placement.policy_num_nodes": 1,
+    "trainer.placement.colocate_all": False,
+}
 
 
-def _server_is_up(port: int) -> bool:
-    import urllib.error
-    import urllib.request
-
-    try:
-        urllib.request.urlopen(f"http://0.0.0.0:{port}/api/v1/healthz", timeout=2).read()
-        return True
-    except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError):
-        return False
+def _fsdp_server(port: int):
+    return start_api_server(
+        port=port,
+        backend="fsdp",
+        base_model=BASE_MODEL,
+        backend_config=BACKEND_CONFIG,
+        extras=("tinker", "fsdp"),
+        wait_for_up=True,
+        teardown_timeout=15.0,
+    )
 
 
 def _make_datum(tokenizer, prompt: str, completion: str):
@@ -121,36 +90,6 @@ def _make_datum(tokenizer, prompt: str, completion: str):
     )
 
 
-def _find_export(lora_sync_path: str, filename: str, model_id: str | None = None) -> str:
-    """Locate an exported adapter file under the configured sync path.
-
-    The worker writes to a per-model subdirectory named after the model id
-    (``_resolve_lora_sync_target`` in workers/worker.py), so search rather than
-    assuming the layout, optionally keeping only one model's export.
-    """
-    matches = [
-        os.path.join(root, filename)
-        for root, _dirs, files in os.walk(lora_sync_path)
-        if filename in files and (model_id is None or model_id in root.split(os.sep))
-    ]
-    assert matches, f"no {filename} exported anywhere under {lora_sync_path}"
-    assert len(matches) == 1, f"expected one {filename}, found {matches}"
-    return matches[0]
-
-
-def _adapter_leaf_names(lora_sync_path: str, model_id: str | None = None) -> set[str]:
-    """Leaf module names that received a LoRA adapter, read off the export."""
-    weights_file = _find_export(lora_sync_path, "adapter_model.safetensors", model_id)
-    leaves = set()
-    for key in load_file(weights_file):
-        parts = key.split(".")
-        for i, part in enumerate(parts):
-            if part.startswith("lora_") and i > 0:
-                leaves.add(parts[i - 1])
-                break
-    return leaves
-
-
 def _service_client(port: int):
     return tinker.ServiceClient(base_url=f"http://0.0.0.0:{port}/", api_key=TINKER_API_KEY)
 
@@ -162,22 +101,31 @@ def _train_step(client) -> None:
     client.optim_step(tinker_types.AdamParams(learning_rate=1e-3)).result()
 
 
-def _train_one_step_and_export(port: int, *, train_attn: bool, train_mlp: bool):
-    """Train one step, then sync to vLLM, which writes the PEFT files we inspect."""
-    client = _service_client(port).create_lora_training_client(
-        base_model=BASE_MODEL,
-        rank=LORA_RANK,
-        train_attn=train_attn,
-        train_mlp=train_mlp,
-        train_unembed=False,
-    )
-    _train_step(client)
-    sampler = client.save_weights_and_get_sampling_client(name=f"lora_flags_{train_attn}_{train_mlp}")
-    return client, sampler
+def _save_and_export(service_client, training_client, name: str) -> tuple[str, dict]:
+    """Save sampler weights and download them as a user exports a LoRA.
+
+    Returns:
+        The checkpoint's tinker path and the archive's ``adapter_config.json``.
+    """
+    path = training_client.save_weights_for_sampler(name=name).result().path
+    parsed = urlparse(path)
+    run_id, checkpoint_id = parsed.netloc, parsed.path.lstrip("/")
+    url = service_client.create_rest_client().get_checkpoint_archive_url(run_id, checkpoint_id).result().url
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        archive = os.path.join(tmp_dir, "checkpoint.tar")
+        urllib.request.urlretrieve(url, archive)
+        with tarfile.open(archive) as tar:
+            tar.extractall(tmp_dir, filter="data")
+        with open(os.path.join(tmp_dir, "adapter_config.json")) as f:
+            return path, json.load(f)
 
 
-def _sample_tokens(client, sampler) -> list[int]:
-    prompt_ids = client.get_tokenizer().encode("Question: 1+1?\nAnswer:", add_special_tokens=True)
+def _adapted_leaves(adapter_config: dict) -> set[str]:
+    return {name.split(".")[-1] for name in adapter_config["target_modules"]}
+
+
+def _sample_tokens(training_client, sampler) -> list[int]:
+    prompt_ids = training_client.get_tokenizer().encode("Question: 1+1?\nAnswer:", add_special_tokens=True)
     out = sampler.sample(
         prompt=tinker_types.ModelInput.from_ints(prompt_ids),
         num_samples=1,
@@ -215,56 +163,43 @@ def _unload(port: int, model_id: str) -> None:
     ],
 )
 def test_flags_select_which_modules_are_adapted(train_attn, train_mlp, expected, port):
-    """Each flag combination exports exactly the expected modules, and vLLM can sample from the adapter."""
-    with tempfile.TemporaryDirectory() as sync_dir:
-        with _api_server(port, sync_dir):
-            client, sampler = _train_one_step_and_export(port, train_attn=train_attn, train_mlp=train_mlp)
-            leaves = _adapter_leaf_names(sync_dir)
-            tokens = _sample_tokens(client, sampler)
+    """The exported adapter covers exactly the requested groups, and vLLM can sample from it."""
+    with _fsdp_server(port):
+        service_client = _service_client(port)
+        client = service_client.create_lora_training_client(
+            base_model=BASE_MODEL, rank=LORA_RANK, train_attn=train_attn, train_mlp=train_mlp, train_unembed=False
+        )
+        _train_step(client)
+        path, adapter_config = _save_and_export(service_client, client, name=f"lora_flags_{train_attn}_{train_mlp}")
+        tokens = _sample_tokens(client, client.create_sampling_client(path))
 
     assert tokens, "vLLM returned no tokens from the narrowed adapter"
-    assert leaves == expected, f"adapted {sorted(leaves)}, expected {sorted(expected)}"
-    # PEFT's "all-linear" excludes the output layer, so lm_head is never adapted.
-    assert "lm_head" not in leaves
-
-
-def test_adapter_config_records_the_narrowed_targets():
-    """adapter_config.json is what vLLM reads back, so it must agree too."""
-    with tempfile.TemporaryDirectory() as sync_dir:
-        with _api_server(8034, sync_dir):
-            _train_one_step_and_export(8034, train_attn=True, train_mlp=False)
-            with open(_find_export(sync_dir, "adapter_config.json")) as f:
-                config = json.load(f)
-
-    assert config["r"] == LORA_RANK
-    assert config["peft_type"] == "LORA"
-    assert set(config["target_modules"]) == ATTN_LEAVES
+    assert (adapter_config["peft_type"], adapter_config["r"]) == ("LORA", LORA_RANK)
+    assert _adapted_leaves(adapter_config) == expected
 
 
 def test_resume_from_state_keeps_the_narrowing():
     """create_training_client_from_state rebuilds the adapter from /weights_info."""
-    with tempfile.TemporaryDirectory() as sync_dir:
-        with _api_server(8035, sync_dir):
-            sc = _service_client(8035)
-            client = sc.create_lora_training_client(
-                base_model=BASE_MODEL, rank=LORA_RANK, train_attn=True, train_mlp=False, train_unembed=False
-            )
-            _train_step(client)
-            state_path = client.save_state(name="narrowed").result().path
+    with _fsdp_server(8034):
+        service_client = _service_client(8034)
+        client = service_client.create_lora_training_client(
+            base_model=BASE_MODEL, rank=LORA_RANK, train_attn=True, train_mlp=False, train_unembed=False
+        )
+        _train_step(client)
+        state_path = client.save_state(name="narrowed").result().path
 
-            info = sc.create_rest_client().get_weights_info_by_tinker_path(state_path).result()
-            assert (info.lora_rank, info.train_attn, info.train_mlp, info.train_unembed) == (
-                LORA_RANK,
-                True,
-                False,
-                False,
-            )
+        info = service_client.create_rest_client().get_weights_info_by_tinker_path(state_path).result()
+        assert (info.lora_rank, info.train_attn, info.train_mlp, info.train_unembed) == (
+            LORA_RANK,
+            True,
+            False,
+            False,
+        )
 
-            # FSDP serves one adapter per server, so free it before resuming.
-            _unload(8035, client.model_id)
-            resumed = sc.create_training_client_from_state(state_path)
-            _train_step(resumed)
-            resumed.save_weights_and_get_sampling_client(name="resumed")
-            leaves = _adapter_leaf_names(sync_dir, resumed.model_id)
+        # FSDP serves one adapter per server, so free it before resuming.
+        _unload(8034, client.model_id)
+        resumed = service_client.create_training_client_from_state(state_path)
+        _train_step(resumed)
+        _, adapter_config = _save_and_export(service_client, resumed, name="resumed")
 
-    assert leaves == ATTN_LEAVES, f"resumed adapter covers {sorted(leaves)}"
+    assert _adapted_leaves(adapter_config) == ATTN_LEAVES, f"resumed adapter covers {adapter_config['target_modules']}"
