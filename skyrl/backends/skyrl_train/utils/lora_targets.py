@@ -73,6 +73,7 @@ def check_lora_group_flags(
     target_modules: Union[str, list[str], None],
     train_attn: bool,
     train_mlp: bool,
+    init_adapter_path: Optional[str] = None,
 ) -> None:
     """Reject ``train_attn``/``train_mlp`` combinations that cannot be applied.
 
@@ -82,10 +83,11 @@ def check_lora_group_flags(
         target_modules: The configured ``trainer.policy.model.lora.target_modules``.
         train_attn: Whether to adapt the attention group.
         train_mlp: Whether to adapt the MLP group.
+        init_adapter_path: The configured ``trainer.policy.model.lora.init_adapter_path``, if any.
 
     Raises:
         ValueError: If both flags are ``False``, or if narrowing is requested alongside an explicit
-            module list.
+            module list or an adapter to initialize from.
     """
     if train_attn and train_mlp:
         return
@@ -93,6 +95,12 @@ def check_lora_group_flags(
         raise ValueError(
             "LoRA requires at least one of `train_attn` or `train_mlp` to be True; with both False "
             "no module would be adapted and there would be nothing to train."
+        )
+    if init_adapter_path:
+        raise ValueError(
+            "`train_attn`/`train_mlp` narrowing cannot be combined with "
+            "`trainer.policy.model.lora.init_adapter_path`: the adapter decides which modules are adapted. "
+            "Set both to True."
         )
     if not (isinstance(target_modules, str) and target_modules.lower() == "all-linear"):
         raise ValueError(

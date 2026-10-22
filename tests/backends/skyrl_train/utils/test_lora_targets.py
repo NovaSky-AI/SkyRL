@@ -11,6 +11,7 @@ import pytest
 import torch.nn as nn
 
 from skyrl.backends.skyrl_train.utils.lora_targets import (
+    check_lora_group_flags,
     check_megatron_lora_group_support,
     lora_module_group,
     megatron_all_linear_target_modules,
@@ -172,6 +173,13 @@ def test_narrowing_an_explicit_module_list_is_rejected() -> None:
     """Narrowing applies only to the all-linear default, not to an explicit module list."""
     with pytest.raises(ValueError, match='narrow `trainer.policy.model.lora.target_modules="all-linear"`'):
         resolve_lora_target_modules(_CausalLM(), ["q_proj"], train_attn=True, train_mlp=False)
+
+
+def test_narrowing_an_adapter_to_initialize_from_is_rejected() -> None:
+    """The adapter at init_adapter_path decides which modules are adapted, so it cannot be narrowed."""
+    check_lora_group_flags("all-linear", True, True, init_adapter_path="/tmp/adapter")
+    with pytest.raises(ValueError, match="init_adapter_path"):
+        check_lora_group_flags("all-linear", True, False, init_adapter_path="/tmp/adapter")
 
 
 def test_model_without_the_requested_group_is_rejected() -> None:

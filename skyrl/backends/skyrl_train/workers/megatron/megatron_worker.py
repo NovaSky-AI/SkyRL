@@ -452,7 +452,12 @@ class MegatronWorker:
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
-        check_lora_group_flags(lora_config.target_modules, lora_config.train_attn, lora_config.train_mlp)
+        check_lora_group_flags(
+            lora_config.target_modules,
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            init_adapter_path=lora_config.init_adapter_path,
+        )
         # `language_model_only` swaps in a text-only bridge only for some architectures
         # (Qwen3.5, Kimi K2.5), so also ask the provider whether it builds a vision tower.
         check_megatron_lora_group_support(

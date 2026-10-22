@@ -18,7 +18,7 @@ All adapters registered against one server must share the same `(rank, alpha, tr
 
 - **LoRA is not applied to the unembedding layer, so `train_unembed` is ignored.** This follows common LoRA practice: PEFT's `"all-linear"` leaves the output layer out too. Adapting `lm_head` would need separate handling that depends on the architecture, since many models tie it to the input embeddings. The Tinker SDK **defaults `train_unembed` to `True`**, so the server accepts the flag rather than rejecting every client: it logs a warning and reports the model's config back with `train_unembed=False`.
 
-At least one of `train_attn` / `train_mlp` must be `True`: an adapter covering no modules would have nothing to train. Narrowing an explicit `target_modules` list is rejected; select the modules in the list instead.
+At least one of `train_attn` / `train_mlp` must be `True`: an adapter covering no modules would have nothing to train. Narrowing an explicit `target_modules` list is rejected; select the modules in the list instead. Narrowing is also rejected with `trainer.policy.model.lora.init_adapter_path`, since the adapter it loads decides which modules are adapted.
 
 #### Megatron
 
