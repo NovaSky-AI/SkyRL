@@ -171,7 +171,7 @@ def test_both_flags_false_is_rejected() -> None:
 
 def test_narrowing_an_explicit_module_list_is_rejected() -> None:
     """Narrowing applies only to the all-linear default, not to an explicit module list."""
-    with pytest.raises(ValueError, match="narrow `target_modules='all-linear'`"):
+    with pytest.raises(ValueError, match='narrow `trainer.policy.model.lora.target_modules="all-linear"`'):
         resolve_lora_target_modules(_CausalLM(), ["q_proj"], train_attn=True, train_mlp=False)
 
 

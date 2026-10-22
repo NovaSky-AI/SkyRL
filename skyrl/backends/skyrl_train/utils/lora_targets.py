@@ -78,6 +78,11 @@ def check_lora_group_flags(
 
     Needs no model, so callers can run it before reserving GPUs.
 
+    Args:
+        target_modules: The configured ``trainer.policy.model.lora.target_modules``.
+        train_attn: Whether to adapt the attention group.
+        train_mlp: Whether to adapt the MLP group.
+
     Raises:
         ValueError: If both flags are ``False``, or if narrowing is requested alongside an explicit
             module list.
@@ -91,9 +96,10 @@ def check_lora_group_flags(
         )
     if not (isinstance(target_modules, str) and target_modules.lower() == "all-linear"):
         raise ValueError(
-            f"`train_attn`/`train_mlp` narrow `target_modules='all-linear'`, but it is set to "
-            f"{target_modules!r}. Name the modules in `target_modules` directly, or leave it at "
-            f'"all-linear" and use the flags.'
+            '`train_attn`/`train_mlp` narrow `trainer.policy.model.lora.target_modules="all-linear"`, but '
+            f"it is set to {target_modules!r}. Name the modules in "
+            '`trainer.policy.model.lora.target_modules` directly, or leave it at "all-linear" and use the '
+            "flags."
         )
 
 
@@ -129,8 +135,8 @@ def check_megatron_lora_group_support(
     if multi_latent_attention and not train_mlp:
         raise ValueError(
             "Attention-only LoRA (`train_mlp=False`) is not supported for multi-latent attention models "
-            'on the Megatron backend: `target_modules="all-linear"` adapts only `linear_proj` of their '
-            "attention. Set both flags to True and name the modules to adapt in "
+            'on the Megatron backend: `trainer.policy.model.lora.target_modules="all-linear"` adapts only '
+            "`linear_proj` of their attention. Set both to True and name the modules to adapt in "
             "`trainer.policy.model.lora.target_modules` instead, e.g. `linear_q_down_proj`, "
             "`linear_q_up_proj`, `linear_kv_down_proj`, `linear_kv_up_proj`, `linear_proj`."
         )
