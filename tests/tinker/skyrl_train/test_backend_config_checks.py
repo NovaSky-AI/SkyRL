@@ -15,6 +15,8 @@ from skyrl.backends.skyrl_train_backend import (  # noqa: E402
     MegatronBackendOverrides,
     SkyRLTrainBackend,
     _build_skyrl_train_config,
+    _built_values,
+    _check_backend_config_applied,
     _config_value,
     _unapplied_adam_params,
 )
@@ -45,8 +47,6 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, {}, "--torch-profiler"),
         ({"trainer.algorithm.policy_loss_type": "gspo"}, {}, "must be 'regular' or 'dual_clip'"),
         ({"use_ray": False}, {}, "use_ray"),
-        # Not in _server_values: __post_init__ copies the deprecated log_example_interval over it.
-        ({"trainer.print_example_interval": 2, "trainer.log_example_interval": 5}, {}, "=2: the server uses 5"),
     ],
 )
 def test_rejected(backend_config, kwargs, expected):
@@ -72,11 +72,29 @@ def test_rejected(backend_config, kwargs, expected):
         ({"trainer.policy.model.lora": {"alpha": 128}}, LORA, "trainer.policy.model.lora.alpha", 128),
         ({"trainer.placement": {"policy_num_gpus_per_node": 2}}, {}, "trainer.placement.policy_num_gpus_per_node", 2),
         ({"trainer.micro_train_batch_size_per_gpu": "4"}, {}, "trainer.micro_train_batch_size_per_gpu", "4"),
+        # __post_init__ normalizes these itself, with a warning; that is not the server overriding them.
+        ({"generator.inference_engine.enforce_eager": True}, LORA, "generator.inference_engine.enforce_eager", False),
+        (
+            {"trainer.print_example_interval": 2, "trainer.log_example_interval": 5},
+            {},
+            "trainer.print_example_interval",
+            5,
+        ),
     ],
 )
 def test_accepted(backend_config, kwargs, key, value):
-    """Values equal to the server's, nested spellings and values in another JSON type are applied."""
+    """Values equal to the server's, nested spellings, values in another JSON type and SkyRL-Train's own
+    normalization build without an error."""
     assert same_config_value(value, _config_value(_build(backend_config, **kwargs), key))
+
+
+def test_write_after_the_build_is_rejected():
+    """A value changed after the build, as _build_critic does for the critic's LoRA, is an error."""
+    cfg = _build({"trainer.critic.model.lora.rank": 16})
+    built = _built_values(cfg, {"trainer.critic.model.lora.rank": 16})
+    cfg.trainer.critic.model.lora.rank = 8
+    with pytest.raises(ValueError, match=re.escape("trainer.critic.model.lora.rank=16: the server uses 8")):
+        _check_backend_config_applied(cfg, built)
 
 
 @pytest.mark.parametrize(

@@ -42,7 +42,6 @@ from skyrl.tinker.config import (
     backend_config_conflicts,
     flatten_backend_config,
     raise_backend_config_problems,
-    same_config_value,
 )
 from skyrl.train.config import (
     OptimizerConfig,
@@ -137,20 +136,28 @@ def _config_value(cfg: Any, key: str) -> Any:
     return node
 
 
-def _check_backend_config_applied(cfg: SkyRLTrainConfig, user_values: dict[str, Any]) -> None:
-    """Raise if a ``backend_config`` value does not hold in the built config.
+def _built_values(cfg: SkyRLTrainConfig, user_values: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
+    """Map each ``backend_config`` key to (the value the user set, the value in ``cfg``).
 
-    ``_server_values`` lists the values the server sets on purpose; this catches any other change,
-    such as a later write to ``cfg`` that ``_server_values`` does not know about. Keys set to null
-    are skipped, since ``__post_init__`` fills unset fields with derived defaults, and so are keys
-    the built config does not hold (deprecated keys ``from_cli_overrides`` drops).
+    Taken right after ``from_cli_overrides``, the second value includes what ``__post_init__``
+    normalizes (it warns when it changes a set value, e.g. ``enforce_eager`` with LoRA). Keys the
+    config does not hold (deprecated keys ``from_cli_overrides`` drops) are left out.
+    """
+    built = {key: (value, _config_value(cfg, key)) for key, value in user_values.items()}
+    return {key: values for key, values in built.items() if values[1] is not _MISSING}
+
+
+def _check_backend_config_applied(cfg: SkyRLTrainConfig, built: dict[str, tuple[Any, Any]]) -> None:
+    """Raise if a ``backend_config`` value changed after the config was built.
+
+    ``_server_values`` covers the values the server sets on purpose before the build; this catches
+    any later write to ``cfg``, such as the critic's LoRA config or one ``_server_values`` does not
+    know about.
     """
     replaced = []
-    for key, value in sorted(user_values.items()):
-        if value is None or (isinstance(value, dict) and not value):
-            continue
+    for key, (value, built_value) in sorted(built.items()):
         actual = _config_value(cfg, key)
-        if actual is not _MISSING and not same_config_value(value, actual):
+        if actual != built_value:
             replaced.append(f"{key}={value!r}: the server uses {actual!r}")
     if replaced:
         raise ValueError(
@@ -239,9 +246,10 @@ def _build_skyrl_train_config(
     cfg = SkyRLTrainConfig.from_cli_overrides(
         {**user_overrides, **{key: value for key, (value, _) in server_values.items()}}
     )
-    _check_backend_config_applied(cfg, user_values)
+    built = _built_values(cfg, user_values)
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
+    _check_backend_config_applied(cfg, built)
     return cfg
 
 
@@ -449,9 +457,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 num_policy_gpus == num_critic_gpus
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
+        built = _built_values(cfg, flatten_backend_config(self.config.model_extra or {}))
         cfg.trainer.critic.model.lora.rank = lora_config.rank
         cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
-        _check_backend_config_applied(cfg, flatten_backend_config(self.config.model_extra or {}))
+        _check_backend_config_applied(cfg, built)
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,

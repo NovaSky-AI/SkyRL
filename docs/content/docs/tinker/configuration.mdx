@@ -46,7 +46,7 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 
 - `strategy`, `runtime_role` and `served_model_name` stop the server at startup.
 - The other keys are checked when the first `create_model` request sets up training (on an inference-only runtime, at the first sample request). That request fails with the error, which also appears in the server log.
-- Any other `--backend-config` value that the server ends up not using as given is rejected at the same point, with the value the server uses instead.
+- A value the server changes after the config is built, such as a critic LoRA rank that differs from the critic's `create_model` request, is rejected the same way. Values that SkyRL-Train itself adjusts while building the config are kept, and SkyRL-Train logs a warning for each (for example `enforce_eager: true` with LoRA on vLLM).
 
 | Key | Set by | Rejected when |
 |-----|--------|---------------|
