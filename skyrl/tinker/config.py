@@ -63,20 +63,20 @@ def same_config_value(requested: Any, actual: Any) -> bool:
     return text == str(other)
 
 
-def backend_config_conflicts(
+def check_backend_config(
     user_values: dict[str, Any],
     server_values: dict[str, tuple[Any, str]],
     unused_keys: dict[str, str] | None = None,
-) -> list[str]:
-    """Describe each ``backend_config`` key the server sets itself to another value, or never uses.
+) -> None:
+    """Reject ``backend_config`` keys the server sets itself to another value, or never uses.
 
     Args:
         user_values: The flattened ``backend_config`` (see ``flatten_backend_config``).
         server_values: Key to (the value the server sets, what sets it).
         unused_keys: Key or key prefix to why no ``backend_config`` value for it is used.
 
-    Returns:
-        One line per offending key, sorted by key.
+    Raises:
+        ValueError: Listing every offending key, so they can be fixed in one restart.
     """
     problems = []
     for key, value in sorted(user_values.items()):
@@ -89,11 +89,6 @@ def backend_config_conflicts(
         elif key in server_values and not same_config_value(value, server_values[key][0]):
             server_value, reason = server_values[key]
             problems.append(f"{key}={value!r}: {reason} ({server_value!r})")
-    return problems
-
-
-def raise_backend_config_problems(problems: list[str]) -> None:
-    """Raise one error that lists every offending ``backend_config`` key."""
     if problems:
         raise ValueError(
             "--backend-config sets keys the Tinker server sets itself or does not use:\n"

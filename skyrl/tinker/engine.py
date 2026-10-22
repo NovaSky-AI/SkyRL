@@ -23,9 +23,8 @@ from skyrl.tinker.config import (
     EngineConfig,
     TinkerTorchProfilerConfig,
     add_model,
-    backend_config_conflicts,
+    check_backend_config,
     flatten_backend_config,
-    raise_backend_config_problems,
 )
 from skyrl.tinker.db_models import (
     CheckpointDB,
@@ -386,9 +385,7 @@ class TinkerEngine:
                     config.base_model,
                     "set to --base-model when --base-model-checkpoint-path is given",
                 )
-            raise_backend_config_problems(
-                backend_config_conflicts(flatten_backend_config(backend_overrides), engine_values)
-            )
+            check_backend_config(flatten_backend_config(backend_overrides), engine_values)
             backend_overrides["runtime_role"] = config.runtime_role
             if config.base_model_checkpoint_path is not None:
                 backend_overrides["generator.inference_engine.served_model_name"] = config.base_model

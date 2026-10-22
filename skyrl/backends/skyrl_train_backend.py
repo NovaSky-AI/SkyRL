@@ -36,11 +36,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
-from skyrl.tinker.config import (
-    backend_config_conflicts,
-    flatten_backend_config,
-    raise_backend_config_problems,
-)
+from skyrl.tinker.config import check_backend_config, flatten_backend_config
 from skyrl.train.config import (
     OptimizerConfig,
     SkyRLTrainConfig,
@@ -205,14 +201,13 @@ def _build_skyrl_train_config(
     unused_keys[SkyRLTrainBackend.PROFILER_CONFIG_KEY] = (
         "start the server with --torch-profiler and call /start_profiling and /stop_profiling"
     )
-    problems = backend_config_conflicts(user_values, server_values, unused_keys)
+    check_backend_config(user_values, server_values, unused_keys)
     loss_type = user_values.get("trainer.algorithm.policy_loss_type")
     if loss_type is not None and loss_type not in SkyRLTrainBackend.TINKER_POLICY_LOSS_TYPES:
-        problems.append(
-            f"trainer.algorithm.policy_loss_type={loss_type!r}: must be 'regular' or 'dual_clip'; "
-            "the request's loss_fn picks the loss function"
+        raise ValueError(
+            f"--backend-config sets trainer.algorithm.policy_loss_type={loss_type!r}: it must be 'regular' "
+            "or 'dual_clip', since the request's loss_fn picks the loss function"
         )
-    raise_backend_config_problems(problems)
 
     cfg = SkyRLTrainConfig.from_cli_overrides(
         {**user_overrides, **{key: value for key, (value, _) in server_values.items()}}
@@ -432,7 +427,7 @@ class SkyRLTrainBackend(AbstractBackend):
             "trainer.critic.model.lora.alpha": (int(lora_config.alpha), "set by the critic's create_model"),
         }
         user_values = flatten_backend_config(self.config.model_extra or {})
-        raise_backend_config_problems(backend_config_conflicts(user_values, critic_lora))
+        check_backend_config(user_values, critic_lora)
         cfg.trainer.critic.model.lora.rank = lora_config.rank
         cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
         critic_model = PPORayActorGroup(
