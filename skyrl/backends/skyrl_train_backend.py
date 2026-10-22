@@ -139,7 +139,7 @@ def _server_values(
     base_model: str,
     overrides: SkyRLTrainBackendOverrides,
     lora_config: types.LoraConfig | None,
-    user_values: dict[str, Any],
+    backend_config_values: dict[str, Any],
 ) -> dict[str, tuple[Any, str]]:
     """Config values the Tinker server sets itself, each with what sets it.
 
@@ -170,8 +170,8 @@ def _server_values(
         )
         # The Tinker SDK cannot express alpha (the API server fills in 32), so a backend_config
         # alpha takes precedence over that placeholder.
-        if lora_config.rank > 0 and "trainer.policy.model.lora.alpha" not in user_values:
-            values["trainer.policy.model.lora.alpha"] = (int(lora_config.alpha), "set by create_model")
+        if lora_config.rank > 0 and "trainer.policy.model.lora.alpha" not in backend_config_values:
+            values["trainer.policy.model.lora.alpha"] = (int(lora_config.alpha), "filled in by the API server")
     return values
 
 
@@ -194,15 +194,15 @@ def _build_skyrl_train_config(
         "fsdp",
         "megatron",
     ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
-    user_overrides = dict(overrides.model_extra or {})
-    user_values = flatten_backend_config(user_overrides)
-    server_values = _server_values(base_model, overrides, lora_config, user_values)
+    backend_config = dict(overrides.model_extra or {})
+    backend_config_values = flatten_backend_config(backend_config)
+    server_values = _server_values(base_model, overrides, lora_config, backend_config_values)
     unused_keys = dict(SkyRLTrainBackend.REPLACED_PER_REQUEST)
     unused_keys[SkyRLTrainBackend.PROFILER_CONFIG_KEY] = (
         "start the server with --torch-profiler and call /start_profiling and /stop_profiling"
     )
-    check_backend_config(user_values, server_values, unused_keys)
-    loss_type = user_values.get("trainer.algorithm.policy_loss_type")
+    check_backend_config(backend_config_values, server_values, unused_keys)
+    loss_type = backend_config_values.get("trainer.algorithm.policy_loss_type")
     if loss_type is not None and loss_type not in SkyRLTrainBackend.TINKER_POLICY_LOSS_TYPES:
         raise ValueError(
             f"--backend-config sets trainer.algorithm.policy_loss_type={loss_type!r}: it must be 'regular' "
@@ -210,7 +210,7 @@ def _build_skyrl_train_config(
         )
 
     cfg = SkyRLTrainConfig.from_cli_overrides(
-        {**user_overrides, **{key: value for key, (value, _) in server_values.items()}}
+        {**backend_config, **{key: value for key, (value, _) in server_values.items()}}
     )
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
@@ -422,14 +422,13 @@ class SkyRLTrainBackend(AbstractBackend):
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
         # Checked before writing, so a rejected request leaves the config unchanged.
-        critic_lora = {
-            "trainer.critic.model.lora.rank": (lora_config.rank, "set by the critic's create_model"),
-            "trainer.critic.model.lora.alpha": (int(lora_config.alpha), "set by the critic's create_model"),
-        }
-        user_values = flatten_backend_config(self.config.model_extra or {})
-        check_backend_config(user_values, critic_lora)
+        critic_lora = {"trainer.critic.model.lora.rank": (lora_config.rank, "set by the critic's create_model")}
+        backend_config_values = flatten_backend_config(self.config.model_extra or {})
+        check_backend_config(backend_config_values, critic_lora)
         cfg.trainer.critic.model.lora.rank = lora_config.rank
-        cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+        # The Tinker SDK cannot send alpha (the API fills in 32), so a backend_config alpha wins, as for the policy.
+        if "trainer.critic.model.lora.alpha" not in backend_config_values:
+            cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,

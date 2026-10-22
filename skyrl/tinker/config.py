@@ -28,14 +28,14 @@ def flatten_backend_config(backend_config: dict) -> dict[str, Any]:
 
 
 def check_backend_config(
-    user_values: dict[str, Any],
+    backend_config_values: dict[str, Any],
     server_values: dict[str, tuple[Any, str]],
     unused_keys: dict[str, str] | None = None,
 ) -> None:
     """Reject ``backend_config`` keys the server sets itself to another value, or never uses.
 
     Args:
-        user_values: The flattened ``backend_config`` (see ``flatten_backend_config``).
+        backend_config_values: The flattened ``backend_config`` (see ``flatten_backend_config``).
         server_values: Key to (the value the server sets, what sets it).
         unused_keys: Key or key prefix to why no ``backend_config`` value for it is used.
 
@@ -43,7 +43,7 @@ def check_backend_config(
         ValueError: Listing every offending key, so they can be fixed in one restart.
     """
     problems = []
-    for key, value in sorted(user_values.items()):
+    for key, value in sorted(backend_config_values.items()):
         unused = next(
             (reason for prefix, reason in (unused_keys or {}).items() if key == prefix or key.startswith(prefix + ".")),
             None,
