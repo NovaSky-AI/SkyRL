@@ -1,0 +1,35 @@
+# Service: this job's Harbor trials use a Ray Sandbox service (service.yaml)
+# over https. See README.md. Submit from the SkyRL checkout root:
+#
+#   anyscale job submit -f examples/train_integrations/harbor/ray_sandbox/job-service.yaml \
+#     --env MODAL_SERVER_URL=https://<service URL> --env MODAL_TOKEN_SECRET="$RAY_SANDBOX_API_TOKEN"
+name: skyrl-harbor-ray-sandbox-service
+image_uri: anyscale/image/skyrl-harbor-ray-sandbox:4
+ray_version: "2.57.0"
+compute_config:
+  # Your Anyscale cloud and, for a multi-resource cloud, its Kubernetes resource.
+  # The tested runs used a CoreWeave resource; the instance types are its names.
+  cloud: <your-cloud>
+  cloud_resource: <your-cloud-resource>
+  # Same GPU shape as job-colocated.yaml. No sandboxes run here,
+  # so the pods need no gVisor permissions.
+  head_node:
+    instance_type: 60CPU-480GB-4xRTX-PRO-6000
+  worker_nodes: []
+  auto_select_worker_config: false
+working_dir: .
+excludes:
+  - .git
+  - .venv
+  - docs
+  - "*.pdf"
+entrypoint: bash examples/train_integrations/harbor/ray_sandbox/run_harbor_gen_ray_sandbox.sh
+max_retries: 0
+env_vars:
+  MODE: service
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+  SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S: "3600"
+  # Let SkyRL's ray.init(runtime_env=...) merge with the job's runtime env.
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+  # Workers `uv run` the full SkyRL env (vLLM, torch) on first start.
+  RAY_worker_register_timeout_seconds: "1800"

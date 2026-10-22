@@ -1,0 +1,77 @@
+# SkyRL (Ray 2.57 / CUDA 13) + Ray Sandbox's Modal-compatible gRPC facade, for
+# SkyRL's Harbor example with environment.type=modal served by Ray instead of
+# Modal (see README.md). The sandbox package is Ray master with the gRPC facade
+# (ray-project/ray#66820), which isn't in a Ray release yet.
+#
+#   anyscale image build -f examples/train_integrations/harbor/ray_sandbox/Containerfile -n skyrl-harbor-ray-sandbox
+FROM novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0
+
+# gVisor (runsc release-20260817 + hostinet MSG_CMSG_CLOEXEC patch) and the
+# user-mode network bridge for network="public" sandboxes.
+RUN ARCH=$(uname -m) && test "$ARCH" = x86_64 \
+ && curl -fsSLo /tmp/runsc https://github.com/xyuzh/gvisor-runsc-patched/releases/download/runsc-cmsg-cloexec-v1/runsc \
+ && echo "f2677cf7706ef5b5db507b71a6af7f4932628c9353b095e3909276fee1ee0782  /tmp/runsc" | sha256sum -c - \
+ && sudo install -m 755 /tmp/runsc /usr/local/bin/runsc && rm /tmp/runsc \
+ && curl -fsSLo /tmp/slirp4netns https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.5/slirp4netns-$ARCH \
+ && sudo install -m 755 /tmp/slirp4netns /usr/local/bin/slirp4netns && rm /tmp/slirp4netns \
+ && runsc --version | head -1 && slirp4netns --version | head -1
+
+# erofs-utils 1.9.4 (mkfs.erofs --tar), required by the sandbox image cache.
+RUN sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends \
+      build-essential autoconf automake libtool pkg-config liblz4-dev libzstd-dev uuid-dev git \
+ && git clone -q --depth 1 --branch v1.9.4 https://github.com/erofs/erofs-utils.git /tmp/erofs-utils \
+ && cd /tmp/erofs-utils && ./autogen.sh >/dev/null && ./configure --disable-fuse >/dev/null && make -j8 >/dev/null \
+ && sudo make install >/dev/null && cd / && rm -rf /tmp/erofs-utils \
+ && mkfs.erofs --version 2>&1 | head -1 && mkfs.erofs --help 2>&1 | grep -q -- '--tar'
+
+# ray.experimental.sandbox at Ray master (#66820's merge commit), sparse-fetched by SHA.
+RUN git init -q /tmp/rayclone && cd /tmp/rayclone \
+ && git remote add origin https://github.com/ray-project/ray.git \
+ && git sparse-checkout init --cone && git sparse-checkout set python/ray/experimental/sandbox \
+ && git fetch -q --depth 1 --filter=blob:none origin 68174559b27a4eba8db6b3c7ef7aaa2678ec20c8 && git checkout -q FETCH_HEAD \
+ && sudo mkdir -p /opt/ray-sandbox-overlay/pkg /opt/ray-sandbox-overlay/pylib \
+ && sudo cp -r python/ray/experimental/sandbox /opt/ray-sandbox-overlay/pkg/sandbox \
+ && sudo find /opt/ray-sandbox-overlay/pkg/sandbox -type d -name tests -prune -exec rm -rf {} + \
+ && sudo chown -R ray /opt/ray-sandbox-overlay && cd / && rm -rf /tmp/rayclone
+
+# Route ray.experimental.sandbox to the overlay ahead of the platform-synced ray
+# copy (Anyscale re-syncs site-packages/ray at cluster start), in every process
+# that uses the image's system Python. SkyRL's own uv env never imports it.
+RUN cat > /opt/ray-sandbox-overlay/pylib/ray_sandbox_overlay_graft.py <<'EOF'
+"""Route ``ray.experimental.sandbox`` to the overlay copy under /opt."""
+
+import importlib.abc
+import importlib.util
+import os
+import sys
+
+_ROOT = "/opt/ray-sandbox-overlay/pkg/sandbox"
+_PREFIX = "ray.experimental.sandbox"
+
+
+class _OverlayFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != _PREFIX and not fullname.startswith(_PREFIX + "."):
+            return None
+        rel = fullname[len(_PREFIX):].lstrip(".").replace(".", os.sep)
+        base = os.path.join(_ROOT, rel) if rel else _ROOT
+        if os.path.isdir(base):
+            init = os.path.join(base, "__init__.py")
+            if not os.path.exists(init):
+                return None
+            return importlib.util.spec_from_file_location(
+                fullname, init, submodule_search_locations=[base]
+            )
+        module = base + ".py"
+        if os.path.exists(module):
+            return importlib.util.spec_from_file_location(fullname, module)
+        return None
+
+
+if not any(isinstance(f, _OverlayFinder) for f in sys.meta_path):
+    sys.meta_path.insert(0, _OverlayFinder())
+EOF
+RUN SITE=$(python -c "import site; print(site.getsitepackages()[0])") \
+ && printf '/opt/ray-sandbox-overlay/pylib\nimport ray_sandbox_overlay_graft\n' > "$SITE/zz_ray_sandbox_overlay.pth" \
+ && pip install -q fastapi pydantic msgpack \
+ && python -c "import ray, ray.experimental.sandbox as s; assert '/opt/ray-sandbox-overlay' in s.__file__; import ray.experimental.sandbox.http.grpc_facade; print('ray', ray.__version__, 'facade ok', s.__file__)"
