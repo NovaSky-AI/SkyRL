@@ -31,6 +31,11 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.linear_attention_packing import (
+    check_boundaries_consumed,
+    gated_delta_net_layers,
+    packed_sequence_kwargs,
+)
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
@@ -291,6 +296,20 @@ class HFModelWrapper(nn.Module):
         else:
             self.model = pretrain_or_model
 
+        self._gdn_layers = gated_delta_net_layers(self.model)
+        # Ulysses shards the sequence dimension; a Gated DeltaNet layer runs its conv and
+        # recurrence left to right, so it cannot be split across ranks even without packing.
+        if self._gdn_layers and self.sequence_parallel_size > 1:
+            raise ValueError(
+                f"{len(self._gdn_layers)} Gated DeltaNet layers cannot be split across "
+                f"sequence_parallel_size={self.sequence_parallel_size} ranks"
+            )
+        self._packed_gdn_layers = self._gdn_layers if remove_microbatch_padding else []
+        if self._packed_gdn_layers:
+            for gdn in self._packed_gdn_layers:
+                check_boundaries_consumed(gdn)
+            logger.info(f"Packed-sequence boundaries passed to {len(self._packed_gdn_layers)} Gated DeltaNet layers")
+
         self.logprobs_chunk_size = logprobs_chunk_size
 
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
@@ -405,7 +424,10 @@ class HFModelWrapper(nn.Module):
         elif self.remove_microbatch_padding and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
-            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+            # Gated DeltaNet layers do not read position_ids themselves, so hand them the same
+            # boundaries flash attention derives from it.
+            packed_kwargs = packed_sequence_kwargs(position_ids_fwd) if self._packed_gdn_layers else {}
+            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd, **packed_kwargs)
         else:
             output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
@@ -512,6 +534,20 @@ def _get_critic_model(
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
 
+            self._gdn_layers = gated_delta_net_layers(self)
+            if self._gdn_layers and self.sequence_parallel_size > 1:
+                raise ValueError(
+                    f"{len(self._gdn_layers)} Gated DeltaNet layers cannot be split across "
+                    f"sequence_parallel_size={self.sequence_parallel_size} ranks"
+                )
+            self._packed_gdn_layers = self._gdn_layers if remove_microbatch_padding else []
+            if self._packed_gdn_layers:
+                for gdn in self._packed_gdn_layers:
+                    check_boundaries_consumed(gdn)
+                logger.info(
+                    f"Packed-sequence boundaries passed to {len(self._packed_gdn_layers)} Gated DeltaNet layers"
+                )
+
             self.post_init()
 
         def forward(
@@ -553,11 +589,18 @@ def _get_critic_model(
                     input_ids_fwd, position_ids_fwd, attention_mask_fwd, self.sequence_parallel_size
                 )
 
+            packed_kwargs = (
+                packed_sequence_kwargs(position_ids_fwd)
+                if self.remove_microbatch_padding and self._packed_gdn_layers
+                else {}
+            )
             if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
-                outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
+                outputs = getattr(self, self.base_model_prefix)(
+                    input_ids_fwd, position_ids=position_ids_fwd, **packed_kwargs
+                )
             else:
                 outputs = getattr(self, self.base_model_prefix)(
-                    input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd
+                    input_ids_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd, **packed_kwargs
                 )
             last_hidden_states_BSH = outputs["last_hidden_state"]
 
