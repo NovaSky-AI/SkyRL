@@ -83,6 +83,68 @@ uv run --isolated --extra skyrl-train \
 
 Add `trainer.arctic_rl.speculative_model=<hf-id-or-path>` to enable Arctic speculative decoding.
 
+## Harbor recipes
+
+The same override flag routes any Harbor recipe through Arctic RL. Target Harbor's own entrypoint and point `trainer.override_entrypoint` at `integrations.arctic_rl.harbor_entrypoint`:
+
+```
+uv run --isolated --extra harbor \
+    --with arctic-platform --with 'arctic-inference[vllm]' --with liger-kernel \
+    --with 'transformers==4.57.6' \
+    --with "flash-attn@${FLASH_ATTN_WHL}" \
+    -- python -m examples.train_integrations.harbor.entrypoints.main_harbor \
+        trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint \
+        <existing Harbor recipe overrides>
+```
+
+`harbor_entrypoint` spins up a small OpenAI-compatible FastAPI shim
+(`openai_bridge.ArcticInferenceEngineAdapter`) in front of
+`arctic_client.generate()` before constructing `HarborGenerator`, so
+Harbor's `terminus-2` agent inside the sandbox reaches the exact same
+model weights the trainer is updating — the shim is served in-process
+on the driver and reachable at `http://127.0.0.1:8000/v1` by default.
+Weight sync (NCCL or CUDA-IPC in colocated mode) still flows through
+the Arctic RL server, not through the shim.
+
+The shim's bind/advertise addresses are env-only (no new SkyRL config
+fields):
+
+| env var                              | default    | notes                                                      |
+|--------------------------------------|------------|------------------------------------------------------------|
+| `ARCTIC_HARBOR_SHIM_HOST`            | `0.0.0.0`  | bind address (needed on `0.0.0.0` for off-driver sandboxes)|
+| `ARCTIC_HARBOR_SHIM_PORT`            | `8000`     | starting port; auto-bumps if busy                          |
+| `ARCTIC_HARBOR_SHIM_ADVERTISED_HOST` | `127.0.0.1`| host clients (sandbox) should call; set to the driver node IP if the sandbox runs off-node |
+
+### Harbor CodeContests recipe
+
+Two launchers, same underlying entrypoint:
+
+- [`examples/train_integrations/harbor/run_codecontest_arctic.sh`](../../examples/train_integrations/harbor/run_codecontest_arctic.sh) — Qwen3-8B / 8-GPU, mirrors Harbor's FSDP `run_codecontest.sh`.
+- [`examples/run_codecontest_arctic_harbor.sh`](examples/run_codecontest_arctic_harbor.sh) — env-driven, defaults to a Qwen3-0.6B / 4-GPU smoke (~5 min from a cold uv cache).
+
+```bash
+export WANDB_API_KEY=...            # WANDB_BASE_URL auto-selects the Snowflake host
+export DAYTONA_API_KEY=...          # or MODAL_TOKEN_ID/_SECRET, E2B_API_KEY
+
+uv run --extra harbor examples/train_integrations/harbor/prepare_harbor_dataset.py \
+    --dataset open-thoughts/CodeContests \
+    --output_dir /data/skyrl-runs/arctic_harbor/data/CodeContests
+
+bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
+```
+
+Scale up via env vars (defaults already match the FSDP baseline recipe — Qwen3-8B, 32K context, colocated CUDA-IPC):
+
+```bash
+NUM_GPUS=8 MODEL=Qwen/Qwen3-8B \
+    TRAIN_BATCH_SIZE=4 N_SAMPLES_PER_PROMPT=8 MAX_CONCURRENCY=32 \
+    bash integrations/arctic_rl/examples/run_codecontest_arctic_harbor.sh
+```
+
+Design + change list: [`docs/HARBOR_DESIGN.md`](docs/HARBOR_DESIGN.md) (see **Launcher invariants** for the two settings — `APPLY_OVERLONG_FILTERING=false` and `max_input_tokens`/`max_output_tokens` sourcing — that must not be casually flipped).
+
+Sandbox concurrency: Harbor spins one sandbox per trial. On Daytona's free tier (10 CPUs total), keep `MAX_CONCURRENCY ≤ 8` and `train_batch_size × n_samples_per_prompt ≤ 16`. If a launcher crashes mid-run, the preflight tells you exactly which port / GPUs are stuck and prints the `pkill` line to free them.
+
 ### `trainer.arctic_rl.*` knobs
 
 | Knob | Default | Effect |
@@ -157,17 +219,29 @@ GPU layout:
 ```
 integrations/arctic_rl/
 ├── README.md
-├── trainer.py         ArcticPPOTrainer — routes training to Arctic server actors
-├── generator.py       ArcticGenerator — routes generation to vLLM, scores via skyrl-gym
-├── config.py          ArcticRLTrainerConfig + build_rl_config
-├── entrypoint.py      Dispatched from main_base via trainer.override_entrypoint
+├── trainer.py             ArcticPPOTrainer — routes training to Arctic server actors
+├── generator.py           ArcticGenerator — routes generation to vLLM, scores via skyrl-gym
+├── config.py              ArcticRLTrainerConfig + build_rl_config
+├── entrypoint.py          Dispatched from main_base via trainer.override_entrypoint
+├── harbor_entrypoint.py   Same, dispatched from main_harbor — Harbor rollouts + Arctic training
+├── openai_bridge.py       OpenAI-compatible HTTP shim over arctic_client.generate()
+├── docs/
+│   └── HARBOR_DESIGN.md
 ├── envs/
 │   ├── bird.py
 │   ├── bird_reward.py
 │   └── preprocess_bird.py
 └── examples/
     ├── run_gsm8k_grpo_4gpu.sh
-    └── run_bird_grpo_*.sh      (BIRD recipes — manual data prep today)
+    ├── run_bird_grpo_*.sh                (BIRD recipes — manual data prep today)
+    └── run_codecontest_arctic_harbor.sh  (Harbor recipe — env-driven, 0.6B smoke -> 8B)
+```
+
+Harbor's own recipe folder also carries a fixed-config companion:
+
+```
+examples/train_integrations/harbor/
+    └── run_codecontest_arctic.sh         (Qwen3-8B / 8-GPU parity with run_codecontest.sh)
 ```
 
 ## BIRD-SQL: 32B Qwen3 on 32 × H200
