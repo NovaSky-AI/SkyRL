@@ -19,7 +19,6 @@ from skyrl.backends.skyrl_train_backend import (  # noqa: E402
     _unapplied_adam_params,
 )
 from skyrl.tinker import types  # noqa: E402
-from skyrl.tinker.config import same_config_value  # noqa: E402
 from skyrl.train.config import OptimizerConfig  # noqa: E402
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
@@ -45,6 +44,8 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, {}, "--torch-profiler"),
         ({"trainer.algorithm.policy_loss_type": "gspo"}, {}, "must be 'regular' or 'dual_clip'"),
         ({"use_ray": False}, {}, "use_ray"),
+        # Compared as given: a string is not the server's bool, and SkyRL-Train keeps strings as strings.
+        ({"trainer.algorithm.use_kl_loss": "false"}, {}, "use_kl_loss='false'"),
     ],
 )
 def test_rejected(backend_config, kwargs, expected):
@@ -69,7 +70,6 @@ def test_rejected(backend_config, kwargs, expected):
         # The Tinker SDK cannot send alpha, so backend_config's alpha wins over the API placeholder.
         ({"trainer.policy.model.lora": {"alpha": 128}}, LORA, "trainer.policy.model.lora.alpha", 128),
         ({"trainer.placement": {"policy_num_gpus_per_node": 2}}, {}, "trainer.placement.policy_num_gpus_per_node", 2),
-        ({"trainer.micro_train_batch_size_per_gpu": "4"}, {}, "trainer.micro_train_batch_size_per_gpu", "4"),
         # __post_init__ normalizes these itself, with a warning; that is not the server overriding them.
         ({"generator.inference_engine.enforce_eager": True}, LORA, "generator.inference_engine.enforce_eager", False),
         (
@@ -81,9 +81,8 @@ def test_rejected(backend_config, kwargs, expected):
     ],
 )
 def test_accepted(backend_config, kwargs, key, value):
-    """Values equal to the server's, nested spellings, values in another JSON type and SkyRL-Train's own
-    normalization build without an error."""
-    assert same_config_value(value, attrgetter(key)(_build(backend_config, **kwargs)))
+    """Values equal to the server's, nested spellings and SkyRL-Train's own normalization build without an error."""
+    assert attrgetter(key)(_build(backend_config, **kwargs)) == value
 
 
 @pytest.mark.parametrize(

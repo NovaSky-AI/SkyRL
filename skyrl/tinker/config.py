@@ -1,12 +1,8 @@
 """Configuration for the Tinker engine."""
 
 import argparse
-import dataclasses
 import json
-import math
 import os
-from collections.abc import Mapping, Sequence
-from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,38 +25,6 @@ def flatten_backend_config(backend_config: dict) -> dict[str, Any]:
         else:
             flat[key] = value
     return flat
-
-
-def same_config_value(requested: Any, actual: Any) -> bool:
-    """Whether a ``backend_config`` value equals the config value it was applied as.
-
-    The two can differ in type without differing in meaning: ``"4"`` and ``4``, ``"true"`` and
-    ``True``, a list and a tuple, an enum member and its value, or a mapping and a dataclass that
-    holds those fields.
-    """
-    if isinstance(actual, Enum):
-        return same_config_value(requested, actual.value) or requested == actual.name
-    if dataclasses.is_dataclass(actual) and not isinstance(actual, type):
-        actual = dataclasses.asdict(actual)
-    if isinstance(requested, Mapping) and isinstance(actual, Mapping):
-        # A merge keeps the keys the request leaves out, so only the requested keys must match.
-        return all(key in actual and same_config_value(value, actual[key]) for key, value in requested.items())
-    if requested == actual:
-        return True
-    if isinstance(requested, str) == isinstance(actual, str):
-        if isinstance(requested, Sequence) and isinstance(actual, Sequence) and not isinstance(requested, str):
-            return len(requested) == len(actual) and all(map(same_config_value, requested, actual))
-        return False
-    # Exactly one side is a string, so OmegaConf may have converted it to or from the field's type.
-    text, other = (requested, actual) if isinstance(requested, str) else (actual, requested)
-    if isinstance(other, bool):
-        return text.strip().lower() == str(other).lower()
-    if isinstance(other, (int, float)):
-        try:
-            return math.isclose(float(text), float(other))
-        except ValueError:
-            return False
-    return text == str(other)
 
 
 def check_backend_config(
@@ -86,7 +50,7 @@ def check_backend_config(
         )
         if unused is not None:
             problems.append(f"{key}={value!r}: {unused}")
-        elif key in server_values and not same_config_value(value, server_values[key][0]):
+        elif key in server_values and value != server_values[key][0]:
             server_value, reason = server_values[key]
             problems.append(f"{key}={value!r}: {reason} ({server_value!r})")
     if problems:
