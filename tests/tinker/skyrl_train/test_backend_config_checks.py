@@ -1,6 +1,5 @@
-"""CPU tests for the SkyRL-Train backend's backend_config checks and its AdamParams warning."""
+"""CPU tests for the backend_config checks (engine startup and config build) and the AdamParams warning."""
 
-import importlib
 import re
 from operator import attrgetter
 from types import SimpleNamespace
@@ -13,15 +12,17 @@ pytest.importorskip("skyrl.backends.skyrl_train_backend")
 from skyrl.backends import skyrl_train_backend  # noqa: E402
 from skyrl.backends.skyrl_train_backend import (  # noqa: E402
     FSDPBackendOverrides,
-    MegatronBackendOverrides,
     SkyRLTrainBackend,
     _build_skyrl_train_config,
     _unapplied_adam_params,
 )
 from skyrl.tinker import types  # noqa: E402
+from skyrl.tinker.config import EngineConfig, flatten_backend_config  # noqa: E402
+from skyrl.tinker.engine import TinkerEngine  # noqa: E402
 from skyrl.train.config import OptimizerConfig  # noqa: E402
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
+CHECKPOINT = {"base_model_checkpoint_path": "/models/custom"}
 LORA = {"lora_config": types.LoraConfig(rank=8, alpha=32, seed=0)}
 FULL_FT = {"lora_config": types.LoraConfig(rank=0, alpha=32, seed=0)}
 
@@ -85,21 +86,50 @@ def test_accepted(backend_config, kwargs, key, value):
     assert attrgetter(key)(_build(backend_config, **kwargs)) == value
 
 
+def test_flatten_backend_config():
+    """Nested mappings become dot-keys; lists and empty mappings stay as values."""
+    assert flatten_backend_config({"a": {"b": 1, "c": {"d": [2]}}, "e": {}}) == {"a.b": 1, "a.c.d": [2], "e": {}}
+
+
+def _start_engine(monkeypatch, backend_config: dict, backend: str = "fsdp", **kwargs) -> None:
+    """Construct a TinkerEngine whose backend is a stub."""
+    monkeypatch.setattr("skyrl.tinker.engine.get_backend_classes", lambda *_a, **_k: (lambda *_: object(), dict))
+    TinkerEngine(
+        EngineConfig(
+            base_model=BASE_MODEL,
+            backend=backend,
+            backend_config=backend_config,
+            database_url="sqlite:///:memory:",
+            **kwargs,
+        )
+    )
+
+
 @pytest.mark.parametrize(
-    "module",
+    ("backend_config", "kwargs", "expected"),
     [
-        "test_fsdp_tinker",
-        "test_tinker_torch_profiler",
-        "test_multi_lora_megatron",
-        "test_multi_lora_megatron_colocated",
-        "test_async_sample_routing",
+        ({"strategy": "megatron"}, {}, "strategy='megatron': set by --backend ('fsdp')"),
+        ({"runtime_role": "trainer"}, {}, "runtime_role='trainer': set by --runtime-role ('combined')"),
+        ({"generator.inference_engine": {"served_model_name": "x"}}, CHECKPOINT, "served_model_name='x'"),
     ],
 )
-def test_backend_configs_of_the_gpu_tests_pass(module):
-    """The configs the Tinker GPU tests launch servers with build without a rejected value."""
-    backend_config = importlib.import_module(f"tests.tinker.skyrl_train.{module}").BACKEND_CONFIG
-    overrides = MegatronBackendOverrides if backend_config["strategy"] == "megatron" else FSDPBackendOverrides
-    _build_skyrl_train_config(BASE_MODEL, overrides(**backend_config), LORA["lora_config"])
+def test_engine_rejects_values_it_overwrites(monkeypatch, backend_config, kwargs, expected):
+    """The engine sets these on the backend overrides itself, so a different value stops it at startup."""
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        _start_engine(monkeypatch, backend_config, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("backend_config", "kwargs"),
+    [
+        ({"strategy": "fsdp", "runtime_role": "trainer"}, {"runtime_role": "trainer"}),
+        ({"generator.inference_engine.served_model_name": BASE_MODEL}, CHECKPOINT),
+        ({"strategy": "megatron", "use_ray": True}, {"backend": "jax"}),
+    ],
+)
+def test_engine_accepts(monkeypatch, backend_config, kwargs):
+    """Values equal to the engine's are redundant, and the jax backend is not checked."""
+    _start_engine(monkeypatch, backend_config, **kwargs)
 
 
 # The Tinker SDK's AdamParams defaults, and the same with SkyRL-Train's optimizer defaults.
