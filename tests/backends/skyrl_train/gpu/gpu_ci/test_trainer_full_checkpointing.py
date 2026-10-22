@@ -220,16 +220,14 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         # optimizer sharding format. With LoRA only the adapter tensors are in the grad
         # buffer, which is why this row passes.
         pytest.param("megatron", False, True, GLM5_3_FLASH_MODEL_NAME, marks=pytest.mark.megatron),
-        # Qwen3.8-Flash-Next (qwen4_exp) slice, LoRA and full fine-tuning. Checkpoints the
-        # hyper-connection and PLE projection params (the frozen PLE n-gram table is a plain
-        # tensor and is not saved) and 512-expert MoE layers sharded over EP=4. H100-only: the
-        # full-FT row keeps the optimizer on the GPU (~44 GB/GPU), like the 4-node recipes.
-        pytest.param(
-            "megatron", False, True, QWEN3_8_FLASH_NEXT_MODEL_NAME, marks=[pytest.mark.megatron, pytest.mark.h100]
-        ),
-        pytest.param(
-            "megatron", False, False, QWEN3_8_FLASH_NEXT_MODEL_NAME, marks=[pytest.mark.megatron, pytest.mark.h100]
-        ),
+        # Qwen3.8-Flash-Next (qwen4_exp) slice with LoRA. Checkpoints the adapters on the
+        # attention/GDN/MoE linears and 512-expert MoE layers sharded over EP=4 (the frozen PLE
+        # n-gram table is a plain tensor and is not saved).
+        #
+        # As for GLM-5.3-Flash, the full-finetune counterpart is NOT parametrized: with the
+        # optimizer on the GPU (as in the 4-node recipes) and expert-DP 1 on 4 GPUs, it peaks at
+        # ~85 GB/GPU, more than this suite's GPUs have.
+        pytest.param("megatron", False, True, QWEN3_8_FLASH_NEXT_MODEL_NAME, marks=pytest.mark.megatron),
     ],
     ids=[
         "fsdp_no_lora",
@@ -237,7 +235,6 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         "megatron_no_lora",
         "megatron_glm5_3_flash_lora",
         "megatron_qwen3_8_flash_next_lora",
-        "megatron_qwen3_8_flash_next_fullft",
     ],
 )
 def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload, lora, model_name):
