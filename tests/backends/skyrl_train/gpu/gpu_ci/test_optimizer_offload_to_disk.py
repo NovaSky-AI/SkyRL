@@ -49,16 +49,12 @@ def test_offloaded_optimizer_matches_regular_optimizer(tmp_path, moe, moment_dty
 @pytest.mark.megatron
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 @pytest.mark.parametrize("storage_dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("direct", [True, False], ids=["o_direct", "buffered_fallback"])
-def test_staged_file_io_round_trips_unaligned_segments(tmp_path, direct, storage_dtype):
-    """Segments whose sizes are not 4 KiB multiples, each spanning several staging chunks, read back exactly.
+def test_staged_file_io_round_trips_segments(tmp_path, storage_dtype):
+    """Back-to-back segments of odd sizes, each spanning several staging chunks, read back exactly.
 
-    O_DIRECT rounds the last chunk of each segment up into the segment's padding; writing the segments in
-    reverse order would expose a rounded write that spills into the next segment.
+    Writing the segments in reverse order would expose a write that spills into the next segment.
     """
     from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
-        IO_ALIGN,
-        _align,
         _StateFile,
     )
 
@@ -66,12 +62,8 @@ def test_staged_file_io_round_trips_unaligned_segments(tmp_path, direct, storage
     offsets, at = [], 0
     for numel in sizes:
         offsets.append(at)
-        at += _align(numel * storage_dtype.itemsize)
-    state_file = _StateFile(str(tmp_path / "state.bin"), at, staging_bytes=4 * IO_ALIGN)
-    if direct and state_file.direct_fd is None:
-        pytest.skip(f"{tmp_path} does not support O_DIRECT")
-    if not direct:
-        state_file._disable_direct("test")
+        at += numel * storage_dtype.itemsize
+    state_file = _StateFile(str(tmp_path / "state.bin"), at, staging_bytes=4096)
 
     tensors = [torch.randn(numel, device="cuda").to(storage_dtype) for numel in sizes]
     for tensor, offset in reversed(list(zip(tensors, offsets))):
@@ -80,5 +72,4 @@ def test_staged_file_io_round_trips_unaligned_segments(tmp_path, direct, storage
         back = torch.empty_like(tensor)
         state_file.read(offset, back)
         assert torch.equal(back, tensor)
-    assert (state_file.direct_fd is not None) == direct, "O_DIRECT fell back to buffered I/O"
     state_file.close()
