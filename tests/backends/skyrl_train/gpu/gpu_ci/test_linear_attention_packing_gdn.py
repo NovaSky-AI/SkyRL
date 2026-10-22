@@ -60,7 +60,7 @@ def _packed_vs_standalone(wrapper, seq_len, seed):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="packed GDN kernels need a GPU")
-def test_packed_gated_delta_net_matches_standalone_forward():
+def test_packed_gated_delta_net_matches_standalone_forward(ray_init_fixture):
     wrapper = _build_wrapper(GDN_MODEL, packing=True)
     assert gated_delta_net_layers(wrapper.model), f"{GDN_MODEL} has no Gated DeltaNet layers"
 
@@ -71,7 +71,7 @@ def test_packed_gated_delta_net_matches_standalone_forward():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="packed GDN kernels need a GPU")
-def test_unpacked_gated_delta_net_is_the_sanity_control():
+def test_unpacked_gated_delta_net_is_the_sanity_control(ray_init_fixture):
     wrapper = _build_wrapper(GDN_MODEL, packing=False)
 
     max_delta, _ = _packed_vs_standalone(wrapper, SEQ_LEN, seed=0)
@@ -80,7 +80,7 @@ def test_unpacked_gated_delta_net_is_the_sanity_control():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="packed kernels need a GPU")
-def test_pure_attention_control_packing_is_clean():
+def test_pure_attention_control_packing_is_clean(ray_init_fixture):
     wrapper = _build_wrapper(CONTROL_MODEL, packing=True)
     assert not gated_delta_net_layers(wrapper.model)
 

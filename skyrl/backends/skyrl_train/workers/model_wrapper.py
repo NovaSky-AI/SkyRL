@@ -32,6 +32,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.linear_attention_packing import (
+    check_boundaries_consumed,
     gated_delta_net_layers,
     packed_sequence_kwargs,
 )
@@ -295,20 +296,19 @@ class HFModelWrapper(nn.Module):
         else:
             self.model = pretrain_or_model
 
-        self._packed_gdn_layers: list[nn.Module] = []
-        if remove_microbatch_padding:
-            self._packed_gdn_layers = gated_delta_net_layers(self.model)
-            # Ulysses only shards attention; a Gated DeltaNet layer would run its conv and
-            # recurrence on each rank's slice from a fresh state.
-            if self._packed_gdn_layers and self.sequence_parallel_size > 1:
-                raise ValueError(
-                    f"{len(self._packed_gdn_layers)} Gated DeltaNet layers cannot be split across "
-                    f"sequence_parallel_size={self.sequence_parallel_size} ranks"
-                )
-            if self._packed_gdn_layers:
-                logger.info(
-                    f"Packed-sequence boundaries passed to {len(self._packed_gdn_layers)} Gated DeltaNet layers"
-                )
+        self._gdn_layers = gated_delta_net_layers(self.model)
+        # Ulysses shards the sequence dimension; a Gated DeltaNet layer runs its conv and
+        # recurrence left to right, so it cannot be split across ranks even without packing.
+        if self._gdn_layers and self.sequence_parallel_size > 1:
+            raise ValueError(
+                f"{len(self._gdn_layers)} Gated DeltaNet layers cannot be split across "
+                f"sequence_parallel_size={self.sequence_parallel_size} ranks"
+            )
+        self._packed_gdn_layers = self._gdn_layers if remove_microbatch_padding else []
+        if self._packed_gdn_layers:
+            for gdn in self._packed_gdn_layers:
+                check_boundaries_consumed(gdn)
+            logger.info(f"Packed-sequence boundaries passed to {len(self._packed_gdn_layers)} Gated DeltaNet layers")
 
         self.logprobs_chunk_size = logprobs_chunk_size
 
@@ -534,18 +534,19 @@ def _get_critic_model(
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)
 
-            self._packed_gdn_layers: list[nn.Module] = []
-            if remove_microbatch_padding:
-                self._packed_gdn_layers = gated_delta_net_layers(self)
-                if self._packed_gdn_layers and self.sequence_parallel_size > 1:
-                    raise ValueError(
-                        f"{len(self._packed_gdn_layers)} Gated DeltaNet layers cannot be split across "
-                        f"sequence_parallel_size={self.sequence_parallel_size} ranks"
-                    )
-                if self._packed_gdn_layers:
-                    logger.info(
-                        f"Packed-sequence boundaries passed to {len(self._packed_gdn_layers)} Gated DeltaNet layers"
-                    )
+            self._gdn_layers = gated_delta_net_layers(self)
+            if self._gdn_layers and self.sequence_parallel_size > 1:
+                raise ValueError(
+                    f"{len(self._gdn_layers)} Gated DeltaNet layers cannot be split across "
+                    f"sequence_parallel_size={self.sequence_parallel_size} ranks"
+                )
+            self._packed_gdn_layers = self._gdn_layers if remove_microbatch_padding else []
+            if self._packed_gdn_layers:
+                for gdn in self._packed_gdn_layers:
+                    check_boundaries_consumed(gdn)
+                logger.info(
+                    f"Packed-sequence boundaries passed to {len(self._packed_gdn_layers)} Gated DeltaNet layers"
+                )
 
             self.post_init()
 
