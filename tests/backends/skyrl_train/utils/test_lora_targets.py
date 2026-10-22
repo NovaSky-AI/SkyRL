@@ -11,7 +11,6 @@ import pytest
 import torch.nn as nn
 
 from skyrl.backends.skyrl_train.utils.lora_targets import (
-    check_lora_group_flags,
     check_megatron_lora_group_support,
     lora_module_group,
     megatron_all_linear_target_modules,
@@ -241,12 +240,6 @@ def test_fused_moe_experts_cannot_be_adapted() -> None:
 
     with pytest.raises(ValueError, match="No mlp linear layers found"):
         resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)
-
-
-@pytest.mark.parametrize(("train_attn", "train_mlp"), [(True, False), (False, True)])
-def test_flag_check_accepts_either_narrowing(train_attn: bool, train_mlp: bool) -> None:
-    """The model-independent check passes narrowing on "all-linear" for every backend."""
-    check_lora_group_flags("all-linear", train_attn, train_mlp)
 
 
 # Megatron-Core names written out rather than imported from lora_targets, so a wrong

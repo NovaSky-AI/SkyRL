@@ -32,7 +32,7 @@ Megatron expands `"all-linear"` to Megatron-Core module names, which are the sam
 The MLP group covers dense MLP layers, shared experts and routed experts. `in_proj` / `out_proj` belong to Gated DeltaNet layers (Qwen3.5, Qwen3-Next) and Mamba layers (Nemotron-3), so both count as attention. Two cases raise while the model is built:
 
 - **Vision-language models with a vision tower.** The tower and its patch merger reuse the language model's module names, so either half would adapt them too. `trainer.policy.language_model_only=true` drops the tower for Qwen3.5 and Kimi K2.5.
-- **Attention-only on multi-latent attention models** (DeepSeek-V3, Kimi K2, GLM-4.7-Flash, GLM-5.3-Flash). `"all-linear"` reaches only `linear_proj` of their attention ([#2512](https://github.com/NovaSky-AI/SkyRL/issues/2512)). MLP-only works.
+- **Attention-only on multi-latent attention models** (DeepSeek-V3, Kimi K2, GLM-4.7-Flash, GLM-5.3-Flash). `"all-linear"` reaches only `linear_proj` of their attention. MLP-only works.
 
 On the first `create_model` these errors come after GPUs are reserved, and the server must be restarted before it accepts another model ([#2482](https://github.com/NovaSky-AI/SkyRL/issues/2482)). Leaving both flags `True` is unaffected.
 
