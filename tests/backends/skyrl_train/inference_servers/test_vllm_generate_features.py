@@ -22,6 +22,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
 from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
     VLLMServerActor,
 )
+from tests.backends.skyrl_train.sample_support_helpers import dense
 
 pytestmark = pytest.mark.vllm
 
@@ -86,7 +87,7 @@ def test_features_reach_the_engine_as_a_multimodal_prompt_with_sample_support():
     assert torch.equal(decoded.get_data()["dummy"], item.get_data()["dummy"])
     # The packed side channels still come back with images.
     packed = response.json()["choices"][0][PackedField.ROLLOUT_SAMPLE_SUPPORT]
-    np.testing.assert_array_equal(decode_packed_sample_support(packed), [[7, 8]])
+    np.testing.assert_array_equal(dense(decode_packed_sample_support(packed)), [[7, 8]])
 
 
 def test_a_request_without_features_keeps_a_token_prompt():
