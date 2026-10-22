@@ -192,6 +192,25 @@ async def test_a_continued_conversation_extends_the_previous_tokens() -> None:
         assert [graph.nodes[i].author for i in path] == ["client", "model", "client", "model"]
 
 
+class PromptRecordingRenderer(FakeRenderer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list[list[int] | None] = []
+
+    def parse(self, completion_ids: Any, tools: Any, prompt_ids: Any = None) -> dict[str, Any]:
+        self.prompts.append(None if prompt_ids is None else list(prompt_ids))
+        return super().parse(completion_ids, tools, prompt_ids)
+
+
+async def test_the_parser_gets_the_prompt_the_completion_was_sampled_from() -> None:
+    async with token_stack() as stack:
+        renderer = stack.server.backend.renderer = PromptRecordingRenderer()  # type: ignore[attr-defined]
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
+
+        assert renderer.prompts == [stack.engine.requests[0]["token_ids"]]
+
+
 async def test_the_sample_is_exactly_what_inference_saw() -> None:
     async with token_stack() as stack:
         created = await stack.create()
@@ -495,8 +514,8 @@ async def test_token_history_continues_from_the_shadowed_sibling_whose_tokens_th
 
         sample, replay = graph.children(0)
         assert (graph.nodes[sample].author, graph.nodes[replay].author) == ("model", "client")
-        assert graph.shadowed_by(replay) == sample
-        # Matching picks the sample, but its tokens aren't the render's, so both later calls fork to the replay.
+        assert graph.shadowed_by(sample) == replay
+        # The replay is the latest sibling and holds the render's tokens, so both later calls continue from it.
         later = [node.id for node in graph if node.author == "model" and node.id != sample]
         assert len(later) == 2 and all(replay in graph.path_to(node) for node in later)
 
@@ -527,7 +546,7 @@ async def test_token_history_never_continues_from_a_shadowed_model_sample() -> N
         assert graph.nodes[fork].author == "client"
         older_tokens = graph.nodes[older].tokens.token_ids
         assert graph.nodes[fork].tokens.token_ids[: len(older_tokens)] == older_tokens
-        assert graph.shadowed_by(fork) == latest
+        assert graph.shadowed_by(fork) is None and graph.shadowed_by(latest) == fork
         later = next(node.id for node in graph if node.author == "model" and node.id not in (older, latest))
         assert fork in graph.path_to(later) and older not in graph.path_to(later)
 
@@ -780,3 +799,34 @@ def test_a_node_with_no_tokens_keeps_the_paths_routed_experts() -> None:
     empty = routing.slice(3, 0)
 
     assert empty is not None and empty.shape == (0, 2, 2)
+
+
+async def test_one_full_render_costs_one_unbridged_call_not_the_rest_of_the_trajectory() -> None:
+    # A reasoning model's history doesn't re-render as sampled (the template drops earlier reasoning), so a
+    # full render twins the history as client nodes and the conversation continues below them. Later calls
+    # must follow those twins to the newest reply and extend it, not stop on the stale model branch.
+    replies = iter(f"THINK:r{n}|a{n}" for n in range(1, 6))
+    async with token_stack(
+        completion=lambda prompt, sampling: [*encode(next(replies)), END], use_raw_content=True
+    ) as stack:
+        stack.renderer.drop_history_thinking = True
+        created = await stack.create()
+        llm = client(created["base_url"])
+        messages = [user("q1")]
+
+        async def call(next_user: str) -> None:
+            reply = (await llm.chat.completions.create(model="policy", messages=messages)).choices[0].message
+            messages.extend([{"role": "assistant", "content": reply.content}, user(next_user)])
+
+        await call("q2")
+        await call("q3")
+        stack.renderer.no_bridge = True  # e.g. a harness edit the renderer can't extend: one full render
+        await call("q4")
+        stack.renderer.no_bridge = False
+        await call("q5")
+        await call("q6")
+        graph = stack.server.trajectories[created["id"]].graph
+
+        bridged = [call.bridged for node in graph if node.author == "model" for call in node.calls]
+        assert bridged == [None, True, False, True, True]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 1

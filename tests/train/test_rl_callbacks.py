@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.train.generators.base import TrajectoryID
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.callbacks import (
     CallbackInput,
@@ -66,6 +67,7 @@ class RecorderCallback(TrainingCallback):
                     "total_steps": ci.total_steps,
                     "steps_per_epoch": ci.steps_per_epoch,
                     "has_batch": ci.batch is not None,
+                    "trajectory_ids": ci.trajectory_ids,
                     "has_metrics": ci.metrics is not None,
                     "metrics_keys": sorted((ci.metrics or {}).keys()),
                     "has_logs": ci.logs is not None,
@@ -221,7 +223,14 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
     monkeypatch.setattr(
         trainer,
         "generate",
-        AsyncMock(return_value={"rollout_metrics": None, "response_ids": [[1]], "rewards": [0.0]}),
+        AsyncMock(
+            return_value={
+                "rollout_metrics": None,
+                "response_ids": [[1]],
+                "rewards": [0.0],
+                "trajectory_ids": [TrajectoryID(instance_id="uid-0", repetition_id=0)],
+            }
+        ),
     )
     monkeypatch.setattr(trainer, "eval", AsyncMock(return_value={"eval/score": 0.5}))
 
@@ -299,6 +308,7 @@ def test_callbacks_fire_during_rl_training(monkeypatch):
         assert snap["has_batch"], "on_step_end should see the training batch"
         assert snap["has_metrics"], "on_step_end should see step metrics"
         assert "policy_loss" in snap["metrics_keys"], snap["metrics_keys"]
+        assert snap["trajectory_ids"] == [TrajectoryID(instance_id="uid-0", repetition_id=0)], snap
 
     # Both eval ends carry eval metrics
     for snap in snaps_by_event["on_eval_end"]:

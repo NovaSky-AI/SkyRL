@@ -4,6 +4,9 @@ import logging
 from argparse import Namespace
 from typing import Any, Dict, List, Optional
 
+from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
+    normalized_moe_expert_lora_rank,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     wire_to_engine_quantization,
 )
@@ -12,6 +15,9 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
+)
+from skyrl.backends.skyrl_train.patches.vllm.patch_moe_expert_lora_rank import (
+    ADDITIONAL_CONFIG_KEY as MOE_EXPERT_LORA_RANK_KEY,
 )
 
 # The receive-side engines must be registered in vLLM's factory before the
@@ -36,6 +42,9 @@ from skyrl.train.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# vLLM logprobs mode for every SkyRL-launched engine: logprobs of the sampling distribution.
+VLLM_LOGPROBS_MODE = "processed_logprobs"
 
 
 def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str = BLOCKWISE_FP8) -> list[str]:
@@ -120,6 +129,13 @@ def _apply_serialized_fp8_weight_sync_defaults(
     engine_kwargs["hf_overrides"] = hf_overrides
 
 
+def _validate_logprobs_mode(engine_kwargs: Dict[str, Any], *, context: str) -> None:
+    """Raises if *engine_kwargs* sets ``logprobs_mode`` to anything but ``VLLM_LOGPROBS_MODE``."""
+    logprobs_mode = engine_kwargs.get("logprobs_mode", VLLM_LOGPROBS_MODE)
+    if logprobs_mode != VLLM_LOGPROBS_MODE:
+        raise ValueError(f"{context}.logprobs_mode must be {VLLM_LOGPROBS_MODE!r}, got {logprobs_mode!r}.")
+
+
 def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
     """Return True when the trainer syncs LoRA adapters (not merged weights).
 
@@ -132,6 +148,40 @@ def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
     if cfg.trainer.strategy == "megatron":
         return not cfg.trainer.policy.megatron_config.lora_config.merge_lora
     return True
+
+
+def _moe_router_topk(model_path: str) -> Optional[int]:
+    """Number of experts routed per token from the HF config, or None for a dense model."""
+    from transformers import AutoConfig
+
+    hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    hf_config = getattr(hf_config, "text_config", None) or hf_config
+    for key in ("num_experts_per_tok", "moe_topk", "num_experts_per_token"):
+        topk = getattr(hf_config, key, None)
+        if topk:
+            return int(topk[0] if isinstance(topk, (list, tuple)) else topk)
+    return None
+
+
+def _resolve_max_expert_lora_rank(cfg: SkyRLTrainConfig) -> Optional[int]:
+    """vLLM MoE expert LoRA slot rank, or None to keep ``max_lora_rank`` for the experts.
+
+    Requires the settings ``validate_inference_engine_cfg`` checks for ``scale_moe_lora_rank``.
+    """
+    if not cfg.generator.inference_engine.scale_moe_lora_rank:
+        return None
+    lora_rank = cfg.trainer.policy.model.lora.rank
+    megatron_cfg = cfg.trainer.policy.megatron_config
+    topk = _moe_router_topk(cfg.trainer.policy.model.path)
+    if topk is None:
+        logger.warning(
+            "generator.inference_engine.scale_moe_lora_rank=true but no MoE top-k was found in the model's "
+            "HF config; the MoE expert LoRA slots keep max_lora_rank."
+        )
+        return None
+    etp = megatron_cfg.expert_tensor_parallel_size or megatron_cfg.tensor_model_parallel_size
+    rank = normalized_moe_expert_lora_rank(lora_rank, topk, etp)
+    return rank if rank < lora_rank else None
 
 
 def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
@@ -221,12 +271,14 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         # models with custom modeling code (MiMo, Qwen3.5, DeepSeek-V3, ...) require it to load.
         # Overridable via generator.inference_engine.engine_init_kwargs.trust_remote_code below.
         trust_remote_code=True,
+        # Logprobs are computed from the sampling distribution (after temperature and top-k/top-p).
+        # Other values from engine kwargs are rejected by _validate_logprobs_mode.
+        logprobs_mode=VLLM_LOGPROBS_MODE,
     )
     # Sample-support capture asks for one logprob per top-k candidate, post-filter, so the
     # -inf entries that mark filtered candidates survive to the capture path.
     if ie_cfg.enable_return_sample_support_set:
         overrides["max_logprobs"] = cfg.generator.sampling_params.top_k
-        overrides["logprobs_mode"] = "processed_logprobs"
     for key, value in overrides.items():
         setattr(args, key, value)
 
@@ -246,7 +298,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     if _uses_lora_weight_sync(cfg):
         lora_cfg = cfg.trainer.policy.model.lora
         args.enable_lora = True
-        args.max_lora_rank = lora_cfg.rank
+        args.max_lora_rank = lora_cfg.max_lora_rank or lora_cfg.rank
         args.max_loras = lora_cfg.max_loras
         if lora_cfg.max_cpu_loras is not None:
             args.max_cpu_loras = lora_cfg.max_cpu_loras
@@ -280,6 +332,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         logger.info(f"vLLM speculative decoding enabled: speculative_config={spec_cfg}")
 
     engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    _validate_logprobs_mode(engine_kwargs, context="generator.inference_engine.engine_init_kwargs")
     _apply_serialized_fp8_weight_sync_defaults(
         ie_cfg,
         engine_kwargs,
@@ -287,6 +340,16 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     )
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
+
+    if args.enable_lora:
+        expert_rank = _resolve_max_expert_lora_rank(cfg)
+        if expert_rank is not None:
+            # Read by patches/vllm/patch_moe_expert_lora_rank.py in every vLLM worker.
+            args.additional_config = {
+                **(args.additional_config or {}),
+                MOE_EXPERT_LORA_RANK_KEY: expert_rank,
+            }
+            logger.info(f"vLLM MoE expert LoRA slot rank: {expert_rank} (max_lora_rank={args.max_lora_rank})")
 
     return args
 
@@ -327,6 +390,15 @@ def get_pd_p2p_connector_name(kv_config: Dict[str, Any]) -> str:
     )
 
 
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """Return a vLLM dict-valued engine arg as a dict (it may also arrive as a JSON string)."""
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        return json.loads(value)
+    return dict(value)
+
+
 def get_pd_cli_args(
     cli_args: Namespace,
     role: str = "prefill",
@@ -337,7 +409,8 @@ def get_pd_cli_args(
     Applies *role_init_kwargs* (``prefill_init_kwargs`` / ``decode_init_kwargs``
     pass-through, mutually exclusive with ``engine_init_kwargs``) on top of the
     base args, then reads ``kv_transfer_config`` from the resulting namespace.
-    Sets ``kv_role=kv_both`` if `kv_role` is not set.
+    A role ``additional_config`` is merged into the base one rather than
+    replacing it. Sets ``kv_role=kv_both`` if `kv_role` is not set.
 
     Args:
         cli_args: Base CLI args from :func:`build_vllm_cli_args`.
@@ -352,7 +425,12 @@ def get_pd_cli_args(
     args = copy.deepcopy(cli_args)
 
     if role_init_kwargs:
+        _validate_logprobs_mode(role_init_kwargs, context=f"generator.inference_engine.{role}_init_kwargs")
         for key, value in role_init_kwargs.items():
+            if key == "additional_config":
+                # Merge instead of replacing: the base dict carries keys SkyRL derives itself
+                # (e.g. the MoE expert LoRA slot rank), which role kwargs cannot set.
+                value = {**_as_dict(getattr(args, "additional_config", None)), **_as_dict(value)}
             setattr(args, key, value)
 
     kv_config = getattr(args, "kv_transfer_config", None)
