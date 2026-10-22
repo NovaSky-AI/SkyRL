@@ -217,13 +217,21 @@ all ranks            engine.send_weights()                       the ordinary NC
 worker               start:  no layerwise reload (the base model is untouched)
                      receive: staging proxy over self.model -> private GPU clone per tensor
                      finish: expand_lora_aliases -> stage_in_memory_adapter(name, tensors, config)
+                             then skyrl_release_receive_buffers (IPC: close the packed-buffer importer)
 rank 0               POST /skyrl/v1/load_lora_adapter {lora_name, in_memory: true}
 API server           add_lora(LoRARequest(lora_path="skyrl-memory://<name>", load_inplace=True))
 worker (patched)     WorkerLoRAManager._load_adapter -> from_lora_tensors(device=GPU) from the stage
+                     add_adapter: pack + activate into the LoRA slots, then
+                       offload_in_memory_adapter                 LoRAModel + stage -> pinned host
 ```
 
 Arming lasts exactly one round — `finish_weight_update` disarms — so a missing or failed
 arm can never apply an adapter stream to the base model, or the reverse.
+
+An armed round skips vLLM's `finish_weight_update`, which on the IPC engine also closes
+the `PackedBufferImporter`: the worker's mapping of the trainer's packed staging buffer.
+The trainer frees that buffer (`ipc_collect`) only after the mapping is released, so
+the LoRA finish calls `skyrl_release_receive_buffers` instead, even when staging fails.
 
 The vLLM side is a runtime patch, `patches/vllm/patch_lora_in_memory.py`, applied by the
 worker-extension import like the other vLLM patches: stock vLLM can only load an
@@ -244,12 +252,13 @@ Memory and lifecycle, per inference GPU:
   tensor, not the public size. Duplicate groups are per `(module, EP-rank expert group,
   lora_A|lora_B)`, verified with `torch.equal`, so a wrong group size costs bandwidth only.
 - **Staged tensors** (`patch_lora_in_memory._STAGED`, keyed by adapter name) are the unique
-  tensors in the inference dtype. They are kept after the load because the `LoRAModel`
-  built from them shares their storage (same device, same dtype), and because vLLM rebuilds
+  tensors in the inference dtype. They are kept after the load because vLLM rebuilds
   an LRU-evicted adapter by calling `_load_adapter` again: with a directory it re-reads the
-  files, here it re-reads the stage. A resync for the same name replaces the stage;
-  `RemoteInferenceClient.unload_lora_adapter` also issues `skyrl_discard_in_memory_lora` so
-  an unloaded tenant frees its tensors.
+  files, here it re-reads the stage. After activation they live on pinned host memory (see
+  below), so a rebuild builds on the host like the directory path, including `pack_moe`,
+  which is several times slower there than on the GPU. A resync for the same
+  name replaces the stage; `RemoteInferenceClient.unload_lora_adapter` also issues
+  `skyrl_discard_in_memory_lora` so an unloaded tenant frees its tensors.
 - **The stage must never be written by vLLM.** vLLM applies `lora_alpha / r` by multiplying
   `lora_b` *in place* on every load (`LoRALayerWeights.optimize`), and since the `LoRAModel`
   shares the staged storage, a non-unit scale would compound on every LRU rebuild (dense and
@@ -259,11 +268,21 @@ Memory and lifecycle, per inference GPU:
   `lora_alpha == r`, so vLLM's scale is exactly 1 and `optimize` is a no-op; the in-memory
   loader rejects a config where they differ. The published adapter is vLLM-shaped, not the
   trainer's raw tensors: a consumer reading `lora_B` directly sees it pre-scaled.
-- **The registered `LoRAModel` lives on the GPU**, unlike the directory path where it lives
-  on pinned CPU memory. vLLM packs per-expert LoRA into stacked tensors sized to the local
-  experts, so a MoE adapter costs roughly its *local un-deduplicated* size per registered
-  adapter (about 1/EP of the public size). With multi-tenant `max_loras` / `max_cpu_loras`
-  above 1, budget that per resident adapter.
+- **The registered `LoRAModel` lives on pinned host memory after activation**, as on the
+  directory path. It is built on the GPU (fast `pack_moe`, aliases kept shared), and the
+  patched `add_adapter` calls `offload_in_memory_adapter` once vLLM has copied it into its
+  pre-allocated LoRA slots: `lora_a` / `lora_b` of every module and the staged tensors move
+  to pinned host memory (tensors that shared GPU storage share one host copy), then
+  `torch.cuda.empty_cache()`. Generation reads only the slots; an evicted adapter is
+  re-activated by vLLM's `set_lora` from the host tensors. The GPU therefore holds the
+  built adapter only during the sync. vLLM packs per-expert LoRA into stacked tensors sized
+  to the local experts, so a MoE `LoRAModel` costs roughly its *local un-deduplicated* size
+  -- per MoE layer and local expert, `3 * r * (hidden + moe_intermediate)` elements in the
+  LoRA dtype. That copy plus the staged tensors is the transient GPU peak of each sync,
+  and the pinned host memory each worker holds per registered adapter (freed host blocks
+  return to PyTorch's pinned-host cache, not to the OS). The LoRA slots themselves are allocated at startup and
+  scale with `max_loras`; with multi-tenant `max_loras` above 1, budget the slots per
+  resident adapter.
   Measured on GLM-5.3 (`glm_moe_dsa`, 256 routed experts, Megatron EP8 -> vLLM TP8, B300
   268 GiB): **~22.4 GiB per resident adapter per inference GPU** — vLLM's weight-load
   memory fell from 220.94 to 198.56 GiB going `max_loras` 2 -> 1. On a 1.4 TB base model

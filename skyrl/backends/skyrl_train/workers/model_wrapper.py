@@ -35,8 +35,10 @@ from skyrl.backends.skyrl_train.utils.lora_targets import (
     resolve_critic_lora_target_modules,
     resolve_lora_target_modules,
 )
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_NO_ROW,
+    PackedSampleSupport,
+)
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     missing_sample_support_message,
     sample_support_row_ids_in_batch_positions,
@@ -60,7 +62,7 @@ class _SampleSupportChannels:
         cls,
         sequences: torch.Tensor,
         attention_mask: torch.Tensor,
-        sample_support: PackedTensor,
+        sample_support: PackedSampleSupport,
         loss_mask: torch.Tensor,
     ) -> "_SampleSupportChannels":
         """Place channels in canonical ``[batch, seq_len]`` positions."""
@@ -320,7 +322,7 @@ class HFModelWrapper(nn.Module):
         pixel_values: Optional[TensorList] = None,
         image_grid_thw: Optional[TensorList] = None,
         mm_token_type_ids: Optional[torch.Tensor] = None,
-        sample_support: Optional[PackedTensor] = None,
+        sample_support: Optional[PackedSampleSupport] = None,
         loss_mask: Optional[torch.Tensor] = None,
         enable_sample_support_replay: bool = False,
     ) -> torch.Tensor:

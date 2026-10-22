@@ -70,7 +70,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         wrapped_model = HFModelWrapper(
             model_path,
             use_flash_attention_2=self.cfg.flash_attn,
-            bf16=self.cfg.policy.inference_only_init,
+            # Under trainer.bf16, a LoRA policy's frozen base loads in bf16; PEFT keeps the adapters in fp32.
+            bf16=self.cfg.policy.inference_only_init or (self._is_lora and self.cfg.bf16),
             lora_rank=self.cfg.policy.model.lora.rank,
             lora_alpha=self.cfg.policy.model.lora.alpha,
             lora_dropout=self.cfg.policy.model.lora.dropout,

@@ -12,13 +12,13 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_NO_ROW,
-    SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
 )
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
     _SampleSupportChannels,
 )
+from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 VOCAB = 12
 
@@ -35,7 +35,7 @@ class _TokenIndexedLM(nn.Module):
 
 
 def _support(segments: list[list[list[int]]]) -> PackedTensor:
-    """Pack one ``[response_tokens, top_k]`` block per trajectory."""
+    """Pack one ``[response_tokens, top_k]`` reference grid per trajectory; ``-1`` marks no member."""
     return PackedTensor(
         torch.tensor([row for segment in segments for row in segment], dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
         cu_seqlens_from_lengths([len(segment) for segment in segments]),
@@ -91,11 +91,12 @@ def _wrapper(model: nn.Module, *, packed: bool = False) -> HFModelWrapper:
 
 
 def _forward(wrapper, sequences, attention_mask, support, response_lengths, num_actions):
+    """Run the forward on the CSR form of the ``support`` reference grid."""
     return wrapper(
         sequences,
         num_actions,
         attention_mask=attention_mask,
-        sample_support=support,
+        sample_support=ragged_support(support),
         loss_mask=_loss_mask(response_lengths, num_actions),
         enable_sample_support_replay=True,
     )
@@ -106,7 +107,7 @@ def _forward_entropy(wrapper, sequences, attention_mask, support, response_lengt
         sequences,
         num_actions,
         attention_mask=attention_mask,
-        sample_support=support,
+        sample_support=ragged_support(support),
         loss_mask=_loss_mask(response_lengths, num_actions),
         enable_sample_support_replay=True,
         return_output=True,
@@ -258,7 +259,7 @@ def test_replay_never_scores_every_position_over_the_full_vocabulary(monkeypatch
 def test_an_unsupported_loss_active_token_is_rejected():
     sequences, attention_mask = _ragged_batch()
     support = _ragged_support(sequences)
-    support.values[1] = SAMPLE_SUPPORT_PADDING
+    support.values[1] = -1
 
     with pytest.raises(ValueError, match="requires captured support for every loss-active token"):
         _forward(_wrapper(_TokenIndexedLM()), sequences, attention_mask, support, [2, 1], 2)
@@ -275,7 +276,7 @@ def test_replay_disabled_takes_the_ordinary_full_vocabulary_path():
         sequences,
         2,
         attention_mask=attention_mask,
-        sample_support=_ragged_support(sequences),
+        sample_support=ragged_support(_ragged_support(sequences)),
         loss_mask=_loss_mask([2, 1], 2),
         enable_sample_support_replay=False,
     )
@@ -297,7 +298,7 @@ def test_replay_disabled_takes_the_ordinary_full_vocabulary_path():
 def test_replay_requires_both_the_support_and_the_loss_mask(omitted, message):
     sequences, attention_mask = _ragged_batch()
     kwargs = {
-        "sample_support": _ragged_support(sequences),
+        "sample_support": ragged_support(_ragged_support(sequences)),
         "loss_mask": _loss_mask([2, 1], 2),
         "enable_sample_support_replay": True,
     }

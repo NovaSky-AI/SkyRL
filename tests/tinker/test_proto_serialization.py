@@ -14,7 +14,9 @@ import pytest
 import tinker.types as sdk_types
 import zstandard
 from fastapi import HTTPException
+from pydantic import ValidationError
 from tinker import ForwardBackwardOutput, SampleResponse
+from tinker.proto import tinker_public_pb2 as pb
 from tinker.proto.request_conv import forward_backward_request_to_proto
 from tinker.proto.response_conv import deserialize_proto_response
 
@@ -240,6 +242,42 @@ def test_parse_forward_backward_request_forward_only_and_config():
     request_dict, forward_only = parse_forward_backward_request(body)
     assert forward_only
     assert request_dict["forward_backward_input"]["loss_fn_config"] == {"clip_low_threshold": 0.2}
+
+
+_HAS_LOSS_FN_CONFIG_V2 = "loss_fn_config_v2" in pb.ForwardBackwardRequest.DESCRIPTOR.fields_by_name
+requires_loss_fn_config_v2 = pytest.mark.skipif(
+    not _HAS_LOSS_FN_CONFIG_V2, reason="installed tinker SDK predates loss_fn_config_v2 (0.27)"
+)
+
+
+@requires_loss_fn_config_v2
+def test_parse_forward_backward_request_prefers_v2_config():
+    """SDK >= 0.27 dual-writes loss_fn_config: numbers land in both the legacy
+    float map and loss_fn_config_v2, strings only in v2. The parser must read
+    v2 so a string value is not silently dropped."""
+    body = encode_sdk_fwd_bwd_request(loss_fn_config={"clip_low_threshold": 0.2, "mode": "token"})
+    request_dict, _ = parse_forward_backward_request(body)
+    assert request_dict["forward_backward_input"]["loss_fn_config"] == {"clip_low_threshold": 0.2, "mode": "token"}
+
+    # No SkyRL loss takes a string parameter, so the API model rejects it
+    # (rather than the value vanishing before validation).
+    with pytest.raises(ValidationError):
+        api.ForwardBackwardRequest.model_validate(request_dict)
+
+
+@requires_loss_fn_config_v2
+def test_parse_forward_backward_request_v2_only_config():
+    """A sender that populates only loss_fn_config_v2 (no legacy mirror)."""
+    msg = pb.ForwardBackwardRequest()
+    msg.ParseFromString(encode_sdk_fwd_bwd_request())
+    msg.loss_fn_config_v2["clip_low_threshold"].number = 0.2
+    msg.loss_fn_config_v2["clip_high_threshold"].number = 0.3
+    assert not msg.loss_fn_config
+    request_dict, _ = parse_forward_backward_request(msg.SerializeToString())
+    assert request_dict["forward_backward_input"]["loss_fn_config"] == {
+        "clip_low_threshold": 0.2,
+        "clip_high_threshold": 0.3,
+    }
 
 
 def test_parse_forward_backward_request_garbage_raises():
