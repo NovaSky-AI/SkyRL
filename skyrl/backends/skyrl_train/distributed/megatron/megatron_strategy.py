@@ -326,6 +326,7 @@ class MegatronStrategy(DistributedStrategy):
         ):
             return False
         offload_megatron_grads_to_cpu(model.actor_module)
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
         return True
 

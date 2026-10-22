@@ -73,6 +73,7 @@ def test_grad_buffers_are_released_only_when_that_loses_nothing(monkeypatch, pen
     monkeypatch.setattr(strategy, "offload_megatron_grads_to_cpu", offload)
     monkeypatch.setattr(strategy, "megatron_grad_buffers_resident", Mock(return_value=resident))
     monkeypatch.setattr(strategy.torch.cuda, "empty_cache", Mock())
+    monkeypatch.setattr(strategy.torch.cuda, "synchronize", Mock())
     owner = strategy.MegatronStrategy.__new__(strategy.MegatronStrategy)
     owner.print = Mock()
     # A forward_backward leaves a pending sync until optim_step; the Tinker server can checkpoint in between.
