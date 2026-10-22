@@ -2,6 +2,7 @@
 
 import importlib
 import re
+from operator import attrgetter
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -15,9 +16,6 @@ from skyrl.backends.skyrl_train_backend import (  # noqa: E402
     MegatronBackendOverrides,
     SkyRLTrainBackend,
     _build_skyrl_train_config,
-    _built_values,
-    _check_backend_config_applied,
-    _config_value,
     _unapplied_adam_params,
 )
 from skyrl.tinker import types  # noqa: E402
@@ -85,16 +83,7 @@ def test_rejected(backend_config, kwargs, expected):
 def test_accepted(backend_config, kwargs, key, value):
     """Values equal to the server's, nested spellings, values in another JSON type and SkyRL-Train's own
     normalization build without an error."""
-    assert same_config_value(value, _config_value(_build(backend_config, **kwargs), key))
-
-
-def test_write_after_the_build_is_rejected():
-    """A value changed after the build, as _build_critic does for the critic's LoRA, is an error."""
-    cfg = _build({"trainer.critic.model.lora.rank": 16})
-    built = _built_values(cfg, {"trainer.critic.model.lora.rank": 16})
-    cfg.trainer.critic.model.lora.rank = 8
-    with pytest.raises(ValueError, match=re.escape("trainer.critic.model.lora.rank=16: the server uses 8")):
-        _check_backend_config_applied(cfg, built)
+    assert same_config_value(value, attrgetter(key)(_build(backend_config, **kwargs)))
 
 
 @pytest.mark.parametrize(

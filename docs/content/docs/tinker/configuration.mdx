@@ -46,7 +46,8 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 
 - `strategy`, `runtime_role` and `served_model_name` stop the server at startup.
 - The other keys are checked when the first `create_model` request sets up training (on an inference-only runtime, at the first sample request). That request fails with the error, which also appears in the server log.
-- A value the server changes after the config is built, such as a critic LoRA rank that differs from the critic's `create_model` request, is rejected the same way. Values that SkyRL-Train itself adjusts while building the config are kept, and SkyRL-Train logs a warning for each (for example `enforce_eager: true` with LoRA on vLLM).
+- The critic's LoRA rank and alpha are checked when the critic's `create_model` request arrives, which fails the same way.
+- Values that SkyRL-Train itself adjusts while building the config are kept, and SkyRL-Train logs a warning for each (for example `enforce_eager: true` with LoRA on vLLM).
 
 | Key | Set by | Rejected when |
 |-----|--------|---------------|
@@ -54,6 +55,7 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 | `runtime_role` | `--runtime-role` | the value differs from `--runtime-role` |
 | `trainer.policy.model.path`, `trainer.critic.model.path` | `--base-model` (or `--base-model-checkpoint-path`) | the value differs |
 | `trainer.{policy,critic}.model.lora.rank` | the LoRA rank the client passes to `create_model` | the value differs from the client's rank. With `--runtime-role inference` the policy rank is used as given: it enables LoRA on the inference engines |
+| `trainer.critic.model.lora.alpha` | the critic's `create_model` (the Tinker SDK always sends 32) | the value differs |
 | `trainer.{policy,critic}.optimizer_config.lr` | `AdamParams.learning_rate` on every `optim_step` | always |
 | `trainer.{policy,critic}.optimizer_config.scheduler`, `…num_warmup_steps` | the client, which schedules the learning rate | the value is not `constant_with_warmup` / `0` |
 | `trainer.algorithm.use_kl_loss` | not supported by the Tinker server | the value is `true` |
