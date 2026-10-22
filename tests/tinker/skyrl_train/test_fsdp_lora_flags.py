@@ -135,23 +135,33 @@ def _sample_tokens(training_client, sampler) -> list[int]:
 
 
 def _unload(port: int, model_id: str) -> None:
-    """Unload through the raw REST API; the SDK's high-level clients do not expose it."""
+    """Unload through the server's ``/api/v1/unload_model``; the SDK has no call for it.
+
+    tinker>=0.26 dropped ``models.unload``, so this posts through the generic client,
+    as ``tests/tinker/test_api.py`` does.
+    """
 
     async def unload():
         async with tinker._client.AsyncTinker(api_key=TINKER_API_KEY, base_url=f"http://0.0.0.0:{port}/") as client:
-            future = await client.models.unload(request=tinker_types.UnloadModelRequest(model_id=model_id))
-            while True:
-                # Read the raw body: the futures.retrieve union resolves to its first member.
-                response = await client.futures.with_raw_response.retrieve(
-                    request=tinker_types.FutureRetrieveRequest(request_id=future.request_id)
-                )
-                body = await response.json()
-                if body.get("type") != "try_again":
-                    return body
-                await asyncio.sleep(0.2)
+            future = await client.post(
+                "/api/v1/unload_model",
+                body=tinker_types.UnloadModelRequest(model_id=model_id).model_dump(mode="json"),
+                cast_to=tinker_types.UntypedAPIFuture,
+            )
+            async with asyncio.timeout(60):
+                while True:
+                    # Read the raw body: the futures.retrieve union resolves to its first member.
+                    response = await client.futures.with_raw_response.retrieve(
+                        request=tinker_types.FutureRetrieveRequest(request_id=future.request_id)
+                    )
+                    body = await response.json()
+                    if body.get("type") != "try_again":
+                        return body
+                    await asyncio.sleep(0.2)
 
     body = asyncio.run(unload())
     assert body.get("type") == "unload_model", body
+    assert body.get("model_id") == model_id, body
 
 
 @pytest.mark.parametrize(
