@@ -157,10 +157,9 @@ cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = "/mnt/local_s
 
 The optimizer step reads the state into the GPU one chunk at a time, runs Adam there, and writes it back, so
 the GPU holds one chunk at a time (`SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL`, default 200M elements, about
-2.4 GB) and host RAM holds only the staging buffers (one per rank and optimizer). The state file is read and
-written with O_DIRECT, so the state does not pass through the page cache (buffered I/O is the fallback where the
-filesystem refuses O_DIRECT). Unlike `optimizer_cpu_offload`, the update runs on the GPU and no gradients or state
-stay in host memory. With fp32 moments the result is identical to the regular optimizer. The cost is the I/O:
+2.4 GB) and host RAM holds only the staging buffers (one per rank and optimizer). The state file uses ordinary
+buffered I/O, so the kernel may keep recently used parts of it in the page cache, which is reclaimable. Unlike
+`optimizer_cpu_offload`, the update runs on the GPU and no gradients or state are held in host memory. With fp32 moments the result is identical to the regular optimizer. The cost is the I/O:
 every step reads and writes the whole state, 12 B x (local params / DP size) per GPU, so it pays off only on fast
 local NVMe. Each GPU needs that much free disk. Example:
 `examples/train/megatron/run_megatron_optimizer_offload_to_disk.sh`.

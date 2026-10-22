@@ -59,7 +59,6 @@ from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from skyrl.env_vars import SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL
 
 MOMENT_STORAGE_DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16}
-IO_ALIGN = 4096
 CHECKPOINT_SUBDIR = "optimizer_offload_to_disk"
 _MEMORY_FILESYSTEMS = ("tmpfs", "ramfs")
 
@@ -73,10 +72,6 @@ class OffloadToDiskSettings:
     """This run's state directory; each rank uses ``<dir>/rank<global rank>/``."""
     moment_storage_dtype: str = "fp32"
     staging_buffer_mb: int = 256
-
-
-def _align(nbytes: int) -> int:
-    return (nbytes + IO_ALIGN - 1) // IO_ALIGN * IO_ALIGN
 
 
 def filesystem_type(path: str, mounts: str = "/proc/mounts") -> str:
@@ -158,17 +153,9 @@ def _transfer_all(op, fd: int, offset: int, buf) -> None:
 
 
 class _StateFile:
-    """A preallocated file of raw tensor bytes, read and written through a pinned host buffer.
-
-    File I/O uses O_DIRECT, so the state does not pass through the page cache. O_DIRECT needs the buffer address,
-    file offset and length 4 KiB-aligned: the pinned buffer is page-aligned, every segment starts on a 4 KiB
-    boundary and is padded to one, and the last piece of a segment is rounded up into that padding. Where O_DIRECT
-    is refused (EINVAL), I/O falls back to buffered, with the file written back and dropped from the page cache
-    after each chunk.
-    """
+    """A preallocated file of raw tensor bytes, read and written through a pinned host buffer."""
 
     def __init__(self, path: str, nbytes: int, staging_bytes: int):
-        assert staging_bytes % IO_ALIGN == 0
         self.path = path
         self.fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
         try:
@@ -181,33 +168,6 @@ class _StateFile:
             os.ftruncate(self.fd, nbytes)
         self._staging = torch.empty(staging_bytes, dtype=torch.uint8, pin_memory=True)
         self._host = self._staging.numpy()
-        self.direct_fd = None
-        if self._staging.data_ptr() % IO_ALIGN != 0:
-            self._disable_direct("the pinned staging buffer is not 4 KiB-aligned")
-        else:
-            try:
-                self.direct_fd = os.open(path, os.O_RDWR | os.O_DIRECT | os.O_CLOEXEC)
-            except OSError as e:
-                if e.errno != errno.EINVAL:
-                    raise
-                self._disable_direct(e)
-
-    def _disable_direct(self, reason) -> None:
-        if self.direct_fd is not None:
-            os.close(self.direct_fd)
-            self.direct_fd = None
-        logger.warning(f"optimizer_offload_to_disk: O_DIRECT unavailable ({reason}); using buffered I/O")
-
-    def _io(self, op, offset: int, nbytes: int) -> None:
-        if self.direct_fd is not None:
-            try:
-                _transfer_all(op, self.direct_fd, offset, self._host[: _align(nbytes)])
-                return
-            except OSError as e:
-                if e.errno != errno.EINVAL:
-                    raise
-                self._disable_direct(e)
-        _transfer_all(op, self.fd, offset, self._host[:nbytes])
 
     def read(self, offset: int, out: torch.Tensor) -> None:
         """Fill the contiguous tensor ``out`` with the bytes at ``offset``."""
@@ -215,7 +175,7 @@ class _StateFile:
         step = self._staging.numel()
         for pos in range(0, data.numel(), step):
             n = min(step, data.numel() - pos)
-            self._io(os.preadv, offset + pos, n)
+            _transfer_all(os.preadv, self.fd, offset + pos, self._host[:n])
             data[pos : pos + n].copy_(self._staging[:n])
 
     def write(self, offset: int, tensor: torch.Tensor) -> int:
@@ -225,30 +185,14 @@ class _StateFile:
         for pos in range(0, data.numel(), step):
             n = min(step, data.numel() - pos)
             self._staging[:n].copy_(data[pos : pos + n])
-            self._io(os.pwritev, offset + pos, n)
+            _transfer_all(os.pwritev, self.fd, offset + pos, self._host[:n])
         return data.numel()
 
-    def drop_cached_pages(self) -> None:
-        """Write back dirty pages and drop the file from the page cache; only buffered I/O leaves any."""
-        if self.direct_fd is None:
-            _drop_cached_pages(self.path)
-
     def close(self) -> None:
-        for fd in (self.fd, self.direct_fd):
-            if fd is not None:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-
-
-def _drop_cached_pages(path: str) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        os.fdatasync(fd)
-        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-    finally:
-        os.close(fd)
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
 
 
 class DiskOptimizerStateStore:
@@ -344,7 +288,7 @@ class DiskOptimizerStateStore:
         return main + [("exp_avg", self.moment_dtype), ("exp_avg_sq", self.moment_dtype)]
 
     def _chunk_nbytes(self, chunk: _Chunk) -> int:
-        return sum(_align(chunk.numel * dtype.itemsize) for _, dtype in self._segments(chunk))
+        return sum(chunk.numel * dtype.itemsize for _, dtype in self._segments(chunk))
 
     def _param_data(self, chunk: _Chunk) -> torch.Tensor:
         return self.dist_opt.buffers[chunk.buffer_index].param_data[chunk.start : chunk.end]
@@ -360,15 +304,14 @@ class DiskOptimizerStateStore:
             stored = torch.empty(chunk.numel, dtype=dtype, device=torch.cuda.current_device())
             self.file.read(offset, stored)
             state[name] = stored.float()
-            offset += _align(chunk.numel * dtype.itemsize)
+            offset += chunk.numel * dtype.itemsize
         return state
 
     def _store_chunk(self, chunk: _Chunk, state: dict) -> None:
         offset = chunk.offset
         for name, dtype in self._segments(chunk):
             self.file.write(offset, state[name].to(dtype))
-            offset += _align(chunk.numel * dtype.itemsize)
-        self.file.drop_cached_pages()
+            offset += chunk.numel * dtype.itemsize
 
     def _adam(self, chunk: _Chunk, state: dict):
         """The regular optimizer's Adam over this chunk's runs, with each run's param group hyperparameters."""
@@ -421,7 +364,6 @@ class DiskOptimizerStateStore:
         for chunk in self.chunks:
             if chunk.main_on_disk:
                 written += self.file.write(chunk.offset, self._param_data(chunk).float())
-        self.file.drop_cached_pages()
         return written
 
     def close(self) -> None:
@@ -451,9 +393,6 @@ class DiskOptimizerStateStore:
         os.makedirs(dirpath, exist_ok=True)
         target = os.path.join(dirpath, "state.bin")
         shutil.copyfile(self.file.path, target)
-        # The copy is buffered: drop its pages, so a checkpoint does not fill the page cache with the state.
-        _drop_cached_pages(target)
-        _drop_cached_pages(self.file.path)
         with open(os.path.join(dirpath, "manifest.json"), "w") as f:
             json.dump(self._manifest(), f)
         logger.info(f"optimizer_offload_to_disk: saved {len(self.chunks)} chunks to {dirpath}")
@@ -484,8 +423,6 @@ class DiskOptimizerStateStore:
         if os.path.getsize(source) != expected:
             raise ValueError(f"{source} has {os.path.getsize(source)} bytes, expected {expected}.")
         shutil.copyfile(source, self.file.path)
-        _drop_cached_pages(self.file.path)
-        _drop_cached_pages(source)
         self.steps = manifest["steps"]
         logger.info(f"optimizer_offload_to_disk: loaded {len(self.chunks)} chunks from {dirpath}")
 
