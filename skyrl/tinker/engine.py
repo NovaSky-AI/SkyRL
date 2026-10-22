@@ -374,8 +374,9 @@ class TinkerEngine:
         backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
         backend_overrides = dict(config.backend_config)
         if config.backend in ("fsdp", "megatron"):
-            # Values the engine sets on the backend overrides itself. A backend_config value that
-            # differs would be overwritten here, so it is rejected instead.
+            # Values decided by the engine's own flags. runtime_role and served_model_name are written
+            # into the overrides below; strategy comes from the overrides class picked by --backend,
+            # and a backend_config "strategy" would replace it. A differing value is rejected.
             engine_values = {
                 "strategy": (config.backend, "set by --backend"),
                 "runtime_role": (config.runtime_role, "set by --runtime-role"),
