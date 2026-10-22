@@ -16,6 +16,18 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
   swapped in by `glm5_next/dsa.py`. Removal plan when bumping megatron: `patches/megatron/README.md`. Requires
   `language_model_only=True` (VL checkpoint) and packed sequences (`remove_microbatch_padding=True`).
 
+## Optimizer state on disk
+
+`megatron_config.optimizer_offload_to_disk` (`skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py`):
+`OffloadedDistributedOptimizer` subclasses megatron-core's `DistributedOptimizer`, keeps fp32 mains + Adam moments
+for each rank's contiguous DDP-bucket shards in one file per rank and optimizer, and streams them through the GPU in
+chunks during `step_with_ready_grads`. Its `_build_model_and_main_param_groups` is generated from the installed
+megatron-core source by replacing one line (`shard_main_param = shard_model_param.clone().float()`); a megatron-core
+bump that moves that line fails `tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py` (run with
+`--extra megatron`) and the GPU test. Correctness test (bit-identity vs the regular optimizer, 2 GPUs):
+`tests/backends/skyrl_train/gpu/gpu_ci/test_optimizer_offload_to_disk.py`. See also
+`skyrl/backends/skyrl_train/patches/megatron/README.md`.
+
 ## Parallelism Strategies
 
 For picking TP/PP/EP/CP/SP sizes, invoke the `parallelism-strategies` skill.

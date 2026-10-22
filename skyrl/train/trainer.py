@@ -627,6 +627,7 @@ class RayPPOTrainer:
             self._ray_gpu_monitor.stop()
 
         self._fire("on_train_end")
+        self.dispatch.release_optimizer_state_files("policy")
         self.tracker.finish()
         logger.info("Training done!")
 

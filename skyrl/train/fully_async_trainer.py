@@ -748,6 +748,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.dispatch.finalize_pending_saves("critic")
 
         await self.finalize_metrics("success")
+        self.dispatch.release_optimizer_state_files("policy")
         self.tracker.finish()
         logger.info("Training done!")
 
