@@ -35,7 +35,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 GLM5_3_FLASH_MODEL_NAME = "eatang/GLM-5.3-Flash-4layer"
 # 4-layer Qwen3.8-Flash-Next slice (3 GDN + 1 QSA attention, PLE, 512-expert MoE, gated
 # hyper-connections), the same checkpoint as the qwen3.8 megatron parity rows.
-QWEN3_8_FLASH_NEXT_MODEL_NAME = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xinyuangui2/Qwen3.8-Flash-Next-4layer")
+QWEN3_8_FLASH_NEXT_MODEL_NAME = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-Flash-Next-4layer")
 NUM_GPUS = 2
 
 

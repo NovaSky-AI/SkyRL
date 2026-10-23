@@ -1,6 +1,6 @@
 """Build an N-layer CI slice of Qwen3.8-Flash-Next (qwen4_exp).
 
-    uv run --isolated --with torch --with safetensors python examples/train/qwen3_8_flash_next/make_slice.py \
+    uv run --isolated --with torch --with safetensors --with numpy python examples/train/qwen3_8_flash_next/make_slice.py \
         <src_dir> <dst_dir> --num-layers 4 [--ple-vocab-base 2048]
 
 Keeps the first ``--num-layers`` text layers (4 covers every layer type: 3 GDN + 1 gated
@@ -16,7 +16,9 @@ derive the hashing from those, so they agree on the slice. ``--ple-vocab-base 0`
 table (symlinked shard files). ``layer_multipliers`` does not depend on the n-gram vocab size and
 is copied unchanged.
 
-Publish with e.g. ``hf upload <org>/Qwen3.8-Flash-Next-4layer <dst_dir>``.
+Published as ``xguihugging/Qwen3.8-Flash-Next-4layer``; republish with e.g. ``hf upload <org>/Qwen3.8-Flash-Next-4layer <dst_dir>``.
+For a local copy (``SKYRL_QWEN38_4LAYER_PATH``), keep "Qwen3.8-Flash-Next" in ``dst_dir``: the GPU tests
+key the model's settings on that name.
 """
 
 import argparse

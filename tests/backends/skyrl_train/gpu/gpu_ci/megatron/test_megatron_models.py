@@ -54,8 +54,9 @@ KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
 # 4-layer slice of Qwen/Qwen3.8-Flash-Next (layers 0-3: GDN x3 + gated attention with the QSA
 # indexer, PLE on layer 1, no MTP) built by examples/train/qwen3_8_flash_next/make_slice.py. The
 # released ~51B-parameter PLE n-gram table is replaced by a small random one (ngram_vocab_size_base
-# 2048), which HF, vLLM and the Megatron bridge all hash into the same way.
-QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xinyuangui2/Qwen3.8-Flash-Next-4layer")
+# 2048), which HF, vLLM and the Megatron bridge all hash into the same way. A local override must
+# keep "Qwen3.8-Flash-Next" in its path: the qwen3.8 settings below are keyed on the model name.
+QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-Flash-Next-4layer")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
