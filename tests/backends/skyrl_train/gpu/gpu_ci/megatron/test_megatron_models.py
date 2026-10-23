@@ -51,6 +51,12 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
+# 4-layer slice of Qwen/Qwen3.8-Flash-Next (layers 0-3: GDN x3 + gated attention with the QSA
+# indexer, PLE on layer 1, no MTP) built by examples/train/qwen3_8_flash_next/make_slice.py. The
+# released ~51B-parameter PLE n-gram table is replaced by a small random one (ngram_vocab_size_base
+# 2048), which HF, vLLM and the Megatron bridge all hash into the same way. A local override must
+# keep "Qwen3.8-Flash-Next" in its path: the qwen3.8 settings below are keyed on the model name.
+QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-Flash-Next-4layer")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -109,6 +115,13 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # max_num_seqs=1024 and 64 heads that is 65536 > 65535 and the CUDA-graph capture / profile
         # run fails with "Triton Error [CUDA]: invalid argument". Stay below the limit.
         cfg.generator.inference_engine.max_num_seqs = 512
+    if "qwen3.8-flash-next" in model_name.lower():
+        # VL checkpoint; patches/megatron/qwen4_exp bridges the language model only, and PLE
+        # needs packed (thd) sequences.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
     if "kimi-k2.5" in model_name.lower():
         # Unified VL checkpoint with a DeepSeek-V3 language model under a
         # `language_model.` prefix; MegatronWorker refuses it without
@@ -147,6 +160,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
+        or ("qwen3.8-flash-next" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -182,8 +196,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         # 600 s health-wait default; production stages the same ceiling. This
         # is a ceiling, not a duration — warm caches boot in minutes.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = "7200"
+    if "qwen3.8-flash-next" in model_name.lower():
+        # A cold node JIT-builds flashinfer's trtllm_mnnvl_comm (~8 min) at vLLM startup, past
+        # the 600 s health-wait default. A ceiling, not a duration.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = "1800"
     # fla's TileLang GDN backend aborts on Blackwell; fall back to Triton.
-    if "qwen3.5" in model_name.lower():
+    if "qwen3.5" in model_name.lower() or "qwen3.8-flash-next" in model_name.lower():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0" if is_blackwell_or_newer() else "1")
     # Same story for GLM-5.3-Flash's KDA layers, which run fla kernels too. Only forced on
     # Blackwell so the H100 rows keep whatever fla picks by default.
@@ -247,6 +265,14 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # colocated with the Megatron shard. The DSA indexer in vLLM needs DeepGEMM.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if "qwen3.8-flash-next" in model_name.lower():
+        # 262k default context; the slice is ~11B params (4 x 512-expert MoE layers, the embedding
+        # and LM head), colocated with the Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+        # Custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's
+        # cumem allocator at TP>1 (custom_all_reduce.cuh:164 'invalid argument' at engine start).
+        overrides["engine_init_kwargs"]["disable_custom_all_reduce"] = True
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.
@@ -547,6 +573,27 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-35b-a3b_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
+        # Qwen3.8-Flash-Next 4-layer slice (QWEN38_4LAYER) on 4xH100-80G: GDN with a sigmoid output
+        # gate, gated attention with the QSA indexer (dense regime: sequences stay under
+        # indexer_budget), 512-expert shared-expert MoE, gated low-rank hyper-connections, the PLE
+        # n-gram embedding sharded over EP=4, and the final hyper-connection mixer. The bridge
+        # supports TP=1 only, so EP is the training axis; vLLM runs TP=4.
+        pytest.param(
+            1,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            QWEN38_4LAYER,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="qwen3.8-flash-next-4layer_h100_ep4",
+            marks=pytest.mark.h100,
+        ),
         # Full-FP8 rows: blockwise FP8 Megatron compute + FP8 vLLM rollout fed
         # by serialized blockwise weight sync; the fp8_param row additionally
         # keeps persistent FP8 Megatron params with exact optimizer-master
@@ -688,7 +735,9 @@ async def test_logprobs_matching_roundtrip(
     Check that logprob diff matches acrosss vllm and megatron.
     """
     # See the comparison branch at the end of the test.
-    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
+    compare_common_prefix = (
+        bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or "qwen3.8-flash-next" in model_name.lower()
+    )
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which
@@ -881,7 +930,9 @@ async def test_logprobs_matching_roundtrip(
             # score different tokens and the diff is noise. FP8 rows ran on identical
             # synced weights (~0.14 positional vs ~1e-3 on prefixes); the Kimi slice
             # has a flat enough distribution that 53 of 80 sequences diverged
-            # (~0.93 positional vs ~0.008 on prefixes).
+            # (~0.93 positional vs ~0.008 on prefixes). So does the 4-of-48-layer
+            # Qwen3.8-Flash-Next slice, whose greedy output differs between two
+            # unsynced runs of the same engine.
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]

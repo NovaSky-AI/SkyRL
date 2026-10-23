@@ -30,6 +30,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF |
+| `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -198,6 +200,31 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
     - the mHC scale mappings.
   - Delete `glm5_next/`.
 - **Verify:** the full [Verification](#verification) set.
+
+## Qwen3.8-Flash-Next (`qwen4_exp`)
+
+### NVIDIA-NeMo/Megatron-Bridge#6123 / #6354 (on NVIDIA/Megatron-LM#7393 / #7553): the model
+
+- **Carried as:** `qwen4_exp/`: `modules.py` (gated low-rank hyper-connection, final mixer, PLE
+  n-gram embedding, sigmoid-gated GDN, the frozen QSA indexer and its sparse attention:
+  chunked SDPA, or FlexAttention on CUDA), `layer_specs.py`,
+  `provider.py`, and `bridge.py` (`Qwen4ExpBridge`, registered for
+  `Qwen4ExpForConditionalGeneration` on import).
+- **Landed?** Megatron-Bridge registers a bridge for `Qwen4ExpForConditionalGeneration` /
+  `model_type="qwen4_exp"` (under `megatron/bridge/models/qwen*`), and megatron-core has the
+  gated-residual hyper-connection, PLE and the sigmoid GDN output gate (Megatron-LM#7393).
+- **Remove:**
+  - `workers/megatron/model_bridges.py`: drop the `qwen4_exp` import.
+  - `workers/megatron/megatron_worker.py`: re-check the `qwen4_exp` `language_model_only` guard
+    against what upstream builds.
+  - Before deleting, compare with upstream: PLE table sharding (here: by n-gram head over the EP
+    group, loaded outside the bridge, never exported), packed-sequence boundary handling in PLE,
+    QSA top-k block selection past `indexer_budget + compress_ratio - 1` tokens (ties, dtype of
+    the indexer scores), and the unexported MTP head.
+  - Delete `qwen4_exp/` and `tests/.../patches/megatron/qwen4_exp/`.
+- **Verify:** `patches/megatron/qwen4_exp/test_qwen4_exp_{modules,qsa}.py`; the
+  `qwen3.8-flash-next-4layer_*` rows of `gpu_ci/megatron/test_megatron_{,lora_}models.py` and
+  `gpu_ci/megatron/test_qwen38_qsa_long_context.py` (~8K tokens, sparse regime).
 
 ## Standalone patches
 

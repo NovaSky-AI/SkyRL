@@ -44,6 +44,7 @@ from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_models import (
     MAX_GENERATE_LENGTH,
+    QWEN38_4LAYER,
     _engine_overrides_for_model,
     _extra_env_vars_for_model,
     generate_with_vllm,
@@ -205,6 +206,25 @@ async def _sync_weights(policy, client, cfg, label: str):
             1e-1,
             False,
             id="glm-5.3-flash-4layer_h100_tp2_ep4_adapter",
+            marks=pytest.mark.h100,
+        ),
+        # Qwen3.8-Flash-Next 4-layer slice, same mesh as its row in test_megatron_models.py.
+        # "all-linear" adapts linear_qkv/linear_proj (gated attention), in_proj/out_proj (GDN) and
+        # linear_fc1/fc2 (shared + routed experts); PLE, hyper-connections, router and the QSA
+        # indexer stay frozen. Adapter sync is what the recipe runs: merge_lora=True re-sends the
+        # whole model and does not fit at full size.
+        pytest.param(
+            1,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            QWEN38_4LAYER,
+            1e-1,
+            False,
+            id="qwen3.8-flash-next-4layer_h100_ep4_adapter",
             marks=pytest.mark.h100,
         ),
     ],
