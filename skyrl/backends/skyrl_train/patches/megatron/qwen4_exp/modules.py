@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from huggingface_hub import hf_hub_download
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet
 from megatron.core.transformer.transformer_config import TransformerConfig
 from safetensors import safe_open
@@ -167,12 +168,19 @@ class Qwen4ExpPLE(nn.Module):
         self.heads_per_rank = self.ngram_heads // size
         heads = range(rank * self.heads_per_rank, (rank + 1) * self.heads_per_rank)
 
-        with open(os.path.join(self._hf_path, "model.safetensors.index.json")) as f:
+        def local(filename):
+            # The bridge passes the model as given: a local directory or a hub repo id. The latter
+            # only fetches the index and the PLE files, through the HF cache.
+            if os.path.isdir(self._hf_path):
+                return os.path.join(self._hf_path, filename)
+            return hf_hub_download(self._hf_path, filename)
+
+        with open(local("model.safetensors.index.json")) as f:
             weight_map = json.load(f)["weight_map"]
         prefix = f"{self._hf_prefix}ple_embedding."
 
         def read(name):
-            with safe_open(os.path.join(self._hf_path, weight_map[prefix + name]), framework="pt") as f:
+            with safe_open(local(weight_map[prefix + name]), framework="pt") as f:
                 return f.get_tensor(prefix + name)
 
         dev = torch.cuda.current_device()
@@ -193,7 +201,7 @@ class Qwen4ExpPLE(nn.Module):
         table = torch.empty(row_hi - row_lo, self.head_dim, dtype=torch.bfloat16, pin_memory=True)
         start = 0
         for name in shard_names:
-            with safe_open(os.path.join(self._hf_path, weight_map[name]), framework="pt") as f:
+            with safe_open(local(weight_map[name]), framework="pt") as f:
                 sl = f.get_slice(name)
                 rows = sl.get_shape()[0]
                 lo, hi = max(start, row_lo), min(start + rows, row_hi)
