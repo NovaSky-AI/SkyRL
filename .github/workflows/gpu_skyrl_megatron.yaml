@@ -39,6 +39,7 @@ jobs:
         (
           github.event_name == 'pull_request_target' &&
           !github.event.pull_request.draft &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
           github.event.label.name == 'run_megatron_gpu_ci'
         )
       )
@@ -53,9 +54,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
           # The Anyscale job uploads this working dir, so we need the PR head.
-          # Fork code only reaches here after a maintainer applies the gating
-          # label above; don't leave the base repo token on disk for it.
-          allow-unsafe-pr-checkout: true
+          # Do not leave the base repo token in the uploaded checkout.
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v5
