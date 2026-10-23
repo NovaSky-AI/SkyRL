@@ -1379,7 +1379,7 @@ def compute_grpo_outcome_advantage(
                 id2mean[idx] = torch.tensor(0.0)
                 id2std[idx] = torch.tensor(1.0)
             elif len(id2score[idx]) > 1:
-                group_scores = torch.tensor(id2score[idx])
+                group_scores = torch.stack(id2score[idx])
                 if (group_scores == group_scores[0]).all():
                     # Every response in the group has the same score, so
                     # every advantage is exactly zero. The float32 mean of
@@ -1389,7 +1389,7 @@ def compute_grpo_outcome_advantage(
                     # group a small nonzero advantage. Using the shared
                     # score as the mean keeps the centered scores at zero.
                     id2mean[idx] = group_scores[0]
-                    id2std[idx] = torch.tensor(1.0)
+                    id2std[idx] = torch.tensor(1.0, device=group_scores.device)
                 else:
                     id2mean[idx] = torch.mean(group_scores)
                     id2std[idx] = torch.std(group_scores)
