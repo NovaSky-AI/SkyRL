@@ -1,9 +1,12 @@
 import importlib
 import sys
 from types import ModuleType
+from unittest.mock import Mock
 
 import pytest
 import torch
+
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 
 
 def _import_model_utils_without_megatron_extensions():
@@ -102,3 +105,41 @@ def test_vocab_entropy_auto_chunk_accounts_for_leading_dimensions():
 def test_vocab_entropy_chunk_resolver_rejects_invalid_values(chunk_size, memory_mb):
     with pytest.raises(ValueError):
         model_utils._resolve_vocab_entropy_chunk_size(torch.empty(1, 4, 8), chunk_size, memory_mb)
+
+
+@pytest.mark.parametrize("backend", [FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE])
+def test_fused_lm_head_dispatch_propagates_triton_errors(monkeypatch, backend):
+    module_name = "skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton"
+    args = (torch.randn(1, 2, 3), torch.randn(5, 3), torch.tensor([[1, 2]]), 0, 5, 2, None, False)
+    monkeypatch.setitem(sys.modules, module_name, None)
+    with pytest.raises(ModuleNotFoundError, match="fused_linear_logprob_triton"):
+        model_utils._fused_lm_head_logprob_apply(backend, *args)
+
+    module = ModuleType(module_name)
+    module.FusedLinearLogprobTriton = Mock()
+    module.FusedLinearLogprobTriton.apply.side_effect = RuntimeError("unsupported target")
+    monkeypatch.setitem(sys.modules, module_name, module)
+    with pytest.raises(RuntimeError, match="unsupported target"):
+        model_utils._fused_lm_head_logprob_apply(backend, *args)
+
+
+def test_torch_lm_head_dispatch_does_not_import_triton(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton", None
+    )
+    expected = torch.randn(1, 2)
+    apply = Mock(return_value=expected)
+    monkeypatch.setattr(model_utils.FusedLinearChunkedDistributedLogprob, "apply", apply)
+    result = model_utils._fused_lm_head_logprob_apply(
+        FusedLmHeadBackend.TORCH,
+        torch.randn(1, 2, 3),
+        torch.randn(5, 3),
+        torch.tensor([[1, 2]]),
+        0,
+        5,
+        2,
+        None,
+        False,
+    )
+    assert result is expected
+    apply.assert_called_once()

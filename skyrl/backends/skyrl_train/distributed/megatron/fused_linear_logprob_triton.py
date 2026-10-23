@@ -10,7 +10,6 @@
 #
 # Changes from upstream:
 #   * Replaced ``verl.utils.device`` with local torch.cuda helpers.
-#   * Made triton optional at import time via ``TRITON_AVAILABLE``.
 #   * Added SkyRL's TP-aware ``FusedLinearLogprobTriton`` adapter.
 #   * Autotune all reachable kernels with cached, bucketed token-shape keys;
 #     exact token counts remain runtime values to avoid recompilation churn.
@@ -61,8 +60,7 @@
 # limitations under the License.
 """Triton fused LM-head log-prob backend for SkyRL.
 
-The module is import-safe without triton; applying the adapter still requires
-CUDA + triton.
+This module requires Triton and is imported only when the Triton backend is selected.
 """
 
 import typing
@@ -70,6 +68,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import triton
+import triton.language as tl
 
 # Local replacements for verl.utils.device.
 is_cuda_available = torch.cuda.is_available()
@@ -89,43 +89,14 @@ def get_device_capability(device_id: int = 0):
     return (None, None)
 
 
-# Keep imports working without triton; decorated kernels become no-ops until called.
-try:
-    import triton
-    import triton.language as tl
+SUPPORT_CUDA_TMA = (
+    is_cuda_available
+    and get_device_capability()[0] is not None
+    and get_device_capability()[0] >= 9
+    and hasattr(tl, "make_tensor_descriptor")
+)
 
-    TRITON_AVAILABLE = True
-    HAVE_TRITON = True
-    SUPPORT_CUDA_TMA = (
-        is_cuda_available
-        and get_device_capability()[0] is not None
-        and get_device_capability()[0] >= 9
-        and hasattr(tl, "make_tensor_descriptor")
-    )
-except ImportError:
-    TRITON_AVAILABLE = False
-    HAVE_TRITON = False
-    SUPPORT_CUDA_TMA = False
-
-if not HAVE_TRITON:
-    from unittest.mock import MagicMock
-
-    def null_decorator(*args, **kwargs):
-        if len(kwargs) == 0 and len(args) == 1 and callable(args[0]):
-            return args[0]
-        else:
-
-            def inner(func):
-                return func
-
-            return inner
-
-    triton = MagicMock()
-    triton.jit = null_decorator
-    triton.autotune = null_decorator
-    tl = MagicMock()
-
-elif SUPPORT_CUDA_TMA:
+if SUPPORT_CUDA_TMA:
     # TMA descriptors require a global memory allocation.
     def alloc_fn(size: int, alignment: int, stream: typing.Optional[int]):
         return torch.empty(size, device=get_device_name(), dtype=torch.int8)
@@ -799,45 +770,42 @@ def efficient_entropy_forward(
     assert _accu.is_contiguous() and _entropy_b.is_contiguous() and _max.is_contiguous()
     assert _accu.is_cuda and _entropy_b.is_cuda and _max.is_cuda
 
-    if TRITON_AVAILABLE:
-        # 1D kernel launch, then split the tile
-        def mainloop_grid(meta):
-            return (triton.cdiv(num_tokens, meta["BLOCK_SIZE_M"]) * num_splits,)
+    # 1D kernel launch, then split the tile
+    def mainloop_grid(meta):
+        return (triton.cdiv(num_tokens, meta["BLOCK_SIZE_M"]) * num_splits,)
 
-        efficient_entropy_kernel_general_mainloop[mainloop_grid](
-            _rank,
-            hidden,
-            weight,
-            labels,
-            active_mask_ptr,
-            num_tokens,
-            _autotune_token_bucket(num_tokens),
-            hidden_size,
-            vocab_size,
-            vocab_per_split,
-            hidden.stride(0),
-            hidden.stride(1),
-            weight.stride(0),
-            weight.stride(1),
-            _max,
-            _max.stride(0),
-            _max.stride(1),
-            _accu,
-            _accu.stride(0),
-            _accu.stride(1),
-            _entropy_b,
-            _entropy_b.stride(0),
-            _entropy_b.stride(1),
-            _logprobs,
-            _logprobs.stride(0),
-            1.0 / temperature,
-            USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
-            HAS_ACTIVE_MASK=has_active_mask,
-            COMPUTE_ENTROPY=compute_entropy,
-            INPUT_PRECISION=_dot_input_precision(hidden),
-        )
-    else:
-        raise AssertionError("Triton is required for efficient entropy kernel")
+    efficient_entropy_kernel_general_mainloop[mainloop_grid](
+        _rank,
+        hidden,
+        weight,
+        labels,
+        active_mask_ptr,
+        num_tokens,
+        _autotune_token_bucket(num_tokens),
+        hidden_size,
+        vocab_size,
+        vocab_per_split,
+        hidden.stride(0),
+        hidden.stride(1),
+        weight.stride(0),
+        weight.stride(1),
+        _max,
+        _max.stride(0),
+        _max.stride(1),
+        _accu,
+        _accu.stride(0),
+        _accu.stride(1),
+        _entropy_b,
+        _entropy_b.stride(0),
+        _entropy_b.stride(1),
+        _logprobs,
+        _logprobs.stride(0),
+        1.0 / temperature,
+        USE_TMA=SUPPORT_CUDA_TMA and hidden.stride(1) == 1 and weight.stride(1) == 1,
+        HAS_ACTIVE_MASK=has_active_mask,
+        COMPUTE_ENTROPY=compute_entropy,
+        INPUT_PRECISION=_dot_input_precision(hidden),
+    )
 
     # reduction on maximum and maximum_indices
     def epilogue_grid(meta):
@@ -1291,10 +1259,6 @@ def efficient_entropy_backward(
 _OOV_LABEL_SENTINEL = torch.iinfo(torch.int64).max
 
 
-def _verl_logprob_kernel_available() -> bool:
-    return TRITON_AVAILABLE and is_cuda_available
-
-
 class FusedLinearLogprobTriton(torch.autograd.Function):
     """Triton fused LM-head + vocab-parallel log-prob of the target token.
 
@@ -1331,12 +1295,8 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
         compute_entropy: bool = False,
         entropy_requires_grad: bool = False,
     ) -> typing.Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        if not _verl_logprob_kernel_available():
-            raise RuntimeError(
-                "FusedLinearLogprobTriton requires Triton (and a CUDA device), but triton is not "
-                "importable. Use the Linux Megatron/FSDP dependency stack, or use the default pure-torch "
-                "'torch' backend (FusedLinearChunkedDistributedLogprob) instead."
-            )
+        if not hidden.is_cuda:
+            raise RuntimeError("Triton fused LM-head projection requires CUDA tensors")
         if entropy_requires_grad and not compute_entropy:
             raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
         if entropy_requires_grad and inference_only:
