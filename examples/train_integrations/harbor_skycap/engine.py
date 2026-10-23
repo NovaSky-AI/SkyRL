@@ -7,8 +7,8 @@ It is vLLM's generate wire with three differences, all SkyRL's:
 - routed experts and sampler support come back as packed
   ``{data, shape, dtype}`` envelopes, decoded with the same functions
   ``RemoteInferenceClient`` uses, so the two readers can't drift;
-- sampler support is asked for with ``return_sample_support`` and is padded
-  with ``-1`` to ``top_k``.
+- sampler support is asked for with ``return_sample_support`` and comes back
+  as CSR rows of at most ``top_k`` IDs.
 
 skycap sends the trajectory id as ``X-Session-ID``, so the router's session and
 the trajectory are the same one.
@@ -24,7 +24,6 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     decode_packed_routed_experts,
     decode_packed_sample_support,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_PADDING
 
 
 class SkyRLEngine(VLLMEngine):
@@ -48,6 +47,6 @@ class SkyRLEngine(VLLMEngine):
         except (TypeError, ValueError) as error:
             raise EngineError(f"unreadable side channel: {error}") from error
         if rows is not None:
-            if rows.shape[0] != len(output.completion_ids):
-                raise EngineError(f"{rows.shape[0]} sample-support rows for {len(output.completion_ids)} tokens")
-            output.sampling_mask = [[int(t) for t in row if t != SAMPLE_SUPPORT_PADDING] for row in rows]
+            if len(rows) != len(output.completion_ids):
+                raise EngineError(f"{len(rows)} sample-support rows for {len(output.completion_ids)} tokens")
+            output.sampling_mask = [rows.token_ids[a:b].tolist() for a, b in zip(rows.offsets[:-1], rows.offsets[1:])]

@@ -34,3 +34,22 @@ Note: Sequence parallelism is auto-enabled when `tensor_model_parallel_size > 1`
 ## Test Requirements
 
 Megatron GPU tests need: `NVTE_FLASH_ATTN=0`
+
+## LoRA adapter import (`lora.init_adapter_path`)
+
+- `skyrl/backends/skyrl_train/distributed/lora_import.py` (CPU, no megatron imports): parses a PEFT adapter
+  into per-module pieces with their PEFT scale (`rank_pattern` / `alpha_pattern` / rslora), folds Tinker's
+  `linear_attn.in_proj_q/k/v` into `in_proj_qkv`, stacks pieces block-diagonally, and folds per-module
+  scales for vLLM's uniform `lora_alpha / r`.
+- `skyrl/backends/skyrl_train/distributed/megatron/lora_import.py`: `SkyRLLoRA` (Megatron-Bridge `LoRA`
+  with per-module `module_dims`), `plan_megatron_lora_import` (adapter module -> Megatron module via the
+  bridge mapping registry, fused rank = sum of constituent ranks padded to TP), and
+  `load_peft_adapter_into_megatron` (places tensors through the bridge's adapter conversion tasks; the
+  fused `lora_B` row layout comes from running `_get_fused_adapter_linear_out_slices` on an index tensor).
+- `distributed/megatron/lora_output_layer.py`: `enable_output_layer_attr_passthrough`, applied in the LoRA
+  pre-wrap hook so a LoRA-wrapped `output_layer` answers `GPTModel._postprocess`'s reads/writes of
+  `gather_output` / `sequence_parallel` with its base linear's attributes.
+- Hooked in `MegatronWorker.configure_lora` (plan, targets, dims) and `make_megatron_module` (load after
+  `provide_distributed_model`). MoE expert adapters and `canonical_lora` raise `NotImplementedError`.
+- Test: `tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_lora_init_adapter.py` (HF+peft reference on
+  a tiny Qwen3.6-style GDN model built by `megatron_tiny_models/create_qwen36_dense_tiny.py`).

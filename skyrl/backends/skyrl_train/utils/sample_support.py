@@ -1,9 +1,12 @@
 """Per-token bounded sampler support used to renormalize rollout logprobs.
 
-Rows contain top-k vocabulary IDs and use trailing ``SAMPLE_SUPPORT_PADDING``.
-Tokens without captured support use an all-padding row.
+Support travels as CSR rows from the inference engine to the trainer: one row of
+vocabulary IDs per token, and an empty row for a token without captured support.
 """
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import IntEnum
 from typing import TypeAlias
 
 import numpy as np
@@ -14,36 +17,88 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataTrace,
     align_packed_token_metadata,
 )
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import (
+    PackedRaggedTensor,
+    RaggedRows,
+)
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
-SampleSupport: TypeAlias = np.ndarray
+# Outer ``cu_seqlens`` hold one segment of rows per trajectory; inner offsets name each row's members.
+PackedSampleSupport: TypeAlias = PackedRaggedTensor
 SAMPLE_SUPPORT_DTYPE = np.dtype(np.int32)
 SAMPLE_SUPPORT_TORCH_DTYPE = torch.int32
 SAMPLE_SUPPORT_DTYPES = frozenset({SAMPLE_SUPPORT_DTYPE})
-SAMPLE_SUPPORT_PADDING = -1
 SAMPLE_SUPPORT_FIELD = "rollout_sample_support"
 # Sentinel outside the valid packed-row range.
 SAMPLE_SUPPORT_NO_ROW = -1
 
 
-def validate_sample_support(sample_support: SampleSupport) -> SampleSupport:
-    """Validate vocabulary IDs and trailing padding."""
-    if not isinstance(sample_support, np.ndarray):
-        raise TypeError("sample support must be a NumPy array")
-    if sample_support.ndim != 2 or not np.issubdtype(sample_support.dtype, np.integer):
-        raise ValueError(
-            "sample support must be an integer [tokens, top_k] array, "
-            f"got shape {sample_support.shape} and dtype {sample_support.dtype}"
+class SampleSupportColumn(IntEnum):
+    """Index of each member column in sample support's ``columns``."""
+
+    TOKEN_IDS = 0
+
+
+@dataclass(frozen=True)
+class CompactSampleSupport(RaggedRows):
+    """CSR support rows for a span of tokens.
+
+    One int32 token-ID column plus int32 offsets. ``top_k`` bounds every row's length.
+    """
+
+    top_k: int
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.column_dtypes != (SAMPLE_SUPPORT_DTYPE,):
+            raise ValueError(f"compact support holds one int32 token-ID column, got {self.column_dtypes}")
+        if self.top_k < 1 or np.any(self.row_lengths > self.top_k) or np.any(self.token_ids < 0):
+            raise ValueError("compact support rows must hold at most a positive top_k nonnegative IDs")
+
+    @property
+    def token_ids(self) -> np.ndarray:
+        return self.columns[SampleSupportColumn.TOKEN_IDS]
+
+    @classmethod
+    def from_token_ids(
+        cls, token_ids: np.ndarray, row_lengths: Sequence[int] | np.ndarray, *, top_k: int
+    ) -> "CompactSampleSupport":
+        """Build rows from consecutive ``row_lengths`` runs of ``token_ids``."""
+        return cls.from_lengths((token_ids,), row_lengths, top_k=top_k)
+
+    @classmethod
+    def from_masked_rows(cls, ids: np.ndarray, present: np.ndarray) -> "CompactSampleSupport":
+        """Keep ``ids[present]`` row by row from ``[tokens, top_k]`` candidate grids."""
+        if ids.ndim != 2 or present.shape != ids.shape:
+            raise ValueError(f"support candidates must be matching [tokens, top_k] grids, got {ids.shape}")
+        # Boolean indexing is row-major, so each row keeps its candidate order.
+        members = np.ascontiguousarray(ids[present], dtype=SAMPLE_SUPPORT_DTYPE)
+        return cls.from_token_ids(members, present.sum(axis=1), top_k=ids.shape[1])
+
+    @classmethod
+    def empty(cls, num_rows: int, top_k: int) -> "CompactSampleSupport":
+        """``num_rows`` rows with no captured support."""
+        return cls.from_token_ids(
+            np.empty(0, dtype=SAMPLE_SUPPORT_DTYPE), np.zeros(num_rows, dtype=np.int64), top_k=top_k
         )
-    if int(sample_support.min(initial=0)) < SAMPLE_SUPPORT_PADDING:
-        raise ValueError(f"sample support IDs must be {SAMPLE_SUPPORT_PADDING} padding or non-negative vocab IDs")
-    if np.any((sample_support[:, :-1] == SAMPLE_SUPPORT_PADDING) & (sample_support[:, 1:] >= 0)):
-        raise ValueError(f"sample support padding must be trailing {SAMPLE_SUPPORT_PADDING} values")
-    return sample_support
+
+    @classmethod
+    def concat(cls, blocks: Sequence["CompactSampleSupport"]) -> "CompactSampleSupport":
+        if any(block.top_k != blocks[0].top_k for block in blocks):
+            raise ValueError("sample-support blocks must share top_k")
+        return super().concat(blocks)
+
+    def contains(self, token_ids: np.ndarray) -> np.ndarray:
+        """Per row, whether ``token_ids[row]`` is one of the row's members."""
+        if token_ids.shape != (self.num_rows,):
+            raise ValueError(f"expected {self.num_rows} token IDs, got shape {token_ids.shape}")
+        rows = np.repeat(np.arange(self.num_rows), self.row_lengths)
+        hits = rows[self.token_ids == token_ids[rows]]
+        return np.bincount(hits, minlength=self.num_rows) > 0
 
 
 def align_sample_support_row_ids(
-    sample_support: PackedTensor,
+    sample_support: PackedSampleSupport,
     layout: TokenMetadataLayout,
 ) -> torch.Tensor:
     """Map model positions to packed support rows.
@@ -72,7 +127,7 @@ def align_sample_support_row_ids(
             f"trajectories {trajectory_lengths.tolist()}"
         )
     row_ids = PackedTensor(
-        torch.arange(sample_support.values.shape[0], dtype=torch.long, device=sample_support.device),
+        torch.arange(int(sample_support.cu_seqlens[-1]), dtype=torch.long, device=sample_support.device),
         sample_support.cu_seqlens,
     )
     return align_packed_token_metadata(
@@ -93,13 +148,13 @@ class SampleSupportTrace:
     def num_rows(self) -> int:
         return self._metadata.num_rows
 
-    def append(self, sample_support: SampleSupport, *, expected_rows: int) -> None:
-        self._metadata.append(validate_sample_support(sample_support), expected_rows=expected_rows)
+    def append(self, sample_support: CompactSampleSupport, *, expected_rows: int) -> None:
+        self._metadata.append(sample_support, expected_rows=expected_rows)
 
     def append_padding(self, count: int) -> None:
-        self._metadata.append_padding(count, fill=SAMPLE_SUPPORT_PADDING)
+        self._metadata.append_padding(count)
 
-    def finalize(self, *, token_count: int, extra_rows: int) -> SampleSupport:
+    def finalize(self, *, token_count: int, extra_rows: int) -> CompactSampleSupport:
         """Validate the trace length and discard ``extra_rows`` trailing rows."""
         if self.num_rows != token_count + extra_rows:
             raise ValueError(

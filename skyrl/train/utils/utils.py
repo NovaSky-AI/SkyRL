@@ -279,6 +279,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
+    # The decoupled MTP draft loss rolls logits and labels without context parallelism (see the CP=1
+    # assert in MegatronModelWrapper), for every model.
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is not None and mtp.enabled and cfg.trainer.policy.megatron_config.context_parallel_size > 1:
+        raise ValueError("trainer.mtp.enabled=true is not supported with context_parallel_size > 1")
+
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
         # Megatron's fused top-k returns before compute_topk consults router_replay
@@ -743,6 +749,24 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
+    if lora_cfg.max_lora_rank is not None and lora_cfg.max_lora_rank < lora_cfg.rank:
+        raise ValueError(
+            f"trainer.policy.model.lora.max_lora_rank={lora_cfg.max_lora_rank} must be >= lora.rank={lora_cfg.rank}"
+        )
+    if lora_cfg.init_adapter_path:
+        if lora_cfg.rank <= 0:
+            raise ValueError("trainer.policy.model.lora.init_adapter_path requires lora.rank > 0 (the adapter's r)")
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError(
+                f"trainer.policy.model.lora.init_adapter_path is only supported with trainer.strategy=megatron, "
+                f"got {cfg.trainer.strategy!r}"
+            )
+        if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.megatron_config.lora_config.lora_type != "lora":
+            raise ValueError(
+                "trainer.policy.model.lora.init_adapter_path requires megatron_config.lora_config.lora_type='lora'"
+            )
+    if cfg.trainer.critic.model.lora.init_adapter_path:
+        raise ValueError("lora.init_adapter_path is only supported for the policy, not trainer.critic")
 
     if ie_cfg.scale_moe_lora_rank:
         megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config

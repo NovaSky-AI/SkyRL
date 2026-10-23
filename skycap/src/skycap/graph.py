@@ -68,6 +68,9 @@ class CallInfo:
     #: token. ``False`` means it was rendered from the messages instead (a harness edit, compaction,
     #: or a turn the renderer wouldn't extend); ``None`` for a trajectory's first call, or text mode.
     bridged: bool | None = None
+    #: The API the call came in on: a ``skycap.dialects.DialectType`` value, e.g. ``openai_responses``.
+    #: ``None`` in records written before dialects.
+    dialect: str | None = None
 
 
 @dataclass(slots=True)
