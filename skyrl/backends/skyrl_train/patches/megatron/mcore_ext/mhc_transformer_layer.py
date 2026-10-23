@@ -257,11 +257,21 @@ def chunked_mlp(
 class _ChunkedRouterReplay:
     """Router replay (R3) for ``chunked_mlp``.
 
-    The router uses ``replay.target_topk_idx`` as its routing result, but that holds the top-k of
-    the whole micro-batch as one tensor, while ``chunked_mlp`` calls the router once per chunk. So
-    each chunk gets its slice in ``target_topk_idx`` before its call, and the full tensor is put
-    back after the last one. The same goes for ``replay_backward_list`` (activation recompute):
-    its entry is split into one per chunk. Recorded top-k is concatenated back into one tensor.
+    ``RouterReplay`` assumes one router call per micro-batch:
+
+    - Expected: on replay, ``get_replay_topk`` returns ``target_topk_idx`` as the routing and
+      gathers the router's scores with it (``scores.gather(1, target_topk_idx)``), so the indices
+      must cover exactly the tokens of this call: ``[call_tokens, topk]``.
+    - Actual: ``target_topk_idx`` holds the whole micro-batch, ``[s * b, topk]``, while
+      ``chunked_mlp`` calls the router once per chunk, with scores of ``[chunk_tokens, experts]``.
+    - So the gather fails on the first chunk ("Size does not match at dimension 0").
+      Recompute (``REPLAY_BACKWARD``) pops one ``replay_backward_list`` entry per call, so the
+      second chunk would take the next micro-batch's entry. ``RECORD`` keeps only the last call's
+      indices, so the earlier chunks' routing would be lost.
+
+    So each chunk gets its slice in ``target_topk_idx`` before its call, and the full tensor is
+    put back after the last one. The micro-batch's ``replay_backward_list`` entry is split into
+    one per chunk. Recorded top-k is concatenated back into one tensor.
     """
 
     def __init__(self, mlp, chunk_tokens, pad_tokens=0):
