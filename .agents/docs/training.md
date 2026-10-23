@@ -4,6 +4,7 @@
 
 - **`skyrl/train/entrypoints/main_base.py`** — Primary training entrypoint. Handles inference server setup, training loop, weight sync.
 - **`skyrl/train/entrypoints/main_generate.py`** — Generation-only entrypoint (no training).
+- **`skyrl/train/entrypoints/main_opd.py`** — On-policy distillation entrypoint: a frozen teacher on an inference engine scores the student's rollouts (library code in `skyrl/train/opd/`, run scripts in `examples/train/on_policy_distillation/`).
 
 ## Running Training
 
