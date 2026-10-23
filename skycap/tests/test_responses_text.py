@@ -143,11 +143,6 @@ def calls(document: dict) -> list[dict]:
     return [call for node in document["nodes"] for call in node["calls"]]
 
 
-def last_event(body: bytes) -> dict:
-    lines = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
-    return orjson.loads([line for line in lines if line.startswith(b"data: ")][-1][6:])
-
-
 # -- forwarding and recording ---------------------------------------------------------------------------
 async def test_a_call_is_forwarded_as_sent_and_its_reply_relayed_and_recorded() -> None:
     async with responses_stack() as stack:
@@ -202,14 +197,14 @@ async def test_a_stream_reaches_the_client_byte_for_byte_and_the_sdk_reads_it() 
 
 
 # -- a length cut-off ------------------------------------------------------------------------------------
-@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("stream, chunk", [(False, 7), (True, 1), (True, 7), (True, 100_000)])
 @pytest.mark.parametrize("final", [None, "response.completed"], ids=["api", "vllm"])
-async def test_without_the_option_a_cut_off_reaches_the_client_as_the_upstream_sent_it(
-    stream: bool, final: str | None
+async def test_a_cut_off_reaches_the_client_as_the_upstream_sent_it_and_is_recorded_as_length(
+    stream: bool, chunk: int, final: str | None
 ) -> None:
     async with responses_stack() as stack:
         stack.upstream.status, stack.upstream.reason = "incomplete", "max_output_tokens"
-        stack.upstream.final = final
+        stack.upstream.chunk, stack.upstream.final = chunk, final
         created = await stack.create()
         _, body = await stack.call(created, {"model": "policy", "input": "q", "stream": stream})
         document = await stack.document(created)
@@ -218,40 +213,9 @@ async def test_without_the_option_a_cut_off_reaches_the_client_as_the_upstream_s
     assert [call["finish_reason"] for call in calls(document)] == ["length"]
 
 
-@pytest.mark.parametrize("chunk", [1, 7, 100_000])
-@pytest.mark.parametrize("final", [None, "response.completed"], ids=["api", "vllm"])
-async def test_with_the_option_a_cut_off_stream_ends_completed_and_is_recorded_as_length(
-    chunk: int, final: str | None
-) -> None:
-    async with responses_stack(length_as_completed=True) as stack:
-        stack.upstream.status, stack.upstream.reason = "incomplete", "max_output_tokens"
-        stack.upstream.chunk, stack.upstream.final = chunk, final
-        created = await stack.create()
-        _, body = await stack.call(created, {"model": "policy", "input": "q", "stream": True})
-        document = await stack.document(created)
-
-    final = last_event(body)
-    assert final["type"] == "response.completed"
-    assert final["response"]["status"] == "completed" and final["response"]["incomplete_details"] is None
-    # Everything before the final event is relayed untouched.
-    assert body.rsplit(b"event: ", 1)[0] == stack.upstream.sent.rsplit(b"event: ", 1)[0]
-    assert [call["finish_reason"] for call in calls(document)] == ["length"]
-
-
-async def test_with_the_option_a_cut_off_json_reply_is_completed_and_is_recorded_as_length() -> None:
-    async with responses_stack(length_as_completed=True) as stack:
-        stack.upstream.status, stack.upstream.reason = "incomplete", "max_output_tokens"
-        created = await stack.create()
-        reply = await openai_client(created["base_url"]).responses.create(model="policy", input="q")
-        document = await stack.document(created)
-
-    assert reply.status == "completed" and reply.incomplete_details is None
-    assert [call["finish_reason"] for call in calls(document)] == ["length"]
-
-
 @pytest.mark.parametrize("stream", [False, True])
 async def test_any_other_incomplete_reply_is_relayed_untouched_and_recorded_as_a_failure(stream: bool) -> None:
-    async with responses_stack(length_as_completed=True) as stack:
+    async with responses_stack() as stack:
         stack.upstream.status, stack.upstream.reason = "incomplete", "content_filter"
         created = await stack.create()
         _, body = await stack.call(created, {"model": "policy", "input": "q", "stream": stream})
@@ -310,7 +274,7 @@ async def test_a_stream_with_bare_cr_or_crlf_lines_is_relayed_without_waiting_fo
     eol: bytes,
 ) -> None:
     """The relay ends at the final event, not at EOF: an upstream that keeps the connection open must not stall."""
-    async with responses_stack(length_as_completed=True) as stack:
+    async with responses_stack() as stack:
         stack.upstream.eol, stack.upstream.linger, stack.upstream.chunk = eol, 30.0, 3
         stack.upstream.status, stack.upstream.reason = "incomplete", "max_output_tokens"
         created = await stack.create()
@@ -319,6 +283,5 @@ async def test_a_stream_with_bare_cr_or_crlf_lines_is_relayed_without_waiting_fo
         )
         document = await stack.document(created)
 
-    assert status == 200
-    assert last_event(body)["type"] == "response.completed"
+    assert status == 200 and body == stack.upstream.sent
     assert [call["finish_reason"] for call in calls(document)] == ["length"]

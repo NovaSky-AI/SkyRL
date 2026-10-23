@@ -40,7 +40,7 @@ from __future__ import annotations
 import itertools
 import secrets
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -159,7 +159,7 @@ class ResponsesDialect(Dialect):
 
     # -- token mode -----------------------------------------------------------------
     def reply(self, call: CallRequest, turn: Turn) -> dict[str, Any]:
-        cut_off = turn.finish_reason == "length" and not turn.length_as_completed
+        cut_off = turn.finish_reason == "length"
         return {
             **_echo(call),
             "id": f"resp_{turn.key}",
@@ -251,27 +251,6 @@ class ResponsesDialect(Dialect):
 
     def assembler(self) -> Assembler:
         return ResponsesAssembler()
-
-    def length_as_completed(self, payload: bytes, *, event: bool) -> bytes:
-        """A cut-off reply or final event, reported as completed.
-
-        Only a ``max_output_tokens`` cut-off changes; any other incomplete reason is kept. The final event is
-        read by its response's status, not its type: the API ends a cut-off stream with ``response.incomplete``,
-        but vLLM (0.31) with ``response.completed`` carrying ``status: "incomplete"``.
-        """
-        if not event:
-            body = orjson.loads(payload)
-            return orjson.dumps(_completed(body)) if _cut_off(body) else payload
-        frame = sse_json(payload)
-        if not isinstance(frame, dict) or frame.get("type") not in ("response.incomplete", "response.completed"):
-            return payload
-        response = frame.get("response")
-        if not isinstance(response, dict) or not _cut_off(response):
-            return payload
-        frame = {**frame, "type": "response.completed", "response": _completed(response)}
-        # The event's own line endings after its last line, whatever they were.
-        separator = payload[len(payload.rstrip(b"\r\n")) :]
-        return b"event: response.completed\ndata: " + orjson.dumps(frame) + (separator or b"\n\n")
 
 
 @dataclass(slots=True)
@@ -536,17 +515,6 @@ def _echo(call: CallRequest) -> dict[str, Any]:
         "text": body.get("text") or {"format": {"type": "text"}},
         "truncation": body.get("truncation") or "disabled",
     }
-
-
-def _cut_off(response: Mapping[str, Any]) -> bool:
-    return (
-        response.get("status") == "incomplete"
-        and (response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
-    )
-
-
-def _completed(response: Mapping[str, Any]) -> dict[str, Any]:
-    return {**response, "status": "completed", "incomplete_details": None}
 
 
 class _Events:

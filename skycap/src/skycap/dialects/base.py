@@ -102,8 +102,6 @@ class Turn:
     key: str
     #: The server's ``use_raw_content``.
     raw_content: bool = False
-    #: The server's ``length_as_completed``.
-    length_as_completed: bool = False
 
 
 @dataclass(slots=True)
@@ -221,14 +219,6 @@ class Dialect(ABC):
     @abstractmethod
     def assembler(self) -> Assembler:
         """A new assembler for one streamed reply."""
-
-    def length_as_completed(self, payload: bytes, *, event: bool) -> bytes:
-        """``payload`` (a whole reply, or one SSE event) with a length cut-off reported as completed.
-
-        For the server option of that name. By default the payload is unchanged: an API whose clients
-        don't treat a cut-off as a failure needs nothing.
-        """
-        return payload
 
 
 #: An SSE line ending: CRLF, LF or a bare CR, mixed freely within one stream.

@@ -64,10 +64,10 @@ parsed items. A `developer` message is folded into the leading `system` message
 when the tokenizer's chat template has no such role, as vLLM does, for either
 API. Each call records its API as `calls[].dialect`.
 
-A Responses client may treat a length cut-off (`status: "incomplete"`) as a
-failure: Codex resamples it up to five times. `--length-as-completed` reports
-the cut-off as `completed` instead, in either mode. The record still says
-`finish_reason: "length"`.
+A reply cut off at its token limit goes back as the API defines it,
+`status: "incomplete"` with reason `max_output_tokens`, and is recorded with
+`finish_reason: "length"`. What a client does with it is the harness's
+concern: Codex, for one, treats it as an error, retries, and fails the turn.
 
 ## Embed a server
 

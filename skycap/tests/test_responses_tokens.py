@@ -146,42 +146,17 @@ async def test_the_sdks_stream_helper_rebuilds_the_same_response_as_the_json_rep
 
 
 # -- a length cut-off -----------------------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "length_as_completed, status, last_event",
-    [(False, "incomplete", "response.incomplete"), (True, "completed", "response.completed")],
-)
-async def test_a_cut_off_is_reported_as_the_option_says_and_recorded_as_length(
-    length_as_completed: bool, status: str, last_event: str
-) -> None:
-    async with token_stack(length_as_completed=length_as_completed) as stack:
+async def test_a_cut_off_is_reported_incomplete_and_recorded_as_length() -> None:
+    async with token_stack() as stack:
         stack.engine.finish_reason = "length"
         created = await stack.create()
         whole = await client(created["base_url"]).responses.create(model="policy", input="hi")
         _, streamed, _ = await post(stack, created, {"model": "policy", "input": "hi", "stream": True})
         calls = [call for node in (await document(stack, created["id"]))["nodes"] for call in node["calls"]]
 
-    assert whole.status == status
-    assert (whole.incomplete_details is None) is length_as_completed
-    assert event_types(streamed)[-1] == last_event
+    assert whole.status == "incomplete" and whole.incomplete_details.reason == "max_output_tokens"
+    assert event_types(streamed)[-1] == "response.incomplete"
     assert [call["finish_reason"] for call in calls] == ["length", "length"]
-
-
-async def test_the_length_option_leaves_chat_as_it_was() -> None:
-    async with token_stack(length_as_completed=True) as stack:
-        stack.engine.finish_reason = "length"
-        created = await stack.create()
-        reply = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
-
-    assert reply.choices[0].finish_reason == "length"
-
-
-async def test_the_capture_records_the_length_option_only_when_on() -> None:
-    async with token_stack(length_as_completed=True) as stack:
-        on = stack.server.backend.describe()
-    async with token_stack() as stack:
-        off = stack.server.backend.describe()
-
-    assert on["length_as_completed"] is True and "length_as_completed" not in off
 
 
 # -- errors and refusals --------------------------------------------------------------------------------------

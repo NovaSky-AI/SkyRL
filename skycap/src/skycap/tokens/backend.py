@@ -54,17 +54,12 @@ class TokensBackend:
         sampling_mask: bool = False,
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
-        length_as_completed: bool = False,
     ) -> None:
         """
         ``use_raw_content`` answers with the completion's own text as ``content``, as vLLM does with no
         reasoning or tool-call parser: a thinking model's reasoning stays inline, and tool calls
         stay text. For a harness written against such a server, which replays ``content`` and
         drops ``reasoning_content``; with parsed replies it would edit every turn it replays.
-
-        ``length_as_completed`` reports a length cut-off to the client as completed where the API would
-        say otherwise (a Responses ``incomplete``), for a client that treats that as a failure and
-        resamples (Codex). The call is still recorded with ``finish_reason: "length"``.
         """
         self.engine_url = engine_url.rstrip("/")
         self.renderer = renderer
@@ -76,7 +71,6 @@ class TokensBackend:
         self.sampling_mask = sampling_mask
         self.logprobs_mode = logprobs_mode
         self.use_raw_content = use_raw_content
-        self.length_as_completed = length_as_completed
         #: The chat template ``developer`` messages are folded for, if the renderer exposes one.
         self.chat_template: str | None = getattr(renderer, "chat_template", None)
         self._locks: dict[str, asyncio.Lock] = {}
@@ -90,8 +84,6 @@ class TokensBackend:
             "logprobs_mode": self.logprobs_mode,
             "sampling_overrides": self.sampling_overrides,
             "use_raw_content": self.use_raw_content,
-            # Recorded only when on: it departs from the API, and older records never had it.
-            **({"length_as_completed": True} if self.length_as_completed else {}),
         }
 
     async def start(self) -> None:
@@ -262,7 +254,6 @@ class TokensBackend:
             completion_tokens=len(output.completion_ids),
             key=hashing.digest([len(planned.prompt_ids), output.completion_ids]),
             raw_content=self.use_raw_content,
-            length_as_completed=self.length_as_completed,
         )
         # The reply as the client's replay of it will be read back, which is what the next call
         # matches: stored as the node's message and hashed for its match hash.

@@ -25,15 +25,13 @@ _HOP_HEADERS = {"authorization", "host", "content-length", "transfer-encoding", 
 
 
 class TextBackend:
-    def __init__(self, upstream_url: str, *, api_key: str | None = None, length_as_completed: bool = False) -> None:
-        """``length_as_completed``: see ``TokensBackend``. Here the upstream's own reply is rewritten."""
+    def __init__(self, upstream_url: str, *, api_key: str | None = None) -> None:
         self.upstream_url = upstream_url.rstrip("/")
         self.api_key = api_key
-        self.length_as_completed = length_as_completed
         self._session: aiohttp.ClientSession | None = None
 
     def describe(self) -> dict[str, Any]:
-        return {"mode": "text", **({"length_as_completed": True} if self.length_as_completed else {})}
+        return {"mode": "text"}
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession(
@@ -87,12 +85,6 @@ class TextBackend:
                 except ValueError as error:
                     _fail(trajectory, up.status, f"unreadable reply: {error}")
                     return response
-                if self.length_as_completed and reply.finish_reason == "length":
-                    response = web.Response(
-                        body=dialect.length_as_completed(body, event=False),
-                        status=up.status,
-                        content_type=up.content_type,
-                    )
                 return retry.committed(response) if commit(trajectory, chat, reply, started) else response
         except aiohttp.ClientError as error:
             _fail(trajectory, None, f"upstream: {error}")
@@ -118,8 +110,7 @@ class TextBackend:
         assembler = dialect.assembler()
         # From the event that ends the turn on, events are held back until the reply is
         # committed: a client that stops at the end of the stream and finishes at once must
-        # find its last reply recorded. Events are relayed whole, so a held one can still be
-        # rewritten (``length_as_completed``).
+        # find its last reply recorded.
         held: list[bytes] = []
         try:
             async for chunk in up.content.iter_any():
@@ -143,9 +134,6 @@ class TextBackend:
             commit(trajectory, chat, reply, started)
         except ValueError as error:
             _fail(trajectory, up.status, f"unreadable stream: {error}")
-        else:
-            if self.length_as_completed and reply.finish_reason == "length":
-                held = [dialect.length_as_completed(event, event=True) for event in held]
         for event in held:
             await response.write(event)
         await response.write_eof()

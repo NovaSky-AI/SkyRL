@@ -68,16 +68,8 @@ def tool_call(call_id: str, name: str = "search", arguments: str = "{}") -> dict
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
 
 
-def sampled(message: dict, *, reason: str = "stop", length_as_completed: bool = False, key: str = "k1") -> Turn:
-    return Turn(
-        message=message,
-        finish_reason=reason,
-        model="policy",
-        prompt_tokens=7,
-        completion_tokens=3,
-        key=key,
-        length_as_completed=length_as_completed,
-    )
+def sampled(message: dict, *, reason: str = "stop", key: str = "k1") -> Turn:
+    return Turn(message=message, finish_reason=reason, model="policy", prompt_tokens=7, completion_tokens=3, key=key)
 
 
 def refused(match: str, items: Any, **body: Any) -> None:
@@ -544,19 +536,15 @@ def test_a_call_with_empty_arguments_still_has_an_arguments_string() -> None:
 
 
 @pytest.mark.parametrize(
-    "reason, length_as_completed, status, details",
+    "reason, status, details",
     [
-        ("stop", False, "completed", None),
-        ("tool_calls", False, "completed", None),
-        ("length", False, "incomplete", {"reason": "max_output_tokens"}),
-        ("length", True, "completed", None),
-        ("stop", True, "completed", None),
+        ("stop", "completed", None),
+        ("tool_calls", "completed", None),
+        ("length", "incomplete", {"reason": "max_output_tokens"}),
     ],
 )
-def test_status_follows_the_finish_reason_and_the_length_option(
-    reason: str, length_as_completed: bool, status: str, details: dict | None
-) -> None:
-    body = RESPONSES.reply(parse("q"), sampled(user_reply(), reason=reason, length_as_completed=length_as_completed))
+def test_status_follows_the_finish_reason(reason: str, status: str, details: dict | None) -> None:
+    body = RESPONSES.reply(parse("q"), sampled(user_reply(), reason=reason))
 
     assert body["status"] == status
     assert body["incomplete_details"] == details
@@ -749,11 +737,11 @@ def test_empty_text_and_arguments_send_no_delta() -> None:
     assert "response.output_text.done" in kinds and "response.function_call_arguments.done" in kinds
 
 
-@pytest.mark.parametrize("length_as_completed, last", [(False, "response.incomplete"), (True, "response.completed")])
-def test_a_cut_off_stream_ends_as_its_status_says(length_as_completed: bool, last: str) -> None:
-    events = stream_of(user_reply(), reason="length", length_as_completed=length_as_completed)
+def test_a_cut_off_stream_ends_incomplete() -> None:
+    events = stream_of(user_reply(), reason="length")
 
-    assert events[-1][0] == last
+    assert events[-1][0] == "response.incomplete"
+    assert events[-1][1]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
 # -- errors -----------------------------------------------------------------------------------------------
@@ -906,68 +894,17 @@ def test_the_assembler_reads_a_last_event_with_no_separator_on_flush() -> None:
     assert assembler.ending
 
 
-# -- text mode: reporting a cut-off as completed -----------------------------------------------------------
-def test_a_cut_off_json_reply_is_reported_completed() -> None:
-    body = orjson.dumps(response_object([said("a")], "incomplete", "max_output_tokens"))
-
-    rewritten = orjson.loads(RESPONSES.length_as_completed(body, event=False))
-
-    assert rewritten["status"] == "completed" and rewritten["incomplete_details"] is None
-    assert rewritten["output"] == [said("a")]
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        response_object([said("a")], "incomplete", "content_filter"),
-        response_object([said("a")]),
-    ],
-)
-def test_any_other_json_reply_is_left_byte_for_byte(body: dict) -> None:
-    raw = orjson.dumps(body)
-
-    assert RESPONSES.length_as_completed(raw, event=False) is raw
-
-
-@pytest.mark.parametrize("separator", [b"\n\n", b"\r\n\r\n"])
-# The API ends a cut-off stream with `response.incomplete`; vLLM 0.31 with `response.completed`, status incomplete.
+# The API ends a cut-off stream with `response.incomplete`; vLLM (0.31) with `response.completed` whose
+# response says `status: "incomplete"`. Either is read as the cut-off it is, and relayed as sent.
 @pytest.mark.parametrize("kind", ["response.incomplete", "response.completed"])
-def test_a_cut_off_final_event_is_rewritten_as_completed_keeping_its_separator(separator: bytes, kind: str) -> None:
-    event = sse(
-        {
-            "type": kind,
-            "sequence_number": 9,
-            "response": response_object([said("a")], "incomplete", "max_output_tokens"),
-        },
-        separator=separator,
-    )
+def test_a_cut_off_stream_is_read_as_length_whichever_final_event_carries_it(kind: str) -> None:
+    assembler = ResponsesAssembler()
+    final = {"type": kind, "response": response_object([said("a")], "incomplete", "max_output_tokens")}
+    events = assembler.feed(sse(final))
 
-    rewritten = RESPONSES.length_as_completed(event, event=True)
-
-    assert rewritten.endswith(separator) and rewritten.startswith(b"event: response.completed\ndata: ")
-    payload = orjson.loads(rewritten.split(b"\ndata: ", 1)[1].strip())
-    assert payload["type"] == "response.completed" and payload["sequence_number"] == 9
-    assert payload["response"]["status"] == "completed" and payload["response"]["incomplete_details"] is None
-
-
-@pytest.mark.parametrize(
-    "event",
-    [
-        sse({"type": "response.incomplete", "response": response_object([], "incomplete", "content_filter")}),
-        sse({"type": "response.completed", "response": response_object([])}),
-        sse({"type": "response.output_item.done", "output_index": 0, "item": said("a", status="incomplete")}),
-        b": keepalive\n\n",
-        b"event: response.incomplete\ndata: {not json\n\n",
-    ],
-)
-def test_any_other_event_is_left_byte_for_byte(event: bytes) -> None:
-    assert RESPONSES.length_as_completed(event, event=True) is event
-
-
-def test_chat_leaves_a_cut_off_alone() -> None:
-    raw = b'{"choices": [{"finish_reason": "length"}]}'
-
-    assert ChatDialect().length_as_completed(raw, event=False) is raw
+    assert [ending for _, ending in events] == [True]
+    reply = assembler.reply()
+    assert reply.finish_reason == "length" and reply.message == {"role": "assistant", "content": "a"}
 
 
 # -- the dialects themselves ---------------------------------------------------------------------------------
@@ -1106,15 +1043,6 @@ def test_data_split_over_lines_is_joined_before_it_is_decoded(eol: bytes) -> Non
 
     reply = assembler.reply()
     assert reply.finish_reason == "length" and reply.message == {"role": "assistant", "content": "a"}
-
-
-@pytest.mark.parametrize("eol", [b"\n", b"\r\n", b"\r"])
-def test_a_cut_off_event_with_data_over_several_lines_is_rewritten(eol: bytes) -> None:
-    rewritten = RESPONSES.length_as_completed(multi_line(CUT_OFF_EVENT, eol), event=True)
-
-    assert rewritten.endswith(eol + eol)
-    payload = orjson.loads(sse_data(rewritten))
-    assert payload["type"] == "response.completed" and payload["response"]["status"] == "completed"
 
 
 @pytest.mark.parametrize(
