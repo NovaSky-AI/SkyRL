@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    PolicyConfig,
     SkyRLTrainConfig,
     TrainerConfig,
     _resolve_class_type,
@@ -1610,3 +1611,39 @@ def test_validate_step_timeouts_warns_below_nccl_timeout():
         logger.remove(handler_id)
     (message,) = messages
     assert "trainer.weight_sync_timeout_s" in message and "NCCL watchdog" in message
+
+
+def _cp2_megatron_config():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.remove_microbatch_padding = True
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    return cfg
+
+
+def test_megatron_validation_refuses_mtp_with_cp():
+    cfg = _cp2_megatron_config()
+    cfg.trainer.mtp.enabled = True
+
+    with pytest.raises(ValueError, match="mtp.enabled=true is not supported with context_parallel_size > 1"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "target_modules, raises",
+    [
+        (["linear_qkv", "linear_proj", "output_layer"], True),
+        (["linear_qkv", "linear_proj"], False),
+        ("all-linear", False),
+    ],
+)
+def test_fused_lm_head_logprob_rejects_output_layer_lora(target_modules, raises):
+    """The fused LM head reads output_layer.weight directly, so it would skip an output_layer adapter."""
+    from skyrl.train.config.config import ModelConfig, SkyRLLoraConfig
+
+    policy = PolicyConfig(model=ModelConfig(lora=SkyRLLoraConfig(rank=8, target_modules=target_modules)))
+    if raises:
+        with pytest.raises(ValueError, match="fused_lm_head_logprob=True reads output_layer.weight"):
+            TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
+    else:
+        TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
