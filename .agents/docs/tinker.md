@@ -23,6 +23,27 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
 
 The API process spawns the engine as a child subprocess (via `uv run -m skyrl.tinker.engine`). If the engine crashes, the API server auto-terminates.
 
+### backend_config on the SkyRL-Train backends
+
+The server sets some SkyRL-Train config values itself: from its own flags (`--backend`,
+`--base-model`, `--runtime-role`) and from each client request (the LoRA rank in
+`create_model`, the learning rate in every `optim_step`). A `--backend-config` value that the
+server would replace is an error instead of being silently ignored:
+
+- A conflicting `strategy`, `runtime_role` or `served_model_name` stops the server at startup.
+- Everything else is checked when the first `create_model` request sets up training (on an
+  inference-only runtime, the first sample request). That request fails with one error that
+  lists every offending key and the value the server uses.
+- Values equal to the server's are accepted, and nested spellings
+  (`{"trainer.policy": {"optimizer_config": {"lr": 1e-5}}}`) are checked like dotted keys.
+
+The full list is under "Keys the server sets" in `docs/content/docs/tinker/configuration.mdx`.
+
+Only `AdamParams.learning_rate` is applied per `optim_step`. Betas, weight decay and
+gradient clipping come from `trainer.<role>.optimizer_config` and eps is 1e-8; on Megatron,
+`megatron_config.optimizer_config_kwargs` overrides any of them it sets. The server logs once
+per model which request values it does not use.
+
 ## Key API Endpoints
 
 All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a `request_id`, poll `retrieve_future`.
@@ -96,8 +117,8 @@ cloud URI (traces stage locally and each closed window is uploaded, then deleted
   in `backend_config`: the policy is offloaded between requests and the manual
   path uses `swap_tensors`, which fails while the profiler holds parameter
   references. Megatron is unaffected.
-- `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at
-  startup -- static config would fight the endpoints over `worker.profiler`.
+- `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected when
+  the config is built -- static config would fight the endpoints over `worker.profiler`.
 
 ## Testing
 
