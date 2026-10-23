@@ -282,6 +282,12 @@ class FSDPConfig(BaseConfig):
 class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
+    """Use asynchronous gradient reductions.
+
+    SkyRL starts reductions at ``optim_step`` after all accumulated forward/backward
+    requests, not during backward. Models using ``calculate_per_token_loss`` require
+    ``overlap_grad_reduce=False``.
+    """
     overlap_param_gather: bool = False
     fp8_param_gather: bool = False
     """Keep the DDP parameter all-gather in FP8.
