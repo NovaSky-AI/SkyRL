@@ -102,12 +102,19 @@ class OPDTrainer(RayPPOTrainer):
         # as one more per-row list.
         step_wise = self.cfg.generator.step_wise_trajectories
         routes_expected = self.cfg.generator.inference_engine.enable_return_routed_experts
-        generator_output = concatenate_generator_outputs(outputs, step_wise=step_wise, routes_expected=routes_expected)
+        support_expected = self.cfg.trainer.algorithm.enable_sample_support_replay
+        generator_output = concatenate_generator_outputs(
+            outputs, step_wise=step_wise, routes_expected=routes_expected, support_expected=support_expected
+        )
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
         generator_output.pop("rollout_metrics", None)
         validate_generator_output(
-            len(input_batch["prompts"]), generator_output, step_wise=step_wise, routes_expected=routes_expected
+            len(input_batch["prompts"]),
+            generator_output,
+            step_wise=step_wise,
+            routes_expected=routes_expected,
+            support_expected=support_expected,
         )
 
         self.all_metrics["opd/teacher_time_per_group_mean"] = (
