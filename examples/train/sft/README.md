@@ -152,6 +152,8 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 | `remove_microbatch_padding` | `true` | Pack multiple sequences per batch (requires flash attention) |
 | `use_sequence_packing` | `false` | Enable controller-level bin-packing across the global mini-batch. Megatron-only. Requires `remove_microbatch_padding=true` and `max_length` set. |
 | `max_tokens_per_microbatch` | `null` | Token budget per worker micro-batch when `use_sequence_packing=true`; must be `>= max_length`. `null` = `max_length` (one bin row per micro-batch). |
+| `align_packing_bins_to_dp` | `false` | Vary contiguous training-batch boundaries so the unpadded packed-bin count is DP-divisible. Requires sequence packing; custom samplers are unsupported. |
+| `packing_batch_size_allowed_variation` | `0.05` | Maximum fractional variation from `batch_size` when aligning packed bins to DP. |
 | `ckpt_path` | `""` | Checkpoint directory (empty = no checkpointing) |
 | `ckpt_interval` | `0` | Save a checkpoint every N steps (0 = only at end, if `ckpt_path` set) |
 | `resume_from` | `""` | Resume training: `""` = fresh start, `"latest"` = latest checkpoint, or path to `global_step_N` dir |
@@ -193,7 +195,8 @@ Example overrides on top of `run_sft_megatron_tulu3_50k.sh`:
 ```bash
 bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
     use_sequence_packing=true \
-    max_tokens_per_microbatch=4096
+    max_tokens_per_microbatch=4096 \
+    align_packing_bins_to_dp=true
 ```
 
 ## Samplers and the stateful dataloader
