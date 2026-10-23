@@ -71,7 +71,7 @@ class SkyrlCheckpointLoadMixin:
         from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
             _load_checkpoint_weights,
         )
-        from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload_finalize import (
+        from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (
             defer_model_finalize,
         )
 
@@ -293,14 +293,19 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
             finally:
                 self.skyrl_release_receive_buffers()
             return
-        from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload_finalize import (
+        from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (
             run_deferred_model_finalize,
+        )
+        from skyrl.backends.skyrl_train.patches.vllm.patch_moe_kernel_constants import (
+            restore_moe_kernel_constants,
         )
 
         with torch.device(self.device):
             super().finish_weight_update()
             # After vLLM's layerwise finalize has every layer back on device.
             run_deferred_model_finalize(self.model)
+            # A level-2 sleep zeroes MoE kernel constants that no reload rebuilds.
+            restore_moe_kernel_constants(self.model)
         skyrl_after_weight_update()
         empty_cuda_cache_rocm()
 

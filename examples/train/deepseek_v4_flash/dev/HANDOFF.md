@@ -10,11 +10,11 @@ Plan agreed with the user: **do DeepSeek-V4-Flash first, then DeepSeek-V4.1-Flas
 ## TL;DR
 
 - DSv4-Flash is mostly integration work: every upstream piece exists at our pins.
-- Stage 0: Megatron forward matches vLLM (slice 0.049, full model 0.040). LoRA row passes. Full-FT row fails
-  only on the post-sync check: vLLM's level-2 sleep loses DSv4 state that a reload doesn't restore (reproduced
-  without SkyRL). See "Post-sync mismatch".
-- Next action: find the lost tensor (checksum diff on node 8), patch it under patches/vllm, rerun the row,
-  then the full model on 2 nodes.
+- Stage 0 (slice): **full-FT roundtrip row passes** (rt15: Megatron vs vLLM 0.048 < 0.1; post-sync vLLM
+  common-prefix 0.016 < 0.05). LoRA row passed once (lora2) and then failed in Megatron's FlashMLA sparse forward
+  (lora3, `TOPK_LENGTH` unsupported by the kernel the dispatcher chose) -- open, see "LoRA: FlashMLA TOPK_LENGTH".
+- Full model: forward matches (0.040); sync needs 2 nodes (OOM on one).
+- Next: LoRA FlashMLA issue, full model on 2 nodes, then Stage 1.
 
 ## What is on this branch
 
@@ -138,6 +138,9 @@ New machine (logs in `$DSV4_ROOT/logs/rt<N>-*.log`):
    (common-prefix mode, since reverted) showed 80/80 sequences diverging at the first token.
 11. Diagnosis (see "Post-sync mismatch" below): export is bit-exact; the bug reproduces in plain vLLM.
 12. rt12: same 0.87 with fp32 kept on the wire -> confirms the export was not the cause.
+13. rt13: attn_sink fix alone: 0.89 (the MoE clamp loss remained).
+14. rt14: both vLLM fixes: positional 0.49 -- at the measured nondeterminism floor (0.39), not a weight problem.
+15. rt15: common-prefix check, threshold 0.05: **PASSED** (Megatron 0.048; post-sync prefix 0.016 over 3535 tokens).
 
 Other rows:
 - LoRA `deepseek-v4-flash-4layer_h100_tp1_ep4_adapter` (node 1): **PASSED** -- zero adapter 0.050, stale sampler
@@ -148,21 +151,41 @@ Other rows:
   `$DSV4_ROOT/models/DeepSeek-V4-Flash-bf16`, 530 GB, built by make_slice.py with all 43 layers): **forward
   matches, 0.040**. Sync OOMs on one node (Megatron ~87 GB + woken vLLM weights ~90 GB per GPU); rerun on 2 nodes.
 
-## Post-sync mismatch (open)
+## Post-sync mismatch (fixed)
 
-- Export check (temporary `test_dsv4_export_check.py`, not committed): `MegatronWeightSource` vs the slice
-  safetensors -- 3186/3186 tensors bit-exact once fp32 params stay fp32 on the wire (before: 38 fp32 tensors --
-  mHC `hc_*`, `attn_sink`, compressor `ape`, router `gate.bias` -- were rounded to bf16; `tid2eid` int64 went out as
-  bf16). `MegatronWeightSource._wire_dtype` now keeps fp32 and integer tensors in their own dtype.
-- vLLM-only (node 8, `vllm_reload_check.py`; 8 GSM8K prompts, greedy 64 tokens, common-prefix tokens / mean diff):
-  no reload 365 / 0.015 (vLLM DSv4 is not bit-reproducible run to run); `reload_weights` from disk 189 / 0.043;
-  **level-2 sleep + wake + reload from disk: 8 / 0.033 -- every sequence diverges at token 2.** So the post-sync
-  failure is vLLM's level-2 sleep path for DSv4: some state outside the checkpoint is not restored. Registered
-  buffers are saved/restored by the worker; plain tensor attributes are not. Bisecting with a per-tensor checksum
-  diff across sleep2+reload.
+Symptom: after a weight sync vLLM served a different model (rt10-14). Root cause: two pieces of vLLM state that a
+**level-2 sleep** zeroes and a layerwise reload never rebuilds (both reproduced and confirmed fixed in plain vLLM on
+node 8 with a per-tensor checksum diff across sleep2 + reload, `vllm_reload_check.py` in the session scratchpad):
 
-Padding note: with `remove_microbatch_padding=False`, `remove_left_padding` left-aligns every sequence,
-so the causal SWA/CSA/HCA attention never sees padding — correct for logprobs, just less efficient.
+1. `attn_sink` (every DSv4 attention layer): `DeepseekV4Model.load_weights` writes it with a direct
+   `params_dict[name][:n].copy_()`, bypassing `weight_loader`, so under layerwise reload the copy lands in the meta
+   placeholder and is dropped ("DeepseekV4FlashMLAAttention: Failed to load weights"); the restored pre-reload storage
+   is zeroed after a level-2 sleep. Fix: `patches/vllm/patch_deepseek_v4_reload.py` stashes sinks whose param is on
+   meta and writes them back (per-rank head slice, -inf padding) after `finalize_layerwise_reload`. Same module defers
+   the model-level finalize (mHC broadcast) to the end of the sync.
+2. `gemm1_clamp_limit` (FlashInfer CUTLASS MoE, `FlashInferExperts.__init__`, `torch.full` per expert from
+   `swiglu_limit`=10): a plain attribute of the kernel object, zeroed by the sleep -> every routed expert clamped to 0.
+   Model-agnostic fix: `patches/vllm/patch_moe_kernel_constants.py` refills `gemm1_clamp_limit` / `gemm1_alpha` /
+   `gemm1_beta` / `fake_input_scale` from the kernel's quant config after every full sync.
+
+With both: 0/122 tensors differ across sleep2 + reload. Test metric: vLLM's DSv4 kernels are not bit-reproducible run
+to run -- with **no sync at all** 52/80 greedy generations diverge and the positional post-sync diff is 0.386 (> the
+0.3 threshold), common prefixes agree to 0.014; sleep2 + patched reload gives 0.376 / 0.014. So the DSv4 rows use
+the test's common-prefix comparison (as Kimi / FP8 do) with `vllm_threshold` tightened 0.3 -> 0.05 (the broken sync
+measured 0.233 on prefixes, which 0.3 would have passed).
+
+Also found on the way (not the cause): the export is bit-exact (temporary `test_dsv4_export_check.py`, 3186/3186
+tensors) once `MegatronWeightSource._wire_dtype` keeps fp32 (mHC, sinks, router bias) and integer (`tid2eid`) tensors
+in their own dtype.
+
+## LoRA: FlashMLA TOPK_LENGTH (open)
+
+lora3 failed in the Megatron forward (no-grad CSA path: indexer top-k -> compacted indices -> `csa_sparse_attn(...,
+topk_length=...)` -> `flash_mla_sparse_fwd`): "The chosen implementation does not support all required features ...
+required but not supported: TOPK_LENGTH" (B200, SM100). lora2 passed with the same Megatron code, so it is
+data-dependent. A microbenchmark of `csa_sparse_attn` over seq 128-4096 x batch 1-2, top-k widths 128-640 and
+grad on/off never fails. Next: capture the failing inputs (temporary dump hook on node 1) and reproduce; candidate
+fix is the non-compact path (`topk_length=None`, -1 invalids -- same semantics) via a megatron patch.
 
 ## FlashInfer MoE autotune hang at vLLM boot (worked around)
 

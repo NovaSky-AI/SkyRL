@@ -511,7 +511,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             4,
             4,
             DEEPSEEK_V4_FLASH_4LAYER,
-            3e-1,
+            5e-2,
             1e-1,
             None,
             None,
@@ -527,7 +527,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             8,
             8,
             DEEPSEEK_V4_FLASH_FULL_BF16,
-            3e-1,
+            5e-2,
             1e-1,
             None,
             None,
@@ -754,8 +754,13 @@ async def test_logprobs_matching_roundtrip(
     """
     Check that logprob diff matches acrosss vllm and megatron.
     """
-    # See the comparison branch at the end of the test.
-    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
+    # See the comparison branch at the end of the test. vLLM's DeepSeek-V4 kernels are not bit-reproducible
+    # run to run: with no weight sync at all, 52/80 greedy generations diverge and the positional diff is
+    # 0.39, while the common prefixes agree to 0.014 (the DSv4 rows' threshold is set to fail a broken sync,
+    # which measured 0.23 on prefixes).
+    compare_common_prefix = (
+        bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or "deepseek-v4-flash" in model_name.lower()
+    )
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which
