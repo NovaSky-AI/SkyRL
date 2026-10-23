@@ -1,0 +1,24 @@
+{#- DeepSeek-V4 chat template: text-only system/user/assistant turns of encoding/encoding_dsv4.py
+    (no tools, tasks or reasoning-effort prefix). Pass `thinking=true` for thinking mode; the default
+    is chat mode, which closes the reasoning block right after <｜Assistant｜>. Reasoning from turns
+    before the last user message is dropped, as with the reference encoder's drop_thinking=True. -#}
+{%- set thinking = thinking | default(false) -%}
+{%- set ns = namespace(last_user=-1) -%}
+{%- for m in messages -%}{%- if m['role'] == 'user' -%}{%- set ns.last_user = loop.index0 -%}{%- endif -%}{%- endfor -%}
+{{- bos_token -}}
+{%- for m in messages -%}
+  {%- if m['role'] == 'system' -%}
+    {{- m['content'] or '' -}}
+  {%- elif m['role'] == 'user' -%}
+    {{- '<｜User｜>' + (m['content'] or '') -}}
+  {%- elif m['role'] == 'assistant' -%}
+    {%- if thinking and loop.index0 > ns.last_user -%}
+      {{- (m['reasoning_content'] or '') + '</think>' -}}
+    {%- endif -%}
+    {{- (m['content'] or '') + '<｜end▁of▁sentence｜>' -}}
+  {%- endif -%}
+  {%- if m['role'] == 'user' and (loop.last and add_generation_prompt or not loop.last and messages[loop.index0 + 1]['role'] == 'assistant') -%}
+    {{- '<｜Assistant｜>' -}}
+    {{- '<think>' if thinking and loop.index0 >= ns.last_user else '</think>' -}}
+  {%- endif -%}
+{%- endfor -%}

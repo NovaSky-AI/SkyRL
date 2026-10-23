@@ -51,6 +51,9 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
+# 4-layer BF16 slice of deepseek-ai/DeepSeek-V4-Flash (examples/train/deepseek_v4_flash/dev/make_slice.py).
+# Not on the Hub yet; override with a local path.
+DEEPSEEK_V4_FLASH_4LAYER = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_4LAYER", "DeepSeek-V4-Flash-4layer")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -137,6 +140,11 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
         cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
         cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
+    if "deepseek-v4-flash" in model_name.lower():
+        # megatron-core's DSv4 hybrid attention (CSA/HCA) asserts packed_seq_params is None at the
+        # pinned rev, so run the padded path: remove_left_padding left-aligns every sequence, and
+        # the causal sliding-window/compressed attention never reaches the trailing padding.
+        cfg.trainer.remove_microbatch_padding = False
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -147,6 +155,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
+        or ("deepseek-v4-flash" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -194,6 +203,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         # kernels during CUDA-graph capture, then runs the JIT kernel warmup and the FlashInfer
         # MoE autotune: ~490 s to healthy on B200, and a cold H100 CI runner exceeded the 600 s
         # default. Warm caches boot in ~2 min.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
+    if "deepseek-v4-flash" in model_name.lower():
+        # Cold-cache vLLM boot JIT-compiles the DSv4 sparse-MLA / mHC / indexer kernels and
+        # autotunes the MoE before the server reports healthy.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
         )
@@ -250,6 +265,11 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+    if "deepseek-v4-flash" in model_name.lower():
+        # 1M default context; the 4-layer slice is ~27B params (256 experts x 4 MoE layers),
+        # colocated with the Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
     return overrides
@@ -470,6 +490,29 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             2048,
             id="glm-5.3-flash-4layer_h100_tp2_ep4_kpool_beyond_topk",
+            marks=pytest.mark.h100,
+        ),
+        # DeepSeek-V4-Flash, 4-layer slice of the real checkpoint (source layers 0, 2, 3, 4): a
+        # sliding-window-only layer and a CSA layer (compress ratio 4 + lightning indexer), both
+        # hash-routed (tid2eid), then an HCA layer (ratio 128) and a CSA layer with score routing
+        # (sqrtsoftplus + expert bias). mHC on every block, clamped SwiGLU, grouped low-rank output
+        # projection, attention sinks. Exercises megatron-bridge's DeepSeekV4Bridge -> HybridModel
+        # and weight sync into vLLM's deepseek_v4 model. megatron-core's DSv4HybridAttention only
+        # supports TP=1 at the pinned rev, so attention is replicated and EP shards the experts.
+        pytest.param(
+            1,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            DEEPSEEK_V4_FLASH_4LAYER,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="deepseek-v4-flash-4layer_h100_tp1_ep4",
             marks=pytest.mark.h100,
         ),
         pytest.param(
