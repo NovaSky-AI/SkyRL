@@ -26,34 +26,47 @@ Plan agreed with the user: **do DeepSeek-V4-Flash first, then DeepSeek-V4.1-Flas
 | `tests/.../megatron/test_megatron_models.py` | New row `deepseek-v4-flash-4layer_h100_tp1_ep4` + per-model config: `remove_microbatch_padding=False`, `inference_only_init`, vLLM `max_model_len=4096`/`gmu=0.5`, 1800 s health timeout. Model path from `SKYRL_DEEPSEEK_V4_FLASH_4LAYER`. |
 | `skyrl/backends/skyrl_train/workers/megatron/megatron_worker.py` | Drops `core_attn` from selective recompute for `experimental_attention_variant == "dsv4_hybrid"` (recompute off if nothing remains). |
 
-## Artifacts (all on /shared — the home directory is NOT persistent on this workspace)
+## Machine: b200-resv-ray-0 (current, from 2026-10-23)
 
-- Full checkpoint: `/shared/models/DeepSeek-V4-Flash` (deepseek-ai/DeepSeek-V4-Flash @ `60d8d707`, 46 shards, 149 GB, complete).
-- 4-layer BF16 slice: `/shared/hackskyrl/dsv4_flash/DeepSeek-V4-Flash-4layer` (52 GB). Source layers
-  0, 2, 3, 4 -> compress ratios `[0, 4, 128, 4]` (SWA, CSA, HCA, CSA), `num_hash_layers=2` (layers 0-1
-  hash-routed via `tid2eid`, 2-3 score-routed with expert bias), 256 experts each. Not on the HF Hub yet
-  (hosting undecided; the default `HF_TOKEN` in this env is someone else's — don't publish with it).
-- Repo copy used by Ray jobs: `/shared/hackskyrl/dsv4_flash/SkyRL` (rsync of the worktree; workers can't see the head node's disk).
-- Job logs: `/shared/hackskyrl/dsv4_flash/logs_dsv4-rt-*.txt`.
-- uv cache: `/shared/hackskyrl/uv_cache` (warm `--extra megatron` env: torch 2.13+cu130, vLLM 0.31.0, transformers 5.16.1).
+Single node, 8 x B200 (183 GB), 224 CPUs, 3.9 TB RAM. Shared login box (other users run jobs here): check
+`nvidia-smi` before a GPU run, and kill only your own processes. No Ray cluster / Slurm / k8s; tests start
+their own Ray with `RAY_ADDRESS=local`. Sibling nodes (`b200-resv-ray-1`, `-3`) are not ssh-reachable and
+no filesystem is shared across nodes, so everything is single-node for now.
+
+Storage: `/` (home) is a persistent disk with ~30 GB free -- keep caches off it. `/workspace` is a shared
+persistent disk at 91%. Everything large lives on `/mnt/local_storage` (32 x local NVMe RAID0, 11 TB;
+**lost if the VM is stopped/preempted** -- the checkpoint re-downloads and the slice rebuilds).
+
+All under `DSV4_ROOT=/mnt/local_storage/avigyabb`:
+
+| What | Path |
+|---|---|
+| Full checkpoint (deepseek-ai/DeepSeek-V4-Flash @ `60d8d707`, 46 shards, 149 GB, verified vs index) | `models/DeepSeek-V4-Flash` |
+| 4-layer BF16 slice (52 GB) = `SKYRL_DEEPSEEK_V4_FLASH_4LAYER` | `models/DeepSeek-V4-Flash-4layer` |
+| GSM8K parquet (`~/data/gsm8k` symlinks here) | `data/gsm8k` |
+| uv cache (`UV_CACHE_DIR`; warm `--extra megatron` env) | `uv_cache` |
+| HF cache (`HF_HOME`; downloads are unauthenticated) | `hf_cache` |
+| vLLM cache (`VLLM_CACHE_ROOT`) / per-run FlashInfer autotune dirs | `vllm_cache/shared`, `vllm_cache/autotune/<run>` |
+| Logs | `logs/` (`rt<N>-<ts>.log` per roundtrip run) |
+
+Worktree: `/home/avigyabb/avigyabb/SkyRL-dsv4` (remote `fork` = avigyabb/SkyRL).
+
+Not on the HF Hub yet (needs a token from the user; never publish with a token found in the env).
 
 ## How to run
 
-Cluster: Anyscale workspace, 2 x 8xB200 worker nodes (head node has no usable GPUs). Never `ray stop`
-the cluster; stop only your own job. Tests use a nested `RAY_ADDRESS=local` Ray inside the job.
-
 ```bash
-rsync -a --delete --exclude .git --exclude '*.egg-info' --exclude .venv <worktree>/ /shared/hackskyrl/dsv4_flash/SkyRL/
-ray job submit --no-wait --entrypoint-num-gpus 8 --submission-id dsv4-rt-$(date +%s) -- \
-  bash /shared/hackskyrl/dsv4_flash/SkyRL/examples/train/deepseek_v4_flash/dev/run_roundtrip.sh \
-  "tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py::test_logprobs_matching_roundtrip[deepseek-v4-flash-4layer_h100_tp1_ep4]"
-ray job logs -f <id>
+cd /home/avigyabb/avigyabb/SkyRL-dsv4
+RUN_ID=rt<N>-$(date +%s) bash examples/train/deepseek_v4_flash/dev/run_roundtrip.sh \
+  "tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py::test_logprobs_matching_roundtrip[deepseek-v4-flash-4layer_h100_tp1_ep4]" \
+  > /mnt/local_storage/avigyabb/logs/$RUN_ID.log 2>&1
 ```
 
-A run takes ~12 min of env install the first time on a node (cached afterwards), ~5-10 min vLLM boot
-(JIT + autotune), then Megatron init/forward/sync. Rebuild the slice with
-`uv run --no-project --with torch --with safetensors --with numpy python make_slice.py <out_dir>`
-(`DSV4_LOCAL_DIR` points at the full checkpoint).
+The `h100` id is historical; the row runs on 4 of the B200s. Rebuild the slice with
+`DSV4_LOCAL_DIR=$DSV4_ROOT/models/DeepSeek-V4-Flash uv run --no-project --with torch --with safetensors --with numpy python make_slice.py $DSV4_ROOT/models/DeepSeek-V4-Flash-4layer`
+(~5 min, CPU). GSM8K: `examples/train/gsm8k/gsm8k_dataset.py --output_dir $DSV4_ROOT/data/gsm8k`.
+
+Previous machine (runs 1-3): Anyscale workspace, 2 x 8xB200 workers, artifacts on `/shared/...` (gone).
 
 ## Upstream status at our pins (all verified by reading the installed code)
 

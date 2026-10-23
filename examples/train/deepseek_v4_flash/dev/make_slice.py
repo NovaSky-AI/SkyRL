@@ -23,7 +23,7 @@ weights, and ``quantization_config`` is removed:
 The release ships no Jinja chat template, so ``../chat_template.jinja`` is embedded in the slice's
 ``tokenizer_config.json``.
 
-Reads the checkpoint from ``DSV4_LOCAL_DIR`` (default /shared/models/DeepSeek-V4-Flash).
+Reads the checkpoint from ``DSV4_LOCAL_DIR`` (default /mnt/local_storage/avigyabb/models/DeepSeek-V4-Flash).
 
 Usage: python make_slice.py <out_dir> [comma-separated layer ids, default 0,2,3,4]
 """
@@ -38,7 +38,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-LOCAL = os.environ.get("DSV4_LOCAL_DIR", "/shared/models/DeepSeek-V4-Flash")
+LOCAL = os.environ.get("DSV4_LOCAL_DIR", "/mnt/local_storage/avigyabb/models/DeepSeek-V4-Flash")
 SHARD_BYTES = 4 << 30
 FP8_BLOCK = 128
 FP4_BLOCK = 32

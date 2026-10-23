@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
-# DeepSeek-V4-Flash Megatron <-> vLLM roundtrip tests on a worker node, submitted as a Ray job:
-#   ray job submit --entrypoint-num-gpus 8 -- bash examples/train/deepseek_v4_flash/dev/run_roundtrip.sh <pytest args>
-# Run from a copy of the repo on /shared (worker nodes can't see the head node's disk).
+# DeepSeek-V4-Flash Megatron <-> vLLM roundtrip tests on a single 8-GPU node, run directly (no Ray job):
+#   bash examples/train/deepseek_v4_flash/dev/run_roundtrip.sh <pytest args> > $DSV4_ROOT/logs/rt-<id>.log 2>&1
+# Paths default to the b200-resv-ray-0 layout (local NVMe RAID under /mnt/local_storage); override via env.
 set -euo pipefail
 cd "$(dirname "$0")/../../../.."
+DSV4_ROOT=${DSV4_ROOT:-/mnt/local_storage/avigyabb}
+# Isolated Ray per test run; never attach to another user's cluster on a shared box.
 export RAY_ADDRESS=local
-# The job holds the whole node; a local raylet rejects a CUDA_VISIBLE_DEVICES subset of the node GPUs.
-unset CUDA_VISIBLE_DEVICES
-# Anyscale turns on event export to its aggregator; a nested local Ray has none and SEGVs on shutdown.
-export RAY_enable_core_worker_ray_event_to_aggregator=0 RAY_enable_ray_event=0
-# The outer Ray job's runtime env leaks into nested ray.init calls (vLLM's engine core); merge instead of failing.
-export RAY_OVERRIDE_JOB_RUNTIME_ENV=1
-# Tests read ~/data/gsm8k; worker nodes only have it on /shared.
-mkdir -p ~/data && ln -sfn /shared/hackskyrl/data/gsm8k ~/data/gsm8k
-export SKYRL_DEEPSEEK_V4_FLASH_4LAYER=${SKYRL_DEEPSEEK_V4_FLASH_4LAYER:-/shared/hackskyrl/dsv4_flash/DeepSeek-V4-Flash-4layer}
-export UV_CACHE_DIR=${UV_CACHE_DIR:-/shared/hackskyrl/uv_cache}
+# Tests read ~/data/gsm8k.
+mkdir -p ~/data
+[ -e ~/data/gsm8k ] || ln -sfn "$DSV4_ROOT/data/gsm8k" ~/data/gsm8k
+export SKYRL_DEEPSEEK_V4_FLASH_4LAYER=${SKYRL_DEEPSEEK_V4_FLASH_4LAYER:-$DSV4_ROOT/models/DeepSeek-V4-Flash-4layer}
+export UV_CACHE_DIR=${UV_CACHE_DIR:-$DSV4_ROOT/uv_cache}
+export HF_HOME=${HF_HOME:-$DSV4_ROOT/hf_cache}
+RUN_ID=${RUN_ID:-$(date +%s)}
+export VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-$DSV4_ROOT/vllm_cache/shared}
+# Fresh FlashInfer autotune cache per run: with a warm cache, vLLM boot hung with TP0 done and TP1-3 stuck in
+# the collective `trtllm::fused_moe::gemm1` tuning (HANDOFF.md, run 3); cold-cache boots were fine.
+export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:-$DSV4_ROOT/vllm_cache/autotune/$RUN_ID}
+export NVTE_FLASH_ATTN=0
+# The node env forces Google's gIB NCCL net plugin (/usr/local/gib, built for NCCL 2.27.5); the venv's NCCL 2.29.7
+# fails "Failed to initialize any NET plugin" -> ncclInvalidUsage at vLLM init. Single node needs no net plugin.
+unset NCCL_NET NCCL_TUNER_CONFIG_PATH
+export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '^/usr/local/gib' | paste -sd: -)
+echo "RUN_ID=$RUN_ID VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=$VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR SKYRL_DEEPSEEK_V4_FLASH_4LAYER=$SKYRL_DEEPSEEK_V4_FLASH_4LAYER"
 uv run --isolated --extra megatron --extra dev python -m pytest -s -v -m "h100 or not h100" "$@"
