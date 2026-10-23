@@ -8,7 +8,9 @@ and trains once.
 In token mode a row also carries the concatenated tokens of its path, aligned
 arrays for training: a loss mask over the sampled tokens of its targets, the
 rollout logprobs, the routed experts (when every node on the path has them) and
-the sampling mask (when every target has one).
+the sampling mask (when every target has one). Its multimodal items (images)
+come with it, in order, each with its placeholder offset in ``input_ids`` and
+the processor's arrays for it.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import numpy as np
 from skycap.graph import MessageGraph, Node
 from skycap.paths import PathRule, Row, all_paths, check_rows
 from skycap.tokens.engine import pack, unpack
+from skycap.tokens.renderer import Media
 
 
 @dataclass(slots=True)
@@ -38,6 +41,8 @@ class Sample:
     routed_experts: np.ndarray | None = None
     #: Per position, the ids the sampler could have drawn; empty where ``loss_mask`` is 0.
     sampling_mask: list[list[int]] | None = None
+    #: The path's multimodal items in order, offsets into ``input_ids``.
+    media: list[Media] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -50,6 +55,7 @@ class Sample:
             out.update(input_ids=self.input_ids, loss_mask=self.loss_mask, logprobs=self.logprobs)
             out["routed_experts"] = pack(self.routed_experts) if self.routed_experts is not None else None
             out["sampling_mask"] = _csr(self.sampling_mask) if self.sampling_mask is not None else None
+            out["media"] = [_media_json(item) for item in self.media]
         return out
 
     @classmethod
@@ -71,6 +77,7 @@ class Sample:
                 if mask is not None
                 else None
             ),
+            media=[_media_from_json(item) for item in data.get("media") or ()],
         )
 
 
@@ -100,10 +107,12 @@ def _fill_tokens(sample: Sample, nodes: list[Node], targets: set[int]) -> None:
     mask_rows: list[list[int]] | None = []
     saw_mask = False
     routed: list[np.ndarray] | None = []
+    media: list[Media] = []
     for node in nodes:
         tokens = node.tokens
         assert tokens is not None
         length = len(tokens.token_ids)
+        media.extend(item.shifted(len(input_ids)) for item in tokens.media)
         input_ids.extend(tokens.token_ids)
         logprobs.extend(tokens.logprobs if tokens.logprobs is not None else [0.0] * length)
         trains = node.id in targets and tokens.sampled_start is not None
@@ -125,9 +134,26 @@ def _fill_tokens(sample: Sample, nodes: list[Node], targets: set[int]) -> None:
             else:
                 routed.append(np.asarray(tokens.routed_experts))
     sample.input_ids, sample.loss_mask, sample.logprobs = input_ids, loss_mask, logprobs
+    sample.media = media
     sample.sampling_mask = mask_rows if saw_mask else None
     if routed:
         sample.routed_experts = np.concatenate(routed)
+
+
+def _media_json(item: Media) -> dict[str, Any]:
+    data = None if item.data is None else {key: pack(np.asarray(value)) for key, value in item.data.items()}
+    return {"modality": item.modality, "offset": item.offset, "length": item.length, "hash": item.hash, "data": data}
+
+
+def _media_from_json(item: dict[str, Any]) -> Media:
+    data = item.get("data")
+    return Media(
+        modality=item["modality"],
+        offset=item["offset"],
+        length=item["length"],
+        hash=item["hash"],
+        data=None if data is None else {key: unpack(value) for key, value in data.items()},
+    )
 
 
 def _csr(rows: list[list[int]]) -> dict[str, list[int]]:

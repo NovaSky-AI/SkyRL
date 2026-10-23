@@ -145,6 +145,7 @@ path that contains it, so a node shared by several paths trains once.
 | `text_offset`, `text_bytes` | the node's text is bytes `[text_offset, text_offset + text_bytes)` of `text`; `text_offset` is null when no text was recorded |
 | `experts_offset`, `experts_rows` | the node's rows of `routed_experts`; offset null when absent |
 | `mask_offset`, `mask_rows` | the node's rows of the sampling mask (one per sampled token); offset null when absent. A node with `mask_rows` 0 has no rows even when its offset is set, and the sidecar may not exist |
+| `media` | the multimodal items (images) whose placeholder tokens are in the node, in order: `{modality, offset, length, hash}`, where `offset` is relative to the node's first token and `hash` is the item's content hash. The item itself is in the node's `message`; its processed arrays are not recorded, so a `finish` answered from the record (a repeat, or after the TTL or a shutdown wrote it) of a trajectory with images answers with no samples. Empty for a model node, and for a node with no images |
 
 ## Sidecars
 

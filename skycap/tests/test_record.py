@@ -119,6 +119,7 @@ def test_the_files_are_split_by_who_reads_them(tmp_path: Path) -> None:
         "experts_rows": 4,
         "mask_offset": 0,
         "mask_rows": 3,
+        "media": [],
     }
     assert list(record.list_ids(tmp_path)) == ["tr_tokens"]
 

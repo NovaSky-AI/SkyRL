@@ -52,6 +52,27 @@ parser. Replies then match that server's: the completion's own text as
 turn back unchanged, and a thinking model's history stays one path. With parsed
 replies, every replayed turn would lose its thinking and fork the graph.
 
+### Images
+
+A vision-language model's messages carry images as OpenAI `image_url` content
+parts. The renderer processes them with the model's Hugging Face processor and
+lays out their placeholder tokens; every call sends the engine all the images
+in its prompt (vLLM's `features`), and each image is stored on the message
+node that sent it. A sample lists its path's images in order, with their
+placeholder offsets in `input_ids` and the processor's arrays
+(`pixel_values`, `image_grid_thw` for Qwen-VL), which is what training needs:
+
+```bash
+uv sync --extra tokens --extra multimodal   # plus torch and torchvision, for the processor
+uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
+  --tokenizer Qwen/Qwen3-VL-8B-Instruct --record-dir ./record
+```
+
+The renderer uses the model's own processor settings, so run the engine
+without `mm_processor_kwargs`: an image processed differently has a different
+number of placeholders than the engine expects. Encoding the images for the
+engine needs `vllm` installed beside skycap.
+
 ### APIs
 
 A trajectory serves two OpenAI APIs, each at its own path under its base URL:
@@ -201,7 +222,7 @@ async with pool.trajectory({"task": "t1", "step": 3}) as trajectory:
 result.status          # "finished", or "failed" if a turn couldn't be attributed exactly
 for sample in result.samples:
     sample.input_ids, sample.loss_mask, sample.logprobs
-    sample.routed_experts, sample.sampling_mask
+    sample.routed_experts, sample.sampling_mask, sample.media
 ```
 
 Creates go round-robin over the servers, and each trajectory's URL names its
