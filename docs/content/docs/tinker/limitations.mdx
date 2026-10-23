@@ -10,7 +10,22 @@ This page documents the features that are not yet wired through the Tinker integ
 
 Multi-tenant LoRA training and sampling are supported on the **Megatron** backend with vLLM serving per-tenant adapters by name. See [Multi-tenancy](./multi_tenancy) for the operator contract and SL/RL quickstarts. **FSDP** support is pending, and full-parameter fine-tuning remains single-tenant on both backends — calling `create_model` with `lora_rank=0` while another model exists returns an error.
 
-All adapters registered against one server must share the same `(rank, alpha, target_modules)` signature; mismatched signatures are hard-rejected at `create_model`.
+All adapters registered against one server must share the same `(rank, alpha, train_attn, train_mlp)` signature; mismatched signatures are hard-rejected at `create_model`. `seed` is not part of it — it changes an adapter's initial values, not its shape. On the skyrl-train backend `seed` is not applied at all: LoRA initialization follows the server's `trainer.seed`. `target_modules` is fixed server-side and so is identical across adapters by construction.
+
+### LoRA group flags
+
+`train_attn` and `train_mlp` are honoured on the **FSDP** backend, where they narrow PEFT's `"all-linear"` to the attention or MLP projections. The exported adapter records which modules it covers, asserted in `tests/tinker/skyrl_train/test_fsdp_lora_flags.py`.
+
+- **LoRA is not applied to the unembedding layer, so `train_unembed` is ignored.** This follows common LoRA practice: PEFT's `"all-linear"` leaves the output layer out too. Adapting `lm_head` would need separate handling that depends on the architecture, since many models tie it to the input embeddings. The Tinker SDK **defaults `train_unembed` to `True`**, so the server accepts the flag rather than rejecting every client: it logs a warning and reports the model's config back with `train_unembed=False`.
+- **A non-default `train_attn` / `train_mlp` on Megatron is rejected.** Megatron builds its LoRA target list from fixed module names rather than by inspecting the model. Since both default to `True`, this only fires when a narrower adapter was explicitly asked for. Use `--backend fsdp`, or name the modules directly in `trainer.policy.model.lora.target_modules`.
+
+At least one of `train_attn` / `train_mlp` must be `True`: an adapter covering no modules would have nothing to train.
+
+**Narrowing needs Llama/Qwen-style module names.** The flags select layers by their parent module: `self_attn` (or `linear_attn`) for attention, `mlp` (or `experts`) for the MLP. Llama, Qwen, Gemma, Mistral and Phi-3 follow this. Architectures that use other names — GPT-NeoX, Falcon and BLOOM (`attention` / `self_attention`), Llama 4 (`feed_forward`), GPT-2 (`Conv1D` layers) — fail with `No attn linear layers found` (or `mlp`) when the matching group is requested. Narrowing also raises when the chosen group shares a layer name with a layer outside it, as GPT-BigCode's MLP and attention both have a `c_proj`. Leaving both flags `True` is unaffected. For those models, name the modules directly in `trainer.policy.model.lora.target_modules`.
+
+**Narrowing is not supported for vision-language models.** Their vision towers and projectors reuse layer names from the language model, so a narrowed adapter would also cover modules outside the requested group. Requesting it raises; leaving both flags `True` is unaffected.
+
+**Routed MoE experts are not covered on FSDP.** Current `transformers` stores routed experts as fused 3-D `nn.Parameter` tensors rather than `nn.Linear` modules, and PEFT can only adapt the latter. On a model with only routed experts (Qwen3-MoE, Mixtral) the MLP group is therefore empty and narrowing to it raises. On a model that also has shared experts or dense MLP layers (DeepSeek-V3, Qwen2-MoE), narrowing to the MLP group adapts those and leaves the routed experts untouched. Megatron adapts MoE experts directly, with its own grouped-expert handling, but rejects these flags.
 
 ### No Prompt Logprobs
 
