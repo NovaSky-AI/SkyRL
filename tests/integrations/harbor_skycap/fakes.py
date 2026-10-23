@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_routed_experts,
     pack_sample_support,
 )
+from tests.backends.skyrl_train.sample_support_helpers import csr
 
 START, END, NL = 1, 2, 3
 SETUP, AGENT, VERIFY, START_TIMEOUT = 5.0, 10.0, 2.0, 600.0
@@ -124,7 +125,7 @@ class MockRouter:
             support = np.full((len(completion), TOP_K), -1, dtype=np.int32)
             support[:, 0] = completion
             support[:, 1] = np.asarray(completion) + 1
-            choice["rollout_sample_support"] = pack_sample_support(support)
+            choice["rollout_sample_support"] = pack_sample_support(csr(support))
         return web.Response(body=orjson.dumps({"choices": [choice]}), content_type="application/json")
 
     async def finish_session(self, request: web.Request) -> web.Response:

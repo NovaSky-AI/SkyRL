@@ -1,4 +1,12 @@
-"""One packed buffer plus segment offsets for ragged token-aligned batch fields."""
+"""One packed buffer plus segment offsets for token-aligned batch fields of uneven length.
+
+Some batch fields hold a fixed-shape row per real token of each trajectory, such as the R3
+routed-expert indices (``[layers, top_k]`` per token). Trajectories differ in length, so a
+padded ``[batch, max_seq_len, *row_shape]`` tensor spends much of its memory, and its
+transfer to the workers, on padding. ``PackedTensor`` stores only the real rows, back to back,
+and keeps the batch structure in offsets. ``packed_ragged_tensor`` extends the same layout to
+rows whose length varies per token.
+"""
 
 from collections.abc import Sequence
 
@@ -49,11 +57,23 @@ def row_index_from_offsets(
 
 
 class PackedTensor:
-    """A ragged batch of token-aligned rows held as one buffer plus ``cu_seqlens``.
+    """A batch of token-aligned rows held as one buffer plus ``cu_seqlens``.
 
-    ``values`` is ``[sum(sequence_lengths), *row_shape]`` in canonical batch order and
-    ``cu_seqlens`` is the ``[batch + 1]`` exclusive prefix sum of the segment lengths.
-    Indexing and batch operations address segments rather than individual rows.
+    Each batch entry (trajectory) is a segment of rows, one row per token:
+
+    - ``values`` (``[sum(sequence_lengths), *row_shape]``) holds every entry's rows back to
+      back, in canonical batch order. Every row has the same ``row_shape``.
+    - ``cu_seqlens`` (``[batch + 1]``, int32 ``CU_SEQLENS_DTYPE``) is the exclusive prefix sum
+      of the segment lengths: entry ``b`` is ``values[cu_seqlens[b]:cu_seqlens[b + 1]]``.
+      For example, entries of 3 and 1 tokens with ``row_shape`` ``(2,)`` are a ``[4, 2]``
+      ``values`` and ``cu_seqlens=[0, 3, 4]``.
+
+    It lets such a field ride in ``TensorBatch`` like a ``[batch, ...]`` tensor: ``len`` counts
+    batch entries, and indexing and the batch operations (slicing, gathering, repeat, ``cat``,
+    padding segments, device moves) address entries and rebuild ``cu_seqlens``. An integer
+    index returns that entry's rows as a plain ``[length, *row_shape]`` view.
+    ``PackedRaggedTensor`` is the same structure with one more offset level, for rows of
+    varying length.
     """
 
     def __init__(self, values: torch.Tensor, cu_seqlens: torch.Tensor):

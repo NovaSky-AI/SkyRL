@@ -15,9 +15,12 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
+from skyrl.backends.skyrl_train.utils.packed_tensor import cu_seqlens_from_lengths
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
-from skyrl.backends.skyrl_train.utils.sample_support_replay import sample_support_scores
+from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    sample_support_scores,
+)
 from skyrl.backends.skyrl_train.workers.megatron import (
     megatron_worker as megatron_worker_module,
 )
@@ -29,6 +32,7 @@ from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_te
 from skyrl.train.utils.utils import validate_cfg
 from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type
+from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 SUPPORT_WIDTH = 2
@@ -61,15 +65,15 @@ def _sample_support_cfg(tensor_parallel_size: int) -> SkyRLTrainConfig:
 def _synthetic_support(
     responses: list[list[int]],
     vocab_size: int,
-) -> PackedTensor:
+) -> PackedRaggedTensor:
     """Build two-token support rows that cross a TP=2 vocabulary partition."""
     segments = []
     for response in responses:
         selected = torch.tensor(response, dtype=torch.long)
         other = (selected + vocab_size // 2) % vocab_size
         other = torch.where(other == selected, (other + 1) % vocab_size, other)
-        segments.append(torch.stack((selected, other), dim=-1).to(torch.int32))
-    return PackedTensor.from_segments(segments)
+        segments.append(torch.stack((selected, other), dim=-1))
+    return ragged_support(segments)
 
 
 def _training_inputs() -> tuple[TrainingInputBatch, TrainingInputBatch]:
@@ -182,11 +186,18 @@ class _SampleSupportTPProbeWorker(MegatronPolicyWorkerBase):
             (sampled_ids, (sampled_ids + total_vocab_size // 2) % total_vocab_size),
             dim=-1,
         ).to(torch.int32)
+        support = PackedRaggedTensor(
+            [support_ids.reshape(-1)],
+            cu_seqlens_from_lengths([SUPPORT_WIDTH] * sampled_ids.numel(), device=device),
+            cu_seqlens_from_lengths([sampled_ids.numel()], device=device),
+        )
+        row_ids = torch.arange(sampled_ids.numel(), device=device).reshape(sampled_ids.shape)
 
         sharded = sample_support_scores(
             local_logits,
             sampled_ids,
-            support_ids,
+            support,
+            row_ids,
             vocab_start_index=tp_rank * local_vocab_size,
             vocab_end_index=(tp_rank + 1) * local_vocab_size,
             tp_group=tp_group,
@@ -199,7 +210,8 @@ class _SampleSupportTPProbeWorker(MegatronPolicyWorkerBase):
         unsharded = sample_support_scores(
             full_logits,
             sampled_ids,
-            support_ids,
+            support,
+            row_ids,
             vocab_start_index=0,
             vocab_end_index=total_vocab_size,
             tp_group=None,

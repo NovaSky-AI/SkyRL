@@ -13,7 +13,6 @@ from huggingface_hub import snapshot_download
 from loguru import logger
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
-from megatron.bridge.peft.lora import LoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from omegaconf import OmegaConf
@@ -81,6 +80,7 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
+    PACKED_BATCH_FIELD_TYPES,
     TensorList,
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -88,7 +88,6 @@ from skyrl.backends.skyrl_train.training_batch import (
     append_tensor_list_padding,
     packed_dummy_row_segments,
 )
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -471,7 +470,13 @@ class MegatronWorker:
                 f"LoRA rank {lora_config.rank} that vLLM max_lora_rank is sized from"
             )
 
-        if lora_config.target_modules == "all-linear":
+        self._lora_import_plan = None
+        if lora_config.init_adapter_path:
+            # The adapter decides which modules are adapted and at what rank; the LoRA
+            # module built below must match it exactly for the import to be lossless.
+            self._lora_import_plan = self._plan_lora_import(lora_config, lora_type)
+            target_modules = self._lora_import_plan.target_modules
+        elif lora_config.target_modules == "all-linear":
             if lora_type == "lora":
                 target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
             else:
@@ -492,7 +497,11 @@ class MegatronWorker:
             target_modules = lora_config.target_modules
 
         if lora_type == "lora":
-            self.lora_cls = LoRA(
+            from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
+                SkyRLLoRA,
+            )
+
+            self.lora_cls = SkyRLLoRA(
                 target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
@@ -507,6 +516,7 @@ class MegatronWorker:
                 sequence_parallel_input_regather=(
                     self.cfg.policy.megatron_config.lora_config.sequence_parallel_input_regather
                 ),
+                module_dims=self._lora_import_plan.module_dims if self._lora_import_plan else {},
             )
         elif lora_type == "canonical_lora":
             if experts_shared_outer_loras:
@@ -522,6 +532,68 @@ class MegatronWorker:
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 normalize_moe_lora=self.cfg.policy.megatron_config.lora_config.normalize_moe_lora,
             )
+
+    def _plan_lora_import(self, lora_config, lora_type: Optional[str]):
+        """Read ``lora.init_adapter_path`` and size the Megatron adapters to hold it."""
+        from skyrl.backends.skyrl_train.distributed.lora_import import (
+            check_adapter_matches_config,
+            normalize_peft_adapter,
+            read_peft_adapter,
+        )
+        from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
+            plan_megatron_lora_import,
+        )
+
+        if lora_type != "lora":
+            raise ValueError(
+                f"init_adapter_path requires megatron_config.lora_config.lora_type='lora', got {lora_type!r}"
+            )
+        adapter = normalize_peft_adapter(read_peft_adapter(lora_config.init_adapter_path))
+        check_adapter_matches_config(adapter, lora_config.rank, lora_config.alpha)
+        plan = plan_megatron_lora_import(
+            self.bridge,
+            adapter,
+            tp_size=mpu.get_tensor_model_parallel_world_size(),
+            pp_size=mpu.get_pipeline_model_parallel_world_size(),
+            target_modules=None if lora_config.target_modules == "all-linear" else list(lora_config.target_modules),
+        )
+        if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob:
+            raise ValueError(
+                "init_adapter_path: the adapter trains lm_head, which trainer.fused_lm_head_logprob=true bypasses "
+                "(it reads output_layer.weight directly); disable fused_lm_head_logprob"
+            )
+        if not self.cfg.policy.megatron_config.lora_config.merge_lora:
+            max_lora_rank = lora_config.max_lora_rank or lora_config.rank
+            if plan.max_rank > max_lora_rank:
+                raise ValueError(
+                    f"init_adapter_path: with merge_lora=false the synced adapter has modules of rank {plan.max_rank} "
+                    f"but vLLM max_lora_rank is {max_lora_rank}; set trainer.policy.model.lora.max_lora_rank to "
+                    "a vLLM-accepted value >= that rank (64, 128, 256, 320 or 512)"
+                )
+        self._lora_import_adapter = adapter
+        if self._rank == 0:
+            logger.info(
+                "init_adapter_path={}: r={} alpha={} adapted leaves={} -> Megatron targets={} ranks={}",
+                lora_config.init_adapter_path,
+                adapter.r,
+                adapter.lora_alpha,
+                adapter.leaf_modules(),
+                plan.target_modules,
+                plan.module_dims,
+            )
+        return plan
+
+    def _load_lora_init_adapter(self, model: List[nn.Module]) -> None:
+        """Copy ``lora.init_adapter_path`` into the freshly built LoRA model."""
+        from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
+            load_peft_adapter_into_megatron,
+        )
+
+        load_peft_adapter_into_megatron(self.bridge, model, self._lora_import_plan, self.lora_cls)
+        # The plan's pieces hold full (unsharded) CPU copies of every adapter tensor; nothing reads them after the load.
+        self._lora_import_plan = None
+        self._lora_import_adapter = None
+        torch.distributed.barrier()
 
     def make_megatron_module(
         self,
@@ -600,6 +672,8 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        if lora_config is not None and getattr(self, "_lora_import_plan", None) is not None:
+            self._load_lora_init_adapter(model)
         return model
 
     def _forward_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
@@ -759,7 +833,7 @@ class MegatronWorker:
             if value is None:
                 padded[key] = None
                 continue
-            if isinstance(value, PackedTensor):
+            if isinstance(value, PACKED_BATCH_FIELD_TYPES):
                 # Per-token fields cover the dummy attended token; response fields do not.
                 padded[key] = append_packed_field_padding(
                     key, value, segment_lengths=packed_dummy_row_segments(key, pad_count)

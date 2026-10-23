@@ -5,7 +5,6 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 import os
 from typing import Any, Dict
 
-import numpy as np
 import pytest
 from loguru import logger
 from transformers import AutoTokenizer
@@ -13,6 +12,7 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
@@ -547,22 +547,18 @@ async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
     assert rollout_sample_support is not None
     assert len(rollout_sample_support) == num_prompts * n_samples_per_prompt
 
-    for response_ids, loss_mask, support_rows in zip(
+    for response_ids, loss_mask, support in zip(
         generator_output["response_ids"],
         generator_output["loss_masks"],
         rollout_sample_support,
     ):
-        assert len(support_rows) == len(response_ids) == len(loss_mask)
-        for token_id, is_loss_active, support_row in zip(response_ids, loss_mask, support_rows):
-            support_row = np.asarray(support_row).tolist()
-            assert len(support_row) == SAMPLE_SUPPORT_TOP_K
-            assert all(candidate_id >= -1 for candidate_id in support_row)
-            first_padding = next(
-                (index for index, candidate_id in enumerate(support_row) if candidate_id == -1),
-                len(support_row),
-            )
-            assert all(candidate_id == -1 for candidate_id in support_row[first_padding:])
+        assert isinstance(support, CompactSampleSupport) and support.top_k == SAMPLE_SUPPORT_TOP_K
+        assert len(support) == len(response_ids) == len(loss_mask)
+        for row, (token_id, is_loss_active) in enumerate(zip(response_ids, loss_mask)):
+            members = support.token_ids[support.offsets[row] : support.offsets[row + 1]].tolist()
+            assert len(members) <= SAMPLE_SUPPORT_TOP_K and len(set(members)) == len(members)
+            # A sampled token's row holds it; a token the model didn't sample has an empty row.
             if is_loss_active:
-                assert token_id in support_row
+                assert token_id in members
             else:
-                assert support_row == [-1] * SAMPLE_SUPPORT_TOP_K
+                assert members == []

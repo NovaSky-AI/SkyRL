@@ -134,6 +134,27 @@ def test_parse_rejects_unsupported_adapters(config, state, message):
         parse_peft_adapter(config, state)
 
 
+@pytest.mark.parametrize("namespace", ["model.", "model.language_model.", ""])
+def test_parse_renames_tinker_unembed_tokens_to_lm_head(namespace):
+    """Tinker's own export spells the (untied) output projection ``model.unembed_tokens``."""
+    config = _config(target_modules=["q_proj", "unembed_tokens"], alpha_pattern={"unembed_tokens": 32})
+    state = _state(_lora("model.layers.0.self_attn.q_proj", 32), _lora(f"{namespace}unembed_tokens", 64, seed=1))
+    adapter = parse_peft_adapter(config, state)
+    assert sorted(adapter.pieces) == ["lm_head", "model.layers.0.self_attn.q_proj"]
+    head = adapter.pieces["lm_head"]
+    # The pattern written against the file's name still sets the scale.
+    assert head.scale == 32 / R
+    torch.testing.assert_close(head.delta(), _delta(state, f"{namespace}unembed_tokens", 32 / R))
+    assert adapter.config["target_modules"] == ["lm_head", "q_proj"]
+    assert adapter.leaf_modules() == ["lm_head", "q_proj"]
+
+
+def test_parse_rejects_unembed_tokens_next_to_lm_head():
+    state = _state(_lora("lm_head", 64), _lora("model.unembed_tokens", 64, seed=1))
+    with pytest.raises(ValueError, match="both name 'lm_head'"):
+        parse_peft_adapter(_config(), state)
+
+
 def test_check_adapter_matches_config():
     adapter = parse_peft_adapter(_config(), _state(_lora("m.q_proj", 32)))
     check_adapter_matches_config(adapter, rank=R, alpha=ALPHA)
