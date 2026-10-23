@@ -266,7 +266,7 @@ When enabled, the metric `token_mask_ratio` is logged, representing the fraction
 
 ## Score Centering
 
-Under a training-inference mismatch, the expected policy-gradient update at a prefix contains a *drift* term, $\mathbb{E}_q[A] \cdot \mathbb{E}_{v \sim q}[\nabla \log \pi_\theta(v)]$, that distills the trainer toward the sampler $q$ and compounds as weights sync back. [Score centering](https://arxiv.org/abs/2609.20807) subtracts that expected score, so the update is unbiased in expectation under any constant advantage.
+Under a training-inference mismatch, the expected policy-gradient update at a prefix contains a *drift* term, $\mathbb E_q[A] \cdot \mathbb E_{v \sim q}[\nabla \log \pi_\theta(v)]$, that distills the trainer toward the sampler $q$ and compounds as weights sync back. [Score centering](https://arxiv.org/abs/2609.20807) subtracts that expected score, so the update is unbiased in expectation under any constant advantage.
 
 With sample-support replay, tokens are drawn from the recorded top-k/top-p support $S$, so the expectation is exact over $S$ alone. It composes with the loss's own importance weight $f$ ([App. A.2](https://arxiv.org/abs/2609.20807)): the expectation of the *weighted* score is subtracted, with the same $f$ evaluated on every member:
 
