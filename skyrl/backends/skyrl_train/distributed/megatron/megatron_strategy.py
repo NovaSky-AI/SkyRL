@@ -36,6 +36,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.streaming_checkpoint import (
+    StreamingCheckpointWrite,
+    StreamingTorchDistSaveShardedStrategy,
+)
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
@@ -211,6 +215,21 @@ class MegatronStrategy(DistributedStrategy):
         global _async_calls
         _async_calls = AsyncCallsQueue(persistent=True)
 
+        if megatron_config.async_save_streaming_write:
+            if not megatron_config.async_dist_ckpt_save:
+                raise ValueError("async_save_streaming_write requires async_dist_ckpt_save=True")
+            if megatron_config.async_save_prestage_to_cpu:
+                raise ValueError("async_save_streaming_write and async_save_prestage_to_cpu are mutually exclusive")
+            if is_lora:
+                raise ValueError("async_save_streaming_write supports full-parameter training only, not LoRA")
+            if megatron_config.ddp_config.overlap_param_gather:
+                raise ValueError(
+                    "async_save_streaming_write is not supported with ddp_config.overlap_param_gather: "
+                    "the parameter all-gather of the next forward pass writes parameters that the "
+                    "checkpoint write reads"
+                )
+        self._streaming_write: Optional[StreamingCheckpointWrite] = None
+
     def set_seed(self, seed: int) -> None:
         # Vary seed by pipeline parallel rank so that different PP stages get
         # different dropout masks and stochastic noise (matches Megatron standard
@@ -250,6 +269,7 @@ class MegatronStrategy(DistributedStrategy):
         so it is offloaded whenever ``offload_optimizer`` is requested even if
         ``optimizer is None`` (e.g. ``policy.inference_only_init=True`` flows).
         """
+        self.finish_streaming_save()
         if offload_model:
             offload_megatron_model_to_cpu(model, is_lora=self.is_lora)
         if offload_optimizer:
@@ -265,6 +285,7 @@ class MegatronStrategy(DistributedStrategy):
         See :meth:`offload_to_cpu` for why the grad-buffer half is decoupled
         from optimizer existence.
         """
+        self.finish_streaming_save()
         if backload_model:
             load_megatron_model_to_gpu(model, is_lora=self.is_lora)
         if backload_optimizer:
@@ -285,6 +306,7 @@ class MegatronStrategy(DistributedStrategy):
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
+        self.finish_streaming_save()
         _, grad_norm, _ = optimizer.step()
         scheduler.step(1)
         optimizer.zero_grad()
@@ -362,22 +384,27 @@ class MegatronStrategy(DistributedStrategy):
         # Save RNG state.
         sharded_state_dict["rng"] = self.get_rng_state()
 
-        # Save the checkpoint across ranks in parallel.
-        save_strategy = get_default_save_sharded_strategy("torch_dist")
-        save_strategy = FullyParallelSaveStrategyWrapper(
-            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-        )
-
         async_save = self.megatron_config.async_dist_ckpt_save
         if async_save and io.is_cloud_path(ckpt_dir):
             # local_work_dir uploads on context exit, which would race the still-running
             # background write. Async is only safe writing in-place to a local/shared FS.
             self.print(f"async_dist_ckpt_save unsupported for cloud path {ckpt_dir}; saving synchronously")
             async_save = False
+        streaming_write = async_save and self.megatron_config.async_save_streaming_write
+
+        # Save the checkpoint across ranks in parallel.
+        if streaming_write:
+            save_strategy = StreamingTorchDistSaveShardedStrategy()
+        else:
+            save_strategy = get_default_save_sharded_strategy("torch_dist")
+        save_strategy = FullyParallelSaveStrategyWrapper(
+            save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+        )
+
         if async_save:
-            # The queue holds one in-flight write; the prior checkpoint dir must be
+            # Only one write is in flight. The prior checkpoint dir must be
             # fully written before this save reuses it.
-            self._finalize_async_calls()
+            self.finalize_pending_saves()
 
         with io.local_work_dir(ckpt_dir) as work_dir:
             async_save_request = dist_checkpointing.save(
@@ -387,7 +414,10 @@ class MegatronStrategy(DistributedStrategy):
                 async_sharded_save=async_save,
                 validate_access_integrity=True,
             )
-            if async_save:
+            if streaming_write:
+                # The write reads the live tensors. See `finish_streaming_save`.
+                self._streaming_write = StreamingCheckpointWrite(async_save_request)
+            elif async_save:
                 # Shards are staged to host; the disk write runs in the background.
                 if self.megatron_config.async_save_prestage_to_cpu:
                     # Keeps GPU tensors from crossing the process boundary, which the writer
@@ -427,7 +457,22 @@ class MegatronStrategy(DistributedStrategy):
 
         No-op when ``async_dist_ckpt_save`` is off or nothing is pending.
         """
+        # This also binds the thread to the GPU of the rank, which the streaming
+        # finalization below needs.
         self._finalize_async_calls()
+        self.finish_streaming_save()
+
+    def finish_streaming_save(self) -> None:
+        """Wait for the streaming checkpoint write, then finalize it on all ranks.
+
+        The write of ``async_save_streaming_write`` reads the live model and optimizer
+        tensors, so this runs before any step that changes them. Finalization is
+        collective: every rank calls this at the same point. No-op when no streaming
+        write is pending.
+        """
+        streaming_write, self._streaming_write = self._streaming_write, None
+        if streaming_write is not None:
+            streaming_write.finish()
 
     def _get_rank_path(self, ckpt_dir):
         tp_rank = mpu.get_tensor_model_parallel_rank()
