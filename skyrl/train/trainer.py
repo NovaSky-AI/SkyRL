@@ -1586,6 +1586,10 @@ class RayPPOTrainer:
         All per-DP mini-batch chunks are pre-staged in the Ray object store before
         the training loop so serialization stays off the GPU critical path.
 
+        Accumulates ``{model}_stage_data``, ``{model}_forward_backward`` and ``{model}_optim_step``
+        into ``self.all_timings``, summed over mini-batches and epochs. ``optim_step`` is driver wall
+        clock, so it also covers the workers' deferred gradient reduce and grad-norm/clipping.
+
         Args:
             model: Model name ("policy" or "critic")
             data: Training data batch
@@ -1604,17 +1608,20 @@ class RayPPOTrainer:
 
         # Pre-stage all per-DP mini-batch chunks in the object store so that
         # serialization is fully off the critical path during training.
-        all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
+        with Timer(f"{model}_stage_data", self.all_timings):
+            all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                with Timer(f"{model}_forward_backward", self.all_timings):
+                    status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
                 # Optimizer step after each mini batch
-                grad_norm = self.dispatch.optim_step(model)
+                with Timer(f"{model}_optim_step", self.all_timings):
+                    grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
 

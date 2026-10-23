@@ -2,6 +2,7 @@
 uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -282,6 +283,48 @@ def test_calc_advantages_and_returns_step_wise_broadcast(dummy_config):
     )
     assert torch.allclose(data["advantages"], expected_advantages)
     assert torch.allclose(data["returns"], expected_advantages)
+
+
+@pytest.mark.parametrize("has_critic", [False, True])
+def test_train_critic_and_policy_times_sub_stages(dummy_config, dummy_generator, monkeypatch, has_critic):
+    dummy_config.trainer.update_epochs_per_batch = 2
+    trainer = RayPPOTrainer(
+        cfg=dummy_config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        inference_engine_client=None,
+        generator=dummy_generator,
+    )
+    dummy_config.trainer.critic.model.path = "dummy-critic" if has_critic else None
+    trainer._normalize_advantages = lambda data, *args: data
+    clock = 0.0
+
+    def elapsed(seconds, result):
+        nonlocal clock
+        clock += seconds
+        return result
+
+    monkeypatch.setattr("skyrl.train.utils.utils.time", SimpleNamespace(time=lambda: clock))
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.stage_data.side_effect = lambda *args: elapsed(2.0, [[MagicMock()], [MagicMock()]])
+    trainer.dispatch.forward_backward_from_staged.side_effect = lambda *args: elapsed(
+        3.0, SimpleNamespace(metrics={"loss": 1.0})
+    )
+    trainer.dispatch.optim_step.side_effect = lambda *args: elapsed(5.0, 0.5)
+    data = TrainingInputBatch({"sequences": torch.zeros((2, 4), dtype=torch.long)})
+    data.metadata = {"policy_mini_batch_boundaries": [(0, 1), (1, 2)], "critic_mini_batch_boundaries": [(0, 1), (1, 2)]}
+
+    status = trainer.train_critic_and_policy(data)
+
+    for model in ["policy", "critic"] if has_critic else ["policy"]:
+        assert trainer.all_timings[f"{model}_stage_data"] == 2.0
+        assert trainer.all_timings[f"{model}_forward_backward"] == 12.0
+        assert trainer.all_timings[f"{model}_optim_step"] == 20.0
+        assert trainer.all_timings[f"{model}_train"] == 34.0
+    if not has_critic:
+        assert not any(key.startswith("critic_") for key in trainer.all_timings)
+    assert status == {"loss": 1.0, "grad_norm": 0.5}
 
 
 def test_flush_pending_metrics_logs_and_clears(dummy_config):
