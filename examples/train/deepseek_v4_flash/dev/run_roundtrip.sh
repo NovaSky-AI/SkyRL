@@ -19,6 +19,8 @@ export VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-$DSV4_ROOT/vllm_cache/shared}
 # the collective `trtllm::fused_moe::gemm1` tuning (HANDOFF.md, run 3); cold-cache boots were fine.
 export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:-$DSV4_ROOT/vllm_cache/autotune/$RUN_ID}
 export NVTE_FLASH_ATTN=0
+# /tmp/skyrl-logs on this shared box is owned by another user.
+export SKYRL_TEST_LOG_PATH=${SKYRL_TEST_LOG_PATH:-$DSV4_ROOT/logs/skyrl-infra}
 # The node env forces Google's gIB NCCL net plugin (/usr/local/gib, built for NCCL 2.27.5); the venv's NCCL 2.29.7
 # fails "Failed to initialize any NET plugin" -> ncclInvalidUsage at vLLM init. Single node needs no net plugin.
 unset NCCL_NET NCCL_TUNER_CONFIG_PATH
