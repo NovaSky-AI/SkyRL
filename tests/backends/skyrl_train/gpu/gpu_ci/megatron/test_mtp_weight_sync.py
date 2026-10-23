@@ -94,6 +94,8 @@ def _make_cfg(weight_sync_backend: str, colocate_all: bool, inference_tp: int, m
     cfg.trainer.policy.inference_only_init = True
     cfg.trainer.mtp.enabled = True
     cfg.trainer.mtp.num_speculative_tokens = NUM_SPECULATIVE_TOKENS
+    # MTP with prefix caching is rejected on Qwen3.5 (recurrent linear-attention layers).
+    cfg.generator.inference_engine.enable_prefix_caching = False
 
     ie_cfg = cfg.generator.inference_engine
     ie_cfg.backend = "vllm"
