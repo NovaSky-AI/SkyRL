@@ -54,6 +54,9 @@ KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
 # 4-layer BF16 slice of deepseek-ai/DeepSeek-V4-Flash (examples/train/deepseek_v4_flash/dev/make_slice.py).
 # Not on the Hub yet; override with a local path.
 DEEPSEEK_V4_FLASH_4LAYER = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_4LAYER", "DeepSeek-V4-Flash-4layer")
+# Full model, dequantized to BF16 by make_slice.py with every layer (~530 GB). Stage 0's one-off
+# full-weights check, not a CI row: skipped unless the path is set.
+DEEPSEEK_V4_FLASH_FULL_BF16 = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_FULL_BF16")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -514,6 +517,27 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             id="deepseek-v4-flash-4layer_h100_tp1_ep4",
             marks=pytest.mark.h100,
+        ),
+        pytest.param(
+            1,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            DEEPSEEK_V4_FLASH_FULL_BF16,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="deepseek-v4-flash-full-bf16_h100_tp1_ep8",
+            marks=[
+                pytest.mark.h100,
+                pytest.mark.skipif(
+                    DEEPSEEK_V4_FLASH_FULL_BF16 is None, reason="SKYRL_DEEPSEEK_V4_FLASH_FULL_BF16 not set"
+                ),
+            ],
         ),
         pytest.param(
             2,

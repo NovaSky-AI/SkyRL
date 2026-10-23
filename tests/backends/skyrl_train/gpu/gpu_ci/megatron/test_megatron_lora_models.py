@@ -43,6 +43,7 @@ from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_models import (
+    DEEPSEEK_V4_FLASH_4LAYER,
     MAX_GENERATE_LENGTH,
     _engine_overrides_for_model,
     _extra_env_vars_for_model,
@@ -96,6 +97,27 @@ GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES = [
     "in_proj_qkvbfg_a",
     "experts",
 ]
+# DeepSeek-V4-Flash: mcore names from megatron-core's DSv4HybridAttention (wq_a -> linear_q_down_proj,
+# wq_b -> linear_q_up_proj, wkv -> linear_kv_proj, wo_b -> linear_proj) plus the MoE/shared-expert MLP.
+# wo_a is the grouped output projection (a raw parameter, not a linear), and the compressor/indexer
+# linears stay frozen, so none of them carry an adapter.
+DEEPSEEK_V4_FLASH_LORA_TARGET_MODULES = [
+    "linear_q_down_proj",
+    "linear_q_up_proj",
+    "linear_kv_proj",
+    "linear_proj",
+    "linear_fc1",
+    "linear_fc2",
+]
+# vLLM names for the same modules: wq_a and wkv are packed into fused_wqa_wkv, w1/w3 into gate_up_proj.
+DEEPSEEK_V4_FLASH_VLLM_LORA_TARGET_MODULES = [
+    "fused_wqa_wkv",
+    "wq_b",
+    "wo_b",
+    "gate_up_proj",
+    "down_proj",
+    "experts",
+]
 # The 4-layer GLM-5.3-Flash slice is far more sensitive to its adapter than the default rows. At a
 # LoRA-B std of 0.008 the stale-sampler diff is about 0.155 (phase 2) and the updated adapter
 # still matches at about 0.062 (phase 3, same as the zero adapter).
@@ -132,6 +154,8 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     if "glm-5.3-flash" in model_name.lower():
         cfg.trainer.policy.model.lora.target_modules = list(GLM5_3_FLASH_LORA_TARGET_MODULES)
+    if "deepseek-v4-flash" in model_name.lower():
+        cfg.trainer.policy.model.lora.target_modules = list(DEEPSEEK_V4_FLASH_LORA_TARGET_MODULES)
     validate_cfg(cfg)
     return cfg
 
@@ -207,6 +231,22 @@ async def _sync_weights(policy, client, cfg, label: str):
             id="glm-5.3-flash-4layer_h100_tp2_ep4_adapter",
             marks=pytest.mark.h100,
         ),
+        # DeepSeek-V4-Flash 4-layer slice (SWA / CSA / HCA / CSA, hash + score routing, mHC), same mesh
+        # as its full-FT row in test_megatron_models.py (attention is TP=1-only at the megatron-core pin).
+        pytest.param(
+            1,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            DEEPSEEK_V4_FLASH_4LAYER,
+            1e-1,
+            False,
+            id="deepseek-v4-flash-4layer_h100_tp1_ep4_adapter",
+            marks=pytest.mark.h100,
+        ),
     ],
 )
 async def test_lora_logprobs_matching_roundtrip(
@@ -239,6 +279,10 @@ async def test_lora_logprobs_matching_roundtrip(
         engine_overrides = _engine_overrides_for_model(model_name)
         if lora_sync and "glm-5.3-flash" in model_name.lower():
             engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES)
+        if lora_sync and "deepseek-v4-flash" in model_name.lower():
+            engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(
+                DEEPSEEK_V4_FLASH_VLLM_LORA_TARGET_MODULES
+            )
         async with InferenceEngineState.create(
             cfg=cfg,
             model=model_name,

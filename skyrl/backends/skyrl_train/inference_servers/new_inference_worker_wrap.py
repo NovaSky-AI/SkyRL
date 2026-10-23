@@ -173,6 +173,14 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 
 apply_pp_relay_worker_patch()
 
+# DeepSeek-V4's load_weights runs its model-level finalize after every chunk, against layers vLLM's
+# layerwise reload still holds on meta; defer it to the end of the weight sync.
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload_finalize import (  # noqa: E402
+    apply_deepseek_v4_reload_finalize_patch,
+)
+
+apply_deepseek_v4_reload_finalize_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 

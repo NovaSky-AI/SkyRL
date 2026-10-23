@@ -10,11 +10,11 @@ Plan agreed with the user: **do DeepSeek-V4-Flash first, then DeepSeek-V4.1-Flas
 ## TL;DR
 
 - DSv4-Flash is mostly integration work: every upstream piece exists at our pins.
-- Stage 0 full-FT roundtrip has not passed yet. Three runs so far; two real blockers were fixed (below).
-  The third run hung in vLLM boot (FlashInfer MoE autotune, see "Current blocker") and was stopped.
-  The Megatron forward has **not been reached yet**, so the next run may surface more issues there.
-- Next action: rerun the roundtrip (command below), fix whatever the Megatron init/forward/weight sync
-  hits, then add the LoRA row.
+- Stage 0: Megatron forward matches vLLM (slice 0.049, full model 0.040). LoRA row passes. Full-FT row fails
+  only on the post-sync check: vLLM's level-2 sleep loses DSv4 state that a reload doesn't restore (reproduced
+  without SkyRL). See "Post-sync mismatch".
+- Next action: find the lost tensor (checksum diff on node 8), patch it under patches/vllm, rerun the row,
+  then the full model on 2 nodes.
 
 ## What is on this branch
 
@@ -125,7 +125,41 @@ New machine (logs in `$DSV4_ROOT/logs/rt<N>-*.log`):
    padding mask on the unpacked path. `MegatronModelWrapper` now passes `attention_mask=None` into the model
    for `experimental_attention_variant == "dsv4_hybrid"` (rows are left-aligned by `remove_left_padding`, so
    causal is exact); the mask is still used for logprob extraction.
-8. rt8: running.
+8. rt8: `seqlen_q (211) must be <= seqlen_k * ratio (208)` in cuDNN's lightning indexer: the unpacked length must
+   be a multiple of every compress ratio. `remove_left_padding(seq_align=...)`; the wrapper passes
+   `max(csa_compress_ratios)` (128) for dsv4_hybrid. Trailing pad only completes a compressed block that pad
+   positions alone can attend to.
+9. rt9: **Megatron vs vLLM forward matches: mean |dlogprob| 0.049** (threshold 0.1; same in rt10-12). Weight sync
+   then died in vLLM: `Cannot copy out of meta tensor` in `finalize_mhc_broadcast_weights`. vLLM's
+   `DeepseekV4ForCausalLM.load_weights` runs its model-level finalize after every chunk, against layers the
+   layerwise reload still holds on meta. `patches/vllm/patch_deepseek_v4_reload_finalize.py` defers it to the end
+   of the sync (hooked in `weight_receivers.py`).
+10. rt10: sync completes; **post-sync vLLM-vs-vLLM diff 0.87** (threshold 0.3). Real, not near-tie noise: rt11
+   (common-prefix mode, since reverted) showed 80/80 sequences diverging at the first token.
+11. Diagnosis (see "Post-sync mismatch" below): export is bit-exact; the bug reproduces in plain vLLM.
+12. rt12: same 0.87 with fp32 kept on the wire -> confirms the export was not the cause.
+
+Other rows:
+- LoRA `deepseek-v4-flash-4layer_h100_tp1_ep4_adapter` (node 1): **PASSED** -- zero adapter 0.050, stale sampler
+  0.194 (> 0.1), updated adapter 0.048 (< 0.1). First attempt died in vLLM boot because TileLang picked the
+  venv's pip CUDA-13 `nvcc` (no `/usr/local/cuda/bin` on PATH in a non-interactive shell): "CUDA compiler and
+  CUDA toolkit headers are incompatible". run_roundtrip.sh now sets `CUDA_HOME`/`PATH`.
+- Full model, BF16 (`deepseek-v4-flash-full-bf16_h100_tp1_ep8`, env-gated, not for the PR; node 3,
+  `$DSV4_ROOT/models/DeepSeek-V4-Flash-bf16`, 530 GB, built by make_slice.py with all 43 layers): **forward
+  matches, 0.040**. Sync OOMs on one node (Megatron ~87 GB + woken vLLM weights ~90 GB per GPU); rerun on 2 nodes.
+
+## Post-sync mismatch (open)
+
+- Export check (temporary `test_dsv4_export_check.py`, not committed): `MegatronWeightSource` vs the slice
+  safetensors -- 3186/3186 tensors bit-exact once fp32 params stay fp32 on the wire (before: 38 fp32 tensors --
+  mHC `hc_*`, `attn_sink`, compressor `ape`, router `gate.bias` -- were rounded to bf16; `tid2eid` int64 went out as
+  bf16). `MegatronWeightSource._wire_dtype` now keeps fp32 and integer tensors in their own dtype.
+- vLLM-only (node 8, `vllm_reload_check.py`; 8 GSM8K prompts, greedy 64 tokens, common-prefix tokens / mean diff):
+  no reload 365 / 0.015 (vLLM DSv4 is not bit-reproducible run to run); `reload_weights` from disk 189 / 0.043;
+  **level-2 sleep + wake + reload from disk: 8 / 0.033 -- every sequence diverges at token 2.** So the post-sync
+  failure is vLLM's level-2 sleep path for DSv4: some state outside the checkpoint is not restored. Registered
+  buffers are saved/restored by the worker; plain tensor attributes are not. Bisecting with a per-tensor checksum
+  diff across sleep2+reload.
 
 Padding note: with `remove_microbatch_padding=False`, `remove_left_padding` left-aligns every sequence,
 so the causal SWA/CSA/HCA attention never sees padding — correct for logprobs, just less efficient.

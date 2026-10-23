@@ -239,6 +239,12 @@ class MegatronModelWrapper:
         # unpacked path remove_left_padding left-aligns every row, so the implicit causal mask
         # already keeps real tokens off the trailing padding; the mask is still used for logprobs.
         self._implicit_causal_mask_only = getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
+        # Its compressed attention (and cuDNN's indexer) also needs seqlen_q <= seqlen_k * ratio, i.e. the
+        # unpacked length padded to a multiple of each compression ratio. Trailing pad only completes the
+        # last compressed block, which only pad positions can attend to under the causal mask.
+        self._seq_align = 1
+        if self._implicit_causal_mask_only:
+            self._seq_align = max([1, *(getattr(config, "csa_compress_ratios", None) or [])])
         # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
         self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
         if self._per_token_loss and any(
@@ -557,6 +563,7 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    seq_align=self._seq_align,
                 )
                 packed_seq_params = None
                 # Qwen-style VLMs recompute 3D mRoPE positions internally from
@@ -1225,6 +1232,7 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    seq_align=self._seq_align,
                 )
                 packed_seq_params = None
                 # Qwen-style VLMs recompute 3D mRoPE positions internally from
