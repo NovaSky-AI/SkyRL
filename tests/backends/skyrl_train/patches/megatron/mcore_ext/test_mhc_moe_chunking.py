@@ -54,7 +54,7 @@ def _run(mlp, x, mask, num_chunks):
     return out.detach(), bias, x.grad, {n: p.grad.clone() for n, p in mlp.named_parameters() if p.grad is not None}
 
 
-@pytest.mark.parametrize("seq, num_chunks", [(32, 8), (30, 4), (5, 8), (32, 1)])
+@pytest.mark.parametrize("seq, num_chunks", [(32, 8), (30, 4), (5, 8), (10, 8), (1, 8), (32, 1)])
 @pytest.mark.parametrize("with_mask", [False, True])
 def test_chunked_matches_single_call(seq, num_chunks, with_mask):
     torch.manual_seed(0)
@@ -73,10 +73,11 @@ def test_chunked_matches_single_call(seq, num_chunks, with_mask):
     for name in ref[3]:
         torch.testing.assert_close(got[3][name], ref[3][name], rtol=1e-5, atol=1e-6)
 
-    # One call per chunk (capped at one token per chunk); masks split along the sequence with the tokens.
-    expected = min(num_chunks, seq)
-    assert len(mlp.calls) == expected
-    assert sum(shape[0] for shape, _ in mlp.calls) == seq
+    # Exactly num_chunks calls, each non-empty, on every rank (EP collectives must match): a
+    # sequence shorter than that is padded with masked dummy tokens. Masks split with the tokens.
+    assert len(mlp.calls) == num_chunks
+    assert all(shape[0] >= 1 for shape, _ in mlp.calls)
+    assert sum(shape[0] for shape, _ in mlp.calls) == max(seq, num_chunks)
     for shape, mask_shape in mlp.calls:
         assert mask_shape == (None if mask is None else (2, shape[0]))
 
@@ -111,3 +112,79 @@ def test_chunked_mlp_omits_input_ids_when_unset():
     # MLPs that do not take ``input_ids`` (dense and ordinary MoE layers) must not receive it.
     out, _ = chunked_mlp(ToyMoE(), torch.randn(8, 2, H), None, 4)
     assert out.shape == (8, 2, H)
+
+
+class ReplayRouter(torch.nn.Module):
+    """Router that goes through megatron-core's ``RouterReplay`` like ``TopKRouter`` does."""
+
+    def __init__(self):
+        super().__init__()
+        from megatron.core.transformer.moe.router_replay import RouterReplay
+
+        self.weight = torch.nn.Linear(H, E, bias=False)
+        self.router_replay = RouterReplay()
+
+    def forward(self, x):
+        scores = torch.softmax(self.weight(x.reshape(-1, H)), dim=-1)
+
+        def default(scores, topk, num_groups=None, group_topk=None):
+            return torch.topk(scores, topk, dim=-1)
+
+        return self.router_replay.get_replay_topk(scores, K, None, None, default)
+
+
+class ReplayMoE(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.router = ReplayRouter()
+        self.seen = []
+
+    def forward(self, x, padding_mask=None):
+        _, idx = self.router(x)
+        self.seen.append(idx.clone())
+        return x * 1.0, None
+
+
+@pytest.mark.parametrize("seq", [30, 3])
+@pytest.mark.parametrize("batch", [1, 2])
+def test_chunked_router_replay(batch, seq):
+    """R3: each chunk replays its own tokens' indices, forward and recompute; recording is whole."""
+    from megatron.core.transformer.moe.router_replay import (
+        RouterReplay,
+        RouterReplayAction,
+    )
+
+    torch.manual_seed(0)
+    num_chunks = 4
+    x = torch.randn(seq, batch, H)
+    mlp = ReplayMoE()
+    real = seq * batch
+    rr = mlp.router.router_replay
+    target = torch.randint(0, E, (seq * batch, K))
+    try:
+        # Forward replay: the concatenated per-chunk indices are the micro-batch's target.
+        rr.clear_indices()
+        rr.set_target_indices(target)
+        rr.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+        chunked_mlp(mlp, x, None, num_chunks)
+        assert len(mlp.seen) == num_chunks
+        assert torch.equal(torch.cat(mlp.seen)[:real], target)
+        assert rr.target_topk_idx is target
+        # Recompute (backward replay) pops the same micro-batch entry, split per chunk.
+        mlp.seen.clear()
+        rr.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
+        chunked_mlp(mlp, x, None, num_chunks)
+        assert len(mlp.seen) == num_chunks
+        assert torch.equal(torch.cat(mlp.seen)[:real], target)
+        assert rr.replay_backward_list == []
+        # Recording keeps every chunk, not just the last one.
+        mlp.seen.clear()
+        rr.clear_indices()
+        rr.set_router_replay_action(RouterReplayAction.RECORD)
+        chunked_mlp(mlp, x, None, num_chunks)
+        assert torch.equal(rr.get_recorded_indices(), torch.cat(mlp.seen)[:real])
+        assert rr.get_recorded_indices().shape[0] == real
+    finally:
+        rr.clear_indices()
+        rr.clear_router_replay_action()
+        RouterReplay.global_router_replay_instances.remove(rr)
