@@ -20,6 +20,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 |---|---|
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
 | `patches/megatron/mcore_ext/test_hyper_connection_proj_rms.py` (CPU) | `mcore_ext/hyper_connection.py` projection: bitwise vs plain autograd, no saved FP32 copy |
+| `patches/megatron/mcore_ext/test_mhc_moe_chunking.py` (CPU) | `mcore_ext/mhc_transformer_layer.py` `chunked_mlp`: chunked MLP/MoE matches one call |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection, query chunking |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
@@ -93,8 +94,15 @@ Two pieces, which may land separately.
 
 **b) MoE sub-layers in the mHC layer**
 - **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
+  - The layer replaces megatron-core's `_forward_mlp`, where `mlp_chunks_for_training` is applied,
+    so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
+    data, routing sends some expert ranks several times their share of tokens; chunking bounds their
+    dispatch/expert/combine buffers.
+  - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
+    `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
+    `TransformerLayer._forward_mlp`.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
-  no `NotImplementedError` for MoE.
+  no `NotImplementedError` for MoE. Check that it honors `mlp_chunks_for_training` before switching.
 - **Remove:**
   - `glm5_next/layer_specs.py`: build the specs on megatron-core's layer.
   - `workers/megatron/megatron_worker.py`: the `enable_mhc_connections` block in `init_configs`
@@ -106,7 +114,8 @@ Two pieces, which may land separately.
     full recompute with mHC. SkyRL's default config is full recompute, and the GLM roundtrip
     tests run on defaults.
   - Delete `mcore_ext/mhc_transformer_layer.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`,
+  `patches/megatron/mcore_ext/test_mhc_moe_chunking.py`; the GLM roundtrip rows.
   These run with the default full recompute, so they exercise the worker block above.
 
 ### NVIDIA/Megatron-LM#7522: k-pool DSA indexer

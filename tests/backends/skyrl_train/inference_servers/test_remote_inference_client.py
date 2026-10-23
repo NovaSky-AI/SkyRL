@@ -26,10 +26,9 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedArrayKey,
     PackedField,
     decode_packed_routed_experts,
-    pack_ndarray,
+    decode_packed_sample_support,
     pack_routed_experts,
     pack_sample_support,
-    unpack_ndarray,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
@@ -43,8 +42,8 @@ from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,
 )
 from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense
 
-_SUPPORT_DTYPES = frozenset({np.dtype(np.float32)})
 _ROUTES = np.arange(12).reshape(3, 2, 2)
 
 
@@ -52,7 +51,7 @@ async def _fake_detokenize(token_id_lists: List[List[int]]) -> List[str]:
     return ["text"] * len(token_id_lists)
 
 
-_SUPPORT = np.arange(6, dtype=np.float32).reshape(2, 3)
+_SUPPORT = csr([[7, 8, -1], [-1, -1, -1], [9, 10, 11]])
 
 
 def _packed_generate_body(*, two_blobs: bool) -> dict:
@@ -62,7 +61,7 @@ def _packed_generate_body(*, two_blobs: bool) -> dict:
         PackedField.ROUTED_EXPERTS.value: pack_routed_experts(_ROUTES),
     }
     if two_blobs:
-        choice[PackedField.ROLLOUT_SAMPLE_SUPPORT.value] = pack_ndarray(_SUPPORT, allowed_dtypes=_SUPPORT_DTYPES)
+        choice[PackedField.ROLLOUT_SAMPLE_SUPPORT.value] = pack_sample_support(_SUPPORT)
     return {"choices": [choice]}
 
 
@@ -344,8 +343,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"is_sleeping": False}
 
     @app.post("/sleep")
-    async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
-        return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
+    async def sleep(level: int = 2, mode: str = "abort", tags: Optional[List[str]] = Query(None)):
+        return {"status": "sleeping", "server_id": server_id, "level": level, "mode": mode, "tags": tags}
 
     @app.post("/wake_up")
     async def wake_up(tags: Optional[List[str]] = Query(None)):
@@ -663,9 +662,7 @@ class TestDataPlane:
                         "token_ids": [7],
                         "finish_reason": "stop",
                         "logprobs": {"content": [{"logprob": -0.1}]},
-                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
-                            np.array([[7, 8]], dtype=np.int32)
-                        ),
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(csr([[7, 8]])),
                     }
                 ]
             }
@@ -682,7 +679,7 @@ class TestDataPlane:
         assert captured["url"].endswith("/skyrl/v1/generate")
         assert captured["json"]["return_sample_support"] is True
         assert captured["packed_side_channels"] is True
-        assert np.array_equal(result.sample_support, np.array([[7, 8]], dtype=np.int32))
+        assert np.array_equal(dense(result.sample_support), [[7, 8]])
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("input_batch_opts", [{}, {"return_sample_support": False}])
@@ -725,9 +722,7 @@ class TestDataPlane:
                     {
                         "token_ids": [7],
                         "finish_reason": "stop",
-                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
-                            np.array([[7, 8]], dtype=np.int32)
-                        ),
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(csr([[7, 8]])),
                     }
                 ]
             }
@@ -738,7 +733,7 @@ class TestDataPlane:
         result = await client.generate({"prompt_token_ids": [[1, 2]], "return_sample_support": True})
 
         assert captured["json"]["return_sample_support"] is True
-        assert np.array_equal(result["rollout_sample_support"][0], np.array([[7, 8]], dtype=np.int32))
+        assert np.array_equal(dense(result["rollout_sample_support"][0]), [[7, 8]])
 
     @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):
@@ -818,8 +813,8 @@ class TestPackedSideChannelBodies:
         assert isinstance(choice[PackedField.ROUTED_EXPERTS][PackedArrayKey.DATA], memoryview)
         assert isinstance(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT][PackedArrayKey.DATA], memoryview)
         assert np.array_equal(decode_packed_routed_experts(choice[PackedField.ROUTED_EXPERTS]), _ROUTES)
-        support, _ = unpack_ndarray(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT], allowed_dtypes=_SUPPORT_DTYPES, ndim=2)
-        assert np.array_equal(support, _SUPPORT)
+        support = decode_packed_sample_support(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT])
+        assert np.array_equal(dense(support), dense(_SUPPORT))
 
     @pytest.mark.asyncio
     async def test_drifted_layout_raises_without_retrying(self, client, mock_servers):
@@ -947,6 +942,9 @@ class TestControlPlane:
         assert len(result) == 2
         for url, response in result.items():
             assert response["body"]["level"] == 2
+            # In-flight requests are aborted by a separate /pause first, so /sleep itself
+            # pauses in "keep" mode (required by vLLM with routed-experts capture enabled).
+            assert response["body"]["mode"] == "keep"
             assert response["body"]["tags"] is None
 
     @pytest.mark.asyncio

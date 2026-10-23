@@ -38,6 +38,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     AGENT,
     EXPERTS_PER_TOKEN,
@@ -203,7 +204,7 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
         routed = node.tokens.routed_experts
         assert routed.shape == (len(node.tokens.token_ids), LAYERS, EXPERTS_PER_TOKEN)
     # Support rows line up with the response: the sampled token first, none where untrained.
-    support = out["rollout_sample_support"][0]
+    support = dense(out["rollout_sample_support"][0])
     assert support.shape == (len(response), TOP_K)
     for token, trained, row in zip(response, mask, support):
         assert (row[0] == token) if trained else (row == -1).all()
@@ -435,7 +436,7 @@ def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
     outcome = TrialOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
 
     support = compose([outcome], overlong_filtering=False, top_k=TOP_K, sample_support=True)["rollout_sample_support"]
-    assert [array.shape for array in support] == [(1, TOP_K)]
+    assert [(len(rows), rows.top_k) for rows in support] == [(1, TOP_K)]
     assert compose([outcome], overlong_filtering=False, top_k=TOP_K)["rollout_sample_support"] is None
 
 
@@ -520,7 +521,7 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
 
 
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
-    support = pack_sample_support(np.zeros((1, TOP_K), dtype=np.int32))
+    support = pack_sample_support(csr(np.zeros((1, TOP_K), dtype=np.int32)))
     body = {
         "choices": [
             {

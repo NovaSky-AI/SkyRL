@@ -85,7 +85,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     load_packed_body,
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
-from skyrl.backends.skyrl_train.utils.sample_support import SampleSupport
+from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
@@ -261,7 +261,7 @@ class RemoteGenerateResult:
     response_logprobs: Optional[List[float]]
     stop_reason: str
     routed_experts: Optional[RoutedExpertIndices]
-    sample_support: Optional[SampleSupport]
+    sample_support: Optional[CompactSampleSupport]
 
 
 @dataclass
@@ -1275,7 +1275,14 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 level,
             )
             level = 1
-        params: Dict[str, Any] = {"level": str(level)}
+        # vLLM's /sleep pauses the scheduler (default mode "abort") and, at level >= 1, resets
+        # the prefix cache including running requests. With routed-experts capture enabled
+        # (`enable_return_routed_experts`), vLLM 0.31 only allows that reset after a "keep"
+        # pause, so a plain /sleep fails with "AuxOutput Connector only supports resetting
+        # running requests after pause(mode='keep')". Abort in-flight requests explicitly
+        # first, then sleep in "keep" mode: the same end state for every engine config.
+        await self.pause(mode=PauseMode.ABORT, clear_cache=False)
+        params: Dict[str, Any] = {"level": str(level), "mode": PauseMode.KEEP.value}
         if tags:
             params["tags"] = tags
         return await self._call_all_servers("/sleep", params=params)

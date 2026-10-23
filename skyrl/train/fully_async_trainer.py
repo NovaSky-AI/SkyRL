@@ -1073,6 +1073,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             generator_outputs,
             step_wise=self.cfg.generator.step_wise_trajectories,
             routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
+            support_expected=self.cfg.trainer.algorithm.enable_sample_support_replay,
         )
         kept_rollout_metrics = generator_output["rollout_metrics"]
         assert kept_rollout_metrics is not None, "Rollout metrics should be non-null."

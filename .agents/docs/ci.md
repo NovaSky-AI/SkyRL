@@ -26,7 +26,7 @@ survives only where it names a real thing (the `skyrl_train` package, the
 ## CPU vs GPU
 
 - **CPU workflows** (`cpu_*.yaml`) run on `ubuntu-latest`, auto-trigger on push to `main`/`rc/*` and on PRs. Run lint + the CPU pytest suites from AGENTS.md.
-- **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `anyscale job submit -f ci/<config>.yaml --timeout 12000`. **Label-gated** on PRs (except `SkyRL-JAX-GPU`, which is path-gated).
+- **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `ci/submit_anyscale_job.sh`. Timeouts vary by workflow. **Label-gated** on PRs (except `SkyRL-JAX-GPU`, which is path-gated).
 
 ### GPU gating labels
 

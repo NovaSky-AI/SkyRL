@@ -74,6 +74,11 @@ from skyrl.train.utils.utils import (
 
 _SET_AFFINITY = False
 
+# Allocation/free events kept in the ``record_memory`` history ring buffer. Live
+# blocks in a snapshot keep their allocation stacks regardless of this cap; it
+# bounds only the event trace, which otherwise grows without limit over a run.
+MEMORY_HISTORY_MAX_ENTRIES = 100_000
+
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
         RemoteInferenceClient,
@@ -108,7 +113,7 @@ class DistributedTorchRayActor:
 
         self.record_memory = record_memory
         if record_memory:
-            torch.cuda.memory._record_memory_history()
+            torch.cuda.memory._record_memory_history(max_entries=MEMORY_HISTORY_MAX_ENTRIES)
 
         # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
         from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
@@ -978,7 +983,6 @@ class PolicyWorkerBase(Worker):
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
-        self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
 
@@ -1566,7 +1570,6 @@ class CriticWorkerBase(Worker):
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
-        self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
         self._micro_batches_accumulated = 0

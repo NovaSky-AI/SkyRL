@@ -35,6 +35,10 @@ class Rendered:
 
 
 class TokenRenderer(Protocol):
+    """How token mode renders and parses. A renderer may also expose ``chat_template``, its chat
+    template's text, which decides whether ``developer`` messages need folding (``tokens.developer``);
+    one without it gets them as sent."""
+
     name: str
 
     def render(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]] | None) -> Rendered: ...
@@ -47,7 +51,12 @@ class TokenRenderer(Protocol):
         tools: Sequence[Mapping[str, Any]] | None,
     ) -> Rendered | None: ...
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]: ...
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]: ...
 
     def stop_token_ids(self) -> list[int]: ...
 
@@ -118,8 +127,13 @@ class RenderersRenderer:
         with ThreadPoolExecutor(max_workers=min(size, 8)) as pool:
             for slot in pool.map(lambda _: build(), range(size - 1)):
                 self._slots.put(slot)
-        with self._checkout() as (renderer, _):
+        with self._checkout() as (renderer, loaded):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
+            template = getattr(loaded, "chat_template", None)
+        if isinstance(template, dict):
+            template = template.get("default")
+        #: The tokenizer's chat template text, which ``tokens.developer`` tests for the ``developer`` role.
+        self.chat_template: str | None = template if isinstance(template, str) else None
 
     @contextmanager
     def _checkout(self) -> Iterator[tuple[Any, Any]]:
@@ -158,22 +172,46 @@ class RenderersRenderer:
             return None
         return Rendered(token_ids=token_ids, tail_indices=list(out.message_indices[reused:]), reused=reused)
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
-        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text."""
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
+        """Return extracted calls without schema validation; keep failed parses as text.
+
+        ``prompt_ids`` is the prompt the completion was sampled from. The parser reads its tail to
+        tell whether the template already opened the reasoning block: Qwen3.5 with thinking on ends
+        every generation prompt in ``<think>\\n``, so the completion starts mid-reasoning and has no
+        opening tag of its own.
+        """
         from renderers import ToolCallParseStatus
 
         with self._checkout() as (renderer, _):
-            parsed = renderer.parse_response(list(completion_ids), tools=normalize_tools(tools))
+            parsed = renderer.parse_response(
+                list(completion_ids),
+                tools=normalize_tools(tools),
+                prompt_ids=list(prompt_ids) if prompt_ids is not None else None,
+            )
         message: dict[str, Any] = {"role": "assistant", "content": parsed.content}
         if getattr(parsed, "reasoning_content", None) is not None:
             message["reasoning_content"] = parsed.reasoning_content
         calls = []
         for index, call in enumerate(getattr(parsed, "tool_calls", None) or ()):
-            if call.status != ToolCallParseStatus.OK or not call.name:
+            # XML parsers also use INVALID_JSON when an extracted parameter cannot be
+            # coerced to its declared type. Its argument object is still complete;
+            # vLLM's XML parser returns the original string for the caller to validate.
+            extracted_arguments = call.status == ToolCallParseStatus.INVALID_JSON and isinstance(call.arguments, dict)
+            if not call.name or (call.status != ToolCallParseStatus.OK and not extracted_arguments):
+                # Parsers extract even failed attempts from content. Restore their raw text;
+                # UNKNOWN_TOOL and structural failures must not become callable actions.
+                message["content"] = "\n".join(part for part in (message["content"], call.raw) if part)
                 continue
             arguments = call.arguments
             if not isinstance(arguments, str):
-                arguments = json.dumps(arguments or {}, separators=(",", ":"), ensure_ascii=False)
+                arguments = json.dumps(
+                    {} if arguments is None else arguments, separators=(",", ":"), ensure_ascii=False
+                )
             calls.append(
                 {
                     "id": call.id or tool_call_id(completion_ids, index),
