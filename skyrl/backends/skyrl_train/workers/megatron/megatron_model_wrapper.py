@@ -235,6 +235,10 @@ class MegatronModelWrapper:
         self._pending_grad_sync: Optional[dict] = None
 
         config = get_model_config(self.actor_module[0])
+        # megatron-core's DeepSeek-V4 compressed sparse attention raises on any explicit mask. On the
+        # unpacked path remove_left_padding left-aligns every row, so the implicit causal mask
+        # already keeps real tokens off the trailing padding; the mask is still used for logprobs.
+        self._implicit_causal_mask_only = getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
         # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
         self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
         if self._per_token_loss and any(
@@ -257,6 +261,11 @@ class MegatronModelWrapper:
         # scaling, and any explicit loss_scale configuration).
         if actor_optimizer is not None:
             config.grad_scale_func = actor_optimizer.scale_loss
+
+    def _model_attention_mask(self, attention_mask):
+        if self._implicit_causal_mask_only:
+            return None
+        return to_te_attention_mask(attention_mask)
 
     def _defer_finalize_model_grads(self, model, num_tokens=None, **kwargs) -> None:
         """Record Megatron's end-of-schedule grad sync instead of running it.
@@ -589,7 +598,7 @@ class MegatronModelWrapper:
                         model,
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         output_processor=fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
@@ -601,7 +610,7 @@ class MegatronModelWrapper:
                     outputs = model(
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         **model_replay_kwargs,
                         **vlm_inputs,
@@ -1295,7 +1304,7 @@ class MegatronModelWrapper:
                         model,
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         output_processor=fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
@@ -1307,7 +1316,7 @@ class MegatronModelWrapper:
                     outputs = model(
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         **model_replay_kwargs,
                         **vlm_inputs,

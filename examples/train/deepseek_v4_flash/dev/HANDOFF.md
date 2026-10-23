@@ -26,12 +26,27 @@ Plan agreed with the user: **do DeepSeek-V4-Flash first, then DeepSeek-V4.1-Flas
 | `tests/.../megatron/test_megatron_models.py` | New row `deepseek-v4-flash-4layer_h100_tp1_ep4` + per-model config: `remove_microbatch_padding=False`, `inference_only_init`, vLLM `max_model_len=4096`/`gmu=0.5`, 1800 s health timeout. Model path from `SKYRL_DEEPSEEK_V4_FLASH_4LAYER`. |
 | `skyrl/backends/skyrl_train/workers/megatron/megatron_worker.py` | Drops `core_attn` from selective recompute for `experimental_attention_variant == "dsv4_hybrid"` (recompute off if nothing remains). |
 
-## Machine: b200-resv-ray-0 (current, from 2026-10-23)
+## Machines (current, from 2026-10-23): 4 x GCP A4 VMs, 8 x B200 each
 
-Single node, 8 x B200 (183 GB), 224 CPUs, 3.9 TB RAM. Shared login box (other users run jobs here): check
-`nvidia-smi` before a GPU run, and kill only your own processes. No Ray cluster / Slurm / k8s; tests start
-their own Ray with `RAY_ADDRESS=local`. Sibling nodes (`b200-resv-ray-1`, `-3`) are not ssh-reachable and
-no filesystem is shared across nodes, so everything is single-node for now.
+| Node | IP | Role |
+|---|---|---|
+| b200-resv-ray-0 | 10.180.0.9 | head; agent runs here; other users (etang, sumanthrh) also run jobs here |
+| b200-resv-ray-1 | 10.180.0.10 | worker |
+| b200-resv-ray-3 | 10.180.0.15 | worker |
+| b200-resv-ray-8 | 10.180.0.14 | worker |
+
+Each node: 8 x B200 (183 GB), 224 CPUs, 3.9 TB RAM, 8 x RoCE NICs (`rocep*`). ray-0 has passwordless ssh
+(`~/.ssh/id_ed25519`) to the other three. No shared filesystem: every node has an identical copy of the
+layout below (checkpoint, slice, GSM8K verified by file count + bytes; code at `~/avigyabb/SkyRL-dsv4`).
+Inter-node TCP is open on arbitrary ports. No Ray cluster is running yet; single-node tests start their own
+with `RAY_ADDRESS=local`. Check `nvidia-smi` before a GPU run and kill only your own processes.
+
+**NCCL:** the interactive login env on these VMs sets Google's gIB net plugin (`NCCL_NET=gIB`,
+`/usr/local/gib/lib64` on `LD_LIBRARY_PATH`, `NCCL_TUNER_CONFIG_PATH`), built for NCCL 2.27.5. The venv's
+NCCL 2.29.7 can't load it ("Failed to initialize any NET plugin" -> `ncclInvalidUsage`). Unset those three;
+NCCL's built-in IB transport then uses all 8 RoCE NICs: 3-node x 8-GPU all_reduce of 256 MiB at ~225-255
+GB/s busbw. Non-interactive ssh shells don't get the gIB env, so `ray start` over ssh is already clean;
+anything started from an interactive shell on ray-0 must unset it (run_roundtrip.sh does).
 
 Storage: `/` (home) is a persistent disk with ~30 GB free -- keep caches off it. `/workspace` is a shared
 persistent disk at 91%. Everything large lives on `/mnt/local_storage` (32 x local NVMe RAID0, 11 TB;
@@ -98,19 +113,30 @@ Previous machine (runs 1-3): Anyscale workspace, 2 x 8xB200 workers, artifacts o
    find a DSv4-compatible selective set (e.g. `moe_act`, `layernorm`) before long-context training.
 3. `dsv4-rt-1792785532`: **hung in vLLM boot**, see below. Stopped after 30 min.
 
+New machine (logs in `$DSV4_ROOT/logs/rt<N>-*.log`):
+
+4. rt4: vLLM init `NCCL error: invalid usage` -- gIB plugin vs NCCL 2.29.7 (see Machines). Fixed in run_roundtrip.sh.
+5. rt5: vLLM booted (590 s incl. MoE autotune, all ranks tuned together with a fresh per-run
+   `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR`). Router died: `/tmp/skyrl-logs` owned by another user. Added
+   `SKYRL_TEST_LOG_PATH` override in `tests/backends/skyrl_train/gpu/utils.py`.
+6. rt6: reached Megatron `init_model`; `NVTE_FLASH_ATTN=0` (which I had added, per the megatron doc) conflicts
+   with SkyRL's `attention_backend="flash"` default. Removed from the script.
+7. rt7: Megatron forward: `CompressedSparseAttention supports only an implicit causal mask`. SkyRL passes the
+   padding mask on the unpacked path. `MegatronModelWrapper` now passes `attention_mask=None` into the model
+   for `experimental_attention_variant == "dsv4_hybrid"` (rows are left-aligned by `remove_left_padding`, so
+   causal is exact); the mask is still used for logprob extraction.
+8. rt8: running.
+
 Padding note: with `remove_microbatch_padding=False`, `remove_left_padding` left-aligns every sequence,
 so the causal SWA/CSA/HCA attention never sees padding — correct for logprobs, just less efficient.
 
-## Current blocker: FlashInfer MoE autotune hang at vLLM boot
+## FlashInfer MoE autotune hang at vLLM boot (worked around)
 
-In run 3, TP0 loaded 42 configs from
-`/home/ray/.cache/vllm/flashinfer_autotune_cache/0.7.0.post1/100a/...` and finished, while TP1-3 sat at
-`[AutoTuner]: Tuning trtllm::fused_moe::gemm1: 0/21` for 30 min (EngineCore only printing
-`shm_broadcast ... No available shared memory broadcast block`). Runs 1 and 2 booted vLLM fine on the
-same nodes, so this looks like a cache race between ranks (one rank's cache file written mid-run) rather
-than a DSv4 problem. Things to try, cheapest first: just rerun; delete the node-local
-`~/.cache/vllm/flashinfer_autotune_cache` on the worker; point the cache at a fresh dir per job; disable
-the boot autotune. If it recurs, py-spy the stuck `RayWorkerProc`s.
+`vllm/model_executor/warmup/kernel_warmup.py::flashinfer_autotune`: rank 0 reads the cache file and broadcasts
+it, then all ranks tune collectively over the world CPU group. Runs 1-2 (cold cache) booted; run 3 (warm cache)
+hung with TP0 done and TP1-3 at `Tuning trtllm::fused_moe::gemm1: 0/21`. Consistent with ranks disagreeing on
+cache hits so only some enter the collective tuning. Workaround: fresh `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` per
+run (costs ~1-2 min of tuning per boot). Not yet reproduced deliberately -- candidate vLLM issue.
 
 ## Next steps (DSv4-Flash)
 
