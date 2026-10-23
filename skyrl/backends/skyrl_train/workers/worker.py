@@ -1250,25 +1250,29 @@ class PolicyWorkerBase(Worker):
             unscaled_loss = loss / grad_sum_correction_factor
             self.strategy.backward(loss, self.model, self.optimizer)
 
-            # Build per-sequence loss_fn_outputs with logprobs.
-            batch_size = action_log_probs.shape[0]
-            seq_len = action_log_probs.shape[1]
+            # Only build per-token outputs for callers that consume them.
+            if return_per_token_outputs:
+                # Build per-sequence loss_fn_outputs with logprobs.
+                batch_size = action_log_probs.shape[0]
+                seq_len = action_log_probs.shape[1]
 
-            if response_mask is not None:
-                valid_lens = response_mask.sum(dim=1).int().tolist()
-            elif loss_mask is not None:
-                valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
+                if response_mask is not None:
+                    valid_lens = response_mask.sum(dim=1).int().tolist()
+                elif loss_mask is not None:
+                    valid_lens = (loss_mask > 0).sum(dim=1).int().tolist()
+                else:
+                    valid_lens = [seq_len] * batch_size
+
+                detached_log_probs = action_log_probs.detach().cpu()
+                loss_fn_outputs = []
+                for i, valid_len in enumerate(valid_lens):
+                    loss_fn_outputs.append(
+                        {
+                            "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
+                        }
+                    )
             else:
-                valid_lens = [seq_len] * batch_size
-
-            detached_log_probs = action_log_probs.detach().cpu()
-            loss_fn_outputs = []
-            for i, valid_len in enumerate(valid_lens):
-                loss_fn_outputs.append(
-                    {
-                        "logprobs": detached_log_probs[i, -valid_len:].tolist() if valid_len > 0 else [],
-                    }
-                )
+                loss_fn_outputs = [{} for _ in range(action_log_probs.shape[0])]
 
             status = {
                 "final_loss": unscaled_loss.item(),
