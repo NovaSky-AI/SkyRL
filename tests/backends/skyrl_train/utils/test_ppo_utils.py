@@ -208,6 +208,51 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
 
 
+@pytest.mark.parametrize("reward", [0.1, 0.3, 0.6, 0.7, 0.9])
+@pytest.mark.parametrize("group_size", [8, 16, 64])
+def test_compute_grpo_outcome_advantage_uniform_group(reward: float, group_size: int):
+    """A group where every response has the same fractional score has no
+    preference between responses, so all advantages are exactly zero.
+
+    The float32 group mean of identical values can land an ulp away from
+    the value, and dividing that residue by the equally small std used to
+    give the whole group the same nonzero advantage (about +0.0289 for a
+    group of 0.3 scores).
+    """
+    token_level_rewards = torch.zeros((group_size, 4), dtype=torch.float32)
+    token_level_rewards[:, -1] = reward
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["prompt"] * group_size)
+
+    for grpo_norm_by_std in (True, False):
+        adv, ret = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=index,
+            grpo_norm_by_std=grpo_norm_by_std,
+        )
+        assert torch.equal(adv, torch.zeros_like(adv))
+        assert torch.equal(ret, torch.zeros_like(ret))
+
+
+def test_compute_grpo_outcome_advantage_uniform_group_next_to_mixed_group():
+    """Only the uniform group is zeroed; the mixed group keeps its advantages."""
+    token_level_rewards = torch.zeros((8, 2), dtype=torch.float32)
+    token_level_rewards[:4, -1] = 0.3
+    token_level_rewards[4:, -1] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["uniform"] * 4 + ["mixed"] * 4)
+
+    adv, ret = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    assert torch.equal(adv[:4], torch.zeros_like(adv[:4]))
+    assert torch.allclose(adv[4:, 0], torch.tensor([1.5, -0.5, -0.5, -0.5]), atol=1e-5)
+
+
 def test_compute_maxrl_advantage():
     # Two groups: [6.0, 3.0] mean=4.5, [9.0, 12.0] mean=10.5
     token_level_rewards = torch.tensor(
