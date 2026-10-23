@@ -236,8 +236,11 @@ def chunked_mlp(
     pad = max(0, num_chunks - seq)
     if pad:
         hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, 0, 0, pad))
-        if padding_mask is not None:
-            padding_mask = torch.nn.functional.pad(padding_mask, (0, pad), value=True)
+        # Mask the dummy tokens even when the caller passed no mask: the router counts unmasked
+        # tokens in its aux / z-loss and expert-bias token counts.
+        if padding_mask is None:
+            padding_mask = hidden_states.new_zeros(batch, seq, dtype=torch.bool)
+        padding_mask = torch.nn.functional.pad(padding_mask, (0, pad), value=True)
         if input_ids is not None:
             input_ids = torch.nn.functional.pad(input_ids, (0, pad))
     chunks = hidden_states.tensor_split(num_chunks, dim=0)
@@ -299,6 +302,9 @@ class _ChunkedRouterReplay:
         """Dummy tokens replay the first real token's experts (any valid, distinct top-k works)."""
         if not pad_tokens or indices is None:
             return indices
+        if indices.shape[0] == 0:  # no real token to copy: experts 0..topk-1
+            dummy = torch.arange(indices.shape[1], dtype=indices.dtype, device=indices.device)
+            return dummy.expand(pad_tokens, -1)
         return torch.cat([indices, indices[:1].expand(pad_tokens, -1)], dim=0)
 
     def before_chunk(self, i):

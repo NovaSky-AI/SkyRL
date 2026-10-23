@@ -15,6 +15,7 @@ import torch
 pytest.importorskip("megatron.core", reason="requires the megatron extra")
 
 from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.mhc_transformer_layer import (  # noqa: E402
+    _ChunkedRouterReplay,
     chunked_mlp,
 )
 
@@ -34,7 +35,7 @@ class ToyMoE(torch.nn.Module):
         self.calls = []
 
     def forward(self, x, padding_mask=None):
-        self.calls.append((tuple(x.shape), None if padding_mask is None else tuple(padding_mask.shape)))
+        self.calls.append((tuple(x.shape), padding_mask))
         probs, idx = torch.topk(torch.softmax(self.router(x), dim=-1), K, dim=-1)
         out = torch.zeros_like(x)
         for k in range(K):
@@ -78,8 +79,15 @@ def test_chunked_matches_single_call(seq, num_chunks, with_mask):
     assert len(mlp.calls) == num_chunks
     assert all(shape[0] >= 1 for shape, _ in mlp.calls)
     assert sum(shape[0] for shape, _ in mlp.calls) == max(seq, num_chunks)
-    for shape, mask_shape in mlp.calls:
-        assert mask_shape == (None if mask is None else (2, shape[0]))
+    pad = max(0, num_chunks - seq)
+    if not pad:
+        for shape, call_mask in mlp.calls:
+            assert (call_mask is None) if mask is None else (call_mask.shape == (2, shape[0]))
+    else:
+        # The dummy tokens are masked, also when the caller passed no mask.
+        real = mask if mask is not None else torch.zeros(2, seq, dtype=torch.bool)
+        expected = torch.cat([real, torch.ones(2, pad, dtype=torch.bool)], dim=1)
+        assert torch.equal(torch.cat([call_mask for _, call_mask in mlp.calls], dim=1), expected)
 
 
 class IdRecordingMLP(torch.nn.Module):
@@ -143,6 +151,12 @@ class ReplayMoE(torch.nn.Module):
         _, idx = self.router(x)
         self.seen.append(idx.clone())
         return x * 1.0, None
+
+
+def test_router_replay_pad_without_real_tokens():
+    # Nothing to copy from an empty micro-batch: the dummies replay distinct experts 0..topk-1.
+    padded = _ChunkedRouterReplay._pad(torch.empty(0, K, dtype=torch.long), 3)
+    assert torch.equal(padded, torch.arange(K).expand(3, -1))
 
 
 @pytest.mark.parametrize("seq", [30, 3])
