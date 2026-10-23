@@ -116,13 +116,13 @@ class SkyRLLoraConfig(BaseConfig):
     tensors; nothing is written. Once the adapter is copied into vLLM's LoRA slots, the built
     adapter and the received tensors move to pinned host memory, where ``"disk"`` keeps the built
     adapter. Shared expert adapters are sent once and aliased on the receiver. Megatron only."""
-    target_modules: str = "all-linear"
+    target_modules: Union[str, List[str]] = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
     list on Megatron (attention, MLP, and GatedDeltaNet projections). GatedDeltaNet ``in_proj``
     is dropped for models like Qwen3-Next whose fused HF checkpoint layout cannot round-trip a
     LoRA adapter through Megatron-Bridge. A list of specific module names can be given instead."""
-    exclude_modules: Optional[str] = None
+    exclude_modules: Optional[Union[str, List[str]]] = None
     """Modules to exclude from LoRA."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
@@ -159,6 +159,18 @@ class SkyRLLoraConfig(BaseConfig):
     the largest per-module rank, which exceeds ``rank`` when ``init_adapter_path`` carries a
     ``rank_pattern`` or when Megatron (``merge_lora=false``) fuses several adapted projections into
     one module. vLLM accepts 8, 16, 32, 64, 128, 256, 320 or 512."""
+
+
+@dataclass
+class BitsAndBytes4BitConfig(BaseConfig):
+    """bitsandbytes 4-bit base-weight quantization for FSDP QLoRA."""
+
+    enabled: bool = False
+    """Load base weights in 4-bit. Policy training requires LoRA when enabled."""
+    quant_type: Literal["fp4", "nf4"] = "nf4"
+    """4-bit data type. NF4 is recommended for normally distributed pretrained weights."""
+    use_double_quant: bool = True
+    """Quantize first-stage quantization constants to save more memory."""
 
 
 @dataclass
@@ -200,6 +212,7 @@ class ModelConfig(BaseConfig):
     path: Optional[str] = None
     """HuggingFace model path (or local directory) for this model."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
+    bitsandbytes_4bit: BitsAndBytes4BitConfig = field(default_factory=BitsAndBytes4BitConfig)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
 
     def __post_init__(self) -> None:
@@ -257,7 +270,8 @@ class FSDPConfig(BaseConfig):
     https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html
     Enabling this replaces SkyRL's manual colocation offload (and makes
     ``optimizer_config.offload_after_step`` inert) rather than stacking with it; see
-    https://docs.skyrl.ai/docs/tutorials/placement for the difference."""
+    https://docs.skyrl.ai/docs/tutorials/placement for the difference. Single-rank 4-bit models are not
+    FSDP-wrapped and must leave this disabled to use manual phase offload."""
     reshard_after_forward: Union[bool, int] = True
     """FSDP2 only.
     Accepts True, False, or an int between 1 and ``fsdp_size``. See
@@ -1573,8 +1587,9 @@ class TrainerConfig(BaseConfig):
     For sharded multi-node HF exports with ``policy.megatron_config.hf_export_config.distributed_save=True``, this must
     be a shared filesystem path visible to all Megatron ranks."""
     bf16: bool = True
-    """Load models in bf16. FSDP: the ref model and a LoRA policy's frozen base (the adapters stay fp32).
-    Megatron: the policy and ref models, including LoRA adapters. ``False`` uses fp32."""
+    """Load models in bf16. FSDP: the ref model and a LoRA policy's frozen base.
+    Non-quantized FSDP LoRA adapters stay in fp32. Megatron: the policy and ref models, including LoRA adapters.
+    Four-bit loading always uses bf16 compute. FSDP inference-only policy initialization also uses bf16."""
     epochs: int = 1
     """Number of epochs (passes over the full dataset)."""
     max_training_steps: Optional[int] = None
@@ -1727,6 +1742,21 @@ class TrainerConfig(BaseConfig):
                 "`trainer.policy.megatron_config.lora_config.merge_lora=False` so weight "
                 "sync preserves the inference engine's INT4 base weights."
             )
+
+        if self.policy.model.bitsandbytes_4bit.enabled:
+            if self.strategy != "fsdp":
+                raise ValueError(
+                    "`trainer.policy.model.bitsandbytes_4bit.enabled=True` is only supported with "
+                    "`trainer.strategy=fsdp`."
+                )
+            if self.policy.model.lora.rank <= 0:
+                raise ValueError(
+                    "`trainer.policy.model.bitsandbytes_4bit.enabled=True` requires "
+                    "`trainer.policy.model.lora.rank > 0` for QLoRA."
+                )
+
+        if self.ref.model.bitsandbytes_4bit.enabled and self.strategy != "fsdp":
+            raise ValueError("`trainer.ref.model.bitsandbytes_4bit` is only supported with FSDP.")
 
         if self.logprobs_chunk_size is not None and (
             not isinstance(self.logprobs_chunk_size, int) or self.logprobs_chunk_size <= 0
