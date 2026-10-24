@@ -10,11 +10,9 @@ Plan agreed with the user: **do DeepSeek-V4-Flash first, then DeepSeek-V4.1-Flas
 ## TL;DR
 
 - DSv4-Flash is mostly integration work: every upstream piece exists at our pins.
-- Stage 0 (slice): **full-FT roundtrip row passes** (rt15: Megatron vs vLLM 0.048 < 0.1; post-sync vLLM
-  common-prefix 0.016 < 0.05). LoRA row passed once (lora2) and then failed in Megatron's FlashMLA sparse forward
-  (lora3, `TOPK_LENGTH` unsupported by the kernel the dispatcher chose) -- open, see "LoRA: FlashMLA TOPK_LENGTH".
-- Full model: forward matches (0.040); sync needs 2 nodes (OOM on one).
-- Next: LoRA FlashMLA issue, full model on 2 nodes, then Stage 1.
+- Stage 0 (slice): **both rows pass** -- full FT (rt16: Megatron vs vLLM 0.050 < 0.1; post-sync common-prefix
+  0.015 < 0.05) and LoRA (lora5: zero adapter 0.047, stale sampler 0.184 > 0.1, updated adapter 0.048).
+- Full model: forward matches (0.040); sync needs 2 nodes (OOM on one). Next: that, then Stage 1.
 
 ## What is on this branch
 
@@ -141,6 +139,7 @@ New machine (logs in `$DSV4_ROOT/logs/rt<N>-*.log`):
 13. rt13: attn_sink fix alone: 0.89 (the MoE clamp loss remained).
 14. rt14: both vLLM fixes: positional 0.49 -- at the measured nondeterminism floor (0.39), not a weight problem.
 15. rt15: common-prefix check, threshold 0.05: **PASSED** (Megatron 0.048; post-sync prefix 0.016 over 3535 tokens).
+16. rt16 (with the FlashMLA preload): **PASSED** (0.050; prefix 0.015 over 4032 tokens).
 
 Other rows:
 - LoRA `deepseek-v4-flash-4layer_h100_tp1_ep4_adapter` (node 1): **PASSED** -- zero adapter 0.050, stale sampler
@@ -178,14 +177,18 @@ Also found on the way (not the cause): the export is bit-exact (temporary `test_
 tensors) once `MegatronWeightSource._wire_dtype` keeps fp32 (mHC, sinks, router bias) and integer (`tid2eid`) tensors
 in their own dtype.
 
-## LoRA: FlashMLA TOPK_LENGTH (open)
+## LoRA: FlashMLA TOPK_LENGTH (fixed)
 
-lora3 failed in the Megatron forward (no-grad CSA path: indexer top-k -> compacted indices -> `csa_sparse_attn(...,
-topk_length=...)` -> `flash_mla_sparse_fwd`): "The chosen implementation does not support all required features ...
-required but not supported: TOPK_LENGTH" (B200, SM100). lora2 passed with the same Megatron code, so it is
-data-dependent. A microbenchmark of `csa_sparse_attn` over seq 128-4096 x batch 1-2, top-k widths 128-640 and
-grad on/off never fails. Next: capture the failing inputs (temporary dump hook on node 1) and reproduce; candidate
-fix is the non-compact path (`topk_length=None`, -1 invalids -- same semantics) via a megatron patch.
+lora3/lora4 failed in the Megatron forward (no-grad CSA path -> `csa_sparse_attn(topk_length=...)` ->
+`flash_mla_sparse_fwd`): "The chosen implementation does not support all required features ... TOPK_LENGTH".
+Not data: the dumped failing inputs run fine in a fresh process. The failing process had **vLLM's bundled
+`vllm/_flashmla_C.abi3.so` loaded before the pinned `flash_mla/cuda*.so`** (nv_dev @ b7643bd). Both statically link
+FlashMLA with the same exported symbols, so the pinned forward dispatched through vLLM's older implementation table
+(its SM100 head-64 kernel lacks TOPK_LENGTH; the pinned source's has it). Reproduced: same inputs fail iff
+`vllm._flashmla_C` is imported first; pinned-then-vLLM works. The LoRA test module imports vLLM at import time, which
+is why the LoRA row hit it (lora2 passed by load order luck). Fix: `patches/flash_mla/preload.py`, called from
+`skyrl/backends/skyrl_train/__init__.py` (like the TE nvrtc pin): loads the pinned FlashMLA first in processes that
+have not imported vLLM; no-op in vLLM's own workers. Proper fix: build the wheel with hidden symbol visibility.
 
 ## FlashInfer MoE autotune hang at vLLM boot (worked around)
 
@@ -211,7 +214,13 @@ run (costs ~1-2 min of tuning per boot). Not yet reproduced deliberately -- cand
 5. Stage 2: DAPO LoRA + full FT with R3, checkpoint save/resume (`test_trainer_full_checkpointing.py`).
 6. Stage 3: packed THD/CP + TP>1 attention (Megatron-LM main has THD/CP), selective recompute,
    MXFP8 model spec under `skyrl/backends/skyrl_train/weight_sync/fp8/models`.
-7. Keep a running list of upstream issues to file (vLLM / megatron-core / Megatron-Bridge).
+7. Keep a running list of upstream issues to file (vLLM / megatron-core / Megatron-Bridge). So far:
+   - vLLM: `DeepseekV4Model.load_weights` writes `attn_sink` via direct copy_, bypassing weight_loader (dropped under
+     layerwise reload); `DeepseekV4ForCausalLM.load_weights` runs the model-level finalize per call (meta tensors
+     under layerwise reload); `FlashInferExperts` per-expert constants are plain attributes zeroed by level-2 sleep;
+     FlashInfer autotune boot hang with a warm cache (unconfirmed); DSv4 serving is not run-to-run deterministic.
+   - FlashMLA wheel (skyrl-wheels): exported symbols collide with vLLM's bundled FlashMLA; build with hidden visibility.
+   - megatron-core: DSv4 attention TP=1 only, no packed THD, no core_attn recompute (Megatron-LM main has THD/CP).
 
 ## DeepSeek-V4.1-Flash-1017 (after V4) — findings so far
 
