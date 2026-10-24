@@ -66,6 +66,26 @@ Worktree: `/home/avigyabb/avigyabb/SkyRL-dsv4` (remote `fork` = avigyabb/SkyRL).
 
 Not on the HF Hub yet (needs a token from the user; never publish with a token found in the env).
 
+## Multi-node Ray cluster (Stage 1+)
+
+Ray daemons run from a persistent venv pinned to the uv env's Ray (2.57.0, Python 3.12.14) -- the system
+`/opt/ray-venv` is 2.58.0, and a `uv run --isolated` env is deleted when `ray start` returns. Workers still run in
+`uv run --isolated` envs (Ray's uv hook ships the working dir and `py_executable`).
+
+```bash
+B=/mnt/local_storage/avigyabb   # same layout on every node
+uv venv --python 3.12.14 $B/ray-venv && uv pip install --python $B/ray-venv/bin/python 'ray[default]==2.57.0'
+export UV_CACHE_DIR=$B/uv_cache HF_HOME=$B/hf_cache VLLM_CACHE_ROOT=$B/vllm_cache/shared \
+  CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH RAY_TMPDIR=$B/ray-tmp
+unset NCCL_NET NCCL_TUNER_CONFIG_PATH   # gIB plugin vs NCCL 2.29 (see Machines)
+$B/ray-venv/bin/ray start --head --port=6390 --node-ip-address=<head ip> --temp-dir=$B/ray-tmp --dashboard-host=127.0.0.1   # head
+$B/ray-venv/bin/ray start --address=<head ip>:6390 --node-ip-address=<this ip>                                                # others
+```
+
+Current cluster (2026-10-24): head b200-resv-ray-1 (10.180.0.10) + b200-resv-ray-3, 16 GPUs. Drivers run on the head
+with `RAY_ADDRESS=10.180.0.10:6390`. Full BF16 model (`models/DeepSeek-V4-Flash-bf16`, 138 files / 568,766,622,520
+bytes) on ray-3 and ray-8; copying to ray-1.
+
 ## How to run
 
 ```bash
