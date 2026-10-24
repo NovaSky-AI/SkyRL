@@ -95,6 +95,9 @@ export PATH="$CUDA_HOME/bin:$PATH"
 # NCCL's built-in IB transport over the RoCE NICs works. No-op elsewhere.
 unset NCCL_NET NCCL_TUNER_CONFIG_PATH
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
+# Fresh FlashInfer autotune cache per run: with a warm one, vLLM boot hung in the collective MoE tuning
+# (rank 0 loads the cache, the others wait) until the health timeout. Each node creates its own empty dir.
+export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:-${TMPDIR:-/tmp}/vllm_autotune_$(date +%s)}"
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1800
 
 RUN_NAME="dsv4_flash_gsm8k_lora_r${LORA_RANK}_tp${MEGATRON_TP}_ep${MEGATRON_EP}"
