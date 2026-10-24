@@ -225,6 +225,47 @@ image(s) in the chat `messages` format. See
 and
 [`prepare_cauldron_vlm.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/sft/prepare_cauldron_vlm.py).
 
+### Choosing what trains
+
+Three `megatron_config` flags select which parts of a vision-language model
+train: `freeze_language_model`, `freeze_vision_model` and
+`freeze_vision_projection` (the projection maps vision features into the
+language model; for Qwen3-VL it is the patch merger plus the DeepStack
+mergers). They are written to the Megatron-Bridge model provider, which
+applies them through the model's own `freeze()`, so they work for every
+Bridge VLM whose provider supports freezing (Qwen-VL, GLM-4.5V, Kimi K2.5-VL,
+Gemma-VL, Nemotron-VL, Ernie-VL) without naming parameters.
+
+All three default to `false` and are always applied, so they replace the
+provider's own defaults: Qwen3-VL MoE's provider would otherwise freeze the
+language model and the vision encoder whenever no flag is set. A set flag on a
+model whose provider lacks them fails at build time, and only the Megatron
+backend applies them; other strategies reject them.
+
+| Recipe | Flags |
+|---|---|
+| Full fine-tune (default) | none |
+| Projection only (e.g. a perception-alignment stage) | `freeze_language_model=true freeze_vision_model=true` |
+| Language model and projection, vision encoder frozen | `freeze_vision_model=true` |
+| Language model only | `freeze_vision_model=true freeze_vision_projection=true` |
+
+With LoRA (`model.lora.rank>0`), only the adapters train: leave the flags unset
+or set all three. Selections that would also train part of the base model next
+to the adapters are rejected. The trainable and total parameter counts per
+top-level module are logged at startup.
+
+<Callout type="warn">
+Qwen3-VL's DeepStack mergers (part of the vision projection) currently receive
+no gradient under activation recompute (`recompute_granularity="full"`, the
+default): the projection then trains only its main patch merger. Until this
+is fixed in Megatron-Bridge, disable recompute for Qwen3-VL runs that train the
+projection:
+`megatron_config.transformer_config_kwargs.recompute_granularity=null`
+`megatron_config.transformer_config_kwargs.recompute_method=null`
+`megatron_config.transformer_config_kwargs.recompute_num_layers=null`
+(activation memory grows; a 4B model with a frozen language model fits a 48 GB GPU).
+</Callout>
+
 ## Key configuration
 
 See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft/sft_config)

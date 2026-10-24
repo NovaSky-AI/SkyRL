@@ -14,6 +14,11 @@ set -x
 #   - sequence_parallel_size and context_parallel_size must be 1
 #   - train_on_what must be last_assistant_message
 #
+# To train only the vision projection (merger + DeepStack mergers), add
+#   megatron_config.freeze_language_model=true megatron_config.freeze_vision_model=true
+# and turn activation recompute off so the DeepStack mergers get gradients
+# (see "Choosing what trains" in docs/content/docs/sft/overview.mdx).
+#
 # Usage:
 #   uv run examples/train/sft/prepare_cauldron_vlm.py --output-dir $HOME/data/cauldron-vlm
 #   bash examples/train/sft/run_sft_megatron_vlm.sh

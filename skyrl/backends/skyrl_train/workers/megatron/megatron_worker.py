@@ -55,6 +55,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     validate_concrete_fp8_recipe,
     validate_mxfp8_gdn_tp_alignment,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.trainable_params import (
+    apply_vlm_freeze_to_provider,
+    summarize_trainable_parameters,
+)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -348,6 +352,14 @@ class MegatronWorker:
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+
+        # Vision-language freeze flags are fields of the Megatron-Bridge VLM providers, applied by the
+        # model's own freeze() inside provide(). All three are always written (after the pass-through
+        # kwargs, so the megatron_config fields win and provider defaults never leak through); a set
+        # flag on a provider without the fields raises.
+        freeze_summary = apply_vlm_freeze_to_provider(provider, megatron_config)
+        if freeze_summary is not None:
+            logger.info(f"VLM freeze: {freeze_summary}")
 
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
         # the residual it would re-materialize is the n-stream tensor consumed by the mHC
@@ -1020,6 +1032,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
+            for line in summarize_trainable_parameters(self.actor_module):
+                logger.info(line)
 
         # Created only on profiled ranks.
         self.profiler = build_profiler_from_policy_cfg(self.cfg)
