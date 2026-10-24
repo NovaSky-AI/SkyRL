@@ -107,10 +107,11 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.moe_token_dispatcher_type="alltoall" \
   trainer.policy.megatron_config.moe_enable_routing_replay=$ENABLE_ROUTING_REPLAY \
   generator.inference_engine.enable_return_routed_experts=$ENABLE_ROUTING_REPLAY \
-  `# Selective recompute of the MoE layers: megatron-core's DSv4 attention rejects core_attn` \
-  `# checkpointing, and full recompute is incompatible with mHC, so MoE is what remains.` \
+  `# Selective recompute: megatron-core's DSv4 attention rejects core_attn checkpointing and mHC` \
+  `# rejects full recompute. mHC's 4-stream residual activations dominate (~55 GiB for one ~400-token` \
+  `# row with only moe recomputed), so recompute mhc too; megatron-core forbids mhc together with mlp.` \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="selective" \
-  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe] \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm] \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
   trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=64 \
