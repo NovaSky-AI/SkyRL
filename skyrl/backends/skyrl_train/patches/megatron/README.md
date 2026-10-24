@@ -29,7 +29,13 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
+| `gpu_ci/patches/megatron/test_moe_combine_bf16_reduce.py` | `patch_moe_combine_bf16_reduce.py` (two ranks + wrapper) |
+| `patches/megatron/test_offload_checkpoint_inputs.py` (CPU) | `patch_offload_checkpoint_inputs.py` wraps every importer, fake functions |
+| `gpu_ci/patches/megatron/test_mhc_full_recompute.py` | `glm5_next/provider.py` `finalize` (mHC + full recompute), `patch_moe_release_dispatcher_probs.py` (loss/grads vs no recompute on a GLM-5.3-Flash slice) |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1, both exchanges (two ranks) |
+| `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py` | `glm5_next/dsa.py` query-chunked fused sparse attention vs one-shot |
+| `gpu_ci/patches/megatron/test_moe_node_dedup_dispatch.py` | `patch_moe_node_dedup_dispatch.py` vs the stock dispatcher (four ranks, two pseudo-nodes) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -64,6 +70,13 @@ model, `glm5_next/` is deleted too.
 ### NVIDIA/Megatron-LM#7054: KDA (Kimi Delta Attention)
 
 - **Carried as:** `mcore_ext/kda.py` (`KimiDeltaAttention`, `get_kda_module_spec`).
+  - SkyRL addition: head-wise (Ulysses) context parallelism, reusing megatron-core's
+    `GatedDeltaNet` all-to-all helpers (`ssm/gated_delta_net/common.py`). #7054 has its own
+    head-/chunk-wise CP (`cp_partition_mode`); compare against it before switching.
+    `SKYRL_KDA_CP_EXCHANGE=allgather` swaps GatedDeltaNet's all-to-all of the projected tensors for
+    an all-gather of the sequence-parallel hidden states (over CP, then TP) and projections of only
+    this rank's head slice: ~5x fewer bytes across the CP group, 1.18x faster fwd+bwd at 1M tokens
+    on TP8 CP2 where CP crosses nodes.
 - **Landed?** megatron-core defines a KDA module or `experimental_attention_variant="kda"`, and
   `TransformerConfig` has `kda_gate_lower_bound`
   (`grep -rn "KimiDeltaAttention\|kda_gate_lower_bound" .venv/.../megatron/core`).
@@ -73,7 +86,8 @@ model, `glm5_next/` is deleted too.
   - `glm5_next/bridge.py`: re-check the KDA parameter names (`q/k/v_conv1d`, `A_log`, `dt_bias`,
     `f_a/f_b/g_a/g_b_proj`) against upstream's module.
   - Delete `mcore_ext/kda.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`,
+  `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py`; the GLM roundtrip rows.
 
 ### NVIDIA/Megatron-LM#7521: mHC (manifold-constrained hyper-connections)
 
@@ -93,7 +107,8 @@ Two pieces, which may land separately.
   - Delete `mcore_ext/hyper_connection.py`.
 
 **b) MoE sub-layers in the mHC layer**
-- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
+- **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`). Its
+  full recompute relies on `patch_moe_release_dispatcher_probs.py` (below), which is not mHC-specific.
   - The layer replaces megatron-core's `_forward_mlp`, where `mlp_chunks_for_training` is applied,
     so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
     data, routing sends some expert ranks several times their share of tokens; chunking bounds their
@@ -106,13 +121,14 @@ Two pieces, which may land separately.
 - **Remove:**
   - `glm5_next/layer_specs.py`: build the specs on megatron-core's layer.
   - `workers/megatron/megatron_worker.py`: the `enable_mhc_connections` block in `init_configs`
-    downgrades `recompute_granularity="full"` to selective and drops `'mhc'`. It exists because
-    megatron-core rejects mHC under full recompute, and our layer doesn't implement the mHC
-    recompute managers that megatron-core's suggested alternative (`'mhc'` in
-    `recompute_modules`) needs. With upstream's layer, keep a downgrade from full to selective
-    **with** `'mhc'` in `recompute_modules`, or delete the block entirely if upstream now allows
-    full recompute with mHC. SkyRL's default config is full recompute, and the GLM roundtrip
-    tests run on defaults.
+    downgrades `recompute_granularity="full"` to selective and drops `'mhc'` for any mHC layer
+    *other than* ours (`supports_mhc_full_recompute`); ours keeps full recompute through
+    `Glm5NextModelProvider.finalize`, which bypasses megatron-core's mHC + full-recompute guard
+    (removed upstream by #7521: delete the override then). Moving GLM onto upstream's layer takes
+    it off that bypass: then keep a
+    downgrade from full to selective **with** `'mhc'` in `recompute_modules`, or delete the block
+    entirely if upstream now allows full recompute with mHC. SkyRL's default config is full
+    recompute, and the GLM roundtrip tests run on defaults.
   - Delete `mcore_ext/mhc_transformer_layer.py`.
 - **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`,
   `patches/megatron/mcore_ext/test_mhc_moe_chunking.py`; the GLM roundtrip rows.
@@ -147,8 +163,21 @@ different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (20
       pinned `DSAIndexer`;
     - `Glm5NextDSAttention._forward_with_kpool_topk`: swaps the pinned `DSAttention.forward`'s
       token-level top-k for `fused_qk_topk_kpool`, and raises if the pooled selection doesn't run
-      exactly once;
+      exactly once; under context parallelism (`cp_comm_type=allgather`, which the pinned
+      `DSAttention` already supports for keys) `_gate_score_like_keys` all-gathers and reorders
+      the k-pool gate score the same way, so pools form over the whole sequence;
     - the `kpool <= 1` long-sequence guard.
+
+      exactly once;
+    - the `kpool <= 1` long-sequence guard;
+    - `_query_chunked_fused_absorbed_sparse_attention`: opt-in (`SKYRL_DSA_QUERY_CHUNK=<tokens>`)
+      runs the fused absorbed sparse attention in query chunks, each checkpointed (recomputed in
+      backward). The checkpoint is what saves memory -- without it autograd keeps every chunk's
+      padded query and kernel output, as much as one unchunked call -- so chunking always implies
+      the recompute: one extra kernel forward in backward; key grads summed across chunks in a
+      different order. Wraps whichever `dsa_kernel_backend` is selected; on `tilelang` the kernel
+      takes GLM-5.3-Flash's layout through `patch_sparse_mla_nope.py`. Tested by
+      `gpu_ci/patches/megatron/test_glm5_next_fused_sparse_attention.py`.
   - `glm5_next/layer_specs.py`: the `core_attention.module` / `submodules.indexer.module` swaps.
   - `glm5_next/provider.py`: `dsa_indexer_kpool`, `dsa_indexer_kpool_always_select_tail`.
 - **Landed?** megatron-core's `experimental_attention_variant/dsa.py` defines
@@ -209,6 +238,37 @@ Per-forward DSA index-share carrier under activation recompute.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
 
+### `patch_moe_combine_bf16_reduce.py`: FP32 upcast in the MoE combine's expert-TP reduce-scatter
+
+`MoEAlltoAllTokenDispatcher.combine_preprocess` reduce-scatters expert outputs across the
+expert-TP group as `reduce_scatter(hidden.to(probs.dtype)).to(hidden.dtype)`; with an FP32 router
+(GLM-5.3-Flash) that is an FP32 copy of every token-expert row (~19 GiB/GPU at 576k tokens, TP8 /
+EP32 x ETP2). For exactly two ranks a bf16 reduce-scatter with NCCL's Ring or PAT kernels (FP32
+accumulate, one rounding) is bit-identical, and Ring is NCCL's default for a 2-rank reduce-scatter
+at every size (NCCL 2.29.7, B200), so the reduce-scatter runs in the activation dtype there. NVLS
+rounds in the switch (<= 1 bf16 ulp off on ~10-20% of elements), so the upcast stays when
+`NCCL_ALGO` asks for NVLS, and for other group sizes. The decision is one method, `_tp_reduce_dtype`, installed with a copy of the pinned
+`combine_preprocess` that differs only in calling it (the test diffs the two). Written to be
+proposed upstream as is. Applied unconditionally in `make_megatron_module`; refuses to install,
+with a warning, if megatron-core's `combine_preprocess` no longer matches the copy.
+- **Landed?** `MoEAlltoAllTokenDispatcher` has `_tp_reduce_dtype` (the patch warns), or its
+  `combine_preprocess` no longer upcasts before a 2-rank reduce-scatter.
+- **Remove:** the module, its call in `make_megatron_module`, and `test_moe_combine_bf16_reduce.py`.
+
+### `patch_moe_node_dedup_dispatch.py`: one inter-node copy per (token, node) in the MoE all-to-all
+
+Opt-in (`SKYRL_MOE_NODE_DEDUP=1`). megatron-core's all-to-all dispatcher sends a token once per
+selected expert; with top-8 over 288 experts on 8 nodes most tokens pick several experts on the
+same remote node. The patch sends each token once per destination node (to the same-local-index GPU
+there, with that node's routing bits and probabilities), fans copies out over NVLink, and sums each
+node's expert outputs there before one partial sum crosses back. Expert ranks see exactly the stock
+rows/order (checked against `output_splits` every call), so ETP, sorting and experts are untouched;
+the combine's bf16 sum is only re-associated. 1.41x faster fwd+bwd at 64k on 64 B200 whose
+inter-node NCCL runs over TCP. Applied in `make_megatron_module` (no-op unless enabled).
+- **Landed?** megatron-core's alltoall dispatcher deduplicates per node (or SkyRL switches to a
+  hierarchical dispatcher such as DeepEP/HybridEP where the network allows).
+- **Remove:** the module, its call in `make_megatron_module`, and `test_moe_node_dedup_dispatch.py`.
+
 ### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
 
 Lets the TileLang SparseMLA kernel (`tilelang_dsa.fused_sparse_mla_absorbed`) take NoPE MLA
@@ -235,6 +295,23 @@ patches that replace dispatcher methods can't drop it. Applied unconditionally i
 - **Landed?** megatron-core's dispatcher clears `self.probs` after the combine (or stops storing it).
 - **Remove:** the module, its call in `make_megatron_module`, and
   `patches/megatron/test_moe_release_dispatcher_probs.py`.
+
+### `patch_offload_checkpoint_inputs.py`: opt-in, not an upstream bug
+
+Wraps `checkpointed_forward` in both modules that import it by name (`transformer_block` and
+`hybrid_block`) in `torch.autograd.graph.save_on_cpu` when
+`SKYRL_OFFLOAD_CHECKPOINT_INPUTS=1`, so full-recompute checkpoint inputs (one hidden state per
+layer) wait in host memory. Applied in `make_megatron_module` after `patch_dsa_index_share()`,
+which rebinds the same function. Pageable by default (exact-size host allocations); pinned with
+`SKYRL_OFFLOAD_CHECKPOINT_INPUTS_PINNED=1` (~4x faster copies, asynchronous), in which case
+`release_pinned_offload_cache()` returns PyTorch's cached pinned blocks at the end of every
+`forward_backward` -- otherwise they stay reserved next to the CPU optimizer's buffers and the
+node runs out of host RAM.
+- **Landed?** Not a fix to retire; delete it if megatron-core grows its own offload of
+  checkpointed layer inputs, or if nobody needs contexts past ~288k tokens per sequence.
+- **Remove:** the module, its call in `make_megatron_module`, the `release_pinned_offload_cache()`
+  call in `forward_backward`, `SKYRL_OFFLOAD_CHECKPOINT_INPUTS` in `skyrl/env_vars.py`, and
+  `patches/megatron/test_offload_checkpoint_inputs.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

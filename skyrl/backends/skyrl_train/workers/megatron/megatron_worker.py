@@ -118,7 +118,11 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     get_microbatch_iterator,
     reduce_metrics,
 )
-from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import (
+    SKYRL_MEGATRON_RANDOM_INIT,
+    SKYRL_OFFLOAD_CHECKPOINT_INPUTS,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+)
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -349,14 +353,18 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
-        # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
-        # the residual it would re-materialize is the n-stream tensor consumed by the mHC
-        # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
-        # needs the mHC recompute managers, which SkyRL's mHC layer does not implement, so
-        # downgrade to selective recompute of the remaining modules instead of failing.
-        # Tied to the vendored mHC layer: see patches/megatron/README.md (Megatron-LM#7521) for
-        # when to change or delete this.
-        if getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
+        # megatron-core rejects mHC (hyper-connection) models under full activation recompute.
+        # SkyRL's own mHC layer (GLM-5.3-Flash) supports it -- Glm5NextModelProvider.finalize()
+        # bypasses that one check (supports_mhc_full_recompute). Any other mHC layer
+        # keeps megatron-core's guard; its suggestion -- selective recompute with "mhc" in
+        # recompute_modules -- needs mHC recompute managers, so downgrade to selective recompute
+        # of the remaining modules instead of failing. Tied to the vendored mHC layer: see
+        # patches/megatron/README.md (Megatron-LM#7521) for when to change or delete this.
+        if (
+            getattr(provider, "enable_mhc_connections", False)
+            and provider.recompute_granularity == "full"
+            and not getattr(provider, "supports_mhc_full_recompute", False)
+        ):
             provider.recompute_granularity = "selective"
             provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
             provider.recompute_method = None
@@ -622,6 +630,13 @@ class MegatronWorker:
         # Delete along with the patch module once the megatron-core pin includes
         # NVIDIA/Megatron-LM#6793.
         patch_dsa_index_share()
+        if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
+            # After patch_dsa_index_share, which rebinds the same function.
+            from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
+                patch_offload_checkpoint_inputs,
+            )
+
+            patch_offload_checkpoint_inputs()
 
         # Drop the MoE dispatcher's router-probs reference after each MoE forward; under full
         # recompute it otherwise pins every MoE layer's recomputed graph through backward.
@@ -629,13 +644,30 @@ class MegatronWorker:
             patch_moe_release_dispatcher_probs,
         )
 
-        patch_moe_release_dispatcher_probs()
+        if os.environ.get("SKYRL_BLOG_NO_PROBS_RELEASE", "0") != "1":  # blog ablation only
+            patch_moe_release_dispatcher_probs()
+
+        # Exact for a 2-rank expert-TP group; saves an FP32 copy of the MoE combine's rows.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_combine_bf16_reduce import (
+            patch_moe_combine_bf16_reduce,
+        )
+
+        if os.environ.get("SKYRL_BLOG_NO_MOE_BF16_COMBINE", "0") != "1":  # blog ablation only
+            patch_moe_combine_bf16_reduce()
+
+        # Opt-in (SKYRL_MOE_NODE_DEDUP=1): one inter-node copy per (token, node) in the MoE all-to-all.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_moe_node_dedup_dispatch import (
+            patch_moe_node_dedup_dispatch,
+        )
+
+        patch_moe_node_dedup_dispatch()
 
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
         # dense O(L^2) softmax. Delete along with the patch module once the megatron-core pin
         # includes NVIDIA/Megatron-LM#7617.
-        patch_sparse_mla_nope()
+        if os.environ.get("SKYRL_BLOG_NO_SPARSE_MLA_NOPE", "0") != "1":  # blog ablation only
+            patch_sparse_mla_nope()
 
         # Give the Qwen3-VL ViT the language model's attention backend; megatron-core
         # now asserts NVTE_* attention env vars agree across all models in a process.
@@ -1400,6 +1432,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Peak CUDA memory over this forward_backward call, max-reduced across ranks.
         status["peak_mem_allocated_gb_max"] = torch.cuda.max_memory_allocated() / 1024**3
         status["peak_mem_reserved_gb_max"] = torch.cuda.max_memory_reserved() / 1024**3
+
+        if SKYRL_OFFLOAD_CHECKPOINT_INPUTS:
+            from skyrl.backends.skyrl_train.patches.megatron.patch_offload_checkpoint_inputs import (
+                release_pinned_offload_cache,
+            )
+
+            release_pinned_offload_cache()
 
         group = mpu.get_data_parallel_group(with_context_parallel=False)
         status = all_reduce_metrics(status, self.strategy, group=group, sum_loss_metrics=True)

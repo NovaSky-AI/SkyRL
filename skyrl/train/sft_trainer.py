@@ -1653,6 +1653,11 @@ class SFTTrainer:
         total_loss_weighted = 0.0
         total_tokens = 0
         num_eval_batches = 0
+        # Blog analysis: with SKYRL_EVAL_POSITION_BUCKET=<tokens>, also average the per-token eval loss
+        # over position buckets ([0, B), [B, 2B), ...) to see whether learning reaches late positions.
+        pos_bucket = int(os.environ.get("SKYRL_EVAL_POSITION_BUCKET", "0"))
+        pos_sum: dict[int, float] = {}
+        pos_cnt: dict[int, int] = {}
         for batch in eval_dataloader:
             num_eval_batches += 1
             # Pad the last (possibly-short) chunk so every dispatch sees exactly
@@ -1677,13 +1682,30 @@ class SFTTrainer:
                 "policy",
                 batch,
                 loss_fn="cross_entropy",
-                return_per_token_outputs=False,
+                return_per_token_outputs=pos_bucket > 0,
             )
+            if pos_bucket > 0:
+                for sample in (output.loss_fn_outputs or [])[: num_rows]:
+                    # ``elementwise_loss`` carries the pre-scaled loss mask (1 / total tokens), so use the
+                    # unscaled per-token NLL from ``logprobs`` instead.
+                    el = [-x for x in (sample.get("logprobs") or [])]
+                    for b in range(0, len(el), pos_bucket):
+                        chunk = el[b : b + pos_bucket]
+                        k = b // pos_bucket
+                        pos_sum[k] = pos_sum.get(k, 0.0) + float(sum(chunk))
+                        pos_cnt[k] = pos_cnt.get(k, 0) + len(chunk)
             batch_loss = float(output.metrics.get("loss", float("nan")))
             total_loss_weighted += batch_loss * nonpad_tokens
             total_tokens += nonpad_tokens
 
         eval_loss = total_loss_weighted / max(total_tokens, 1)
+        if pos_bucket > 0 and pos_cnt:
+            means = {k: pos_sum[k] / pos_cnt[k] for k in sorted(pos_cnt)}
+            overall = sum(pos_sum.values()) / max(sum(pos_cnt.values()), 1)
+            logger.info(
+                f"Eval position buckets (step {self.global_step}, {pos_bucket} tokens each, overall {overall:.4f}): "
+                + json.dumps({str(k * pos_bucket): round(v, 6) for k, v in means.items()})
+            )
         return eval_loss, num_eval_batches
 
     def train_step(self, batch: TrainingInputBatch, step: int) -> dict:
@@ -1744,9 +1766,7 @@ class SFTTrainer:
                 )
             return
         if self.sft_cfg.strategy == "megatron":
-            tp = self.sft_cfg.megatron_config.tensor_model_parallel_size
-            pp = self.sft_cfg.megatron_config.pipeline_model_parallel_size
-            dp_size = total_gpus // (tp * pp)
+            dp_size = self._dp_size()
         else:
             # FSDP: all GPUs are data-parallel
             dp_size = total_gpus
@@ -2055,8 +2075,17 @@ class SFTTrainer:
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
+                log_dict.update({f"memory/{k}": v for k, v in step_result["peak_mem"].items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())
+                # Blog benchmarking: same one-line summary as the dummy loop, every step.
+                peak_mem_str = ", ".join(f"{k}={v:.1f}" for k, v in step_result["peak_mem"].items())
+                logger.info(
+                    f"Step {self.global_step}: loss={step_result['loss']:.4f}, "
+                    f"grad_norm={step_result['grad_norm']}, "
+                    f"tokens_per_second={tokens_per_second:.0f}, "
+                    f"step_time={all_timings['step']:.2f}s, {peak_mem_str}"
+                )
 
                 self._fire("on_step_end", batch=batch, metrics=step_result)
 

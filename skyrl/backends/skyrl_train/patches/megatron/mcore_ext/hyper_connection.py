@@ -10,6 +10,7 @@ DELETE THIS MODULE once ``TransformerConfig`` carries the input-norm knobs upstr
 (``mhc_norm_eps`` / ``mhc_norm_eps_inside_sqrt``, read by ``HyperConnectionModule`` itself).
 """
 
+import os
 from typing import Tuple
 
 import torch
@@ -45,6 +46,9 @@ class RMSNormInputHyperConnectionModule(HyperConnectionModule):
         # upcast in _proj_rms); compute_mappings casts the bounded mixing weights back down.
         # Checkpointed so backward keeps only the activation-dtype input, not its FP32 upcast
         # (2 GiB per mHC site at 32k tokens per rank); the upcast and the math rerun in backward.
+        if os.environ.get("SKYRL_BLOG_NO_MHC_PROJ_CKPT", "0") == "1":  # blog ablation only
+            proj, r = _proj_rms(x.reshape(s * b, nC), self.mapping_proj.weight, self.norm_eps)
+            return proj.view(s, b, -1), r.view(s, b, 1)
         proj, r = checkpoint(
             _proj_rms,
             x.reshape(s * b, nC),
