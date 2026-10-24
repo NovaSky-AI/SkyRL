@@ -25,6 +25,10 @@ hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --re
 
 ```
 
+:::note
+Empty gold results: a sizable fraction of the training tasks (roughly 44%, mostly SynSQL rows) have a gold SQL that returns **no rows** on the OmniSQL databases. For those tasks, result-set equality cannot distinguish a correct query from any query that returns nothing (e.g. `SELECT 1 WHERE 0;`). By default, the `text2sql` env now awards **0** when both the gold and predicted results are empty; set `environment.skyrl_gym.text2sql.reward_empty_gold=true` to restore the old behavior. See [issue #2451](https://github.com/NovaSky-AI/SkyRL/issues/2451). If you want to train only on tasks whose gold result is non-empty, filter the dataset with your own script.
+:::
+
 ## DB environment
 
 Make sure to setup the database files needed for training.  We use the database files from [OmniSQL](https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/README.md). 
