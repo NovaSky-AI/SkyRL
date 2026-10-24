@@ -30,6 +30,10 @@ NUM_INFERENCE_ENGINES=2          # one engine per node, colocated with that node
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="${LOGGER:-console}"  # change to "wandb" to log to wandb
 
+# Stage 1 smoke run: an epoch is ~233 steps, and a step is ~16 min (training is kernel-launch-bound:
+# small padded microbatches through mHC's Sinkhorn iterations, compressor and indexer per layer).
+MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-10}"
+
 MAX_PROMPT_LENGTH=512
 MAX_RESPONSE_LENGTH=1024
 INFERENCE_ENGINE_MAX_MODEL_LEN=2048
@@ -121,6 +125,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.update_epochs_per_batch=1 \
   trainer.epochs=1 \
+  trainer.max_training_steps=$MAX_TRAINING_STEPS \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   trainer.eval_batch_size=256 \
   trainer.eval_before_train=false \
