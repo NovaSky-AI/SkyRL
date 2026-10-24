@@ -200,10 +200,16 @@ class _AsyncStalenessManager:
             self._stat.running += 1
 
     async def on_rollout_accepted(self) -> None:
+        """Record completion, waking submitters only when another group can be admitted.
+
+        Acceptance preserves ``accepted + running``, so it cannot free staleness capacity.
+        Broadcast when capacity exists so a canceled waiter cannot consume the only notification.
+        """
         async with self._cond:
             self._stat.accepted += 1
             self._stat.running -= 1
-            self._cond.notify_all()
+            if self._compute_capacity_unlocked() > 0:
+                self._cond.notify_all()
 
     async def on_rollout_filtered(self) -> None:
         """Reclassify an already-accepted group as filtered when it is dropped from training.
