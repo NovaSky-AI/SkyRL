@@ -196,6 +196,57 @@ async def test_fsdp_token_based_loss_equivalence(ray_init_fixture):
         assert abs(bl - tl) < 1e-4, f"Loss mismatch on rank {i}: {bl} vs {tl}"
 
 
+def _assert_loss_forward_equivalent(results_baseline, results_token, tol):
+    """Per-rank loss-path ``forward`` outputs match: summed ``loss`` and per-sample logprobs in input order."""
+    for i, (r_baseline, r_token) in enumerate(zip(results_baseline, results_token)):
+        bl, tl = r_baseline.metrics["loss"], r_token.metrics["loss"]
+        print(f"  Rank {i} loss: baseline={bl:.6f}, token-based={tl:.6f}, diff={abs(bl - tl):.6f}")
+        assert abs(bl - tl) < tol * max(1.0, abs(bl)), f"loss mismatch on rank {i}: {bl} vs {tl} (tol={tol})"
+        assert len(r_baseline.loss_fn_outputs) == len(r_token.loss_fn_outputs)
+        for j, (ob, ot) in enumerate(zip(r_baseline.loss_fn_outputs, r_token.loss_fn_outputs)):
+            diff = torch.max(torch.abs(torch.tensor(ob["logprobs"]) - torch.tensor(ot["logprobs"]))).item()
+            assert diff < tol, f"logprobs mismatch on rank {i} sample {j}: max diff {diff} (tol={tol})"
+
+
+@pytest.mark.asyncio
+async def test_fsdp_token_based_loss_forward_equivalence(ray_init_fixture):
+    """
+    ``forward(loss_fn="cross_entropy")`` with token-based batching matches sample-based
+    batching: same summed loss and the same per-sample logprobs in input order.
+
+    Same split as ``test_fsdp_token_based_loss_equivalence``: rank0=[20,5] runs 2
+    microbatches and rank1=[10,5] packs into 1, so rank1 also runs a padding microbatch.
+    """
+    from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
+
+    seq_lens = [20, 5, 10, 5]
+    batch = _make_variable_length_batch(seq_lens, num_actions=4)
+    batch.metadata["global_step"] = 0
+
+    def _run(max_tokens_per_microbatch):
+        cfg = get_fsdp_test_config()
+        cfg.trainer.strategy = "fsdp2"
+        cfg.trainer.policy.model.path = MODEL_NAME
+        cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.trainer.max_tokens_per_microbatch = max_tokens_per_microbatch
+        validate_cfg(cfg)
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+        return ray.get(actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy"))
+
+    results_baseline = _run(-1)
+    ray.shutdown()
+    ray_init_for_tests()
+    results_token = _run(20)
+
+    _assert_loss_forward_equivalent(results_baseline, results_token, tol=1e-3)
+
+
 @pytest.mark.asyncio
 async def test_fsdp_token_based_batching_performance(ray_init_fixture):
     """
@@ -491,6 +542,53 @@ async def test_megatron_token_based_loss_equivalence(
             tl = r_token.metrics[key]
             print(f"  Rank {i} {key}: baseline={bl:.6f}, token-based={tl:.6f}, diff={abs(bl - tl):.6f}")
             assert abs(bl - tl) < tol, f"{key} mismatch on rank {i}: {bl} vs {tl} (tol={tol})"
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron
+@pytest.mark.parametrize("remove_microbatch_padding", [True, False])
+@pytest.mark.parametrize(
+    "tp, pp, gpus, seq_lens, max_tokens",
+    [
+        (2, 2, 4, [50, 40, 31, 30, 20, 21, 10, 10], 55),
+        (2, 1, 4, [30, 30, 30, 30, 15, 15, 15, 15], 30),
+    ],
+    ids=["dp1_pp2", "dp2_pp1_padding_microbatch"],
+)
+async def test_megatron_token_based_loss_forward_equivalence(
+    ray_init_fixture, tp, pp, gpus, seq_lens, max_tokens, remove_microbatch_padding
+):
+    """
+    ``forward(loss_fn="cross_entropy")`` with token-based batching matches sample-based
+    batching: same summed loss and the same per-sample logprobs in input order.
+
+    Uses the topologies and tolerances of ``test_megatron_token_based_loss_equivalence``:
+    the DP=1 case pads uneven microbatches with dummy rows, and the DP=2 case adds
+    padding microbatches on the rank that packs into fewer microbatches.
+    """
+    from tests.backends.skyrl_train.gpu.utils import ray_init_for_tests
+
+    def _run(max_tokens_per_microbatch):
+        batch = _make_variable_length_batch(seq_lens, num_actions=4)
+        batch.metadata["global_step"] = 0
+        cfg = _get_megatron_test_config(tp=tp, pp=pp, gpus=gpus)
+        cfg.trainer.max_tokens_per_microbatch = max_tokens_per_microbatch
+        cfg.trainer.remove_microbatch_padding = remove_microbatch_padding
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+        return ray.get(actor_group.async_run_ray_method("mesh", "forward", data=batch, loss_fn="cross_entropy"))
+
+    results_baseline = _run(-1)
+    ray.shutdown()
+    ray_init_for_tests()
+    results_token = _run(max_tokens)
+
+    _assert_loss_forward_equivalent(results_baseline, results_token, tol=1e-3 if remove_microbatch_padding else 1e-6)
 
 
 @pytest.mark.asyncio
