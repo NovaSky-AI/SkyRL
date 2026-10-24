@@ -43,7 +43,8 @@ TRAIN_BATCH_SIZE=32
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8
 # Unpacked microbatches (see remove_microbatch_padding below): each holds this many padded rows.
-MICRO_TRAIN_BATCH_SIZE_PER_GPU=2
+# 2 OOM'd in the forward at step 1 (168 GiB in use: bf16 weights + grads + no-recompute activations).
+MICRO_TRAIN_BATCH_SIZE_PER_GPU=1
 MICRO_FORWARD_BATCH_SIZE_PER_GPU=4
 
 USE_KL_LOSS=false   # no ref model is constructed when this (and use_kl_in_reward) are false
@@ -103,8 +104,12 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.moe_token_dispatcher_type="alltoall" \
   trainer.policy.megatron_config.moe_enable_routing_replay=$ENABLE_ROUTING_REPLAY \
   generator.inference_engine.enable_return_routed_experts=$ENABLE_ROUTING_REPLAY \
-  `# No recompute: megatron-core's DSv4 attention rejects core_attn checkpointing, and the worker` \
-  `# drops it (leaving recompute off). Activation memory is bounded by the short context here.` \
+  `# Selective recompute of the MoE layers: megatron-core's DSv4 attention rejects core_attn` \
+  `# checkpointing, and full recompute is incompatible with mHC, so MoE is what remains.` \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="selective" \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe] \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
   trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=64 \
   trainer.policy.megatron_config.transformer_config_kwargs.gradient_accumulation_fusion=false \
   trainer.policy.megatron_config.transformer_config_kwargs.disable_parameter_transpose_cache=true \
