@@ -119,13 +119,18 @@ def _segment_shift(tokens: Tensor, seg_start: Tensor, eos: int, shift: int) -> T
     return torch.where(positions - seg_start >= shift, tokens[src], tokens.new_full((), eos))
 
 
+def _row_bounds(num_rows: int, size: int) -> Tensor:
+    """[size + 1] row boundaries: rank ``r`` of ``size`` owns rows ``[b[r], b[r + 1])``."""
+    return torch.tensor([num_rows * r // size for r in range(size + 1)], dtype=torch.long)
+
+
 class Qwen4ExpPLE(nn.Module):
     """HF ``Qwen4ExpTextPLELayer`` for packed (THD) sequences.
 
-    The hashed n-gram table (``ple_embedding.ngram_embedding``, ~51B parameters) is frozen. It is
-    sharded by n-gram head across ``shard_group`` (the expert-parallel group, whose ranks already
-    run every forward in lockstep for the MoE all-to-all) and is loaded straight from the HF
-    safetensors shards rather than through the bridge, which would materialize all of it. The
+    The hashed n-gram table (``ple_embedding.ngram_embedding``, ~51B parameters) is frozen. Its
+    rows are sharded contiguously over the expert-parallel group (whose ranks already run every
+    forward in lockstep for the MoE all-to-all), any group size, and are loaded straight from the
+    HF safetensors shards rather than through the bridge, which would materialize all of it. The
     shard lives in pinned host memory and is looked up on the CPU (a few MB per micro-batch).
 
     Forward expects ``set_tokens(input_ids, cu_seqlens)`` to have been called for the current
@@ -162,14 +167,9 @@ class Qwen4ExpPLE(nn.Module):
 
     # -- table -----------------------------------------------------------------------------------
     def load_table(self, group) -> None:
-        """Load this rank's n-gram heads (and the hashing buffers) from the HF checkpoint."""
-        self._group = group
+        """Load this rank's rows of the n-gram table (and the hashing buffers) from the HF checkpoint."""
         size = dist.get_world_size(group) if group is not None else 1
         rank = dist.get_rank(group) if group is not None else 0
-        if self.ngram_heads % size:
-            raise ValueError(f"PLE shard group size {size} must divide the {self.ngram_heads} n-gram heads.")
-        self.heads_per_rank = self.ngram_heads // size
-        heads = range(rank * self.heads_per_rank, (rank + 1) * self.heads_per_rank)
 
         def local(filename):
             # The bridge passes the model as given: a local directory or a hub repo id. The latter
@@ -192,9 +192,7 @@ class Qwen4ExpPLE(nn.Module):
             read("ngram_heads_vocab_sizes"),
             read("ngram_heads_offsets"),
         )
-        # Rows owned by this rank: the contiguous range covering its heads.
-        row_lo = int(offsets[heads[0]])
-        row_hi = int(offsets[heads[-1]] + sizes[heads[-1]])
+        row_lo, row_hi = _row_bounds(int(offsets[-1] + sizes[-1]), size)[rank : rank + 2].tolist()
         shard_names = sorted(
             (k for k in weight_map if k.startswith(prefix + "ngram_embedding.shard_")),
             key=lambda k: int(k.split("shard_")[1].split(".")[0]),
@@ -211,15 +209,21 @@ class Qwen4ExpPLE(nn.Module):
                 if lo < hi:
                     table[lo - row_lo : hi - row_lo] = sl[lo - start : hi - start].to(torch.bfloat16)
                 start += rows
-        self.set_table(table, row_lo, multipliers.to(dev), sizes.to(dev), offsets.to(dev))
+        self.set_table(table, row_lo, multipliers.to(dev), sizes.to(dev), offsets.to(dev), group)
 
-    def set_table(self, table: Tensor, row_lo: int, multipliers: Tensor, sizes: Tensor, offsets: Tensor) -> None:
-        """Install this rank's rows ``[row_lo, row_lo + len(table))`` and the hashing constants."""
-        if not hasattr(self, "heads_per_rank"):
-            self.heads_per_rank = self.ngram_heads
+    def set_table(
+        self, table: Tensor, row_lo: int, multipliers: Tensor, sizes: Tensor, offsets: Tensor, group=None
+    ) -> None:
+        """Install this rank's rows ``[row_lo, row_lo + len(table))`` of the table sharded over ``group``
+        (as ``_row_bounds``), and the hashing constants."""
         self.register_buffer("layer_multipliers", multipliers, persistent=False)
         self.register_buffer("head_vocab_sizes", sizes, persistent=False)
         self.register_buffer("head_offsets", offsets, persistent=False)
+        size = dist.get_world_size(group) if group is not None else 1
+        self.register_buffer(
+            "row_bounds", _row_bounds(int(offsets[-1] + sizes[-1]), size).to(offsets.device), persistent=False
+        )
+        self._group = group
         self.row_lo = row_lo
         self._table = table  # deliberately not an nn.Parameter: frozen, never trained or synced
 
@@ -260,30 +264,26 @@ class Qwen4ExpPLE(nn.Module):
         return F.embedding(local_ids.to(self._table.device), self._table).to(local_ids.device)
 
     def _lookup(self, ids: Tensor) -> Tensor:
-        """Embed ``ids`` ([T, heads]) with the head-sharded table; returns [T, heads * head_dim]."""
+        """Embed ``ids`` ([T, heads] global rows) with the row-sharded table; returns [T, heads * head_dim]."""
         size = dist.get_world_size(self._group) if self._group is not None else 1
         if size == 1:
             return self._embed(ids - self.row_lo).flatten(-2)
-        rank = dist.get_rank(self._group)
-        # Every rank needs its own tokens' rows from every head; exchange ids, look up the local
-        # heads, then all-to-all the embeddings back. Lengths differ per rank: pad to the max.
-        t = torch.tensor([ids.shape[0]], device=ids.device)
-        lens = [torch.empty_like(t) for _ in range(size)]
-        dist.all_gather(lens, t, group=self._group)
-        lens = [int(x) for x in lens]
-        tmax = max(lens)
-        padded = F.pad(ids, (0, 0, 0, tmax - ids.shape[0]))
-        gathered = torch.empty(size * tmax, ids.shape[1], dtype=ids.dtype, device=ids.device)
-        dist.all_gather_into_tensor(gathered, padded, group=self._group)
-        hp = self.heads_per_rank
-        local = gathered[:, rank * hp : (rank + 1) * hp] - self.row_lo
-        local = local.clamp(0, self._table.shape[0] - 1)
-        emb = self._embed(local)  # [size * tmax, hp, d], chunk r belongs to rank r
-        out = torch.empty_like(emb)
-        dist.all_to_all_single(out, emb.contiguous(), group=self._group)
-        # out chunk r = rank r's heads for our tokens
-        out = out.view(size, tmax, hp, self.head_dim).permute(1, 0, 2, 3).reshape(tmax, -1)
-        return out[: ids.shape[0]]
+        # Send every id to the rank owning its row, look the rows up there, and send them back.
+        flat = ids.reshape(-1)
+        owner = torch.searchsorted(self.row_bounds, flat, right=True) - 1
+        order = torch.argsort(owner, stable=True)
+        send_counts = torch.bincount(owner, minlength=size)
+        recv_counts = torch.empty_like(send_counts)
+        dist.all_to_all_single(recv_counts, send_counts, group=self._group)
+        send, recv = send_counts.tolist(), recv_counts.tolist()
+        recv_ids = flat.new_empty(sum(recv))
+        dist.all_to_all_single(recv_ids, flat[order], recv, send, group=self._group)
+        rows = self._embed(recv_ids - self.row_lo)
+        sorted_rows = rows.new_empty(flat.shape[0], self.head_dim)
+        dist.all_to_all_single(sorted_rows, rows, send, recv, group=self._group)
+        out = torch.empty_like(sorted_rows)
+        out[order] = sorted_rows
+        return out.view(ids.shape[0], -1)
 
     def _short_conv(self, x: Tensor, seg_start_seq: Tensor) -> Tensor:
         """Causal dilated depthwise conv per packed sequence; x is [T, n*C]."""
