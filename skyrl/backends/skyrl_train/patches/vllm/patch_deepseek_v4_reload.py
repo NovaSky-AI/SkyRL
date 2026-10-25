@@ -17,8 +17,10 @@ calls have received all of its weights. Two pieces of ``DeepseekV4ForCausalLM`` 
    reload that copy lands in the meta placeholder and is dropped; the attention module logs
    ``Failed to load weights`` and gets its pre-reload storage back. After a level-2 sleep that storage
    is zeroed, so every sink -- real heads and the ``-inf`` padding heads -- serves as 0. Here the sink
-   tensors are taken out of the stream when their parameter is on meta and written into the restored
-   parameter (same per-rank head slice, ``-inf`` padding) by ``run_deferred_model_finalize``.
+   tensors are taken out of the stream (always during a SkyRL receive, whose chunk order decides whether the
+   layer is still on meta; otherwise when their parameter is on meta) and written into the restored
+   parameter (same per-rank head slice, ``-inf`` padding) by ``run_deferred_model_finalize``. Applies to
+   DeepSeek-V4 and to V4.1's text model (same loader); without it V4.1's post-sync logprobs drift by 0.12-0.16.
 
 Remove once vLLM loads ``attn_sink`` through a weight loader and runs the model-level finalize once at
 the end of a layerwise reload.
@@ -30,6 +32,9 @@ from typing import Any, Iterable, Iterator, Tuple
 from loguru import logger
 
 _PATCHED = False
+# Set while a SkyRL weight-sync receive is loading (defer_model_finalize); the model's load_weights then stashes
+# every attention sink instead of only those it finds on meta.
+_IN_SYNC_LOAD = 0
 _DEFER_ATTR = "_skyrl_defer_model_finalize"
 _PENDING_ATTR = "_skyrl_model_finalize_pending"
 _SINK_STASH_ATTR = "_skyrl_pending_attn_sinks"
@@ -87,8 +92,6 @@ def _patch_classes(causal_lm_cls, model_cls) -> None:
         stashed: dict = self.__dict__.setdefault(_SINK_STASH_ATTR, {})
         stashed_now = set()
 
-        unmatched = []
-
         def without_meta_sinks() -> Iterator[Tuple[str, Any]]:
             nonlocal params
             for name, weight in weights:
@@ -96,19 +99,16 @@ def _patch_classes(causal_lm_cls, model_cls) -> None:
                     if params is None:
                         params = dict(self.named_parameters())
                     param = params.get(name)
-                    if param is not None and param.is_meta:
+                    # During a sync, whether a sink's layer is still held on meta when the sink arrives depends on
+                    # the chunk order (a direct copy into a materialized-then-restored layer is lost the same
+                    # way), so stash them all and write them after the layerwise finalize.
+                    if param is not None and (param.is_meta or _IN_SYNC_LOAD):
                         stashed[name] = weight.detach().clone()
                         stashed_now.add(name)
                         continue
-                    unmatched.append((name, None if param is None else (param.device, type(param).__name__)))
                 yield name, weight
 
-        loaded = original_load(self, without_meta_sinks()) | stashed_now
-        if stashed_now:
-            logger.info(f"Stashed {len(stashed_now)} attention sinks held on meta by layerwise reload")
-        if unmatched:
-            logger.info(f"attn_sink loaded directly (not stashed): {unmatched[:3]} ({len(unmatched)} total)")
-        return loaded
+        return original_load(self, without_meta_sinks()) | stashed_now
 
     causal_lm_cls.process_weights_after_loading = process_weights_after_loading
     model_cls.load_weights = load_weights
@@ -117,10 +117,13 @@ def _patch_classes(causal_lm_cls, model_cls) -> None:
 @contextmanager
 def defer_model_finalize(model: Any) -> Iterator[None]:
     """Make a patched model's ``process_weights_after_loading`` a pending marker for the duration."""
+    global _IN_SYNC_LOAD
     setattr(model, _DEFER_ATTR, True)
+    _IN_SYNC_LOAD += 1
     try:
         yield
     finally:
+        _IN_SYNC_LOAD -= 1
         setattr(model, _DEFER_ATTR, False)
 
 
@@ -154,9 +157,6 @@ def _apply_stashed_attn_sinks(model: Any) -> None:
 
 def run_deferred_model_finalize(model: Any) -> None:
     """After vLLM's layerwise finalize: restore stashed sinks, then run a pending model-level finalize."""
-    logger.info(
-        f"run_deferred_model_finalize({type(model).__name__}): pending={getattr(model, _PENDING_ATTR, False)}"
-    )
     _apply_stashed_attn_sinks(model)
     if getattr(model, _PENDING_ATTR, False):
         setattr(model, _PENDING_ATTR, False)
