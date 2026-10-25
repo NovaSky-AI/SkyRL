@@ -25,6 +25,7 @@ hybrid stack splits each DeepSeek block into an attention layer and a MoE layer,
 """
 
 import copy
+import os
 import threading
 from contextlib import contextmanager
 
@@ -54,6 +55,39 @@ from torch import nn
 
 # Queries scored per indexer chunk: [chunk, b, n_heads, n_compressed] fp32 stays ~0.3 GB at 10K tokens.
 _INDEXER_CHUNK = 256
+
+# Reproduce the reference's KV activation quantization (window KV: FP8 e4m3 per 32 with power-of-2 scales;
+# compressed KV: FP4 e2m1 per 16 with e4m3 scales), straight-through for gradients. vLLM stores the KV
+# cache that way too, so this brings training numerics closer to the rollout engine.
+FAKE_QUANT_KV = os.environ.get("SKYRL_DSV41_FAKE_QUANT", "0") == "1"
+_FP4_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _straight_through(x, y):
+    return x + (y - x).detach()
+
+
+def fake_quant_fp8_block(x: torch.Tensor, block: int = 32) -> torch.Tensor:
+    """Reference ``act_quant(x, block, scale_fmt='ue8m0', inplace=True)``."""
+    with torch.no_grad():
+        v = x.float().unflatten(-1, (-1, block))
+        amax = v.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4)
+        scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
+        y = ((v / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale).flatten(-2).to(x.dtype)
+    return _straight_through(x, y)
+
+
+def fake_quant_fp4_e4m3(x: torch.Tensor, block: int = 16) -> torch.Tensor:
+    """Reference ``fp4_act_quant(x, block, inplace=True, scale_dtype=float8_e4m3fn)``."""
+    with torch.no_grad():
+        v = x.float().unflatten(-1, (-1, block))
+        amax = v.abs().amax(dim=-1, keepdim=True).clamp_min(6 * 2**-9)
+        scale = (amax / 6.0).to(torch.float8_e4m3fn).float()
+        q = (v / scale).clamp(-6.0, 6.0)
+        grid = torch.tensor(_FP4_GRID, device=x.device)
+        idx = torch.bucketize(q.abs(), (grid[1:] + grid[:-1]) / 2)
+        y = (torch.copysign(grid[idx], q) * scale).flatten(-2).to(x.dtype)
+    return _straight_through(x, y)
 
 
 class SharedAttentionState:
@@ -305,6 +339,8 @@ class DSv41CompressedSparseAttention(MegatronModule):
         assert packed_seq_params is None, "packed sequences are not supported for DeepSeek-V4.1 attention"
         sq, b, _, _ = query.size()
         kv = key.squeeze(-2)
+        if FAKE_QUANT_KV:
+            kv = fake_quant_fp8_block(kv)
         window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
         compressed_idxs = None
         kv_full = kv
@@ -323,6 +359,8 @@ class DSv41CompressedSparseAttention(MegatronModule):
                             k, _ = self.indexer.linear_wk(latent.detach())
                             state.index_k = self._rope(self.indexer.k_norm(k), n_c, ratio)
                     state.compress_kv = self._rope(latent, n_c, ratio)
+                    if FAKE_QUANT_KV:
+                        state.compress_kv = fake_quant_fp4_e4m3(state.compress_kv)
             assert (
                 state.compress_ratio == ratio
             ), f"layer {self.layer_id} (ratio {ratio}) reads compressed KV of ratio {state.compress_ratio}"

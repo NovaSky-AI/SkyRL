@@ -1066,6 +1066,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         if os.environ.get("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"):
             env_vars["VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"] = os.environ["VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"]
 
+        # DeepSeek-V4.1 KV fake-quant in the Megatron trainer (patches/megatron/deepseek_v41/attention.py).
+        if os.environ.get("SKYRL_DSV41_FAKE_QUANT"):
+            env_vars["SKYRL_DSV41_FAKE_QUANT"] = os.environ["SKYRL_DSV41_FAKE_QUANT"]
+
         if os.environ.get("RAY_CGRAPH_get_timeout"):
             logger.info(
                 f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
