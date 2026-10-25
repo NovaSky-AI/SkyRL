@@ -341,3 +341,38 @@ vLLM serving benchmark (nightly 0.32.1rc1), not training work.
   MTP); 6-layer slice 0,1,2,3,20,24 (SWA, engram, KV/index source, consumer, candidate source, candidate
   consumer). PP stage boundaries must not split a KV-sharing group.
 - Rough compute (B300 288 GB): LoRA ~2 nodes; full FT ~4 nodes with optimizer CPU offload, ~8 without.
+
+### V4.1 work (from 2026-10-25)
+
+Extra nodes (same user, same `/mnt/local_storage/avigyabb` layout, W&B creds in `~/.config/skyrl/wandb.env`,
+repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
+
+| Node | IP | Notes |
+|---|---|---|
+| b200-resv-ray-4 | 10.180.15.246 | GPU 0 held by another user's idle vLLM engine (do not touch); root disk 97% full; another user's tmux |
+| b200-resv-ray-5 | 10.180.15.203 | V4.1 slice test node; `models/DeepSeek-V4.1-Flash-6layer` |
+| b200-resv-ray-6 | 10.180.15.248 | idle |
+| b200-resv-ray-7 | 10.180.15.202 | idle |
+
+- Slice: `make_slice_v41.py` -> `models/DeepSeek-V4.1-Flash-6layer` (251 GB; on nodes 0, 4, 5). Text only, layers
+  0,1,2,3,20,24 -> compress_ratios [0,0,2,2,1,1], kv_source [2,4], index_source [2,4,5], candidate_source 4,
+  engram [1] (keeps its id: hash seeds use it). Engram table + scale kept FP8; everything else BF16.
+- Megatron: `skyrl/backends/skyrl_train/patches/megatron/deepseek_v41/` on megatron-core's dsv4_hybrid HybridModel:
+  - attention: no per-head q RMS norm; compressed RoPE (compress_rope_theta + YaRN) on ratio 1 too; compressor
+    without APE/overlap; KV / index-key / top-k / candidate sharing through a per-forward state; indexer under
+    no_grad (chunked torch scoring); sparse attention via mcore's csa kernels. Layer roles in `config.dsv41_spec`
+    (mcore forces C=4 per symbol and only allows ratios 0/4/128 in `csa_compress_ratios`).
+  - mHC wiring differs from V4 (same formulas): a sublayer collapses with the *previous* sublayer's pre-mix (first
+    = one-hot stream 0) and the final readout uses the last pre-mix; there is no hc_head (removed from the stack).
+    mcore's mHC rms eps is hard-coded 1e-6 (reference uses rms_norm_eps=1e-20; negligible).
+  - Engram: frozen table shard per rank over a node-local group of 8 (~12 GB/GPU per table), loaded lazily from the
+    HF safetensors, all-gather ids -> local dequant -> reduce-scatter; trainable wkv + q/k gate weights.
+  - bridge: registers vLLM's `DeepseekV41Config` with transformers and `DeepseekV41ForCausalLM` -> HybridModel.
+- vLLM (survey of 0.31): only the VL wrapper is registered; `patch_deepseek_v41.py` (a `vllm.general_plugins` entry)
+  registers the text-only `DeepseekV41LLMForCausalLM` under the same arch name. BF16 needs
+  `attention_backend=FLASHMLA_SPARSE_DSV41` (SM100 default mega attention is FP8-only and permutes wq_b/wo_a once
+  at load). The V4 reload patch (attn_sink copy_, per-call finalize) now covers the V4.1 classes. Engram tables are
+  never synced (vLLM keeps them in pinned host memory). LoRA: keep compressors out of the targets (ratio-1
+  `fused_wkv_wgate` has one slice).
+- Stage 0 row: `test_megatron_models.py::test_logprobs_matching_roundtrip[deepseek-v4.1-flash-6layer_tp1_ep8]`
+  (`SKYRL_DEEPSEEK_V41_FLASH_6LAYER`); first run on node 5: `logs/v41rt1-*.log`.
