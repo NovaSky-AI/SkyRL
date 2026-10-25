@@ -10,6 +10,7 @@ Plan agreed with the user: **do DeepSeek-V4-Flash first, then DeepSeek-V4.1-Flas
 ## TL;DR
 
 - DSv4-Flash is mostly integration work: every upstream piece exists at our pins.
+- **Stage 1 done**: GSM8K LoRA (1 node) and full FT (4 nodes) both train end to end with stable logprob gaps.
 - Stage 0 (slice): **both rows pass** -- full FT (rt16: Megatron vs vLLM 0.050 < 0.1; post-sync common-prefix
   0.015 < 0.05) and LoRA (lora5: zero adapter 0.047, stale sampler 0.184 > 0.1, updated adapter 0.048).
 - Full model: forward matches (0.040); sync needs 2 nodes (OOM on one). Next: that, then Stage 1.
@@ -94,6 +95,11 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
 - LoRA, 1 node (`run_gsm8k_dsv4_flash_lora_1node.sh`, W&B `dsv4_flash_gsm8k/tm3osw8z`): ~15 steps, reward 0.80 ->
   0.86-0.93, rollout/train logprob gap 0.041 (R3 off), entropy ~0.19. Step ~13-16 min, of which training ~11 min:
   kernel-launch-bound (all ranks at 100% of one CPU core, GPUs mostly idle) -- the first Stage 3 perf target.
+- Full FT, 4 nodes (`run_gsm8k_dsv4_flash_fullft_4node.sh`, W&B `dsv4_flash_gsm8k/4juk94b5`, 2026-10-25): **10/10
+  steps, clean exit**. Reward 0.78 -> 0.96 (0.78, 0.86, 0.89, 0.91, 0.76, 0.95, 0.97, 0.98, 0.92, 0.96); rollout/train
+  logprob gap 0.034-0.054 every step (so the post-update full-model sync is correct); entropy 0.16-0.22; grad norm
+  0.1-0.65 (0 at step 7: every group's samples tied, so GRPO advantages were all zero). ~117-121 GiB/GPU during
+  training. Step ~10.5 min (train ~9.5 min, full sync ~53 s, rollout ~8 s).
 - Full FT: needs **4 nodes** (`run_gsm8k_dsv4_flash_fullft_4node.sh`). On 2 nodes (EP=16) step 1 OOM'd in the forward
   with 162.8 GiB allocated whatever the recompute: megatron-core's distributed optimizer keeps fp32 main params on GPU
   even with `optimizer_cpu_offload` (the CPU Adam works from them; SkyRL offloads them only while vLLM runs), and with
