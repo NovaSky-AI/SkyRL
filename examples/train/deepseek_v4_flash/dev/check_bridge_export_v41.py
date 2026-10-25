@@ -29,6 +29,7 @@ def main():
     provider.mtp_num_layers = None
     provider.moe_token_dispatcher_type = "alltoall"  # as SkyRL configures it (HybridEP is not installed)
     provider.moe_shared_expert_overlap = False
+    provider.gradient_accumulation_fusion = False
     provider.finalize()
     model = provider.provide_distributed_model(wrap_with_ddp=False)
     bridge.load_hf_weights(model)
