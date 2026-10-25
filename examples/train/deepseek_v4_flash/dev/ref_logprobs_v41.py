@@ -127,6 +127,11 @@ def main():
     parser.add_argument(
         "--ref-dir", default="/mnt/local_storage/avigyabb/models/DeepSeek-V4.1-Flash-1017/inference"
     )
+    parser.add_argument(
+        "--no-quant",
+        action="store_true",
+        help="skip the reference's in-place activation fake-quant (KV cache FP8/FP4, attention output FP8)",
+    )
     args = parser.parse_args()
 
     world, rank = int(os.environ["WORLD_SIZE"]), int(os.environ["RANK"])
@@ -134,7 +139,14 @@ def main():
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.set_default_dtype(torch.bfloat16)
     sys.path.insert(0, args.ref_dir)
+    import model as ref_model
     from model import ModelArgs, ParallelHead, Transformer
+
+    if args.no_quant:
+        # BF16 weights never reach the quantized GEMM paths, so only the in-place quant-dequant calls remain.
+        real_act_quant, real_fp4_act_quant = ref_model.act_quant, ref_model.fp4_act_quant
+        ref_model.act_quant = lambda x, *a, inplace=False, **k: x if inplace else real_act_quant(x, *a, **k)
+        ref_model.fp4_act_quant = lambda x, *a, inplace=False, **k: x if inplace else real_fp4_act_quant(x, *a, **k)
     from transformers import AutoTokenizer
 
     with open(os.path.join(args.slice_dir, "config.json")) as f:
@@ -168,7 +180,7 @@ def main():
         print(f"|ref - vllm|      {(ref - v)[m].abs().mean():.4f}")
         print(f"|ref - megatron|  {(ref - g)[m].abs().mean():.4f}")
         print(f"|vllm - megatron| {(v - g)[m].abs().mean():.4f}")
-        torch.save({"ref": ref}, args.dump + ".ref.pt")
+        torch.save({"ref": ref}, args.dump + (".ref-noquant.pt" if args.no_quant else ".ref.pt"))
     dist.destroy_process_group()
 
 
