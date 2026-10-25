@@ -317,7 +317,9 @@ run (costs ~1-2 min of tuning per boot). Not yet reproduced deliberately -- cand
 
 ## DeepSeek-V4.1-Flash-1017 (after V4) — findings so far
 
-Checkpoint: `/shared/models/DeepSeek-V4.1-Flash-1017` (476 GB; reference code in `inference/model.py`,
+Checkpoint: `/mnt/local_storage/avigyabb/models/DeepSeek-V4.1-Flash-1017` on node 0 (downloaded from the public HF repo
+`deepseek-ai/DeepSeek-V4.1-Flash-1017`; was `/shared/models/...` on the old machine). Tech report + chat template from
+`deepseek-ai/DeepSeek-V4.1-Flash` in `/mnt/local_storage/avigyabb/models/DeepSeek-V4.1-Flash-docs`. (476 GB; reference code in `inference/model.py`,
 `inference/engram.py` — use these as the parity reference). `/shared/dsv41_logs` is an unrelated earlier
 vLLM serving benchmark (nightly 0.32.1rc1), not training work.
 
@@ -333,7 +335,8 @@ vLLM serving benchmark (nightly 0.32.1rc1), not training work.
   gating into the mHC stream; gate `bias_vl` for image tokens; no hash routing; DSpark MTP x3; vision
   tower. FP8 block 32x32 ue8m0, MXFP4 experts, `rms_norm_eps=1e-20`, 384 experts, hidden 5120, 40 layers.
 - Size: ~551B trainable backbone params + ~197B engram params.
-- Decisions proposed to the user (not yet confirmed): freeze engram tables (FP8 buffers, row-sharded,
+- Decisions **confirmed by the user 2026-10-25** ("not strict requirements -- do whatever gets 4.1 supported
+  fastest"): freeze engram tables (FP8 buffers, row-sharded,
   dequantized on lookup, excluded from weight sync — vLLM keeps its own copy); text-only (drop vision +
   MTP); 6-layer slice 0,1,2,3,20,24 (SWA, engram, KV/index source, consumer, candidate source, candidate
   consumer). PP stage boundaries must not split a KV-sharing group.
