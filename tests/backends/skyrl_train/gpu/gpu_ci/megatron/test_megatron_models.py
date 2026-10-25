@@ -58,6 +58,17 @@ DEEPSEEK_V4_FLASH_4LAYER = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_4LAYER", "Dee
 # full-weights check, not a CI row: skipped unless the path is set.
 DEEPSEEK_V4_FLASH_FULL_BF16 = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_FULL_BF16")
 
+# 6-layer text-only BF16 slice of deepseek-ai/DeepSeek-V4.1-Flash-1017
+# (examples/train/deepseek_v4_flash/dev/make_slice_v41.py). Not on the Hub yet; override with a local path.
+DEEPSEEK_V41_FLASH_6LAYER = os.environ.get("SKYRL_DEEPSEEK_V41_FLASH_6LAYER", "DeepSeek-V4.1-Flash-6layer")
+
+
+def _is_deepseek_v4(model_name: str) -> bool:
+    """DeepSeek-V4-Flash or DeepSeek-V4.1-Flash (same Megatron attention family and test settings)."""
+    name = model_name.lower()
+    return "deepseek-v4-flash" in name or "deepseek-v4.1-flash" in name
+
+
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
 MAX_GENERATE_LENGTH = 128
@@ -143,7 +154,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
         cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
         cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
-    if "deepseek-v4-flash" in model_name.lower():
+    if _is_deepseek_v4(model_name):
         # megatron-core's DSv4 hybrid attention (CSA/HCA) asserts packed_seq_params is None at the
         # pinned rev, so run the padded path: remove_left_padding left-aligns every sequence, and
         # the causal sliding-window/compressed attention never reaches the trailing padding.
@@ -158,7 +169,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
-        or ("deepseek-v4-flash" in model_name.lower())
+        or _is_deepseek_v4(model_name)
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -209,7 +220,7 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
         )
-    if "deepseek-v4-flash" in model_name.lower():
+    if _is_deepseek_v4(model_name):
         # Cold-cache vLLM boot JIT-compiles the DSv4 sparse-MLA / mHC / indexer kernels and
         # autotunes the MoE before the server reports healthy.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
@@ -270,11 +281,15 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # to the colocated Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
-    if "deepseek-v4-flash" in model_name.lower():
+    if _is_deepseek_v4(model_name):
         # 1M default context; the 4-layer slice is ~27B params (256 experts x 4 MoE layers),
         # colocated with the Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if "deepseek-v4.1-flash" in model_name.lower():
+        # vLLM's SM100 default for V4.1 is the FP8-only mega attention (needs wq_b / wo_a weight scales,
+        # and permutes them once at load, which a weight sync would leave unpermuted). Serve BF16 with FlashMLA.
+        overrides["engine_init_kwargs"]["attention_backend"] = "FLASHMLA_SPARSE_DSV41"
     return overrides
 
 
@@ -518,6 +533,28 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="deepseek-v4-flash-4layer_h100_tp1_ep4",
             marks=pytest.mark.h100,
         ),
+        # DeepSeek-V4.1-Flash, 6-layer text-only slice (source layers 0, 1, 2, 3, 20, 24): window-only
+        # layers with and without Engram, a ratio-2 KV/index source and its consumer, the ratio-1
+        # KV/index/candidate-block source, and a ratio-1 index source on that KV filtered by the candidate
+        # blocks. mHC with V4.1's delayed pre-mix, no hash routing. Exercises skyrl's DeepSeekV41Bridge
+        # (patches/megatron/deepseek_v41) and weight sync into vLLM's text-only deepseek_v41 class. The
+        # Engram table rows shard over the 8 ranks of the node.
+        pytest.param(
+            1,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            DEEPSEEK_V41_FLASH_6LAYER,
+            5e-2,
+            1e-1,
+            None,
+            None,
+            id="deepseek-v4.1-flash-6layer_tp1_ep8",
+            marks=pytest.mark.h100,
+        ),
         pytest.param(
             1,
             1,
@@ -759,7 +796,7 @@ async def test_logprobs_matching_roundtrip(
     # 0.39, while the common prefixes agree to 0.014 (the DSv4 rows' threshold is set to fail a broken sync,
     # which measured 0.23 on prefixes).
     compare_common_prefix = (
-        bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or "deepseek-v4-flash" in model_name.lower()
+        bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or _is_deepseek_v4(model_name)
     )
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)

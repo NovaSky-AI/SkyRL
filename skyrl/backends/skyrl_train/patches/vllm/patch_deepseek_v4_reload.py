@@ -1,4 +1,4 @@
-"""Runtime patch: make vLLM's DeepSeek-V4 model survive a weight-sync reload.
+"""Runtime patch: make vLLM's DeepSeek-V4 and V4.1 models survive a weight-sync reload.
 
 vLLM's layerwise reload holds every layer on the meta device until that layer's ``weight_loader``
 calls have received all of its weights. Two pieces of ``DeepseekV4ForCausalLM`` loading don't fit it:
@@ -40,15 +40,39 @@ def apply_deepseek_v4_reload_patch() -> bool:
     global _PATCHED
     if _PATCHED:
         return False
+    pairs = []
     try:
         from vllm.models.deepseek_v4.nvidia.model import (
             DeepseekV4ForCausalLM,
             DeepseekV4Model,
         )
-    except ImportError:
-        return False
 
-    original_finalize = DeepseekV4ForCausalLM.process_weights_after_loading
+        pairs.append((DeepseekV4ForCausalLM, DeepseekV4Model))
+    except ImportError:
+        pass
+    try:
+        # DeepSeek-V4.1 (text-only class; see patch_deepseek_v41.py) has its own copies of both.
+        from vllm.models.deepseek_v41.nvidia.model import (
+            DeepseekV4Model as DeepseekV41Model,
+        )
+        from vllm.models.deepseek_v41.nvidia.model import (
+            DeepseekV41LLMForCausalLM,
+        )
+
+        pairs.append((DeepseekV41LLMForCausalLM, DeepseekV41Model))
+    except ImportError:
+        pass
+    if not pairs:
+        return False
+    for causal_lm_cls, model_cls in pairs:
+        _patch_classes(causal_lm_cls, model_cls)
+    _PATCHED = True
+    logger.info("Installed DeepSeek-V4/V4.1 weight-sync reload patch (deferred finalize, attention sinks)")
+    return True
+
+
+def _patch_classes(causal_lm_cls, model_cls) -> None:
+    original_finalize = causal_lm_cls.process_weights_after_loading
 
     def process_weights_after_loading(self) -> None:
         if getattr(self, _DEFER_ATTR, False):
@@ -56,7 +80,7 @@ def apply_deepseek_v4_reload_patch() -> bool:
             return
         original_finalize(self)
 
-    original_load = DeepseekV4Model.load_weights
+    original_load = model_cls.load_weights
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]) -> set:
         params = None
@@ -78,11 +102,8 @@ def apply_deepseek_v4_reload_patch() -> bool:
 
         return original_load(self, without_meta_sinks()) | stashed_now
 
-    DeepseekV4ForCausalLM.process_weights_after_loading = process_weights_after_loading
-    DeepseekV4Model.load_weights = load_weights
-    _PATCHED = True
-    logger.info("Installed DeepSeek-V4 weight-sync reload patch (deferred finalize, attention sinks)")
-    return True
+    causal_lm_cls.process_weights_after_loading = process_weights_after_loading
+    model_cls.load_weights = load_weights
 
 
 @contextmanager

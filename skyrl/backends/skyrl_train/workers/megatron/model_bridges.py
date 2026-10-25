@@ -30,6 +30,10 @@ try:
     # registers the bridge for ``Glm5NextForConditionalGeneration`` -> GPTModel.
     import skyrl.backends.skyrl_train.patches.megatron.glm5_next.bridge  # noqa: F401
 
+    # DeepSeek-V4.1-Flash (deepseek_v41, text only) -> HybridModel. Importing registers the bridge, the
+    # transformers config class and the V4.1 hybrid-model hooks.
+    import skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.bridge  # noqa: F401
+
     @MegatronModelBridge.register_bridge(
         source="Glm4MoeLiteForCausalLM",
         target=GPTModel,

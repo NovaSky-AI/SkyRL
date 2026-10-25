@@ -11,6 +11,7 @@ export RAY_ADDRESS=local
 mkdir -p ~/data
 [ -e ~/data/gsm8k ] || ln -sfn "$DSV4_ROOT/data/gsm8k" ~/data/gsm8k
 export SKYRL_DEEPSEEK_V4_FLASH_4LAYER=${SKYRL_DEEPSEEK_V4_FLASH_4LAYER:-$DSV4_ROOT/models/DeepSeek-V4-Flash-4layer}
+export SKYRL_DEEPSEEK_V41_FLASH_6LAYER=${SKYRL_DEEPSEEK_V41_FLASH_6LAYER:-$DSV4_ROOT/models/DeepSeek-V4.1-Flash-6layer}
 export UV_CACHE_DIR=${UV_CACHE_DIR:-$DSV4_ROOT/uv_cache}
 export HF_HOME=${HF_HOME:-$DSV4_ROOT/hf_cache}
 RUN_ID=${RUN_ID:-$(date +%s)}
