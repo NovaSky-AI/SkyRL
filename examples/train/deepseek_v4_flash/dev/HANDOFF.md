@@ -145,6 +145,9 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   8. Run 10 then OOMed in the step-1 policy forward (MoE grouped GEMM output; 146.7 GiB allocated + 13.5 GiB held
      by the sleeping vLLM engine). Run 9 had squeaked through the same forward, so 8K responses sit right at
      the limit. `MAX_RESPONSE_LENGTH` now defaults to 4096 (env-overridable); 8K needs a memory cut (Stage 3).
+  Run 11 (`dapo-lora4-1792950053.log`, 4K responses, W&B `dsv4_flash_dapo`): **step 1 trains end to end** --
+  step 922 s (generate 149 s, logprob fwd 119 s, policy_train 521 s, sync 118 s), rollout-vs-train logprob
+  abs diff 0.040, peak 95 GiB allocated (so ~6K responses would likely fit), grad_norm 0.027.
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
