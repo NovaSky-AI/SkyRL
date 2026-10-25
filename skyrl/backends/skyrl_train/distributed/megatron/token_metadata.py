@@ -1,5 +1,6 @@
 """Token-aligned metadata layout transforms shared by training features."""
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Optional
@@ -49,8 +50,13 @@ def build_token_metadata_layout(
     packed: bool,
     fp8_enabled: bool,
     fp8_recipe: Optional[str] = None,
+    seq_align: int = 1,
 ) -> TokenMetadataLayout:
-    """Compute the shared layout once for all replayed token metadata."""
+    """Compute the shared layout once for all replayed token metadata.
+
+    ``seq_align`` must match the extra unpacked-length alignment ``remove_left_padding`` applied to the model
+    input (e.g. DeepSeek-V4's largest KV compression ratio), so replayed metadata covers every token.
+    """
     import megatron.core.parallel_state as mpu
 
     aligned_attention_mask = attention_mask.to(device=device, dtype=torch.bool)
@@ -59,7 +65,9 @@ def build_token_metadata_layout(
     tp_size = mpu.get_tensor_model_parallel_world_size()
 
     if not packed:
-        align_size = get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
+        align_size = math.lcm(
+            get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe), seq_align
+        )
         max_sequence_length = max(sequence_lengths)
         aligned_sequence_length = max_sequence_length + (-max_sequence_length % align_size)
         return TokenMetadataLayout(

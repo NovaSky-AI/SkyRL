@@ -194,6 +194,7 @@ def _build_replay_metadata_layout(
     packed: bool,
     fp8_enabled: bool,
     fp8_recipe: Optional[str],
+    seq_align: int = 1,
 ) -> Optional[TokenMetadataLayout]:
     """Build the token layout needed by router or sample-support replay."""
     if rollout_expert_indices is None and sample_support is None:
@@ -204,6 +205,7 @@ def _build_replay_metadata_layout(
         packed=packed,
         fp8_enabled=fp8_enabled,
         fp8_recipe=fp8_recipe,
+        seq_align=seq_align,
     )
 
 
@@ -578,6 +580,7 @@ class MegatronModelWrapper:
                 packed=packed_seq_params is not None,
                 fp8_enabled=fp8_enabled,
                 fp8_recipe=fp8_recipe,
+                seq_align=self._seq_align,
             )
 
             model_replay_kwargs = {}
@@ -1249,6 +1252,7 @@ class MegatronModelWrapper:
                 packed=packed_seq_params is not None,
                 fp8_enabled=fp8_enabled,
                 fp8_recipe=fp8_recipe,
+                seq_align=self._seq_align,
             )
 
             model_replay_kwargs = {}
