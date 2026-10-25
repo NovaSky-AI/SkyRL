@@ -246,9 +246,10 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
 # ``model_runner.model_state`` tensors that vLLM's wake path does not restore and that are not
 # rewritten before use, by attribute name. Model Runner V2 allocates ``model_state`` in the weights
 # pool, but waking restores only the model's parameters and buffers. Add a model's lost tensor here.
+# Drop this once vLLM builds the model state in the runtime pool (vllm-project/vllm#63548).
 MODEL_STATE_TENSORS_LOST_ON_SLEEP = (
     # Qwen4Exp's constant n-gram offsets (arange(-2, 0)) come back as zeros, which corrupts every
-    # later PLE n-gram context (vllm-project/vllm#60009).
+    # later PLE n-gram context.
     "ngram_context_offsets",
 )
 
