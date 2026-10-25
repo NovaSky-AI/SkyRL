@@ -23,6 +23,10 @@ export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:-
 # "CUDA compiler and CUDA toolkit headers are incompatible".
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 export PATH=$CUDA_HOME/bin:$PATH
+# Checkpoint tests write into a mkdtemp; on these nodes /tmp is the ~35 GB root disk, which a full-FT slice
+# checkpoint (fp32 main params + optimizer state) fills.
+export SKYRL_TEST_CKPT_DIR=${SKYRL_TEST_CKPT_DIR:-$DSV4_ROOT/ckpt-tests}
+mkdir -p "$SKYRL_TEST_CKPT_DIR"
 # /tmp/skyrl-logs on this shared box is owned by another user.
 export SKYRL_TEST_LOG_PATH=${SKYRL_TEST_LOG_PATH:-$DSV4_ROOT/logs/skyrl-infra}
 # The node env forces Google's gIB NCCL net plugin (/usr/local/gib, built for NCCL 2.27.5); the venv's NCCL 2.29.7
