@@ -56,10 +56,14 @@ from torch import nn
 # Queries scored per indexer chunk: [chunk, b, n_heads, n_compressed] fp32 stays ~0.3 GB at 10K tokens.
 _INDEXER_CHUNK = 256
 
-# Reproduce the reference's KV activation quantization (window KV: FP8 e4m3 per 32 with power-of-2 scales;
-# compressed KV: FP4 e2m1 per 16 with e4m3 scales), straight-through for gradients. vLLM stores the KV
-# cache that way too, so this brings training numerics closer to the rollout engine.
-FAKE_QUANT_KV = os.environ.get("SKYRL_DSV41_FAKE_QUANT", "0") == "1"
+# Optional KV fake-quant, straight-through for gradients (SKYRL_DSV41_FAKE_QUANT):
+# - "vllm": vLLM's fp8_ds_mla KV cache -- the 448 NoPE dims in FP8 e4m3 per 64 with power-of-2 scales, the
+#   64 RoPE dims kept in BF16 -- for window and compressed KV alike. Matches the rollout engine.
+# - "reference" (or "1"): DeepSeek's inference/model.py -- window KV FP8 per 32 over all 512 dims, compressed
+#   KV FP4 e2m1 per 16 with e4m3 scales.
+FAKE_QUANT_KV = {"1": "reference"}.get(
+    os.environ.get("SKYRL_DSV41_FAKE_QUANT", ""), os.environ.get("SKYRL_DSV41_FAKE_QUANT", "")
+)
 _FP4_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
@@ -75,6 +79,12 @@ def fake_quant_fp8_block(x: torch.Tensor, block: int = 32) -> torch.Tensor:
         scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
         y = ((v / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float() * scale).flatten(-2).to(x.dtype)
     return _straight_through(x, y)
+
+
+def fake_quant_fp8_ds_mla(x: torch.Tensor, nope_dim: int = 448, block: int = 64) -> torch.Tensor:
+    """vLLM's ``fp8_ds_mla`` KV cache row: FP8 NoPE dims with power-of-2 scales, BF16 RoPE dims."""
+    nope, rope = x[..., :nope_dim], x[..., nope_dim:]
+    return torch.cat([fake_quant_fp8_block(nope, block), rope], dim=-1)
 
 
 def fake_quant_fp4_e4m3(x: torch.Tensor, block: int = 16) -> torch.Tensor:
@@ -339,7 +349,9 @@ class DSv41CompressedSparseAttention(MegatronModule):
         assert packed_seq_params is None, "packed sequences are not supported for DeepSeek-V4.1 attention"
         sq, b, _, _ = query.size()
         kv = key.squeeze(-2)
-        if FAKE_QUANT_KV:
+        if FAKE_QUANT_KV == "vllm":
+            kv = fake_quant_fp8_ds_mla(kv, kv.size(-1) - self.config.qk_pos_emb_head_dim)
+        elif FAKE_QUANT_KV == "reference":
             kv = fake_quant_fp8_block(kv)
         window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
         compressed_idxs = None
@@ -359,7 +371,11 @@ class DSv41CompressedSparseAttention(MegatronModule):
                             k, _ = self.indexer.linear_wk(latent.detach())
                             state.index_k = self._rope(self.indexer.k_norm(k), n_c, ratio)
                     state.compress_kv = self._rope(latent, n_c, ratio)
-                    if FAKE_QUANT_KV:
+                    if FAKE_QUANT_KV == "vllm":
+                        state.compress_kv = fake_quant_fp8_ds_mla(
+                            state.compress_kv, state.compress_kv.size(-1) - self.config.qk_pos_emb_head_dim
+                        )
+                    elif FAKE_QUANT_KV == "reference":
                         state.compress_kv = fake_quant_fp4_e4m3(state.compress_kv)
             assert (
                 state.compress_ratio == ratio
