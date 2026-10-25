@@ -131,6 +131,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
+  `# the full CPU optimizer offload turns this off by default; without it NCCL OOMs lazily allocating buffers for the post-backward metrics all-reduce.` \
+  trainer.policy.megatron_config.empty_cuda_cache=true \
   trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
   trainer.policy.model.lora.rank=$LORA_RANK \
   trainer.policy.model.lora.alpha=$LORA_ALPHA \
