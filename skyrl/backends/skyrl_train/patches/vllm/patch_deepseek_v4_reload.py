@@ -87,6 +87,8 @@ def _patch_classes(causal_lm_cls, model_cls) -> None:
         stashed: dict = self.__dict__.setdefault(_SINK_STASH_ATTR, {})
         stashed_now = set()
 
+        unmatched = []
+
         def without_meta_sinks() -> Iterator[Tuple[str, Any]]:
             nonlocal params
             for name, weight in weights:
@@ -98,9 +100,13 @@ def _patch_classes(causal_lm_cls, model_cls) -> None:
                         stashed[name] = weight.detach().clone()
                         stashed_now.add(name)
                         continue
+                    unmatched.append((name, None if param is None else (param.device, type(param).__name__)))
                 yield name, weight
 
-        return original_load(self, without_meta_sinks()) | stashed_now
+        loaded = original_load(self, without_meta_sinks()) | stashed_now
+        if unmatched:
+            logger.info(f"attn_sink loaded directly (not stashed): {unmatched[:3]} ({len(unmatched)} total)")
+        return loaded
 
     causal_lm_cls.process_weights_after_loading = process_weights_after_loading
     model_cls.load_weights = load_weights
