@@ -21,6 +21,9 @@ def main():
     import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  registers the V4.1 bridge
 
     parallel_state.initialize_model_parallel(1, 1)
+    from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
+
+    model_parallel_cuda_manual_seed(42)
     bridge = AutoBridge.from_hf_pretrained(slice_dir, trust_remote_code=True)
     provider = bridge.to_megatron_provider(load_weights=False)
     provider.mtp_num_layers = None
