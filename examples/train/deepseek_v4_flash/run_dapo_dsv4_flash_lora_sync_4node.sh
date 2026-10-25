@@ -76,7 +76,8 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION="${INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION:-0.6}"
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
-ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "enable_prefix_caching": false}'
+# Prefix caching stays on: R3 returns routed experts through vLLM's AuxOutput connector, which requires it.
+ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$PATH"
