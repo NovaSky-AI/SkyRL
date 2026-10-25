@@ -959,6 +959,12 @@ async def test_logprobs_matching_roundtrip(
                 f"Megatron - mean: {logprobs_megatron_valid.mean().item():.6f}, std: {logprobs_megatron_valid.std().item():.6f}"
             )
             print(f"logprob diff mean: {logprobs_diff.mean().item():.6f}, std: {logprobs_diff.std().item():.6f}")
+            if os.environ.get("SKYRL_TEST_DUMP_LOGPROBS"):
+                # Debug aid: the exact token batch and both logprob sets, to compare against a third
+                # implementation offline (e.g. examples/train/deepseek_v4_flash/dev/ref_logprobs_v41.py).
+                dump = {k: v.cpu() for k, v in training_input.items() if isinstance(v, torch.Tensor)}
+                dump.update(response_mask=response_mask.cpu(), vllm=logprobs_t.cpu(), megatron=logprobs_megatron.cpu())
+                torch.save(dump, os.environ["SKYRL_TEST_DUMP_LOGPROBS"])
 
             assert (
                 logprobs_diff.mean().item() < megatron_threshold
