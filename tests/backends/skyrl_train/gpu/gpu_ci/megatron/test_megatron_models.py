@@ -293,6 +293,32 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
     return overrides
 
 
+def _common_prefix_logprob_diff(gen_out_1, gen_out_2, label: str) -> torch.Tensor:
+    """Per-token |logprob| gaps over the shared prefix of two greedy generations of the same prompts."""
+    ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
+    ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
+    assert lp_1 is not None and lp_2 is not None, "the common-prefix check needs rollout logprobs"
+    diffs = []
+    divergent = 0
+    for s1, s2, l1, l2 in zip(ids_1, ids_2, lp_1, lp_2):
+        n = 0
+        for a, b in zip(s1, s2):
+            if a != b:
+                break
+            n += 1
+        if n < min(len(s1), len(s2)):
+            divergent += 1
+        diffs.extend(abs(x - y) for x, y in zip(l1[:n], l2[:n]))
+    assert diffs, "no common-prefix tokens between the two generations"
+    logprobs_diff = torch.tensor(diffs)
+    print(
+        f"{label} common-prefix logprob diff mean: {logprobs_diff.mean().item():.6f}, "
+        f"std: {logprobs_diff.std().item():.6f} over {len(diffs)} tokens "
+        f"({divergent}/{len(ids_1)} sequences diverged at a near-tie token)"
+    )
+    return logprobs_diff
+
+
 async def generate_with_vllm(
     generator, client, model_name, tokenizer, return_training_input=False, max_generate_length=MAX_GENERATE_LENGTH
 ):
@@ -930,6 +956,17 @@ async def test_logprobs_matching_roundtrip(
                 return_training_input=True,
                 max_generate_length=max_generate_length,
             )
+            if os.environ.get("SKYRL_TEST_MEASURE_VLLM_NOISE") and compare_common_prefix:
+                # Debug aid: the resync check's noise floor -- the same prompts again, no sleep or sync between.
+                (_, _, gen_out_repeat), _ = await generate_with_vllm(
+                    generator,
+                    client,
+                    model_name,
+                    tokenizer,
+                    return_training_input=True,
+                    max_generate_length=max_generate_length,
+                )
+                _common_prefix_logprob_diff(gen_out_1, gen_out_repeat, "vLLM repeat (no sync)")
             await client.sleep()
 
             if policy is None:
@@ -1003,27 +1040,7 @@ async def test_logprobs_matching_roundtrip(
             # has a flat enough distribution that 53 of 80 sequences diverged
             # (~0.93 positional vs ~0.008 on prefixes).
             if compare_common_prefix:
-                ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
-                ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
-                assert lp_1 is not None and lp_2 is not None, "resync check needs rollout logprobs"
-                diffs = []
-                divergent = 0
-                for s1, s2, l1, l2 in zip(ids_1, ids_2, lp_1, lp_2):
-                    n = 0
-                    for a, b in zip(s1, s2):
-                        if a != b:
-                            break
-                        n += 1
-                    if n < min(len(s1), len(s2)):
-                        divergent += 1
-                    diffs.extend(abs(x - y) for x, y in zip(l1[:n], l2[:n]))
-                assert diffs, "no common-prefix tokens between pre/post-sync generations"
-                logprobs_diff = torch.tensor(diffs)
-                print(
-                    f"vLLM resync common-prefix logprob diff mean: {logprobs_diff.mean().item():.6f}, "
-                    f"std: {logprobs_diff.std().item():.6f} over {len(diffs)} tokens "
-                    f"({divergent}/{len(ids_1)} sequences diverged at a near-tie token)"
-                )
+                logprobs_diff = _common_prefix_logprob_diff(gen_out_1, gen_out_2, "vLLM resync")
             else:
                 logprobs_t_valid = logprobs_t[response_mask.bool()]
                 logprobs_t_2_valid = logprobs_t_2[response_mask_2.bool()]
