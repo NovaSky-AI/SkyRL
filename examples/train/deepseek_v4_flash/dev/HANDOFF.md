@@ -106,6 +106,24 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   EP == DP the expert main params are unsharded: ~50 bf16 + ~73 fp32 + ~50 grads = ~173 GiB/GPU. EP=32 halves the
   expert terms (~102 GiB). Recompute must be selective `[moe, mhc, layernorm]` (no core_attn for DSv4; mHC forbids
   full recompute and mlp). The first full-model weight sync (2 nodes, ~530 GiB) took 60 s with no errors.
+## Stage 2
+
+- Checkpoint save/resume (`test_trainer_full_checkpointing.py`, 4-layer slice): **LoRA and full-FT rows pass**
+  (`megatron_deepseek_v4_flash_{lora,fullft}_h100`). Full FT needed three fixes:
+  1. megatron-core `DistributedOptimizer` indexes model params by grad-buffer order (bf16 buffer, then fp32) but
+     orders each optimizer group's main params `[fp32..., bf16...]`; in a group holding both dtypes every param
+     resolved to the next one's main param/state (a 5-param cycle on the slice: `output_layer`, mHC
+     `mapping_proj`, compressor/indexer `ape`). Only checkpoint save/load read that index -- training is fine.
+     `patches/megatron/patch_distopt_mixed_dtype_group_index.py` rebuilds it. This is also the "distributed-optimizer
+     shape mismatch" the GLM-5.3 full-FT row is skipped for (unverified for GLM: no GLM slice here).
+  2. With `optimizer_cpu_offload`, megatron-core builds the `HybridDeviceOptimizer` with `init_state_fn=None`, so
+     SkyRL's `_ensure_optimizer_state_initialized` skipped it and a save before the first step had no
+     `exp_avg`/`exp_avg_sq` (load then `KeyError`s). It now creates the sub-optimizers' first-step state.
+  3. The DSv4 full-FT test row uses optimizer CPU offload (as the recipes do): on 4 GPUs the slice's fp32 Adam
+     state otherwise OOMs at load. Checkpoint tests write to `SKYRL_TEST_CKPT_DIR` (local NVMe; a full-FT
+     slice checkpoint filled a node's 35 GB root disk under /tmp).
+- DAPO LoRA (`run_dapo_dsv4_flash_lora_sync_4node.sh`, 4 nodes, R3 on): see below.
+
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
   fresh per-run dir.

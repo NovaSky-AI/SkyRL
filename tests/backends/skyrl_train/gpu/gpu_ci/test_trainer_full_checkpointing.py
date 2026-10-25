@@ -127,6 +127,15 @@ def get_test_trainer_config(
             "recompute_num_layers": None,
         }
         cfg.generator.inference_engine.engine_init_kwargs = {"max_model_len": 4096}
+        if not lora:
+            # As in the DSv4 full-FT recipes: on 4 GPUs the slice's fp32 Adam state stays on GPU otherwise, and
+            # loading it back (TE FusedAdam allocates fresh state) OOMs at 178 GiB.
+            cfg.trainer.policy.megatron_config.optimizer_config_kwargs = {
+                **cfg.trainer.policy.megatron_config.optimizer_config_kwargs,
+                "optimizer_cpu_offload": True,
+                "optimizer_offload_fraction": 1.0,
+                "overlap_cpu_optimizer_d2h_h2d": False,
+            }
 
     if lora:
         lora_cfg = cfg.trainer.policy.model.lora
