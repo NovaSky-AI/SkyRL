@@ -154,6 +154,13 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   (61.1% -> 63.9%), pass@12 0.933 both (the 8K baseline was 0.35: 4K truncates long solutions). Step-10
   checkpoint saved in 42 s, ~9 GB/node on node-local NVMe: each node holds only its own ranks, so resume
   needs the same rank placement (or the dirs synced to every node).
+  **Run 11 finished all 20 steps** (2026-10-25 22:10, ~12-15 min/step, no errors). AIME-2024 avg_score
+  0.222 -> 0.278 (step 10) -> 0.306 (step 20), i.e. accuracy 61.1% -> 63.9% -> 65.3%; pass@12 0.93/0.93/0.90.
+  Rollout reward per step (different prompts each batch): 0.40 0.40 0.46 0.40 0.50 0.38 0.30 0.44 0.44 0.49
+  0.38 0.42 0.45 0.45 0.28 0.40 0.44 0.36 0.58 0.42; logprob diff 0.040-0.051 throughout; peak ~97 GiB/GPU.
+  Same hyperparameters as the GLM-5.3 DAPO LoRA run except 4K vs 8K responses; DSv4 starts at a much higher
+  reward (~0.4 vs ~0.17), so the climb is smaller. Resume test: step-10 dirs merged onto every node at
+  `ckpts/dapo-lora4-resume` (74 files, 36 GB).
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
