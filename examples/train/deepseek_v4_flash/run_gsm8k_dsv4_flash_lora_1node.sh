@@ -135,8 +135,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.model.lora.rank=$LORA_RANK \
   trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.model.lora.target_modules="$LORA_TARGET_MODULES" \
-  `# Per-user adapter dir: the default /tmp/skyrl_lora_sync can be owned by another user on a shared node.` \
-  trainer.policy.model.lora.lora_sync_path="${TMPDIR:-/tmp}/skyrl_lora_sync_${USER}" \
+  `# Per-user adapter dir (the default /tmp/skyrl_lora_sync can belong to another user on a shared node). With` \
+  `# experts adapted the adapter is ~20 GB per sync, so point LORA_SYNC_PATH at big local storage on every node.` \
+  trainer.policy.model.lora.lora_sync_path="${LORA_SYNC_PATH:-${TMPDIR:-/tmp}/skyrl_lora_sync_${USER}}" \
   trainer.policy.megatron_config.lora_config.merge_lora=$MERGE_LORA \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
