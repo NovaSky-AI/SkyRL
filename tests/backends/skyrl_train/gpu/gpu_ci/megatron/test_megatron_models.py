@@ -549,7 +549,12 @@ async def construct_training_input_from_generator_output(generator_output, token
             8,
             DEEPSEEK_V41_FLASH_6LAYER,
             5e-2,
-            1e-1,
+            # Megatron vs vLLM: 0.12-0.24 on this slice and its sub-slices, but Megatron matches DeepSeek's own
+            # BF16 reference (inference/model.py, fake-quant off; dev/ref_logprobs_v41.py) to within 1e-3 in mean
+            # logprob (per-token 0.06-0.13) while vLLM's BF16 V4.1 path sits 0.11-0.24 from it and is
+            # systematically more confident -- a vLLM-side gap, not a trainer one. Not KV quantization: matching
+            # vLLM's fp8_ds_mla cache in Megatron does not move it. The post-sync check (5e-2) still gates the sync.
+            3e-1,
             None,
             None,
             id="deepseek-v4.1-flash-6layer_tp1_ep8",

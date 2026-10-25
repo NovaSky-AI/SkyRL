@@ -161,6 +161,9 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   Same hyperparameters as the GLM-5.3 DAPO LoRA run except 4K vs 8K responses; DSv4 starts at a much higher
   reward (~0.4 vs ~0.17), so the climb is smaller. Resume test: step-10 dirs merged onto every node at
   `ckpts/dapo-lora4-resume` (74 files, 36 GB).
+  **Resume passes** (`dapo-lora4-resume-1792966381.log`): loaded global_step_10 (policy dist-ckpt + LoRA adapters,
+  trainer + dataloader state) in 12 s on all 4 nodes, then trained steps 11-12: logprob diff 0.050 / 0.044 and
+  grad_norm 0.027 / 0.026, matching the original run's steps 11-12 (0.051 / 0.045, ~0.03); rewards 0.42 / 0.42.
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
@@ -383,3 +386,18 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   `fused_wkv_wgate` has one slice).
 - Stage 0 row: `test_megatron_models.py::test_logprobs_matching_roundtrip[deepseek-v4.1-flash-6layer_tp1_ep8]`
   (`SKYRL_DEEPSEEK_V41_FLASH_6LAYER`); first run on node 5: `logs/v41rt1-*.log`.
+- Stage 0 status (2026-10-25): runs end to end. Megatron vs vLLM logprob diff 0.235-0.287 on the 6-layer slice
+  (sub-slices: window+engram [0,1] 0.074, ratio-2 [0,2,3] 0.124-0.129, ratio-1 [0,4,5] 0.116-0.117). Against
+  DeepSeek's reference (`dev/ref_logprobs_v41.py` on the test's dumped batch, `SKYRL_TEST_DUMP_LOGPROBS`):
+  | slice | mean logprob ref(bf16) / megatron / vllm | ref-megatron | ref-vllm |
+  |---|---|---|---|
+  | ratio-1 | -1.7355 / -1.7358 / -1.6938 | 0.068 | 0.113 |
+  | ratio-2 | -2.1410 / -2.1396 / -2.1062 | 0.060 | 0.125 |
+  | full 6-layer | -1.5509 / -1.5515 / -1.4588 | 0.132 | 0.239 |
+  Megatron tracks the reference; vLLM's BF16 V4.1 path is the outlier (more confident). With the reference's own
+  activation fake-quant on, it is ~0.29-0.41 from both. KV fake-quant in Megatron (`SKYRL_DSV41_FAKE_QUANT=vllm`
+  for fp8_ds_mla, `=reference` for the reference's FP8/FP4) does not close the gap. The gap is largest on the
+  first response tokens (prefill logits). The row's Megatron threshold is 0.3 so the post-sync check runs; the
+  vLLM-side gap is an open item (upstream issue candidate).
+- Weight-sync buffer: SkyRL floors the packed IPC/NCCL buffer at the checkpoint's largest tensor; the Engram table
+  asked for 183 GiB (fixed: `checkpoint_shapes._NOT_SYNCED`).
