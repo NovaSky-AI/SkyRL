@@ -141,7 +141,10 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
      (GPU test in `gpu_ci/patches/megatron/`). MoE-only recompute OOMs on 8K-token rows.
   7. `Failed to CUDA calloc 10485760 bytes` (NCCL "unhandled cuda error") in the post-backward metrics all-reduce:
      with the optimizer fully on CPU `empty_cuda_cache` defaults off and the caching allocator holds everything.
-     The script sets `empty_cuda_cache=true`. Run 10 (`dapo-lora4-1792948133.log`) is the first with all fixes.
+     The script sets `empty_cuda_cache=true`.
+  8. Run 10 then OOMed in the step-1 policy forward (MoE grouped GEMM output; 146.7 GiB allocated + 13.5 GiB held
+     by the sleeping vLLM engine). Run 9 had squeaked through the same forward, so 8K responses sit right at
+     the limit. `MAX_RESPONSE_LENGTH` now defaults to 4096 (env-overridable); 8K needs a memory cut (Stage 3).
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a

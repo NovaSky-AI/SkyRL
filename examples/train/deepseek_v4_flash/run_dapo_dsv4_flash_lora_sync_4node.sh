@@ -30,9 +30,11 @@ LOGGER="${LOGGER:-wandb}"
 MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-20}"
 
 MAX_PROMPT_LENGTH=2048
-MAX_RESPONSE_LENGTH=8192
-INFERENCE_ENGINE_MAX_MODEL_LEN=10752         # prompt + response + chat-template headroom
-OVERLONG_BUFFER_LEN=2048                     # penalty starts at 6144
+# 8K responses OOM in the step-1 policy forward (146.7 GiB allocated by the trainer + 13.5 GiB held by the
+# sleeping vLLM engine on a 178 GiB B200), so the default is 4K; AIME-2024 baseline responses average ~1.6K.
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
+INFERENCE_ENGINE_MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 512))  # + chat-template headroom
+OVERLONG_BUFFER_LEN="${OVERLONG_BUFFER_LEN:-$((MAX_RESPONSE_LENGTH / 4))}"  # penalty starts this far before the cap
 OVERLONG_BUFFER_PENALTY_FACTOR=1.0
 
 # validate_cfg requires (policy_mini_batch_size * n_samples_per_prompt) % dp == 0; dp = 32 (TP=1).
