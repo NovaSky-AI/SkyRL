@@ -85,7 +85,8 @@ if [ "$MERGE_LORA" = "false" ]; then
 else
   LORA_ENGINE_KWARG=''
 fi
-ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', '"$LORA_ENGINE_KWARG"'"enable_prefix_caching": false}'
+# Leave prefix caching on: R3 (enable_return_routed_experts) needs it for vLLM's AuxOutput connector.
+ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', '"${LORA_ENGINE_KWARG%, }"'}'
 
 # TileLang JITs vLLM's mHC kernels with CUDA_HOME's nvcc; without it on PATH it falls back to the
 # venv's pip nvcc, which rejects the venv's CCCL headers. SkyRL forwards CUDA_HOME to the actors.
