@@ -118,11 +118,10 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.moe_token_dispatcher_type="alltoall" \
   trainer.policy.megatron_config.moe_enable_routing_replay=$ENABLE_ROUTING_REPLAY \
   generator.inference_engine.enable_return_routed_experts=$ENABLE_ROUTING_REPLAY \
-  `# Selective recompute of the MoE layers only (DSv4 attention rejects core_attn checkpointing, mHC rejects full` \
-  `# recompute). mhc/layernorm output-discarding recompute fails in backward with LoRA + R3 ("coroutine raised` \
-  `# StopIteration" in _load_args_from_ctx); the full-FT recipe uses it without LoRA.` \
+  `# Selective recompute (DSv4 attention rejects core_attn checkpointing, mHC rejects full recompute). moe alone` \
+  `# OOMs on 8k-token rows; mhc/layernorm under LoRA relies on patch_checkpoint_without_output_frozen_inputs.` \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="selective" \
-  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe] \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm] \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
   `# No mlp_chunks_for_training: megatron-core then routes each sequence chunk separately, but R3 hands every` \
