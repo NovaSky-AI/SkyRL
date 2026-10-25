@@ -27,8 +27,11 @@ try:
     from megatron.core.utils import unwrap_model
 
     # GLM-5.3-Flash (glm5_next): KDA + NoPE-MLA/DSA hybrid MoE with mHC residuals. Importing
-    # registers the bridge for ``Glm5NextForConditionalGeneration`` -> GPTModel.
-    import skyrl.backends.skyrl_train.patches.megatron.glm5_next.bridge  # noqa: F401
+    # registers the text bridge for ``Glm5NextForConditionalGeneration`` -> GPTModel.
+    # ``Glm5NextVLBridge`` is registered under GLM5_NEXT_VL_SENTINEL (see maybe_force_glm5_next_vl_bridge).
+    from skyrl.backends.skyrl_train.patches.megatron.glm5_next.bridge import (
+        GLM5_NEXT_VL_SENTINEL,
+    )
 
     @MegatronModelBridge.register_bridge(
         source="Glm4MoeLiteForCausalLM",
@@ -319,7 +322,22 @@ try:
         bridge.hf_pretrained.config.architectures = [sentinel]
         return True
 
+    def maybe_force_glm5_next_vl_bridge(bridge, hf_config) -> bool:
+        """Rewrite a GLM-5.3-Flash bridge's ``architectures`` to the vision-language sentinel so
+        it dispatches to ``Glm5NextVLBridge`` (vision tower + language model) instead of the
+        default text-only ``Glm5NextBridge``.
+
+        Returns ``True`` if rewritten (caller gates on ``not language_model_only``).
+        """
+        if getattr(hf_config, "model_type", None) != "glm5_next":
+            return False
+        bridge.hf_pretrained.config.architectures = [GLM5_NEXT_VL_SENTINEL]
+        return True
+
 except ImportError:
+
+    def maybe_force_glm5_next_vl_bridge(bridge, hf_config) -> bool:  # noqa: D103
+        return False
 
     def maybe_force_qwen35_text_bridge(bridge, hf_config) -> bool:  # noqa: D103
         # megatron-bridge not installed (e.g. CPU-only environment): nothing to force.
