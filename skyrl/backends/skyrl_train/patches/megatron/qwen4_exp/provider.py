@@ -20,8 +20,8 @@ class Qwen4ExpModelProvider(GPTModelProvider):
 
     On top of the Qwen3.5 hybrid GDN / gated-attention MoE configuration (set by the bridge),
     the ``qwen4_*`` fields describe the gated hyper-connections, the PLE n-gram embedding and
-    the QSA indexer. Supported parallelism: TP=1, CP=1, PP=1, any EP dividing the 16 n-gram heads
-    (the PLE table is sharded over the expert-parallel group).
+    the QSA indexer. Supported parallelism: TP=1, CP=1, PP=1, any EP (the PLE table is row-sharded
+    over the expert-parallel group).
     """
 
     transformer_layer_spec: Union[ModuleSpec, Callable] = build_qwen4_exp_layer_spec

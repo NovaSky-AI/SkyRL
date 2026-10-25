@@ -145,3 +145,53 @@ def test_bridge_provider_accepts_qwen_sparse_attention(tmp_path):
     provider = AutoBridge.from_hf_pretrained(str(tmp_path)).to_megatron_provider(load_weights=False)
     assert list(provider.linear_attention_freq) == [1, 1, 1, 0]
     assert provider.qwen4_ple_hf_prefix == "model.language_model.layers.1.ple."
+
+
+def _sharded_ple_worker(rank, world_size, init_file):
+    import torch.distributed as dist
+
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+        Qwen4ExpPLE,
+        _row_bounds,
+    )
+
+    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    try:
+        c = _hf_config()
+        ref = hf.Qwen4ExpTextPLELayer(c, layer_idx=1, ple_layer_index=0)
+        _randomize(ref)
+        emb = ref.ple_embedding
+        weights = {k: v for k, v in ref.state_dict().items() if not k.startswith("ple_embedding.")}
+        table = emb.ngram_embedding.weight.detach().clone()
+        consts = (emb.layer_multipliers.clone(), emb.ngram_heads_vocab_sizes.clone(), emb.ngram_heads_offsets.clone())
+
+        full = Qwen4ExpPLE(_mcore_config(c), ple_layer_index=0)
+        full.load_state_dict(weights)
+        full.set_table(table, 0, *consts)
+        sharded = Qwen4ExpPLE(_mcore_config(c), ple_layer_index=0)
+        sharded.load_state_dict(weights)
+        # Shard the rows the heads address (HF pads the table past the last head).
+        num_rows = int(consts[2][-1] + consts[1][-1])
+        lo, hi = _row_bounds(num_rows, world_size)[rank : rank + 2].tolist()
+        sharded.set_table(table[lo:hi].clone(), lo, *consts, group=dist.group.WORLD)
+
+        # Different token counts per rank; EOS inside so the n-gram ids cover every head.
+        torch.manual_seed(10 + rank)
+        tokens = torch.randint(10, 500, (11 + 7 * rank,))
+        tokens[3] = EOS
+        hidden = torch.randn(len(tokens), 1, N * H)
+        cu = torch.tensor([0, len(tokens)], dtype=torch.int32)
+        with torch.no_grad():
+            for ple in (full, sharded):
+                ple.set_tokens(tokens[None], cu)
+            torch.testing.assert_close(sharded(hidden), full(hidden))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_ple_row_sharded_matches_unsharded(tmp_path):
+    """Row-sharding the n-gram table over a group (3 ranks: does not divide the 16 heads) gives the
+    unsharded result on every rank, with a different number of tokens per rank."""
+    import torch.multiprocessing as mp
+
+    mp.spawn(_sharded_ple_worker, args=(3, str(tmp_path / "init")), nprocs=3)

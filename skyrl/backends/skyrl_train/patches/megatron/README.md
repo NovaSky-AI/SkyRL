@@ -232,7 +232,7 @@ switch to it and delete `qwen4_exp/` as a whole; don't port pieces between imple
     Config-only bridge (Megatron-Bridge#6354) needs a builder path in `megatron_worker.py`.
   - Activation recompute: the DAPO full-FT recipe uses `recompute_granularity=full`.
   - PLE placement next to colocated vLLM at the recipes' TP (here: frozen, in pinned host memory,
-    sharded by n-gram head over the EP group, loaded outside the bridge, never exported).
+    row-sharded over the EP group, loaded outside the bridge, never exported).
   - Packed (THD) sequences with the PLE n-gram context reset at every sequence boundary.
   - LoRA target module names and the vLLM adapter mapping.
   - Router replay (R3) through its MoE layer, including `chunked_mlp` if its layer bypasses
