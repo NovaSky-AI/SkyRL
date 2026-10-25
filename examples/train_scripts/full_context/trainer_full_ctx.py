@@ -1,9 +1,54 @@
 import random
+from typing import List, Tuple
 
 from loguru import logger
 
+from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import Timer
+
+
+def make_dummy_generator_output(
+    rng: random.Random,
+    vocab_size: int,
+    num_prompts: int,
+    n_samples_per_prompt: int,
+    prompt_length: int,
+    response_length: int,
+) -> Tuple[GeneratorOutput, List[str]]:
+    """Builds a batch of max-length sequences with a random token id at every position.
+
+    Token ids are drawn uniformly from ``[0, vocab_size)``, which spreads MoE routing across
+    experts. Each prompt is shared by the ``n_samples_per_prompt`` responses of its group, and
+    every response is drawn independently.
+
+    Args:
+        rng: Random number generator used for the token ids and rewards.
+        vocab_size: Number of token ids to draw from.
+        num_prompts: Number of prompts (groups) in the batch.
+        n_samples_per_prompt: Number of responses per prompt.
+        prompt_length: Number of tokens in each prompt.
+        response_length: Number of tokens in each response.
+
+    Returns:
+        The generator output with ``num_prompts * n_samples_per_prompt`` samples, and the uid of
+        each sample's group.
+    """
+    num_samples = num_prompts * n_samples_per_prompt
+    prompt_token_ids = []
+    uids = []
+    for i in range(num_prompts):
+        prompt = rng.choices(range(vocab_size), k=prompt_length)
+        prompt_token_ids.extend([prompt] * n_samples_per_prompt)
+        uids.extend([str(i)] * n_samples_per_prompt)
+    response_ids = [rng.choices(range(vocab_size), k=response_length) for _ in range(num_samples)]
+    generator_output = {
+        "prompt_token_ids": prompt_token_ids,
+        "response_ids": response_ids,
+        "rewards": [[0] * (response_length - 1) + [rng.randint(0, 1)]] * num_samples,
+        "loss_masks": [[1] * response_length] * num_samples,
+    }
+    return generator_output, uids
 
 
 class FullCtxTrainer(RayPPOTrainer):
@@ -28,44 +73,25 @@ class FullCtxTrainer(RayPPOTrainer):
 
         # Run a few training steps
         self.global_step += 1  # start from 1
+        # Seeded so that runs with the same config train on the same dummy batches.
+        rng = random.Random(self.cfg.trainer.seed)
         self._profiler_start()
         try:
             for step in range(self.cfg.trainer.num_dummy_steps):
                 logger.info(f"Running dummy training step {step + 1}/{self.cfg.trainer.num_dummy_steps}")
 
+                # Create the dummy batch with max-length sequences. It is built outside the step timer.
+                dummy_generator_output, uids = make_dummy_generator_output(
+                    rng=rng,
+                    vocab_size=self.tokenizer.vocab_size,
+                    num_prompts=self.cfg.trainer.train_batch_size,
+                    n_samples_per_prompt=self.cfg.generator.n_samples_per_prompt,
+                    prompt_length=self.cfg.generator.max_input_length,
+                    response_length=self.cfg.generator.sampling_params.max_generate_length,
+                )
+
                 # Run a single training step
                 with Timer("step", self.all_timings):
-                    # Create training input directly with max length sequences
-                    num_samples = self.cfg.trainer.train_batch_size * self.cfg.generator.n_samples_per_prompt
-                    uids = [str(i) for i in range(self.cfg.trainer.train_batch_size)]
-                    prompt_token_ids = [
-                        [random.randint(0, self.tokenizer.vocab_size - 1)] * self.cfg.generator.max_input_length
-                    ] * self.cfg.trainer.train_batch_size
-                    prompt_token_ids = sum(
-                        [
-                            [prompt_token_id] * self.cfg.generator.n_samples_per_prompt
-                            for prompt_token_id in prompt_token_ids
-                        ],
-                        [],
-                    )
-                    response_ids = [
-                        [random.randint(0, self.tokenizer.vocab_size - 1)]
-                        * self.cfg.generator.sampling_params.max_generate_length
-                    ] * num_samples
-                    uids = sum(
-                        [[uid] * self.cfg.generator.n_samples_per_prompt for uid in uids],
-                        [],
-                    )
-
-                    dummy_generator_output = {
-                        "prompt_token_ids": prompt_token_ids,
-                        "response_ids": response_ids,
-                        "rewards": [
-                            [0] * (self.cfg.generator.sampling_params.max_generate_length - 1) + [random.randint(0, 1)]
-                        ]
-                        * num_samples,
-                        "loss_masks": [[1] * self.cfg.generator.sampling_params.max_generate_length] * num_samples,
-                    }
                     training_input = self.convert_to_training_input(dummy_generator_output, uids)
 
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
