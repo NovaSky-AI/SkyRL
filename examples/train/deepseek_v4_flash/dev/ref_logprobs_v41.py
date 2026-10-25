@@ -157,7 +157,7 @@ def main():
         tokens = seqs[b, cols].unsqueeze(0).cuda()
         _, logits, _ = model(tokens, 0)
         logp = torch.log_softmax(logits[0].float(), dim=-1)
-        full = torch.zeros(seqs.size(1))
+        full = torch.zeros(seqs.size(1), dtype=torch.float32, device="cpu")
         full[cols[1:]] = logp[:-1].gather(-1, tokens[0, 1:, None]).squeeze(-1).cpu()
         ref[b] = full[-n_resp:]
     if rank == 0:
