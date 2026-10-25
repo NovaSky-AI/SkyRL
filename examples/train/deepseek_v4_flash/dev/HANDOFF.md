@@ -148,6 +148,12 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   Run 11 (`dapo-lora4-1792950053.log`, 4K responses, W&B `dsv4_flash_dapo`): **step 1 trains end to end** --
   step 922 s (generate 149 s, logprob fwd 119 s, policy_train 521 s, sync 118 s), rollout-vs-train logprob
   abs diff 0.040, peak 95 GiB allocated (so ~6K responses would likely fit), grad_norm 0.027.
+  Steps 1-10 (W&B run `pktgjo3p`): ~12-15 min/step; rollout reward 0.40, 0.40, 0.46, 0.40, 0.50, 0.38, 0.30, 0.44,
+  0.44, 0.49 (different prompts per batch, so noisy); logprob diff 0.040-0.049; grad_norm 0.027-0.031; clip ratio
+  ~0.05%. AIME-2024 avg_score (+1/-1 reward, so acc = (score+1)/2) at 4K responses: **0.222 -> 0.278 at step 10**
+  (61.1% -> 63.9%), pass@12 0.933 both (the 8K baseline was 0.35: 4K truncates long solutions). Step-10
+  checkpoint saved in 42 s, ~9 GB/node on node-local NVMe: each node holds only its own ranks, so resume
+  needs the same rank placement (or the dirs synced to every node).
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
