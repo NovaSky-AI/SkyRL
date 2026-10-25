@@ -84,7 +84,9 @@ $B/ray-venv/bin/ray start --address=<head ip>:6390 --node-ip-address=<this ip>  
 
 Current cluster (2026-10-25): head b200-resv-ray-1 (10.180.0.10) + ray-0, ray-3, ray-8 = 4 nodes, 32 GPUs. Drivers
 run on the head with `RAY_ADDRESS=10.180.0.10:6390`. On ray-0 (an interactive login box) start the raylet from a clean
-env (`env -i ...`), or the gIB NCCL settings leak in. Full BF16 model (`models/DeepSeek-V4-Flash-bf16`, 138 files /
+env (`env -i HOME=$HOME USER=$USER PATH=/usr/local/cuda/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin ...`), or
+the gIB NCCL settings leak in -- and keep `/usr/local/bin` on PATH: Ray workers start via `uv run --isolated`, and a
+raylet without `uv` fails every worker there ("worker startup repeatedly failed"; `uv: not found` in raylet.err). Full BF16 model (`models/DeepSeek-V4-Flash-bf16`, 138 files /
 568,766,622,520 bytes) on every node.
 
 ## Stage 1 (GSM8K)
