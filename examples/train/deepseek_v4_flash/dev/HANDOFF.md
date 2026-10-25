@@ -82,9 +82,25 @@ $B/ray-venv/bin/ray start --head --port=6390 --node-ip-address=<head ip> --temp-
 $B/ray-venv/bin/ray start --address=<head ip>:6390 --node-ip-address=<this ip>                                                # others
 ```
 
-Current cluster (2026-10-24): head b200-resv-ray-1 (10.180.0.10) + b200-resv-ray-3, 16 GPUs. Drivers run on the head
-with `RAY_ADDRESS=10.180.0.10:6390`. Full BF16 model (`models/DeepSeek-V4-Flash-bf16`, 138 files / 568,766,622,520
-bytes) on ray-3 and ray-8; copying to ray-1.
+Current cluster (2026-10-25): head b200-resv-ray-1 (10.180.0.10) + ray-0, ray-3, ray-8 = 4 nodes, 32 GPUs. Drivers
+run on the head with `RAY_ADDRESS=10.180.0.10:6390`. On ray-0 (an interactive login box) start the raylet from a clean
+env (`env -i ...`), or the gIB NCCL settings leak in. Full BF16 model (`models/DeepSeek-V4-Flash-bf16`, 138 files /
+568,766,622,520 bytes) on every node.
+
+## Stage 1 (GSM8K)
+
+- LoRA, 1 node (`run_gsm8k_dsv4_flash_lora_1node.sh`, W&B `dsv4_flash_gsm8k/tm3osw8z`): ~15 steps, reward 0.80 ->
+  0.86-0.93, rollout/train logprob gap 0.041 (R3 off), entropy ~0.19. Step ~13-16 min, of which training ~11 min:
+  kernel-launch-bound (all ranks at 100% of one CPU core, GPUs mostly idle) -- the first Stage 3 perf target.
+- Full FT: needs **4 nodes** (`run_gsm8k_dsv4_flash_fullft_4node.sh`). On 2 nodes (EP=16) step 1 OOM'd in the forward
+  with 162.8 GiB allocated whatever the recompute: megatron-core's distributed optimizer keeps fp32 main params on GPU
+  even with `optimizer_cpu_offload` (the CPU Adam works from them; SkyRL offloads them only while vLLM runs), and with
+  EP == DP the expert main params are unsharded: ~50 bf16 + ~73 fp32 + ~50 grads = ~173 GiB/GPU. EP=32 halves the
+  expert terms (~102 GiB). Recompute must be selective `[moe, mhc, layernorm]` (no core_attn for DSv4; mHC forbids
+  full recompute and mlp). The first full-model weight sync (2 nodes, ~530 GiB) took 60 s with no errors.
+- Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
+  allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
+  fresh per-run dir.
 
 ## How to run
 

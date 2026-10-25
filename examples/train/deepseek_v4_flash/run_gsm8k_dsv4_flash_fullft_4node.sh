@@ -1,20 +1,22 @@
 set -x
 
 # Colocated GRPO training+generation for DeepSeek-V4-Flash on GSM8K with Megatron, full fine-tuning.
-# 2 nodes x 8xB200 (178 GiB/GPU), all colocated, against a running Ray cluster (`ray start` on both
+# 4 nodes x 8xB200 (178 GiB/GPU), all colocated, against a running Ray cluster (`ray start` on both
 # nodes with the same Ray version as the uv env; MODEL_PATH and DATA_DIR present on every node).
 #
 #   uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 #   export WANDB_API_KEY=<your_key_here>   # or leave LOGGER=console
-#   bash examples/train/deepseek_v4_flash/run_gsm8k_dsv4_flash_fullft_2node.sh
+#   bash examples/train/deepseek_v4_flash/run_gsm8k_dsv4_flash_fullft_4node.sh
 #
 # Short-context smoke run: prompts capped at 512 tokens, responses at 1024, a 2k engine context.
 #
-# Memory: DeepSeek-V4-Flash is ~284B params (~530 GiB bf16, 97% of it routed experts). At TP=1 /
-# EP=16 each GPU holds ~15 GiB of replicated attention/mHC weights + ~35 GiB of experts, the same
-# again as bf16 grads (grad_reduce_in_fp32=false: fp32 grads would add ~50 GiB/GPU), and the fp32
-# master + Adam state (~3.4 TiB) is offloaded to CPU (~1.7 TiB per node). vLLM's ~66 GiB/GPU shard
-# sleeps (level 2) during training. More nodes (EP=32) leave room for fp32 grad reduction.
+# Memory: DeepSeek-V4-Flash is ~284B params (~530 GiB bf16, 97% of it routed experts). megatron-core's
+# distributed optimizer keeps the fp32 main params on GPU even with optimizer_cpu_offload (the CPU Adam
+# works from them), and with EP == DP the expert main params are not sharded. Per GPU at TP=1/EP=32:
+# ~15 GiB replicated attention/mHC + ~18 GiB experts (bf16), ~36 GiB fp32 main params, ~33 GiB bf16
+# grads (grad_reduce_in_fp32=false), plus activations. 2 nodes (EP=16) needs ~173 GiB before
+# activations and OOMs. The fp32 Adam moments are on CPU. vLLM's ~66 GiB/GPU shard sleeps (level 2)
+# during training.
 #
 # MODEL_PATH is a BF16 copy, not the release: deepseek-ai/DeepSeek-V4-Flash ships FP8 attention and
 # MXFP4 experts. Megatron-Bridge dequantizes those on import, but vLLM must serve the same BF16
@@ -24,9 +26,9 @@ set -x
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/avigyabb/models/DeepSeek-V4-Flash-bf16}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k}"
-NUM_NODES=2
+NUM_NODES=4
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=2          # one engine per node, colocated with that node's policy shard
+NUM_INFERENCE_ENGINES=4          # one engine per node, colocated with that node's policy shard
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="${LOGGER:-console}"  # change to "wandb" to log to wandb
 
@@ -38,12 +40,11 @@ MAX_PROMPT_LENGTH=512
 MAX_RESPONSE_LENGTH=1024
 INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 
-# 32 prompts x 8 samples = 256 sequences per step, one optimizer step per batch. DP is 16 (TP=1).
+# 32 prompts x 8 samples = 256 sequences per step, one optimizer step per batch. DP is 32 (TP=1).
 TRAIN_BATCH_SIZE=32
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8
 # Unpacked microbatches (see remove_microbatch_padding below): each holds this many padded rows.
-# 2 OOM'd in the forward at step 1 (168 GiB in use: bf16 weights + grads + no-recompute activations).
 MICRO_TRAIN_BATCH_SIZE_PER_GPU=1
 MICRO_FORWARD_BATCH_SIZE_PER_GPU=4
 
@@ -51,12 +52,12 @@ USE_KL_LOSS=false   # no ref model is constructed when this (and use_kl_in_rewar
 LR=1e-6
 
 # Megatron mesh. megatron-core's DSv4 hybrid attention is TP=1-only at the pinned rev, so attention
-# is replicated and EP shards the experts (16/GPU). PP stays 1 (hash-routed layers must sit on the
+# is replicated and EP shards the experts (8/GPU). PP stays 1 (hash-routed layers must sit on the
 # embedding's stage; mHC + PP is untested here).
 MEGATRON_TP=1
 MEGATRON_PP=1
 MEGATRON_CP=1
-MEGATRON_EP=16
+MEGATRON_EP=32
 MEGATRON_ETP=1
 
 OPTIMIZER_OFFLOAD=true
@@ -66,7 +67,7 @@ OPTIMIZER_OFFLOAD_FRACTION=1.0
 ENABLE_ROUTING_REPLAY=false
 
 # vLLM's share of each GPU: 0.6 -> ~107 GiB, ~66 GiB of it the BF16 shard at TP8. Megatron's weights
-# stay resident (~50 GiB) through rollout; grads and activations only exist while vLLM sleeps.
+# stay resident (~33 GiB) through rollout; grads and activations only exist while vLLM sleeps.
 INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION="${INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION:-0.6}"
 
 ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "enable_prefix_caching": false}'
@@ -108,8 +109,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.moe_enable_routing_replay=$ENABLE_ROUTING_REPLAY \
   generator.inference_engine.enable_return_routed_experts=$ENABLE_ROUTING_REPLAY \
   `# Selective recompute: megatron-core's DSv4 attention rejects core_attn checkpointing and mHC` \
-  `# rejects full recompute. mHC's 4-stream residual activations dominate (~55 GiB for one ~400-token` \
-  `# row with only moe recomputed), so recompute mhc too; megatron-core forbids mhc together with mlp.` \
+  `# rejects full recompute. mHC keeps 4 residual streams per sub-layer, so recompute it with the MoE` \
+  `# layers (megatron-core forbids mhc together with mlp).` \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="selective" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm] \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
