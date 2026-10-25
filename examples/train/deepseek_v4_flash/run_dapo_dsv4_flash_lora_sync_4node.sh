@@ -123,7 +123,8 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm] \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
-  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=64 \
+  `# No mlp_chunks_for_training: megatron-core then routes each sequence chunk separately, but R3 hands every` \
+  `# chunk the whole microbatch's replayed routes (hash-routed layers fail "expected index [1280, 6] ... [20, 256]").` \
   trainer.policy.megatron_config.transformer_config_kwargs.gradient_accumulation_fusion=false \
   trainer.policy.megatron_config.transformer_config_kwargs.disable_parameter_transpose_cache=true \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \
