@@ -144,9 +144,17 @@ def main():
 
     if args.no_quant:
         # BF16 weights never reach the quantized GEMM paths, so only the in-place quant-dequant calls remain.
+        # Signatures: act_quant(x, block_size, scale_fmt, scale_dtype, inplace), fp4_act_quant(x, block_size,
+        # inplace, scale_dtype); model.py passes inplace positionally.
         real_act_quant, real_fp4_act_quant = ref_model.act_quant, ref_model.fp4_act_quant
-        ref_model.act_quant = lambda x, *a, inplace=False, **k: x if inplace else real_act_quant(x, *a, **k)
-        ref_model.fp4_act_quant = lambda x, *a, inplace=False, **k: x if inplace else real_fp4_act_quant(x, *a, **k)
+
+        def act_quant(x, *a, **k):
+            return x if k.get("inplace", len(a) > 3 and a[3]) else real_act_quant(x, *a, **k)
+
+        def fp4_act_quant(x, *a, **k):
+            return x if k.get("inplace", len(a) > 1 and a[1]) else real_fp4_act_quant(x, *a, **k)
+
+        ref_model.act_quant, ref_model.fp4_act_quant = act_quant, fp4_act_quant
     from transformers import AutoTokenizer
 
     with open(os.path.join(args.slice_dir, "config.json")) as f:
