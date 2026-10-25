@@ -104,6 +104,8 @@ def _patch_classes(causal_lm_cls, model_cls) -> None:
                 yield name, weight
 
         loaded = original_load(self, without_meta_sinks()) | stashed_now
+        if stashed_now:
+            logger.info(f"Stashed {len(stashed_now)} attention sinks held on meta by layerwise reload")
         if unmatched:
             logger.info(f"attn_sink loaded directly (not stashed): {unmatched[:3]} ({len(unmatched)} total)")
         return loaded
@@ -152,6 +154,9 @@ def _apply_stashed_attn_sinks(model: Any) -> None:
 
 def run_deferred_model_finalize(model: Any) -> None:
     """After vLLM's layerwise finalize: restore stashed sinks, then run a pending model-level finalize."""
+    logger.info(
+        f"run_deferred_model_finalize({type(model).__name__}): pending={getattr(model, _PENDING_ATTR, False)}"
+    )
     _apply_stashed_attn_sinks(model)
     if getattr(model, _PENDING_ATTR, False):
         setattr(model, _PENDING_ATTR, False)
