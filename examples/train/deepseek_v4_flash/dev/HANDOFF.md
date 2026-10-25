@@ -14,6 +14,7 @@ Plan agreed with the user: **do DeepSeek-V4-Flash first, then DeepSeek-V4.1-Flas
 - Stage 0 (slice): **both rows pass** -- full FT (rt16: Megatron vs vLLM 0.050 < 0.1; post-sync common-prefix
   0.015 < 0.05) and LoRA (lora5: zero adapter 0.047, stale sampler 0.184 > 0.1, updated adapter 0.048).
 - Full model: forward matches (0.040); sync needs 2 nodes (OOM on one). Next: that, then Stage 1.
+- Stage 2: checkpoint save/resume passes (LoRA + full FT); DAPO LoRA with R3 in progress (see Stage 2).
 
 ## What is on this branch
 
@@ -122,7 +123,25 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   3. The DSv4 full-FT test row uses optimizer CPU offload (as the recipes do): on 4 GPUs the slice's fp32 Adam
      state otherwise OOMs at load. Checkpoint tests write to `SKYRL_TEST_CKPT_DIR` (local NVMe; a full-FT
      slice checkpoint filled a node's 35 GB root disk under /tmp).
-- DAPO LoRA (`run_dapo_dsv4_flash_lora_sync_4node.sh`, 4 nodes, R3 on): see below.
+- DAPO LoRA (`run_dapo_dsv4_flash_lora_sync_4node.sh`, 4 nodes, R3 on, W&B project `dsv4_flash_dapo`, logs
+  `/mnt/local_storage/avigyabb/logs/dapo-lora4-*.log` on node 1). Baseline AIME-2024 avg_score 0.35, pass@12 0.90,
+  mean response ~1.6K tokens; step-1 rollout reward ~0.44. Fixes needed to get through step 1 (runs 1-10):
+  1. R3 needs prefix caching on in vLLM (its AuxOutput connector); the script no longer disables it.
+  2. `lora_sync_path` defaults to `/tmp/skyrl_lora_sync` (owned by another user on node 3, and ~20 GB adapters
+     fill the 35 GB root disks): the script uses `LORA_SYNC_PATH` (set to `$B/lora_sync`).
+  3. R3 layer indices: vLLM reports routes per DSv4 block (43), Megatron's HybridModel counts sub-layers (86).
+     `replay_utils._hybrid_sublayers_to_block_indices` maps them back.
+  4. R3 all-to-all split mismatch: the replay layout ignored the CSA `seq_align` padding that
+     `remove_left_padding` applies; `build_token_metadata_layout(..., seq_align=...)` now matches it.
+  5. `mlp_chunks_for_training>1` chunks hash-routed layers' replayed routes wrongly (`[1280, 6]` vs `[20, 256]`):
+     dropped from the script.
+  6. LoRA + `recompute_modules=[..., mhc, layernorm]`: `StopIteration` in backward, because megatron-core's
+     `CheckpointWithoutOutput` saves nothing when no input requires grad (frozen embeddings / base weights)
+     but still recomputes. `patches/megatron/patch_checkpoint_without_output_frozen_inputs.py` keeps the inputs
+     (GPU test in `gpu_ci/patches/megatron/`). MoE-only recompute OOMs on 8K-token rows.
+  7. `Failed to CUDA calloc 10485760 bytes` (NCCL "unhandled cuda error") in the post-backward metrics all-reduce:
+     with the optimizer fully on CPU `empty_cuda_cache` defaults off and the caching allocator holds everything.
+     The script sets `empty_cuda_cache=true`. Run 10 (`dapo-lora4-1792948133.log`) is the first with all fixes.
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
