@@ -7,6 +7,7 @@ contiguous token stream of every packed sequence.
 """
 
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from megatron.core.ssm.gated_delta_net import GatedDeltaNet
 from megatron.core.transformer.transformer_config import TransformerConfig
 from safetensors import safe_open
 from torch import Tensor, nn
+
+logger = logging.getLogger(__name__)
 
 
 class ZeroCenteredRMSNorm(nn.Module):
@@ -331,9 +334,8 @@ class Qwen4ExpPLE(nn.Module):
 # QSA (Qwen sparse attention) indexer and the attention over its selection
 # ------------------------------------------------------------------------------------------------
 
-# TODO: replace the indexer and ``qsa_sparse_attention`` (FlexAttention / chunked SDPA, ~6x the cost
-# of dense attention at 8K) with megatron-core's QSA kernel once the Megatron team implements it
-# (NVIDIA/Megatron-LM#7393 / #7553).
+# TODO: replace the indexer with a fused kernel (cuDNN's ``qsa_select_forward``, or megatron-core's
+# once NVIDIA/Megatron-LM#7393 / #7553 land) after checking its top-k ties against HF.
 
 # Query rows per chunk of the indexer scores ([rows, heads, blocks] fp32) and of the masked
 # attention ([heads, rows, keys]): bounds peak memory independently of the sequence length.
@@ -346,6 +348,14 @@ QSA_ATTENTION_CHUNK = 512
 QSA_FLEX_PAD = 2048
 _QSA_FLEX = os.environ.get("SKYRL_QWEN4_QSA_FLEX", "1") != "0"
 _flex_attention = None
+# Blackwell fast path: cuDNN frontend's QSA kernels (NVIDIA/cudnn-frontend#1765; SM100/SM103, BF16,
+# head dim 256, 24Q/2KV or 12Q/1KV, 4-token blocks), 1.7-3.5x FlexAttention fwd+bwd at 8-10K
+# tokens. Needs a cudnn-frontend with ``cudnn.ops.qsa_forward`` (>= 1.32; until it is on PyPI,
+# the GitHub dev wheel via ``uv run --with``); without it, or elsewhere, FlexAttention runs.
+# SKYRL_QWEN4_QSA_CUDNN=0 forces FlexAttention.
+_QSA_CUDNN = os.environ.get("SKYRL_QWEN4_QSA_CUDNN", "1") != "0"
+_CUDNN_QSA_HEADS = {(24, 2), (12, 1)}
+_cudnn_qsa_ops = None
 
 
 def _rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
@@ -528,11 +538,99 @@ def _flex_sequence_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor
     return out[0, :, :length].transpose(0, 1)
 
 
+def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio: int) -> bool:
+    """Whether the cuDNN QSA kernels support these packed q / k / v ([T, heads, d]) on this device."""
+    global _cudnn_qsa_ops
+    if not (_QSA_CUDNN and query.is_cuda and query.dtype == torch.bfloat16 and compress_ratio == 4):
+        return False
+    if query.shape[-1] != 256 or value.shape[-1] != 256 or (query.shape[1], key.shape[1]) not in _CUDNN_QSA_HEADS:
+        return False
+    if torch.cuda.get_device_capability(query.device)[0] != 10:
+        return False
+    if _cudnn_qsa_ops is None:
+        try:
+            from cudnn.ops import qsa_backward, qsa_forward
+
+            _cudnn_qsa_ops = (qsa_forward, qsa_backward)
+            logger.info("Qwen4Exp QSA sparse attention: using cuDNN frontend qsa_forward / qsa_backward.")
+        except (ImportError, AttributeError):
+            _cudnn_qsa_ops = False
+    return bool(_cudnn_qsa_ops)
+
+
+def cudnn_qsa_metadata(selection: QSASelection, num_tokens: int, device) -> tuple:
+    """The cuDNN QSA selection tensors for ``selection`` over a packed stream of ``num_tokens``.
+
+    Returns ``(sel_blocks, lo, hi, blk_base, tok_base, block_first, block_last)`` (cudnn-frontend
+    ``docs/fe-oss-apis/qsa.md``): query ``t`` sees key ``j`` iff ``lo[t] <= j <= hi[t]`` and block
+    ``blk_base[t] + (j - tok_base[t]) // r`` is set in ``sel_blocks[t]``. Every packed span (a
+    sequence and the padding after it) numbers its own blocks; real queries see ``[start, t]``,
+    padding queries none (``lo > hi``, zero output). The incomplete causal tail block is set
+    explicitly: the kernel does not add it.
+    """
+    r = selection.compress_ratio
+    seqs = selection.sequences
+    # (span start, span end, real tokens, block mask or None for dense); a leading gap is all padding.
+    spans = [(0, seqs[0].start, 0, None)] if seqs[0].start > 0 else []
+    ends = [seq.start for seq in seqs[1:]] + [num_tokens]
+    spans += [(seq.start, end, seq.length, seq.block_mask) for seq, end in zip(seqs, ends)]
+    blocks = [-(-(end - start) // r) for start, end, _, _ in spans]
+    nb_total = sum(blocks)
+    i32 = dict(dtype=torch.int32, device=device)
+    sel = torch.zeros(num_tokens, nb_total, dtype=torch.uint8, device=device)
+    lo, hi = torch.empty(num_tokens, **i32), torch.empty(num_tokens, **i32)
+    blk_base, tok_base = torch.empty(num_tokens, **i32), torch.empty(num_tokens, **i32)
+    block_first, block_last = torch.empty(nb_total, **i32), torch.empty(nb_total, **i32)
+    b0 = 0
+    for (start, end, n, block_mask), nb in zip(spans, blocks):
+        u = torch.arange(end - start, device=device)
+        lo[start:end] = torch.where(u < n, start, start + u)
+        hi[start:end] = torch.where(u < n, start + u, start + u - 1)
+        blk_base[start:end] = b0
+        tok_base[start:end] = start
+        first = start + r * torch.arange(nb, device=device)
+        block_first[b0 : b0 + nb] = first
+        block_last[b0 : b0 + nb] = (first + r - 1).clamp_max(end - 1)
+        rows = u[:n]
+        if block_mask is None:  # dense: every block up to the query's own
+            sel[start : start + n, b0 : b0 + nb] = (torch.arange(nb, device=device) <= (rows // r)[:, None]).to(
+                torch.uint8
+            )
+        elif n:
+            sel[start : start + n, b0 : b0 + block_mask.shape[1]] = block_mask.to(torch.uint8)
+            tail = rows[(rows + 1) % r != 0]  # queries whose own block is still incomplete
+            sel[start + tail, b0 + tail // r] = 1
+        b0 += nb
+    return sel, lo, hi, blk_base, tok_base, block_first, block_last
+
+
+class _CudnnQSA(torch.autograd.Function):
+    """``cudnn.ops.qsa_forward`` / ``qsa_backward`` (which install no autograd) as one op."""
+
+    @staticmethod
+    def forward(ctx, query, key, value, scale, *metadata):
+        qsa_forward, _ = _cudnn_qsa_ops
+        out, out_fp32, lse = qsa_forward(query, key, value, *metadata, scale)
+        ctx.save_for_backward(query, key, value, out_fp32, lse, *metadata)
+        ctx.scale = scale
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        _, qsa_backward = _cudnn_qsa_ops
+        query, key, value, out_fp32, lse, *metadata = ctx.saved_tensors
+        dq, dk, dv = qsa_backward(grad_out.contiguous(), query, key, value, out_fp32, lse, *metadata, ctx.scale)
+        return (dq, dk, dv, None) + (None,) * len(metadata)
+
+
 def qsa_sparse_attention(query: Tensor, key: Tensor, value: Tensor, selection: QSASelection, scale: float) -> Tensor:
     """Causal attention restricted to the QSA selection, for packed (THD) q / k / v.
 
     ``query`` is [T, np, d] and ``key`` / ``value`` [T, ng, d]; returns [T, np * d] (zeros on the
-    padding between sequences; [T, 1, ...] in and out for one unpacked sequence). Queries are processed in chunks of ``QSA_ATTENTION_CHUNK`` over
+    padding between sequences; [T, 1, ...] in and out for one unpacked sequence). On Blackwell with
+    cuDNN's QSA kernels available, the whole pack runs through them (``_cudnn_qsa_usable``).
+    Otherwise sparse-regime sequences use FlexAttention on CUDA, and the rest (or every sequence
+    with SKYRL_QWEN4_QSA_FLEX=0) chunked SDPA: queries in chunks of ``QSA_ATTENTION_CHUNK`` over
     the keys before the chunk end, each chunk recomputed in backward (non-reentrant checkpoint),
     so the [heads, chunk, keys] scores of only one chunk are alive at a time. The selection never
     leaves a query without keys (at least one block or the tail), so no softmax row is empty.
@@ -541,6 +639,11 @@ def qsa_sparse_attention(query: Tensor, key: Tensor, value: Tensor, selection: Q
     if batched:
         query, key, value = (t.squeeze(1) for t in (query, key, value))
     num_tokens, num_heads, _ = query.shape
+    if _cudnn_qsa_usable(query, key, value, selection.compress_ratio):
+        metadata = cudnn_qsa_metadata(selection, num_tokens, query.device)
+        q, k, v = (t.contiguous() for t in (query, key, value))
+        out = _CudnnQSA.apply(q, k, v, scale, *metadata).reshape(num_tokens, -1)
+        return out.unsqueeze(1) if batched else out
     out_dim = value.shape[-1]
     checkpoint = torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value))
     pieces, pos = [], 0

@@ -13,6 +13,13 @@ set -x
 # response budget, which runs the QSA indexer in its sparse regime (sequences past
 # indexer_budget + compress_ratio - 1 = 2051 tokens), and rollout router replay (R3).
 
+# On B200, the sparse-regime attention runs on cuDNN frontend's QSA kernels (1.7-3.5x FlexAttention)
+# when a cudnn-frontend with cudnn.ops.qsa_forward is installed: >= 1.32, until then the
+# nvidia_cudnn_frontend-1.32.0.dev* cp312 wheel from github.com/NVIDIA/cudnn-frontend/releases.
+# Set QSA_CUDNN_WHEEL to its path (the same path on every node; Ray workers reuse the `uv run`
+# command line); without it, FlexAttention runs.
+QSA_CUDNN_WHEEL="${QSA_CUDNN_WHEEL:-}"
+
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
 export SKYRL_GENERATE_CONCURRENCY_PER_ENGINE=128
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
@@ -73,7 +80,7 @@ ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout
 RUN_NAME="${RUN_NAME:-qwen3_8_flash_next_dapo_sync_fullft_8k_ep16}"
 CKPT_PATH="${CKPT_PATH:-$HOME/ckpts/$RUN_NAME}"
 
-uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"} -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.strategy=megatron \

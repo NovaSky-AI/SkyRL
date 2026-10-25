@@ -254,3 +254,46 @@ def test_indexer_dense_for_short_packed_sequences():
     x = torch.randn(int(cu_padded[-1]), 1, H)
     assert ours.select(x, _rope_table(c, MAX_DENSE), packed) is None
     assert all(not p.requires_grad for p in ours.parameters())
+
+
+@pytest.mark.parametrize("lead", [0, 4], ids=["no_leading_gap", "leading_gap"])
+def test_cudnn_qsa_metadata_matches_mask(lead):
+    """The cuDNN QSA selection tensors allow exactly the keys of ``_qsa_token_mask``, per packed
+    sequence, and nothing for padding queries (between sequences and before the first)."""
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+        QSASelection,
+        QSASequenceSelection,
+        _qsa_token_mask,
+        cudnn_qsa_metadata,
+    )
+
+    r = 4
+    torch.manual_seed(0)
+    lengths, pad_to = [50, 13, 35, 7, 37], 8  # sparse, dense, sparse, dense, sparse; lengths % 4 vary
+    seqs, start = [], lead
+    for n, sparse in zip(lengths, [True, False, True, False, True]):
+        mask = None
+        if sparse:
+            visible = (torch.arange(n) + 1) // r
+            mask = (torch.rand(n, n // r) < 0.5) & (torch.arange(n // r) < visible[:, None])
+        seqs.append(QSASequenceSelection(start, n, mask))
+        start += (n + pad_to - 1) // pad_to * pad_to
+    total = start
+    sel, lo, hi, blk_base, tok_base, block_first, block_last = cudnn_qsa_metadata(QSASelection(seqs, r), total, "cpu")
+
+    # The cuDNN rule (qsa.md): b = blk_base[t] + (j - tok_base[t]) // r; allowed iff lo <= j <= hi and sel[t, b].
+    nb = sel.shape[1]
+    j = torch.arange(total)[None, :]
+    b = blk_base[:, None] + torch.div(j - tok_base[:, None], r, rounding_mode="floor")
+    in_range = (lo[:, None] <= j) & (j <= hi[:, None]) & (b >= 0) & (b < nb)
+    allowed = in_range & (sel.gather(1, b.clamp(0, nb - 1)) != 0)
+
+    expected = torch.zeros(total, total, dtype=torch.bool)
+    for s in seqs:
+        expected[s.start : s.start + s.length, s.start : s.start + s.length] = _qsa_token_mask(
+            s.block_mask, 0, s.length, r, "cpu"
+        )
+    assert torch.equal(allowed, expected)
+    # Block spans tile the stream, at most r tokens each.
+    assert int(block_first[0]) == 0 and int(block_last[-1]) == total - 1
+    assert torch.all(block_last - block_first < r) and torch.all(block_first[1:] == block_last[:-1] + 1)
