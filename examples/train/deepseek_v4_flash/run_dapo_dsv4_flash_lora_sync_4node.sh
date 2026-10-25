@@ -89,7 +89,7 @@ export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1800
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
 export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:-${TMPDIR:-/tmp}/vllm_autotune_$(date +%s)}"
 
-RUN_NAME="${RUN_NAME:-dsv4_flash_dapo_sync_lora_r${LORA_RANK}_8k_ep${MEGATRON_EP}}"
+RUN_NAME="${RUN_NAME:-dsv4_flash_dapo_sync_lora_r${LORA_RANK}_resp${MAX_RESPONSE_LENGTH}_ep${MEGATRON_EP}}"
 CKPT_PATH="${CKPT_PATH:-$HOME/ckpts/$RUN_NAME}"
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
