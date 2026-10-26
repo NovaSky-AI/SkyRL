@@ -228,10 +228,6 @@ class DSv41Indexer(MegatronModule):
         if owns_k:
             self.linear_wk = _duplicated_linear(config, config.v_head_dim, self.head_dim, f"{name}.linear_wk")
             self.k_norm = _rms_norm_module(config, self.head_dim)
-        # Top-k selection runs under no_grad, so these never get a gradient. Left trainable, full FT
-        # would bucket them in DDP and let weight decay drift them away from what vLLM's indexer expects.
-        for param in self.parameters():
-            param.requires_grad_(False)
 
 
 class DSv41CompressedSparseAttention(MegatronModule):
