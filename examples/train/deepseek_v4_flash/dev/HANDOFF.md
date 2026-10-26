@@ -169,6 +169,8 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   distributed optimizer, 4 nodes) saves in 582 s. At 1.5K responses AIME is mostly truncated: avg_score -0.033 ->
   -0.061, pass@12 0.80 -> 0.63 at step 10, so this budget shows the pipeline, not learning; a real full-FT DAPO
   curve needs more nodes (or the Stage 3 memory work) for >=4K responses. W&B `dsv4_flash_dapo/0wjvh0wo`.
+  It then OOMed at step 13 even at 1.5K (a long-row batch; 4-node full FT sits at the memory edge). Not relaunched:
+  V4.1 has priority, and the pipeline / checkpoint path is what Stage 2 needed from it. The 4 DSv4 nodes are free.
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
