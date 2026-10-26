@@ -454,4 +454,18 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   with it because it pads to a multiple of 128. Fixed with `tensor_split` (exactly n pieces; unit test adds
   (100, 64)); also froze the V4.1 indexer (never gets a gradient; selection is under no_grad). Commit 3a5e0d1f.
   Relaunched as `v41-gsm8k-fullft6-1792991642.log`.
+- Attempt 2 (`...-1792991642`): first rollout after the initial sync returned NaN logprobs (HTTP 400 "Out of
+  range float values are not JSON compliant: nan"). Reverted the indexer freeze (6627eb6a). The same freeze passes
+  the 6-layer slice round trip on node 6 (post-sync gap 0.241), so the link to the NaN is unconfirmed.
+- Attempt 3 (`...-1792994224`, no freeze): rollout fine (gen 13 s, logprob fwd 502 s), then **hung again in
+  policy_train**: all 48 GPUs at 100% util and ~236 W (NCCL spin, not compute), memory frozen. Real cause: the
+  V4.1 hybrid layers are megatron-core's `HyperConnectionHybridLayer`, whose `TransformerLayer._forward_mlp`
+  also chunks with `Tensor.chunk(n)`, and only in training (so the eval logprob forward never hit it). SkyRL's
+  `chunked_mlp` fix does not reach that path. Fix (ea6bb0f8): pad unpacked rows to a multiple of
+  `mlp_chunks_for_training` (lcm with the compress-ratio alignment), so every rank gets exactly n chunks.
+  The packed (THD) path is not covered. Also added opt-in `SKYRL_DSV41_FAULTHANDLER=1` (on in the 6-node script):
+  `kill -USR1 <worker pid>` dumps Python stacks to the worker log, since py-spy needs ptrace.
+- Checked: megatron-core's mHC recompute does not call `compute_mappings` again (only `aggregate` is
+  checkpointed, with the delayed `h_pre` as input), so the thread-local delayed pre-mix state is safe under
+  recompute.
 - Remote note: in this worktree `origin` is upstream NovaSky-AI/SkyRL and `fork` is avigyabb/SkyRL -- push to `fork`.
