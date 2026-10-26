@@ -512,3 +512,8 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   6 nodes (EP=48, 3 vLLM engines TP8 x PP2, chat mode), ~530 s/step, peak 93-97 GiB/GPU. Rollout reward 0.77 0.85 0.81
   0.87 0.93 0.92 0.96 0.96 0.97 0.95; grad_norm 1.69 -> 0.034; rollout-vs-train logprob diff 0.016-0.019 (steps 1 and 8:
   8.68 / 0.31, a few vLLM -9999-floor tokens). **GSM8K test pass@1 after training 0.958** (chat mode).
+- **V4.1 DAPO LoRA checkpoint resume passes on the full model** (`v41-dapo-lora-resume-1793019483`, W&B
+  `dsv41_flash_dapo`): `resume_mode=latest` from the merged `v41-dapo-lora-ckpt-merged/global_step_2` ("Successfully
+  loaded complete checkpoint state", 22 s), then step 3 in 1497 s with rollout-vs-train logprob diff 0.0093 (0.009
+  before the save), grad_norm 0.015, reward -0.23. Remaining Stage 2: DAPO full FT with R3
+  (`run_dapo_dsv41_flash_fullft_sync_6node.sh`).
