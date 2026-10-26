@@ -421,3 +421,7 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   - vLLM PP bug: a KV cache group with no layers on a PP stage keeps its full UniformTypeKVCacheSpecs, so stage 1
     allocates tensors for stage-0 layers -> StopIteration in allocate_kv_cache. Patched
     (`patches/vllm/patch_pp_kv_cache_projection.py`).
+- **Stage 1 runs end to end on the full model (2026-10-26, `v41-gsm8k-lora2-1792975380.log`, W&B `dsv41_flash_gsm8k`)**:
+  step 1 = 592 s (generate 57 s, logprob fwd 163 s, policy_train 257 s, LoRA sync 106 s); rollout-vs-train logprob
+  diff **0.025** on the full 40-layer model (the 0.12-0.25 on 3-6-layer slices is a truncated-model artifact);
+  peak 117 GiB/GPU; grad_norm 0.030; first-step GSM8K reward 0.586 (avg response 237 tokens).
