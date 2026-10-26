@@ -59,7 +59,7 @@ setting different teacher configurations.
 The SkyRL-managed teacher backend shares the same configuration schema with the rollout engine. However, there
 are some defualts to the inference engine config that are different between the teacher and rollout engine:
 
-- Prefix caching is off (because scoring requests aren't autoregressive)
+- Prefix caching is off
 - `gpu_memory_utilization` 0.9
 - Ray Prometheus stats off
 
