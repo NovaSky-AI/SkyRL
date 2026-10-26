@@ -33,6 +33,8 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     FusedLinearChunkedDistributedLogprob,
     _compute_distributed_log_softmax,
 )
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
+from skyrl.backends.skyrl_train.utils.packed_tensor import cu_seqlens_from_lengths
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_TORCH_DTYPE
 from skyrl.backends.skyrl_train.utils.sample_support_replay import sample_support_scores
 from skyrl.train.fused_lm_head import FusedLmHeadBackend
@@ -264,9 +266,14 @@ def test_fused_sample_support_matches_torch_candidate_projection(
     rows = torch.arange(batch * sequence, device=device).unsqueeze(1)
     slots = torch.arange(width, device=device).unsqueeze(0)
     members = (rows * 37 + slots * 101) % vocab
-    support = torch.where(slots < lengths.unsqueeze(1), members, -1).to(SAMPLE_SUPPORT_TORCH_DTYPE)
+    # One CSR support row per position, holding that row's first ``length`` members.
+    support = PackedRaggedTensor(
+        [members[slots < lengths.unsqueeze(1)].to(SAMPLE_SUPPORT_TORCH_DTYPE)],
+        cu_seqlens_from_lengths(lengths, device=device),
+        cu_seqlens_from_lengths([batch * sequence], device=device),
+    )
+    row_ids = torch.arange(batch * sequence, device=device).reshape(batch, sequence)
     sampled = torch.where(lengths > 0, members[:, 0], 0).reshape(batch, sequence)
-    support = support.reshape(batch, sequence, width)
     logprob_seed = torch.linspace(0.5, 1.5, batch * sequence, device=device).reshape(batch, sequence)
     entropy_seed = torch.linspace(-0.25, 0.75, batch * sequence, device=device).reshape(batch, sequence)
 
@@ -277,6 +284,7 @@ def test_fused_sample_support_matches_torch_candidate_projection(
             run_hidden,
             sampled,
             support,
+            row_ids,
             vocab_start_index=0,
             vocab_end_index=vocab,
             tp_group=None,
