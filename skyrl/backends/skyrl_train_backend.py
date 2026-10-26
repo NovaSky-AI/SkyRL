@@ -11,7 +11,7 @@ from typing import Callable, Literal
 import ray
 import torch
 from pydantic import BaseModel
-from ray.util.placement_group import placement_group
+from ray.util.placement_group import placement_group, remove_placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
@@ -582,31 +582,36 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # First-time setup OR critic creation (existing path).
         if model_role == "policy":
-            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+            # Restored on failure rather than reset: an inference-only runtime may have built it while sampling.
+            cfg_before = self._cfg
+            with cleanup_on_error(
+                lambda: self._discard_partial_runtime(cfg_before), "Discarding the partially built runtime"
+            ):
+                self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
 
-            if not ray.is_initialized():
-                logger.info("Initializing Ray with runtime environment")
-                initialize_ray(self._cfg)
+                if not ray.is_initialized():
+                    logger.info("Initializing Ray with runtime environment")
+                    initialize_ray(self._cfg)
 
-            self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
+                self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self.config.runtime_role == "inference":
-                PolicyWorker = None
-            elif self._cfg.trainer.strategy == "fsdp":
-                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
-                    PolicyWorker,
-                )
-            elif self._cfg.trainer.strategy == "megatron":
-                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                    PolicyWorker,
-                )
-            else:
-                raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-            if PolicyWorker is not None:
-                logger.info("Building models.")
-                self._build_policy(PolicyWorker, model_id=model_id)
-            if is_lora:
-                self._base_lora_signature = self._lora_signature_from(lora_config)
+                if self.config.runtime_role == "inference":
+                    PolicyWorker = None
+                elif self._cfg.trainer.strategy == "fsdp":
+                    from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                        PolicyWorker,
+                    )
+                elif self._cfg.trainer.strategy == "megatron":
+                    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                        PolicyWorker,
+                    )
+                else:
+                    raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
+                if PolicyWorker is not None:
+                    logger.info("Building models.")
+                    self._build_policy(PolicyWorker, model_id=model_id)
+                if is_lora:
+                    self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
             if model_role in self._model_ids_to_role.values():
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
@@ -644,6 +649,15 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info("Placement group ready!")
 
         return ResolvedPlacementGroup(pg)
+
+    def _discard_partial_runtime(self, cfg_before) -> None:
+        """Undo a first ``create_model`` that failed part-way, so the next one starts from scratch."""
+        self._cfg = cfg_before
+        self._dispatch = None
+        self._base_lora_signature = None
+        colocate_pg, self._colocate_pg = self._colocate_pg, None
+        if colocate_pg is not None:
+            remove_placement_group(colocate_pg.pg)
 
     def _unload_inference_adapter(self, model_id: str) -> None:
         """Drop a deleted tenant's LoRA adapter from the inference engines.
