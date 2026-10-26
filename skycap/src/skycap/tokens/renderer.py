@@ -157,8 +157,8 @@ def _multi_modal_data(media: Sequence[Media]) -> MultiModalData | None:
     return data
 
 
-def png_part(width: int, height: int) -> dict[str, Any]:
-    """A plain white PNG of this size as an OpenAI ``image_url`` content part (a data URI)."""
+@lru_cache(maxsize=16)
+def _png_url(width: int, height: int) -> str:
     import base64
     import io
 
@@ -166,10 +166,12 @@ def png_part(width: int, height: int) -> dict[str, Any]:
 
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), "white").save(buffer, "PNG")
-    return {
-        "type": "image_url",
-        "image_url": {"url": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()},
-    }
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def png_part(width: int, height: int) -> dict[str, Any]:
+    """A plain white PNG of this size as an OpenAI ``image_url`` content part (a data URI). Needs Pillow."""
+    return {"type": "image_url", "image_url": {"url": _png_url(width, height)}}
 
 
 class RenderersRenderer:
@@ -303,8 +305,8 @@ class RenderersRenderer:
         """
         if not self.multimodal:
             return None
-        probe = [{"role": "user", "content": [png_part(64, 64), {"type": "text", "text": "?"}]}]
         try:
+            probe = [{"role": "user", "content": [png_part(64, 64), {"type": "text", "text": "?"}]}]
             rendered = self.render(probe, None)
             if not rendered.media:
                 return "the probe image rendered no multimodal item"

@@ -438,3 +438,13 @@ def test_processor_kwargs_for_a_text_only_model_are_refused(renderer: RenderersR
     with pytest.raises(ValueError, match="processor_kwargs are for a multimodal model"):
         RenderersRenderer(TOKENIZER, size=1, processor_kwargs={"max_pixels": 200704})
     assert renderer.processor_probes() == []
+
+
+def test_a_probe_that_cannot_be_built_is_a_reason_not_a_crash(vl_renderer: RenderersRenderer, monkeypatch) -> None:
+    import skycap.tokens.renderer as renderer_module
+
+    def no_pillow(width: int, height: int) -> dict:
+        raise ImportError("No module named 'PIL'")
+
+    monkeypatch.setattr(renderer_module, "png_part", no_pillow)
+    assert vl_renderer.validate_media_encoding() == "ImportError: No module named 'PIL'"

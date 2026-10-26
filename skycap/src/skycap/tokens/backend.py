@@ -116,10 +116,14 @@ class TokensBackend:
         probes = getattr(self.renderer, "processor_probes", None)
         if probes is None or self.media_error:
             return
-        probes = await asyncio.to_thread(probes)
+        name = self.renderer.name
+        try:
+            probes = await asyncio.to_thread(probes)
+        except Exception as error:  # noqa: BLE001 - e.g. Pillow missing; images then fail per request, text works
+            logger.warning("%s: couldn't build the probes to check image processing: %s", name, error)
+            return
         if not probes:
             return
-        name = self.renderer.name
         if not self.model:
             logger.warning("%s: no model name, so image processing isn't checked against the engine", name)
             return

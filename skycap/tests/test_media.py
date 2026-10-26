@@ -306,3 +306,17 @@ async def test_a_chat_template_difference_or_an_unreachable_engine_only_warns() 
     await _start_with_probes(None)
     mock = await _start_with_probes(_rendered, model=None)
     assert mock.chat_requests == []
+
+
+async def test_probes_that_cannot_be_built_leave_the_server_starting() -> None:
+    from skycap.tokens.backend import TokensBackend
+    from tests.fake_renderer import FakeRenderer
+
+    def no_pillow() -> list[Any]:
+        raise ImportError("No module named 'PIL'")
+
+    renderer = FakeRenderer()
+    renderer.processor_probes = no_pillow  # type: ignore[attr-defined]
+    backend = TokensBackend("http://engine", renderer, model="policy")
+    await backend.start()
+    await backend.close()
