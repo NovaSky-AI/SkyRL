@@ -29,8 +29,9 @@ MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-20}"
 
 MAX_PROMPT_LENGTH=2048
 # The LoRA recipe peaks at ~95 GiB/GPU with 4K responses (~60 GiB of it activations); full FT adds ~70 GiB of
-# fp32 main params and bf16 grads on top, so it defaults to 2K responses (DAPO-LoRA rollouts average ~1.2K).
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-2048}"
+# fp32 main params and bf16 grads on top. 2K responses peaked at 147 GiB on step 1 and OOMed on step 4 (a batch
+# of longer rows), so the default is 1.5K (DAPO-LoRA rollouts average ~1.2K).
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-1536}"
 INFERENCE_ENGINE_MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 512))  # + chat-template headroom
 OVERLONG_BUFFER_LEN="${OVERLONG_BUFFER_LEN:-$((MAX_RESPONSE_LENGTH / 4))}"  # penalty starts this far before the cap
 OVERLONG_BUFFER_PENALTY_FACTOR=1.0
