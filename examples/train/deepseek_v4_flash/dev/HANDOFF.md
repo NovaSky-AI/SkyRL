@@ -445,3 +445,13 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   452, convert 122, fwd 198, train 768, sync 115) -- one engine for 1536 x 2K samples is the bottleneck.
 - Full V4.1 BF16 copy now on nodes 0, 1, 3, 8, 5, 6, 7. Full-FT recipe `run_gsm8k_dsv41_flash_fullft_6node.sh` (EP=48,
   3 engines TP8 x PP2, Engram tables on host via `SKYRL_DSV41_ENGRAM_TABLE_DEVICE=cpu`).
+- Full-FT attempt 1 (`v41-gsm8k-fullft6-1792987443.log`, 6 nodes = DSv4 cluster nodes 0,1,3,8 + 5,7, head node 1):
+  boot + initial sync 79 s, generate 18 s, logprob fwd 316 s, reward 0.83 (chat mode), then **hung in policy_train**
+  for 30 min until the NCCL watchdog fired: node 3's ranks sat in an EP-group `_ALLGATHER_BASE` of 384 elements
+  (the per-expert token counts) that the others never joined. Cause: `chunked_mlp` (mHC layer's
+  `mlp_chunks_for_training`) used `Tensor.chunk(64)`, which yields fewer than 64 pieces unless 64 divides the
+  length (100 -> 50). Unpacked rows are padded per rank, so ranks made different numbers of MoE calls. DSv4 got away
+  with it because it pads to a multiple of 128. Fixed with `tensor_split` (exactly n pieces; unit test adds
+  (100, 64)); also froze the V4.1 indexer (never gets a gradient; selection is under no_grad). Commit 3a5e0d1f.
+  Relaunched as `v41-gsm8k-fullft6-1792991642.log`.
+- Remote note: in this worktree `origin` is upstream NovaSky-AI/SkyRL and `fork` is avigyabb/SkyRL -- push to `fork`.
