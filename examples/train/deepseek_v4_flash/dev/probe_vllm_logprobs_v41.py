@@ -3,6 +3,9 @@ non-finite or at vLLM's -9999 floor (what SkyRL's rollout-vs-train logprob metri
 
 Usage (one 8-GPU node, no weight sync involved):
   python probe_vllm_logprobs_v41.py <model_dir> <dapo.parquet> <out.jsonl> [--prompts 128] [--n 12] [--max-tokens 2048]
+
+--poison-kv fills every KV cache tensor with 0xFF bytes (NaN in fp8 e4m3 and bf16) before sampling: if the rate
+jumps, attention reads slots that were never written (after a sleep/wake the cache holds whatever training left).
 """
 
 import argparse
@@ -11,6 +14,33 @@ import math
 
 import pandas as pd
 from vllm import LLM, SamplingParams
+
+
+def _poison_kv_cache(worker) -> int:
+    """Fill this worker's KV cache tensors with 0xFF bytes; returns how many tensors were filled."""
+    import torch
+
+    runner = getattr(worker, "model_runner", worker)
+    caches = getattr(runner, "kv_caches", None)
+    seen, count = set(), 0
+
+    def fill(obj):
+        nonlocal count
+        if isinstance(obj, torch.Tensor):
+            if obj.is_cuda and obj.data_ptr() not in seen:
+                seen.add(obj.data_ptr())
+                obj.view(torch.uint8).fill_(255)
+                count += 1
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                fill(item)
+        elif isinstance(obj, dict):
+            for item in obj.values():
+                fill(item)
+
+    fill(caches)
+    torch.cuda.synchronize()
+    return count
 
 
 def main():
@@ -24,6 +54,7 @@ def main():
     p.add_argument("--tp", type=int, default=8)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--poison-kv", action="store_true")
     args = p.parse_args()
 
     df = pd.read_parquet(args.data).head(args.prompts)
@@ -37,6 +68,8 @@ def main():
         enable_prefix_caching=False,
         seed=args.seed,
     )
+    if args.poison_kv:
+        print("PROBE poisoned KV tensors per rank:", llm.collective_rpc(_poison_kv_cache), flush=True)
     tok = llm.get_tokenizer()
     prompts = [
         tok.apply_chat_template(list(row["prompt"]), tokenize=False, add_generation_prompt=True)
