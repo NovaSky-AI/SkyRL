@@ -164,6 +164,11 @@ raylet without `uv` fails every worker there ("worker startup repeatedly failed"
   **Resume passes** (`dapo-lora4-resume-1792966381.log`): loaded global_step_10 (policy dist-ckpt + LoRA adapters,
   trainer + dataloader state) in 12 s on all 4 nodes, then trained steps 11-12: logprob diff 0.050 / 0.044 and
   grad_norm 0.027 / 0.026, matching the original run's steps 11-12 (0.051 / 0.045, ~0.03); rewards 0.42 / 0.42.
+- DAPO full FT (`run_dapo_dsv4_flash_fullft_sync_4node.sh`, R3): runs end to end (step ~8-10 min, logprob diff
+  0.034, peak 147 GiB at 2K responses; 2K OOMed at step 4 -> default 1.5K). Step-10 checkpoint (fp32 main params +
+  distributed optimizer, 4 nodes) saves in 582 s. At 1.5K responses AIME is mostly truncated: avg_score -0.033 ->
+  -0.061, pass@12 0.80 -> 0.63 at step 10, so this budget shows the pipeline, not learning; a real full-FT DAPO
+  curve needs more nodes (or the Stage 3 memory work) for >=4K responses. W&B `dsv4_flash_dapo/0wjvh0wo`.
 
 - Multi-node vLLM boot hang: the same warm FlashInfer autotune cache hang as roundtrip run 3. SkyRL forwards an
   allow-list of env vars to Ray workers; `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` is now on it and the scripts set a
