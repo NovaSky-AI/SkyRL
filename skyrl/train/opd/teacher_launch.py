@@ -10,7 +10,6 @@ learns "launch a deployment from these args at this port and hand back its clien
 """
 
 import copy
-from argparse import Namespace
 from typing import TYPE_CHECKING, Tuple
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
@@ -24,25 +23,6 @@ if TYPE_CHECKING:
         RemoteInferenceClient,
     )
     from skyrl.backends.skyrl_train.inference_servers.setup import InferenceServerSetup
-
-
-def served_teacher_name(teacher: TeacherConfig) -> str:
-    """The name the launched servers know the teacher by, and the ``model`` scoring requests send."""
-    return teacher.inference_engine.served_model_name or teacher.model
-
-
-def teacher_cli_args(cfg) -> Namespace:
-    """vLLM server args for the teacher: the frozen role, with ``max_model_len`` defaulted to what scoring needs."""
-    from skyrl.backends.skyrl_train.inference_servers.utils import (
-        build_frozen_vllm_cli_args,
-    )
-
-    teacher: TeacherConfig = cfg.trainer.teacher
-    ie_cfg = copy.deepcopy(teacher.inference_engine)
-    # vLLM otherwise takes the model's native context, which is more KV budget than a prefill server
-    # needs and, on a small teacher GPU, more than the KV pool can hold at startup.
-    ie_cfg.engine_init_kwargs.setdefault("max_model_len", teacher_max_model_len(cfg))
-    return build_frozen_vllm_cli_args(teacher.model, ie_cfg, cfg.trainer.seed)
 
 
 def teacher_start_port(cfg) -> int:
@@ -77,12 +57,20 @@ def launch_teacher(cfg) -> Tuple["RemoteInferenceClient", "InferenceServerSetup"
     from skyrl.backends.skyrl_train.inference_servers.setup import (
         launch_remote_inference_client,
     )
+    from skyrl.backends.skyrl_train.inference_servers.utils import (
+        build_frozen_vllm_cli_args,
+    )
 
     teacher: TeacherConfig = cfg.trainer.teacher
+    ie_cfg = copy.deepcopy(teacher.inference_engine)
+    # vLLM otherwise takes the model's native context, which is more KV budget than a prefill server
+    # needs and, on a small teacher GPU, more than the KV pool can hold at startup.
+    ie_cfg.engine_init_kwargs.setdefault("max_model_len", teacher_max_model_len(cfg))
     return launch_remote_inference_client(
         teacher.inference_engine,
-        teacher_cli_args(cfg),
-        model_name=served_teacher_name(teacher),
+        build_frozen_vllm_cli_args(teacher.model, ie_cfg, cfg.trainer.seed),
+        # The name the launched servers know the teacher by, and the `model` scoring requests send.
+        model_name=teacher.inference_engine.served_model_name or teacher.model,
         log_path=cfg.trainer.log_path,
         start_port=teacher_start_port(cfg),
     )

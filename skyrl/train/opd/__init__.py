@@ -32,8 +32,6 @@ from skyrl.train.opd.teacher_client import (
 )
 from skyrl.train.opd.teacher_launch import (
     launch_teacher,
-    served_teacher_name,
-    teacher_cli_args,
     teacher_start_port,
 )
 from skyrl.train.opd.trainer import OPDTrainer
@@ -58,8 +56,6 @@ __all__ = [
     "TeacherLogprobClient",
     "VLLMTeacherClient",
     "launch_teacher",
-    "served_teacher_name",
-    "teacher_cli_args",
     "teacher_start_port",
     "OPDTrainer",
     "apply_opd_to_advantages",

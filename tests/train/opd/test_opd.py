@@ -30,11 +30,7 @@ from skyrl.train.opd.teacher_client import (
     TeacherLogprobClient,
     VLLMTeacherClient,
 )
-from skyrl.train.opd.teacher_launch import (
-    served_teacher_name,
-    teacher_cli_args,
-    teacher_start_port,
-)
+from skyrl.train.opd.teacher_launch import teacher_start_port
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
     TEACHER_LOGPROBS_KEY,
@@ -433,13 +429,6 @@ def test_teacher_max_model_len_single_and_multi_turn():
 # ---------------------------------------------------------------------------
 
 
-def test_served_teacher_name_prefers_the_served_alias():
-    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=Qwen/Qwen3-32B"])
-    assert served_teacher_name(cfg.trainer.teacher) == "Qwen/Qwen3-32B"
-    cfg.trainer.teacher.inference_engine.served_model_name = "teacher"
-    assert served_teacher_name(cfg.trainer.teacher) == "teacher"
-
-
 @pytest.mark.parametrize(
     "overrides, expected",
     [
@@ -473,33 +462,6 @@ def test_served_teacher_name_prefers_the_served_alias():
 def test_teacher_start_port_is_past_the_students_windows(overrides, expected):
     cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"] + overrides)
     assert teacher_start_port(cfg) == expected
-
-
-def test_teacher_cli_args_uses_the_frozen_role_and_defaults_max_model_len(monkeypatch):
-    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
-
-    calls = []
-
-    def fake_frozen(model_path, ie_cfg, seed):
-        calls.append((model_path, ie_cfg, seed))
-        return "cli-args"
-
-    monkeypatch.setattr(inference_utils, "build_frozen_vllm_cli_args", fake_frozen)
-    cfg = OPDExpConfig.from_cli_overrides(
-        ["trainer.teacher.model=Qwen/Qwen3-32B", "trainer.seed=7", "trainer.teacher.inference_engine.num_engines=2"]
-    )
-    assert teacher_cli_args(cfg) == "cli-args"
-    ((model_path, ie_cfg, seed),) = calls
-    assert model_path == "Qwen/Qwen3-32B"
-    assert seed == 7
-    assert ie_cfg.num_engines == 2
-    assert ie_cfg.engine_init_kwargs["max_model_len"] == teacher_max_model_len(cfg)
-    # the config itself is not mutated
-    assert "max_model_len" not in cfg.trainer.teacher.inference_engine.engine_init_kwargs
-
-    cfg.trainer.teacher.inference_engine.engine_init_kwargs["max_model_len"] = 65536
-    teacher_cli_args(cfg)
-    assert calls[-1][1].engine_init_kwargs["max_model_len"] == 65536  # a user value is kept
 
 
 class FakeRemoteInferenceClient:
