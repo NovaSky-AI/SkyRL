@@ -26,7 +26,7 @@ survives only where it names a real thing (the `skyrl_train` package, the
 ## CPU vs GPU
 
 - **CPU workflows** (`cpu_*.yaml`) run on `ubuntu-latest`, auto-trigger on push to `main`/`rc/*` and on PRs. Run lint + the CPU pytest suites from AGENTS.md.
-- **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `ci/submit_anyscale_job.sh`. Timeouts vary by workflow. **Label-gated** on PRs (except `SkyRL-JAX-GPU`, which is path-gated).
+- **GPU workflows** (`gpu_*.yaml`, `tinker_*.yaml`) run on `ubuntu-latest` but submit to Anyscale via `ci/submit_anyscale_job.sh`. Timeouts vary by workflow. **Label-gated** on PRs (`SkyRL-JAX-GPU` is paths-gated for pushes and same-repo PRs, and label-gated for fork PRs).
 
 ### GPU gating labels
 
@@ -41,6 +41,7 @@ never runs, and fails silently.
 | `run_megatron_gpu_ci_models` | `Megatron-Model-GPU-CI` |
 | `run_h100_gpu_ci` | `H100-GPU-CI` |
 | `run_tinker_skyrl_backend_gpu_ci` | `Tinker-SkyRL-Backend-GPU` |
+| `run_jax_gpu_ci` | `SkyRL-JAX-GPU` |
 
 ## Anyscale
 
@@ -58,4 +59,5 @@ never runs, and fails silently.
 ## Gotchas
 
 - The `paths:` filter on each workflow gates whether CPU CI even runs. Touching only `docs/` or `examples/` skips CI.
+- Fork PRs get no repo secrets on plain `pull_request` events — GitHub withholds them — so an Anyscale-submitting workflow can never pass from a fork that way (the job fails at Anyscale auth, before any test runs). That is why the GPU suites are label-gated, and why `SkyRL-JAX-GPU` skips fork PRs on its plain trigger and runs them through `pull_request_target` + the `run_jax_gpu_ci` label instead.
 - The `SkyRL-JAX-*` workflows are deliberately scoped to the JAX/tx code path (`skyrl/tx`, `skyrl/backends/{backend,jax,ray_jax}.py`, `skyrl/utils`, `skyrl/tinker/types.py`, `tests/tx`), so most PRs never run them. If you touch tx, check that your files are in those `paths:` lists — and note the `push:` and `pull_request:` lists are duplicated, because GitHub Actions does not support YAML anchors.
