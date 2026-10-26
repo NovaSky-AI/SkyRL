@@ -469,3 +469,7 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   checkpointed, with the delayed `h_pre` as input), so the thread-local delayed pre-mix state is safe under
   recompute.
 - Remote note: in this worktree `origin` is upstream NovaSky-AI/SkyRL and `fork` is avigyabb/SkyRL -- push to `fork`.
+- **V4.1 checkpoint save/resume passes** (2026-10-26, node 6, `logs/ckpt-v41.log`): `test_trainer_full_checkpointing.py
+  -k deepseek_v41` -> `megatron_deepseek_v41_flash_lora_h100` and `..._fullft_h100` both PASSED (34 min) on the 2-layer
+  sub-slice `DeepSeek-V4.1-Flash-sub-win-engram` (sliding-window layer + Engram layer; EP=4, TP2 vLLM, BF16 FlashMLA).
+  Run: `bash examples/train/deepseek_v4_flash/dev/run_roundtrip.sh tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -k deepseek_v41`.
