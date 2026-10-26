@@ -37,12 +37,7 @@ class OPDExp(BasePPOExp):
         self._teacher_client: TeacherLogprobClient = None
 
     def get_teacher_client(self) -> TeacherLogprobClient:
-        """Build the teacher client from ``trainer.teacher``. Override for other backends.
-
-        ``backend="skyrl"`` launches the teacher's vLLM deployment here, before the student's engines
-        and the training workers exist (``_setup_trainer`` calls this first): the colocate placement
-        group, if any, was created in ``__init__``, so the teacher can never take colocated GPUs.
-        """
+        """Build the teacher client from ``trainer.teacher``."""
         teacher = self.cfg.trainer.teacher
         if teacher.backend == "skyrl":
             client, server_setup = launch_teacher(self.cfg)

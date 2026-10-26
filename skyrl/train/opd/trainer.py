@@ -1,22 +1,11 @@
-"""``OPDTrainer``: ``RayPPOTrainer`` plus teacher scoring and the consumers of ``teacher_logprobs``.
+"""The OPD trainer: ``RayPPOTrainer`` plus teacher scoring. Works with any ``GeneratorInterface``.
 
-Nothing here touches the generator. ``generate`` splits the batch into one ``GeneratorInput`` per
-prompt (its ``n_samples_per_prompt`` rows) and runs one ``generator.generate`` call per group
-concurrently, the way ``FullyAsyncRayPPOTrainer._run_generate_for_a_group_loop`` does; each group
-is scored under the teacher as soon as its rollouts are back, while the other groups are still
-generating. Only the groups that finish last pay for the teacher. This works with any
-``GeneratorInterface``, which matters because users bring their own generator for custom harnesses.
-
-The other three overrides consume the resulting ``GeneratorOutput["teacher_logprobs"]``:
-
-- ``postprocess_generator_output`` zeroes the per-token rewards in pure mode, after their metrics
-  are logged, so the advantage estimator contributes nothing.
-- ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like
-  ``rollout_logprobs``.
-- ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)``
-  on trainable tokens *after* the configured estimator, which is what lets the teacher term compose
-  with any estimator in mixed mode and any reward-only estimator in pure mode (GRPO would otherwise
-  sum the per-token signal into one scalar per sequence).
+- ``generate`` runs one ``generator.generate`` call per prompt group concurrently and scores each group
+  under the teacher as soon as its rollouts are back, so only the last groups to finish wait on the teacher.
+- ``postprocess_generator_output`` zeroes the rewards in pure mode, after their metrics are logged.
+- ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like ``rollout_logprobs``.
+- ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)`` on trainable
+  tokens, after the configured advantage estimator.
 """
 
 import asyncio

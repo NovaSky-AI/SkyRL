@@ -1,9 +1,7 @@
 """On-policy distillation (OPD) for SkyRL.
 
-The student samples its own rollouts; a frozen teacher served by an inference engine scores every
-response token; the negative per-token reverse KL to the teacher becomes a dense advantage, on
-its own (pure distillation) or on top of a task reward. Entry point:
-``skyrl.train.entrypoints.main_opd``; run scripts under ``examples/train/on_policy_distillation``.
+Entry point: ``skyrl.train.entrypoints.main_opd``; read run scripts and documentation under
+``examples/train/on_policy_distillation``.
 
 - ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the launched (``SkyRLTeacherClient``
   over a ``RemoteInferenceClient``) and vLLM-URL backends.

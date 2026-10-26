@@ -1,11 +1,10 @@
 """Launching the teacher's vLLM deployment inside the job (``trainer.teacher.backend="skyrl"``).
 
-The deployment is the student's own launch path, ``create_inference_servers`` (server groups plus a
-router), with a frozen-model argument set from ``build_frozen_vllm_cli_args``: no weight transfer, no
-sleep mode, no LoRA. It gets its own placement group (never the colocate group), a port window past
-the student's, and is driven through a ``RemoteInferenceClient`` exactly as the student's engines are.
-The rules below (which fields are frozen, the context bound, the port offset) are OPD's; core only
-learns "launch a deployment from these args at this port and hand back its client".
+The deployment follows the rollout inference engine's launch path, ``create_inference_servers``
+(server groups plus a router), with a frozen-model argument set from ``build_frozen_vllm_cli_args``.
+The teacher model has no weight transfer, no sleep mode, no LoRA. It gets its own placement group
+(never the colocate group), a port window past the student's, and is driven through a
+``RemoteInferenceClient``.
 """
 
 import copy
@@ -22,9 +21,10 @@ if TYPE_CHECKING:
         RemoteInferenceClient,
     )
     from skyrl.backends.skyrl_train.inference_servers.setup import InferenceServerSetup
+    from skyrl.train.config import SkyRLTrainConfig
 
 
-def _teacher_start_port(cfg) -> int:
+def _teacher_start_port(cfg: "SkyRLTrainConfig") -> int:
     """The first port window past the student's launched servers.
 
     Each server actor owns ``SERVER_PORT_STRIDE`` ports (HTTP port plus its DP TCPStore probe range)
@@ -39,11 +39,11 @@ def _teacher_start_port(cfg) -> int:
     return VLLM_START_PORT + windows * SERVER_PORT_STRIDE
 
 
-def launch_teacher(cfg) -> Tuple["RemoteInferenceClient", "InferenceServerSetup"]:
+def launch_teacher(cfg: "SkyRLTrainConfig") -> Tuple["RemoteInferenceClient", "InferenceServerSetup"]:
     """Launch the teacher deployment; return the client that drives it and the setup that owns its actors.
 
-    Keep the setup referenced for the run: Ray terminates a non-detached actor once every handle to
-    it is gone, and the setup's server groups hold the only handles.
+    The setup has to be referenced during the entire run. Ray terminates a non-detached actor once every
+    handle to it is gone, and only the setup's server groups hold the handles.
 
     Blocks until every server answers ``/health``. The deployment creates its own placement group;
     a GPU budget the cluster cannot satisfy surfaces as that group's timeout

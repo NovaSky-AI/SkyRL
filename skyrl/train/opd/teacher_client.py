@@ -1,23 +1,22 @@
 """Teacher log-probability clients for on-policy distillation.
 
-On-policy distillation needs exactly one thing from the teacher: for a sequence the student
-produced, the teacher's log-probability of every response token given everything before it.
-That is a prefill (a forward pass over ``prompt + response`` with nothing sampled), so the teacher
-belongs on an inference engine, not on a training worker.
+During on-policy distillation, the teacher only needs to compute the log-probability of
+the student trajectory, nothing else. Therefore, the teacher can actually be treated
+like an inference engine.
 
-``TeacherLogprobClient`` is the abstract base class. It owns everything every backend needs
-identically -- the concurrency limit, the empty-response case, the length and finiteness
-invariants -- and a backend implements one method, ``_compute_logprobs``.
-Callers only ever use ``compute_logprobs``.
+The ``TeacherLogprobClient`` abstract base class defines how the teacher model should
+behave, including the concurrency limit, empty-response case, the length and finiteness
+invariants, etc. Creating a new teacher backend consists of implementing the
+``_compute_logprobs`` method. Callers will use the public method, ``compute_logprobs``.
 
 Backends:
 
 - ``SkyRLTeacherClient``: a vLLM deployment this job launched (``trainer.teacher.backend="skyrl"``),
-  driven through its ``RemoteInferenceClient`` exactly as the student's engines are; scoring goes
-  through the client's ``sample()`` with ``include_prompt_logprobs``.
-- ``VLLMTeacherClient``: one vLLM endpoint you run per teacher model (a stock ``vllm serve``, or a
-  router in front of several servers such as the one SkyRL's ``serve`` entrypoint starts), through the
-  OpenAI-compatible ``/v1/completions`` with vLLM's ``prompt_logprobs`` parameter.
+  driven through its ``RemoteInferenceClient``. Scoring goes through the client's ``sample()`` with
+  ``include_prompt_logprobs``.
+- ``VLLMTeacherClient``: supports having a teacher on an external vLLM server. Similar to the
+  ``SkyRLTeacherClient``, scoring goes through the OpenAI-compatible ``/v1/completions`` with
+  vLLM's ``prompt_logprobs`` parameter.
 """
 
 from __future__ import annotations
@@ -47,9 +46,8 @@ class TeacherLogprobClient(abc.ABC):
         if max_concurrency <= 0:
             raise ValueError(f"max_concurrency must be positive, got {max_concurrency}")
         self._max_concurrency = max_concurrency
-        # Created lazily per event loop (as RemoteInferenceClient._get_semaphores does): the
-        # generator's agent-loop tasks all share one client inside the trainer's loop, and a
-        # semaphore is bound to the loop that created it.
+        # Created lazily per event loop: the generator's agent-loop tasks all share one client
+        # inside the trainer's loop, and a semaphore is bound to the loop that created it.
         self._sem: Optional[asyncio.Semaphore] = None
         self._sem_loop: Optional[asyncio.AbstractEventLoop] = None
 

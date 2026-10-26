@@ -15,10 +15,11 @@ import ray
 
 logger = logging.getLogger(__name__)
 
-# Base of the first launched server's port window; a second deployment on the same
-# nodes starts past the first one's windows (see `create_inference_servers`).
-# Overridable because another service on the host (e.g. a k8s LoadBalancer) can claim
-# port 8000 and silently hijack /wake_up, which then 404s from the other app.
+# The base port for the vLLM server group. This is the lowest port number SkyRL
+# assigns vLLM servers that are launched. Each server actor owns a 100-port window
+# (`SERVER_PORT_STRIDE`). Overridable because another service on the host
+# (e.g. a k8s LoadBalancer) can claim port 8000 and silently hijack /wake_up,
+# which then 404s from the other app.
 VLLM_START_PORT = int(os.environ.get("SKYRL_VLLM_START_PORT", 8000))
 
 # Stride between successive server actors' (or groups') start_port values.

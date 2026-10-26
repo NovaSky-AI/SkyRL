@@ -6,9 +6,8 @@ Adds two blocks to the standard config and changes two algorithm defaults:
   a reference-KL penalty can still be turned on alongside the teacher). ``backend`` picks one of two
   exclusive homes: launched by this job (``skyrl``, the default) or vLLM servers you run (``vllm``).
 - ``trainer.algorithm.opd``: the distillation knobs.
-- ``trainer.algorithm.use_kl_loss`` defaults to ``False`` (the core default would instantiate a
-  reference model for nothing) and ``policy_loss_type`` to ``"importance_sampling"`` (the
-  Thinking Machines / tinker recipe). Every other core default is already right for OPD.
+- ``trainer.algorithm.use_kl_loss`` defaults to ``False`` and
+  ``policy_loss_type`` to ``"importance_sampling"``.
 """
 
 from dataclasses import dataclass, field
