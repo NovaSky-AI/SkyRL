@@ -317,6 +317,25 @@ class MegatronStrategy(DistributedStrategy):
             cfg = getattr(opt, "config", None)
             if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
+            elif (
+                init_fn is None
+                and hasattr(inner_opt, "sub_optimizers")
+                and hasattr(inner_opt, "_sync_sub_optimizers_state_to_hdo")
+                and len(inner_opt.state) == 0
+            ):
+                # HybridDeviceOptimizer (optimizer_cpu_offload): megatron-core builds it with init_state_fn=None
+                # and fills its state from the sub-optimizers only after a step. Create the state their first
+                # step would (torch Adam/AdamW: step + moments), then mirror it into the HDO.
+                for sub_opt in inner_opt.sub_optimizers:
+                    for group in sub_opt.param_groups:
+                        for p in group["params"]:
+                            if len(sub_opt.state[p]) == 0:
+                                sub_opt.state[p]["step"] = torch.tensor(0.0)
+                                sub_opt.state[p]["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                                sub_opt.state[p]["exp_avg_sq"] = torch.zeros_like(
+                                    p, memory_format=torch.preserve_format
+                                )
+                inner_opt._sync_sub_optimizers_state_to_hdo()
 
     def save_checkpoint(
         self,
