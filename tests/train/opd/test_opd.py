@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import torch
+from loguru import logger
 
 from skyrl.train.generators.base import (
     BatchMetadata,
@@ -22,7 +23,6 @@ from skyrl.train.generators.base import (
 from skyrl.train.opd.config import (
     OPDExpConfig,
     TeacherEngineConfig,
-    teacher_max_model_len,
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
@@ -367,10 +367,6 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
         ),
         (["trainer.teacher.model=m", "trainer.teacher.inference_engine.num_engines=0"], "at least one GPU"),
         (
-            ["trainer.teacher.model=m", "trainer.teacher.inference_engine.engine_init_kwargs.max_model_len=100"],
-            "max_model_len=100 is shorter",
-        ),
-        (
             [
                 "trainer.teacher.model=m",
                 "trainer.teacher.backend=vllm",
@@ -401,6 +397,27 @@ def test_validate_opd_cfg_rejects(overrides, message):
         validate_opd_cfg(cfg)
 
 
+@pytest.mark.parametrize(
+    "overrides, warns",
+    [
+        (["trainer.teacher.model=m"], True),
+        (["trainer.teacher.model=m", "trainer.teacher.inference_engine.engine_init_kwargs.max_model_len=4096"], False),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_url=http://a:8000"],
+            False,
+        ),
+    ],
+)
+def test_validate_opd_cfg_warns_when_launched_teacher_max_model_len_is_unset(overrides, warns):
+    messages = []
+    handler_id = logger.add(messages.append, level="WARNING")
+    try:
+        validate_opd_cfg(OPDExpConfig.from_cli_overrides(overrides))
+    finally:
+        logger.remove(handler_id)
+    assert any("max_model_len is not set" in message for message in messages) == warns
+
+
 def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo():
     validate_opd_cfg(
         OPDExpConfig.from_cli_overrides(
@@ -413,15 +430,6 @@ def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo():
             ]
         )
     )
-
-
-def test_teacher_max_model_len_single_and_multi_turn():
-    cfg = OPDExpConfig.from_cli_overrides(
-        ["trainer.max_prompt_length=2048", "generator.sampling_params.max_generate_length=8192"]
-    )
-    assert teacher_max_model_len(cfg) == 2048 + 8192 + 1
-    cfg.generator.max_input_length = 30000  # multi-turn: the engine input per turn, which includes earlier turns
-    assert teacher_max_model_len(cfg) == 30000 + 8192 + 1
 
 
 # ---------------------------------------------------------------------------

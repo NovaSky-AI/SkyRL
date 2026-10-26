@@ -49,14 +49,8 @@ Where the teacher lives is one choice with two answers, and each backend reads o
 
 | `trainer.teacher.backend` | What it is | Notes |
 |---|---|---|
-| `skyrl` (default) | A vLLM deployment this job launches from `trainer.teacher.inference_engine` (the same block as `generator.inference_engine`) on its own GPUs, driven through a `RemoteInferenceClient` exactly as the student's engines are | `trainer.teacher.model` is an HF id or local path. Own placement group (never the colocate group), a router, a port window past the student's; never weight-synced or slept. Defaults that differ from the student's block: prefix caching off (scoring requests never read it), `gpu_memory_utilization` 0.9, Ray Prometheus stats off; `max_model_len` defaults to the longest input + longest response + 1. Weight-sync, sleep, LoRA, PD, speculative-decoding, routed-expert and external-URL fields are rejected. |
+| `skyrl` (default) | A vLLM deployment this job launches from `trainer.teacher.inference_engine` (the same block as `generator.inference_engine`) on its own GPUs, driven through a `RemoteInferenceClient` exactly as the student's engines are | `trainer.teacher.model` is an HF id or local path. Own placement group (never the colocate group), a router, a port window past the student's; never weight-synced or slept. Defaults that differ from the student's block: prefix caching off (scoring requests never read it), `gpu_memory_utilization` 0.9, Ray Prometheus stats off. Set `engine_init_kwargs.max_model_len` to cover prompt + response + 1, as the example script does; unset, vLLM uses the model's native context, as for the student. Weight-sync, sleep, LoRA, PD, speculative-decoding, routed-expert and external-URL fields are rejected. |
 | `vllm` | One vLLM endpoint you run per teacher model, given by `trainer.teacher.server_url`, scored through the OpenAI-compatible `/v1/completions` with vLLM's `prompt_logprobs` parameter | A single `vllm serve`, a data-parallel one, or a router in front of several servers: SkyRL's `serve` entrypoint (`examples/train/remote_inference_server/run_vllm_server.sh`) starts servers behind a router and logs its `proxy_url`, which is the URL to use. Spreading requests over replicas is the endpoint's job; the client does not round-robin. Any model vLLM serves; `max_model_len` must cover prompt + response + 1. The servers are never weight-synced or slept. |
-
-There are no preflight checks yet. Nothing verifies before training that the teacher's tokenizer
-matches the student's, or that a vLLM teacher you run has a context covering the longest input plus the
-longest response (a launched teacher gets that context by construction). Those are tracked as a TODO in
-`skyrl/train/entrypoints/main_opd.py`, together with what other frameworks check. Until then: pick a
-teacher from the student's model family (same tokenizer) and serve it with enough context.
 
 ### A teacher launched by the job
 
@@ -103,29 +97,11 @@ sent to vLLM servers.
 
 ## Configuration
 
-| Key | Default | Meaning |
-|---|---|---|
-| `trainer.teacher.backend` | `skyrl` | `skyrl` (launched by the job) or `vllm` (servers you run) |
-| `trainer.teacher.model` | — | `skyrl`: HF id or local path; `vllm`: the served model name |
-| `trainer.teacher.inference_engine.*` | the student's block with prefix caching off, `gpu_memory_utilization` 0.9, Ray Prometheus stats off | `skyrl` only: engine count, parallelism, memory, batching, `engine_init_kwargs` (e.g. `max_model_len`) |
-| `trainer.teacher.server_url` | — | `vllm` only: root URL of the teacher's one endpoint, e.g. `http://host:8000`, without `/v1` |
-| `trainer.teacher.max_concurrency` | 32 | Teacher requests in flight (a launched teacher is also capped per engine like the student's rollouts) |
-| `trainer.teacher.request_timeout_s`, `max_retries` | 120, 3 | `vllm` only: request timeout and retries with backoff on the same endpoint; a launched teacher uses its `RemoteInferenceClient`'s policy |
-| `trainer.algorithm.opd.kl_coef` | 1.0 | `advantages -= kl_coef · (log π_student − log π_teacher)` |
-| `trainer.algorithm.opd.use_task_reward` | `false` | `false`: pure distillation (env reward is only logged). `true`: the reward's advantages plus the teacher term |
+Every OPD field, and the two algorithm defaults the entrypoint changes (`trainer.algorithm.use_kl_loss=false`,
+`policy_loss_type=importance_sampling`), is documented in `skyrl/train/opd/config.py`. `validate_opd_cfg` in
+the same file rejects the settings that would break the teacher signal.
 
-The entrypoint changes two algorithm defaults: `trainer.algorithm.use_kl_loss=false` (no reference
-model is instantiated; turn it on to add a reference-KL loss alongside the teacher) and
-`policy_loss_type=importance_sampling` (the Thinking Machines recipe; `regular`, PPO-clip, also
-works). Everything else keeps the core default: `advantage_estimator=grpo` (with zero rewards the
-reward-only estimators, GRPO, RLOO and REINFORCE++, emit zeros, so pure OPD needs no special
-estimator), `zero_variance_filter=false`, no dynamic sampling, `advantage_batch_normalize=false`,
-temperature and top-p 1.0. `validate_opd_cfg` rejects settings that would silently break the signal:
-zero-variance filtering, dynamic sampling, batch-normalized advantages, losses that skip the
-old-logprob forward pass (`rollout_is`, `dppo`, and `cispo` with `cispo_anchor=rollout`), and `gae`
-in pure mode, where a critic's whitened value residuals would replace the teacher signal.
-
-The two math scripts set one thing beyond these defaults, to match the 2025-11 writeup they reproduce:
+To match the 2025-11 writeup it reproduces, the math script sets
 `trainer.algorithm.loss_reduction=seq_mean_token_sum_norm` with `trainer.algorithm.max_seq_len` set to
 the longest prompt plus the longest response (2048 + 8192). That sums the batch's token losses and
 divides by a constant, where the default `token_mean` divides by the batch's own token count.

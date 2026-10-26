@@ -62,7 +62,9 @@ are some defualts to the inference engine config that are different between the 
 - Prefix caching is off (because scoring requests aren't autoregressive)
 - `gpu_memory_utilization` 0.9
 - Ray Prometheus stats off
-- `max_model_len` defaults to the longest input + longest response + 1.
+
+As for the student, vLLM uses the model's native context unless `trainer.teacher.inference_engine.engine_init_kwargs.max_model_len`
+is set; set it to cover prompt + response + 1, as the example script does.
 
 Furthermore, the teacher model is never weight-synced or slept.
 </Callout>
@@ -85,4 +87,4 @@ when tuning `kl_coef` in mixed mode. `opd/teacher_time_exposed` is the seconds t
 teacher after the last rollout of the batch came back, the only scoring cost the overlap cannot hide.
 `reward/avg_pass_at_n` still reports the verifier's pass rate on training rollouts in pure mode.
 
-See `examples/train/on_policy_distillation/README.md` for the full configuration table and the caveats.
+See `skyrl/train/opd/config.py` for every OPD field, and `examples/train/on_policy_distillation/README.md` for the caveats.

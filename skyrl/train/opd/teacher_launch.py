@@ -7,14 +7,13 @@ The teacher model has no weight transfer, no sleep mode, no LoRA. It gets its ow
 ``RemoteInferenceClient``.
 """
 
-import copy
 from typing import TYPE_CHECKING, Tuple
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     SERVER_PORT_STRIDE,
     VLLM_START_PORT,
 )
-from skyrl.train.opd.config import TeacherConfig, teacher_max_model_len
+from skyrl.train.opd.config import TeacherConfig
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -61,13 +60,9 @@ def launch_teacher(cfg: "SkyRLTrainConfig") -> Tuple["RemoteInferenceClient", "I
     )
 
     teacher: TeacherConfig = cfg.trainer.teacher
-    ie_cfg = copy.deepcopy(teacher.inference_engine)
-    # vLLM otherwise takes the model's native context, which is more KV budget than a prefill server
-    # needs and, on a small teacher GPU, more than the KV pool can hold at startup.
-    ie_cfg.engine_init_kwargs.setdefault("max_model_len", teacher_max_model_len(cfg))
     return launch_remote_inference_client(
         teacher.inference_engine,
-        build_frozen_vllm_cli_args(teacher.model, ie_cfg, cfg.trainer.seed),
+        build_frozen_vllm_cli_args(teacher.model, teacher.inference_engine, cfg.trainer.seed),
         # The name the launched servers know the teacher by, and the `model` scoring requests send.
         model_name=teacher.inference_engine.served_model_name or teacher.model,
         log_path=cfg.trainer.log_path,

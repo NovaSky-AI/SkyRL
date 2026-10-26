@@ -78,8 +78,8 @@ class TeacherConfig(BaseConfig):
     """The launched deployment for ``backend="skyrl"``, the same block as ``generator.inference_engine``.
     Weight-sync, sleep, LoRA, PD, speculative-decoding, routed-expert and external-URL fields do not apply
     to a frozen model and are rejected when set. Defaults that differ from the student's: prefix caching
-    off, ``gpu_memory_utilization`` 0.9, Ray Prometheus stats off. ``engine_init_kwargs.max_model_len``
-    defaults to the longest input plus the longest response plus one."""
+    off, ``gpu_memory_utilization`` 0.9, Ray Prometheus stats off. As for the student, vLLM uses the model's
+    native context unless ``engine_init_kwargs.max_model_len`` is set."""
     server_url: Optional[str] = None
     """Root URL of the one vLLM endpoint serving the teacher for ``backend="vllm"``, e.g. ``"http://host:8000"``.
     A single server, a data-parallel one, or a router in front of several (SkyRL's ``serve`` entrypoint
@@ -118,17 +118,6 @@ class OPDTrainerConfig(TrainerConfig):
 OPDExpConfig = make_config(trainer_cls=OPDTrainerConfig)
 
 
-def teacher_max_model_len(cfg) -> int:
-    """The context a teacher server needs: the longest input, the longest response, and vLLM's one generated token.
-
-    ``generator.max_input_length`` bounds what the engine sees per turn (multi-turn), else
-    ``trainer.max_prompt_length`` does; the scoring request is that plus the response, and vLLM
-    refuses ``max_tokens=0``, so one token is generated and discarded.
-    """
-    max_input = cfg.generator.max_input_length or cfg.trainer.max_prompt_length
-    return max_input + cfg.generator.sampling_params.max_generate_length + 1
-
-
 # Fields of the teacher's engine block that would change a launched server's behaviour if honoured.
 # Refusing beats silently ignoring; weight_sync_backend and delta_weight_sync are never read on the
 # frozen path and need no rule.
@@ -146,7 +135,7 @@ _FROZEN_ENGINE_FIELDS_MUST_BE_NONE = (
 )
 
 
-def _validate_launched_teacher(cfg, teacher: TeacherConfig) -> None:
+def _validate_launched_teacher(teacher: TeacherConfig) -> None:
     """``backend="skyrl"``: the job launches the teacher, so nothing may point elsewhere."""
     ie_cfg: TeacherEngineConfig = teacher.inference_engine
     if teacher.server_url is not None:
@@ -172,12 +161,11 @@ def _validate_launched_teacher(cfg, teacher: TeacherConfig) -> None:
     )
     if num_gpus < 1:
         raise ValueError("trainer.teacher.inference_engine must describe at least one GPU")
-    max_model_len = ie_cfg.engine_init_kwargs.get("max_model_len")
-    needed = teacher_max_model_len(cfg)
-    if max_model_len is not None and max_model_len < needed:
-        raise ValueError(
-            f"trainer.teacher.inference_engine.engine_init_kwargs.max_model_len={max_model_len} is shorter than the "
-            f"longest input + longest response + 1 = {needed}; the teacher would reject the scoring request"
+    if ie_cfg.engine_init_kwargs.get("max_model_len") is None:
+        logger.warning(
+            "trainer.teacher.inference_engine.engine_init_kwargs.max_model_len is not set, so vLLM uses the teacher "
+            "model's native context, whose KV cache may not fit on the teacher's GPUs. Set it to cover the longest "
+            "prompt + response + 1."
         )
 
 
@@ -201,7 +189,7 @@ def validate_opd_cfg(cfg) -> None:
     if not teacher.model:
         raise ValueError("trainer.teacher.model must be set")
     if teacher.backend == "skyrl":
-        _validate_launched_teacher(cfg, teacher)
+        _validate_launched_teacher(teacher)
     elif teacher.backend == "vllm":
         if not teacher.server_url:
             raise ValueError("trainer.teacher.backend='vllm' requires trainer.teacher.server_url")

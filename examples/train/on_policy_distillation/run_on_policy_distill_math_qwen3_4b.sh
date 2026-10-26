@@ -48,11 +48,10 @@ LR=1e-5
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=8192
 
-# Loss aggregation of the 2025-11 writeup these scripts reproduce: the batch's token losses are summed and
-# divided by a constant, the number of sequences times MAX_SEQ_LEN (longest prompt + longest response).
-# The entrypoint's default, token_mean, divides by the batch's own token count instead.
 LOSS_REDUCTION="seq_mean_token_sum_norm"
 MAX_SEQ_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
+# The teacher scores prompt + response and generates one token it discards.
+TEACHER_MAX_MODEL_LEN=$((MAX_SEQ_LEN + 1))
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   data.train_data="['$TRAIN_FILE']" \
@@ -62,6 +61,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
   trainer.teacher.model="$TEACHER_MODEL" \
   trainer.teacher.inference_engine.num_engines=$TEACHER_NUM_ENGINES \
   trainer.teacher.inference_engine.tensor_parallel_size=$TEACHER_TP_SIZE \
+  trainer.teacher.inference_engine.engine_init_kwargs.max_model_len=$TEACHER_MAX_MODEL_LEN \
   trainer.teacher.max_concurrency=$TEACHER_MAX_CONCURRENCY \
   trainer.algorithm.opd.kl_coef=$KL_COEF \
   trainer.algorithm.opd.use_task_reward=$USE_TASK_REWARD \

@@ -20,7 +20,6 @@ from skyrl.train.opd.config import (
     OPDExpConfig,
     OPDTrainerConfig,
     TeacherConfig,
-    teacher_max_model_len,
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
@@ -44,7 +43,6 @@ __all__ = [
     "OPDExpConfig",
     "OPDTrainerConfig",
     "TeacherConfig",
-    "teacher_max_model_len",
     "validate_opd_cfg",
     "TEACHER_LOGPROBS_KEY",
     "SkyRLTeacherClient",
