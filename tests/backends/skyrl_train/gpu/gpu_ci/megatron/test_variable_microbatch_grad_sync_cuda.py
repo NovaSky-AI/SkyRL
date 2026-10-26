@@ -142,10 +142,12 @@ def _distributed_main():
             values = torch.cat([p.detach().flatten() for p in module.parameters()]).clone()
             assert not torch.equal(initial, values)
             if overlap:
-                # A second forward_backward before optim_step would accumulate into in-flight buffers.
+                # A second forward_backward before optim_step would accumulate into in-flight
+                # buffers, so it is rejected before its schedule runs.
+                wrapper._reject_overlapped_accumulation()
                 wrapper._defer_finalize_model_grads(None)
                 with pytest.raises(RuntimeError, match="one forward_backward call"):
-                    wrapper._defer_finalize_model_grads(None)
+                    wrapper._reject_overlapped_accumulation()
                 wrapper._pending_grad_sync = None
             return torch.tensor(metrics), values
         finally:

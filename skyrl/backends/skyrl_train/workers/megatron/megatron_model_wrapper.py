@@ -281,16 +281,22 @@ class MegatronModelWrapper:
         its own count instead; see :meth:`_per_token_grad_scaling` for details.
         """
         del model, num_tokens, kwargs  # replayed against self.actor_module with default process groups
-        pending = self._pending_grad_sync
-        if self._overlap_grad_reduce and pending is not None:
-            # Overlapped reductions dispatch from the final microbatch's backward
-            # hook, so the previous call's gradients are already in flight.
+        self._pending_grad_sync = {"num_tokens": None}
+
+    def _reject_overlapped_accumulation(self) -> None:
+        """Fail a second training ``forward_backward`` before ``optim_step`` under overlap.
+
+        Overlapped reductions dispatch from the final microbatch's backward hook, so the
+        previous call's gradients are already in flight. Checked before the schedule runs:
+        any backward would write into those buffers, and its last microbatch would
+        dispatch reductions into buckets whose collectives are still outstanding.
+        """
+        if self._overlap_grad_reduce and self._pending_grad_sync is not None:
             raise RuntimeError(
                 "ddp_config.overlap_grad_reduce=True requires one forward_backward call "
                 "per optimizer step, but a second call was made before optim_step. "
                 "Set overlap_grad_reduce=False to accumulate across calls."
             )
-        self._pending_grad_sync = {"num_tokens": None}
 
     @contextmanager
     def _per_token_grad_scaling(self, num_tokens_global: int):
@@ -687,6 +693,8 @@ class MegatronModelWrapper:
         """
         if self.is_vlm:
             self._assert_vlm_supported()
+        if not forward_only:
+            self._reject_overlapped_accumulation()
         forward_backward_func = get_forward_backward_func()
 
         # Multi-Token Prediction (MTP): if the model was built with native MTP heads, train them with
