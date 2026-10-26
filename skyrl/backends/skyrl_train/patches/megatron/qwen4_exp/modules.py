@@ -552,9 +552,14 @@ def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio:
             from cudnn.ops import qsa_backward, qsa_forward
 
             _cudnn_qsa_ops = (qsa_forward, qsa_backward)
-            logger.info("Qwen4Exp QSA sparse attention: using cuDNN frontend qsa_forward / qsa_backward.")
+            # WARNING, not INFO: Megatron workers drop INFO, and the recipe log should show which path ran.
+            logger.warning("Qwen4Exp QSA sparse attention: using cuDNN frontend qsa_forward / qsa_backward.")
         except (ImportError, AttributeError):
             _cudnn_qsa_ops = False
+            logger.warning(
+                "Qwen4Exp QSA sparse attention: cudnn-frontend has no cudnn.ops.qsa_forward (needs >= 1.32); "
+                "falling back to the FlexAttention path."
+            )
     return bool(_cudnn_qsa_ops)
 
 
