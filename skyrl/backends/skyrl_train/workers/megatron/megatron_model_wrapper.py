@@ -126,40 +126,6 @@ def _pack_sequence_values(
     return packed.unsqueeze(0)
 
 
-def _build_packed_valid_mask(
-    attention_mask: torch.Tensor,
-    packed_seq_params,
-    sub_seq_lengths: Optional[list[list[int]]] = None,
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Build a ``[1, T]`` real-token mask aligned to the packed (THD) logits layout.
-
-    1.0 for real tokens, 0.0 for the per-segment alignment padding that ``preprocess_packed_seqs``
-    inserts between sub-sequences. This is the packed counterpart of the ``[batch, seq]``
-    ``attention_mask`` the decoupled MTP draft loss uses to mask invalid positions; mirrors the
-    index math of :func:`_build_packed_targets` but scatters ones instead of token ids.
-    """
-    cu_padded = packed_seq_params.cu_seqlens_q_padded.to(device=attention_mask.device, dtype=torch.long)
-    total_padded_tokens = int(cu_padded[-1].item())
-    mask = torch.zeros((total_padded_tokens,), dtype=dtype, device=attention_mask.device)
-    if sub_seq_lengths is not None:
-        cu_padded_cpu = cu_padded.detach().cpu().tolist()
-        seg_idx = 0
-        for row_lens in sub_seq_lengths:
-            for seq_len in row_lens:
-                seq_len = int(seq_len)
-                packed_start = cu_padded_cpu[seg_idx]
-                mask[packed_start : packed_start + seq_len] = 1.0
-                seg_idx += 1
-        return mask.unsqueeze(0)
-
-    attn = attention_mask.to(device=cu_padded.device, dtype=torch.bool)
-    token_offsets = attn.to(torch.long).cumsum(dim=1) - 1
-    packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
-    mask[packed_indices[attn]] = 1.0
-    return mask.unsqueeze(0)
-
-
 def _build_active_mask(loss_mask: torch.Tensor, num_actions: int, sequence_length: int) -> torch.Tensor:
     """Expand the action loss mask into prediction-row coordinates."""
     if loss_mask.dim() != 2 or loss_mask.shape[1] != num_actions:
