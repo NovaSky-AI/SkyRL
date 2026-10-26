@@ -1,9 +1,9 @@
+import math
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
-import math
 import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
