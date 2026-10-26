@@ -12,7 +12,13 @@ set -x
 # run_gsm8k_dsv41_flash_lora_2node.sh (Megatron EP=16, one vLLM engine TP8 x PP2; see its header for memory).
 # MODEL_PATH is the full text-only BF16 copy built by dev/make_slice_v41.py.
 
-MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/avigyabb/models/DeepSeek-V4.1-Flash-bf16}"
+# V4.1's official template defaults to thinking mode ("Reasoning Effort: 75", <think>), which a 2K budget truncates.
+# R3 needs token-in-token-out generation, which a `generator.chat_template` override breaks (SkyRL retokenizes the
+# history), so the chat-mode template is the tokenizer's own: a copy of the BF16 dir made of symlinks plus a
+# tokenizer_config.json whose chat_template is chat_template_v41_chat.jinja:
+#   S=.../DeepSeek-V4.1-Flash-bf16; D=$S-chat; mkdir $D; for f in $S/*; do [ "$(basename $f)" = tokenizer_config.json ] || ln -s $f $D/; done
+#   python -c 'import json; t=json.load(open("'$S'/tokenizer_config.json")); t["chat_template"]=open("examples/train/deepseek_v4_flash/chat_template_v41_chat.jinja").read(); json.dump(t, open("'$D'/tokenizer_config.json", "w"))'
+MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/avigyabb/models/DeepSeek-V4.1-Flash-bf16-chat}"
 DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
@@ -177,9 +183,6 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.batched=true \
-  `# V4.1's official template defaults to thinking mode ("Reasoning Effort: 75", <think>), which a 2K budget truncates.` \
-  generator.chat_template.source=file \
-  generator.chat_template.name_or_path=examples/train/deepseek_v4_flash/chat_template_v41_chat.jinja \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   environment.env_class=aime \
