@@ -37,6 +37,29 @@ BasicType = Union[int, float, str, bool, type(None)]
 GLOBAL_STEP_PREFIX = "global_step_"
 
 
+def clamped_rollout_logprob_stats(
+    rollout_logprobs: Optional[List[List[float]]], floor: float = -9999.0
+) -> Dict[str, Any]:
+    """Count rollout logprobs at the inference server's floor for non-finite values (``CLAMPED_LOGPROB``).
+
+    A handful of these dominate ``rollout_train_logprobs_abs_diff_mean`` (each contributes ~1e4), so their
+    count, the share at the first response token, and a few (sequence, position) examples tell a floor
+    spike apart from a real rollout/train mismatch.
+    """
+    stats = {"count": 0, "first_token": 0, "sequences": 0, "tokens": 0, "examples": []}
+    for seq_index, logprobs in enumerate(rollout_logprobs or []):
+        stats["tokens"] += len(logprobs)
+        positions = [pos for pos, lp in enumerate(logprobs) if lp is not None and lp <= floor]
+        if not positions:
+            continue
+        stats["count"] += len(positions)
+        stats["first_token"] += int(positions[0] == 0)
+        stats["sequences"] += 1
+        if len(stats["examples"]) < 8:
+            stats["examples"].append((seq_index, positions[:4], len(logprobs)))
+    return stats
+
+
 def finalize_minibatch_rollout_logprob_diff_std(metrics: Dict[str, float]) -> None:
     """Reconstruct the logprob-diff std from its reduced first/second moments, in place.
 
