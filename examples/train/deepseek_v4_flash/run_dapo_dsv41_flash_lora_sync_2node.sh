@@ -177,6 +177,9 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.batched=true \
+  `# V4.1's official template defaults to thinking mode ("Reasoning Effort: 75", <think>), which a 2K budget truncates.` \
+  generator.chat_template.source=file \
+  generator.chat_template.name_or_path=examples/train/deepseek_v4_flash/chat_template_v41_chat.jinja \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   environment.env_class=aime \
