@@ -328,9 +328,14 @@ class MegatronStrategy(DistributedStrategy):
                 # step would (torch Adam/AdamW: step + moments), then mirror it into the HDO.
                 for sub_opt in inner_opt.sub_optimizers:
                     for group in sub_opt.param_groups:
+                        # As torch's Adam/AdamW create it: fused / capturable kernels need `step` on the param's
+                        # device (a GPU sub-optimizer when optimizer_offload_fraction < 1), otherwise a CPU scalar.
+                        on_param_device = group.get("fused") or group.get("capturable")
                         for p in group["params"]:
                             if len(sub_opt.state[p]) == 0:
-                                sub_opt.state[p]["step"] = torch.tensor(0.0)
+                                sub_opt.state[p]["step"] = torch.tensor(
+                                    0.0, dtype=torch.float32, device=p.device if on_param_device else "cpu"
+                                )
                                 sub_opt.state[p]["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                                 sub_opt.state[p]["exp_avg_sq"] = torch.zeros_like(
                                     p, memory_format=torch.preserve_format
