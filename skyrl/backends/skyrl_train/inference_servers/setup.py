@@ -276,6 +276,7 @@ def launch_remote_inference_client(
     tokenizer=None,
     enable_return_routed_experts: bool = False,
     enable_return_sample_support_set: bool = False,
+    enable_return_sample_support_logprobs: bool = False,
     uses_lora_weight_sync: bool = False,
 ) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
     """Launch a vLLM deployment this job owns and return the client that drives it.
@@ -298,6 +299,7 @@ def launch_remote_inference_client(
         tokenizer: Optional HF tokenizer for local tokenize/detokenize on the client.
         enable_return_routed_experts: Policy only; see :class:`RemoteInferenceClient`.
         enable_return_sample_support_set: Policy only; see :class:`RemoteInferenceClient`.
+        enable_return_sample_support_logprobs: Policy only; see :class:`RemoteInferenceClient`.
         uses_lora_weight_sync: Policy only; see :class:`RemoteInferenceClient`.
 
     Returns:
@@ -316,6 +318,7 @@ def launch_remote_inference_client(
         model_name=model_name,
         enable_return_routed_experts=enable_return_routed_experts,
         enable_return_sample_support_set=enable_return_sample_support_set,
+        enable_return_sample_support_logprobs=enable_return_sample_support_logprobs,
         uses_lora_weight_sync=uses_lora_weight_sync,
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,
@@ -394,6 +397,7 @@ def build_new_inference_client(
             tokenizer=tokenizer,
             enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
+            enable_return_sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
             uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
         )
 

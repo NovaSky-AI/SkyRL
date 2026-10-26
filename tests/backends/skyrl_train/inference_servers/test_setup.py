@@ -15,10 +15,11 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     InferenceServerSetup,
+    build_new_inference_client,
     create_inference_servers,
     launch_remote_inference_client,
 )
-from skyrl.train.config import InferenceEngineConfig
+from skyrl.train.config import InferenceEngineConfig, SkyRLTrainConfig
 
 
 class FakeServerGroup:
@@ -124,6 +125,7 @@ def test_launch_remote_inference_client_wraps_the_deployment(monkeypatch):
         start_port=8800,
         enable_return_routed_experts=True,
         enable_return_sample_support_set=True,
+        enable_return_sample_support_logprobs=True,
         uses_lora_weight_sync=True,
     )
 
@@ -136,5 +138,34 @@ def test_launch_remote_inference_client_wraps_the_deployment(monkeypatch):
     assert client.data_parallel_size == 2
     assert client.enable_return_routed_experts is True
     assert client.enable_return_sample_support_set is True
+    assert client.enable_return_sample_support_logprobs is True
     assert client.uses_lora_weight_sync is True
     assert client.tokenizer is None
+
+
+def test_build_new_inference_client_launched_and_external_clients_get_the_same_policy_flags(monkeypatch):
+    # The launched branch goes through launch_remote_inference_client; the external branches build the
+    # client directly. A flag passed in one place only is lost for the other (score centering was).
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_return_sample_support_set = True
+    cfg.trainer.algorithm.enable_score_centering = True
+    canned = InferenceServerSetup(proxy_url="http://router:7000", server_urls=["http://s0:8000"])
+    monkeypatch.setattr(inference_setup, "build_vllm_cli_args", lambda _cfg: "cli-args")
+    monkeypatch.setattr(inference_setup, "create_inference_servers", lambda *_args, **_kwargs: canned)
+
+    launched, _ = build_new_inference_client(cfg, tokenizer=None)
+    ie_cfg.external_proxy_url = canned.proxy_url
+    ie_cfg.external_server_urls = canned.server_urls
+    external, _ = build_new_inference_client(cfg, tokenizer=None)
+
+    assert launched.enable_return_sample_support_logprobs is True
+    for name in (
+        "model_name",
+        "enable_return_routed_experts",
+        "enable_return_sample_support_set",
+        "enable_return_sample_support_logprobs",
+        "uses_lora_weight_sync",
+        "data_parallel_size",
+    ):
+        assert getattr(launched, name) == getattr(external, name), name

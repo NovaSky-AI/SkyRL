@@ -92,8 +92,13 @@ class OPDTrainer(RayPPOTrainer):
         step_wise = self.cfg.generator.step_wise_trajectories
         routes_expected = self.cfg.generator.inference_engine.enable_return_routed_experts
         support_expected = self.cfg.trainer.algorithm.enable_sample_support_replay
+        support_scores_expected = self.cfg.trainer.algorithm.enable_score_centering
         generator_output = concatenate_generator_outputs(
-            outputs, step_wise=step_wise, routes_expected=routes_expected, support_expected=support_expected
+            outputs,
+            step_wise=step_wise,
+            routes_expected=routes_expected,
+            support_expected=support_expected,
+            support_scores_expected=support_scores_expected,
         )
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
@@ -104,6 +109,7 @@ class OPDTrainer(RayPPOTrainer):
             step_wise=step_wise,
             routes_expected=routes_expected,
             support_expected=support_expected,
+            support_scores_expected=support_scores_expected,
         )
 
         self.all_metrics["opd/teacher_time_per_group_mean"] = (
