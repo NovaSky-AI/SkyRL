@@ -87,6 +87,7 @@ def _install_nan_hooks(worker) -> int:
                         }
                     )
                     return
+
         return hook
 
     def pre_model(module, inputs):
@@ -159,6 +160,7 @@ def _install_nan_origin_hooks(worker) -> int:
                     "n_nan_rows": int(rows.numel()),
                 }
             )
+
         return hook
 
     def pre_model(module, inputs):
@@ -199,7 +201,9 @@ def _zero_attn_out(worker) -> int:
 
             def _alloc_attn_out(self, num_tokens, hidden_states):
                 return torch.zeros(
-                    (num_tokens, self.padded_heads, self.head_dim), dtype=hidden_states.dtype, device=hidden_states.device
+                    (num_tokens, self.padded_heads, self.head_dim),
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
                 )
 
             cls._alloc_attn_out = _alloc_attn_out
@@ -269,7 +273,11 @@ def _install_nan_func_hooks(worker) -> int:
                 wrapped += 1
             elif inspect.isclass(obj) and obj.__module__ == mod_name:
                 for attr, member in list(vars(obj).items()):
-                    if inspect.isfunction(member) and not attr.startswith("__") and not getattr(member, "_nan_wrapped", False):
+                    if (
+                        inspect.isfunction(member)
+                        and not attr.startswith("__")
+                        and not getattr(member, "_nan_wrapped", False)
+                    ):
                         setattr(obj, attr, wrap(f"{mod_name}.{obj.__name__}.{attr}", member))
                         wrapped += 1
 
@@ -311,6 +319,15 @@ def _nan_prefill_workspace(worker) -> str:
     return _fill_prefill_workspace(worker, float("nan"))
 
 
+def _apply_skyrl_workspace_patch(worker) -> bool:
+    """Install SkyRL's real fix (patches/vllm/patch_deepseek_v41_prefill_workspace.py) in this worker."""
+    from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (
+        apply_deepseek_v41_prefill_workspace_patch,
+    )
+
+    return apply_deepseek_v41_prefill_workspace_patch()
+
+
 def _collect_nan_events(worker):
     return getattr(worker, "_nan_probe_state", {"events": []})["events"]
 
@@ -343,13 +360,16 @@ def main():
     p.add_argument("--replay-alone", action="store_true", help="with --replay: one request per generate call")
     p.add_argument("--zero-compressor-latent", action="store_true", help="torch.zeros for the compressor latent")
     p.add_argument("--prefill-workspace", default=None, help="pre-fill gathered-KV workspace: zero, nan or a float")
+    p.add_argument("--skyrl-workspace-patch", action="store_true", help="install SkyRL's prefill workspace fix")
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--dump-all", default=None, help="write every request's first-token (prompt, token, logprob) here")
     p.add_argument("--nan-func-hooks", action="store_true", help="report functions that create NaN (eager)")
     p.add_argument("--zero-attn-out", action="store_true", help="torch.zeros for the attention output buffer")
     p.add_argument("--no-aux-streams", action="store_true", help="run aux-stream work on the default stream")
     p.add_argument("--nan-origin-hooks", action="store_true", help="report modules turning clean inputs into NaN")
-    p.add_argument("--nan-hooks", action="store_true", help="report the first module emitting NaN (needs --enforce-eager)")
+    p.add_argument(
+        "--nan-hooks", action="store_true", help="report the first module emitting NaN (needs --enforce-eager)"
+    )
     args = p.parse_args()
 
     df = pd.read_parquet(args.data).iloc[args.prompt_offset : args.prompt_offset + args.prompts]
@@ -379,6 +399,8 @@ def main():
         print("PROBE poisoned KV tensors per rank:", llm.collective_rpc(_poison_kv_cache), flush=True)
     if args.zero_compressor_latent:
         print("PROBE zero compressor latent:", llm.collective_rpc(_zero_compressor_latent), flush=True)
+    if args.skyrl_workspace_patch:
+        print("PROBE skyrl workspace patch:", llm.collective_rpc(_apply_skyrl_workspace_patch), flush=True)
     if args.prefill_workspace:
         value = {"zero": 0.0, "nan": float("nan")}.get(args.prefill_workspace)
         value = float(args.prefill_workspace) if value is None else value
@@ -422,7 +444,13 @@ def main():
                             first = comp.logprobs[0].get(comp.token_ids[0]) if comp.logprobs else None
                             dump.write(
                                 json.dumps(
-                                    [repeat, pi + args.prompt_offset, si, comp.token_ids[0], None if first is None else first.logprob]
+                                    [
+                                        repeat,
+                                        pi + args.prompt_offset,
+                                        si,
+                                        comp.token_ids[0],
+                                        None if first is None else first.logprob,
+                                    ]
                                 )
                                 + "\n"
                             )
