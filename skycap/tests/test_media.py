@@ -244,7 +244,7 @@ async def test_start_records_why_a_renderer_cannot_send_images() -> None:
     from tests.fake_renderer import FakeRenderer
 
     renderer = FakeRenderer()
-    renderer.media_encoding_error = lambda: "no encoder"  # type: ignore[attr-defined]
+    renderer.validate_media_encoding = lambda: "no encoder"  # type: ignore[attr-defined]
     backend = TokensBackend("http://engine", renderer)
     await backend.start()
     try:

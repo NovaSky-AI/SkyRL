@@ -280,12 +280,14 @@ async def test_two_image_turns_through_skycap(vl_renderer: RenderersRenderer, mo
             assert len(set(sample.input_ids[item.offset : item.offset + item.length])) == 1
 
 
-def test_image_encoding_for_vllm_is_reported(vl_renderer: RenderersRenderer) -> None:
-    error = vl_renderer.media_encoding_error()
-    if VL_MODELS[vl_renderer.name]:
-        assert error is None
-    else:
+def test_image_encoding_for_vllm_is_validated(vl_renderer: RenderersRenderer) -> None:
+    if not VL_MODELS[vl_renderer.name]:
+        # renderers has no vLLM encoder for the family; it says so before it needs vLLM.
+        error = vl_renderer.validate_media_encoding()
         assert error is not None and "not implemented" in error
+        return
+    pytest.importorskip("vllm")
+    assert vl_renderer.validate_media_encoding() is None
 
 
 PREFILLING_TOKENIZER = "Qwen/Qwen3.5-0.8B"

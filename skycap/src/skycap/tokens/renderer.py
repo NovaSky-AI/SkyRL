@@ -268,25 +268,32 @@ class RenderersRenderer:
             media=_media(getattr(out, "multi_modal_data", None), start=reused),
         )
 
-    def media_encoding_error(self) -> str | None:
-        """Why this model's images can't be sent to vLLM, or None if they can (or it takes no images).
+    def validate_media_encoding(self) -> str | None:
+        """Encode a probe image for vLLM: None if it works (or the model takes no images), else why not.
 
-        ``renderers`` renders and bridges every multimodal family, but encodes items for vLLM only for
-        some (Qwen-VL, Qwen3.5, Gemma 4, Nemotron 3.5; not Kimi K2.5 or Inkling). Its encoder dispatches
-        on the renderer class before it touches the items or imports vLLM, so an empty probe tells the
-        two apart without vLLM installed.
+        It runs what an image request runs: the chat template and the model's processor (``render``), then
+        the ``renderers`` encoding for vLLM (``features``). So it catches a family ``renderers`` renders but
+        can't encode for vLLM (Kimi K2.5, Inkling), ``vllm`` missing beside skycap, and an encoder that fails.
         """
         if not self.multimodal:
             return None
-        from renderers.client import _build_mm_features
+        import base64
+        import io
 
-        with self._checkout() as (renderer, _):
-            try:
-                _build_mm_features(renderer, None)
-            except NotImplementedError as error:
-                return str(error)
-            except Exception:  # noqa: BLE001 - past the dispatch: the empty probe, or vllm not installed
-                return None
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (64, 64), "white").save(buffer, "PNG")
+        url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+        image = {"type": "image_url", "image_url": {"url": url}}
+        probe = [{"role": "user", "content": [image, {"type": "text", "text": "?"}]}]
+        try:
+            rendered = self.render(probe, None)
+            if not rendered.media:
+                return "the probe image rendered no multimodal item"
+            self.features(rendered.media)
+        except Exception as error:  # noqa: BLE001 - whatever the processor or the encoder raises
+            return f"{type(error).__name__}: {error}"
         return None
 
     def features(self, media: Sequence[Media]) -> dict[str, Any]:

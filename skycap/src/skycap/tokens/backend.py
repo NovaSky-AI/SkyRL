@@ -71,7 +71,7 @@ class TokensBackend:
         self.sampling_mask = sampling_mask
         self.logprobs_mode = logprobs_mode
         self.use_raw_content = use_raw_content
-        #: Why the renderer's images can't be sent to the engine (``media_encoding_error``), checked at ``start``.
+        #: Why the renderer's images can't be sent to the engine (``validate_media_encoding``), checked at ``start``.
         self.media_error: str | None = None
         #: The chat template ``developer`` messages are folded for, if the renderer exposes one.
         self.chat_template: str | None = getattr(renderer, "chat_template", None)
@@ -89,7 +89,7 @@ class TokensBackend:
         }
 
     async def start(self) -> None:
-        check = getattr(self.renderer, "media_encoding_error", None)
+        check = getattr(self.renderer, "validate_media_encoding", None)
         self.media_error = await asyncio.to_thread(check) if check is not None else None
         if self.media_error:
             # Text-only calls still work; a call with images is refused (400) rather than failing in the encoder.
