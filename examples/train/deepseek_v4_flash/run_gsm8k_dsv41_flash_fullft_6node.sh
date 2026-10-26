@@ -79,6 +79,8 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:-${TMPDIR:-/tmp}/vllm_autotune_$(date +%s)}"
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 export SKYRL_DSV41_ENGRAM_TABLE_DEVICE=cpu
+# `kill -USR1 <worker pid>` dumps Python stacks to the worker log (diagnosing collective hangs).
+export SKYRL_DSV41_FAULTHANDLER=${SKYRL_DSV41_FAULTHANDLER:-1}
 
 RUN_NAME="${RUN_NAME:-dsv41_flash_gsm8k_fullft_ep${MEGATRON_EP}}"
 

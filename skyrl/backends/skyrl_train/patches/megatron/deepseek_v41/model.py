@@ -14,6 +14,7 @@ Per-forward state (the pending ``pre``, engram hash ids, the shared compressed K
 """
 
 import functools
+import os
 
 import torch
 
@@ -43,6 +44,13 @@ def apply_deepseek_v41_patches() -> bool:
     global _APPLIED
     if _APPLIED:
         return True
+    if os.environ.get("SKYRL_DSV41_FAULTHANDLER") == "1":
+        # Debug aid for collective hangs (py-spy needs ptrace): `kill -USR1 <worker pid>` writes every
+        # thread's Python stack to the worker's stderr.
+        import faulthandler
+        import signal
+
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     try:
         from megatron.core.models.hybrid import hybrid_block, hybrid_model
         from megatron.core.models.hybrid.layers import hybrid_hyper_connection
