@@ -35,6 +35,11 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 GLM5_3_FLASH_MODEL_NAME = "eatang/GLM-5.3-Flash-4layer"
 # 4-layer BF16 slice of DeepSeek-V4-Flash (examples/train/deepseek_v4_flash/dev/make_slice.py); not on the Hub yet.
 DEEPSEEK_V4_FLASH_MODEL_NAME = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_4LAYER", "DeepSeek-V4-Flash-4layer")
+# 2-layer DeepSeek-V4.1-Flash sub-slice: a sliding-window layer and the first Engram layer, whose frozen FP8
+# n-gram table must stay out of the checkpoint (examples/train/deepseek_v4_flash/dev/sub_slice_v41.py).
+DEEPSEEK_V41_FLASH_MODEL_NAME = os.environ.get(
+    "SKYRL_DEEPSEEK_V41_FLASH_SUB_WIN_ENGRAM", "DeepSeek-V4.1-Flash-sub-win-engram"
+)
 NUM_GPUS = 2
 
 
@@ -52,6 +57,10 @@ class DummyDataset(Dataset):
 
     def collate_fn(self, batch):
         return batch
+
+
+def _is_deepseek_v4(model_name: str) -> bool:
+    return any(tag in model_name.lower() for tag in ("deepseek-v4-flash", "deepseek-v4.1-flash"))
 
 
 def get_test_trainer_config(
@@ -109,7 +118,7 @@ def get_test_trainer_config(
         cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
         cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "none"
 
-    if "deepseek-v4-flash" in model_name.lower():
+    if _is_deepseek_v4(model_name):
         # Mirrors the DSv4 rows in megatron/test_megatron_models.py: megatron-core's DSv4 attention is
         # TP=1-only and takes no packed sequences at the pinned rev; mHC rejects PP > 1.
         cfg.trainer.remove_microbatch_padding = False
@@ -127,6 +136,9 @@ def get_test_trainer_config(
             "recompute_num_layers": None,
         }
         cfg.generator.inference_engine.engine_init_kwargs = {"max_model_len": 4096}
+        if "deepseek-v4.1" in model_name.lower():
+            # vLLM's SM100 default V4.1 attention is FP8-only; BF16 weights need FlashMLA sparse.
+            cfg.generator.inference_engine.engine_init_kwargs["attention_backend"] = "FLASHMLA_SPARSE_DSV41"
         if not lora:
             # As in the DSv4 full-FT recipes: on 4 GPUs the slice's fp32 Adam state stays on GPU otherwise, and
             # loading it back (TE FusedAdam allocates fresh state) OOMs at 178 GiB.
@@ -162,7 +174,7 @@ def get_test_trainer_config(
                 "o_proj",
             ]
             cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
-        if "deepseek-v4-flash" in model_name.lower():
+        if _is_deepseek_v4(model_name):
             # Same lists as the DSv4 row in megatron/test_megatron_lora_models.py.
             lora_cfg.target_modules = [
                 "linear_q_down_proj",
@@ -252,6 +264,13 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         pytest.param(
             "megatron", False, False, DEEPSEEK_V4_FLASH_MODEL_NAME, marks=[pytest.mark.megatron, pytest.mark.h100]
         ),
+        # DeepSeek-V4.1-Flash 2-layer sub-slice (sliding window + Engram), LoRA and full finetune.
+        pytest.param(
+            "megatron", False, True, DEEPSEEK_V41_FLASH_MODEL_NAME, marks=[pytest.mark.megatron, pytest.mark.h100]
+        ),
+        pytest.param(
+            "megatron", False, False, DEEPSEEK_V41_FLASH_MODEL_NAME, marks=[pytest.mark.megatron, pytest.mark.h100]
+        ),
     ],
     ids=[
         "fsdp_no_lora",
@@ -260,6 +279,8 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         "megatron_glm5_3_flash_lora",
         "megatron_deepseek_v4_flash_lora_h100",
         "megatron_deepseek_v4_flash_fullft_h100",
+        "megatron_deepseek_v41_flash_lora_h100",
+        "megatron_deepseek_v41_flash_fullft_h100",
     ],
 )
 def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp_cpu_offload, lora, model_name):
