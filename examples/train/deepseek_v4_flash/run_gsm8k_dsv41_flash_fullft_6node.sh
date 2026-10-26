@@ -120,7 +120,10 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=false \
   `# the full CPU optimizer offload turns this off by default; without it NCCL can OOM lazily allocating buffers.` \
   trainer.policy.megatron_config.empty_cuda_cache=true \
-  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
+  `# Precision-aware: the optimizer reads the bf16 grads directly. Off, megatron-core first materializes an fp32` \
+  `# copy of every grad on GPU (~45 GiB of expert grads at EP=48, since EP == DP leaves experts unsharded) and` \
+  `# OOMs in optim_step. The GLM-5.3 recipes keep it off because it can break checkpoint saving.` \
+  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=${PRECISION_AWARE_OPTIMIZER:-true} \
   trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32=false \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
