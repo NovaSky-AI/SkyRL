@@ -123,10 +123,10 @@ DEEPSEEK_V4_FLASH_VLLM_LORA_TARGET_MODULES = [
 # The 4-layer GLM-5.3-Flash slice is far more sensitive to its adapter than the default rows. At a
 # LoRA-B std of 0.008 the stale-sampler diff is about 0.155 (phase 2) and the updated adapter
 # still matches at about 0.062 (phase 3, same as the zero adapter).
-LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 8.0, "deepseek-v4.1-flash": 16.0}
+LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 8.0, "deepseek-v4.1-flash": 32.0}
 # DeepSeek-V4.1-Flash: its rows use a 0.3 parity threshold (vLLM's BF16 V4.1 path sits 0.1-0.24 from DeepSeek's
 # reference, Megatron within 1e-3 in mean; see test_megatron_models.py), so a missed sync must move logprobs
-# by more than that.
+# by more than that (16x gave a 0.29 stale-sampler gap on the ratio-1 sub-slice).
 
 
 def _lora_b_multiplier(model_name: str) -> float:
