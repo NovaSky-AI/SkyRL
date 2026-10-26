@@ -473,3 +473,9 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   -k deepseek_v41` -> `megatron_deepseek_v41_flash_lora_h100` and `..._fullft_h100` both PASSED (34 min) on the 2-layer
   sub-slice `DeepSeek-V4.1-Flash-sub-win-engram` (sliding-window layer + Engram layer; EP=4, TP2 vLLM, BF16 FlashMLA).
   Run: `bash examples/train/deepseek_v4_flash/dev/run_roundtrip.sh tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -k deepseek_v41`.
+- Attempt 4 (`...-1792997597`, padding fix): **policy_train completes** (674 s; step 1 902 s: gen 14 s, logprob fwd
+  213 s), then optim_step OOMed at 170.6 GiB in `_copy_model_grads_to_main_grads`: without the precision-aware
+  optimizer megatron-core copies every grad to fp32 on GPU before the CPU optimizer runs (~45 GiB of unsharded expert
+  grads at EP=48). The 6-node script now sets `use_precision_aware_optimizer=true` (`PRECISION_AWARE_OPTIMIZER`). The
+  GLM recipes keep it off over checkpoint-save worries; the V4.1 full-FT checkpoint save/resume row **passes with it
+  on** (node 6, `logs/ckpt-v41-precaware.log`, 23 min). Attempt 5: `...-1793000285`.
