@@ -39,6 +39,7 @@ from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
+    cleanup_on_error,
     get_ray_pg_ready_with_timeout,
     initialize_ray,
 )
@@ -301,40 +302,43 @@ class SkyRLTrainBackend(AbstractBackend):
             record_memory=cfg.trainer.policy.record_memory,
         )
 
-        # set to a large number for megatron scheduler init
-        # lr will be managed externally via set_lr()
-        policy_num_training_steps = 1e9
-        ray.get(
-            policy_model.async_init_model(
-                cfg.trainer.policy.model.path,
-                num_training_steps=policy_num_training_steps,
+        with cleanup_on_error(policy_model.shutdown, "Shutting down the policy workers"):
+            # set to a large number for megatron scheduler init
+            # lr will be managed externally via set_lr()
+            policy_num_training_steps = 1e9
+            ray.get(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=policy_num_training_steps,
+                )
             )
-        )
-        ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
+            ray.get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
+            )
 
-        if is_lora and cfg.trainer.strategy == "megatron":
-            # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
-            # the freshly-initialised LoRA into a per-worker pristine slot, then
-            # register the first adapter under `model_id`. Must happen while the
-            # model + optimizer are still GPU-resident (i.e. before the offload).
-            # currently, this is only supported for megatron backend
-            ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
-            ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
-            ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
+            if is_lora and cfg.trainer.strategy == "megatron":
+                # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
+                # the freshly-initialised LoRA into a per-worker pristine slot, then
+                # register the first adapter under `model_id`. Must happen while the
+                # model + optimizer are still GPU-resident (i.e. before the offload).
+                # currently, this is only supported for megatron backend
+                ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
+                ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
+                ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
 
-        if colocate_all:
-            policy_model.offload_to_cpu()
+            if colocate_all:
+                policy_model.offload_to_cpu()
 
-        # Create unified dispatch that manages all actor groups
-        self._dispatch = WorkerDispatch(
-            cfg=cfg,
-            policy_actor_group=policy_model,
-            inference_engine_client=self._inference_engine_client,
-        )
+            # Create unified dispatch that manages all actor groups
+            self._dispatch = WorkerDispatch(
+                cfg=cfg,
+                policy_actor_group=policy_model,
+                inference_engine_client=self._inference_engine_client,
+            )
 
-        # Mark the offloaded policy model in dispatch state
-        if colocate_all:
-            self._dispatch.mark_as_offloaded("policy")
+            # Mark the offloaded policy model in dispatch state
+            if colocate_all:
+                self._dispatch.mark_as_offloaded("policy")
 
         logger.info("init policy model done")
 
@@ -360,12 +364,20 @@ class SkyRLTrainBackend(AbstractBackend):
             colocate_all=colocate_all,
             sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
         )
-        self._dispatch.register_actor_group("critic", critic_model)
-        self._dispatch.init_model("critic", cfg.trainer.critic.model.path, num_training_steps=1e9)
-        ray.get(critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
-        if colocate_all:
-            critic_model.offload_to_cpu()
-            self._dispatch.mark_as_offloaded("critic")
+
+        def release_critic():
+            self._dispatch.unregister_actor_group("critic")
+            critic_model.shutdown()
+
+        with cleanup_on_error(release_critic, "Shutting down the critic workers"):
+            self._dispatch.register_actor_group("critic", critic_model)
+            self._dispatch.init_model("critic", cfg.trainer.critic.model.path, num_training_steps=1e9)
+            ray.get(
+                critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
+            )
+            if colocate_all:
+                critic_model.offload_to_cpu()
+                self._dispatch.mark_as_offloaded("critic")
         logger.info("init critic model done")
 
     def init_weight_sync_state(self):
