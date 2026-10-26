@@ -524,3 +524,19 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   1.7-2.2 (vLLM -9999-floor tokens, under investigation on node 6). **AIME-2024 avg_score 0.044 -> 0.272, pass@12
   0.73 -> 0.90.** Step-10 full-FT checkpoint saved in 632 s (`$B/ckpts/v41-dapo-fullft6-1793022818`).
   Stages 0-2 for V4.1 are complete.
+- **Floored-logprob investigation (2026-10-26), resolved as one rare vLLM flake, not a full-FT/sync problem.**
+  - `dev/probe_vllm_logprobs_v41.py`, fresh vLLM load (TP8, BF16, FLASHMLA_SPARSE_DSV41), no weight sync: full model
+    4 bad / 2.23M sampled tokens; 6-layer slice 6 / 3.1M. Every one is the **first response token** with a fully NaN
+    logits row (sampled id 1023 and top-1 id 0 both `nan`); the rest of the sequence decodes normally. So some
+    requests' prefill last-position logits come out NaN; per request (different samples of a prompt), not per prompt.
+  - Filling the KV cache with 0xFF (NaN) bytes first (`--poison-kv`) does not change the rate (4 vs 6 / 3.1M): not
+    reads of unwritten KV slots.
+  - Training-side counter (`generate/clamped_logprob_*`, a475c1b0) on a 5-step DAPO full-FT run
+    (`v41-dapo-fullft6-floor-1793036246`, W&B `kq96cd4h`): step 1 0 floored tokens, step 2 **1** (first token of a
+    14-token sequence), which alone moved `minibatch_rollout_logprobs_abs_diff_mean` from 0.01 to 0.47 (max 9979):
+    that metric averages per-micro-batch means, so one floored token in a short sequence dominates it. The earlier
+    0.3-2.2 "spikes" were a handful of such tokens, i.e. the same ~1e-6/token flake; my earlier "~100x in full FT"
+    estimate was wrong (it assumed a plain token mean).
+  - Impact: the first response token of ~1 sequence per step is sampled from NaN logits. Harmless to the loss with TIS
+    off; with TIS on, mask such sequences. Root cause (which layer yields NaN in prefill) still open: replay a captured
+    failing prefill batch and bisect Engram / indexer top-k / sparse attention + sinks / mHC.
