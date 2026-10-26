@@ -411,4 +411,13 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   - vLLM's V4.1 serving is not reproducible run to run: regenerating the same prompts with no sync gives 0.121 on
     common prefixes (80/80 diverge), so the pre/post-sync vLLM comparison is noise for this model. The V4.1 row
     gates the sync on post-sync vLLM vs Megatron instead (`resync_vs_megatron`). Negative control
-    (`SKYRL_DEBUG_SKIP_SINK_STASH=1`): `logs/v41negctl-full-*.log`.
+    (`SKYRL_DEBUG_SKIP_SINK_STASH=1`, zeroed sinks): post-sync 0.360 -> fails the 0.3 gate (with the fix: 0.258).
+- Stage 1 (GSM8K LoRA, full model) setup:
+  - Full text-only BF16 copy `models/DeepSeek-V4.1-Flash-bf16` (1.2 TB, 263 shards; `make_slice_v41.py <out>
+    $(seq -s, 0 39)`, ~1 h) on nodes 5, 6, 7.
+  - V4.1 Ray cluster: head b200-resv-ray-6 (10.180.15.248:6390) + b200-resv-ray-7, 16 GPUs, ray-venv 2.57.0 on
+    each (started from a clean env as for the DSv4 cluster). Recipe: `run_gsm8k_dsv41_flash_lora_2node.sh`
+    (Megatron EP=16; one vLLM engine TP8 x PP2, BF16 FlashMLA). Logs: `logs/v41-gsm8k-lora2-*.log` on node 6.
+  - vLLM PP bug: a KV cache group with no layers on a PP stage keeps its full UniformTypeKVCacheSpecs, so stage 1
+    allocates tensors for stage-0 layers -> StopIteration in allocate_kv_cache. Patched
+    (`patches/vllm/patch_pp_kv_cache_projection.py`).
