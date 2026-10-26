@@ -485,3 +485,16 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   whole request at JSON encoding. Fix 5e915cd0: requests asking for logprobs go to `/skyrl/v1/generate`, which floors
   them and logs `clamped N/M ... non-finite sampled logprobs`. Indexer stays unfrozen for now (could be re-frozen:
   it never gets a gradient).
+- Attempts 6-7 (`...-1793002127`, `...-1793004074`, precision-aware on): step 1 rollout + fwd (64-72 s) +
+  policy_train (455-472 s) all fine, then **CUDA illegal memory access in optim_step** (one rank, no ECC errors).
+  Reproduced on the 6-layer slice on one node (node 6: the 6-node script with `trainer.placement.policy_num_nodes=1
+  ...expert_model_parallel_size=8 generator.inference_engine.num_engines=1 ...pipeline_parallel_size=1
+  trainer.train_batch_size=16 trainer.policy_mini_batch_size=16 MODEL_PATH=<slice> RAY_ADDRESS=local`, ~15 min).
+  Off -> passes; `CUDA_LAUNCH_BLOCKING=1` -> TE `multi_tensor_apply` in `clip_grads.get_grad_norm_fp32`. Cause: with
+  the precision-aware optimizer the grad norm/clip lists are the `decoupled_grad` views, which keep each param's
+  dtype, and mHC trains some params in fp32 -> one mixed bf16/fp32 list -> the kernel dispatches on the first
+  dtype and reads past bf16 tensors. Fix 5ea94d72 (`patches/megatron/patch_clip_grads_mixed_dtype.py`): split those
+  multi-tensor calls by dtype. Slice step passes with it (logs "splitting a mixed-dtype grad list").
+- DAPO LoRA checkpoint test on the full model (`v41-dapo-lora-ckpt-*.log`, 2 steps, ckpt at 2, `LORA_SYNC_PATH` on
+  local storage: the default `/tmp` filled node 3's root disk -- my old `~/.cache/uv` was 32 GB there and on node 8,
+  now cleaned).
