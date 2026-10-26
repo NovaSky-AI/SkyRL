@@ -4,7 +4,7 @@ Parity reference: ``inference/engram.py`` (hashing) and ``Engram`` / ``ParallelE
 ``inference/model.py`` of the DeepSeek-V4.1-Flash-1017 checkpoint.
 
 The hash tables (``layers.N.engram.embed.{weight,scale}``: ~384M rows x 256 FP8 + ue8m0 scales per 32,
-~101 GB per layer) are frozen: they are non-persistent buffers, not parameters, so they get no gradient,
+~101 GB per layer) are frozen: they are plain tensors, not parameters, so they get no gradient,
 optimizer state, checkpoint or weight sync (vLLM keeps its own copy). Each rank holds a contiguous row
 shard over a node-local group and loads it straight from the HF safetensors on first use. Ranks see
 different tokens (data parallel), so a lookup all-gathers the group's hash ids, dequantizes the local
@@ -24,6 +24,9 @@ import torch.distributed as dist
 from megatron.core.transformer.module import MegatronModule
 
 _ENGRAM_GROUPS = {}
+# Where each rank keeps its table shard: "gpu" (default) or "cpu" (pinned host memory, ~25 GiB/GPU saved for the
+# two full-model tables; each lookup then gathers its rows on the host, a few hundred MB per microbatch).
+ENGRAM_TABLE_DEVICE = os.environ.get("SKYRL_DSV41_ENGRAM_TABLE_DEVICE", "gpu")
 
 
 def _find_next_prime(start: int, seen: set) -> int:
@@ -203,7 +206,8 @@ class DSv41Engram(MegatronModule):
         for suffix in ("weight", "scale"):
             key = f"{prefix}.{suffix}"
             with safe_open(os.path.join(self.spec.hf_path, weight_map[key]), framework="pt") as f:
-                rows[suffix] = f.get_slice(key)[start:end].to(device)
+                part_rows = f.get_slice(key)[start:end]
+                rows[suffix] = part_rows.pin_memory() if ENGRAM_TABLE_DEVICE == "cpu" else part_rows.to(device)
         self._table = (rows["weight"], rows["scale"].view(torch.uint8), start)
 
     @torch.no_grad()
@@ -226,8 +230,14 @@ class DSv41Engram(MegatronModule):
         mask = (local < 0) | (local >= weight.size(0))
         local = local.masked_fill(mask, 0)
         block = weight.size(1) // scale.size(1)
-        values = weight[local].float().unflatten(-1, (-1, block))
-        exponents = scale[local].to(torch.int32) - 127
+        if weight.device.type == "cpu":
+            local_cpu = local.cpu()
+            rows = weight[local_cpu].pin_memory().to(hash_ids.device, non_blocking=True)
+            row_scales = scale[local_cpu].pin_memory().to(hash_ids.device, non_blocking=True)
+        else:
+            rows, row_scales = weight[local], scale[local]
+        values = rows.float().unflatten(-1, (-1, block))
+        exponents = row_scales.to(torch.int32) - 127
         values = torch.ldexp(values, exponents.unsqueeze(-1).float()).flatten(-2).to(torch.bfloat16)
         values = values.masked_fill(mask.unsqueeze(-1), 0)
         out = torch.empty(max_n, *values.shape[1:], dtype=values.dtype, device=values.device)
