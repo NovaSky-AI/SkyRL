@@ -706,6 +706,26 @@ class TestDataPlane:
         assert result["rollout_sample_support"] is None
 
     @pytest.mark.asyncio
+    async def test_logprob_requests_use_the_clamping_endpoint(self, monkeypatch):
+        # The native endpoint 400s on a NaN sampled logprob; /skyrl/v1/generate floors it.
+        client = RemoteInferenceClient(proxy_url="http://unused", server_urls=["http://unused"], data_parallel_size=1)
+        captured = {}
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            captured.update(url=url, packed_side_channels=packed_side_channels)
+            choice = {"token_ids": [1], "finish_reason": "stop", "logprobs": {"content": [{"logprob": -0.5}]}}
+            return {"choices": [choice]}
+
+        monkeypatch.setattr(client._get_generate_client(), "_post", fake_post)
+        monkeypatch.setattr(client, "detokenize", _fake_detokenize)
+
+        result = await client.generate({"prompt_token_ids": [[1, 2]], "sampling_params": {"logprobs": 0}})
+
+        assert captured["url"].endswith("/skyrl/v1/generate")
+        assert captured["packed_side_channels"] is False
+        assert result["response_logprobs"] == [[-0.5]]
+
+    @pytest.mark.asyncio
     async def test_sample_support_capture_honours_an_explicit_opt_in(self, monkeypatch):
         client = RemoteInferenceClient(
             proxy_url="http://unused",
