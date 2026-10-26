@@ -517,3 +517,10 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   loaded complete checkpoint state", 22 s), then step 3 in 1497 s with rollout-vs-train logprob diff 0.0093 (0.009
   before the save), grad_norm 0.015, reward -0.23. Remaining Stage 2: DAPO full FT with R3
   (`run_dapo_dsv41_flash_fullft_sync_6node.sh`).
+- **V4.1 Stage 2 DAPO full FT with R3 done (2026-10-26, `v41-dapo-fullft6-1793022818`, W&B `dsv41_flash_dapo`,
+  `run_dapo_dsv41_flash_fullft_sync_6node.sh`)**: 10/10 steps on 6 nodes, 2K responses, ~11.5 min/step (gen ~100 s
+  with 3 engines vs 452 s for the 1-engine LoRA recipe). Peak 123-140 GiB/GPU. Reward -0.21 0.00 -0.06 0.00 0.24
+  0.18 0.16 0.36 0.42 0.41; grad_norm 0.12-0.16; rollout-vs-train logprob diff 0.009-0.036, except steps 4/6/9 at
+  1.7-2.2 (vLLM -9999-floor tokens, under investigation on node 6). **AIME-2024 avg_score 0.044 -> 0.272, pass@12
+  0.73 -> 0.90.** Step-10 full-FT checkpoint saved in 632 s (`$B/ckpts/v41-dapo-fullft6-1793022818`).
+  Stages 0-2 for V4.1 are complete.
