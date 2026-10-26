@@ -54,7 +54,7 @@ def _run(mlp, x, mask, num_chunks):
     return out.detach(), bias, x.grad, {n: p.grad.clone() for n, p in mlp.named_parameters() if p.grad is not None}
 
 
-@pytest.mark.parametrize("seq, num_chunks", [(32, 8), (30, 4), (5, 8), (32, 1)])
+@pytest.mark.parametrize("seq, num_chunks", [(32, 8), (30, 4), (5, 8), (32, 1), (100, 64)])
 @pytest.mark.parametrize("with_mask", [False, True])
 def test_chunked_matches_single_call(seq, num_chunks, with_mask):
     torch.manual_seed(0)

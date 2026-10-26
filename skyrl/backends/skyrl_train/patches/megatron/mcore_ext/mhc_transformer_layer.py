@@ -228,11 +228,14 @@ def chunked_mlp(
     if num_chunks <= 1:
         kwargs = {"input_ids": input_ids} if input_ids is not None else {}
         return mlp(hidden_states, padding_mask=padding_mask, **kwargs)
-    masks = padding_mask.chunk(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
-    # input_ids is [b, s] while hidden_states is [s, b, h], so it is chunked along dim 1.
-    id_chunks = input_ids.chunk(num_chunks, dim=1) if input_ids is not None else [None] * num_chunks
+    # tensor_split, not chunk: ``chunk(n)`` yields fewer than n pieces unless n divides the length
+    # (100 tokens -> 50 chunks of 2). Data-parallel ranks see different lengths, and each MoE call is
+    # a set of expert-parallel collectives, so a rank-dependent count hangs the EP group.
+    masks = padding_mask.tensor_split(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
+    # input_ids is [b, s] while hidden_states is [s, b, h], so it is split along dim 1.
+    id_chunks = input_ids.tensor_split(num_chunks, dim=1) if input_ids is not None else [None] * num_chunks
     outputs = [
         mlp(chunk, padding_mask=mask, **({"input_ids": ids} if ids is not None else {}))
-        for chunk, mask, ids in zip(hidden_states.chunk(num_chunks, dim=0), masks, id_chunks)
+        for chunk, mask, ids in zip(hidden_states.tensor_split(num_chunks, dim=0), masks, id_chunks)
     ]
     return torch.cat([out for out, _ in outputs], dim=0), outputs[0][1]
