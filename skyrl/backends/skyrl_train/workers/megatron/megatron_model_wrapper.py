@@ -3,6 +3,7 @@ from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
+import math
 import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
@@ -247,6 +248,13 @@ class MegatronModelWrapper:
         self._seq_align = 1
         if self._implicit_causal_mask_only:
             self._seq_align = max([1, *(getattr(config, "csa_compress_ratios", None) or [])])
+        # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
+        # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
+        # a per-rank piece count hangs the EP group; padding the unpacked length to a multiple of n keeps the
+        # count equal on every rank. (The packed path is not covered.)
+        mlp_chunks = getattr(config, "mlp_chunks_for_training", 1) or 1
+        if mlp_chunks > 1:
+            self._seq_align = math.lcm(self._seq_align, mlp_chunks)
         # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
         self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
         if self._per_token_loss and any(
