@@ -324,22 +324,29 @@ class MegatronStrategy(DistributedStrategy):
                 and len(inner_opt.state) == 0
             ):
                 # HybridDeviceOptimizer (optimizer_cpu_offload): megatron-core builds it with init_state_fn=None
-                # and fills its state from the sub-optimizers only after a step. Create the state their first
-                # step would (torch Adam/AdamW: step + moments), then mirror it into the HDO.
+                # and fills its state from the sub-optimizers only after a step. Create the state each
+                # sub-optimizer's first step would, then mirror it into the HDO.
                 for sub_opt in inner_opt.sub_optimizers:
+                    # The GPU sub-optimizer (optimizer_offload_fraction < 1) is TransformerEngine's FusedAdam: its
+                    # moment dtypes, scales and master params are its own, and its step count lives in the group.
+                    # Let it initialize itself exactly as its step() would.
+                    te_initialize_state = getattr(sub_opt, "initialize_state", None)
                     for group in sub_opt.param_groups:
-                        # As torch's Adam/AdamW create it: fused / capturable kernels need `step` on the param's
-                        # device (a GPU sub-optimizer when optimizer_offload_fraction < 1), otherwise a CPU scalar.
+                        # torch's Adam/AdamW (the CPU sub-optimizer): fused / capturable kernels need `step` on the
+                        # param's device, otherwise it is a CPU scalar.
                         on_param_device = group.get("fused") or group.get("capturable")
                         for p in group["params"]:
-                            if len(sub_opt.state[p]) == 0:
-                                sub_opt.state[p]["step"] = torch.tensor(
-                                    0.0, dtype=torch.float32, device=p.device if on_param_device else "cpu"
-                                )
-                                sub_opt.state[p]["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
-                                sub_opt.state[p]["exp_avg_sq"] = torch.zeros_like(
-                                    p, memory_format=torch.preserve_format
-                                )
+                            if len(sub_opt.state[p]) != 0:
+                                continue
+                            if te_initialize_state is not None:
+                                remainders = getattr(sub_opt, "store_param_remainders", False)
+                                te_initialize_state(p, bool(remainders) and p.dtype == torch.bfloat16)
+                                continue
+                            sub_opt.state[p]["step"] = torch.tensor(
+                                0.0, dtype=torch.float32, device=p.device if on_param_device else "cpu"
+                            )
+                            sub_opt.state[p]["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                            sub_opt.state[p]["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
                 inner_opt._sync_sub_optimizers_state_to_hdo()
 
     def save_checkpoint(
