@@ -537,6 +537,9 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     that metric averages per-micro-batch means, so one floored token in a short sequence dominates it. The earlier
     0.3-2.2 "spikes" were a handful of such tokens, i.e. the same ~1e-6/token flake; my earlier "~100x in full FT"
     estimate was wrong (it assumed a plain token mean).
+  - Full 5-step counts: floored tokens per step 0, 1, 1, 11, 0 (13 / 7680 requests = 0.17%), all at the first response
+    token; the no-sync fresh-load probe gives 0.26% (4 / 1536). Weight sync does not raise the rate overall; it varies
+    by step (step 4: 11), so batch composition or the current weights may modulate it.
   - Impact: the first response token of ~1 sequence per step is sampled from NaN logits. Harmless to the loss with TIS
     off; with TIS on, mask such sequences. Root cause (which layer yields NaN in prefill) still open: replay a captured
     failing prefill batch and bisect Engram / indexer top-k / sparse attention + sinks / mHC.
