@@ -241,8 +241,11 @@ class MegatronModelWrapper:
         # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
         # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
         # a per-rank piece count hangs the EP group. Pad the unpacked length (remove_left_padding and the replay
-        # metadata layout alike) to a multiple of n so every rank gets n pieces. The packed path is not covered.
-        self._seq_align = getattr(config, "mlp_chunks_for_training", 1) or 1
+        # metadata layout alike) so every rank gets n pieces: with sequence parallelism the MLP sees the length
+        # divided by TP, so pad to a multiple of n * TP. The packed path is not covered.
+        mlp_chunks = getattr(config, "mlp_chunks_for_training", 1) or 1
+        sp_size = mpu.get_tensor_model_parallel_world_size() if getattr(config, "sequence_parallel", False) else 1
+        self._seq_align = mlp_chunks * sp_size if mlp_chunks > 1 else 1
         # megatron-core's DeepSeek-V4 compressed sparse attention raises on any explicit mask. On the
         # unpacked path remove_left_padding left-aligns every row, so the implicit causal mask
         # already keeps real tokens off the trailing padding; the mask is still used for logprobs.
