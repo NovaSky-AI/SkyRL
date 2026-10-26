@@ -838,7 +838,8 @@ _ZERO_COPY_PAYLOADS: dict[str, Callable[[], BatchField]] = {
         cu_seqlens_from_lengths(_ZERO_COPY_SEGMENT_LENGTHS),
     ),
     SAMPLE_SUPPORT_FIELD: lambda: ragged_support(
-        [torch.randint(0, 32_000, (length, 20)) for length in _ZERO_COPY_SEGMENT_LENGTHS]
+        [torch.randint(0, 32_000, (length, 20)) for length in _ZERO_COPY_SEGMENT_LENGTHS],
+        logprobs=[-torch.rand(length, 20) for length in _ZERO_COPY_SEGMENT_LENGTHS],
     ),
 }
 

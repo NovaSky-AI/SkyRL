@@ -1072,6 +1072,7 @@ class RayPPOTrainer:
             step_wise=self.cfg.generator.step_wise_trajectories,
             routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
             support_expected=self.cfg.trainer.algorithm.enable_sample_support_replay,
+            support_scores_expected=self.cfg.trainer.algorithm.enable_score_centering,
         )
 
         return generator_output
