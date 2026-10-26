@@ -238,9 +238,16 @@ class MegatronModelWrapper:
         self._pending_grad_sync: Optional[dict] = None
 
         config = get_model_config(self.actor_module[0])
-        # Extra alignment of the unpacked (padded) sequence length, applied by remove_left_padding and by the
-        # replay metadata layout alike.
+        # megatron-core's DeepSeek-V4 compressed sparse attention raises on any explicit mask. On the
+        # unpacked path remove_left_padding left-aligns every row, so the implicit causal mask
+        # already keeps real tokens off the trailing padding; the mask is still used for logprobs.
+        self._implicit_causal_mask_only = getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
+        # Its compressed attention (and cuDNN's indexer) also needs seqlen_q <= seqlen_k * ratio, i.e. the
+        # unpacked length padded to a multiple of each compression ratio. Trailing pad only completes the
+        # last compressed block, which only pad positions can attend to under the causal mask.
         self._seq_align = 1
+        if self._implicit_causal_mask_only:
+            self._seq_align = max([1, *(getattr(config, "csa_compress_ratios", None) or [])])
         # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
         # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
         # a per-rank piece count hangs the EP group; padding the unpacked length to a multiple of n keeps the
@@ -270,6 +277,11 @@ class MegatronModelWrapper:
         # scaling, and any explicit loss_scale configuration).
         if actor_optimizer is not None:
             config.grad_scale_func = actor_optimizer.scale_loss
+
+    def _model_attention_mask(self, attention_mask):
+        if self._implicit_causal_mask_only:
+            return None
+        return to_te_attention_mask(attention_mask)
 
     def _defer_finalize_model_grads(self, model, num_tokens=None, **kwargs) -> None:
         """Record Megatron's end-of-schedule grad sync instead of running it.
@@ -604,7 +616,7 @@ class MegatronModelWrapper:
                         model,
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         output_processor=fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
@@ -616,7 +628,7 @@ class MegatronModelWrapper:
                     outputs = model(
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         **model_replay_kwargs,
                         **vlm_inputs,
@@ -1312,7 +1324,7 @@ class MegatronModelWrapper:
                         model,
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         output_processor=fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
@@ -1324,7 +1336,7 @@ class MegatronModelWrapper:
                     outputs = model(
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         **model_replay_kwargs,
                         **vlm_inputs,

@@ -295,3 +295,17 @@ def test_router_replay_schedule_clears_after_exception(router_replay_module):
 
     assert router_replay_module.replay_backward_list == []
     assert router_replay_module.action is None
+
+
+def test_hybrid_sublayers_map_to_rollout_blocks():
+    # DeepSeek-V4 on a Megatron HybridModel: 43 blocks -> 86 sub-layers (attention, MoE); the MoE routers sit on
+    # odd sub-layers while vLLM returns routed experts per block.
+    moe_sublayers = list(range(1, 86, 2))
+    assert replay_utils._hybrid_sublayers_to_block_indices(moe_sublayers, 86, 43) == list(range(43))
+
+
+def test_hybrid_sublayer_mapping_leaves_in_range_indices_alone():
+    # Ordinary MoE models (indices already per HF layer) and non-divisible layouts are untouched.
+    assert replay_utils._hybrid_sublayers_to_block_indices([1, 2, 3], 48, 48) == [1, 2, 3]
+    assert replay_utils._hybrid_sublayers_to_block_indices([3, 5], 61, 61) == [3, 5]
+    assert replay_utils._hybrid_sublayers_to_block_indices([60, 70], 90, 47) == [60, 70]

@@ -382,6 +382,22 @@ class MegatronWorker:
                 "full recompute."
             )
 
+        # megatron-core's DSv4HybridAttention (DeepSeek-V4) asserts checkpoint_core_attention is off,
+        # which the selective "core_attn" recompute above (and SkyRL's default) turns on.
+        if (
+            getattr(provider, "experimental_attention_variant", None) == "dsv4_hybrid"
+            and provider.recompute_granularity == "selective"
+            and "core_attn" in (provider.recompute_modules or [])
+        ):
+            provider.recompute_modules = [m for m in provider.recompute_modules if m != "core_attn"]
+            if not provider.recompute_modules:
+                provider.recompute_granularity = None
+            logger.info(
+                "DSv4 hybrid attention does not support core_attn recompute; "
+                f"recompute_granularity={provider.recompute_granularity}, "
+                f"recompute_modules={provider.recompute_modules}"
+            )
+
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
         # `len(pattern) == num_layers` in `get_linear_attention_pattern`. Truncate so a
