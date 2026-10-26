@@ -430,3 +430,8 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   step 1 = 592 s (generate 57 s, logprob fwd 163 s, policy_train 257 s, LoRA sync 106 s); rollout-vs-train logprob
   diff **0.025** on the full 40-layer model (the 0.12-0.25 on 3-6-layer slices is a truncated-model artifact);
   peak 117 GiB/GPU; grad_norm 0.030; first-step GSM8K reward 0.586 (avg response 237 tokens).
+  All 10 steps clean (~6 min/step after step 1; logprob diff 0.025-0.029, grad_norm 0.03-0.04, entropy 0.33-0.37);
+  rollout reward 0.59 0.62 0.63 0.58 0.57 0.57 0.69 0.48 0.60 0.55; final GSM8K test pass@1 0.603 (W&B `yxaqr3nq`).
+  The official V4.1 template defaults to **thinking mode** ("Reasoning Effort: 75" system line, `<think>`); wrong
+  answers average 291 tokens (not truncation at 1024), so the GSM8K `####` extractor is likely missing thinking-mode
+  answers. `chat_template_v41_chat.jinja` defaults to chat mode (used by the DAPO recipe).
