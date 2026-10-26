@@ -170,23 +170,31 @@ def test_decoded_spans_are_whole_characters_and_rejoin_to_the_text(renderer: Ren
     assert b"".join(spans) == data
 
 
-# The smallest Qwen3-VL the `renderers` library maps by name.
-VL_TOKENIZER = "Qwen/Qwen3-VL-4B-Instruct"
+# One model per multimodal family the `renderers` library renders, and whether it can encode that family's
+# images for vLLM. Only tokenizer and processor files are loaded, on CPU.
+VL_MODELS = {
+    "Qwen/Qwen3-VL-4B-Instruct": True,
+    "Qwen/Qwen3.5-0.8B": True,
+    "Qwen/Qwen3.8-27B": True,
+    "google/gemma-4-E2B-it": True,
+    "moonshotai/Kimi-K2.5": False,
+    "thinkingmachines/Inkling-Small": False,
+}
 
 
-@pytest.fixture(scope="module")
-def vl_renderer() -> RenderersRenderer:
+@pytest.fixture(scope="module", params=list(VL_MODELS))
+def vl_renderer(request: pytest.FixtureRequest) -> RenderersRenderer:
     pytest.importorskip("PIL")
     pytest.importorskip("torchvision")
-    from transformers import AutoProcessor
-
-    # Only missing model files skip (transformers raises OSError without network or cache); a broken
-    # renderer or processor setup fails the test.
+    # Only missing or gated model files skip (OSError without network, cache or access); a broken renderer or
+    # processor setup fails the test.
     try:
-        AutoProcessor.from_pretrained(VL_TOKENIZER)
+        renderer = RenderersRenderer(request.param, size=1)
+        renderer.render([_first_image()], None)  # loads the processor too
     except OSError as error:
-        pytest.skip(f"processor unavailable: {error}")
-    return RenderersRenderer(VL_TOKENIZER, size=1)
+        pytest.skip(f"{request.param} unavailable: {error}")
+    assert renderer.multimodal, f"{request.param} should render images"
+    return renderer
 
 
 def _png(color: str, size: tuple[int, int]) -> dict:
@@ -203,26 +211,81 @@ def _png(color: str, size: tuple[int, int]) -> dict:
     }
 
 
-def test_an_image_turn_bridges_to_exactly_the_full_render(vl_renderer: RenderersRenderer) -> None:
-    from renderers.base import load_tokenizer
+def _first_image() -> dict:
+    return {"role": "user", "content": [_png("red", (1024, 768)), {"type": "text", "text": "color?"}]}
 
-    tokenizer = load_tokenizer(VL_TOKENIZER)
-    pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
-    first_message = {"role": "user", "content": [_png("red", (1024, 768)), {"type": "text", "text": "color?"}]}
-    second_message = {"role": "user", "content": [_png("blue", (96, 64)), {"type": "text", "text": "and?"}]}
-    first = vl_renderer.render([first_message], None)
-    completion = tokenizer.encode("red<|im_end|>", add_special_tokens=False)
-    bridged = vl_renderer.bridge(first.token_ids, completion, [second_message], None, first.media)
-    full = vl_renderer.render([first_message, {"role": "assistant", "content": "red"}, second_message], None)
 
-    # One placeholder per 2x2 block of the processor's patch grid.
+def _second_image() -> dict:
+    return {"role": "user", "content": [_png("blue", (96, 64)), {"type": "text", "text": "and?"}]}
+
+
+def _completion(renderer: RenderersRenderer, prompt: list[int]) -> tuple[list[int], bool]:
+    """The tokens a model would sample for "red", and whether the prompt opened the think block itself."""
+    full = renderer.render([_first_image(), {"role": "assistant", "content": "red"}], None).token_ids
+    stops = set(renderer.stop_token_ids())
+    if full[: len(prompt)] != prompt:
+        # The generation prompt opens the think block (Qwen3.8): the model samples the rest of it.
+        from renderers.base import load_tokenizer
+
+        tokenizer = load_tokenizer(renderer.name)
+        return [*tokenizer.encode("\n</think>\n\nred", add_special_tokens=False), min(stops)], True
+    end = next(i for i in range(len(prompt), len(full)) if full[i] in stops)
+    return full[len(prompt) : end + 1], False
+
+
+def test_an_image_turn_bridges_like_the_full_render(vl_renderer: RenderersRenderer) -> None:
+    first = vl_renderer.render([_first_image()], None)
     (image,) = first.media
-    assert image.length == int(image.data["image_grid_thw"].prod()) // 4
-    assert bridged is not None and bridged.token_ids == full.token_ids
-    assert [m.hash for m in bridged.media] == [full.media[1].hash]
-    assert [(m.offset, m.length) for m in [*first.media, *bridged.media]] == [(m.offset, m.length) for m in full.media]
-    for item in full.media:
-        assert full.token_ids[item.offset : item.offset + item.length] == [pad] * item.length
+    # A placeholder span is one token repeated, whatever the family's token and count (Kimi K2.5: one per image).
+    assert len(set(first.token_ids[image.offset : image.offset + image.length])) == 1 and image.data
+
+    completion, opened_think = _completion(vl_renderer, first.token_ids)
+    bridged = vl_renderer.bridge(first.token_ids, completion, [_second_image()], None, first.media)
+    assert bridged is not None, "bridge declined"
+    (second,) = bridged.media
+    assert len(set(bridged.token_ids[second.offset : second.offset + second.length])) == 1
+    if opened_think:
+        # A full render isn't the reference when the generation prompt opens the think block: the bridge and the
+        # render split the newlines at </think> differently. The bridge still keeps the sampled tokens.
+        assert bridged.token_ids[: bridged.reused] == [*first.token_ids, *completion]
+        return
+    full = vl_renderer.render([_first_image(), {"role": "assistant", "content": "red"}, _second_image()], None)
+    assert bridged.token_ids == full.token_ids
+    assert [(m.offset, m.length, m.hash) for m in [*first.media, *bridged.media]] == [
+        (m.offset, m.length, m.hash) for m in full.media
+    ]
+
+
+async def test_two_image_turns_through_skycap(vl_renderer: RenderersRenderer, monkeypatch) -> None:
+    # No vLLM here: the engine is a mock, so send it placeholders only (encoding is the test below).
+    monkeypatch.setattr(
+        vl_renderer, "features", lambda media: {"mm_placeholders": [[m.offset, m.length] for m in media]}
+    )
+    reply, _ = _completion(vl_renderer, vl_renderer.render([_first_image()], None).token_ids)
+
+    async with token_stack(completion=lambda prompt, sampling: reply) as stack:
+        stack.server.backend.renderer = vl_renderer  # type: ignore[attr-defined]
+        created = await stack.create()
+        llm = client(created["base_url"])
+        first = await llm.chat.completions.create(model="policy", messages=[_first_image()])
+        messages = [_first_image(), first.choices[0].message.model_dump(exclude_none=True), _second_image()]
+        await llm.chat.completions.create(model="policy", messages=messages)
+
+        graph = stack.server.trajectories[created["id"]].graph
+        assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True]
+        assert [len(node.tokens.media) for node in graph if node.author == "client"] == [1, 1]
+        (sample,) = build_samples(graph)
+        assert len(sample.media) == 2
+        for item in sample.media:
+            assert len(set(sample.input_ids[item.offset : item.offset + item.length])) == 1
+
+
+def test_image_encoding_for_vllm_is_reported(vl_renderer: RenderersRenderer) -> None:
+    error = vl_renderer.media_encoding_error()
+    if VL_MODELS[vl_renderer.name]:
+        assert error is None
+    else:
+        assert error is not None and "not implemented" in error
 
 
 PREFILLING_TOKENIZER = "Qwen/Qwen3.5-0.8B"

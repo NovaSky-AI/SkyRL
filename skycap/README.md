@@ -59,8 +59,11 @@ parts. The renderer processes them with the model's Hugging Face processor and
 lays out their placeholder tokens; every call sends the engine all the images
 in its prompt (vLLM's `features`), and each image is stored on the message
 node that sent it. A sample lists its path's images in order, with their
-placeholder offsets in `input_ids` and the processor's arrays
-(`pixel_values`, `image_grid_thw` for Qwen-VL), which is what training needs:
+placeholder offsets in `input_ids` and the processor's arrays, which is what
+training needs. The arrays are the model family's own (`pixel_values` and
+`image_grid_thw` for Qwen-VL, `pixel_values` and `image_position_ids` for Gemma
+4), and a placeholder count isn't always an embedding count (Kimi K2.5 has one
+placeholder per image):
 
 ```bash
 uv sync --extra tokens --extra multimodal   # plus torch and torchvision, for the processor

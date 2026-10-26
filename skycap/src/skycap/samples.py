@@ -41,7 +41,8 @@ class Sample:
     routed_experts: np.ndarray | None = None
     #: Per position, the ids the sampler could have drawn; empty where ``loss_mask`` is 0.
     sampling_mask: list[list[int]] | None = None
-    #: The path's multimodal items in order, offsets into ``input_ids``.
+    #: The path's multimodal items in order, offsets into ``input_ids``. ``length`` counts placeholder tokens, not
+    #: always embeddings, and ``data``'s keys are the model's processor outputs, which vary by family (``Media``).
     media: list[Media] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:

@@ -221,3 +221,33 @@ async def test_a_repeated_finish_of_a_recorded_text_trajectory_still_returns_its
         repeat = await stack.finish(created["id"])
 
     assert repeat["samples"] == first["samples"] != []
+
+
+async def test_images_a_model_cannot_send_to_the_engine_are_refused_but_text_still_works() -> None:
+    import openai
+
+    async with token_stack() as stack:
+        # As start() records it for a renderer whose family renders images but has no vLLM encoder.
+        stack.server.backend.media_error = "Multimodal serialization not implemented for KimiK25Renderer."
+        created = await stack.create()
+        llm = client(created["base_url"])
+        with pytest.raises(openai.BadRequestError, match="images can't be sent to the engine"):
+            await llm.chat.completions.create(model="policy", messages=[look("what is this?", image("cat", 3))])
+        assert stack.engine.requests == []
+
+        await llm.chat.completions.create(model="policy", messages=[user("hi")])
+        assert len(stack.engine.requests) == 1
+
+
+async def test_start_records_why_a_renderer_cannot_send_images() -> None:
+    from skycap.tokens.backend import TokensBackend
+    from tests.fake_renderer import FakeRenderer
+
+    renderer = FakeRenderer()
+    renderer.media_encoding_error = lambda: "no encoder"  # type: ignore[attr-defined]
+    backend = TokensBackend("http://engine", renderer)
+    await backend.start()
+    try:
+        assert backend.media_error == "no encoder"
+    finally:
+        await backend.close()

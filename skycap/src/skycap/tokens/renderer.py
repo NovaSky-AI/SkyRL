@@ -30,11 +30,16 @@ class Media:
     """One multimodal item, such as an image, and where its placeholder tokens sit.
 
     ``offset`` is relative to the tokens the item is listed with: a ``Rendered``'s
-    ``token_ids``, a node's tokens, or a sample's ``input_ids``. ``hash`` identifies
-    the item's content. ``data`` is the processor's output for the item (for
-    Qwen-VL, ``pixel_values`` and ``image_grid_thw``), or None for an item read
-    back from a record, which keeps placeholders only. Two items are equal, and
-    hash alike, by everything but ``data``, which ``hash`` already identifies.
+    ``token_ids``, a node's tokens, or a sample's ``input_ids``. ``length`` is the
+    number of placeholder tokens, which is not always the number of embeddings the
+    model puts there: Kimi K2.5 has one placeholder per image and expands it inside
+    the model. ``hash`` identifies the item's content (its decoded pixels and size).
+    ``data`` is the model's processor output for the item, whose keys vary by family
+    (Qwen-VL and Qwen3.5: ``pixel_values``, ``image_grid_thw``; Gemma 4:
+    ``pixel_values``, ``image_position_ids``; Inkling: ``pixel_values``), or None
+    for an item read back from a record, which keeps placeholders only. Two items
+    are equal, and hash alike, by everything but ``data``, which ``hash`` already
+    identifies.
     """
 
     modality: str
@@ -262,6 +267,27 @@ class RenderersRenderer:
             reused=reused,
             media=_media(getattr(out, "multi_modal_data", None), start=reused),
         )
+
+    def media_encoding_error(self) -> str | None:
+        """Why this model's images can't be sent to vLLM, or None if they can (or it takes no images).
+
+        ``renderers`` renders and bridges every multimodal family, but encodes items for vLLM only for
+        some (Qwen-VL, Qwen3.5, Gemma 4, Nemotron 3.5; not Kimi K2.5 or Inkling). Its encoder dispatches
+        on the renderer class before it touches the items or imports vLLM, so an empty probe tells the
+        two apart without vLLM installed.
+        """
+        if not self.multimodal:
+            return None
+        from renderers.client import _build_mm_features
+
+        with self._checkout() as (renderer, _):
+            try:
+                _build_mm_features(renderer, None)
+            except NotImplementedError as error:
+                return str(error)
+            except Exception:  # noqa: BLE001 - past the dispatch: the empty probe, or vllm not installed
+                return None
+        return None
 
     def features(self, media: Sequence[Media]) -> dict[str, Any]:
         """vLLM's ``features`` for a prompt with these items: hashes, placeholders and encoded items.
