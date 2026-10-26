@@ -26,6 +26,7 @@ Remove once vLLM loads ``attn_sink`` through a weight loader and runs the model-
 the end of a layerwise reload.
 """
 
+import os
 from contextlib import contextmanager
 from typing import Any, Iterable, Iterator, Tuple
 
@@ -111,7 +112,9 @@ def _patch_classes(causal_lm_cls, model_cls) -> None:
         return original_load(self, without_meta_sinks()) | stashed_now
 
     causal_lm_cls.process_weights_after_loading = process_weights_after_loading
-    model_cls.load_weights = load_weights
+    # SKYRL_DEBUG_SKIP_SINK_STASH=1 leaves vLLM's sink loading alone: a negative control for the sync tests.
+    if os.environ.get("SKYRL_DEBUG_SKIP_SINK_STASH") != "1":
+        model_cls.load_weights = load_weights
 
 
 @contextmanager
