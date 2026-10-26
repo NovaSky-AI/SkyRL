@@ -247,7 +247,10 @@ def _distributed_main():
         out_er, entropy_er, gh_er, gw_er = _materialized_entropy_loss_fb(hidden, w_full.to(dev), target)
         torch.testing.assert_close(out_el, out_er, atol=1e-4, rtol=1e-4)
         torch.testing.assert_close(entropy_el, entropy_er, atol=1e-4, rtol=1e-4)
-        torch.testing.assert_close(gh_el, gh_er, atol=5e-3, rtol=5e-3)
+        # The fused op leaves grad_hidden's TP all-reduce to the caller.
+        gh_el = gh_el.float()
+        dist.all_reduce(gh_el, group=tp_group)
+        torch.testing.assert_close(gh_el, gh_er.float(), atol=5e-3, rtol=5e-3)
         torch.testing.assert_close(gw_el.float(), gw_er[vstart:vend].float(), atol=5e-3, rtol=5e-3)
 
     ok = torch.tensor([1.0], device=dev)
