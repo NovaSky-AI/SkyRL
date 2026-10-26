@@ -60,8 +60,14 @@ permissions:
   checks: write
   contents: read
 
+# Workflow-level concurrency applies when a run is created, before the job `if:`
+# below is evaluated. On `pull_request_target`, `github.ref` is the base branch,
+# so a group keyed on it alone would put every label event on every PR in the
+# same group as the push-to-main run, and `cancel-in-progress` would cancel the
+# real run even when the new one's job is skipped. Key on the event, the PR and
+# the label that fired instead.
 concurrency:
-  group: skyrl-gpu-${{ github.workflow }}-${{ github.ref }}
+  group: skyrl-gpu-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.label.name }}
   cancel-in-progress: true
 
 jobs:
