@@ -238,23 +238,21 @@ class MegatronModelWrapper:
         self._pending_grad_sync: Optional[dict] = None
 
         config = get_model_config(self.actor_module[0])
+        # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
+        # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
+        # a per-rank piece count hangs the EP group. Pad the unpacked length (remove_left_padding and the replay
+        # metadata layout alike) to a multiple of n so every rank gets n pieces. The packed path is not covered.
+        self._seq_align = getattr(config, "mlp_chunks_for_training", 1) or 1
         # megatron-core's DeepSeek-V4 compressed sparse attention raises on any explicit mask. On the
         # unpacked path remove_left_padding left-aligns every row, so the implicit causal mask
         # already keeps real tokens off the trailing padding; the mask is still used for logprobs.
         self._implicit_causal_mask_only = getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
-        # Its compressed attention (and cuDNN's indexer) also needs seqlen_q <= seqlen_k * ratio, i.e. the
-        # unpacked length padded to a multiple of each compression ratio. Trailing pad only completes the
-        # last compressed block, which only pad positions can attend to under the causal mask.
-        self._seq_align = 1
         if self._implicit_causal_mask_only:
-            self._seq_align = max([1, *(getattr(config, "csa_compress_ratios", None) or [])])
-        # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
-        # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
-        # a per-rank piece count hangs the EP group; padding the unpacked length to a multiple of n keeps the
-        # count equal on every rank. (The packed path is not covered.)
-        mlp_chunks = getattr(config, "mlp_chunks_for_training", 1) or 1
-        if mlp_chunks > 1:
-            self._seq_align = math.lcm(self._seq_align, mlp_chunks)
+            # Its compressed attention (and cuDNN's indexer) also needs seqlen_q <= seqlen_k * ratio, i.e. the
+            # unpacked length padded to a multiple of the largest compression ratio as well. Trailing pad only
+            # completes the last compressed block, which only pad positions can attend to under the causal mask.
+            max_ratio = max([1, *(getattr(config, "csa_compress_ratios", None) or [])])
+            self._seq_align = math.lcm(self._seq_align, max_ratio)
         # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
         self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
         if self._per_token_loss and any(
