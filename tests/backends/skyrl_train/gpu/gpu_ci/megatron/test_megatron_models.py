@@ -829,6 +829,7 @@ async def test_logprobs_matching_roundtrip(
     compare_common_prefix = (
         bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or _is_deepseek_v4(model_name)
     )
+    resync_vs_megatron = "deepseek-v4.1-flash" in model_name.lower()
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which
@@ -1024,14 +1025,35 @@ async def test_logprobs_matching_roundtrip(
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
             await client.wake_up(tags=["kv_cache"])
 
-            response_mask_2, logprobs_t_2, gen_out_2 = await generate_with_vllm(
+            (response_mask_2, logprobs_t_2, gen_out_2), training_input_2 = await generate_with_vllm(
                 generator,
                 client,
                 model_name,
                 tokenizer,
-                return_training_input=False,
+                return_training_input=True,
                 max_generate_length=max_generate_length,
             )
+
+            if resync_vs_megatron:
+                # vLLM's DeepSeek-V4.1 serving is not reproducible run to run (the same prompts regenerated with
+                # no sync in between: 0.12 on common prefixes, 80/80 diverged), so a pre/post-sync vLLM comparison
+                # cannot tell a broken sync (zeroed attention sinks: 0.12-0.16) from noise. Score the post-sync
+                # samples with the trainer instead: synced engines must match it as well as before the sync.
+                await client.sleep()
+                policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
+                results = ray.get(policy.async_run_ray_method("mesh", "forward", data=training_input_2))
+                logprobs_megatron_2 = loss_fn_outputs_to_tensor(
+                    WorkerOutput.cat(policy.actor_infos, results).loss_fn_outputs, key="logprobs"
+                )
+                mask_2 = response_mask_2.bool()
+                resync_diff = (logprobs_t_2[mask_2] - logprobs_megatron_2[mask_2]).abs()
+                _common_prefix_logprob_diff(gen_out_1, gen_out_2, "vLLM resync (informational)")
+                print(f"post-sync vLLM vs Megatron logprob diff mean: {resync_diff.mean().item():.6f}")
+                assert resync_diff.mean().item() < megatron_threshold, (
+                    f"post-sync vLLM vs Megatron diff should be less than {megatron_threshold}, "
+                    f"but is {resync_diff.mean().item():.6f}"
+                )
+                return
 
             # Compare only each sequence's common prefix when the two greedy
             # generations are expected to diverge: past a near-tie flip the two sides
