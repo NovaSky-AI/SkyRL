@@ -437,3 +437,11 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   The official V4.1 template defaults to **thinking mode** ("Reasoning Effort: 75" system line, `<think>`); wrong
   answers average 291 tokens (not truncation at 1024), so the GSM8K `####` extractor is likely missing thinking-mode
   answers. `chat_template_v41_chat.jinja` defaults to chat mode (used by the DAPO recipe).
+- Stage 2 DAPO LoRA (`run_dapo_dsv41_flash_lora_sync_2node.sh`, R3 on, 2K responses, `v41-dapo-lora2-1792982729.log`,
+  W&B `dsv41_flash_dapo/ycblqga1`): R3 rejects `generator.chat_template` (it retokenizes), so chat mode comes from a
+  symlinked model dir whose tokenizer_config carries the chat template (`DeepSeek-V4.1-Flash-bf16-chat`, on all 7
+  nodes). Baseline AIME-2024 (chat mode, 2K): avg_score 0.067, pass@12 0.77, 1.6K tokens. **Step 1 end to end with
+  R3 over vLLM PP2**: rollout-vs-train logprob diff **0.009**, peak 132 GiB, grad_norm 0.014; step 1665 s (generate
+  452, convert 122, fwd 198, train 768, sync 115) -- one engine for 1536 x 2K samples is the bottleneck.
+- Full V4.1 BF16 copy now on nodes 0, 1, 3, 8, 5, 6, 7. Full-FT recipe `run_gsm8k_dsv41_flash_fullft_6node.sh` (EP=48,
+  3 engines TP8 x PP2, Engram tables on host via `SKYRL_DSV41_ENGRAM_TABLE_DEVICE=cpu`).
