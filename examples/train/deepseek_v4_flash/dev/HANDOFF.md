@@ -508,3 +508,7 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
 - DAPO LoRA checkpoint test (`v41-dapo-lora-ckpt-1793007559`): 2 steps (1525 s, 1478 s; peak 132-135 GiB), step-2
   checkpoint saved in 43 s. Pieces were split (trainer/data state on node 1, policy shards on nodes 3 and 5): merged
   into `$B/ckpts/v41-dapo-lora-ckpt-merged` on all six nodes for the resume test.
+- **V4.1 Stage 1 full FT done (2026-10-26, `v41-gsm8k-fullft6-1793011946`, W&B `dsv41_flash_gsm8k`)**: 10/10 steps on
+  6 nodes (EP=48, 3 vLLM engines TP8 x PP2, chat mode), ~530 s/step, peak 93-97 GiB/GPU. Rollout reward 0.77 0.85 0.81
+  0.87 0.93 0.92 0.96 0.96 0.97 0.95; grad_norm 1.69 -> 0.034; rollout-vs-train logprob diff 0.016-0.019 (steps 1 and 8:
+  8.68 / 0.31, a few vLLM -9999-floor tokens). **GSM8K test pass@1 after training 0.958** (chat mode).
