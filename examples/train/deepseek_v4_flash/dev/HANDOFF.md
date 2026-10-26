@@ -479,3 +479,9 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   grads at EP=48). The 6-node script now sets `use_precision_aware_optimizer=true` (`PRECISION_AWARE_OPTIMIZER`). The
   GLM recipes keep it off over checkpoint-save worries; the V4.1 full-FT checkpoint save/resume row **passes with it
   on** (node 6, `logs/ckpt-v41-precaware.log`, 23 min). Attempt 5: `...-1793000285`.
+- Attempt 5 (`...-1793000285`, no indexer freeze) also died at the first rollout with the NaN HTTP 400, so the NaN is
+  intermittent (2/5 boots) and **not** the indexer freeze. It is vLLM's known occasional non-finite sampled logprob
+  (see `build_logprobs_content`): without R3 the client used the native `/inference/v1/generate`, which fails the
+  whole request at JSON encoding. Fix 5e915cd0: requests asking for logprobs go to `/skyrl/v1/generate`, which floors
+  them and logs `clamped N/M ... non-finite sampled logprobs`. Indexer stays unfrozen for now (could be re-frozen:
+  it never gets a gradient).
