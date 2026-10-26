@@ -418,3 +418,23 @@ async def test_invalid_numeric_tool_argument_can_be_corrected_without_losing_sam
         assert sample.input_ids == second_request["token_ids"] + correction
         assert sum(sample.loss_mask) == len(completion) + len(correction)
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
+
+
+def test_processor_kwargs_change_how_images_are_processed() -> None:
+    pytest.importorskip("torchvision")
+    try:
+        renderer = RenderersRenderer("Qwen/Qwen3-VL-4B-Instruct", size=1, processor_kwargs={"max_pixels": 200704})
+        (image,) = renderer.render([_first_image()], None).media
+    except OSError as error:
+        pytest.skip(f"processor unavailable: {error}")
+
+    # 1024x768 under max_pixels=200704 is a 24x32 patch grid: 192 placeholders, not the default's 768.
+    assert image.length == 192 and image.data["image_grid_thw"].tolist() == [[1, 24, 32]]
+    labels = [label for label, _ in renderer.processor_probes()]
+    assert labels[0] == "text" and len(labels) == 4
+
+
+def test_processor_kwargs_for_a_text_only_model_are_refused(renderer: RenderersRenderer) -> None:
+    with pytest.raises(ValueError, match="processor_kwargs are for a multimodal model"):
+        RenderersRenderer(TOKENIZER, size=1, processor_kwargs={"max_pixels": 200704})
+    assert renderer.processor_probes() == []

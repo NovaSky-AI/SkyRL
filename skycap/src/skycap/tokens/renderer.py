@@ -157,6 +157,21 @@ def _multi_modal_data(media: Sequence[Media]) -> MultiModalData | None:
     return data
 
 
+def png_part(width: int, height: int) -> dict[str, Any]:
+    """A plain white PNG of this size as an OpenAI ``image_url`` content part (a data URI)."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(buffer, "PNG")
+    return {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()},
+    }
+
+
 class RenderersRenderer:
     """A pool of ``renderers`` renderers, one tokenizer each, used from threads.
 
@@ -165,9 +180,12 @@ class RenderersRenderer:
     what was sampled, and every turn would fork instead of extending.
 
     A multimodal renderer (Qwen-VL, Qwen3.5, Gemma 4, ...) processes images
-    itself, with the model's Hugging Face processor and its default settings,
-    which must be the engine's too: an image processed differently has a
-    different number of placeholder tokens than the engine expects.
+    itself, with the model's Hugging Face processor. ``processor_kwargs`` are
+    passed when loading it and must be the engine's (vLLM's
+    ``mm_processor_kwargs``, e.g. ``max_pixels``): an image processed
+    differently has a different number of placeholder tokens than the engine
+    expects. ``processor_probes`` gives the requests that check this against
+    the engine (``TokensBackend.start``).
     """
 
     #: How many encoded items ``features`` keeps.
@@ -180,6 +198,7 @@ class RenderersRenderer:
         size: int = 8,
         thinking_retention: str = "all",
         chat_template_kwargs: Mapping[str, Any] | None = None,
+        processor_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         from renderers import AutoRendererConfig, create_renderer
         from renderers.base import is_multimodal, load_tokenizer
@@ -193,6 +212,13 @@ class RenderersRenderer:
                 AutoRendererConfig(thinking_retention=thinking_retention),
                 chat_template_kwargs=chat_template_kwargs,
             )
+            if processor_kwargs:
+                if not is_multimodal(renderer):
+                    raise ValueError(f"processor_kwargs are for a multimodal model; {tokenizer} renders text only")
+                from transformers import AutoProcessor
+
+                # A multimodal renderer loads its processor lazily, without kwargs; one given here wins.
+                renderer._processor = AutoProcessor.from_pretrained(tokenizer, **processor_kwargs)
             return renderer, loaded
 
         #: (renderer, its tokenizer) pairs, each used by one thread at a time.
@@ -277,16 +303,7 @@ class RenderersRenderer:
         """
         if not self.multimodal:
             return None
-        import base64
-        import io
-
-        from PIL import Image
-
-        buffer = io.BytesIO()
-        Image.new("RGB", (64, 64), "white").save(buffer, "PNG")
-        url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
-        image = {"type": "image_url", "image_url": {"url": url}}
-        probe = [{"role": "user", "content": [image, {"type": "text", "text": "?"}]}]
+        probe = [{"role": "user", "content": [png_part(64, 64), {"type": "text", "text": "?"}]}]
         try:
             rendered = self.render(probe, None)
             if not rendered.media:
@@ -295,6 +312,21 @@ class RenderersRenderer:
         except Exception as error:  # noqa: BLE001 - whatever the processor or the encoder raises
             return f"{type(error).__name__}: {error}"
         return None
+
+    def processor_probes(self) -> list[tuple[str, list[dict[str, Any]]]]:
+        """Requests whose prompt token counts show whether images are processed here as in the engine.
+
+        ``(label, messages)`` pairs, text first: a text-only difference is the chat template's, not the
+        processor's. The images are sized to reach the processor's limits (min and max pixels, aspect ratio)
+        and an ordinary screenshot. Empty for a model that takes no images.
+        """
+        if not self.multimodal:
+            return []
+        ask = {"type": "text", "text": "Describe the image."}
+        probes = [("text", [{"role": "user", "content": "Describe the image."}])]
+        for width, height in ((8, 8), (6000, 1000), (1024, 768)):
+            probes.append((f"{width}x{height} image", [{"role": "user", "content": [png_part(width, height), ask]}]))
+        return probes
 
     def features(self, media: Sequence[Media]) -> dict[str, Any]:
         """vLLM's ``features`` for a prompt with these items: hashes, placeholders and encoded items.

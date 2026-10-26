@@ -98,6 +98,63 @@ class TokensBackend:
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=30),
             connector=aiohttp.TCPConnector(limit=0),
         )
+        try:
+            await self._check_engine_processor()
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _check_engine_processor(self) -> None:
+        """Refuse to start if the engine processes images differently, which would otherwise be silent.
+
+        Each of the renderer's ``processor_probes`` is rendered here and sent to the engine's
+        ``/v1/chat/completions`` (one token): the prompt token counts must agree, or the model would see
+        images at another resolution than the engine is configured for. A text-only difference is the chat
+        template's, and an engine that doesn't answer (not up yet, or asleep) can't be compared: both only
+        warn. Equal counts don't prove equal pixels, but catch different min/max pixels.
+        """
+        probes = getattr(self.renderer, "processor_probes", None)
+        if probes is None or self.media_error:
+            return
+        probes = await asyncio.to_thread(probes)
+        if not probes:
+            return
+        name = self.renderer.name
+        if not self.model:
+            logger.warning("%s: no model name, so image processing isn't checked against the engine", name)
+            return
+        for label, messages in probes:
+            try:
+                ours = len((await asyncio.to_thread(self.renderer.render, messages, None)).token_ids)
+                async with self.session.post(
+                    f"{self.engine_url}/v1/chat/completions",
+                    json={"model": self.model, "messages": messages, "max_tokens": 1},
+                    headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as up:
+                    body = await up.json(content_type=None)
+                    if up.status != 200:
+                        raise RuntimeError(f"HTTP {up.status}: {str(body)[:300]}")
+                theirs = int(body["usage"]["prompt_tokens"])
+            except Exception as error:  # noqa: BLE001 - whatever the engine or the request raises
+                logger.warning("%s: couldn't check image processing against the engine (%s): %s", name, label, error)
+                return
+            if ours == theirs:
+                continue
+            if label == "text":
+                logger.warning(
+                    "%s: a text-only prompt is %d tokens here and %d in the engine (the chat templates differ), "
+                    "so image processing isn't checked against the engine",
+                    name,
+                    ours,
+                    theirs,
+                )
+                return
+            raise RuntimeError(
+                f"{name}: a {label} prompt is {ours} tokens in skycap and {theirs} in the engine, so the image "
+                "processor settings differ. Give skycap the engine's mm_processor_kwargs (processor_kwargs, "
+                "--processor-kwargs)."
+            )
 
     async def close(self) -> None:
         if self._session is not None:

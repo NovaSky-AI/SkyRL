@@ -251,3 +251,58 @@ async def test_start_records_why_a_renderer_cannot_send_images() -> None:
         assert backend.media_error == "no encoder"
     finally:
         await backend.close()
+
+
+def _has_image(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(m["content"], list) and any(p.get("type") == "image_url" for p in m["content"]) for m in messages
+    )
+
+
+async def _start_with_probes(chat_tokens: Any, *, model: str | None = "policy") -> Any:
+    """A backend whose renderer probes one text and one image prompt, against an engine answering ``chat_tokens``."""
+    from aiohttp.test_utils import TestServer
+
+    from skycap.tokens.backend import TokensBackend
+    from tests.fake_renderer import FakeRenderer
+    from tests.mock_engine import MockEngine
+
+    renderer = FakeRenderer()
+    renderer.processor_probes = lambda: [("text", [user("hi")]), ("4x4 image", [look("what?", image("probe", 4))])]  # type: ignore[attr-defined]
+    mock = MockEngine()
+    mock.chat_tokens = None if chat_tokens is None else lambda messages: chat_tokens(renderer, messages)
+    engine_server = TestServer(mock.app())
+    await engine_server.start_server()
+    try:
+        backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, model=model)
+        await backend.start()
+        await backend.close()
+        return mock
+    finally:
+        await engine_server.close()
+
+
+def _rendered(renderer: Any, messages: list[dict[str, Any]]) -> int:
+    return len(renderer.render(messages, None).token_ids)
+
+
+async def test_start_passes_when_the_engine_processes_images_alike() -> None:
+    mock = await _start_with_probes(_rendered)
+
+    assert [len(r["messages"]) for r in mock.chat_requests] == [1, 1]
+    assert all(r["max_tokens"] == 1 and r["model"] == "policy" for r in mock.chat_requests)
+
+
+async def test_start_refuses_an_engine_that_processes_images_differently() -> None:
+    with pytest.raises(RuntimeError, match="image processor settings differ"):
+        await _start_with_probes(lambda renderer, messages: _rendered(renderer, messages) + 3 * _has_image(messages))
+
+
+async def test_a_chat_template_difference_or_an_unreachable_engine_only_warns() -> None:
+    # The text probe already differs, so the images can't be compared.
+    mock = await _start_with_probes(lambda renderer, messages: _rendered(renderer, messages) + 1)
+    assert len(mock.chat_requests) == 1
+    # No chat endpoint (404), and no model name to ask for: skipped.
+    await _start_with_probes(None)
+    mock = await _start_with_probes(_rendered, model=None)
+    assert mock.chat_requests == []

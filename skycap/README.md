@@ -71,10 +71,14 @@ uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
   --tokenizer Qwen/Qwen3-VL-8B-Instruct --record-dir ./record
 ```
 
-The renderer uses the model's own processor settings, so run the engine
-without `mm_processor_kwargs`: an image processed differently has a different
-number of placeholders than the engine expects. Encoding the images for the
-engine needs `vllm` installed beside skycap.
+`--processor-kwargs` (a JSON object) must be the engine's `mm_processor_kwargs`,
+e.g. `'{"max_pixels": 1003520}'`; without it the processor's defaults are used.
+An image processed differently has a different number of placeholders than the
+engine expects, so at start skycap sends the engine a text prompt and a few
+image prompts (`/v1/chat/completions`, one token each) and refuses to start if
+an image's prompt token count differs. Encoding the images for the engine needs
+`vllm` installed beside skycap; a model whose images can't be encoded serves
+text only, and a call with images gets a 400.
 
 ### APIs
 
