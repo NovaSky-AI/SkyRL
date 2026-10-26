@@ -498,3 +498,13 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
 - DAPO LoRA checkpoint test on the full model (`v41-dapo-lora-ckpt-*.log`, 2 steps, ckpt at 2, `LORA_SYNC_PATH` on
   local storage: the default `/tmp` filled node 3's root disk -- my old `~/.cache/uv` was 32 GB there and on node 8,
   now cleaned).
+- **Attempt 8 (`v41-gsm8k-fullft6-1793011946`, W&B `dsv41_flash_gsm8k`, all fixes): V4.1 full FT trains on 6 nodes.**
+  Step 1 724 s (sync 75, gen 13, fwd 80, train 558 incl. optimizer, sync 71), steps 2-3 ~530-560 s (gen ~15 s, fwd ~15 s,
+  train ~430-450 s, sync ~70 s). Peak 93-97 GiB/GPU. Rollout reward 0.77 -> 0.85; grad_norm 1.69, 0.27.
+  Rollout-vs-train logprob diff: step 2 **0.018** (max 1.74). Step 1's 8.68 mean is a handful of tokens at vLLM's
+  -9999 floor (sampled token with -inf logprob) on the **first rollout after the initial full sync** -- the same spot
+  as the NaN logprobs; post-training syncs are clean. Open: what is off in vLLM right after the first full-weight
+  sync (LoRA runs never full-sync). Harmless here (TIS off); matters for DAPO full FT with TIS.
+- DAPO LoRA checkpoint test (`v41-dapo-lora-ckpt-1793007559`): 2 steps (1525 s, 1478 s; peak 132-135 GiB), step-2
+  checkpoint saved in 43 s. Pieces were split (trainer/data state on node 1, policy shards on nodes 3 and 5): merged
+  into `$B/ckpts/v41-dapo-lora-ckpt-merged` on all six nodes for the resume test.
