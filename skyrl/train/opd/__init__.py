@@ -30,10 +30,7 @@ from skyrl.train.opd.teacher_client import (
     TeacherLogprobClient,
     VLLMTeacherClient,
 )
-from skyrl.train.opd.teacher_launch import (
-    launch_teacher,
-    teacher_start_port,
-)
+from skyrl.train.opd.teacher_launch import launch_teacher
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
     TEACHER_LOGPROBS_KEY,
@@ -56,7 +53,6 @@ __all__ = [
     "TeacherLogprobClient",
     "VLLMTeacherClient",
     "launch_teacher",
-    "teacher_start_port",
     "OPDTrainer",
     "apply_opd_to_advantages",
     "pad_teacher_logprobs",

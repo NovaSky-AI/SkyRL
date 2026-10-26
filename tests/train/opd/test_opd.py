@@ -30,7 +30,7 @@ from skyrl.train.opd.teacher_client import (
     TeacherLogprobClient,
     VLLMTeacherClient,
 )
-from skyrl.train.opd.teacher_launch import teacher_start_port
+from skyrl.train.opd.teacher_launch import _teacher_start_port
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
     TEACHER_LOGPROBS_KEY,
@@ -461,7 +461,7 @@ def test_teacher_max_model_len_single_and_multi_turn():
 )
 def test_teacher_start_port_is_past_the_students_windows(overrides, expected):
     cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"] + overrides)
-    assert teacher_start_port(cfg) == expected
+    assert _teacher_start_port(cfg) == expected
 
 
 class FakeRemoteInferenceClient:

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.setup import InferenceServerSetup
 
 
-def teacher_start_port(cfg) -> int:
+def _teacher_start_port(cfg) -> int:
     """The first port window past the student's launched servers.
 
     Each server actor owns ``SERVER_PORT_STRIDE`` ports (HTTP port plus its DP TCPStore probe range)
@@ -72,5 +72,5 @@ def launch_teacher(cfg) -> Tuple["RemoteInferenceClient", "InferenceServerSetup"
         # The name the launched servers know the teacher by, and the `model` scoring requests send.
         model_name=teacher.inference_engine.served_model_name or teacher.model,
         log_path=cfg.trainer.log_path,
-        start_port=teacher_start_port(cfg),
+        start_port=_teacher_start_port(cfg),
     )
