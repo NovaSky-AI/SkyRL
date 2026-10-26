@@ -5,8 +5,8 @@ the student trajectory, nothing else. Therefore, the teacher can actually be tre
 like an inference engine.
 
 The ``TeacherLogprobClient`` abstract base class defines how the teacher model should
-behave, including the concurrency limit, empty-response case, the length and finiteness
-invariants, etc. Creating a new teacher backend consists of implementing the
+behave, including the concurrency limit, empty-response case, the length, missing-logprob and
+finiteness invariants, etc. Creating a new teacher backend consists of implementing the
 ``_compute_logprobs`` method. Callers will use the public method, ``compute_logprobs``.
 
 Backends:
@@ -63,7 +63,8 @@ class TeacherLogprobClient(abc.ABC):
 
         Returns one float per response token, in order. Empty responses return ``[]`` without a
         request. At most ``max_concurrency`` requests are in flight per client. A wrong number of
-        values or a non-finite value raises: a NaN or infinity would poison the advantages.
+        values, a missing value or a non-finite value raises: a missing value means the teacher could
+        not score the student's token id, and a NaN or infinity would poison the advantages.
         """
         if not response_ids:
             return []
@@ -71,6 +72,13 @@ class TeacherLogprobClient(abc.ABC):
             logprobs = await self._compute_logprobs(list(prompt_ids), list(response_ids))
         if len(logprobs) != len(response_ids):
             raise RuntimeError(f"teacher returned {len(logprobs)} logprobs for {len(response_ids)} response tokens")
+        missing = [i for i, value in enumerate(logprobs) if value is None]
+        if missing:
+            shown = missing[:5]
+            raise RuntimeError(
+                f"teacher returned no logprob for response position(s) {shown} (token ids "
+                f"{[response_ids[i] for i in shown]}); the teacher's vocabulary may differ from the student's"
+            )
         if not all(math.isfinite(value) for value in logprobs):
             raise RuntimeError(
                 "teacher returned a non-finite logprob (NaN or infinity); its forward pass is numerically broken "
@@ -79,11 +87,11 @@ class TeacherLogprobClient(abc.ABC):
         return logprobs
 
     @abc.abstractmethod
-    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[float]:
+    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[Optional[float]]:
         """Backend-specific request. Called by ``compute_logprobs``; do not call directly.
 
-        Must return the teacher's log-probability of each response token, in order, as floats.
-        ``response_ids`` is non-empty.
+        Must return the teacher's log-probability of each response token, in order: a float, or ``None``
+        where the teacher returned no logprob for that token. ``response_ids`` is non-empty.
         """
 
     async def aclose(self) -> None:
@@ -91,8 +99,8 @@ class TeacherLogprobClient(abc.ABC):
         return None
 
 
-def _vllm_prompt_logprob(entry: Any, token_id: int) -> float:
-    """The logprob of ``token_id`` in one vLLM ``prompt_logprobs`` entry.
+def _vllm_prompt_logprob(entry: Any, token_id: int) -> Optional[float]:
+    """The logprob of ``token_id`` in one vLLM ``prompt_logprobs`` entry, or ``None`` if it has none.
 
     An entry is ``{token_id: {"logprob": float, "rank": int, "decoded_token": str}, ...}`` (keys are
     strings once serialized to JSON) covering the prompt token at that position plus any top-k
@@ -100,19 +108,10 @@ def _vllm_prompt_logprob(entry: Any, token_id: int) -> float:
     lookup by id works for any k, so a server configured to return more entries is fine.
     """
     if not isinstance(entry, dict):
-        raise RuntimeError(
-            f"vLLM has no prompt logprob for token id {token_id} (entry {entry!r}); position 0 of a sequence "
-            "cannot be scored, so the prompt must be non-empty"
-        )
+        return None
     value = entry.get(str(token_id), entry.get(token_id))
-    if value is None:
-        raise RuntimeError(
-            f"vLLM returned no logprob for token id {token_id}; the teacher's tokenizer does not match the student's"
-        )
     logprob = value.get("logprob") if isinstance(value, dict) else value
-    if logprob is None:
-        raise RuntimeError(f"vLLM returned a null logprob for token id {token_id}")
-    return float(logprob)
+    return None if logprob is None else float(logprob)
 
 
 def normalize_server_url(server_url: Optional[str]) -> str:
@@ -213,7 +212,7 @@ class VLLMTeacherClient(TeacherLogprobClient):
                 await asyncio.sleep(delay)
         raise AssertionError("unreachable")
 
-    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[float]:
+    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[Optional[float]]:
         body = {
             "model": self._model_name,
             "prompt": prompt_ids + response_ids,
@@ -282,7 +281,7 @@ class SkyRLTeacherClient(TeacherLogprobClient):
     def server_setup(self) -> Optional["InferenceServerSetup"]:
         return self._server_setup
 
-    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[float]:
+    async def _compute_logprobs(self, prompt_ids: List[int], response_ids: List[int]) -> List[Optional[float]]:
         token_ids = prompt_ids + response_ids
         response = await self._client.sample(
             {
@@ -302,14 +301,7 @@ class SkyRLTeacherClient(TeacherLogprobClient):
                 f"the teacher deployment returned {len(prompt_logprobs)} prompt logprobs for {len(token_ids)} tokens"
             )
         tail = list(prompt_logprobs)[-len(response_ids) :]
-        missing = [i for i, value in enumerate(tail) if value is None]
-        if missing:
-            shown = missing[:5]
-            raise RuntimeError(
-                f"the teacher deployment returned no logprob for response position(s) {shown} "
-                f"(token ids {[response_ids[i] for i in shown]}); the teacher's vocabulary may differ from the student's"
-            )
-        return [float(value) for value in tail]
+        return [None if value is None else float(value) for value in tail]
 
     async def aclose(self) -> None:
         # TODO (kyuds): consider gracefully shutting down the deployment in server_setup here (router,

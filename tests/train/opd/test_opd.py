@@ -76,6 +76,11 @@ class WrongLengthTeacher(TeacherLogprobClient):
         return [0.0] * (len(response_ids) + 1)
 
 
+class MissingLogprobTeacher(TeacherLogprobClient):
+    async def _compute_logprobs(self, prompt_ids, response_ids):
+        return [-0.5, None] + [-0.5] * (len(response_ids) - 2)
+
+
 class NonFiniteTeacher(TeacherLogprobClient):
     """Answers with one bad value first, then well-formed logprobs."""
 
@@ -148,6 +153,12 @@ async def test_base_client_empty_response_short_circuits():
 async def test_base_client_length_invariant():
     with pytest.raises(RuntimeError, match="returned 3 logprobs for 2"):
         await WrongLengthTeacher().compute_logprobs([1], [5, 6])
+
+
+@pytest.mark.asyncio
+async def test_base_client_rejects_missing_logprobs():
+    with pytest.raises(RuntimeError, match=r"position\(s\) \[1\] \(token ids \[6\]\); the teacher's vocabulary"):
+        await MissingLogprobTeacher().compute_logprobs([1], [5, 6, 7])
 
 
 @pytest.mark.asyncio
@@ -262,7 +273,7 @@ async def test_vllm_wrong_token_id_and_short_response_raise():
         return _vllm_response(prompt_len=1, ids=[99], logprobs=[-1.0])  # we sent 30
 
     client._post = scored_a_different_token  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="tokenizer"):
+    with pytest.raises(RuntimeError, match="vocabulary may differ"):
         await client.compute_logprobs([10], [30])
 
     async def too_short(body):

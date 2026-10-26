@@ -122,7 +122,7 @@ divides by a constant, where the default `token_mean` divides by the batch's own
   and with any reward-only estimator in pure mode: GRPO would otherwise sum the per-token signal
   into one scalar per sequence.
 - `skyrl.train.opd.teacher_client.TeacherLogprobClient` is the abstract base class for teachers; it owns the concurrency limit,
-  the length and finiteness checks, and a backend implements one method, `_compute_logprobs`.
+  the length, missing-logprob and finiteness checks, and a backend implements one method, `_compute_logprobs`.
 
 ## Metrics
 
