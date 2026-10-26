@@ -1,19 +1,5 @@
 """On-policy distillation (OPD) entrypoint.
 
-The student samples its own rollouts; a frozen teacher served by an inference engine scores every
-response token; the negative per-token reverse KL to the teacher,
-``log pi_teacher - log pi_student``, becomes a dense advantage. Pure distillation is the default
-(the environment reward is only logged); ``trainer.algorithm.opd.use_task_reward=true`` adds the
-teacher term on top of the reward's advantages instead.
-
-On top of ``main_base``: ``OPDTrainer.generate`` runs one ``generator.generate`` call per prompt
-group concurrently and scores each group under the teacher as soon as its rollouts are back, so
-teacher latency overlaps with the rest of the batch's generation and any generator works; the
-trainer's other overrides consume the resulting ``GeneratorOutput["teacher_logprobs"]``; and this
-experiment class builds the teacher client, launching the teacher's vLLM deployment in the job
-when ``trainer.teacher.backend="skyrl"`` (the default). Nothing verifies the teacher before training
-yet; see the TODO in ``_setup_trainer``. See ``skyrl.train.opd``.
-
 Usage (teacher launched by the job on its own GPUs):
 
     uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \\
@@ -24,7 +10,7 @@ Usage (teacher launched by the job on its own GPUs):
         data.train_data="['$HOME/data/dapo/dapo-math-17k-cleaned.parquet']" \\
         environment.env_class=aime ...
 
-A server you run instead: ``trainer.teacher.backend=vllm trainer.teacher.server_url=http://host:8000``. Run scripts:
+For more usecases and example scripts, look at
 ``examples/train/on_policy_distillation/``.
 """
 
@@ -76,27 +62,8 @@ class OPDExp(BasePPOExp):
 
     def _setup_trainer(self) -> RayPPOTrainer:
         self._teacher_client = self.get_teacher_client()
-        # TODO (kyuds): preflight checks on the teacher before any model is loaded. Nothing verifies the
-        # teacher today, so a wrong setup surfaces minutes into the run, or never: a teacher with a
-        # different vocabulary accepts the student's token ids and scores them deterministically. What other frameworks do (surveyed 2026-09-22):
-        #   - NeMo-RL (nemo_rl/algorithms/distillation.py, check_vocab_equality): loads the teacher
-        #     tokenizer and asserts get_vocab(), len() and config.vocab_size equal the student's;
-        #     skippable with an env var. The only one of these with a tokenizer check.
-        #   - verl (verl/workers/config/distillation.py, validate_and_prepare_for_distillation): the
-        #     teacher's max_model_len must cover prompt_length + response_length + 1; teacher config
-        #     completeness (model_path, key, num_replicas, no duplicate keys).
-        #   - prime-rl (orchestrator/clients.py, wait_for_ready / maybe_check_has_model): polls /health
-        #     on every teacher server until ready, then requires the configured model in /v1/models.
-        #   - Miles (utils/arguments.py, rollout/on_policy_distillation.py): argument validation only
-        #     (teacher URL syntax, duplicates, a default entry, checkpoint path exists); no probe.
-        #   - tinker-cookbook: nothing; both sides share the student's tokenizer by construction.
-        # Candidates here, to be decided: NeMo-RL's vocabulary equality (a launched teacher's model is
-        # an HF id or path; an external vLLM teacher's served name need not be), prime-rl's /v1/models
-        # listing for external vLLM teachers, verl's context bound (a launched teacher gets
-        # max_model_len by construction), and a reproducibility probe that scores one sequence n times
-        # and refuses replica-dependent teachers (hosted serverless replicas disagreed by ~0.25 nats
-        # mean / 2.7 nats max on identical requests in 2026-09-17 probes, more than the 0.01-0.09 nat
-        # distillation signal).
+        # TODO (kyuds): It might be good to consider whether we want to have
+        # preflight checks on the teacher before any model is loaded.
         return super()._setup_trainer()
 
 

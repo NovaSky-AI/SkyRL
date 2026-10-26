@@ -3,15 +3,13 @@ title: "On-Policy Distillation"
 ---
 
 On-policy distillation (OPD) trains a student on its own rollouts while a frozen teacher grades every
-token: the negative per-token reverse KL to the teacher, `log π_teacher − log π_student`, is the
-advantage. It keeps the on-policy character of RL and adds a dense, per-token signal
+token using the negative per-token reverse KL to the teacher, `log π_teacher − log π_student`.
+It keeps the on-policy character of RL and adds a dense, per-token signal
 ([Thinking Machines](https://thinkingmachines.ai/blog/on-policy-distillation/)).
 
-SkyRL's entrypoint, `skyrl.train.entrypoints.main_opd` (library code under `skyrl/train/opd/`, run scripts under `examples/train/on_policy_distillation/`), serves the teacher from an
-inference engine rather than a training worker: it never syncs weights, can be much larger than the
-student, and scores each prompt's group of rollouts as soon as it finishes, while the other groups are
-still generating, so teacher latency overlaps with generation. The generator is untouched: any
-`GeneratorInterface` works.
+SkyRL's entrypoint, `skyrl.train.entrypoints.main_opd` (library code under `skyrl/train/opd/`, run scripts under `examples/train/on_policy_distillation/`),
+serves the teacher from an inference engine. During a rollout, the teacher model scores each prompt's group of rollouts as soon as it finishes. Importantly,
+the teacher works with the `GeneratorInterface` to do this scoring. Therefore, any pre-existing `GeneratorInterface` implementation can be left untouched.
 
 ## Quickstart
 
@@ -23,7 +21,7 @@ bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.s
 ```
 
 The only OPD-specific flags are the teacher and, optionally, the mixing knobs. By default the job launches
-the teacher's vLLM deployment on its own GPUs:
+the teacher's vLLM deployment on its own cluster GPUs:
 
 ```bash
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
@@ -38,30 +36,36 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
 
 <Callout type="warn">
 The student and the teacher must share a tokenizer: the teacher scores the student's token ids verbatim.
+SkyRL's OPD implementation currently does not support cross-tokenizer training.
 </Callout>
 
 ## Teacher backends
 
-Where the teacher lives is one choice with two answers; each backend reads only its own fields, and
-setting the other's fields is a config error.
+Currently SkyRL allows for the teacher model to be setup in two different ways. Each method requires
+setting different teacher configurations.
 
 - `trainer.teacher.backend=skyrl` (default): the job launches a vLLM deployment of `trainer.teacher.model`
-  (an HF id or local path) from `trainer.teacher.inference_engine`, the same block as
-  `generator.inference_engine`, on its own GPUs, and drives it through a `RemoteInferenceClient` exactly as
-  the student's engines are. The teacher's `num_engines · tensor_parallel_size · pipeline_parallel_size ·
-  data_parallel_size` GPUs come on top of the student's; a budget the cluster cannot satisfy surfaces as the
-  teacher placement group's timeout. Defaults that differ from the student's block: prefix caching off
-  (scoring requests never read it), `gpu_memory_utilization` 0.9, Ray Prometheus stats off; `max_model_len`
-  defaults to the longest input + longest response + 1. Never weight-synced or slept.
-- `trainer.teacher.backend=vllm`: one vLLM endpoint you run per teacher model, given by
-  `trainer.teacher.server_url`: a stock `vllm serve`, or a router in front of several servers, such as the
-  `proxy_url` that SkyRL's `serve` entrypoint logs. Scored through the OpenAI-compatible `/v1/completions`
+  (an HF id or local path) from `trainer.teacher.inference_engine` (same schema as `generator.inference_engine`)
+  similar to how SkyRL creates vLLM deployments for the rollout engine. The teacher requires
+  `num_engines · tensor_parallel_size · pipeline_parallel_size · data_parallel_size` GPUs to be available
+  in addition to the GPUs required for the trainer and rollout inference engine.
+- `trainer.teacher.backend=vllm`: sometimes there may be teacher models already running on external
+  vLLM deployments, or it might be more convenient to run the teacher models from a different cluster.
+  In this situation, it is possible to provide vLLM endpoints as the teacher model via `trainer.teacher.server_url`.
+  The teacher scores student trajectories through the OpenAI-compatible `/v1/completions`
   with vLLM's `prompt_logprobs` parameter; `trainer.teacher.model` is the served model name.
 
-There are no preflight checks yet: nothing verifies the teacher's tokenizer or context length before
-training (a launched teacher gets its context by construction; a TODO in
-`skyrl/train/entrypoints/main_opd.py` records what other frameworks check). Pick a teacher from the
-student's model family and serve it with enough context.
+<Callout type="info">\
+The SkyRL-managed teacher backend shares the same configuration schema with the rollout engine. However, there
+are some defualts to the inference engine config that are different between the teacher and rollout engine:
+
+- Prefix caching is off (because scoring requests aren't autoregressive)
+- `gpu_memory_utilization` 0.9
+- Ray Prometheus stats off
+- `max_model_len` defaults to the longest input + longest response + 1.
+
+Furthermore, the teacher model is never weight-synced or slept.
+</Callout>
 
 ## Pure and mixed distillation
 

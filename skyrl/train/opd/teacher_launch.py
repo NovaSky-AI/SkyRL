@@ -5,8 +5,7 @@ router), with a frozen-model argument set from ``build_frozen_vllm_cli_args``: n
 sleep mode, no LoRA. It gets its own placement group (never the colocate group), a port window past
 the student's, and is driven through a ``RemoteInferenceClient`` exactly as the student's engines are.
 The rules below (which fields are frozen, the context bound, the port offset) are OPD's; core only
-learns "launch a deployment from these args at this port and hand back its client". Design notes:
-``plan/opd-entrypoint/teacher-launcher.md`` in the workspace.
+learns "launch a deployment from these args at this port and hand back its client".
 """
 
 import copy

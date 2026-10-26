@@ -18,10 +18,6 @@ Backends:
 - ``VLLMTeacherClient``: one vLLM endpoint you run per teacher model (a stock ``vllm serve``, or a
   router in front of several servers such as the one SkyRL's ``serve`` entrypoint starts), through the
   OpenAI-compatible ``/v1/completions`` with vLLM's ``prompt_logprobs`` parameter.
-
-``VLLMTeacherClient`` is over ``aiohttp`` so the package adds no dependency. Neither is an
-``InferenceEngineInterface`` implementation, deliberately: a frozen teacher never sleeps, wakes,
-syncs weights or pauses, and a class of eleven stubs would only hide that.
 """
 
 from __future__ import annotations
