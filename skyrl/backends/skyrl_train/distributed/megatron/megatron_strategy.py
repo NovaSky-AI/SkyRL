@@ -332,6 +332,15 @@ class MegatronStrategy(DistributedStrategy):
                     # Let it initialize itself exactly as its step() would.
                     te_initialize_state = getattr(sub_opt, "initialize_state", None)
                     for group in sub_opt.param_groups:
+                        if te_initialize_state is not None and "step" not in group and group["params"]:
+                            # FusedAdam keeps one step count per group and creates it on its first step(); the
+                            # checkpoint loader matches param groups including it. Start it at 0 so the next
+                            # step() makes it 1, as on a fresh run.
+                            group["step"] = (
+                                torch.tensor([0], dtype=torch.int, device=group["params"][0].device)
+                                if getattr(sub_opt, "capturable", False)
+                                else 0
+                            )
                         # torch's Adam/AdamW (the CPU sub-optimizer): fused / capturable kernels need `step` on the
                         # param's device, otherwise it is a CPU scalar.
                         on_param_device = group.get("fused") or group.get("capturable")
