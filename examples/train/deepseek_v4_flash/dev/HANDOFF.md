@@ -401,3 +401,14 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   vLLM-side gap is an open item (upstream issue candidate).
 - Weight-sync buffer: SkyRL floors the packed IPC/NCCL buffer at the checkpoint's largest tensor; the Engram table
   asked for 183 GiB (fixed: `checkpoint_shapes._NOT_SYNCED`).
+- **Stage 0 passes on the slice (2026-10-26)**:
+  - full-FT row (`v41sync5-full-*.log`, 6-layer slice): Megatron vs vLLM 0.248 pre-sync, 0.258 post-sync (< 0.3).
+  - LoRA row (`v41lora2-r1-*.log`, ratio-1 sub-slice [0,4,5]): zero adapter 0.122, stale sampler 0.462 (> 0.3 with
+    LoRA-B x32), updated adapter 0.118.
+  - Sync bug fixed on the way: vLLM's V4.1 text model writes `attn_sink` with a direct `copy_` (as V4 does); the
+    V4 reload patch stashed sinks only when their layer was still on meta, which depends on the sync's chunk order,
+    so some syncs served zeroed sinks. It now stashes every sink during a SkyRL receive.
+  - vLLM's V4.1 serving is not reproducible run to run: regenerating the same prompts with no sync gives 0.121 on
+    common prefixes (80/80 diverge), so the pre/post-sync vLLM comparison is noise for this model. The V4.1 row
+    gates the sync on post-sync vLLM vs Megatron instead (`resync_vs_megatron`). Negative control
+    (`SKYRL_DEBUG_SKIP_SINK_STASH=1`): `logs/v41negctl-full-*.log`.
