@@ -16,8 +16,10 @@ from loguru import logger
 from omegaconf import OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
+    PlacementGroup,
     placement_group,
     placement_group_table,
+    remove_placement_group,
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from torch.optim import Optimizer
@@ -67,6 +69,7 @@ from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.train.utils import deadline
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
+    cleanup_on_error,
     configure_ray_worker_logging,
     get_ray_pg_ready_with_timeout,
     ray_noset_visible_devices,
@@ -784,7 +787,11 @@ class PPORayActorGroup:
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
         self._last_dp_size: Optional[int] = None
-        self._initiate_actors(pg, num_gpus_per_actor)
+        self._actor_handlers = []
+        self.actor_infos = []
+        self._internal_pg: Optional[PlacementGroup] = None
+        with cleanup_on_error(self.shutdown, "Shutting down the actor group"):
+            self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[ResolvedPlacementGroup], num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
@@ -827,6 +834,7 @@ class PPORayActorGroup:
 
             raw_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            self._internal_pg = raw_pg
 
         def _scheduling_strategy_for_rank(rank):
             if reordered_bundle_indices:
@@ -898,6 +906,16 @@ class PPORayActorGroup:
         if self.actor_infos:
             self._last_dp_size = self.actor_infos[0].rank.dp_size
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")
+
+    def shutdown(self) -> None:
+        """Kill the workers and remove the placement group this group created, if any."""
+        for actor in self._actor_handlers:
+            ray.kill(actor)
+        self._actor_handlers = []
+        self.actor_infos = []
+        if self._internal_pg is not None:
+            remove_placement_group(self._internal_pg)
+            self._internal_pg = None
 
     def async_init_model(
         self,
