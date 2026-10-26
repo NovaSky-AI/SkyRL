@@ -45,11 +45,12 @@ def apply_deepseek_v41_patches() -> bool:
     if _APPLIED:
         return True
     if os.environ.get("SKYRL_DSV41_FAULTHANDLER") == "1":
-        # Debug aid for collective hangs (py-spy needs ptrace): `kill -USR1 <worker pid>` writes every
-        # thread's Python stack to the worker's stderr.
+        # Debug aid for collective hangs and async CUDA faults (py-spy needs ptrace): `kill -USR1 <worker pid>`,
+        # or the NCCL watchdog's SIGABRT, writes every thread's Python stack to the worker's stderr.
         import faulthandler
         import signal
 
+        faulthandler.enable(all_threads=True)
         faulthandler.register(signal.SIGUSR1, all_threads=True)
     try:
         from megatron.core.models.hybrid import hybrid_block, hybrid_model
