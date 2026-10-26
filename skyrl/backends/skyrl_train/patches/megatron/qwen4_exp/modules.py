@@ -1,9 +1,11 @@
 """Megatron modules for the Qwen4Exp-specific pieces of Qwen3.8-Flash-Next.
 
 Parameter names mirror the HF ``Qwen4ExpText*`` modules so the bridge maps them one to one.
-All of them assume ``tensor_model_parallel_size == 1`` and no context parallelism (checked by
-the provider): the hyper-connection and PLE parameters are replicated, and PLE needs the whole,
-contiguous token stream of every packed sequence.
+The hyper-connection and PLE parameters are replicated over TP. Under sequence parallelism they
+run on this rank's tokens (marked ``sequence_parallel`` so their gradients are summed over TP),
+except PLE and the QSA indexer, which need every packed sequence whole: the layer gathers their
+input over TP (``sp_gather``) and PLE keeps this rank's tokens of its output (``sp_local``). No
+context parallelism (checked by the provider).
 """
 
 import json
@@ -19,11 +21,36 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from huggingface_hub import hf_hub_download
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet
+from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
 from megatron.core.transformer.transformer_config import TransformerConfig
 from safetensors import safe_open
 from torch import Tensor, nn
 
 logger = logging.getLogger(__name__)
+
+
+def _mark_sequence_parallel(module: nn.Module, config: TransformerConfig) -> None:
+    """Replicated over TP but fed this rank's tokens under SP: Megatron sums these grads over TP."""
+    for p in module.parameters():
+        setattr(p, "sequence_parallel", config.sequence_parallel)
+
+
+def sp_gather(x: Tensor, group) -> Tensor:
+    """All-gather the sequence-parallel ``x`` ([s/TP, ...]) over ``group`` (None: no SP).
+
+    Backward reduce-scatters: every rank's gradient covers the whole gathered sequence.
+    """
+    if group is None:
+        return x
+    return gather_from_sequence_parallel_region(x, tensor_parallel_output_grad=True, group=group)
+
+
+def sp_local(x: Tensor, group) -> Tensor:
+    """This rank's rows of the full-sequence ``x`` ([s, ...]); backward zero-pads (not a gather)."""
+    if group is None:
+        return x
+    n = x.shape[0] // group.size()
+    return x[group.rank() * n : (group.rank() + 1) * n]
 
 
 class ZeroCenteredRMSNorm(nn.Module):
@@ -61,6 +88,7 @@ class Qwen4ExpGatedResidual(nn.Module):
         self.input_mix_weight_down = nn.Linear(n * c, config.qwen4_hc_lowrank, bias=False)
         self.input_mix_weight_up = nn.Linear(config.qwen4_hc_lowrank, n * c, bias=False)
         self.block_inject_weight = nn.Linear(n * c, n, bias=False) if use_combine else None
+        _mark_sequence_parallel(self, config)
 
     def forward(self, x: Tensor):
         normed = self.hc_norm(x)
@@ -157,6 +185,9 @@ class Qwen4ExpPLE(nn.Module):
         self.norm_query = ZeroCenteredRMSNorm(n * c, group_size=c, eps=config.layernorm_epsilon)
         self.norm_conv = ZeroCenteredRMSNorm(n * c, group_size=c, eps=config.layernorm_epsilon)
         self.conv1d = nn.Conv1d(n * c, n * c, kernel_size=self.kernel, groups=n * c, dilation=self.dilation, bias=False)
+        # The layer runs PLE on the TP-gathered sequence and keeps this rank's tokens of the output,
+        # so each rank's grads cover only its own tokens, as for the hyper-connections.
+        _mark_sequence_parallel(self, config)
 
         self._tokens: Optional[Tensor] = None
         self._cu_seqlens: Optional[Tensor] = None
@@ -305,7 +336,8 @@ class Qwen4ExpPLE(nn.Module):
         s, b, nc = hidden_states.shape
         if b != 1 or self._tokens.shape[0] != s:
             raise NotImplementedError(
-                "Qwen4Exp PLE needs packed sequences (remove_microbatch_padding=true), TP=1 and CP=1; "
+                "Qwen4Exp PLE needs packed sequences (remove_microbatch_padding=true), the TP-gathered "
+                "sequence and CP=1; "
                 f"got hidden {tuple(hidden_states.shape)} for {self._tokens.shape[0]} tokens."
             )
         x = hidden_states.view(s, nc)

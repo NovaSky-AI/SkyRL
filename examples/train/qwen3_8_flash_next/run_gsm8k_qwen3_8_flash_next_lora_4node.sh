@@ -12,9 +12,9 @@ set -x
 #
 # Megatron support is SkyRL's own (skyrl/backends/skyrl_train/patches/megatron/qwen4_exp), which
 # constrains the recipe:
-#   - TP=CP=PP=1; scale is expert parallelism, here EP=16 (expert-DP 2 on 32 GPUs). EP also
-#     row-shards the frozen ~51B-parameter PLE n-gram table (~100 GB / EP per rank, ~6.4 GB at
-#     EP=16, kept in pinned host memory).
+#   - CP=PP=1. TP=1 here (TP > 1 runs with sequence parallelism); scale is expert parallelism,
+#     EP=16 (expert-DP 2 on 32 GPUs). EP also row-shards the frozen ~51B-parameter PLE n-gram
+#     table (~100 GB / EP per rank, ~6.4 GB at EP=16, kept in pinned host memory).
 #   - Text only (language_model_only) and packed sequences (remove_microbatch_padding).
 #   - Sequences must stay within the QSA indexer budget (2048 + 3 tokens), where the indexer
 #     selects every key and attention is exactly dense; longer sequences raise. Hence the

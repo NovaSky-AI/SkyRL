@@ -68,10 +68,17 @@ def _long_context_input(model_name, tokenizer):
 @pytest.mark.asyncio
 @pytest.mark.megatron_models
 @pytest.mark.h100
-@pytest.mark.parametrize("threshold", [pytest.param(1e-1, id="qwen3.8-flash-next-4layer_h100_ep4_qsa8k")])
-async def test_qwen38_qsa_long_context_logprobs(threshold, monkeypatch):
+@pytest.mark.parametrize(
+    "tp,threshold",
+    [
+        pytest.param(1, 1e-1, id="qwen3.8-flash-next-4layer_h100_ep4_qsa8k"),
+        # Sequence parallelism: the indexer selects on the TP-gathered sequence.
+        pytest.param(2, 1e-1, id="qwen3.8-flash-next-4layer_h100_tp2_ep4_qsa8k"),
+    ],
+)
+async def test_qwen38_qsa_long_context_logprobs(tp, threshold, monkeypatch):
     model_name = QWEN38_4LAYER
-    tp, ep, inference_tp, num_gpus = 1, 4, 4, 4
+    ep, inference_tp, num_gpus = 4, 4, 4
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
         cfg = get_test_actor_config(model_name=model_name)
         cfg.trainer.strategy = "megatron"

@@ -576,8 +576,9 @@ async def construct_training_input_from_generator_output(generator_output, token
         # Qwen3.8-Flash-Next 4-layer slice (QWEN38_4LAYER) on 4xH100-80G: GDN with a sigmoid output
         # gate, gated attention with the QSA indexer (dense regime: sequences stay under
         # indexer_budget), 512-expert shared-expert MoE, gated low-rank hyper-connections, the PLE
-        # n-gram embedding sharded over EP=4, and the final hyper-connection mixer. The bridge
-        # supports TP=1 only, so EP is the training axis; vLLM runs TP=4.
+        # n-gram embedding row-sharded over EP=4, and the final hyper-connection mixer. vLLM runs
+        # TP=4. The tp2 row runs the same slice with sequence parallelism: PLE and the QSA indexer
+        # on the TP-gathered sequence, 12Q/1KV attention heads per rank.
         pytest.param(
             1,
             1,
@@ -592,6 +593,22 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             None,
             id="qwen3.8-flash-next-4layer_h100_ep4",
+            marks=pytest.mark.h100,
+        ),
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            QWEN38_4LAYER,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="qwen3.8-flash-next-4layer_h100_tp2_ep4",
             marks=pytest.mark.h100,
         ),
         # Full-FP8 rows: blockwise FP8 Megatron compute + FP8 vLLM rollout fed

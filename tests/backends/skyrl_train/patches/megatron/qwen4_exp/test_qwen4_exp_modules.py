@@ -3,6 +3,7 @@
 Covers the gated low-rank hyper-connection (with and without inject, i.e. the final mixer) and
 the PLE n-gram layer on a packed stream: two sequences with EOS tokens inside, compared with HF
 run on each sequence separately (HF resets the n-gram context and the dilated conv per sequence).
+Also checks PLE under the row-sharded table and under sequence parallelism (gloo processes).
 
 Tiny configs, fp32, CPU.
 """
@@ -41,8 +42,9 @@ def _hf_config():
     )
 
 
-def _mcore_config(c):
+def _mcore_config(c, sequence_parallel=False):
     return types.SimpleNamespace(
+        sequence_parallel=sequence_parallel,
         hidden_size=c.hidden_size,
         layernorm_epsilon=c.rms_norm_eps,
         qwen4_hc_count=c.hc_count,
@@ -195,3 +197,73 @@ def test_ple_row_sharded_matches_unsharded(tmp_path):
     import torch.multiprocessing as mp
 
     mp.spawn(_sharded_ple_worker, args=(3, str(tmp_path / "init")), nprocs=3)
+
+
+def _sequence_parallel_ple_worker(rank, world_size, init_file):
+    import torch.distributed as dist
+
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+        Qwen4ExpPLE,
+        sp_gather,
+        sp_local,
+    )
+
+    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    # megatron-core's SP gather / reduce-scatter allocate on torch.cuda.current_device().
+    torch.cuda.current_device = lambda: "cpu"
+    try:
+        c = _hf_config()
+        ref = hf.Qwen4ExpTextPLELayer(c, layer_idx=1, ple_layer_index=0)
+        _randomize(ref)
+        emb = ref.ple_embedding
+        weights = {k: v for k, v in ref.state_dict().items() if not k.startswith("ple_embedding.")}
+        consts = (emb.layer_multipliers.clone(), emb.ngram_heads_vocab_sizes.clone(), emb.ngram_heads_offsets.clone())
+        ples = []
+        for sp in (False, True):
+            ple = Qwen4ExpPLE(_mcore_config(c, sequence_parallel=sp), ple_layer_index=0)
+            ple.load_state_dict(weights)
+            ple.set_table(emb.ngram_embedding.weight.detach().clone(), 0, *consts)
+            ples.append(ple)
+        full, sharded = ples
+        assert all(p.sequence_parallel for p in sharded.parameters())
+
+        # Same pack on every rank; a sequence boundary and EOS fall inside rank 0's tokens so the
+        # n-gram context and the dilated conv cross the rank boundary.
+        torch.manual_seed(0)
+        t = 12 * world_size
+        tokens = torch.randint(10, 500, (t,))
+        tokens[5] = EOS
+        cu = torch.tensor([0, 7, t], dtype=torch.int32)
+        x = torch.randn(t, 1, N * H)
+        grad = torch.randn(t, 1, N * H)
+        for ple in ples:
+            ple.set_tokens(tokens[None], cu)
+
+        x_full = x.clone().requires_grad_()
+        out_full = full(x_full)
+        (out_full * grad).sum().backward()
+
+        group = dist.group.WORLD
+        n = t // world_size
+        x_local = x[rank * n : (rank + 1) * n].clone().requires_grad_()
+        out_local = sp_local(sharded(sp_gather(x_local, group)), group)
+        (out_local * grad[rank * n : (rank + 1) * n]).sum().backward()
+
+        torch.testing.assert_close(out_local, out_full[rank * n : (rank + 1) * n])
+        torch.testing.assert_close(x_local.grad, x_full.grad[rank * n : (rank + 1) * n])
+        # Each rank's parameter grads cover its own tokens; summed over TP they are the full grads.
+        for (name, p_sp), p_full in zip(sharded.named_parameters(), full.parameters()):
+            g = p_sp.grad.clone()
+            dist.all_reduce(g, group=group)
+            torch.testing.assert_close(g, p_full.grad, msg=name)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_ple_sequence_parallel_matches_full(tmp_path):
+    """PLE on the TP-gathered sequence, keeping this rank's tokens (as ``Qwen4ExpTransformerLayer``
+    runs it under SP), matches the full-sequence PLE: outputs, input grads, and parameter grads once
+    summed over TP (the ``sequence_parallel`` reduction)."""
+    import torch.multiprocessing as mp
+
+    mp.spawn(_sequence_parallel_ple_worker, args=(2, str(tmp_path / "init")), nprocs=2)

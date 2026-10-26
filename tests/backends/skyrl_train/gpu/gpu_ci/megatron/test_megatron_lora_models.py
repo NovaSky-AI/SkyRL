@@ -227,6 +227,20 @@ async def _sync_weights(policy, client, cfg, label: str):
             id="qwen3.8-flash-next-4layer_h100_ep4_adapter",
             marks=pytest.mark.h100,
         ),
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            QWEN38_4LAYER,
+            1e-1,
+            False,
+            id="qwen3.8-flash-next-4layer_h100_tp2_ep4_adapter",
+            marks=pytest.mark.h100,
+        ),
     ],
 )
 async def test_lora_logprobs_matching_roundtrip(

@@ -3,7 +3,7 @@
 ``qsa_sparse_attention`` runs a pack through cuDNN's ``qsa_forward`` / ``qsa_backward`` on
 Blackwell (NVIDIA/cudnn-frontend#1765). This checks its output and q / k / v gradients against
 the chunked SDPA path on a padded pack mixing sparse-regime sequences (top-512 blocks), short
-dense ones and padding, for 24Q/2KV (TP=1) and 12Q/1KV (TP=2).
+dense ones and padding, for 24Q/2KV (TP=1) and 12Q/1KV (TP=2 with sequence parallelism).
 
 Needs an SM100/SM103 GPU and a cudnn-frontend with ``cudnn.ops.qsa_forward`` (>= 1.32; until it
 is on PyPI, the GitHub dev wheel); skipped otherwise. Run with:

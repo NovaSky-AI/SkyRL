@@ -20,8 +20,8 @@ class Qwen4ExpModelProvider(GPTModelProvider):
 
     On top of the Qwen3.5 hybrid GDN / gated-attention MoE configuration (set by the bridge),
     the ``qwen4_*`` fields describe the gated hyper-connections, the PLE n-gram embedding and
-    the QSA indexer. Supported parallelism: TP=1, CP=1, PP=1, any EP (the PLE table is row-sharded
-    over the expert-parallel group).
+    the QSA indexer. Supported parallelism: any TP with sequence parallelism, CP=1, PP=1, any EP
+    (the PLE table is row-sharded over the expert-parallel group).
     """
 
     transformer_layer_spec: Union[ModuleSpec, Callable] = build_qwen4_exp_layer_spec
@@ -45,11 +45,14 @@ class Qwen4ExpModelProvider(GPTModelProvider):
     qwen4_ple_hf_prefix: Optional[str] = None
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None):
-        if self.tensor_model_parallel_size != 1 or self.context_parallel_size != 1:
+        if self.context_parallel_size != 1:
             raise NotImplementedError(
-                "Qwen4Exp on Megatron supports tensor_model_parallel_size=1 and context_parallel_size=1 "
-                "(PLE needs each packed sequence whole on one rank); scale with expert parallelism."
+                "Qwen4Exp on Megatron does not support context parallelism yet (PLE and the QSA indexer "
+                "need each packed sequence whole on one rank)."
             )
+        if self.tensor_model_parallel_size > 1 and not self.sequence_parallel:
+            # Without SP every TP rank would run the hyper-connections and PLE on all tokens.
+            raise NotImplementedError("Qwen4Exp on Megatron needs sequence_parallel=True with TP > 1.")
         if self.pipeline_model_parallel_size != 1:
             raise NotImplementedError("Qwen4Exp on Megatron does not support pipeline parallelism yet.")
         model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)

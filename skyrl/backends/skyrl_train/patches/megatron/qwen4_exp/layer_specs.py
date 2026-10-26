@@ -10,6 +10,7 @@ layer expands the embedding by replication and the block's final "layer norm" is
 import copy
 from typing import Optional
 
+import torch
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
     TEDotProductAttention,
@@ -47,6 +48,8 @@ from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
     Qwen4ExpPLE,
     Qwen4ExpQSAIndexer,
     qsa_sparse_attention,
+    sp_gather,
+    sp_local,
 )
 
 
@@ -75,6 +78,10 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
         x = x + y' ⊗ w        # y' = F(y); there is no separate pre-norm
 
     with ``x += PLE(x, input_ids)`` before the attention site on the PLE layers.
+
+    Under sequence parallelism ``x`` holds this rank's tokens. PLE and the QSA indexer need whole
+    sequences, so their inputs are all-gathered over TP; the attention / GDN and MoE handle SP
+    themselves.
     """
 
     def __init__(
@@ -83,7 +90,6 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
         super().__init__(config=config, submodules=submodules, layer_number=layer_number, **kwargs)
         if not isinstance(self.cross_attention, IdentityOp):
             raise ValueError("Qwen4ExpTransformerLayer does not support cross-attention.")
-        import torch
 
         global_idx = self.layer_number - 1  # layer_number is global and 1-based
         with torch.device(torch.cuda.current_device()):
@@ -99,6 +105,7 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
             if module is not None and config.params_dtype is not None:
                 module.to(config.params_dtype)
         self.expand_input = global_idx == 0
+        self.sp_group = self.tp_group if config.sequence_parallel and self.tp_group.size() > 1 else None
 
     @property
     def _qwen4_is_gdn(self) -> bool:
@@ -124,14 +131,17 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
         if self.expand_input:
             hidden_states = hidden_states.repeat(1, 1, self.config.qwen4_hc_count)
         if self.ple is not None:
-            hidden_states = hidden_states + self.ple(hidden_states)
+            hidden_states = hidden_states + sp_local(self.ple(sp_gather(hidden_states, self.sp_group)), self.sp_group)
 
         # Attention / GDN site.
         attn_in, inject = self.attn_hyper_connection(hidden_states)
         if not self._qwen4_is_gdn:
             core_attention = self.self_attention.core_attention
+            # sp_gather under no_grad: the indexer is frozen and its selection non-differentiable.
+            with torch.no_grad():
+                index_in = sp_gather(attn_in, self.sp_group)
             core_attention.qsa_selection = self.self_attention.indexer.select(
-                attn_in, rotary_pos_emb, packed_seq_params
+                index_in, rotary_pos_emb, packed_seq_params
             )
         attn_out, attn_bias = self.self_attention(
             attn_in,
