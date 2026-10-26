@@ -44,9 +44,11 @@ from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_models import (
     DEEPSEEK_V4_FLASH_4LAYER,
+    DEEPSEEK_V41_FLASH_6LAYER,
     MAX_GENERATE_LENGTH,
     _engine_overrides_for_model,
     _extra_env_vars_for_model,
+    _is_deepseek_v4,
     generate_with_vllm,
     get_test_actor_config,
 )
@@ -121,7 +123,10 @@ DEEPSEEK_V4_FLASH_VLLM_LORA_TARGET_MODULES = [
 # The 4-layer GLM-5.3-Flash slice is far more sensitive to its adapter than the default rows. At a
 # LoRA-B std of 0.008 the stale-sampler diff is about 0.155 (phase 2) and the updated adapter
 # still matches at about 0.062 (phase 3, same as the zero adapter).
-LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 8.0}
+LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 8.0, "deepseek-v4.1-flash": 32.0}
+# DeepSeek-V4.1-Flash: its rows use a 0.3 parity threshold (vLLM's BF16 V4.1 path sits 0.1-0.24 from DeepSeek's
+# reference, Megatron within 1e-3 in mean; see test_megatron_models.py), so a missed sync must move logprobs
+# by more than that (16x gave a 0.29 stale-sampler gap on the ratio-1 sub-slice).
 
 
 def _lora_b_multiplier(model_name: str) -> float:
@@ -154,7 +159,7 @@ def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     if "glm-5.3-flash" in model_name.lower():
         cfg.trainer.policy.model.lora.target_modules = list(GLM5_3_FLASH_LORA_TARGET_MODULES)
-    if "deepseek-v4-flash" in model_name.lower():
+    if _is_deepseek_v4(model_name):
         cfg.trainer.policy.model.lora.target_modules = list(DEEPSEEK_V4_FLASH_LORA_TARGET_MODULES)
     validate_cfg(cfg)
     return cfg
@@ -247,6 +252,22 @@ async def _sync_weights(policy, client, cfg, label: str):
             id="deepseek-v4-flash-4layer_h100_tp1_ep4_adapter",
             marks=pytest.mark.h100,
         ),
+        # DeepSeek-V4.1-Flash 6-layer text-only slice: same module lists as V4 (vLLM's compressor fused_wkv_wgate
+        # stays out -- a ratio-1 compressor has one slice), mesh as its full-FT row.
+        pytest.param(
+            1,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            DEEPSEEK_V41_FLASH_6LAYER,
+            3e-1,
+            False,
+            id="deepseek-v4.1-flash-6layer_tp1_ep8_adapter",
+            marks=pytest.mark.h100,
+        ),
     ],
 )
 async def test_lora_logprobs_matching_roundtrip(
@@ -279,7 +300,7 @@ async def test_lora_logprobs_matching_roundtrip(
         engine_overrides = _engine_overrides_for_model(model_name)
         if lora_sync and "glm-5.3-flash" in model_name.lower():
             engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES)
-        if lora_sync and "deepseek-v4-flash" in model_name.lower():
+        if lora_sync and _is_deepseek_v4(model_name):
             engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(
                 DEEPSEEK_V4_FLASH_VLLM_LORA_TARGET_MODULES
             )

@@ -1066,6 +1066,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         if os.environ.get("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"):
             env_vars["VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"] = os.environ["VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"]
 
+        # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
+        # Engram table placement).
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
+
         if os.environ.get("RAY_CGRAPH_get_timeout"):
             logger.info(
                 f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
