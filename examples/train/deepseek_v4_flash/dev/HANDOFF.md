@@ -543,3 +543,20 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   - Impact: the first response token of ~1 sequence per step is sampled from NaN logits. Harmless to the loss with TIS
     off; with TIS on, mask such sequences. Root cause (which layer yields NaN in prefill) still open: replay a captured
     failing prefill batch and bisect Engram / indexer top-k / sparse attention + sinks / mHC.
+- **vLLM NaN first-token root cause (2026-10-26/27, `dev/probe_vllm_logprobs_v41.py`, 6-layer slice, max_tokens=1).**
+  BF16 V4.1 prefill (`FLASHMLA_SPARSE_DSV41`, `vllm/models/deepseek_v41/nvidia/flashmla.py::_forward_prefill`) gathers
+  each chunk's compressed + SWA KV into a reused, uninitialized workspace (`current_workspace_manager().
+  get_simultaneous`), one `chunk_M`-row slab per request sized for the longest request in the chunk; shorter requests
+  leave slab rows unwritten. `flash_mla_sparse_fwd` loads those rows and weights them 0, so finite garbage is harmless
+  but NaN/Inf garbage turns the output row NaN (0 * NaN). Evidence (24,576 requests each unless noted):
+  - workspace untouched 207 bad (0.84%); **zero-filled 0**; NaN-filled 11,479 (46.7%) -> ~half of batched requests
+    touch unwritten rows. Zero- vs 1000-filled greedy first tokens (8,192): same token 99.9%, |dlogprob| 0.0006 vs
+    0.0004 zero-vs-zero -> unwritten rows are masked, not attended (no silent corruption; does not explain the
+    separate 0.12-0.24 vLLM-vs-reference gap).
+  - Batching required: max_num_seqs 1/2/4 -> 0, 16 -> 5/16k, 64 -> 140/16k. Nondeterministic (same batch twice:
+    disjoint failing requests). Ruled out: weight sync, KV-cache poisoning, CUDA graphs, Engram host offload,
+    compressor latent rows, aux streams, attn_out buffer (all A/B'd; no change).
+  - Localization: module hooks -> `layers.N.attn` (clean inputs, NaN out); function hooks ->
+    `DeepseekV4Attention._sparse_indexer_and_attn` writes NaN in place.
+  - Fix: zero the gathered-KV workspace before the gather (no visible prefill slowdown in the probe). Upstream:
+    zero slab tails or select instead of multiply in the kernel.
