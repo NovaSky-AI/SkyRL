@@ -1789,7 +1789,12 @@ class SFTTrainer:
         return batch
 
     def _train_dummy(self):
-        """Dummy training loop for benchmarking. Skips real data, checkpoints, and resume."""
+        """Dummy training loop for benchmarking. Skips real data, checkpoints, and resume.
+
+        Fires the train, step and log callback events (``CallbackInput`` reports one epoch of ``num_steps``
+        steps). There are no epoch, eval or save events, and ``control.should_save`` / ``should_evaluate`` are
+        ignored.
+        """
         self._validate_batch_parallelism()
         batch = self._build_dummy_batch()
         num_steps = self.sft_cfg.dummy_run_max_steps
@@ -1799,17 +1804,27 @@ class SFTTrainer:
             f"(batch_size={self.sft_cfg.batch_size}, max_length={self.sft_cfg.max_length})..."
         )
 
+        self._total_steps = num_steps
+        self._steps_per_epoch = num_steps
+        self._current_epoch = 0
+        self._training_control.reset()
+
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
+        self._fire("on_train_start")
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
-            for step in range(num_steps):
+            # SkyRL starts counting at step 1
+            for step in range(1, num_steps + 1):
+                self.global_step = step
                 all_timings: dict[str, float] = {}
 
+                self._fire("on_step_start", batch=batch)
                 with Timer("step", all_timings):
                     step_result = self.train_step(batch, step)
                     all_timings.update(step_result["timings"])
+                self._fire("on_step_end", batch=batch, metrics=step_result)
 
                 actual_num_tokens = batch["attention_mask"].sum().item()
                 self._total_tokens_processed += actual_num_tokens
@@ -1828,6 +1843,7 @@ class SFTTrainer:
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())
 
+                self._fire("on_log", logs=log_dict)
                 self.tracker.log(log_dict, step=step, commit=True)
                 peak_mem_str = ", ".join(f"{k}={v:.1f}" for k, v in step_result["peak_mem"].items())
                 logger.info(
@@ -1840,6 +1856,7 @@ class SFTTrainer:
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
 
+        self._fire("on_train_end")
         logger.info("Dummy SFT training complete!")
 
     @staticmethod

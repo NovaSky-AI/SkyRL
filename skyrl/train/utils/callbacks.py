@@ -50,7 +50,7 @@ class CallbackInput:
     # Step events
     batch: Optional["TrainingInputBatch"] = None
 
-    # on_step_end of the RL trainer only - the trajectory of each of ``batch``'s rows, before padding
+    # on_step_end of the synchronous RL trainer only - the trajectory of each of ``batch``'s rows, before padding
     trajectory_ids: Optional[List["TrajectoryID"]] = None
 
     # Step end / eval end
