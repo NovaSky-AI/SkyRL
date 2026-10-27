@@ -587,3 +587,31 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     (`~/exports/dumped_evals/global_step_{0,10}_evals/aggregated_results.jsonl` on the head): avg_score 0.028 ->
     0.233, pass@12 0.767 -> 0.867. ~700 s/step, 2h04m for 10 steps. The end-of-training checkpoint save (640 s)
     succeeded this time, so the node-7 host OOM above is marginal rather than deterministic.
+
+### Overnight perf / correctness pass (2026-10-27)
+
+- **Step-time profile** (DAPO full FT + R3, 6 nodes, ~700 s/step): policy_train 480 s (66%), generate 95 s,
+  fwd_logprobs 63-81 s, sync_weights 70 s. py-spy on one policy rank during step-2 policy_train (420 s window):
+  forward_backward 80% (GPU bound: `custom_backward` + CUDA waits), optim_step 18%, of which torch's fused CPU AdamW
+  ~53 s = ~13 s per optimizer step x 4 mini-batches.
+- **CPU optimizer ran on one thread**: Ray starts the policy actor with num_cpus=1, so OMP_NUM_THREADS=1 and
+  torch.get_num_threads()==1 (checked in a Ray actor). V4.1 has 544B routed-expert params = 11.3B per rank at EP=48;
+  fused CPU AdamW is 1.36 s/B on 1 thread vs 0.14 s/B on 28. a0bf46f3 sets torch threads to the rank's share of the
+  node's CPUs when optimizer_cpu_offload is on. A/B run `v41-dapo-perf-threads-*` in progress.
+- **optimizer_offload_fraction=0.5** (half the optimizer on GPU, possible since the #2542 fix): GPU OOM in the first
+  colocated weight sync (trainer 92 GiB + vLLM 86 GiB on one GPU); the GPU-resident optimizer state is not offloaded
+  for the sync. Not usable colocated without offloading it.
+- **Host memory**: each policy rank holds ~110 GB anon + ~240 GB pinned (fp32 master/grad/moments of 11.3B params on
+  the host); 8 ranks/node is ~2.8 TB of the 3.9 TB before a checkpoint save stages anything, which is why the step-10
+  save OOMed once. b4676690 empties PyTorch's pinned-host cache after building the optimizer and before saving; at
+  init it released < 1 GiB (the pinned memory is live), so it is not the fix by itself.
+- **Rollout-vs-trainer logprob outliers come from vLLM decode with prefix caching.** `dev/analyze_logprob_outliers.py`
+  on `trainer.dump_data_batch` dumps: mean |diff| 0.014, only 2-6e-5 of tokens > 1, vLLM the more confident side
+  (20/23, 55/70), no position / long-context trend, but clustered by prompt group (the 12 samples of one prompt) and
+  sometimes at the first response token. `dev/rescore_vllm_v41.py`: re-scoring those tokens in a vLLM prefill lands on
+  the trainer's value (step 1, same weights: 21/23 tokens; chunked prefill reading the KV cache: 22/23).
+  `dev/decode_vs_prefill_v41.py` (vLLM alone, 69 outlier-group prompts, decode-time vs prefill logprob of the same
+  sampled tokens): prefix caching off, 2 samples/prompt: 9e-6 of tokens > 1 (max 1.07); off, 12 samples/prompt:
+  2.2e-5 (max 1.9, unclustered); **on, 12 samples/prompt (as SkyRL's rollout engines run): 6.9e-5 (max 2.8),
+  clustered by prompt group**. A prefix-cache hit seems to restore V4.1's compressed/indexer state for the shared
+  prompt inexactly. Mitigation to test: `generator.inference_engine.enable_prefix_caching=false`.
