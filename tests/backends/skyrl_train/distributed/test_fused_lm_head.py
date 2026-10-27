@@ -109,6 +109,7 @@ def test_hybrid_processes_hidden_states_and_restores_post_process(hybrid_model_t
     )
 
 
+@pytest.mark.megatron
 def test_megatron_offload_interface_exposes_mark_not_offload():
     # The stub above must track the real interface; guard against the method name drifting.
     offload = pytest.importorskip("megatron.core.pipeline_parallel.fine_grained_activation_offload")
