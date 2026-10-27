@@ -862,11 +862,7 @@ class PPORayActorGroup:
             return None
 
         sched = _scheduling_strategy_for_rank(0)
-        actor_options = {
-            "num_cpus": num_gpus_per_actor,
-            "num_gpus": num_gpus_per_actor,
-            "resources": self._resources,
-        }
+        actor_options = device.ray_actor_options(num_gpus_per_actor, self._resources)
         if sched is not None:
             actor_options["scheduling_strategy"] = sched
 
@@ -888,11 +884,7 @@ class PPORayActorGroup:
                 local_rank = rank % self._num_gpus_per_node
 
                 sched = _scheduling_strategy_for_rank(rank)
-                actor_options = {
-                    "num_cpus": num_gpus_per_actor,
-                    "num_gpus": num_gpus_per_actor,
-                    "resources": self._resources,
-                }
+                actor_options = device.ray_actor_options(num_gpus_per_actor, self._resources)
                 if sched is not None:
                     actor_options["scheduling_strategy"] = sched
 

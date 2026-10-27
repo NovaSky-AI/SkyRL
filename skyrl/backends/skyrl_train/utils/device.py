@@ -134,3 +134,24 @@ def can_device_access_peer(i: int, j: int) -> bool:
     if is_cuda():
         return torch.cuda.can_device_access_peer(i, j)
     return False
+
+
+def ray_actor_options(num_accelerators: float, resources: dict | None = None) -> dict:
+    """Ray actor ``.options()`` kwargs to reserve ``num_accelerators`` accelerators.
+
+    CUDA ties ``num_cpus`` to ``num_gpus`` (as the trainer already does) and passes
+    the caller's ``resources`` through unchanged.  Neuron has no ``num_gpus`` sugar:
+    it reserves the ``neuron_cores`` custom resource, requests a single CPU, and
+    forces ``num_gpus=0`` (overriding any ``@ray.remote(num_gpus=1)`` class default).
+    """
+    if is_neuron():
+        return {
+            "num_cpus": 1,
+            "num_gpus": 0,
+            "resources": {"neuron_cores": num_accelerators},
+        }
+    return {
+        "num_cpus": num_accelerators,
+        "num_gpus": num_accelerators,
+        "resources": resources,
+    }

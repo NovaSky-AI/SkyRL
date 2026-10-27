@@ -253,11 +253,23 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
 
 
 def create_device_mesh(world_size, fsdp_size):
+    # TorchNeuron has no NCCL: collectives run on CPU via gloo. ``init_device_mesh``
+    # resolves the backend lazily and raises for unknown accelerator types, so pin
+    # the backend explicitly on neuron. Single-core is the only supported shape.
+    backend_override = {0: "gloo"} if device.is_neuron() else None
     if fsdp_size < 0 or fsdp_size >= world_size:
-        device_mesh = init_device_mesh(device.backend(), mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
+        device_mesh = init_device_mesh(
+            device.backend(),
+            mesh_shape=(world_size,),
+            mesh_dim_names=["fsdp"],
+            backend_override=backend_override,
+        )
     else:
         device_mesh = init_device_mesh(
-            device.backend(), mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
+            device.backend(),
+            mesh_shape=(world_size // fsdp_size, fsdp_size),
+            mesh_dim_names=["ddp", "fsdp"],
+            backend_override=backend_override,
         )
     return device_mesh
 
