@@ -47,11 +47,6 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8080)
     tokens = serve.add_argument_group("tokens mode")
     tokens.add_argument("--tokenizer", help="Hugging Face tokenizer name, rendered through `renderers`")
-    tokens.add_argument(
-        "--renderer",
-        default=None,
-        help="the `renderers` renderer (e.g. qwen3.5), when --tokenizer is not a name the library maps",
-    )
     tokens.add_argument("--model", default=None, help="model name sent to the engine (default: the request's)")
     tokens.add_argument("--max-model-len", type=int, default=None, help="clamp max_tokens to fit this context")
     tokens.add_argument(
@@ -160,7 +155,6 @@ def build_server(args: argparse.Namespace) -> CaptureServer:
         tokenizer=args.tokenizer,
         renderer_pool_size=args.renderer_pool_size,
         processor_kwargs=args.processor_kwargs,
-        renderer_name=args.renderer,
         model=args.model,
         max_model_len=args.max_model_len,
         sampling_overrides=args.sampling_overrides,

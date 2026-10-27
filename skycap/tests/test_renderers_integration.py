@@ -448,25 +448,3 @@ def test_a_probe_that_cannot_be_built_is_a_reason_not_a_crash(vl_renderer: Rende
 
     monkeypatch.setattr(renderer_module, "png_part", no_pillow)
     assert vl_renderer.validate_media_encoding() == "ImportError: No module named 'PIL'"
-
-
-def _local_checkpoint(name: str) -> str:
-    """``name``'s tokenizer and processor files, at a local path the renderers library can't map by name."""
-    from huggingface_hub import snapshot_download
-
-    try:
-        return snapshot_download(name, allow_patterns=["*.json", "*.jinja", "*.txt", "*.model"])
-    except Exception as error:  # noqa: BLE001 - no network and no cache
-        pytest.skip(f"{name} unavailable: {error}")
-
-
-def test_a_local_vlm_checkpoint_needs_its_renderer_named() -> None:
-    pytest.importorskip("torchvision")
-    path = _local_checkpoint("Qwen/Qwen3-VL-4B-Instruct")
-    with pytest.raises(ValueError, match="No multimodal renderer registered"):
-        RenderersRenderer(path, size=1)
-
-    renderer = RenderersRenderer(path, size=1, renderer="qwen3-vl")
-    assert renderer.multimodal
-    (image,) = renderer.render([_first_image()], None).media
-    assert image.length > 0

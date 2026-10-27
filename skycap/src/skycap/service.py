@@ -52,7 +52,6 @@ def build_backend(
     renderer: TokenRenderer | None = None,
     renderer_pool_size: int = 8,
     processor_kwargs: Mapping[str, Any] | None = None,
-    renderer_name: str | None = None,
     engine: VLLMEngine | None = None,
     model: str | None = None,
     max_model_len: int | None = None,
@@ -65,8 +64,7 @@ def build_backend(
 
     Token mode renders with ``tokenizer`` through ``renderers``, or with ``renderer`` when one is given
     (e.g. a test's). ``processor_kwargs`` configure a multimodal model's image processor, and must be the
-    engine's ``mm_processor_kwargs``; ``renderer_name`` picks the ``renderers`` renderer when the tokenizer's
-    name doesn't (``RenderersRenderer``). ``engine`` is the engine's wire, vLLM's by default.
+    engine's ``mm_processor_kwargs`` (``RenderersRenderer``). ``engine`` is the engine's wire, vLLM's by default.
     """
     if mode == "text":
         return TextBackend(upstream_url, api_key=api_key)
@@ -83,9 +81,7 @@ def build_backend(
             raise ValueError(
                 f"processor_kwargs must be a mapping (a JSON object), got {type(processor_kwargs).__name__}"
             )
-        renderer = RenderersRenderer(
-            tokenizer, size=renderer_pool_size, processor_kwargs=processor_kwargs, renderer=renderer_name
-        )
+        renderer = RenderersRenderer(tokenizer, size=renderer_pool_size, processor_kwargs=processor_kwargs)
     return TokensBackend(
         upstream_url,
         renderer,
@@ -125,7 +121,6 @@ class CaptureService:
         renderer: TokenRenderer | None = None,
         renderer_pool_size: int = 8,
         processor_kwargs: Mapping[str, Any] | None = None,
-        renderer_name: str | None = None,
         engine: VLLMEngine | None = None,
         model: str | None = None,
         max_model_len: int | None = None,
@@ -153,7 +148,6 @@ class CaptureService:
             renderer=renderer,
             renderer_pool_size=renderer_pool_size,
             processor_kwargs=processor_kwargs,
-            renderer_name=renderer_name,
             engine=engine,
             model=model,
             max_model_len=max_model_len,
