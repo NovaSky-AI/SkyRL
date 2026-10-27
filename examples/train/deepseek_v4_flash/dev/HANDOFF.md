@@ -560,3 +560,7 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     `DeepseekV4Attention._sparse_indexer_and_attn` writes NaN in place.
   - Fix: zero the gathered-KV workspace before the gather (no visible prefill slowdown in the probe). Upstream:
     zero slab tails or select instead of multiply in the kernel.
+  - Confirmed on the full BF16 model (node 6, TP8, CUDA graphs on, 32,768 distinct-prompt requests): as shipped
+    193 bad (0.59%), with `patch_deepseek_v41_prefill_workspace` (installed on all 8 ranks) **0**. The patch
+    (b6e8542b) loads via `new_inference_worker_wrap.py`; on PR #2547 as 8849c5c6. The planned 5-step DAPO
+    confirmation was dropped (floored tokens too rare per step to add evidence beyond the probe).
