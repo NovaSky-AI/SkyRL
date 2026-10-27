@@ -202,3 +202,128 @@ def test_chunked_router_replay(batch, seq):
         rr.clear_indices()
         rr.clear_router_replay_action()
         RouterReplay.global_router_replay_instances.remove(rr)
+
+
+class RecomputeReplayMoE(torch.nn.Module):
+    """Like ``MoELayer`` under selective ``"moe"`` recompute: checkpoints its own call."""
+
+    def __init__(self):
+        super().__init__()
+        self.router = ReplayRouter()
+        self.moe_layer_recompute = True
+        self.config = type("Config", (), {"fp8": None, "fp4": None})()
+        self.calls = []
+
+    def forward(self, x, padding_mask=None):
+        def custom_forward(x):
+            probs, idx = self.router(x)
+            self.calls.append((x.detach().clone(), idx.clone()))
+            return x * probs.sum(dim=-1).view(x.shape[0], x.shape[1], 1)
+
+        if self.moe_layer_recompute and self.training:
+            return torch.utils.checkpoint.checkpoint(custom_forward, x, use_reentrant=True), None
+        return custom_forward(x), None
+
+
+@pytest.fixture
+def cpu_checkpoint(monkeypatch):
+    """megatron-core's checkpoint saves CUDA RNG state; use torch's on CPU."""
+    from skyrl.backends.skyrl_train.patches.megatron.mcore_ext import (
+        mhc_transformer_layer,
+    )
+
+    monkeypatch.setattr(
+        mhc_transformer_layer,
+        "_checkpoint",
+        lambda mlp, fn, chunk, mask: torch.utils.checkpoint.checkpoint(fn, chunk, mask, use_reentrant=True),
+    )
+
+
+@pytest.fixture
+def replay_moe():
+    from megatron.core.transformer.moe.router_replay import RouterReplay
+
+    mlp = RecomputeReplayMoE().train()
+    yield mlp
+    rr = mlp.router.router_replay
+    rr.clear_indices()
+    rr.clear_router_replay_action()
+    RouterReplay.global_router_replay_instances.remove(rr)
+
+
+@pytest.mark.parametrize("seq", [30, 3])
+@pytest.mark.parametrize("batch", [1, 2])
+def test_chunked_router_replay_with_moe_recompute(cpu_checkpoint, replay_moe, batch, seq):
+    """Selective "moe" recompute reruns each chunk's call on its own in backward, not the chunk
+    loop; each rerun must still replay its own chunk's slice."""
+    from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+    torch.manual_seed(0)
+    mlp, num_chunks, real = replay_moe, 4, seq * batch
+    rr = mlp.router.router_replay
+    target = torch.randint(0, E, (real, K))
+    x = torch.randn(seq, batch, H, requires_grad=True)
+
+    rr.set_target_indices(target)
+    rr.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+    out, _ = chunked_mlp(mlp, x, None, num_chunks)
+    forward_calls = list(mlp.calls)
+    assert len(forward_calls) == num_chunks
+    assert torch.equal(torch.cat([idx for _, idx in forward_calls])[:real], target)
+    assert rr.target_topk_idx is target and mlp.moe_layer_recompute
+    # No rerun pops the micro-batch's entry, so it is dropped up front.
+    assert rr.replay_backward_list == []
+
+    mlp.calls.clear()
+    rr.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
+    out.sum().backward()
+    # One rerun per chunk (the MoE's own checkpoint is replaced, not nested), each on its slice.
+    assert len(mlp.calls) == num_chunks
+    expected = {tuple(xc.flatten().tolist()): idx for xc, idx in forward_calls}
+    for xc, idx in mlp.calls:
+        assert torch.equal(idx, expected[tuple(xc.flatten().tolist())])
+    assert rr.router_replay_action == RouterReplayAction.REPLAY_BACKWARD
+    assert x.grad is not None
+
+
+def test_moe_recompute_keeps_earlier_micro_batches_entries(cpu_checkpoint, replay_moe):
+    """Only this micro-batch's entry is dropped; earlier ones (pipeline 1F1B) stay queued."""
+    from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+    rr = replay_moe.router.router_replay
+    earlier = torch.randint(0, E, (5, K))
+    rr.set_target_indices(earlier)
+    rr.set_target_indices(torch.randint(0, E, (8, K)))
+    rr.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+    chunked_mlp(replay_moe, torch.randn(8, 1, H, requires_grad=True), None, 4)
+    assert len(rr.replay_backward_list) == 1 and rr.replay_backward_list[0] is earlier
+
+
+@pytest.mark.parametrize("action", ["REPLAY_FORWARD", "REPLAY_BACKWARD"])
+def test_replay_indices_must_match_the_token_count(replay_moe, action):
+    """Extra or missing rows raise, as the unchunked gather does, instead of being sliced off."""
+    from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+    rr = replay_moe.router.router_replay
+    rr.set_router_replay_action(RouterReplayAction[action])
+    for rows in (10, 6):
+        rr.clear_indices()
+        rr.set_target_indices(torch.randint(0, E, (rows, K)))
+        with pytest.raises(ValueError, match=f"have {rows} rows, but this MoE layer routes 8"):
+            _ChunkedRouterReplay(replay_moe, [4, 4])
+    # Dummy tokens are not counted: 6 real tokens padded with 2.
+    rr.clear_indices()
+    rr.set_target_indices(torch.randint(0, E, (6, K)))
+    _ChunkedRouterReplay(replay_moe, [4, 4], pad_tokens=2)
+
+
+def test_quantile_balancing_rejects_padded_chunks():
+    """Dummy tokens need a padding mask, which quantile balancing does not support yet."""
+    mlp = ToyMoE()
+    mlp.router.routing_type = "quantile_balancing"
+    with pytest.raises(NotImplementedError, match="quantile-balancing"):
+        chunked_mlp(mlp, torch.randn(3, 2, H), None, 4)
+    assert mlp.calls == []
+    # A sequence of at least num_chunks tokens needs no padding and runs as before.
+    chunked_mlp(mlp, torch.randn(8, 2, H), None, 4)
+    assert len(mlp.calls) == 4

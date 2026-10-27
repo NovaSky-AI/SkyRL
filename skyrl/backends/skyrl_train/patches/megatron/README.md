@@ -99,6 +99,11 @@ Two pieces, which may land separately.
     so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
     data, routing sends some expert ranks several times their share of tokens; chunking bounds their
     dispatch/expert/combine buffers.
+  - `chunked_mlp` keeps in sync with NVIDIA/Megatron-LM#8463 (equal MoE call counts, router
+    replay per chunk, quantile balancing rejected for padded chunks, replay row-count check).
+    Under selective `"moe"` recompute with router replay, it checkpoints each chunk itself so the
+    rerun replays the chunk's slice. Once the pin includes #8463, pass the slice as
+    `MoELayer.forward(replay_topk_idx=...)` instead and drop that checkpoint (`_checkpoint`).
   - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
     `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
     `TransformerLayer._forward_mlp`.

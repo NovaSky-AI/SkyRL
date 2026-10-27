@@ -234,6 +234,13 @@ def chunked_mlp(
     # dummy tokens when it is shorter than that; their outputs are dropped.
     seq, batch = hidden_states.shape[:2]
     pad = max(0, num_chunks - seq)
+    if pad and getattr(getattr(mlp, "router", None), "routing_type", None) == "quantile_balancing":
+        # The dummy tokens need a padding mask, which quantile balancing does not support yet.
+        raise NotImplementedError(
+            f"mlp_chunks_for_training={num_chunks} with quantile-balancing routing needs a local "
+            f"sequence of at least {num_chunks} tokens, got {seq}: shorter ones are padded with "
+            "masked dummy tokens, and quantile balancing does not support padding masks yet."
+        )
     if pad:
         hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, 0, 0, pad))
         # Mask the dummy tokens even when the caller passed no mask: the router counts unmasked
@@ -250,8 +257,7 @@ def chunked_mlp(
     replay = _ChunkedRouterReplay(mlp, [c.shape[0] * batch for c in chunks], pad * batch)
     outputs = []
     for i, (chunk, mask, ids) in enumerate(zip(chunks, masks, id_chunks)):
-        replay.before_chunk(i)
-        outputs.append(mlp(chunk, padding_mask=mask, **({"input_ids": ids} if ids is not None else {})))
+        outputs.append(replay.call(i, chunk, mask, {"input_ids": ids} if ids is not None else {}))
         replay.after_chunk()
     replay.finish()
     return torch.cat([out for out, _ in outputs], dim=0)[:seq], outputs[0][1]
@@ -272,14 +278,21 @@ class _ChunkedRouterReplay:
       second chunk would take the next micro-batch's entry. ``RECORD`` keeps only the last call's
       indices, so the earlier chunks' routing would be lost.
 
-    So each chunk gets its slice in ``target_topk_idx`` before its call, and the full tensor is
-    put back after the last one. The micro-batch's ``replay_backward_list`` entry is split into
-    one per chunk. Recorded top-k is concatenated back into one tensor.
+    So each chunk's call replays its own slice of the micro-batch's indices (``call``), and the
+    recorded top-k is concatenated back into one tensor.
+
+    With selective ``"moe"`` recompute, ``MoELayer`` checkpoints each call on its own, and backward
+    reruns only that call, not this loop, so nothing here could hand the rerun its slice. Instead,
+    ``call`` checkpoints the chunk itself, around both the MoE call and the code that sets its
+    slice, so the rerun replays the same slice whatever order autograd runs the chunks in.
+    NVIDIA/Megatron-LM#8463 does the same upstream by passing the slice to
+    ``MoELayer.forward(replay_topk_idx=...)``.
     """
 
     def __init__(self, mlp, chunk_tokens, pad_tokens=0):
         from megatron.core.transformer.moe.router_replay import RouterReplayAction
 
+        self.mlp = mlp
         router = getattr(mlp, "router", None)
         self.replay = getattr(router, "router_replay", None)
         self.action = self.replay.router_replay_action if self.replay is not None else None
@@ -288,14 +301,32 @@ class _ChunkedRouterReplay:
             self.bounds.append(self.bounds[-1] + n)
         self.recorded = []
         self.real_tokens = self.bounds[-1] - pad_tokens
-        self.target = None
+        # MoELayer checkpoints each call under selective "moe" recompute.
+        self.chunks_recompute = getattr(mlp, "moe_layer_recompute", False) and mlp.training
+        self.indices = None
         if self.action == RouterReplayAction.REPLAY_FORWARD:
-            self.saved_target = self.replay.target_topk_idx
-            self.target = self._pad(self.saved_target, pad_tokens)
+            target = self.replay.target_topk_idx
+            self._check_num_rows(target)
+            backward_list = self.replay.replay_backward_list
+            # The chunks' reruns replay their slices of the target, so no rerun pops the entry
+            # set_target_indices appended for this micro-batch; drop it.
+            if self.chunks_recompute and backward_list and backward_list[-1] is target:
+                backward_list.pop()
+            self.indices = self._pad(target, pad_tokens)
         elif self.action == RouterReplayAction.REPLAY_BACKWARD and self.replay.replay_backward_list:
-            full = self._pad(self.replay.replay_backward_list.pop(0), pad_tokens)
-            self.replay.replay_backward_list[0:0] = [full[lo:hi] for lo, hi in zip(self.bounds[:-1], self.bounds[1:])]
+            # Full-layer recompute reruns this loop.
+            entry = self.replay.replay_backward_list.pop(0)
+            self._check_num_rows(entry)
+            self.indices = self._pad(entry, pad_tokens)
         self._record = self.action == RouterReplayAction.RECORD
+
+    def _check_num_rows(self, indices):
+        """One replay row per real token, as the unchunked gather requires; slicing would ignore extra rows."""
+        if indices is not None and indices.shape[0] != self.real_tokens:
+            raise ValueError(
+                f"Routing replay indices have {indices.shape[0]} rows, but this MoE layer routes "
+                f"{self.real_tokens} tokens."
+            )
 
     @staticmethod
     def _pad(indices, pad_tokens):
@@ -307,16 +338,48 @@ class _ChunkedRouterReplay:
             return dummy.expand(pad_tokens, -1)
         return torch.cat([indices, indices[:1].expand(pad_tokens, -1)], dim=0)
 
-    def before_chunk(self, i):
-        if self.target is not None:
-            self.replay.target_topk_idx = self.target[self.bounds[i] : self.bounds[i + 1]]
+    def call(self, i, chunk, mask, kwargs):
+        """Run the MLP on chunk ``i``, replaying its slice of the micro-batch's indices."""
+        if self.indices is None:
+            return self.mlp(chunk, padding_mask=mask, **kwargs)
+        indices = self.indices[self.bounds[i] : self.bounds[i + 1]]
+
+        def run(chunk, mask):
+            from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+            # The slice is replayed as a forward target, also in a recompute (REPLAY_BACKWARD).
+            saved = self.replay.target_topk_idx, self.replay.router_replay_action
+            self.replay.target_topk_idx = indices
+            self.replay.router_replay_action = RouterReplayAction.REPLAY_FORWARD
+            # The checkpoint below replaces the MoE layer's own.
+            if self.chunks_recompute:
+                self.mlp.moe_layer_recompute = False
+            try:
+                return self.mlp(chunk, padding_mask=mask, **kwargs)
+            finally:
+                if self.chunks_recompute:
+                    self.mlp.moe_layer_recompute = True
+                self.replay.target_topk_idx, self.replay.router_replay_action = saved
+
+        if not self.chunks_recompute:
+            return run(chunk, mask)
+        return _checkpoint(self.mlp, run, chunk, mask)
 
     def after_chunk(self):
         if self._record and self.replay.recorded_topk_idx is not None:
             self.recorded.append(self.replay.recorded_topk_idx.clone())
 
     def finish(self):
-        if self.target is not None:
-            self.replay.target_topk_idx = self.saved_target
         if self._record and self.recorded:
             self.replay.recorded_topk_idx = torch.cat(self.recorded, dim=0)[: self.real_tokens]
+
+
+def _checkpoint(mlp, fn, chunk, mask):
+    """Checkpoint ``fn(chunk, mask)`` the way ``MoELayer.forward`` checkpoints its call."""
+    from megatron.core import tensor_parallel
+
+    if mlp.config.fp8 or mlp.config.fp4:
+        from megatron.core.extensions.transformer_engine import te_checkpoint
+
+        return te_checkpoint(fn, False, tensor_parallel.random.get_cuda_rng_tracker, mlp.tp_group, chunk, mask)
+    return tensor_parallel.checkpoint(fn, False, chunk, mask)
