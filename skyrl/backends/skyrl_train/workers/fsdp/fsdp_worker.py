@@ -188,7 +188,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 RemoteInferenceClient,
             )
 
-            if isinstance(inference_engine_client, RemoteInferenceClient):
+            if inference_engine_client is None:
+                # Native neuron backend: the engine lives on the driver and reloads
+                # this exported path after ``broadcast_to_inference_engines`` returns
+                # (see ``WorkerDispatch._neuron_save_weights_for_sampler``). Export-only.
+                pass
+            elif isinstance(inference_engine_client, RemoteInferenceClient):
                 await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
             else:
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)

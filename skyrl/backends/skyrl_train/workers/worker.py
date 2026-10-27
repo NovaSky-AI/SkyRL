@@ -632,6 +632,10 @@ class Worker(DistributedTorchRayActor):
 
         Returned rather than awaited so the caller can overlap it with the send.
         """
+        if inference_engine_client is None:
+            # Native neuron backend: the engine lives on the driver, so the worker
+            # has no client and there is no prefix cache to reset.
+            return None
         if not self._should_reset_prefix_cache(inference_engine_cfg):
             return None
         if torch.distributed.get_rank() != 0:

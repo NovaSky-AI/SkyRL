@@ -8,6 +8,7 @@ Automatically handles GPU placement:
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
+import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -684,6 +685,12 @@ class WorkerDispatch:
 
     def init_weight_sync_state(self, inference_engine_client) -> None:
         """Initialize weight sync state for policy model."""
+        # Native neuron backend: the engine lives on the driver and holds a full model
+        # (not serializable), so it never crosses into the worker. There is no
+        # vLLM/NCCL/RDT engine to rendezvous; LoRA adapters are exported to disk and
+        # reloaded driver-side in save_weights_for_sampler.
+        if self.cfg.generator.inference_engine.backend == "neuron":
+            return
         deadline.ray_get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
@@ -790,6 +797,9 @@ class WorkerDispatch:
         vLLM under ``model_id``.
 
         """
+        if self.cfg.generator.inference_engine.backend == "neuron":
+            await self._neuron_save_weights_for_sampler(model_id)
+            return
         if self._inference_engine_client is None:
             raise RuntimeError(
                 "Cannot save_weights_for_sampler: no inference_engine_client configured. "
@@ -873,3 +883,53 @@ class WorkerDispatch:
         # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
         # (see `GeneratorConfig.use_cache_salt`).
         self._inference_engine_client.increment_weight_version()
+
+    async def _neuron_save_weights_for_sampler(self, model_id: Optional[str] = None) -> None:
+        """LoRA-only weight sync for the native neuron (in-process) engine.
+
+        The neuron engine lives on the driver, so the FSDP worker cannot reach it
+        (it holds a full model, not serializable). The worker exports the adapter
+        to disk (``broadcast_to_inference_engines`` is export-only when the client
+        is ``None``); the driver then reloads the engine from that path.
+        """
+        if self._inference_engine_client is None:
+            raise RuntimeError(
+                "Neuron weight sync requires an in-process inference_engine_client on the driver."
+            )
+        if self.cfg.trainer.policy.model.lora.rank <= 0:
+            raise NotImplementedError(
+                "Native neuron engine only supports LoRA weight sync; full-weight sync is not wired."
+            )
+
+        # Worker exports the adapter to disk. The client arg is None: the worker has
+        # no engine handle under the neuron backend, and saves without reloading.
+        deadline.ray_get(
+            self._actor_groups["policy"].async_run_ray_method(
+                "pass_through",
+                "broadcast_to_inference_engines",
+                None,
+                self.cfg.generator.inference_engine,
+                model_id=model_id,
+            ),
+            "broadcast_to_inference_engines",
+        )
+
+        # Reload the in-process engine from the exported path (single-tenant uses the
+        # shared adapter name + shared sync path; multi-tenant routes through basename).
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            SKYRL_LORA_ADAPTER_NAME,
+        )
+        from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
+
+        base_sync_path = self.cfg.trainer.policy.model.lora.lora_sync_path
+        safe_model_id = os.path.basename(model_id) if model_id is not None else None
+        if safe_model_id:
+            lora_name = safe_model_id
+            lora_sync_path = os.path.join(base_sync_path, safe_model_id)
+        else:
+            lora_name = SKYRL_LORA_ADAPTER_NAME
+            lora_sync_path = base_sync_path
+
+        await self._inference_engine_client.update_named_weights(
+            LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
+        )
