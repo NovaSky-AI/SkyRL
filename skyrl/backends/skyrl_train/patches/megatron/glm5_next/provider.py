@@ -46,10 +46,3 @@ class Glm5NextModelProvider(MLAModelProvider):
     # KDA forget gate: ``lower_bound * sigmoid(exp(A_log) * (f + dt_bias))``; ``None`` selects
     # the unbounded ``-exp(A_log) * softplus(f + dt_bias)`` gate.
     kda_gate_lower_bound: Optional[float] = -5.0
-
-    # DSA indexer k-pool compression: the indexer scores groups of ``dsa_indexer_kpool``
-    # consecutive keys and selects ``dsa_indexer_topk // dsa_indexer_kpool`` groups (plus the
-    # incomplete tail group when ``dsa_indexer_kpool_always_select_tail``). Recorded from the HF
-    # config; see ``glm5_next.dsa`` for what the Megatron path currently supports.
-    dsa_indexer_kpool: int = 1
-    dsa_indexer_kpool_always_select_tail: bool = True

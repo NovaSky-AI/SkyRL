@@ -1,15 +1,14 @@
-"""Parity test for SkyRL's vendored DSA k-pool pooling math.
+"""Parity test for megatron-core's DSA k-pool pooling math (NVIDIA/Megatron-LM#7522).
 
-``_kpool_compress_keys`` is vendored from NVIDIA/Megatron-LM#7522 into
-``mcore_ext/dsa_kpool.py`` because the pinned megatron-core does not have the pooled indexer.
-GLM-5.3-Flash depends on it matching HF's ``Glm5NextTextIndexer.compress_keys`` exactly, so a
+GLM-5.3-Flash depends on megatron-core's ``_kpool_compress_keys`` matching HF's
+``Glm5NextTextIndexer.compress_keys`` exactly, so a
 transcription error would otherwise only surface as a quality drop in a training run. The HF
 formulation is transcribed independently below rather than imported, so a change on either
 side shows up.
 
 Pure tensor math, so it runs on CPU and lives outside ``gpu/``; the selection-behaviour half
 needs the CUDA kernels and stays in
-``tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py``.
+``tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/glm5_next/test_dsa_kpool.py``.
 """
 
 import pytest
@@ -49,7 +48,7 @@ def _hf_reference_pool(k: torch.Tensor, gate_score: torch.Tensor, ape: torch.Ten
 @pytest.mark.parametrize("seqlen", [64, 256, 1024])
 def test_kpool_compress_keys_matches_hf_reference(seqlen):
     """The softmax-weighted pooling itself, against HF's formulation."""
-    from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.dsa_kpool import (
+    from megatron.core.transformer.experimental_attention_variant.dsa import (
         _kpool_compress_keys,
     )
 

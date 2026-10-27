@@ -21,7 +21,10 @@ dependencies = [
     "tokenizers>=0.23.1",
     "transformers>=5.6.1,<=5.16.1",
     "typer>=0.17.4",
-    "peft==0.18.1",
+    # Exact pin: peft 0.19.x turned a string `target_modules` such as "all-linear"
+    # into a character set on MoE models (fixed by 0.21.0). Megatron-Bridge
+    # requires peft>=0.20.0,<=0.21.0.
+    "peft==0.21.0",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
     "zstandard>=0.23.0",
@@ -86,7 +89,7 @@ skyrl-train = [
     "torchdata",
     "omegaconf",
     "ray==2.57.0",
-    "peft==0.18.1",
+    "peft==0.21.0",
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
@@ -548,7 +551,7 @@ harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f
 # NVRx 0.6 wheels require glibc 2.39; its supported source build also works on Ubuntu 22.04.
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
 # Megatron-Bridge upstream snapshot, with the matching Core revision below.
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "c4067f501aebefe03f27813f8ac0e4fe835249dd", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "7171584bd7452caf2adfa6afd12fb89cc37fbc64", marker = "sys_platform == 'linux'"}
 # megatron-core must match the `3rdparty/Megatron-LM` submodule pin of the
 # megatron-bridge rev above -- that is the only megatron-core commit Bridge's
 # own CI validates against. Bump the two together, reading the submodule rev with
@@ -557,7 +560,7 @@ megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev =
 # Upstream PRs not yet in these pins (GLM-5.3-Flash's KDA / mHC / k-pool DSA, and a few bug
 # fixes) are carried in skyrl/backends/skyrl_train/patches/megatron/. When bumping either pin,
 # follow skyrl/backends/skyrl_train/patches/megatron/README.md to retire whatever has landed.
-megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "07147d6942dfd4e6d1566b64bb1730f478a1bc32", marker = "sys_platform == 'linux'"}
+megatron-core = {git = "https://github.com/NVIDIA/Megatron-LM", rev = "ed9c2c8c1cf4a5438922ae8d215181e7c8b9e0fe", marker = "sys_platform == 'linux'"}
 # NOTE (sumanthrh): This custom wheel of vllm-router includes a fix for /chat/completions endpoint: https://github.com/vllm-project/router/pull/162  on top of 0.1.14 as well as a new `sticky_least_loaded` policy: https://github.com/SumanthRH/router/tree/session-aware-lb
 vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },

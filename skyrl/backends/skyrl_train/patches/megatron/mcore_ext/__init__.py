@@ -1,7 +1,7 @@
 """Megatron-Core extensions that SkyRL carries ahead of the pinned ``megatron-core``.
 
-Credit: the KDA, mHC and k-pool DSA implementations here come from @HollowMan6's
-open NVIDIA/Megatron-LM PRs #7054, #7521 and #7522.
+Credit: the KDA and mHC implementations here come from @HollowMan6's
+open NVIDIA/Megatron-LM PRs #7054 and #7521.
 
 Removal plan (what retires each module, touchpoints outside this package, tests):
 ``skyrl/backends/skyrl_train/patches/megatron/README.md``.

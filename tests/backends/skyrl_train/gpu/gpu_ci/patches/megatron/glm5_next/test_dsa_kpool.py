@@ -1,7 +1,7 @@
 """Contract test for megatron-core's DSA k-pool *selection*, on GPU.
 
-Exercises SkyRL's vendored ``fused_qk_topk_kpool`` (``mcore_ext/dsa_kpool.py``, from
-NVIDIA/Megatron-LM#7522), which the pinned megatron-core does not have. GLM-5.3-Flash trains
+Exercises megatron-core's ``fused_qk_topk_kpool`` (NVIDIA/Megatron-LM#7522) at
+GLM-5.3-Flash's pool size and head dim. GLM-5.3-Flash trains
 on sequences past ``dsa_indexer_topk``, so a regression in the selection kernel would
 otherwise only surface as a quality drop in a training run.
 
@@ -12,11 +12,11 @@ must still hold is that it stays causal, respects the budget, and keeps the quer
 trailing pool.
 
 The pooling-math half is pure tensor math and runs on CPU, in
-``tests/backends/skyrl_train/patches/megatron/mcore_ext/test_dsa_kpool_math.py``.
+``tests/backends/skyrl_train/patches/megatron/glm5_next/test_dsa_kpool_math.py``.
 
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s \
-    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py
+    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/glm5_next/test_mcore_dsa.py
 """
 
 import pytest
@@ -50,12 +50,11 @@ def test_kpool_selects_every_visible_token_below_topk(seqlen):
     ships (``index_kpool=4``, ``index_head_dim=128``), so a change to either constant in the
     checkpoint surfaces here rather than in a training run.
     """
+    from megatron.core.transformer.experimental_attention_variant.dsa import (
+        fused_qk_topk_kpool,
+    )
     from megatron.core.transformer.experimental_attention_variant.dsa_masking import (
         generate_varlen_mask_params_for_positions,
-    )
-
-    from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.dsa_kpool import (
-        fused_qk_topk_kpool,
     )
 
     device = "cuda"
@@ -117,17 +116,19 @@ def test_kpool_selects_every_visible_token_below_topk(seqlen):
 
 @pytest.mark.parametrize("seq_lens", [[1000], [300, 517, 183]])
 def test_kpool_query_chunking_is_exact(seq_lens, monkeypatch):
-    """Scoring in query chunks (SkyRL's deviation from #7522) must select the same pools.
+    """Scoring in query chunks (``return_index_scores=False``, what ``DSAttention`` runs) must
+    select the same pools as the one-shot path.
 
-    The verbatim path materializes O(sq^2) per-head FP32 scores; the chunked path keeps only a
+    The one-shot path materializes O(sq^2) per-head FP32 scores; the chunked path keeps only a
     chunk of them. Top-k is per query row, so forcing many small chunks -- including ones that
     straddle packed-document boundaries -- must reproduce the single-chunk indices exactly.
     """
+    from megatron.core.transformer.experimental_attention_variant import (
+        dsa as mcore_dsa,
+    )
     from megatron.core.transformer.experimental_attention_variant.dsa_masking import (
         generate_varlen_mask_params_for_positions,
     )
-
-    from skyrl.backends.skyrl_train.patches.megatron.mcore_ext import dsa_kpool
 
     device = "cuda"
     seqlen = sum(seq_lens)
@@ -138,8 +139,8 @@ def test_kpool_query_chunking_is_exact(seq_lens, monkeypatch):
     starts, ends = generate_varlen_mask_params_for_positions(cu, positions)
     q, k, weights, gate, ape = _make_inputs(seqlen, device=device)
 
-    def run():
-        return dsa_kpool.fused_qk_topk_kpool(
+    def run(return_index_scores):
+        return mcore_dsa.fused_qk_topk_kpool(
             q,
             k,
             weights,
@@ -151,15 +152,16 @@ def test_kpool_query_chunking_is_exact(seq_lens, monkeypatch):
             varlen_ends=ends,
             cu_seqlens_kv=cu,
             always_select_tail=True,
+            return_index_scores=return_index_scores,
         )
 
-    full_scores, full_indices = run()
-    assert full_scores is not None, "one chunk should cover every query at this size"
+    full_scores, full_indices = run(True)
+    assert full_scores is not None
 
     num_pools = sum(n // POOL_SIZE for n in seq_lens)
     # 37 queries per chunk: not a divisor of any segment length or of the pool size.
-    monkeypatch.setattr(dsa_kpool, "_KPOOL_SCORE_CHUNK_ELEMS", 37 * N_HEADS * num_pools)
-    chunked_scores, chunked_indices = run()
+    monkeypatch.setattr(mcore_dsa, "_KPOOL_SCORE_CHUNK_BYTES", 37 * N_HEADS * num_pools * 4)
+    chunked_scores, chunked_indices = run(False)
 
     assert chunked_scores is None
     assert torch.equal(chunked_indices, full_indices)
@@ -200,11 +202,12 @@ def test_kpool_selection_matches_reference(seq_lens, chunked, use_relu, monkeypa
     the query's document; there are ``min(budget, visible)`` of them; no unselected visible pool
     scores above a selected one (up to rounding); and the tail tokens are exact.
     """
+    from megatron.core.transformer.experimental_attention_variant import (
+        dsa as mcore_dsa,
+    )
     from megatron.core.transformer.experimental_attention_variant.dsa_masking import (
         generate_varlen_mask_params_for_positions,
     )
-
-    from skyrl.backends.skyrl_train.patches.megatron.mcore_ext import dsa_kpool
 
     device = "cuda"
     seqlen = sum(seq_lens)
@@ -215,12 +218,12 @@ def test_kpool_selection_matches_reference(seq_lens, chunked, use_relu, monkeypa
     starts, ends = generate_varlen_mask_params_for_positions(cu, positions)
     q, k, weights, gate, ape = _make_inputs(seqlen, device=device, seed=len(seq_lens) + 7 * use_relu)
 
-    k_pooled, pool_token_base = dsa_kpool._kpool_compress_keys_per_seg(k, gate, ape, POOL_SIZE, cu)
+    k_pooled, pool_token_base = mcore_dsa._kpool_compress_keys_per_seg(k, gate, ape, POOL_SIZE, cu)
     num_pools = k_pooled.size(0)
     if chunked:
         # 37 queries per chunk: not a divisor of any segment length or of the pool size.
-        monkeypatch.setattr(dsa_kpool, "_KPOOL_SCORE_CHUNK_ELEMS", 37 * N_HEADS * num_pools)
-    scores_out, indices = dsa_kpool.fused_qk_topk_kpool(
+        monkeypatch.setattr(mcore_dsa, "_KPOOL_SCORE_CHUNK_BYTES", 37 * N_HEADS * num_pools * 4)
+    scores_out, indices = mcore_dsa.fused_qk_topk_kpool(
         q,
         k,
         weights,
@@ -233,6 +236,7 @@ def test_kpool_selection_matches_reference(seq_lens, chunked, use_relu, monkeypa
         cu_seqlens_kv=cu,
         use_relu=use_relu,
         always_select_tail=True,
+        return_index_scores=not chunked,
     )
     assert (scores_out is None) == chunked
 
