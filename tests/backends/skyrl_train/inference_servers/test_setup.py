@@ -16,8 +16,8 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     InferenceServerSetup,
     build_new_inference_client,
+    build_new_inference_client_impl,
     create_inference_servers,
-    launch_remote_inference_client,
 )
 from skyrl.train.config import InferenceEngineConfig, SkyRLTrainConfig
 
@@ -103,8 +103,8 @@ def test_create_inference_servers_default_port_and_supplied_pg(launcher_doubles)
     assert result.server_urls == ["http://server-0-0:8000"]
 
 
-def test_launch_remote_inference_client_wraps_the_deployment(monkeypatch):
-    ie_cfg = InferenceEngineConfig(num_engines=2, data_parallel_size=2)
+def test_build_new_inference_client_impl_launches_with_the_role_inputs(monkeypatch):
+    ie_cfg = InferenceEngineConfig(num_engines=2, data_parallel_size=2, served_model_name="teacher")
     canned = InferenceServerSetup(
         proxy_url="http://router:7000",
         server_urls=[f"http://s{i}:8000" for i in range(4)],
@@ -117,16 +117,12 @@ def test_launch_remote_inference_client_wraps_the_deployment(monkeypatch):
 
     monkeypatch.setattr(inference_setup, "create_inference_servers", fake_create)
 
-    client, server_setup = launch_remote_inference_client(
+    client, server_setup = build_new_inference_client_impl(
         ie_cfg,
-        "cli-args",
-        model_name="teacher",
+        model_path="Qwen/Qwen3-32B",
         log_path="/tmp/logs",
+        make_cli_args=lambda: "cli-args",
         start_port=8800,
-        enable_return_routed_experts=True,
-        enable_return_sample_support_set=True,
-        enable_return_sample_support_logprobs=True,
-        uses_lora_weight_sync=True,
     )
 
     assert server_setup is canned
@@ -134,18 +130,34 @@ def test_launch_remote_inference_client_wraps_the_deployment(monkeypatch):
     assert isinstance(client, RemoteInferenceClient)
     assert client.proxy_url == "http://router:7000"
     assert client.server_urls == canned.server_urls
-    assert client.model_name == "teacher"
+    assert client.model_name == "teacher"  # served_model_name over the path
     assert client.data_parallel_size == 2
-    assert client.enable_return_routed_experts is True
-    assert client.enable_return_sample_support_set is True
-    assert client.enable_return_sample_support_logprobs is True
-    assert client.uses_lora_weight_sync is True
+    # no role kwargs: the policy-only fields keep their defaults
+    assert client.enable_return_routed_experts is False
+    assert client.enable_return_sample_support_set is False
+    assert client.enable_return_sample_support_logprobs is False
+    assert client.uses_lora_weight_sync is False
     assert client.tokenizer is None
 
 
+def test_build_new_inference_client_impl_external_setup_never_builds_cli_args(monkeypatch):
+    ie_cfg = InferenceEngineConfig(external_proxy_url="http://p:9000", external_server_urls=["http://s0:8000"])
+    monkeypatch.setattr(inference_setup, "create_inference_servers", lambda *_args, **_kwargs: pytest.fail("launched"))
+
+    client, server_setup = build_new_inference_client_impl(
+        ie_cfg,
+        model_path="m",
+        log_path="/tmp/logs",
+        make_cli_args=lambda: pytest.fail("built vLLM args for an external setup"),
+    )
+
+    assert server_setup.proxy_url == client.proxy_url == "http://p:9000"
+    assert client.server_urls == ["http://s0:8000"]
+
+
 def test_build_new_inference_client_launched_and_external_clients_get_the_same_policy_flags(monkeypatch):
-    # The launched branch goes through launch_remote_inference_client; the external branches build the
-    # client directly. A flag passed in one place only is lost for the other (score centering was).
+    # Launched and external servers share one client construction, so they get the same policy fields.
+    # When they did not, launched engines lost score centering's flag.
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
     ie_cfg.enable_return_sample_support_set = True

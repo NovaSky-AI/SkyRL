@@ -53,18 +53,17 @@ def launch_teacher(cfg: "SkyRLTrainConfig") -> Tuple["RemoteInferenceClient", "I
     # instead of waiting out the placement-group timeout. Left out for now because a snapshot
     # under-reports an autoscaling cluster; decide warn-vs-error with the team.
     from skyrl.backends.skyrl_train.inference_servers.setup import (
-        launch_remote_inference_client,
+        build_new_inference_client_impl,
     )
     from skyrl.backends.skyrl_train.inference_servers.utils import (
         build_frozen_vllm_cli_args,
     )
 
     teacher: TeacherConfig = cfg.trainer.teacher
-    return launch_remote_inference_client(
+    return build_new_inference_client_impl(
         teacher.inference_engine,
-        build_frozen_vllm_cli_args(teacher.model, teacher.inference_engine, cfg.trainer.seed),
-        # The name the launched servers know the teacher by, and the `model` scoring requests send.
-        model_name=teacher.inference_engine.served_model_name or teacher.model,
+        model_path=teacher.model,
         log_path=cfg.trainer.log_path,
+        make_cli_args=lambda: build_frozen_vllm_cli_args(teacher.model, teacher.inference_engine, cfg.trainer.seed),
         start_port=_teacher_start_port(cfg),
     )
