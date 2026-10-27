@@ -127,6 +127,37 @@ Checkpointing behavior is controlled by several parameters in the YAML configura
   - **Purpose**: Specific checkpoint directory to resume from (only used when `resume_mode: "from_path"`)
   - **Format**: Must point to a `global_step_N` directory
 
+`resume_load_global_step`
+  - **Default**: `true`
+  - **Purpose**: Restore the checkpoint's global step. Set to `false` to start a new training phase at step zero.
+
+`resume_load_dataloader_state`
+  - **Default**: `true`
+  - **Purpose**: Restore dataloader position. Set to `false` when starting a new training phase or changing datasets.
+
+`resume_load_optimizer_states`
+  - **Default**: `true`
+  - **Purpose**: Restore policy and critic optimizer states. Set to `false` to use optimizers initialized from the current configuration.
+
+`resume_load_lr_scheduler_states`
+  - **Default**: `true`
+  - **Purpose**: Restore policy and critic learning rate scheduler states. Set to `false` to use schedulers initialized from the current configuration.
+
+Disable selected state-loading options when using checkpoint weights to start a new training phase or dataset:
+
+```yaml
+trainer:
+  resume_mode: from_path
+  resume_path: /path/to/ckpts/global_step_100
+  ckpt_path: /path/to/new-phase-ckpts
+  resume_load_global_step: false
+  resume_load_dataloader_state: false
+  resume_load_optimizer_states: false
+  resume_load_lr_scheduler_states: false
+```
+
+Use a different `ckpt_path` when resetting the global step so new checkpoints cannot overwrite the source run.
+
 ## HuggingFace Model Export
 
 In addition to checkpointing, users can optionally save the policy model in HuggingFace safetensors format at regular intervals.
