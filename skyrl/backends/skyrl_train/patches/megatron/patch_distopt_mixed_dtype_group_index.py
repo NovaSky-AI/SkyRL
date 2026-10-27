@@ -14,7 +14,11 @@ fp32 under bf16 training hits it -- DeepSeek-V4's mHC ``mapping_proj`` and compr
 -- and full-finetune checkpoint save fails with a shape mismatch in ``sharded_param_state_*``
 (``AssertionError: (torch.Size([362976]), 0, 120968256)``). LoRA rows pass because only adapters train.
 
-Remove once megatron-core builds the index from the final ``orig_group["params"]`` order.
+TODO: remove once the pinned megatron-core rebuilds the index itself. Upstream fixes, same rebuild as this patch
+(``[*model_fp32_params, *model_float16_params]`` per group, at the end of ``DistributedOptimizer.__init__``):
+NVIDIA/Megatron-LM#2872 (open, ``main``) and NVIDIA/Megatron-LM#5835 (merged 2026-07-18 into ``dev`` only, not in
+SkyRL's ``main`` pin). Check that ``DistributedOptimizer.__init__`` in the pinned version rebuilds
+``model_param_group_index_map`` before removing; see ``README.md``.
 """
 
 import functools
