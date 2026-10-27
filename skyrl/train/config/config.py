@@ -1116,6 +1116,10 @@ class FullyAsyncConfig(BaseConfig):
     If False, we reuse KV cache from stale policies during generation
     (avoids recomputation at the cost of using slightly stale KV cache).
     """
+    save_during_eval: bool = False
+    """Run the checkpoint and HF model saves that are due at an eval step while the eval runs. The eval uses the
+    inference engines and the saves use the trainer workers. The next step starts when both end. Defaults to False,
+    which runs the eval first and the saves after it."""
 
     # --- Trainer simulation (no real trainer components) ---
     simulate_training: bool = False

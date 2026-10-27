@@ -104,6 +104,9 @@ For fully async specifically, the following are the main knobs to tune:
   avoiding recomputation at the cost of using slightly stale KV cache. Set to `true` to match synchronous RL behavior.
   Note that prefix-cache blocks are still isolated per policy version by `generator.use_cache_salt` (on by default), so
   cache is reused within a weight version and not shared across versions.
+- `trainer.fully_async.save_during_eval`: When `true`, the checkpoint and the HF model export that are due at an eval
+  step run on the trainer workers while the eval runs on the inference engines. The next step starts when both end.
+  Defaults to `false`, which runs the eval first and the saves after it.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
