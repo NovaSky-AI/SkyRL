@@ -38,9 +38,9 @@ MODEL_NAME = "Qwen/Qwen3.5-2B"
 NUM_SPECULATIVE_TOKENS = 2
 MAX_GENERATE_LENGTH = 96
 RESPONSE_TOLERANCE = 0.05
-# Greedy decoding flips near-ties across a sleep/wake (2-3 of 8 on main as well);
-# corrupted main-model weights diverge on every prompt.
-MIN_MATCHING_RESPONSE_FRACTION = 0.5
+# Greedy decoding can branch at near-ties after the same initial answer.
+RESPONSE_PREFIX_LENGTH = 64
+MIN_MATCHING_RESPONSE_FRACTION = 0.75
 MIN_ACCEPTANCE_AFTER_SYNC = 0.5
 MAX_ACCEPTANCE_DROP = 0.15
 
@@ -185,7 +185,11 @@ async def test_megatron_mtp_weight_sync_roundtrip(
         diverged = [
             (i, resp_before, resp_after)
             for i, (resp_before, resp_after) in enumerate(zip(before["responses"], after["responses"]))
-            if not are_responses_similar([resp_before], [resp_after], tolerance=RESPONSE_TOLERANCE)
+            if not are_responses_similar(
+                [resp_before[:RESPONSE_PREFIX_LENGTH]],
+                [resp_after[:RESPONSE_PREFIX_LENGTH]],
+                tolerance=RESPONSE_TOLERANCE,
+            )
         ]
         for i, resp_before, resp_after in diverged:
             print(f"[mtp weight sync] generation {i} diverged:\n  before: {resp_before!r}\n  after:  {resp_after!r}")

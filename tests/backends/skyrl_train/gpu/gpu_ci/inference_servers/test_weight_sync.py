@@ -325,7 +325,8 @@ class TestColocatedIpcWeightUpdateFlow:
         pytest.param((MODEL, {}), id="dense"),
         # Native config: the checkpoint's remote config has no head_dim, so under
         # trust_remote_code vLLM builds 96-dim attention heads instead of 128.
-        pytest.param((NEMOTRON_H, {"trust_remote_code": False}), id="mamba2_nemotron_h"),
+        # This GPU has fewer Mamba cache blocks than vLLM's 1024-sequence default.
+        pytest.param((NEMOTRON_H, {"trust_remote_code": False, "max_num_seqs": 32}), id="mamba2_nemotron_h"),
     ],
 )
 async def rdt_weight_update_env(class_scoped_ray_init_fixture, request):
