@@ -1789,12 +1789,7 @@ class SFTTrainer:
         return batch
 
     def _train_dummy(self):
-        """Dummy training loop for benchmarking. Skips real data, checkpoints, and resume.
-
-        Fires the train, step and log callback events (``CallbackInput`` reports one epoch of ``num_steps``
-        steps). There are no epoch, eval or save events, and ``control.should_save`` / ``should_evaluate`` are
-        ignored.
-        """
+        """Dummy training loop for benchmarking. Skips real data, checkpoints, and resume."""
         self._validate_batch_parallelism()
         batch = self._build_dummy_batch()
         num_steps = self.sft_cfg.dummy_run_max_steps
