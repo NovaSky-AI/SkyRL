@@ -672,3 +672,8 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     ~4.2K tokens): steps 1-3 fit, rewards 0.282 / 0.357 / 0.388 / 0.411 (step-4 rollout). 3K is at the edge of the
     6-node layout; longer responses need memory work (e.g. a memory snapshot of one rank to see what beyond the ~45 GB
     of bf16 params + grads holds the rest). Next: 2560 (`v41-dapo-fullft6-resp2560-*`, 20 steps).
+- **Upstream status of the V4.1 NaN (2026-10-27):** root cause is stale slots in the reused sparse-index workspace
+  (`combine_topk_swa_indices` writes only each row's valid prefix; FlashMLA loads the whole last 64-slot block), which
+  can point at non-finite rows of the KV gather buffer our patch zeroes. Fixed on vLLM main by vllm-project/vllm#60613
+  (2026-10-23, seeds `-1`; not in 0.32.0); DeepSeek-V4 got the same fix in #55299 (in 0.31.0+), so V4 needs no patch.
+  #2538 (non-finite logprob routing + counter) was dropped from #2546/#2547 accordingly.
