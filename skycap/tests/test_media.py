@@ -227,7 +227,8 @@ async def test_images_a_model_cannot_send_to_the_engine_are_refused_but_text_sti
     import openai
 
     async with token_stack() as stack:
-        # As start() records it for a renderer whose family renders images but has no vLLM encoder.
+        # As the first call with images records it for a renderer whose family renders images but has no vLLM
+        # encoder (test_the_first_check_records_why_a_renderer_cannot_send_images).
         stack.server.backend.media_error = "Multimodal serialization not implemented for KimiK25Renderer."
         created = await stack.create()
         llm = client(created["base_url"])
@@ -239,15 +240,19 @@ async def test_images_a_model_cannot_send_to_the_engine_are_refused_but_text_sti
         assert len(stack.engine.requests) == 1
 
 
-async def test_start_records_why_a_renderer_cannot_send_images() -> None:
+async def test_the_first_check_records_why_a_renderer_cannot_send_images() -> None:
     from skycap.tokens.backend import TokensBackend
     from tests.fake_renderer import FakeRenderer
 
     renderer = FakeRenderer()
     renderer.validate_media_encoding = lambda: "no encoder"  # type: ignore[attr-defined]
-    backend = TokensBackend("http://engine", renderer)
+    # The engine isn't asked: images that can't be encoded aren't compared.
+    renderer.processor_probes = lambda: pytest.fail("probed")  # type: ignore[attr-defined]
+    backend = TokensBackend("http://engine", renderer, model="policy")
     await backend.start()
     try:
+        assert backend.media_error is None  # nothing at start
+        await backend._check_media()
         assert backend.media_error == "no encoder"
     finally:
         await backend.close()
@@ -279,7 +284,7 @@ async def _check_with_probes(chat_tokens: Any, *, model: str | None = "policy") 
         await backend.start()
         try:
             assert mock.chat_requests == []  # not at start: the engine may be asleep then
-            await backend._check_engine_processor()
+            await backend._check_media()
             return mock, backend.media_error
         finally:
             await backend.close()
@@ -329,7 +334,7 @@ async def test_probes_that_cannot_be_built_leave_images_unchecked() -> None:
     backend = TokensBackend("http://engine", renderer, model="policy")
     await backend.start()
     try:
-        await backend._check_engine_processor()
+        await backend._check_media()
         assert backend.media_error is None
     finally:
         await backend.close()

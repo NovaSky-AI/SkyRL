@@ -188,7 +188,7 @@ class RenderersRenderer:
     differently has a different number of placeholder tokens than the engine
     expects. ``processor_probes`` gives the requests that check this against
     the engine, before the first call with images
-    (``TokensBackend._check_engine_processor``).
+    (``TokensBackend._check_media``).
     """
 
     #: How many encoded items ``features`` keeps.

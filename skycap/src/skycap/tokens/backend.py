@@ -71,15 +71,15 @@ class TokensBackend:
         self.sampling_mask = sampling_mask
         self.logprobs_mode = logprobs_mode
         self.use_raw_content = use_raw_content
-        #: Why the renderer's images can't be sent to the engine (``validate_media_encoding``), checked at ``start``.
+        #: Why the renderer's images can't be sent to the engine, found by the first call with images (``_check_media``).
         self.media_error: str | None = None
         #: The chat template ``developer`` messages are folded for, if the renderer exposes one.
         self.chat_template: str | None = getattr(renderer, "chat_template", None)
         self._locks: dict[str, asyncio.Lock] = {}
         self._session: aiohttp.ClientSession | None = None
-        #: Whether the first call with images has checked the engine's image processing (``_check_engine_processor``).
-        self._processor_checked = False
-        self._processor_check_lock = asyncio.Lock()
+        #: Whether the first call with images has checked that images can be sent to the engine (``_check_media``).
+        self._media_checked = False
+        self._media_check_lock = asyncio.Lock()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -92,42 +92,44 @@ class TokensBackend:
         }
 
     async def start(self) -> None:
-        check = getattr(self.renderer, "validate_media_encoding", None)
-        self.media_error = await asyncio.to_thread(check) if check is not None else None
-        if self.media_error:
-            # Text-only calls still work; a call with images is refused (400) rather than failing in the encoder.
-            logger.warning("%s: images can't be sent to the engine: %s", self.renderer.name, self.media_error)
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=30),
             connector=aiohttp.TCPConnector(limit=0),
         )
 
-    async def _check_engine_processor(self) -> None:
-        """Once, before the first call with images: refuse images if the engine processes them differently.
+    async def _check_media(self) -> None:
+        """Once, before the first call with images: refuse images the engine can't take as rendered here.
 
-        A difference would otherwise be silent: the model would see images at another resolution than the
-        engine is configured for. Each of the renderer's ``processor_probes`` is rendered here and sent to the
-        engine's ``/v1/chat/completions`` (one token), and the prompt token counts must agree. Not at ``start``,
-        when the engine may not answer yet (SkyRL's colocated engines are asleep then). A difference sets
-        ``media_error``, so calls with images get a 400 and text-only calls still work. A text-only difference
-        is the chat template's, and an engine that doesn't answer can't be compared: both only warn. Equal
-        counts don't prove equal pixels, but catch different min/max pixels.
+        Two checks, both of which would otherwise fail per call or not at all: that the renderer can encode
+        images for vLLM (``validate_media_encoding``; not every family can, e.g. Kimi K2.5), and that the
+        engine processes images as the renderer does (``_compare_engine_processor``). A failure sets
+        ``media_error``, so calls with images get a 400 and text-only calls still work. Not at ``start``, when
+        the engine may not answer yet (SkyRL's colocated engines are asleep then). Concurrent first calls wait
+        for it, and the flag is set only once it's done, so none sends images unchecked.
         """
-        async with self._processor_check_lock:
-            if self._processor_checked:
+        async with self._media_check_lock:
+            if self._media_checked:
                 return
             try:
-                error = await self._compare_engine_processor()
+                check = getattr(self.renderer, "validate_media_encoding", None)
+                error = await asyncio.to_thread(check) if check is not None else None
+                if error is None:
+                    error = await self._compare_engine_processor()
                 if error is not None:
-                    logger.error("%s; refusing calls with images", error)
+                    logger.error("%s: refusing calls with images: %s", self.renderer.name, error)
                     self.media_error = error
             finally:
-                # Only once it's done: until then, other first calls with images wait on the lock rather than
-                # skip it and send their images unchecked.
-                self._processor_checked = True
+                self._media_checked = True
 
     async def _compare_engine_processor(self) -> str | None:
-        """``_check_engine_processor``'s comparison: why images can't be sent, or None if they can."""
+        """Whether the engine processes images as the renderer does: why not, or None.
+
+        Each of the renderer's ``processor_probes`` is rendered here and sent to the engine's
+        ``/v1/chat/completions`` (one token), and the prompt token counts must agree, or the model would see
+        images at another resolution than the engine is configured for. A text-only difference is the chat
+        template's, and an engine that doesn't answer can't be compared: both only warn. Equal counts don't
+        prove equal pixels, but catch different min/max pixels.
+        """
         probes = getattr(self.renderer, "processor_probes", None)
         if probes is None or self.media_error:
             return None
@@ -170,7 +172,7 @@ class TokensBackend:
                 )
                 return None
             return (
-                f"{name}: a {label} prompt is {ours} tokens in skycap and {theirs} in the engine, so the image "
+                f"a {label} prompt is {ours} tokens in skycap and {theirs} in the engine, so the image "
                 "processor settings differ. Give skycap the engine's mm_processor_kwargs (processor_kwargs, "
                 "--processor-kwargs)."
             )
@@ -292,8 +294,8 @@ class TokensBackend:
 
         routes_from = turn.routes_from(graph, planned)
         features = None
-        if planned.media and not self._processor_checked:
-            await self._check_engine_processor()
+        if planned.media and not self._media_checked:
+            await self._check_media()
         if planned.media and self.media_error:
             return _error(f"{self.renderer.name}'s images can't be sent to the engine: {self.media_error}", 400)
         if planned.media:
