@@ -247,7 +247,8 @@ class MegatronModelWrapper:
         # last compressed block, which only pad positions can attend to under the causal mask.
         self._seq_align = 1
         if self._implicit_causal_mask_only:
-            self._seq_align = max([1, *(getattr(config, "csa_compress_ratios", None) or [])])
+            # Ratio 0 is a sliding-window-only layer.
+            self._seq_align = math.lcm(1, *[r for r in (getattr(config, "csa_compress_ratios", None) or []) if r > 0])
         # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
         # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
         # a per-rank piece count hangs the EP group; padding the unpacked length to a multiple of n keeps the
