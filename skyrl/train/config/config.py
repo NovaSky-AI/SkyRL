@@ -1282,7 +1282,8 @@ class InferenceEngineConfig(BaseConfig):
     num_engines: int = 1
     """Number of inference engines to launch when ``run_engines_locally=True``."""
     backend: str = "vllm"
-    """``"vllm"``."""
+    """Inference engine backend: ``"vllm"`` or ``"neuron"`` (native transformers
+    ``model.generate`` on TorchNeuron)."""
     weight_sync_backend: str = "nccl"
     """Backend used for weight synchronization.
     Use ``"nccl"`` (colocated ``nccl`` uses CUDA IPC internally), or ``"delta"`` for checkpoint-delta sync through

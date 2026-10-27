@@ -82,8 +82,46 @@ def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig])
     return vllm_sampling_params
 
 
+def get_neuron_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
+    """Map SkyRL ``SamplingParams`` to transformers ``generate`` kwargs.
+
+    The native (TorchNeuron) engine calls ``model.generate(**kwargs)`` directly, so
+    the keys are transformers ``generate`` arguments rather than vLLM fields.
+    ``logprobs`` is deliberately dropped here: the native engine always computes
+    prompt/response logprobs via ``output_logits``, so the vLLM ``logprobs`` key has
+    no ``generate`` equivalent.
+    """
+    stop_val = sampling_params.stop
+    generate_kwargs = {
+        "max_new_tokens": sampling_params.max_generate_length,
+        "temperature": sampling_params.temperature,
+        "top_p": sampling_params.top_p,
+        "repetition_penalty": sampling_params.repetition_penalty,
+        "stop_strings": list(stop_val) if stop_val is not None else None,
+    }
+    if sampling_params.top_k is not None and sampling_params.top_k > 0:
+        generate_kwargs["top_k"] = sampling_params.top_k
+    if sampling_params.min_p is not None and sampling_params.min_p > 0:
+        generate_kwargs["min_p"] = sampling_params.min_p
+    if isinstance(sampling_params, DictConfig):
+        exclude_keys = ["max_generate_length", "logprobs"]
+        for key, value in sampling_params.items():
+            if key not in generate_kwargs and key not in exclude_keys:
+                if isinstance(value, ListConfig):
+                    value = list(value)
+                generate_kwargs[key] = value
+    else:
+        if sampling_params.additional_kwargs is not None:
+            for key, value in sampling_params.additional_kwargs.items():
+                if key not in generate_kwargs:
+                    generate_kwargs[key] = value
+    return generate_kwargs
+
+
 def get_sampling_params_for_backend(backend: str, sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
     if backend == "vllm":
         return get_vllm_sampling_params(sampling_params)
+    elif backend == "neuron":
+        return get_neuron_sampling_params(sampling_params)
     else:
         raise ValueError(f"Unsupported generation backend: {backend}")
