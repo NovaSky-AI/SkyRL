@@ -659,3 +659,9 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
 - **4K responses**: at the 2048-token cap, 35% (step 1) and 18% (step 6) of DAPO responses are truncated and
   overlong-filtered out of the loss. `v41-dapo-fullft6-resp4k-*` (MAX_RESPONSE_LENGTH=4096, 20 steps, evals at 0/10/20,
   no checkpoints) tests memory, truncation and reward at 4K.
+  - **4096: base AIME-2024 eval avg_score 0.472, pass@12 0.933** (avg 2160 generated tokens), vs 0.03-0.08 at the
+    2048 cap: the 2K recipe mostly measures truncation, and its earlier "0.04 -> 0.27" gains are largely learning to
+    finish under 2K. Training at 4096 **OOMs in step-1 policy_train** (MoE expert forward under recompute; 162 GiB
+    allocated + 7 GiB of the slept vLLM engine on a 178 GiB B200; rows up to ~6.1K tokens). Every memory knob the recipe
+    can use is already on (Engram on host, grad_reduce_in_fp32=false, expandable segments, micro batch 1, selective
+    recompute [moe, mhc, layernorm]; no trainer PP). Retrying at 3072 (`v41-dapo-fullft6-resp3k-*`).
