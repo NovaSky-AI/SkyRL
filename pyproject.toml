@@ -195,6 +195,43 @@ megatron = [
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
 
+# Trainium2 (TorchNeuron) native backend. ``torch`` is deliberately NOT pinned here:
+# it is supplied by ``torch-neuronx``, which must be installed from the AWS Neuron
+# index *before* this extra (see `.agents/docs/backends/neuron.md`). Everything
+# CUDA/vLLM-only from ``skyrl-train`` -- ``vllm-router``, ``flash-attn``,
+# ``flash-linear-attention``, ``causal-conv1d``, ``nixl`` -- is omitted, as is the
+# base ``[project].dependencies`` floor on transformers when a newer release is
+# required by the model on neuron (see the doc).
+neuron = [
+    "loguru",
+    "tqdm",
+    "ninja",
+    "tensorboard",
+    "func_timeout",
+    "hydra-core==1.3.4",
+    "accelerate",
+    "omegaconf",
+    "ray==2.57.0",
+    "peft==0.18.1",
+    "debugpy==1.8.0",
+    "hf_transfer",
+    "wandb",
+    "datasets>=4.0.0",
+    "tensordict",
+    "jaxtyping",
+    "skyrl-gym",
+    "polars",
+    "s3fs",
+    "s5cmd>=0.3.3; sys_platform == 'linux'",
+    "gcsfs",
+    "fastapi",
+    "orjson>=3.11.9",
+    "pybase64>=1.4.2",
+    "uvicorn",
+    "pybind11",
+    "setuptools",
+]
+
 # Opt-in FlashAttention 4. NOT part of `megatron`, so the default install runs FA2.
 #
 # The combined `flash-attn` wheel (see [tool.uv.sources]) always carries FA4's
