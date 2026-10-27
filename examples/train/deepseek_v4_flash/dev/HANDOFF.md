@@ -653,3 +653,9 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
 - **Step-6 outlier is not prompt-specific.** `v41-dapo-dump6-1793114210` (same recipe and data order, dumps on):
   step 6 max |diff| 1.07, 1 token > 1 of 1.23M, mixed signs. Responses are resampled each run, so the 8.67 (and
   12.1) at step 6 were one-off tokens: with per-trajectory salts a > ~1.5 gap is ~1 in 12M tokens. No further action.
+- **No batch-size effect in vLLM's residual decode-vs-prefill gap** (`dev/decode_vs_prefill_v41.py`, node 6, prefix
+  caching off, 12 samples/prompt, ~674k tokens each): `max_num_seqs` 32 / 128 / 512 / default -> 3.4e-5 / 2.8e-5 /
+  1.5e-5 / 2.2e-5 of tokens > 1 (max 2.4 / 1.6 / 1.8 / 1.9). A flat ~2e-5 floor; the n=2 run's 9e-6 was within noise.
+- **4K responses**: at the 2048-token cap, 35% (step 1) and 18% (step 6) of DAPO responses are truncated and
+  overlong-filtered out of the loss. `v41-dapo-fullft6-resp4k-*` (MAX_RESPONSE_LENGTH=4096, 20 steps, evals at 0/10/20,
+  no checkpoints) tests memory, truncation and reward at 4K.
