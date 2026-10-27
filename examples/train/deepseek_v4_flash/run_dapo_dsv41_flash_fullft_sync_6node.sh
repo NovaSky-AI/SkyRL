@@ -173,6 +173,9 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.batched=true \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  `# vLLM's V4.1 decode drifts from prefill after a prefix-cache hit (logprob outliers clustered by prompt); R3 needs` \
+  `# prefix caching on, so give each sample its own cache salt instead (~1% rollout time); see GeneratorConfig.cache_salt_per_trajectory.` \
+  generator.cache_salt_per_trajectory=true \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   environment.env_class=aime \
   trainer.logger="$LOGGER" \

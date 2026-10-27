@@ -149,6 +149,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.batched=true \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  `# vLLM's V4.1 decode drifts from prefill after a prefix-cache hit (logprob outliers clustered by prompt); R3 needs` \
+  `# prefix caching on, so give each sample its own cache salt instead (~1% rollout time); see GeneratorConfig.cache_salt_per_trajectory.` \
+  generator.cache_salt_per_trajectory=true \
   environment.env_class=gsm8k \
   trainer.logger="$LOGGER" \
   trainer.project_name="dsv41_flash_gsm8k" \
