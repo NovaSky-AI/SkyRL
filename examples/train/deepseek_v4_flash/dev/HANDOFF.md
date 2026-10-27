@@ -677,3 +677,8 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   can point at non-finite rows of the KV gather buffer our patch zeroes. Fixed on vLLM main by vllm-project/vllm#60613
   (2026-10-23, seeds `-1`; not in 0.32.0); DeepSeek-V4 got the same fix in #55299 (in 0.31.0+), so V4 needs no patch.
   #2538 (non-finite logprob routing + counter) was dropped from #2546/#2547 accordingly.
+  - **2560 fits for 20 steps** (W&B `dsv41_flash_dapo/fqoqd8ux`, `v41-dapo-fullft6-resp2560-1793127190.log`, no
+    checkpoints): rewards 0.071 / 0.183 / 0.206 / 0.220 / 0.403 / 0.311 / 0.247 / 0.460 / 0.553 / 0.547 / 0.492 /
+    0.530 / 0.569 / 0.658 / 0.439 / 0.543 / 0.529 / 0.550 / 0.736 / 0.565 (2K: -0.22 -> 0.44 over 10 steps). AIME-2024
+    avg_score / pass@12: step 0 0.211 / 0.833, step 10 0.333 / 0.967, step 20 0.344 / 0.833 (30 problems, pass@12 is
+    noisy). Steps ~600-700 s after warmup. Largest response cap that is stable on 6 nodes; 3072 OOMs by step 4.
