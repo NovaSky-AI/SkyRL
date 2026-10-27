@@ -32,6 +32,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py` | `patch_checkpoint_without_output_frozen_inputs.py`; the unpatched case doubles as the landed check |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -284,6 +285,21 @@ k-pool indexer (`index_kpool > 1`) selects through `fused_qk_topk_kpool` and byp
 - **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
+
+### `patch_checkpoint_without_output_frozen_inputs.py`: no upstream PR yet
+
+`CheckpointWithoutOutput` (the `mhc` / `layernorm` / `moe_act` selective-recompute modules) saves its
+inputs with `save_for_backward`, which keeps nothing when none of them requires grad, but its recompute
+hook still fires once a later consumer is trainable. Under LoRA (frozen embeddings and early base weights,
+trainable adapters after the first mHC / layernorm block) backward then runs off the end of
+`ctx.saved_tensors`: `RuntimeError: coroutine raised StopIteration` (DeepSeek-V4 LoRA with
+`recompute_modules=[..., mhc, layernorm]`). The patch keeps references to such inputs on the ctx and
+recomputes from them. Applied unconditionally at `megatron_worker.py` import.
+- **Landed?** megatron-core recomputes (or keeps) inputs that do not require grad: the GPU test
+  `test_unpatched_recompute_fails_on_frozen_inputs` then fails because backward no longer raises.
+- **Remove:** the module-level `apply_checkpoint_without_output_frozen_inputs_patch()` call and import in
+  `megatron_worker.py`, the module, and
+  `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py`.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 
