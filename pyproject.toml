@@ -116,7 +116,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.31.0; sys_platform == 'linux'",
+    "vllm==0.32.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -167,7 +167,7 @@ megatron = [
     # (imported lazily as `flash_mla.flash_mla_sparse_fwd`). Not on PyPI: our own x86_64 build of
     # the `nv_dev` branch, see [tool.uv.sources]. No aarch64 wheel yet.
     "flash-mla==1.0.0+cu.13.0.torch.2.13.b7643bd; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "vllm==0.31.0; sys_platform == 'linux'",
+    "vllm==0.32.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -322,7 +322,7 @@ override-dependencies = [
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu12 variant
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
-    # vLLM 0.31.0 pins flashinfer-python==0.7.0.post1, while Megatron-Bridge pins
+    # vLLM 0.32.0 pins flashinfer-python==0.7.0.post1, while Megatron-Bridge pins
     # flashinfer-python/flashinfer-cubin==0.6.18.post1, so the flashinfer packages
     # are held here. flashinfer hard-errors when an installed cubin's version
     # differs from its own, so python, cubin and jit-cache must move together.
@@ -344,7 +344,7 @@ override-dependencies = [
     "flashinfer-jit-cache-sm121a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "flashinfer-cubin==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
-    # vLLM 0.31.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
+    # vLLM 0.32.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
     # overridden here; these two MUST be bumped together.
     #
     # FA4 requires apache-tvm-ffi>=0.1.12, newer than either package's metadata
@@ -359,18 +359,14 @@ override-dependencies = [
     # 0.1.13 is the first tilelang whose bound (`>=0.1.11,<0.1.13`) admits 0.1.12.
     "tilelang==0.1.13; sys_platform == 'linux'",
     "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
-    # vLLM 0.31.0 pins nvidia-cutlass-dsl==4.7.1; held at 4.8.0 here (flashinfer
-    # 0.7 and quack-kernels 0.6.5 both accept >=4.7).
+    # vLLM 0.32.0 pins nvidia-cutlass-dsl==4.8.0 and quack-kernels==0.6.5, but the
+    # combined FA4 `flash-attn` wheel (`fa4` extra) pins quack-kernels==0.6.4 and an
+    # older cutlass-dsl, so both are held at vLLM's versions here.
     "nvidia-cutlass-dsl[cu13]==4.8.0; sys_platform == 'linux'",
     "quack-kernels[cu13]==0.6.5; sys_platform == 'linux'",
-    # vLLM 0.31.0 pins xgrammar==0.2.7; held at the 0.2.8 bugfix release here.
-    # Before moving this pin, check that the new release publishes a cp312 linux
-    # x86_64 wheel: 0.2.4/0.2.5 shipped without one, which broke install on
-    # x86_64 py3.12.
-    "xgrammar==0.2.8",
     "torch==2.13.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
-    # torch: 0.30.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.31.0 pulls
+    # torch: 0.30.0 wants torch 2.13.0, 0.26.0 wants 2.11.0. vLLM 0.32.0 pulls
     # torchvision==0.28.0, so without this the torch override above would resolve
     # a torchvision that cannot import against the torch we actually install.
     "torchvision==0.28.0; sys_platform == 'linux'",

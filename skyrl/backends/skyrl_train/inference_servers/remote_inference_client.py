@@ -1300,11 +1300,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
             )
             level = 1
         # vLLM's /sleep pauses the scheduler (default mode "abort") and, at level >= 1, resets
-        # the prefix cache including running requests. With routed-experts capture enabled
-        # (`enable_return_routed_experts`), vLLM 0.31 only allows that reset after a "keep"
-        # pause, so a plain /sleep fails with "AuxOutput Connector only supports resetting
-        # running requests after pause(mode='keep')". Abort in-flight requests explicitly
-        # first, then sleep in "keep" mode: the same end state for every engine config.
+        # the prefix cache including running requests. vLLM 0.31 rejected that reset with
+        # routed-experts capture (`enable_return_routed_experts`) unless paused in "keep" mode;
+        # vllm#59060 (in 0.32) lifted that. Abort in-flight requests explicitly first, then sleep
+        # in "keep" mode: the same end state for every engine config.
         await self.pause(mode=PauseMode.ABORT, clear_cache=False)
         params: Dict[str, Any] = {"level": str(level), "mode": PauseMode.KEEP.value}
         if tags:
