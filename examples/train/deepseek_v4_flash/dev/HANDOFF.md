@@ -626,3 +626,15 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   two throwaway ones (`v41-dapo-perf-threads-*`, the partial `v41-dapo-fullft6-final-*`); still kept:
   `v41-dapo-fullft6-{1793022818,floor-1793036246,curve-1793076638}`, `dapo-fullft4-1792972963`, LoRA ckpts.
   Perf/debug runs should pass `trainer.ckpt_interval=0` (no saves at all, not even the end-of-training one).
+- **Mitigation for the prefix-cache logprob drift: `generator.cache_salt_per_trajectory=true`** (17421d17; now on in
+  all four V4.1 recipes). `enable_prefix_caching=false` is not an option with R3: vLLM's AuxOutput connector (routed
+  expert capture) raises "AuxOutput Connector requires prefix caching". A per-trajectory salt keeps every sample off
+  the others' cached prompt KV. DAPO full FT + R3, same recipe (`v41-dapo-perf-trajsalt-*` vs `v41-dapo-perf-base-*`
+  dumps, ~1.1-1.2M response tokens per step):
+
+  | step | tokens > 0.5 | tokens > 1 | max | generate |
+  |---|---|---|---|---|
+  | 1 (same base weights) | 104 -> 13 | 23 -> 0 | 10.17 -> 0.99 | 99 -> 100 s |
+  | 2 | 85 -> 12 | 14 -> 0 | 2.00 -> 1.00 | 97 -> 98 s |
+
+  Mean |diff| is unchanged (0.014): the bulk is bf16 noise; only the prefix-cache tail goes away.
