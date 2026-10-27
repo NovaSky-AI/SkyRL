@@ -157,14 +157,6 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import ( 
 
 apply_per_block_fp8_param_patch()
 
-# R3 on monolithic MoE kernels (FlashInfer TRT-LLM FP8): the routed-experts capture callback is
-# bound once at startup and lost when a weight sync rebuilds the kernel (vllm#59449 / #59455).
-from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import (  # noqa: E402
-    apply_routed_experts_rebind_patch,
-)
-
-apply_routed_experts_rebind_patch()
-
 # R3 with inference PP > 1: relay each stage's routes to the next so the last stage returns every
 # layer (pass-through at PP=1; a no-op when vLLM relays natively).
 from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (  # noqa: E402
@@ -172,6 +164,14 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 )
 
 apply_pp_relay_worker_patch()
+
+# A PP stage with no layers of some KV cache group gets cache tensors for layers it does not own (DeepSeek-V4.1 at PP=2).
+# TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.32.0).
+from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import (  # noqa: E402
+    apply_pp_kv_cache_projection_patch,
+)
+
+apply_pp_kv_cache_projection_patch()
 
 # DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
 # NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#60613 is in the pinned vLLM.
