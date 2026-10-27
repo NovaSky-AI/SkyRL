@@ -320,3 +320,71 @@ async def test_probes_that_cannot_be_built_leave_the_server_starting() -> None:
     backend = TokensBackend("http://engine", renderer, model="policy")
     await backend.start()
     await backend.close()
+
+
+def _probing(monkeypatch: Any) -> None:
+    """Every ``FakeRenderer`` probes one text and one image prompt, as ``_start_with_probes``'s does."""
+    from tests.fake_renderer import FakeRenderer
+
+    probes = lambda self: [("text", [user("hi")]), ("4x4 image", [look("what?", image("probe", 4))])]  # noqa: E731
+    monkeypatch.setattr(FakeRenderer, "processor_probes", probes, raising=False)
+
+
+async def test_an_engine_asleep_at_start_is_checked_before_the_first_call_with_images(monkeypatch: Any) -> None:
+    _probing(monkeypatch)
+    # No chat endpoint at start, as SkyRL's colocated engines are asleep then.
+    async with token_stack(model="policy") as stack:
+        assert stack.server.backend._processor_check_pending
+        assert len(stack.engine.chat_requests) == 1
+        stack.engine.chat_tokens = lambda messages: _rendered(stack.renderer, messages)
+        llm = client((await stack.create())["base_url"])
+
+        await llm.chat.completions.create(model="policy", messages=[user("hi")])
+        assert len(stack.engine.chat_requests) == 1  # text only: not checked yet
+        await llm.chat.completions.create(model="policy", messages=[look("what is this?", image("cat", 3))])
+        assert len(stack.engine.chat_requests) == 3 and not stack.server.backend._processor_check_pending
+        await llm.chat.completions.create(model="policy", messages=[look("and this?", image("dog", 3))])
+        assert len(stack.engine.chat_requests) == 3 and len(stack.engine.requests) == 3
+
+
+async def test_an_engine_found_to_process_images_differently_late_refuses_images(monkeypatch: Any) -> None:
+    import openai
+
+    _probing(monkeypatch)
+    async with token_stack(model="policy") as stack:
+        stack.engine.chat_tokens = lambda messages: _rendered(stack.renderer, messages) + 3 * _has_image(messages)
+        llm = client((await stack.create())["base_url"])
+        for _ in range(2):
+            with pytest.raises(openai.BadRequestError, match="image processor settings differ"):
+                await llm.chat.completions.create(model="policy", messages=[look("what is this?", image("cat", 3))])
+        assert stack.engine.requests == [] and len(stack.engine.chat_requests) == 3
+
+        await llm.chat.completions.create(model="policy", messages=[user("hi")])
+        assert len(stack.engine.requests) == 1
+
+
+async def test_an_engine_that_still_doesnt_answer_is_left_unchecked(monkeypatch: Any) -> None:
+    _probing(monkeypatch)
+    async with token_stack(model="policy") as stack:
+        llm = client((await stack.create())["base_url"])
+        for text in ("what is this?", "and this?"):
+            await llm.chat.completions.create(model="policy", messages=[look(text, image("cat", 3))])
+        # Once at start, once before the first call with images; not again.
+        assert len(stack.engine.chat_requests) == 2 and len(stack.engine.requests) == 2
+        assert not stack.server.backend._processor_check_pending
+
+
+async def test_concurrent_first_calls_with_images_check_once(monkeypatch: Any) -> None:
+    import asyncio
+
+    _probing(monkeypatch)
+    async with token_stack(model="policy") as stack:
+        stack.engine.chat_tokens = lambda messages: _rendered(stack.renderer, messages)
+        bases = [(await stack.create())["base_url"] for _ in range(4)]
+        await asyncio.gather(
+            *(
+                client(base).chat.completions.create(model="policy", messages=[look("what is this?", image("cat", 3))])
+                for base in bases
+            )
+        )
+        assert len(stack.engine.chat_requests) == 3 and len(stack.engine.requests) == 4

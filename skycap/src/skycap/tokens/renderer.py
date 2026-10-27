@@ -188,6 +188,11 @@ class RenderersRenderer:
     differently has a different number of placeholder tokens than the engine
     expects. ``processor_probes`` gives the requests that check this against
     the engine (``TokensBackend.start``).
+
+    ``renderer`` names the ``renderers`` renderer (``qwen3.5``, ``qwen3-vl``,
+    ...). By default it is looked up from ``tokenizer``, which finds only the
+    exact Hugging Face names the library lists, so a local checkpoint or a
+    fine-tune names it.
     """
 
     #: How many encoded items ``features`` keeps.
@@ -201,19 +206,23 @@ class RenderersRenderer:
         thinking_retention: str = "all",
         chat_template_kwargs: Mapping[str, Any] | None = None,
         processor_kwargs: Mapping[str, Any] | None = None,
+        renderer: str | None = None,
     ) -> None:
-        from renderers import AutoRendererConfig, create_renderer
+        from pydantic import TypeAdapter
+        from renderers import AutoRendererConfig, RendererConfig, create_renderer
         from renderers.base import is_multimodal, load_tokenizer
 
         self.name = tokenizer
+        if renderer is None:
+            config = AutoRendererConfig(thinking_retention=thinking_retention)
+        else:
+            config = TypeAdapter(RendererConfig).validate_python(
+                {"name": renderer, "thinking_retention": thinking_retention}
+            )
 
         def build() -> tuple[Any, Any]:
             loaded = load_tokenizer(tokenizer)
-            renderer = create_renderer(
-                loaded,
-                AutoRendererConfig(thinking_retention=thinking_retention),
-                chat_template_kwargs=chat_template_kwargs,
-            )
+            renderer = create_renderer(loaded, config, chat_template_kwargs=chat_template_kwargs)
             if processor_kwargs:
                 if not is_multimodal(renderer):
                     raise ValueError(f"processor_kwargs are for a multimodal model; {tokenizer} renders text only")

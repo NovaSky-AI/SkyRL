@@ -77,6 +77,10 @@ class TokensBackend:
         self.chat_template: str | None = getattr(renderer, "chat_template", None)
         self._locks: dict[str, asyncio.Lock] = {}
         self._session: aiohttp.ClientSession | None = None
+        #: The engine didn't answer ``start``'s image-processing check (asleep, as SkyRL's colocated engines are
+        #: then, or not up yet): it runs once more, before the first call with images.
+        self._processor_check_pending = False
+        self._processor_check_lock = asyncio.Lock()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -104,14 +108,16 @@ class TokensBackend:
             await self.close()
             raise
 
-    async def _check_engine_processor(self) -> None:
+    async def _check_engine_processor(self, *, late: bool = False) -> None:
         """Refuse to start if the engine processes images differently, which would otherwise be silent.
 
         Each of the renderer's ``processor_probes`` is rendered here and sent to the engine's
         ``/v1/chat/completions`` (one token): the prompt token counts must agree, or the model would see
         images at another resolution than the engine is configured for. A text-only difference is the chat
-        template's, and an engine that doesn't answer (not up yet, or asleep) can't be compared: both only
-        warn. Equal counts don't prove equal pixels, but catch different min/max pixels.
+        template's: it only warns. An engine that doesn't answer (not up yet, or asleep) can't be compared at
+        start, so the check runs again before the first call with images (``_check_engine_processor_late``);
+        if it doesn't answer then either (``late``), it only warns. Equal counts don't prove equal pixels, but
+        catch different min/max pixels.
         """
         probes = getattr(self.renderer, "processor_probes", None)
         if probes is None or self.media_error:
@@ -141,7 +147,14 @@ class TokensBackend:
                         raise RuntimeError(f"HTTP {up.status}: {str(body)[:300]}")
                 theirs = int(body["usage"]["prompt_tokens"])
             except Exception as error:  # noqa: BLE001 - whatever the engine or the request raises
-                logger.warning("%s: couldn't check image processing against the engine (%s): %s", name, label, error)
+                self._processor_check_pending = not late
+                logger.warning(
+                    "%s: couldn't check image processing against the engine (%s): %r; %s",
+                    name,
+                    label,
+                    error,
+                    "it isn't checked" if late else "checking again before the first call with images",
+                )
                 return
             if ours == theirs:
                 continue
@@ -159,6 +172,22 @@ class TokensBackend:
                 "processor settings differ. Give skycap the engine's mm_processor_kwargs (processor_kwargs, "
                 "--processor-kwargs)."
             )
+
+    async def _check_engine_processor_late(self) -> None:
+        """``start``'s check, for an engine that didn't answer then: once, before the first call with images.
+
+        Calls with images wait for it rather than go unchecked. A mismatch can't stop the server any more, so
+        from then on it refuses every call with images (400), as for ``media_error``; text-only calls still work.
+        """
+        async with self._processor_check_lock:
+            if not self._processor_check_pending:
+                return
+            self._processor_check_pending = False
+            try:
+                await self._check_engine_processor(late=True)
+            except RuntimeError as error:
+                logger.error("%s; refusing calls with images", error)
+                self.media_error = str(error)
 
     async def close(self) -> None:
         if self._session is not None:
@@ -276,6 +305,8 @@ class TokensBackend:
 
         routes_from = turn.routes_from(graph, planned)
         features = None
+        if planned.media and self._processor_check_pending:
+            await self._check_engine_processor_late()
         if planned.media and self.media_error:
             return _error(f"{self.renderer.name}'s images can't be sent to the engine: {self.media_error}", 400)
         if planned.media:
