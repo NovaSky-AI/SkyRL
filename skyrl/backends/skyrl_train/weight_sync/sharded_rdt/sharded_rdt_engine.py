@@ -674,9 +674,16 @@ class SkyRLShardedRDTWeightTransferEngine(
             finalize_layerwise_reload,
         )
 
+        from skyrl.backends.skyrl_train.patches.vllm.patch_moe_kernel_constants import (
+            restore_moe_kernel_constants,
+        )
+
         self.drain_pending()
         with torch.device(self.device):
             finalize_layerwise_reload(self.model, self.model_config)
+            # A sleep for the sync (offload_kv_for_weight_sync) zeroes MoE kernel
+            # constants that no reload rebuilds.
+            restore_moe_kernel_constants(self.model)
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Receive one update. Unlike the base, does NOT issue a per-update
