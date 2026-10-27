@@ -9,15 +9,20 @@ Run with::
       tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_mtp_weight_sync.py
 """
 
+import hashlib
 import re
 from typing import List, Tuple
 
 import httpx
 import pytest
 import ray
+import torch
 
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
+    NewInferenceWorkerWrap,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
@@ -29,7 +34,6 @@ from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
-    are_responses_similar,
     init_worker_with_type,
     run_inference,
 )
@@ -37,10 +41,6 @@ from tests.backends.skyrl_train.gpu.utils import (
 MODEL_NAME = "Qwen/Qwen3.5-2B"
 NUM_SPECULATIVE_TOKENS = 2
 MAX_GENERATE_LENGTH = 96
-RESPONSE_TOLERANCE = 0.05
-# Greedy decoding can branch at near-ties after the same initial answer.
-RESPONSE_PREFIX_LENGTH = 64
-MIN_MATCHING_RESPONSE_FRACTION = 0.75
 MIN_ACCEPTANCE_AFTER_SYNC = 0.5
 MAX_ACCEPTANCE_DROP = 0.15
 
@@ -54,6 +54,43 @@ PROMPTS = [
     "Explain photosynthesis in one sentence.",
     "Continue the sequence: 2, 4, 8, 16.",
 ]
+
+
+class MtpFingerprintWorker(NewInferenceWorkerWrap):
+    """Expose live parameter hashes to the weight-sync regression test."""
+
+    def skyrl_model_fingerprints(self):
+        result = {}
+        for label, module in (("main", self.model_runner.model), ("draft", self._skyrl_draft_model())):
+            if module is None:
+                result[label] = None
+                continue
+            result[label] = {
+                name: hashlib.sha256(param.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+                for name, param in module.named_parameters()
+            }
+        return result
+
+
+async def _model_fingerprints(client: RemoteInferenceClient):
+    responses = await client._call_all_servers("/collective_rpc", {"method": "skyrl_model_fingerprints"})
+    return {url: response["body"]["results"] for url, response in responses.items()}
+
+
+def _assert_matching_fingerprints(before, after):
+    assert before.keys() == after.keys()
+    for url, before_workers in before.items():
+        after_workers = after[url]
+        assert len(before_workers) == len(after_workers)
+        for rank, (before_models, after_models) in enumerate(zip(before_workers, after_workers)):
+            for label in ("main", "draft"):
+                old, new = before_models[label], after_models[label]
+                assert old and new, f"{label} model missing on worker {rank} of {url}"
+                assert old.keys() == new.keys(), f"{label} parameter names changed on worker {rank} of {url}"
+                changed = [name for name in old if old[name] != new[name]]
+                assert not changed, f"{label} weights changed on worker {rank} of {url}: {changed[:10]}"
+                print(f"[mtp weight sync] {label} worker {rank}: {len(old)} parameters match bitwise")
+
 
 _SPEC_COUNTER_RE = re.compile(r"^vllm:spec_decode_num_(draft_tokens|accepted_tokens)(?:_total)?(?:\{[^}]*\})? (\S+)$")
 
@@ -102,7 +139,11 @@ def _make_cfg(weight_sync_backend: str, colocate_all: bool, inference_tp: int, m
     ie_cfg.gpu_memory_utilization = 0.6
     ie_cfg.enforce_eager = True
     ie_cfg.max_num_seqs = 16
-    ie_cfg.engine_init_kwargs = {"gdn_prefill_backend": "triton", "max_model_len": 1024}
+    ie_cfg.engine_init_kwargs = {
+        "gdn_prefill_backend": "triton",
+        "max_model_len": 1024,
+        "worker_extension_cls": f"{__name__}.MtpFingerprintWorker",
+    }
     ie_cfg.enable_ray_prometheus_stats = False
     if weight_sync_backend == "delta":
         ie_cfg.delta_weight_sync = DeltaWeightSyncConfig(
@@ -156,6 +197,7 @@ async def test_megatron_mtp_weight_sync_roundtrip(
         assert drafted_before > 0, "speculative decoding is not active on the engine"
         acceptance_before = accepted_before / drafted_before
         print(f"[mtp weight sync] acceptance before sync: {acceptance_before:.3f} ({drafted_before:.0f} drafted)")
+        fingerprints_before = await _model_fingerprints(client)
 
         # Level 2 discards every weight, the drafter's included: only the sync restores them.
         await client.sleep()
@@ -172,6 +214,8 @@ async def test_megatron_mtp_weight_sync_roundtrip(
             ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client, ie_cfg))
         policy.offload_to_cpu()
         await client.wake_up(tags=["kv_cache"])
+        fingerprints_after = await _model_fingerprints(client)
+        _assert_matching_fingerprints(fingerprints_before, fingerprints_after)
 
         after = await run_inference(client, prompts, sampling_params, tokenizer=tokenizer)
         drafted_after, accepted_after = await _spec_decode_counters(client)
@@ -182,22 +226,6 @@ async def test_megatron_mtp_weight_sync_roundtrip(
         print(f"[mtp weight sync] acceptance after sync: {acceptance_after:.3f} ({drafted:.0f} drafted)")
 
         assert all(before["responses"]) and all(after["responses"]), "empty generations: nothing to compare"
-        diverged = [
-            (i, resp_before, resp_after)
-            for i, (resp_before, resp_after) in enumerate(zip(before["responses"], after["responses"]))
-            if not are_responses_similar(
-                [resp_before[:RESPONSE_PREFIX_LENGTH]],
-                [resp_after[:RESPONSE_PREFIX_LENGTH]],
-                tolerance=RESPONSE_TOLERANCE,
-            )
-        ]
-        for i, resp_before, resp_after in diverged:
-            print(f"[mtp weight sync] generation {i} diverged:\n  before: {resp_before!r}\n  after:  {resp_after!r}")
-        matching = len(prompts) - len(diverged)
-        assert matching >= MIN_MATCHING_RESPONSE_FRACTION * len(prompts), (
-            f"only {matching}/{len(prompts)} generations survived the weight sync "
-            f"(diverged: {[i for i, _, _ in diverged]})"
-        )
         assert acceptance_after >= MIN_ACCEPTANCE_AFTER_SYNC, (
             f"draft acceptance collapsed to {acceptance_after:.3f} after the sync "
             f"(before: {acceptance_before:.3f}): the drafter was not reloaded"
