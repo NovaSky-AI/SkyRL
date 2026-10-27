@@ -32,7 +32,6 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
-| `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py` | `patch_checkpoint_without_output_frozen_inputs.py`; the unpatched case doubles as the landed check |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 
@@ -327,21 +326,6 @@ bypasses the hook.
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
 
-### `patch_checkpoint_without_output_frozen_inputs.py`: no upstream PR yet
-
-`CheckpointWithoutOutput` (the `mhc` / `layernorm` / `moe_act` selective-recompute modules) saves its
-inputs with `save_for_backward`, which keeps nothing when none of them requires grad, but its recompute
-hook still fires once a later consumer is trainable. Under LoRA (frozen embeddings and early base weights,
-trainable adapters after the first mHC / layernorm block) backward then runs off the end of
-`ctx.saved_tensors`: `RuntimeError: coroutine raised StopIteration` (DeepSeek-V4 LoRA with
-`recompute_modules=[..., mhc, layernorm]`). The patch keeps references to such inputs on the ctx and
-recomputes from them. Applied unconditionally at `megatron_worker.py` import.
-- **Landed?** megatron-core recomputes (or keeps) inputs that do not require grad: the GPU test
-  `test_unpatched_recompute_fails_on_frozen_inputs` then fails because backward no longer raises.
-- **Remove:** the module-level `apply_checkpoint_without_output_frozen_inputs_patch()` call and import in
-  `megatron_worker.py`, the module, and
-  `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py`.
-
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 
 Qwen3-VL ViT attention-backend propagation.
@@ -380,15 +364,38 @@ Use `RAY_ADDRESS=local` if a Ray cluster is already up on the box. Don't put `--
 # CPU
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/patches/megatron/glm5_next/test_dsa_kpool_math.py
 
-# GPU (4+ GPUs): kernels, KDA/mHC vs HF, and the three GLM roundtrip rows vs vLLM
-uv run --isolated --extra dev --extra megatron pytest -s -v -m "h100 or not h100" \
-  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/glm5_next/test_dsa_kpool.py \
-  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py \
+# GPU (4+ GPUs): k-pool kernels and TP sharding, KDA/mHC vs HF
+uv run --isolated --extra dev --extra megatron pytest -s -v \
+  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/glm5_next/ \
+  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py
+
+# GPU (4 GPUs; needs ~/data/gsm8k from examples/train/gsm8k/gsm8k_dataset.py):
+# the three GLM-5.3-Flash roundtrip rows vs vLLM. Run one roundtrip session per machine at a
+# time: every session's vLLM server binds port 8000, so a second one on other GPUs sends its
+# requests to the first one's server.
+uv run --isolated --extra dev --extra megatron pytest -s -v -m "h100 or not h100" -k "glm-5.3" \
   tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py \
-  -k "kpool_selects or glm5_next_modules or glm-5.3"
+  tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py
 ```
 
-Expected Megatron-vs-vLLM logprob diffs (threshold 0.1):
-- `glm-5.3-flash-4layer_h100_tp2_ep4`: 0.0651
-- `..._kpool_beyond_topk`: 0.0527
-- `..._lora`: 0.0620
+### Reference values
+
+Mean |logprob diff| over the response tokens, as the tests print them. Compare a bump against the
+newest column on the same GPU type and add a column for it. A column changes one pin at a time
+where possible, so a shift can be pinned on Megatron or on vLLM.
+
+| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump |
+|---|---|---|---|
+| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b |
+| vLLM | not recorded | 0.32.0 | 0.32.0 |
+| GPU | not recorded | 4x B200 | 4x B200 |
+| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 |
+| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 |
+| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 |
+| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 |
+| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 |
+| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 |
+| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 |
+
+Two values in a cell are two runs. The megatron bump sits about 0.008 above main on `tp2_ep4`
+(reproduced, not investigated, well inside 0.1); the same pins with vLLM 0.31.0 gave 0.0630 there.
