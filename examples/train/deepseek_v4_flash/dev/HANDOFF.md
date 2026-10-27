@@ -619,3 +619,10 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   2.2e-5 (max 1.9, unclustered); **on, 12 samples/prompt (as SkyRL's rollout engines run): 6.9e-5 (max 2.8),
   clustered by prompt group**. A prefix-cache hit seems to restore V4.1's compressed/indexer state for the shared
   prompt inexactly. Mitigation to test: `generator.inference_engine.enable_prefix_caching=false`.
+- **Checkpoint disk**: a V4.1 full-FT checkpoint (bf16 model + fp32 optimizer, dist-ckpt, written node-locally) is
+  ~1.2 TB on each of the 6 nodes. Five kept full-FT checkpoints plus a run with `ckpt_interval=3` (two saves) filled
+  node 0's 12 TB `/mnt/local_storage`; the final safety-net save then failed (`inline_container.cc ... unexpected
+  pos`, i.e. ENOSPC) and the next launch failed in Ray's working_dir unpack (`No space left on device`). Deleted the
+  two throwaway ones (`v41-dapo-perf-threads-*`, the partial `v41-dapo-fullft6-final-*`); still kept:
+  `v41-dapo-fullft6-{1793022818,floor-1793036246,curve-1793076638}`, `dapo-fullft4-1792972963`, LoRA ckpts.
+  Perf/debug runs should pass `trainer.ckpt_interval=0` (no saves at all, not even the end-of-training one).
