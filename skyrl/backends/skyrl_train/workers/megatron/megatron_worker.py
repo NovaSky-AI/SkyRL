@@ -156,6 +156,25 @@ apply_clip_grads_mixed_dtype_patch()
 apply_checkpoint_without_output_frozen_inputs_patch()
 
 
+def drop_core_attn_recompute_for_dsv4_hybrid(provider) -> None:
+    """megatron-core's DSv4HybridAttention (DeepSeek-V4 / V4.1) asserts checkpoint_core_attention is off, which
+    selective "core_attn" recompute (and SkyRL's default) turns on: drop it, and turn recompute off if nothing
+    else is left. A no-op for every other model."""
+    if (
+        getattr(provider, "experimental_attention_variant", None) == "dsv4_hybrid"
+        and provider.recompute_granularity == "selective"
+        and "core_attn" in (provider.recompute_modules or [])
+    ):
+        provider.recompute_modules = [m for m in provider.recompute_modules if m != "core_attn"]
+        if not provider.recompute_modules:
+            provider.recompute_granularity = None
+        logger.info(
+            "DSv4 hybrid attention does not support core_attn recompute; "
+            f"recompute_granularity={provider.recompute_granularity}, "
+            f"recompute_modules={provider.recompute_modules}"
+        )
+
+
 class MegatronWorker:
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
@@ -384,21 +403,7 @@ class MegatronWorker:
                 "full recompute."
             )
 
-        # megatron-core's DSv4HybridAttention (DeepSeek-V4) asserts checkpoint_core_attention is off,
-        # which the selective "core_attn" recompute above (and SkyRL's default) turns on.
-        if (
-            getattr(provider, "experimental_attention_variant", None) == "dsv4_hybrid"
-            and provider.recompute_granularity == "selective"
-            and "core_attn" in (provider.recompute_modules or [])
-        ):
-            provider.recompute_modules = [m for m in provider.recompute_modules if m != "core_attn"]
-            if not provider.recompute_modules:
-                provider.recompute_granularity = None
-            logger.info(
-                "DSv4 hybrid attention does not support core_attn recompute; "
-                f"recompute_granularity={provider.recompute_granularity}, "
-                f"recompute_modules={provider.recompute_modules}"
-            )
+        drop_core_attn_recompute_for_dsv4_hybrid(provider)
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
