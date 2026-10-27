@@ -1,4 +1,4 @@
-"""Runtime patch: make vLLM's DeepSeek-V4 model survive a weight-sync reload.
+"""Runtime patch: make vLLM's DeepSeek-V4 and V4.1 models survive a weight-sync reload.
 
 vLLM's layerwise reload holds every layer on the meta device until that layer's ``weight_loader``
 calls have received all of its weights. Two pieces of ``DeepseekV4ForCausalLM`` loading don't fit it:
@@ -17,19 +17,25 @@ calls have received all of its weights. Two pieces of ``DeepseekV4ForCausalLM`` 
    reload that copy lands in the meta placeholder and is dropped; the attention module logs
    ``Failed to load weights`` and gets its pre-reload storage back. After a level-2 sleep that storage
    is zeroed, so every sink -- real heads and the ``-inf`` padding heads -- serves as 0. Here the sink
-   tensors are taken out of the stream when their parameter is on meta and written into the restored
-   parameter (same per-rank head slice, ``-inf`` padding) by ``run_deferred_model_finalize``.
+   tensors are taken out of the stream (always during a SkyRL receive, whose chunk order decides whether the
+   layer is still on meta; otherwise when their parameter is on meta) and written into the restored
+   parameter (same per-rank head slice, ``-inf`` padding) by ``run_deferred_model_finalize``. Applies to
+   DeepSeek-V4 and to V4.1's text model (same loader); without it V4.1's post-sync logprobs drift by 0.12-0.16.
 
 Remove once vLLM loads ``attn_sink`` through a weight loader and runs the model-level finalize once at
 the end of a layerwise reload.
 """
 
+import os
 from contextlib import contextmanager
 from typing import Any, Iterable, Iterator, Tuple
 
 from loguru import logger
 
 _PATCHED = False
+# Set while a SkyRL weight-sync receive is loading (defer_model_finalize); the model's load_weights then stashes
+# every attention sink instead of only those it finds on meta.
+_IN_SYNC_LOAD = 0
 _DEFER_ATTR = "_skyrl_defer_model_finalize"
 _PENDING_ATTR = "_skyrl_model_finalize_pending"
 _SINK_STASH_ATTR = "_skyrl_pending_attn_sinks"
@@ -40,15 +46,39 @@ def apply_deepseek_v4_reload_patch() -> bool:
     global _PATCHED
     if _PATCHED:
         return False
+    pairs = []
     try:
         from vllm.models.deepseek_v4.nvidia.model import (
             DeepseekV4ForCausalLM,
             DeepseekV4Model,
         )
-    except ImportError:
-        return False
 
-    original_finalize = DeepseekV4ForCausalLM.process_weights_after_loading
+        pairs.append((DeepseekV4ForCausalLM, DeepseekV4Model))
+    except ImportError:
+        pass
+    try:
+        # DeepSeek-V4.1 (text-only class; see patch_deepseek_v41.py) has its own copies of both.
+        from vllm.models.deepseek_v41.nvidia.model import (
+            DeepseekV4Model as DeepseekV41Model,
+        )
+        from vllm.models.deepseek_v41.nvidia.model import (
+            DeepseekV41LLMForCausalLM,
+        )
+
+        pairs.append((DeepseekV41LLMForCausalLM, DeepseekV41Model))
+    except ImportError:
+        pass
+    if not pairs:
+        return False
+    for causal_lm_cls, model_cls in pairs:
+        _patch_classes(causal_lm_cls, model_cls)
+    _PATCHED = True
+    logger.info("Installed DeepSeek-V4/V4.1 weight-sync reload patch (deferred finalize, attention sinks)")
+    return True
+
+
+def _patch_classes(causal_lm_cls, model_cls) -> None:
+    original_finalize = causal_lm_cls.process_weights_after_loading
 
     def process_weights_after_loading(self) -> None:
         if getattr(self, _DEFER_ATTR, False):
@@ -56,7 +86,7 @@ def apply_deepseek_v4_reload_patch() -> bool:
             return
         original_finalize(self)
 
-    original_load = DeepseekV4Model.load_weights
+    original_load = model_cls.load_weights
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]) -> set:
         params = None
@@ -70,7 +100,10 @@ def apply_deepseek_v4_reload_patch() -> bool:
                     if params is None:
                         params = dict(self.named_parameters())
                     param = params.get(name)
-                    if param is not None and param.is_meta:
+                    # During a sync, whether a sink's layer is still held on meta when the sink arrives depends on
+                    # the chunk order (a direct copy into a materialized-then-restored layer is lost the same
+                    # way), so stash them all and write them after the layerwise finalize.
+                    if param is not None and (param.is_meta or _IN_SYNC_LOAD):
                         stashed[name] = weight.detach().clone()
                         stashed_now.add(name)
                         continue
@@ -78,20 +111,22 @@ def apply_deepseek_v4_reload_patch() -> bool:
 
         return original_load(self, without_meta_sinks()) | stashed_now
 
-    DeepseekV4ForCausalLM.process_weights_after_loading = process_weights_after_loading
-    DeepseekV4Model.load_weights = load_weights
-    _PATCHED = True
-    logger.info("Installed DeepSeek-V4 weight-sync reload patch (deferred finalize, attention sinks)")
-    return True
+    causal_lm_cls.process_weights_after_loading = process_weights_after_loading
+    # SKYRL_DEBUG_SKIP_SINK_STASH=1 leaves vLLM's sink loading alone: a negative control for the sync tests.
+    if os.environ.get("SKYRL_DEBUG_SKIP_SINK_STASH") != "1":
+        model_cls.load_weights = load_weights
 
 
 @contextmanager
 def defer_model_finalize(model: Any) -> Iterator[None]:
     """Make a patched model's ``process_weights_after_loading`` a pending marker for the duration."""
+    global _IN_SYNC_LOAD
     setattr(model, _DEFER_ATTR, True)
+    _IN_SYNC_LOAD += 1
     try:
         yield
     finally:
+        _IN_SYNC_LOAD -= 1
         setattr(model, _DEFER_ATTR, False)
 
 
