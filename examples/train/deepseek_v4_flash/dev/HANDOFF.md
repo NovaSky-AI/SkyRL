@@ -668,3 +668,7 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   - **3072 fits** (`v41-dapo-fullft6-resp3k-1793123157.log`): base AIME-2024 avg_score 0.378, pass@12 0.867 (avg 1910
     tokens); step-1 reward 0.282, step 2 0.357 (2K: ~-0.22, -0.04). Step 765 s after warmup (generate 130 s, policy_train
     496 s) vs ~650 s at 2K. Running 20 steps, evals at 10 and 20.
+  - **3072 OOMs at step 4** (TE linear forward in policy_train; 154.6 GiB allocated + 7.3 GiB slept vLLM; rows up to
+    ~4.2K tokens): steps 1-3 fit, rewards 0.282 / 0.357 / 0.388 / 0.411 (step-4 rollout). 3K is at the edge of the
+    6-node layout; longer responses need memory work (e.g. a memory snapshot of one rank to see what beyond the ~45 GB
+    of bf16 params + grads holds the rest). Next: 2560 (`v41-dapo-fullft6-resp2560-*`, 20 steps).
