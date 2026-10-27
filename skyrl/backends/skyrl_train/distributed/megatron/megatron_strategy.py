@@ -108,22 +108,6 @@ def _patched_update_fp32_params_by_new_state(self):
         fp32_param.data.copy_(v["master_param"])
 
 
-def release_cached_pinned_host_memory() -> float:
-    """Return PyTorch's cached, unused pinned host blocks to the OS; returns the GiB released.
-
-    The CUDA caching host allocator keeps every freed pinned block (``pin_memory()``, non-blocking staging)
-    for reuse and never returns one on its own, so the pinned temporaries of building a CPU-offloaded
-    optimizer and of each offload / backload stay resident. A checkpoint save needs that host memory back.
-    """
-    try:
-        stats = torch.cuda.host_memory_stats()
-        cached = stats.get("allocated_bytes.current", 0) - stats.get("active_bytes.current", 0)
-        torch._C._host_emptyCache()
-    except (AttributeError, RuntimeError):
-        return 0.0
-    return cached / 2**30
-
-
 @contextlib.contextmanager
 def _without_stub_optimizers(optimizer):
     """Temporarily drop stub sub-optimizers from a ChainedOptimizer for checkpoint save/load.
@@ -412,10 +396,6 @@ class MegatronStrategy(DistributedStrategy):
 
         # All ranks wait for the checkpoint directory to be created before saving.
         dist.barrier()
-
-        released = release_cached_pinned_host_memory()
-        if released >= 1:
-            self.print(f"Released {released:.1f} GiB of cached pinned host memory before the checkpoint save")
 
         # Collect the sharded state dicts for model and optimizer, and full state dict for the scheduler.
         sharded_state_dict = {}
