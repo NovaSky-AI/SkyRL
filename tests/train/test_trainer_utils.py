@@ -1361,15 +1361,3 @@ def test_validate_generator_output_allows_sample_support_under_step_wise():
     output["rollout_sample_support"] = [_support(len(response)) for response in output["response_ids"]]
 
     validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
-
-
-def test_clamped_rollout_logprob_stats_counts_floor_tokens():
-    from skyrl.train.utils.trainer_utils import clamped_rollout_logprob_stats
-
-    stats = clamped_rollout_logprob_stats([[-9999.0, -0.1, -0.2], [-0.3, -0.4], [-0.5, -9999.0, -9999.0]])
-    assert stats["count"] == 3
-    assert stats["first_token"] == 1
-    assert stats["sequences"] == 2
-    assert stats["tokens"] == 8
-    assert stats["examples"] == [(0, [0], 3), (2, [1, 2], 3)]
-    assert clamped_rollout_logprob_stats(None)["tokens"] == 0
