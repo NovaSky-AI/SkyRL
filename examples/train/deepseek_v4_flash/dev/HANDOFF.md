@@ -636,5 +636,9 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   |---|---|---|---|---|
   | 1 (same base weights) | 104 -> 13 | 23 -> 0 | 10.17 -> 0.99 | 99 -> 100 s |
   | 2 | 85 -> 12 | 14 -> 0 | 2.00 -> 1.00 | 97 -> 98 s |
+  | 3 | 349 -> 19 | 70 -> 0 | 4.37 -> 1.00 | 98 -> 99 s |
+
+  The baseline tail is one-sided (16 of the top 17 have rollout > trainer: vLLM overconfident, i.e. systematic); with
+  per-trajectory salts the top gaps have mixed signs and decay smoothly to ~1 (bf16 noise).
 
   Mean |diff| is unchanged (0.014): the bulk is bf16 noise; only the prefix-cache tail goes away.
