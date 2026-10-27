@@ -564,3 +564,19 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     193 bad (0.59%), with `patch_deepseek_v41_prefill_workspace` (installed on all 8 ranks) **0**. The patch
     (b6e8542b) loads via `new_inference_worker_wrap.py`; on PR #2547 as 8849c5c6. The planned 5-step DAPO
     confirmation was dropped (floored tokens too rare per step to add evidence beyond the probe).
+- **DAPO full FT + R3 with every fix (2026-10-27, 88f62b39, 6 nodes, W&B `dsv41_flash_dapo/ds1css8s`).** Same recipe
+  as the earlier 10-step run, now with the prefill workspace patch (engine log: "Installed DeepSeek-V4.1 FlashMLA
+  prefill workspace zero-fill patch"), the HDO checkpoint fixes and the fp32 wire dtype.
+  - `minibatch_rollout_logprobs_abs_diff_mean` 0.0090 / 0.0104 / 0.0104 / 0.0106 / 0.0117 / 0.0112 / 0.0120 /
+    0.0122 / 0.0131 for steps 1-9: no spikes. The earlier run had 1.70 / 2.23 / 2.20 on three of ten steps (the
+    floored NaN tokens) and 0.009-0.036 otherwise.
+  - `avg_final_rewards` -0.196 / -0.037 / -0.104 / -0.047 / 0.185 / 0.142 / 0.067 / 0.325 / 0.339 / 0.393 (step
+    10 rollouts); rollout pass@12 0.79 -> 0.91-0.95. ~700 s/step.
+  - **Step-10 checkpoint save OOMed the host on node 7 (10.180.15.202)**: kernel OOM killer took one
+    MegatronPolicyWorker (anon-rss 122 GB, shmem-rss 314 GB) during `save_checkpoints`; the run died with
+    ActorUnavailableError before logging step 10 / the final eval. The earlier run's identical step-10 save
+    succeeded, so this recipe's save sits at the edge of the 3.9 TB hosts (precision-aware CPU optimizer state +
+    Engram pinned tables + dist-ckpt CPU staging). Not fixed; options: async/streamed save, fewer workers per
+    node holding Engram, or lower `optimizer_offload_fraction`.
+  - Rerun for a complete 10-step curve with `trainer.ckpt_interval=100` (only the end-of-training safety-net
+    save, after step-10 metrics and eval are logged): log `v41-dapo-fullft6-curve-1793076638.log`.
