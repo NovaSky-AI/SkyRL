@@ -157,6 +157,10 @@ class TestManagerPatch:
         manager = self._manager(expert_rank=8)
         manager.modules = {"model.layers.0.mlp.experts": self._moe_lora_module()}
         manager._registered_adapters = {}
+        # vLLM >= 0.32 runs _validate_moe_lora_format first in _add_adapter; it is not under test here.
+        self.monkeypatch.setattr(
+            self.model_manager.LoRAModelManager, "_validate_moe_lora_format", lambda self, lora: None, raising=False
+        )
         lora_model = types.SimpleNamespace(id=1, loras={"model.layers.0.mlp.experts": self._packed_moe_weights(16)})
         with pytest.raises(ValueError, match="above the MoE expert LoRA slot rank"):
             manager._add_adapter(lora_model)
