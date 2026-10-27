@@ -21,6 +21,7 @@ from ray.util.placement_group import (
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     has_visible_cuda_device,
     is_blackwell_or_newer,
@@ -969,8 +970,10 @@ def ray_noset_visible_devices(env_vars=os.environ):
 def get_physical_gpu_id():
     import torch
 
-    device = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device)
+    if not device.is_cuda():
+        return "0"
+    device_id = device.current_device_id()
+    props = torch.cuda.get_device_properties(device_id)
     return str(props.uuid)
 
 
@@ -1476,7 +1479,7 @@ def print_mem(tag: str, mem: dict):
 
 
 def run_p2p_access_check():
-    device_count = torch.cuda.device_count()
+    device_count = device.device_count()
     if device_count < 2:
         return False
 
@@ -1485,7 +1488,7 @@ def run_p2p_access_check():
         for j in range(device_count):
             if i != j:
                 # This checks if device i can access device j's memory
-                can_access = torch.cuda.can_device_access_peer(i, j)
+                can_access = device.can_device_access_peer(i, j)
                 if not can_access:
                     return False
 
@@ -1498,7 +1501,11 @@ def peer_access_supported(max_num_gpus_per_node: int):
     if max_num_gpus_per_node <= 1:
         return False
 
-    if not torch.cuda.is_available():
+    if device.is_neuron():
+        # Trainium has no CUDA P2P path.
+        return False
+
+    if not device.is_cuda():
         # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
         ray.init()
         pg = placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK")
