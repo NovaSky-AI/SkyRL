@@ -7,23 +7,20 @@ ships no weight-synchronization path for RL, while ``torch-neuronx`` exposes a p
 ``torch.nn.Module`` that ``model.generate`` already supports (this is the same path the
 TRL GRPO leg uses).
 
-This first cut implements the *text* RL path end-to-end.  Three follow-ups are
-deliberately deferred and documented inline:
+This first cut implements the *text* RL path end-to-end, plus the multimodal
+(VLM) path over a vLLM-free codec.  Two follow-ups remain:
 
-1. **Multimodal (VLM) ``generate`` / ``render_chat_completion``** -- the generator's
-   ``MultiModalFeatures.kwargs_data`` is serialized in vLLM's ``mm_serde`` base64
-   format, and the trainer decodes it via
-   ``vllm.entrypoints.scale_out.token_in_token_out.mm_serde.decode_mm_kwargs_item``.
-   That format is not available on a vLLM-free Trainium node, so the feature codec
-   must be decoupled from ``mm_serde`` before VLM rollouts can run here.
-2. **Processed-logprob exactness** -- ``_sampled_token_logprobs`` re-implements
+1. **Processed-logprob exactness** -- ``_sampled_token_logprobs`` re-implements
    transformers' sampling filters (temperature/top-k/min-p/top-p) to reproduce vLLM's
    "processed logprob of the sampled token".  It must be validated bit-for-bit against
    the trainer's ``processed_logprobs`` forward on a neuron instance.
-3. **Full-weight sync routing** -- SkyRL syncs full weights by bypassing
+2. **Full-weight sync routing** -- SkyRL syncs full weights by bypassing
    ``InferenceEngineInterface`` (vLLM's own trainer engine).  Routing that through
    ``update_named_weights`` (and placing the engine relative to the FSDP workers) is a
    separate change; LoRA sync already flows through this interface.
+
+The VLM path uses ``skyrl.backends.mm_codec`` (safetensors + a ``skyrl:torch:`` prefix)
+for ``kwargs_data`` instead of vLLM's ``mm_serde``, so it does not require vLLM.
 """
 
 from __future__ import annotations
@@ -34,6 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from loguru import logger
 
+from skyrl.backends.mm_codec import decode_mm_kwargs_item, encode_mm_kwargs_item
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
@@ -97,13 +95,6 @@ class NeuronInferenceEngine(InferenceEngineInterface):
 
     async def generate(self, input_batch: InferenceEngineInput, model: Optional[str] = None) -> InferenceEngineOutput:
         mm_features = input_batch.get("mm_features")
-        if mm_features:
-            raise NotImplementedError(
-                "Multimodal generation is not implemented in the native TorchNeuron engine: "
-                "the ``MultiModalFeatures.kwargs_data`` codec is vLLM's ``mm_serde``, which "
-                "is unavailable on a vLLM-free Trainium node. Decouple that serialization "
-                "(see module docstring, follow-up 1) before enabling VLM rollouts."
-            )
 
         prompt_token_ids = input_batch.get("prompt_token_ids")
         if not prompt_token_ids:
@@ -120,7 +111,7 @@ class NeuronInferenceEngine(InferenceEngineInterface):
                 self._active_lora_name = model
 
         # ``model.generate`` is a blocking call; keep the driver's event loop free.
-        return await asyncio.to_thread(self._generate_sync, prompt_token_ids, generate_kwargs)
+        return await asyncio.to_thread(self._generate_sync, prompt_token_ids, generate_kwargs, mm_features)
 
     def get_endpoint_url(self) -> str:
         raise NotImplementedError("The native engine has no HTTP endpoint; it runs in-process.")
@@ -133,12 +124,93 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         if messages is None:
             raise ValueError("render_chat_completion requires request_payload['json']['messages']")
         if self._is_vlm:
-            raise NotImplementedError(
-                "Multimodal render is not implemented in the native TorchNeuron engine "
-                "(see module docstring, follow-up 1)."
-            )
+            return self._render_vlm(messages)
         token_ids = self._tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
         return {"token_ids": token_ids, "features": None}
+
+    def _render_vlm(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Render a VLM conversation to token ids + encoded vision tensors.
+
+        The processor is the single source of truth for both token expansion (image
+        placeholder counts depend on the per-image patch grid) and vision-tensor layout:
+        ``pixel_values`` / ``image_grid_thw`` are produced here and replayed verbatim in
+        :meth:`_vlm_inputs`, so no layout is re-derived by hand. The tensors travel as one
+        ``mm_codec`` blob in ``kwargs_data["image"]`` (the trainer's ``decode_mm_kwargs``
+        concatenates items along dim 0, so a single item holding the full concatenation
+        round-trips unchanged).
+        """
+        images = self._extract_images(messages)
+        text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        if images:
+            inputs = self._processor(text=[text], images=images, return_tensors="pt", padding=True)
+        else:
+            inputs = self._processor(text=[text], return_tensors="pt", padding=True)
+
+        input_ids = inputs["input_ids"][0].tolist()
+        pixel_values = inputs.get("pixel_values")
+        image_grid_thw = inputs.get("image_grid_thw")
+
+        # Some processors return one pixel_values tensor per image; collapse to the full
+        # [num_patches, dim] tensor the trainer's decoder expects.
+        if isinstance(pixel_values, (list, tuple)):
+            pixel_values = torch.cat(list(pixel_values), dim=0) if pixel_values else None
+
+        features: Dict[str, Any] = {"mm_hashes": {}, "mm_placeholders": {}}
+        if pixel_values is not None and image_grid_thw is not None:
+            features["kwargs_data"] = {
+                "image": [encode_mm_kwargs_item({"pixel_values": pixel_values, "image_grid_thw": image_grid_thw})]
+            }
+        else:
+            features["kwargs_data"] = None
+        return {"token_ids": input_ids, "features": features}
+
+    @staticmethod
+    def _extract_images(messages: List[Dict[str, Any]]) -> List[Any]:
+        """Collect image references from an OpenAI-style message list, in conversation order.
+
+        Handles the content-part spellings the env/renderer emit: ``image_url``
+        (``{"image_url": {"url": ...}}``) and bare ``image`` (path, data URI, or PIL image).
+        """
+        images: List[Any] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type == "image_url":
+                    url = (part.get("image_url") or {}).get("url")
+                    if url:
+                        images.append(NeuronInferenceEngine._load_image(url))
+                elif part_type == "image" and part.get("image") is not None:
+                    images.append(NeuronInferenceEngine._load_image(part["image"]))
+        return images
+
+    @staticmethod
+    def _load_image(source: Any) -> Any:
+        """Resolve an image reference (data URI, file URI/path, or PIL image) to a PIL image.
+
+        Remote ``http(s)`` URLs are not fetched here; the env is expected to emit data URIs
+        or local paths (as the tinker renderer does).
+        """
+        from PIL import Image
+
+        if isinstance(source, Image.Image):
+            return source
+        if not isinstance(source, str):
+            raise TypeError(f"Unsupported image reference type: {type(source)!r}")
+
+        if source.startswith("data:"):
+            import base64
+            import io
+
+            _, b64 = source.split(",", 1)
+            return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+
+        path = source[7:] if source.startswith("file://") else source
+        return Image.open(path).convert("RGB")
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError("The native engine does not serve the OpenAI HTTP API.")
@@ -212,27 +284,19 @@ class NeuronInferenceEngine(InferenceEngineInterface):
     # -- generation core -------------------------------------------------------
 
     def _generate_sync(
-        self, prompt_token_ids: List[List[int]], generate_kwargs: Dict[str, Any]
+        self,
+        prompt_token_ids: List[List[int]],
+        generate_kwargs: Dict[str, Any],
+        mm_features: Optional[List[Dict[str, Any]]] = None,
     ) -> InferenceEngineOutput:
-        batch = len(prompt_token_ids)
-        prompt_lens = [len(ids) for ids in prompt_token_ids]
-        max_prompt_len = max(prompt_lens)
-
-        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
-        input_ids = torch.tensor(
-            [ids + [pad_id] * (max_prompt_len - len(ids)) for ids in prompt_token_ids],
-            device=self._device,
-            dtype=torch.long,
-        )
-        attention_mask = torch.tensor(
-            [[1] * pl + [0] * (max_prompt_len - pl) for pl in prompt_lens],
-            device=self._device,
-            dtype=torch.long,
-        )
+        if mm_features:
+            inputs, prompt_lens = self._vlm_inputs(prompt_token_ids, mm_features)
+        else:
+            inputs, prompt_lens = self._text_inputs(prompt_token_ids)
+        batch = len(prompt_lens)
 
         outputs = self._model.generate(
-            input_ids,
-            attention_mask=attention_mask,
+            **inputs,
             output_logits=True,
             return_dict_in_generate=True,
             **generate_kwargs,
@@ -241,6 +305,7 @@ class NeuronInferenceEngine(InferenceEngineInterface):
 
         max_new_tokens = generate_kwargs.get("max_new_tokens")
         eos_id = self._tokenizer.eos_token_id
+        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
 
         response_ids: List[List[int]] = []
         responses: List[str] = []
@@ -265,6 +330,56 @@ class NeuronInferenceEngine(InferenceEngineInterface):
             rollout_expert_indices=None,
             rollout_sample_support=None,
         )
+
+    def _text_inputs(self, prompt_token_ids: List[List[int]]) -> Tuple[Dict[str, torch.Tensor], List[int]]:
+        """Pad a text batch into the ``{input_ids, attention_mask}`` ``generate`` inputs."""
+        prompt_lens = [len(ids) for ids in prompt_token_ids]
+        max_prompt_len = max(prompt_lens)
+
+        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
+        input_ids = torch.tensor(
+            [ids + [pad_id] * (max_prompt_len - len(ids)) for ids in prompt_token_ids],
+            device=self._device,
+            dtype=torch.long,
+        )
+        attention_mask = torch.tensor(
+            [[1] * pl + [0] * (max_prompt_len - pl) for pl in prompt_lens],
+            device=self._device,
+            dtype=torch.long,
+        )
+        return {"input_ids": input_ids, "attention_mask": attention_mask}, prompt_lens
+
+    def _vlm_inputs(
+        self,
+        prompt_token_ids: List[List[int]],
+        mm_features: List[Dict[str, Any]],
+    ) -> Tuple[Dict[str, torch.Tensor], List[int]]:
+        """Rebuild a single-sample VLM ``generate`` input from token ids + encoded vision tensors.
+
+        The VLM generator runs unbatched (``batched=False``), so there is exactly one
+        sample and no padding: the input is the sample's token ids plus the vision tensors
+        the render step stashed in ``kwargs_data``. Those tensors were produced by the
+        processor and are replayed verbatim, so their layout is whatever the model expects.
+        """
+        sample_ids = prompt_token_ids[0]
+        input_ids = torch.tensor([sample_ids], device=self._device, dtype=torch.long)
+        inputs: Dict[str, torch.Tensor] = {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids),
+        }
+
+        kwargs_data = (mm_features[0].get("kwargs_data") or {}) if mm_features else None
+        image_blobs = (kwargs_data or {}).get("image") or []
+        if image_blobs and image_blobs[0] is not None:
+            data = decode_mm_kwargs_item(image_blobs[0])
+            pixel_values = data.get("pixel_values")
+            image_grid_thw = data.get("image_grid_thw")
+            if pixel_values is not None:
+                inputs["pixel_values"] = pixel_values.to(self._device)
+            if image_grid_thw is not None:
+                inputs["image_grid_thw"] = image_grid_thw.to(self._device)
+
+        return inputs, [len(sample_ids)]
 
     def _response_logprobs(
         self,
