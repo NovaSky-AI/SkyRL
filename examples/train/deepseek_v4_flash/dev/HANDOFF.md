@@ -650,3 +650,6 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   avg_score 0.078 -> 0.167, pass@12 0.800 -> 0.867. Step 6 is the outlier in both runs (same data order), so one
   step-6 prompt still trips something the salt does not cover; `v41-dapo-dump6-*` re-runs 6 steps with
   `dump_data_batch` to find it.
+- **Step-6 outlier is not prompt-specific.** `v41-dapo-dump6-1793114210` (same recipe and data order, dumps on):
+  step 6 max |diff| 1.07, 1 token > 1 of 1.23M, mixed signs. Responses are resampled each run, so the 8.67 (and
+  12.1) at step 6 were one-off tokens: with per-trajectory salts a > ~1.5 gap is ~1 in 12M tokens. No further action.
