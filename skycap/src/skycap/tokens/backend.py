@@ -116,11 +116,15 @@ class TokensBackend:
         async with self._processor_check_lock:
             if self._processor_checked:
                 return
-            self._processor_checked = True
-            error = await self._compare_engine_processor()
-            if error is not None:
-                logger.error("%s; refusing calls with images", error)
-                self.media_error = error
+            try:
+                error = await self._compare_engine_processor()
+                if error is not None:
+                    logger.error("%s; refusing calls with images", error)
+                    self.media_error = error
+            finally:
+                # Only once it's done: until then, other first calls with images wait on the lock rather than
+                # skip it and send their images unchecked.
+                self._processor_checked = True
 
     async def _compare_engine_processor(self) -> str | None:
         """``_check_engine_processor``'s comparison: why images can't be sent, or None if they can."""

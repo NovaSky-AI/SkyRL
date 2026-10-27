@@ -397,3 +397,23 @@ async def test_concurrent_first_calls_with_images_check_once(monkeypatch: Any) -
             )
         )
         assert len(stack.engine.chat_requests) == 2 and len(stack.engine.requests) == 4
+
+
+async def test_concurrent_first_calls_with_images_all_wait_for_a_check_that_refuses_them(monkeypatch: Any) -> None:
+    import asyncio
+
+    import openai
+
+    _probing(monkeypatch)
+    async with token_stack(model="policy") as stack:
+        stack.engine.chat_tokens = lambda messages: _rendered(stack.renderer, messages) + 3 * _has_image(messages)
+        bases = [(await stack.create())["base_url"] for _ in range(4)]
+        results = await asyncio.gather(
+            *(
+                client(base).chat.completions.create(model="policy", messages=[look("what is this?", image("cat", 3))])
+                for base in bases
+            ),
+            return_exceptions=True,
+        )
+        assert all(isinstance(result, openai.BadRequestError) for result in results)
+        assert stack.engine.requests == [] and len(stack.engine.chat_requests) == 2
