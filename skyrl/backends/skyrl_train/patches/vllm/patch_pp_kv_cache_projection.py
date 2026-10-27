@@ -7,7 +7,14 @@
 (0-19 | 20-39) trips it: its ratio-2 layers are all on stage 0.
 
 All of a config's tensors view one shared backing allocation, so dropping the foreign ones frees nothing and
-loses nothing. Remove once vLLM projects ``UniformTypeKVCacheSpecs`` for groups with no layers on a stage.
+loses nothing.
+
+TODO: remove this patch and its call in ``new_inference_worker_wrap.py`` once SkyRL pins a vLLM release
+that includes vllm-project/vllm#60234 (merged to main 2026-10-27, commit 5c1eb11cb3; not in 0.32.0). It builds
+each stage's KV cache tensors from the projected ``group.layer_names`` (``kv_cache_planning.py``) instead of the
+group spec's full layer list, so no stage gets tensors for layers it does not own. Upstream tracking: issue
+vllm-project/vllm#63615; its regression test is vllm-project/vllm#63617. Before removing, check that the pinned
+vLLM's tensor loop iterates ``group.layer_names``.
 """
 
 import dataclasses
