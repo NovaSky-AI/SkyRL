@@ -30,6 +30,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.lora_output_layer import (
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
+    release_cached_pinned_host_memory,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     _clear_mtp_hybrid_pattern,
@@ -1072,6 +1073,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+            if self.cfg.policy.megatron_config.optimizer_config_kwargs.get("optimizer_cpu_offload"):
+                # Building the CPU optimizer stages its params through pinned copies the host allocator keeps.
+                released = release_cached_pinned_host_memory()
+                if released >= 1 and torch.distributed.get_rank() == 0:
+                    logger.info(
+                        f"Released {released:.1f} GiB of cached pinned host memory after building the optimizer"
+                    )
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
