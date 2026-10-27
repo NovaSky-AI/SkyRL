@@ -659,6 +659,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session_ids = input_batch.get("session_ids")
         mm_features = input_batch.get("mm_features")
         cache_salt = input_batch.get("cache_salt")
+        if isinstance(cache_salt, list) and len(cache_salt) != len(prompt_token_ids):
+            raise ValueError("a per-prompt cache_salt list must have one entry per prompt")
         routed_experts_prompt_starts = input_batch.get("routed_experts_prompt_starts")
         if routed_experts_prompt_starts is not None:
             if not self.enable_return_routed_experts:
@@ -696,7 +698,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     ),
                     return_sample_support=return_sample_support,
                     model=model,
-                    cache_salt=cache_salt,
+                    cache_salt=cache_salt[idx] if isinstance(cache_salt, list) else cache_salt,
                 )
             async with gen_sem:
                 return await self._generate_single(
@@ -709,7 +711,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                     ),
                     return_sample_support=return_sample_support,
                     model=model,
-                    cache_salt=cache_salt,
+                    cache_salt=cache_salt[idx] if isinstance(cache_salt, list) else cache_salt,
                 )
 
         async def _throttled_detokenize(token_ids: List[int]) -> str:
