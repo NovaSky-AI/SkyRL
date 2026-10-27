@@ -31,8 +31,10 @@ def test_unpatched_recompute_fails_on_frozen_inputs():
         pytest.skip("patch already applied in this process")
     # Plain StopIteration here; inside the training worker's coroutine it surfaces as
     # "RuntimeError: coroutine raised StopIteration".
-    with pytest.raises((StopIteration, RuntimeError)):
+    with pytest.raises((StopIteration, RuntimeError)) as excinfo:
         _discard_and_backward()
+    # Only the frozen-input failure counts, not any other RuntimeError.
+    assert isinstance(excinfo.value, StopIteration) or "StopIteration" in str(excinfo.value)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
