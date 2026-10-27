@@ -187,7 +187,8 @@ class RenderersRenderer:
     ``mm_processor_kwargs``, e.g. ``max_pixels``): an image processed
     differently has a different number of placeholder tokens than the engine
     expects. ``processor_probes`` gives the requests that check this against
-    the engine (``TokensBackend.start``).
+    the engine, before the first call with images
+    (``TokensBackend._check_engine_processor``).
     """
 
     #: How many encoded items ``features`` keeps.

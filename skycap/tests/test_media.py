@@ -259,8 +259,9 @@ def _has_image(messages: list[dict[str, Any]]) -> bool:
     )
 
 
-async def _start_with_probes(chat_tokens: Any, *, model: str | None = "policy") -> Any:
-    """A backend whose renderer probes one text and one image prompt, against an engine answering ``chat_tokens``."""
+async def _check_with_probes(chat_tokens: Any, *, model: str | None = "policy") -> tuple[Any, str | None]:
+    """The check of a renderer probing one text and one image prompt, against an engine answering ``chat_tokens``:
+    the engine's chat requests, and the ``media_error`` it left."""
     from aiohttp.test_utils import TestServer
 
     from skycap.tokens.backend import TokensBackend
@@ -276,8 +277,12 @@ async def _start_with_probes(chat_tokens: Any, *, model: str | None = "policy") 
     try:
         backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, model=model)
         await backend.start()
-        await backend.close()
-        return mock
+        try:
+            assert mock.chat_requests == []  # not at start: the engine may be asleep then
+            await backend._check_engine_processor()
+            return mock, backend.media_error
+        finally:
+            await backend.close()
     finally:
         await engine_server.close()
 
@@ -286,29 +291,33 @@ def _rendered(renderer: Any, messages: list[dict[str, Any]]) -> int:
     return len(renderer.render(messages, None).token_ids)
 
 
-async def test_start_passes_when_the_engine_processes_images_alike() -> None:
-    mock = await _start_with_probes(_rendered)
+async def test_the_check_passes_when_the_engine_processes_images_alike() -> None:
+    mock, error = await _check_with_probes(_rendered)
 
+    assert error is None
     assert [len(r["messages"]) for r in mock.chat_requests] == [1, 1]
     assert all(r["max_tokens"] == 1 and r["model"] == "policy" for r in mock.chat_requests)
 
 
-async def test_start_refuses_an_engine_that_processes_images_differently() -> None:
-    with pytest.raises(RuntimeError, match="image processor settings differ"):
-        await _start_with_probes(lambda renderer, messages: _rendered(renderer, messages) + 3 * _has_image(messages))
+async def test_the_check_refuses_images_an_engine_processes_differently() -> None:
+    _, error = await _check_with_probes(
+        lambda renderer, messages: _rendered(renderer, messages) + 3 * _has_image(messages)
+    )
+    assert error is not None and "image processor settings differ" in error
 
 
 async def test_a_chat_template_difference_or_an_unreachable_engine_only_warns() -> None:
     # The text probe already differs, so the images can't be compared.
-    mock = await _start_with_probes(lambda renderer, messages: _rendered(renderer, messages) + 1)
-    assert len(mock.chat_requests) == 1
+    mock, error = await _check_with_probes(lambda renderer, messages: _rendered(renderer, messages) + 1)
+    assert len(mock.chat_requests) == 1 and error is None
     # No chat endpoint (404), and no model name to ask for: skipped.
-    await _start_with_probes(None)
-    mock = await _start_with_probes(_rendered, model=None)
-    assert mock.chat_requests == []
+    _, error = await _check_with_probes(None)
+    assert error is None
+    mock, error = await _check_with_probes(_rendered, model=None)
+    assert mock.chat_requests == [] and error is None
 
 
-async def test_probes_that_cannot_be_built_leave_the_server_starting() -> None:
+async def test_probes_that_cannot_be_built_leave_images_unchecked() -> None:
     from skycap.tokens.backend import TokensBackend
     from tests.fake_renderer import FakeRenderer
 
@@ -319,35 +328,36 @@ async def test_probes_that_cannot_be_built_leave_the_server_starting() -> None:
     renderer.processor_probes = no_pillow  # type: ignore[attr-defined]
     backend = TokensBackend("http://engine", renderer, model="policy")
     await backend.start()
-    await backend.close()
+    try:
+        await backend._check_engine_processor()
+        assert backend.media_error is None
+    finally:
+        await backend.close()
 
 
 def _probing(monkeypatch: Any) -> None:
-    """Every ``FakeRenderer`` probes one text and one image prompt, as ``_start_with_probes``'s does."""
+    """Every ``FakeRenderer`` probes one text and one image prompt, as ``_check_with_probes``'s does."""
     from tests.fake_renderer import FakeRenderer
 
     probes = lambda self: [("text", [user("hi")]), ("4x4 image", [look("what?", image("probe", 4))])]  # noqa: E731
     monkeypatch.setattr(FakeRenderer, "processor_probes", probes, raising=False)
 
 
-async def test_an_engine_asleep_at_start_is_checked_before_the_first_call_with_images(monkeypatch: Any) -> None:
+async def test_the_first_call_with_images_checks_the_engine_once(monkeypatch: Any) -> None:
     _probing(monkeypatch)
-    # No chat endpoint at start, as SkyRL's colocated engines are asleep then.
     async with token_stack(model="policy") as stack:
-        assert stack.server.backend._processor_check_pending
-        assert len(stack.engine.chat_requests) == 1
         stack.engine.chat_tokens = lambda messages: _rendered(stack.renderer, messages)
         llm = client((await stack.create())["base_url"])
 
         await llm.chat.completions.create(model="policy", messages=[user("hi")])
-        assert len(stack.engine.chat_requests) == 1  # text only: not checked yet
+        assert stack.engine.chat_requests == []  # text only: not checked
         await llm.chat.completions.create(model="policy", messages=[look("what is this?", image("cat", 3))])
-        assert len(stack.engine.chat_requests) == 3 and not stack.server.backend._processor_check_pending
+        assert len(stack.engine.chat_requests) == 2
         await llm.chat.completions.create(model="policy", messages=[look("and this?", image("dog", 3))])
-        assert len(stack.engine.chat_requests) == 3 and len(stack.engine.requests) == 3
+        assert len(stack.engine.chat_requests) == 2 and len(stack.engine.requests) == 3
 
 
-async def test_an_engine_found_to_process_images_differently_late_refuses_images(monkeypatch: Any) -> None:
+async def test_an_engine_that_processes_images_differently_gets_no_images(monkeypatch: Any) -> None:
     import openai
 
     _probing(monkeypatch)
@@ -357,21 +367,20 @@ async def test_an_engine_found_to_process_images_differently_late_refuses_images
         for _ in range(2):
             with pytest.raises(openai.BadRequestError, match="image processor settings differ"):
                 await llm.chat.completions.create(model="policy", messages=[look("what is this?", image("cat", 3))])
-        assert stack.engine.requests == [] and len(stack.engine.chat_requests) == 3
+        assert stack.engine.requests == [] and len(stack.engine.chat_requests) == 2
 
         await llm.chat.completions.create(model="policy", messages=[user("hi")])
         assert len(stack.engine.requests) == 1
 
 
-async def test_an_engine_that_still_doesnt_answer_is_left_unchecked(monkeypatch: Any) -> None:
+async def test_an_engine_that_doesnt_answer_the_check_is_left_unchecked(monkeypatch: Any) -> None:
     _probing(monkeypatch)
+    # No chat endpoint: the text probe gets a 404.
     async with token_stack(model="policy") as stack:
         llm = client((await stack.create())["base_url"])
         for text in ("what is this?", "and this?"):
             await llm.chat.completions.create(model="policy", messages=[look(text, image("cat", 3))])
-        # Once at start, once before the first call with images; not again.
-        assert len(stack.engine.chat_requests) == 2 and len(stack.engine.requests) == 2
-        assert not stack.server.backend._processor_check_pending
+        assert len(stack.engine.chat_requests) == 1 and len(stack.engine.requests) == 2
 
 
 async def test_concurrent_first_calls_with_images_check_once(monkeypatch: Any) -> None:
@@ -387,4 +396,4 @@ async def test_concurrent_first_calls_with_images_check_once(monkeypatch: Any) -
                 for base in bases
             )
         )
-        assert len(stack.engine.chat_requests) == 3 and len(stack.engine.requests) == 4
+        assert len(stack.engine.chat_requests) == 2 and len(stack.engine.requests) == 4
