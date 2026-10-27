@@ -9,7 +9,10 @@ grad buffers, which keep each param's dtype. Models that train some params in fp
 params of DeepSeek-V4/V4.1 and GLM-5.3 -- then pass a mixed list, the kernel reads bf16 tensors as fp32,
 and the first optimizer step dies with "CUDA error: an illegal memory access" in ``multi_tensor_apply``.
 
-Remove once megatron-core groups grads by dtype before these calls.
+TODO: remove once the pinned megatron-core groups grads by dtype itself: NVIDIA/Megatron-LM#7279 (open; issue
+NVIDIA/Megatron-LM#7338) loops ``get_grad_norm_fp32`` and ``clip_grad_by_total_norm_fp32`` over
+``_group_grads_by_dtype`` and sums the squared norms, the same math as this wrapper. Check for
+``_group_grads_by_dtype`` in the pinned ``clip_grads.py`` before removing; see ``README.md``.
 """
 
 from loguru import logger
