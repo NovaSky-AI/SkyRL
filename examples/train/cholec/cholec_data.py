@@ -23,9 +23,9 @@ Output: SkyRL-format parquet (one row per frame) that ``PromptDataset`` and
 
 The image is embedded in the prompt as a data URI because SkyRL's neuron renderer
 (``NeuronInferenceEngine._extract_images``) reads images from the prompt's
-``image_url`` content parts, not a separate ``images`` column. The raw encoded
-frame bytes are preserved byte-for-byte (PNG/JPEG sniffed by magic bytes) so the
-frame is passed to the processor exactly as verl did; no lossy re-encode.
+``image_url`` content parts, not a separate ``images`` column. Every frame is
+resized to a constant 854x480 grid (matching the TRL trainium2 leg) so the vision
+patch count is fixed, then losslessly re-encoded as PNG.
 
 The reward contract matches ``CholecEnv.reward_single``:
     reward = 0.4 * triplet_F1 + 0.6 * mean(instrument_F1, verb_F1, target_F1)
@@ -41,11 +41,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import os
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from PIL import Image
 
 PROMPT = (
     "You are a surgical activity recognition model. List every surgical action "
@@ -54,38 +56,31 @@ PROMPT = (
     "action is visible, reply 'none'."
 )
 
-
-def _sniff_mime(data: bytes) -> str:
-    if data[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/jpeg"
+# The CholecT50 frames arrive mixed-size (854x480 and 1920x1080). The TRL
+# trainium2 leg resizes every frame to a constant 854x480 grid so the vision
+# patch count is fixed and the scoring-forward shape stays stable. Mirror that.
+IMAGE_SIZE = (854, 480)
 
 
 def _image_data_uri(img) -> str:
     """Encode one ``images[0]`` element (a ``{"bytes": ...}`` struct from pyarrow,
-    a PIL image, or raw bytes) as a data URI, preserving the original bytes."""
+    a PIL image, or raw bytes) as a PNG data URI, resized to ``IMAGE_SIZE``."""
     if isinstance(img, dict):
         raw = img.get("bytes")
         if raw is None:
             raise ValueError(f"images[0] struct has no 'bytes': {list(img.keys())}")
-        raw = bytes(raw)
+        pil = Image.open(io.BytesIO(bytes(raw))).convert("RGB")
     elif isinstance(img, (bytes, bytearray)):
-        raw = bytes(img)
+        pil = Image.open(io.BytesIO(bytes(img))).convert("RGB")
     else:
-        # A PIL image (datasets read path) -- no original bytes, so encode losslessly.
-        import io
+        pil = img.convert("RGB")
 
-        from PIL import Image
+    if pil.size != IMAGE_SIZE:
+        pil = pil.resize(IMAGE_SIZE)
 
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        raw = buf.getvalue()
-    mime = _sniff_mime(raw)
-    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+    buf = io.BytesIO()
+    pil.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _row_to_skyrl(row, idx: int) -> dict:

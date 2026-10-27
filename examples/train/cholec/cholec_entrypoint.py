@@ -43,9 +43,38 @@ def apply_vision_rope_device_patch() -> None:
     print("[cholec] patched Qwen3_5VisionRotaryEmbedding.forward (device-safe inv_freq)", flush=True)
 
 
+def apply_neuron_vision_interp_patch() -> None:
+    """Force Qwen3.5 vision position-interpolation precompute onto CPU.
+
+    ``get_vision_interpolation_indices_and_weights`` uses ``torch.repeat_interleave``
+    with a dynamic ``repeats`` tensor. neuronx-cc cannot compile that op (Torch-MLIR
+    lowering fails / BIRCodeGenLoop crashes), so the small ``(total_thw, n_taps)``
+    index/weight tensors are computed on CPU and moved back. Same fix the TRL
+    trainium2 leg ships (``_patch_vision_interp``); eager mode already falls back
+    to CPU for the same op, so this is a sync, not a correctness, change.
+    """
+    import transformers.models.qwen3_5.modeling_qwen3_5 as _mq
+
+    _orig = getattr(_mq, "get_vision_interpolation_indices_and_weights", None)
+    if _orig is None:
+        print("[cholec] WARN: get_vision_interpolation_indices_and_weights not found; skipping patch", flush=True)
+        return
+
+    def _patched(grid_thw, *args, **kwargs):
+        dev = grid_thw.device
+        if dev.type == "neuron":
+            indices, weights = _orig(grid_thw.to("cpu"), *args, **kwargs)
+            return indices.to(dev), weights.to(dev)
+        return _orig(grid_thw, *args, **kwargs)
+
+    _mq.get_vision_interpolation_indices_and_weights = _patched
+    print("[cholec] patched get_vision_interpolation_indices_and_weights (repeat_interleave on CPU)", flush=True)
+
+
 @ray.remote(num_cpus=1)
 def cholec_entrypoint(cfg: SkyRLTrainConfig):
     apply_vision_rope_device_patch()
+    apply_neuron_vision_interp_patch()
     register(
         id="cholec",
         entry_point="examples.train.cholec.env:CholecEnv",
