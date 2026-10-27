@@ -14,8 +14,14 @@
 # Smoke test: pass `trainer.max_training_steps=1` as an extra arg.
 set -x
 
-# uv installs to ~/.local/bin, which non-login SSH shells don't put on PATH.
-export PATH="$HOME/.local/bin:$PATH"
+# The torch-neuronx DLAMI ships the patched torch + Neuron runtime in a managed
+# venv. torch-neuronx is not on PyPI (and the `neuron` extra deliberately does
+# not declare `torch`), so the repo's usual `uv run --isolated --extra neuron`
+# cannot resolve it; run straight from the DLAMI venv instead (the same path the
+# TRL trainium2 leg uses). `setup_skyrl.sh` has already pinned the venv's
+# torch-neuronx/transformers/peft and installed skyrl+skyrl-gym editable.
+# shellcheck disable=SC1091
+source /opt/aws_neuronx_venv_torch_neuronx_2_14_0/bin/activate
 
 # Single NeuronCore of a trn2.48xlarge (0 of 48). Pin the visible core + disable
 # the NKI trace cache (its ~10GB HBM footprint otherwise OOMs a 25.8GB core).
@@ -42,11 +48,7 @@ cd "$SKYRL_ROOT"
 # release, swap this for `trainer.policy.model.lora.target_modules="all-linear"`.
 LORA_TARGETS="['q_proj','k_proj','v_proj','o_proj','gate_proj','up_proj','down_proj','in_proj_qkv','in_proj_z','in_proj_b','in_proj_a','out_proj']"
 
-# NOTE: the `neuron` extra is the skyrl-train extra minus the CUDA/vLLM-only pieces
-# (vllm-router, flash-attn, flash-linear-attention, causal-conv1d, nixl). Use it so
-# the env resolves against the torch-neuronx torch, not a CUDA torch.
-uv run --isolated --extra neuron \
-  python examples/train/cholec/cholec_entrypoint.py \
+python examples/train/cholec/cholec_entrypoint.py \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/val.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
