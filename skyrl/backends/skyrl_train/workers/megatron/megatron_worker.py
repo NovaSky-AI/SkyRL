@@ -58,6 +58,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_checkpoint_without_output_frozen_inputs import (
+    apply_checkpoint_without_output_frozen_inputs_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
 )
@@ -110,6 +113,9 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
+from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
+    sync_params_for_export,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -142,6 +148,8 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
+# Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
+apply_checkpoint_without_output_frozen_inputs_patch()
 
 
 class MegatronWorker:
@@ -881,6 +889,7 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
+        sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
         # Save model in HuggingFace safetensors format
         hf_export = self.megatron_config.hf_export_config
         self.strategy.save_hf_model(
@@ -1874,6 +1883,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         inference_engine_cfg: "InferenceEngineConfig",
         model_id: Optional[str] = None,
     ):
+        sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
         if inference_engine_client is None:
             inference_engine_client = self._weight_sync_inference_client
 

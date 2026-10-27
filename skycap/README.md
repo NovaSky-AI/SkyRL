@@ -52,6 +52,23 @@ parser. Replies then match that server's: the completion's own text as
 turn back unchanged, and a thinking model's history stays one path. With parsed
 replies, every replayed turn would lose its thinking and fork the graph.
 
+### APIs
+
+A trajectory serves two OpenAI APIs, each at its own path under its base URL:
+Chat Completions (`/chat/completions`) and Responses (`/responses`), the API
+Codex speaks. Text mode forwards a call to the same path on the upstream. In
+token mode, Responses items are regrouped into chat-template turns by vLLM's
+rule and the reply goes back as items (`skycap.dialects.openai_responses`);
+`--use-raw-content` is refused there, since a Responses client acts only on
+parsed items. A `developer` message is folded into the leading `system` message
+when the tokenizer's chat template has no such role, as vLLM does, for either
+API. Each call records its API as `calls[].dialect`.
+
+A reply cut off at its token limit goes back as the API defines it,
+`status: "incomplete"` with reason `max_output_tokens`, and is recorded with
+`finish_reason: "length"`. What a client does with it is the harness's
+concern: Codex, for one, treats it as an error, retries, and fails the turn.
+
 ## Embed a server
 
 A trainer can run a server in its own process instead, from the same options
@@ -78,7 +95,7 @@ subclass), which is the one piece an embedder supplies.
 A harness that runs outside the server's network, such as an agent inside a
 remote sandbox (Daytona, Modal), can't reach the server's own URL. With an
 exposure, the server listens a second time with the harness routes alone
-(`/t/{id}/v1/chat/completions` and `/models`; no control plane is routed
+(`/t/{id}/v1/chat/completions`, `/responses` and `/models`; no control plane is routed
 there), and the exposure makes that listener reachable:
 
 ```bash
@@ -185,6 +202,7 @@ result.status          # "finished", or "failed" if a turn couldn't be attribute
 for sample in result.samples:
     sample.input_ids, sample.loss_mask, sample.logprobs
     sample.routed_experts, sample.sampling_mask
+    sample.sampling_mask_logprobs  # when the engine returns the sampler's logprob of each support id
 ```
 
 Creates go round-robin over the servers, and each trajectory's URL names its

@@ -40,6 +40,8 @@ class MockEngine:
         self.bad_routing = False
         #: Seconds to wait before answering.
         self.delay = 0.0
+        #: The finish reason every completion reports, e.g. ``"length"`` for a cut-off.
+        self.finish_reason = "stop"
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=1024**3)
@@ -79,7 +81,7 @@ class MockEngine:
         choice = {
             "index": 0,
             "token_ids": completion,
-            "finish_reason": "stop",
+            "finish_reason": self.finish_reason,
             "logprobs": {"content": [{"token": "", "logprob": lp} for lp in logprobs]},
             "routed_experts": base64.b64encode(buffer.getvalue()).decode(),
             "sampling_mask": [[t, t + 1] for t in completion],

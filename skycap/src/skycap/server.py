@@ -3,14 +3,18 @@
     POST /trajectories                    {meta}                -> {id, base_url, api_key[, exposed_base_url]}
     POST /trajectories/{id}/finish        {annotations, paths}  -> {status, samples, record}
     GET  /trajectories/{id}                                      -> the trajectory document
-    POST /t/{id}/v1/chat/completions                             (the harness)
+    POST /t/{id}/v1/chat/completions                             (the harness, OpenAI Chat Completions)
+    POST /t/{id}/v1/responses                                    (the harness, OpenAI Responses)
     GET  /t/{id}/v1/models                                       (passed through)
     GET  /healthz
+
+Each harness route is one API dialect (``skycap.dialects``): it reads the
+request into chat-template turns and puts the reply back on that API's wire.
 
 A trajectory's route is its URL: the harness needs no header and no SDK patch.
 Each trajectory also gets an API key of its own, minted at ``create``. With
 ``require_api_key``, its harness routes answer only a caller that sends it the
-way any OpenAI client sends its key (``Authorization: Bearer <api_key>``), so a
+way its API's clients send a key (``Authorization: Bearer <api_key>`` for OpenAI's), so a
 route reachable from outside (a sandbox, a tunnel) can't be written to by anyone
 who merely learns the URL. The key is never recorded.
 ``finish`` seals the trajectory: in-flight calls are cancelled and never
@@ -51,8 +55,8 @@ import orjson
 from aiohttp import web
 
 from skycap import record
+from skycap.dialects.base import CallRequest, DialectType, RequestError, error_body
 from skycap.mirror import RecordMirror
-from skycap.openai_chat import ChatRequest, RequestError, error_body, parse_request
 from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
 from skycap.samples import Sample, build_samples, samples_for
 from skycap.trajectory import Status, Trajectory, new_api_key, new_trajectory_id
@@ -70,7 +74,7 @@ class Backend(Protocol):
     async def finalize(self, trajectory: Trajectory) -> None: ...
     async def models(self, request: web.Request) -> web.Response: ...
     async def chat(
-        self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
+        self, trajectory: Trajectory, request: web.Request, chat: CallRequest, raw: bytes
     ) -> web.StreamResponse: ...
 
 
@@ -145,8 +149,7 @@ class CaptureServer:
         app.router.add_post("/trajectories", self.create)
         app.router.add_post("/trajectories/{id}/finish", self.finish)
         app.router.add_get("/trajectories/{id}", self.get)
-        app.router.add_post("/t/{id}/v1/chat/completions", self.chat)
-        app.router.add_get("/t/{id}/v1/models", self.models)
+        self._add_harness_routes(app)
         app.on_startup.append(self._on_startup)
         app.on_cleanup.append(self._on_cleanup)
         return app
@@ -157,9 +160,18 @@ class CaptureServer:
         It has no control plane to reach and no lifecycle of its own: ``app`` starts and stops the backend.
         """
         app = web.Application(client_max_size=1024**3)
-        app.router.add_post("/t/{id}/v1/chat/completions", self.chat)
-        app.router.add_get("/t/{id}/v1/models", self.models)
+        self._add_harness_routes(app)
         return app
+
+    def _add_harness_routes(self, app: web.Application) -> None:
+        """One route per dialect, at its API's path, plus the model list."""
+        for dialect in DialectType:
+
+            async def call(request: web.Request, dialect: DialectType = dialect) -> web.StreamResponse:
+                return await self.call(request, dialect)
+
+            app.router.add_post(f"/t/{{id}}/v1{dialect.get_dialect().path}", call)
+        app.router.add_get("/t/{id}/v1/models", self.models)
 
     async def _on_startup(self, app: web.Application) -> None:
         await self.backend.start()
@@ -410,18 +422,19 @@ class CaptureServer:
         # Ended first: an ended trajectory answers 410 whatever key is sent, and its key opens nothing more.
         if not trajectory.is_open:
             return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
-        if not self._authorized(trajectory, request):
+        if not self._authorized(trajectory, request, DialectType.OPENAI_CHAT):
             return _unauthorized()
         return await self.backend.models(request)
 
-    async def chat(self, request: web.Request) -> web.StreamResponse:
+    async def call(self, request: web.Request, dialect: DialectType) -> web.StreamResponse:
+        """A harness call on ``dialect``'s route."""
         trajectory_id = request.match_info["id"]
         trajectory = self.trajectories.get(trajectory_id)
         if trajectory is None:
             return self._ended_or_unknown(trajectory_id)
         if not trajectory.is_open:
             return _openai_error(f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
-        if not self._authorized(trajectory, request):
+        if not self._authorized(trajectory, request, dialect):
             return _unauthorized()
         # In flight from here on, so a finish that lands during the body read cancels this call.
         task = asyncio.current_task()
@@ -431,7 +444,7 @@ class CaptureServer:
         try:
             raw = await request.read()
             try:
-                chat = parse_request(orjson.loads(raw))
+                chat = dialect.get_dialect().parse_request(orjson.loads(raw))
             except (orjson.JSONDecodeError, RequestError) as error:
                 return _openai_error(str(error), 400)
             return await trajectory.replay.call(
@@ -441,22 +454,23 @@ class CaptureServer:
             trajectory.inflight.discard(task)
             trajectory.touch()
 
-    def _authorized(self, trajectory: Trajectory, request: web.Request) -> bool:
-        """Whether the call carries this trajectory's key, or no key is required."""
+    def _authorized(self, trajectory: Trajectory, request: web.Request, dialect: DialectType) -> bool:
+        """Whether the call carries this trajectory's key where ``dialect``'s clients send one, or no key
+        is required."""
         if not self.require_api_key:
             return True
         if trajectory.api_key is None:
             return False
-        parts = request.headers.get("Authorization", "").split(maxsplit=1)
-        if len(parts) != 2 or parts[0].lower() != "bearer":
+        sent = dialect.get_dialect().api_key(request.headers)
+        if sent is None:
             return False
         # Bytes: compare_digest refuses str with non-ASCII characters, which a caller controls. aiohttp keeps
         # header bytes that aren't UTF-8 as surrogates; surrogateescape turns them back into those bytes.
-        given = parts[1].strip().encode("utf-8", "surrogateescape")
+        given = sent.encode("utf-8", "surrogateescape")
         return hmac.compare_digest(given, trajectory.api_key.encode())
 
     def _start(
-        self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
+        self, trajectory: Trajectory, request: web.Request, chat: CallRequest, raw: bytes
     ) -> asyncio.Future[web.StreamResponse]:
         """Start the call as its own task. ``finish`` still cancels it, as in-flight work."""
         work = asyncio.ensure_future(self.backend.chat(trajectory, request, chat, raw))

@@ -1011,6 +1011,8 @@ class AlgorithmConfig(BaseConfig):
     - ``"dppo"``: DPPO, from Rethinking the Trust Region in LLM Reinforcement Learning
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability
       divergences rather than probability ratios, improving on PPO clipping behavior.
+    - ``"reinforce"``: plain policy gradient ``-A log π`` with no importance ratio, the objective
+      score centering builds on (https://arxiv.org/abs/2609.20807).
     """
     loss_reduction: str = "token_mean"
     """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
@@ -1058,6 +1060,20 @@ class AlgorithmConfig(BaseConfig):
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
+    enable_score_centering: bool = False
+    """Score centering (https://arxiv.org/abs/2609.20807): subtract each token's expected weighted
+    score under the sampler, cancelling the drift a training-inference mismatch adds to the policy
+    gradient.
+
+    The expectation runs over the recorded support with the sampler's processed logprobs, which is
+    exact under top-k/top-p sampling, and weights every member with the loss's own weight on the
+    sampled token. That weight must be relative to the sampler, so this requires
+    ``enable_sample_support_replay`` and a loss with no ratio or a rollout-anchored one:
+    ``"reinforce"`` (``f = 1``), ``"rollout_is"`` (its band), ``"cispo"`` with
+    ``cispo_anchor="rollout"`` (its clamp) or ``"dppo"`` (its trust region). Incompatible with
+    ``off_policy_correction.tis_ratio_type`` and the token-mask IS thresholds, which weight only the
+    sampled token by ``π_old / π_rollout``; sequence and outlier masks apply to both terms but are
+    approximate, because each depends on the sampled token's own ratio."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1978,6 +1994,33 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError(
                     "sample-support replay requires generator.use_conversation_multi_turn=True because "
                     "use_conversation_multi_turn=False appends a synthetic loss-active EOS without captured support"
+                )
+
+        algorithm = self.trainer.algorithm
+        if algorithm.enable_score_centering:
+            from skyrl.backends.skyrl_train.utils.ppo_utils import (
+                score_centering_weight,
+            )
+
+            if not algorithm.enable_sample_support_replay:
+                raise ValueError("trainer.algorithm.enable_score_centering requires enable_sample_support_replay")
+            # Raises for a loss whose weight is not relative to the sampler.
+            score_centering_weight(algorithm.policy_loss_type, algorithm)
+            off_policy = algorithm.off_policy_correction
+            if off_policy.tis_ratio_type is not None:
+                raise ValueError(
+                    "score centering does not compose with off_policy_correction.tis_ratio_type, which weights "
+                    "only the sampled token by pi_old / pi_rollout; the loss's own weight is the importance "
+                    "correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
+                )
+            if (
+                off_policy.token_mask_is_threshold_low is not None
+                or off_policy.token_mask_is_threshold_high is not None
+            ):
+                raise ValueError(
+                    "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
+                    "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
+                    "importance weight that score centering applies to every support member"
                 )
 
         # Eval requests opt out of capture and do not use these constraints.

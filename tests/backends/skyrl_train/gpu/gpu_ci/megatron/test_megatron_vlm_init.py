@@ -635,7 +635,8 @@ def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
 @pytest.mark.parametrize(
     ("model_name", "tp"),
     [
-        ("Qwen/Qwen3-VL-2B-Instruct", 1),
+        # CP=1 puts all of Qwen3-VL-2B and its Adam state on one GPU (~41 GB peak), past a 22 GB L4.
+        pytest.param("Qwen/Qwen3-VL-2B-Instruct", 1, marks=pytest.mark.h100),
         ("Qwen/Qwen3.5-0.8B", 1),
         # TP=2 turns on sequence parallelism: the deepstack/SP split runs on top of the CP split.
         ("Qwen/Qwen3-VL-2B-Instruct", 2),
