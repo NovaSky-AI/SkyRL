@@ -635,7 +635,8 @@ class InferenceEngineState:
         setup = create_inference_servers(
             ie_cfg,
             cli_args,
-            log_path=cfg.trainer.log_path,
+            # The default /tmp/skyrl-logs belongs to whoever created it first on a shared box.
+            log_path=os.environ.get("SKYRL_TEST_LOG_PATH", cfg.trainer.log_path),
             placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
         )
         router = setup.router
