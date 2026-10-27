@@ -174,7 +174,7 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 apply_pp_relay_worker_patch()
 
 # DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
-# NaN. Zero the workspace before each gather.
+# NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#62365 is in the pinned vLLM.
 from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
     apply_deepseek_v41_prefill_workspace_patch,
 )
