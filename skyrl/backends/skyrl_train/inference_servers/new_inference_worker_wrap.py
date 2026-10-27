@@ -190,7 +190,7 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import
 apply_pp_kv_cache_projection_patch()
 
 # DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
-# NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#62365 is in the pinned vLLM.
+# NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#60613 is in the pinned vLLM.
 from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
     apply_deepseek_v41_prefill_workspace_patch,
 )

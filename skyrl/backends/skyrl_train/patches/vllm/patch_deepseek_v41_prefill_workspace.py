@@ -15,12 +15,17 @@ to noise, so the rows are masked, not attended. Single-request prefill never hit
 
 Zeroing costs one memset of the gather buffer per prefill chunk per layer.
 
-TODO: remove this patch (and its call in ``new_inference_worker_wrap.py`` and its test) once vLLM ships the
-upstream fix, vllm-project/vllm#62365 (commit eadaec214e, "[DSv4.1] Fix Engram stack entry, SWA block stride and
-combine index tails"), in the version SkyRL pins. There, V4.1's sparse-prefill combine kernel
-(``vllm/models/deepseek_v41/common/ops/cache_utils.py``) writes -1 to every index slot past ``combined_lens``: the
-FlashMLA kernel loads the whole last 64-slot block, so a stale slot left in the reused index workspace could point
-at a non-finite row of this gather buffer. Check that the pinned vLLM has that tail fill before removing.
+The root cause is stale slots in the reused sparse-index workspace: ``combine_topk_swa_indices`` writes only each
+row's valid prefix, and FlashMLA loads the whole last 64-slot block, so a stale slot can point at a non-finite row of
+this gather buffer. Zeroing the buffer makes whatever such a slot points at finite.
+
+TODO: remove this patch (and its call in ``new_inference_worker_wrap.py`` and its test) once SkyRL pins a vLLM
+release that includes vllm-project/vllm#60613 ("[DSv4.1] Seed the -1 sentinel in the prefill sparse index
+workspace", merged to main 2026-10-23; not in 0.32.0, published 2026-10-18). It adds ``combined_indices.fill_(-1)``
+to V4.1's ``combine_topk_swa_indices`` (``vllm/models/deepseek_v41/common/ops/cache_utils.py``), porting
+vllm-project/vllm#55299, which fixed DeepSeek-V4's copy (in 0.31.0+, so V4 needs no patch). Before removing, check
+that the pinned vLLM's V4.1 ``combine_topk_swa_indices`` seeds ``-1`` (that line, or the in-kernel tail fill of
+vllm-project/vllm#63264 / #62365).
 """
 
 from loguru import logger
