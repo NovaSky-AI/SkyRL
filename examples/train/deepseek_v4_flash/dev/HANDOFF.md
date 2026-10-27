@@ -580,3 +580,10 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     node holding Engram, or lower `optimizer_offload_fraction`.
   - Rerun for a complete 10-step curve with `trainer.ckpt_interval=100` (only the end-of-training safety-net
     save, after step-10 metrics and eval are logged): log `v41-dapo-fullft6-curve-1793076638.log`.
+  - **Complete 10-step curve (W&B `dsv41_flash_dapo/1sjty1ud`, log `v41-dapo-fullft6-curve-1793076638.log`).**
+    `avg_final_rewards` -0.217 / -0.037 / -0.097 / -0.015 / 0.186 / 0.156 / 0.132 / 0.380 / 0.369 / 0.443;
+    `minibatch_rollout_logprobs_abs_diff_mean` 0.0091 / 0.0106 / 0.0105 / 0.0109 / 0.0117 / 0.0119 / 0.0132 /
+    0.0130 / 0.0140 / 0.0133 (no spikes); rollout `reward/avg_pass_at_12` 0.84 -> 0.91-0.95. AIME-2024 eval
+    (`~/exports/dumped_evals/global_step_{0,10}_evals/aggregated_results.jsonl` on the head): avg_score 0.028 ->
+    0.233, pass@12 0.767 -> 0.867. ~700 s/step, 2h04m for 10 steps. The end-of-training checkpoint save (640 s)
+    succeeded this time, so the node-7 host OOM above is marginal rather than deterministic.
