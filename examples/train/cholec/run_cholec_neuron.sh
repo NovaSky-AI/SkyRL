@@ -12,7 +12,7 @@
 #   * colocate_all=false, single core (the A10G run used 4xA10G colocated).
 #
 # Smoke test: pass `trainer.max_training_steps=1` as an extra arg.
-set -x
+set -euo pipefail
 
 # The torch-neuronx DLAMI ships the patched torch + Neuron runtime in a managed
 # venv. torch-neuronx is not on PyPI (and the `neuron` extra deliberately does
