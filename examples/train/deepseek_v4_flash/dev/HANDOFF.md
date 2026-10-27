@@ -604,7 +604,11 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
 - **Host memory**: each policy rank holds ~110 GB anon + ~240 GB pinned (fp32 master/grad/moments of 11.3B params on
   the host); 8 ranks/node is ~2.8 TB of the 3.9 TB before a checkpoint save stages anything, which is why the step-10
   save OOMed once. b4676690 empties PyTorch's pinned-host cache after building the optimizer and before saving; at
-  init it released < 1 GiB (the pinned memory is live), so it is not the fix by itself.
+  init and at a step-3 save it released < 1 GiB (the pinned memory is live optimizer state); reverted. During that
+  save node 7 stayed at ~1.0 TB used / ~970 GB available (peak), so the save fits with margin when nothing else
+  grows; the earlier OOM remains unexplained beyond the ~2.8 TB baseline.
+- **CPU-thread fix measured** (`v41-dapo-perf-threads-*` vs `v41-dapo-perf-base-*`, same recipe): policy_train
+  488 -> 434 s (step 2) and 466 -> 420 s (step 3); fwd_logprobs 62-63 -> 54-55 s; whole step 727 -> 662 s (-9%).
 - **Rollout-vs-trainer logprob outliers come from vLLM decode with prefix caching.** `dev/analyze_logprob_outliers.py`
   on `trainer.dump_data_batch` dumps: mean |diff| 0.014, only 2-6e-5 of tokens > 1, vLLM the more confident side
   (20/23, 55/70), no position / long-context trend, but clustered by prompt group (the 12 samples of one prompt) and
