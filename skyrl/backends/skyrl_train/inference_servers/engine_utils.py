@@ -1,7 +1,8 @@
 import os
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional, Union
 
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from skyrl.train.config import SamplingParams
 
@@ -82,39 +83,85 @@ def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig])
     return vllm_sampling_params
 
 
-def get_neuron_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
+# Keys that are consumed by the mapping below (or dropped on purpose) and must not be
+# re-emitted verbatim as ``generate`` kwargs by the passthrough loop.
+_NEURON_CONSUMED_KEYS = {
+    "max_generate_length",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+    "stop",
+    "logprobs",
+    "additional_kwargs",
+}
+
+
+def _sampling_params_to_dict(sampling_params: Union[SamplingParams, DictConfig, Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize the three accepted sampling-params shapes to a plain ``dict``.
+
+    Generators pass sampling params as a plain ``dict`` (``dataclasses.asdict`` of
+    ``SamplingParams``); config-driven paths pass a ``DictConfig``; and callers may
+    pass the typed ``SamplingParams`` directly. Reading keys through a single dict
+    view keeps the mapping logic free of shape-specific attribute access.
+    """
+    if isinstance(sampling_params, dict) and not isinstance(sampling_params, DictConfig):
+        return sampling_params
+    if isinstance(sampling_params, DictConfig):
+        return OmegaConf.to_container(sampling_params, resolve=True)
+    if is_dataclass(sampling_params):
+        return asdict(sampling_params)
+    raise TypeError(f"Unsupported sampling_params type: {type(sampling_params)!r}")
+
+
+def get_neuron_sampling_params(sampling_params: Union[SamplingParams, DictConfig, Dict[str, Any]]) -> Dict[str, Any]:
     """Map SkyRL ``SamplingParams`` to transformers ``generate`` kwargs.
 
     The native (TorchNeuron) engine calls ``model.generate(**kwargs)`` directly, so
     the keys are transformers ``generate`` arguments rather than vLLM fields.
+
     ``logprobs`` is deliberately dropped here: the native engine always computes
     prompt/response logprobs via ``output_logits``, so the vLLM ``logprobs`` key has
     no ``generate`` equivalent.
+
+    ``do_sample`` is derived from ``temperature`` to match vLLM semantics: transformers
+    falls back to greedy decoding at ``temperature == 1.0`` (the common RL default),
+    which would silently disable the sampling RL exploration depends on.
     """
-    stop_val = sampling_params.stop
-    generate_kwargs = {
-        "max_new_tokens": sampling_params.max_generate_length,
-        "temperature": sampling_params.temperature,
-        "top_p": sampling_params.top_p,
-        "repetition_penalty": sampling_params.repetition_penalty,
+    params = _sampling_params_to_dict(sampling_params)
+
+    stop_val = params.get("stop")
+    generate_kwargs: Dict[str, Any] = {
+        "max_new_tokens": params.get("max_generate_length"),
+        "temperature": params.get("temperature"),
+        "top_p": params.get("top_p"),
+        "repetition_penalty": params.get("repetition_penalty"),
         "stop_strings": list(stop_val) if stop_val is not None else None,
     }
-    if sampling_params.top_k is not None and sampling_params.top_k > 0:
-        generate_kwargs["top_k"] = sampling_params.top_k
-    if sampling_params.min_p is not None and sampling_params.min_p > 0:
-        generate_kwargs["min_p"] = sampling_params.min_p
-    if isinstance(sampling_params, DictConfig):
-        exclude_keys = ["max_generate_length", "logprobs"]
-        for key, value in sampling_params.items():
-            if key not in generate_kwargs and key not in exclude_keys:
-                if isinstance(value, ListConfig):
-                    value = list(value)
-                generate_kwargs[key] = value
-    else:
-        if sampling_params.additional_kwargs is not None:
-            for key, value in sampling_params.additional_kwargs.items():
-                if key not in generate_kwargs:
-                    generate_kwargs[key] = value
+
+    temperature = params.get("temperature")
+    if temperature is not None:
+        generate_kwargs["do_sample"] = temperature > 0
+
+    top_k = params.get("top_k")
+    if top_k is not None and top_k > 0:
+        generate_kwargs["top_k"] = top_k
+    min_p = params.get("min_p")
+    if min_p is not None and min_p > 0:
+        generate_kwargs["min_p"] = min_p
+
+    additional_kwargs = params.get("additional_kwargs")
+    if additional_kwargs:
+        for key, value in additional_kwargs.items():
+            generate_kwargs.setdefault(key, value)
+
+    for key, value in params.items():
+        if key not in _NEURON_CONSUMED_KEYS and key not in generate_kwargs:
+            if isinstance(value, ListConfig):
+                value = list(value)
+            generate_kwargs[key] = value
+
     return generate_kwargs
 
 

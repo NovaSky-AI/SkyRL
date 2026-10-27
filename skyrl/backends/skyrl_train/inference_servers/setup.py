@@ -20,6 +20,7 @@ from skyrl.train.utils.utils import (
 )
 
 from .common import SERVER_PORT_STRIDE
+from .base import InferenceEngineInterface
 from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
 from .utils import (
@@ -266,7 +267,7 @@ def build_new_inference_client(
     cfg: SkyRLTrainConfig,
     tokenizer,
     placement_group: Optional[ResolvedPlacementGroup] = None,
-) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
+) -> Tuple[InferenceEngineInterface, InferenceServerSetup]:
     """Build the new HTTP-based inference client and supporting state.
 
     Resolves the ``(external_proxy_url, external_server_urls)`` matrix:
@@ -295,6 +296,19 @@ def build_new_inference_client(
     external_server_urls = ie_cfg.external_server_urls
     has_external_proxy = external_proxy_url is not None
     has_external_servers = external_server_urls is not None
+
+    if ie_cfg.backend == "neuron":
+        # Native transformers engine: no vLLM servers, router, or HTTP proxy. The
+        # engine runs in-process on the ``neuron`` device and is returned directly.
+        from .neuron_engine import NeuronInferenceEngine
+
+        engine = NeuronInferenceEngine(
+            model_path=ie_cfg.served_model_name or cfg.trainer.policy.model.path,
+            tokenizer=tokenizer,
+        )
+        server_setup = InferenceServerSetup(proxy_url="", server_urls=[])
+        logger.info("Native TorchNeuron inference engine created (no vLLM servers).")
+        return engine, server_setup
 
     if has_external_proxy and has_external_servers:
         proxy_url = external_proxy_url

@@ -39,6 +39,33 @@ def test_neuron_sampling_params_skips_disabled_knobs():
     assert "top_k" not in kwargs
     assert "min_p" not in kwargs
     assert kwargs["stop_strings"] is None
+    # temperature=1.0 must sample (vLLM semantics), not fall back to greedy.
+    assert kwargs["do_sample"] is True
+
+
+def test_neuron_sampling_params_accepts_plain_dict():
+    # Generators pass ``asdict(SamplingParams)`` -- a plain dict, not the typed config.
+    params = {
+        "max_generate_length": 96,
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "top_k": 40,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "logprobs": 1,
+        "stop": ["<|im_end|>"],
+        "additional_kwargs": None,
+    }
+    kwargs = get_neuron_sampling_params(params)
+    assert kwargs["max_new_tokens"] == 96
+    assert kwargs["temperature"] == 0.8
+    assert kwargs["top_p"] == 0.95
+    assert kwargs["top_k"] == 40
+    assert kwargs["stop_strings"] == ["<|im_end|>"]
+    assert kwargs["do_sample"] is True
+    assert "min_p" not in kwargs
+    assert "logprobs" not in kwargs
+    assert "stop" not in kwargs
 
 
 def test_get_sampling_params_for_backend_dispatch():
