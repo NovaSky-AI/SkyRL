@@ -13,8 +13,14 @@ batched prefill requests: 0.84% NaN first tokens as shipped, 0 with the workspac
 NaN-filled (about half of batched requests touch unwritten rows); zero- vs 1000-filled first-token logprobs agree
 to noise, so the rows are masked, not attended. Single-request prefill never hits it.
 
-Zeroing costs one memset of the gather buffer per prefill chunk per layer. Remove once vLLM zero-fills the slab
-tails or the kernel selects instead of multiplying masked rows.
+Zeroing costs one memset of the gather buffer per prefill chunk per layer.
+
+TODO: remove this patch (and its call in ``new_inference_worker_wrap.py`` and its test) once vLLM ships the
+upstream fix, vllm-project/vllm#62365 (commit eadaec214e, "[DSv4.1] Fix Engram stack entry, SWA block stride and
+combine index tails"), in the version SkyRL pins. There, V4.1's sparse-prefill combine kernel
+(``vllm/models/deepseek_v41/common/ops/cache_utils.py``) writes -1 to every index slot past ``combined_lens``: the
+FlashMLA kernel loads the whole last 64-slot block, so a stale slot left in the reused index workspace could point
+at a non-finite row of this gather buffer. Check that the pinned vLLM has that tail fill before removing.
 """
 
 from loguru import logger
