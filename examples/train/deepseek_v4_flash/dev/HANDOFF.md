@@ -665,3 +665,6 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     allocated + 7 GiB of the slept vLLM engine on a 178 GiB B200; rows up to ~6.1K tokens). Every memory knob the recipe
     can use is already on (Engram on host, grad_reduce_in_fp32=false, expandable segments, micro batch 1, selective
     recompute [moe, mhc, layernorm]; no trainer PP). Retrying at 3072 (`v41-dapo-fullft6-resp3k-*`).
+  - **3072 fits** (`v41-dapo-fullft6-resp3k-1793123157.log`): base AIME-2024 avg_score 0.378, pass@12 0.867 (avg 1910
+    tokens); step-1 reward 0.282, step 2 0.357 (2K: ~-0.22, -0.04). Step 765 s after warmup (generate 130 s, policy_train
+    496 s) vs ~650 s at 2K. Running 20 steps, evals at 10 and 20.
