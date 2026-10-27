@@ -1060,6 +1060,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             )
             env_vars["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"]
 
+        # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
+        # Engram table placement).
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
+
         if os.environ.get("RAY_CGRAPH_get_timeout"):
             logger.info(
                 f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
