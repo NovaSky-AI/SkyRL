@@ -12,8 +12,8 @@ pytest.importorskip("renderers")
 
 from renderers import ParsedResponse, ParsedToolCall, ToolCallParseStatus  # noqa: E402
 
+from skycap.tokens.backend import finish_reason  # noqa: E402
 from skycap.tokens.renderer import RenderersRenderer, tool_call_id  # noqa: E402
-from skycap.tokens.response import finish_reason  # noqa: E402
 
 
 def parse(*calls: ParsedToolCall, content: str = "") -> dict:

@@ -13,7 +13,7 @@ A record directory holds, per trajectory `{id}`:
 | `{id}.json.zst` | always | the document (graph) |
 | `{id}.tokens.zst` | optional: token mode only, when any node has tokens; never in text mode | token ids, logprobs, the text the tokens decode to, and each token's byte offset in it |
 | `{id}.experts.zst` | optional: when routed experts were captured (R3) | routed experts |
-| `{id}.sampling_mask.zst` | optional: when a captured sampling mask has at least one row | per sampled token, the ids it could have been drawn from |
+| `{id}.sampling_mask.zst` | optional: when a captured sampling mask has at least one row | per sampled token, the ids it could have been drawn from, and their sampler logprobs when captured |
 
 Every sidecar is optional. The document's `sidecars` manifest lists the ones
 the trajectory captured, and a kind missing from it is one the trajectory
@@ -127,7 +127,7 @@ Node `i` is `nodes[i]`, and `nodes[i].id == i`. A node is one message:
 | `message` | the message, exactly as the harness sent or received it |
 | `match_hash`, `delta_hash` | identity hashes (see the graph module) |
 | `created_at` | Unix seconds |
-| `calls` | model-authored nodes: every call that produced this output, `{t_start, t_end, model, sampling, usage, finish_reason, tools, bridged}`, where `tools` is the key of the call's tool set in the document's `tools`, or null, and `bridged` (token mode) is whether the call's prompt extended an earlier call's prompt and completion token for token: `false` when it was rendered from the messages instead, null for a trajectory's first call or text mode |
+| `calls` | model-authored nodes: every call that produced this output, `{t_start, t_end, model, sampling, usage, finish_reason, tools, bridged, dialect}`, where `tools` is the key of the call's tool set in the document's `tools`, or null, `bridged` (token mode) is whether the call's prompt extended an earlier call's prompt and completion token for token: `false` when it was rendered from the messages instead, null for a trajectory's first call or text mode, and `dialect` is the API the call came in on, `openai_chat` or `openai_responses` (absent or null in records written before it). |
 | `shadowed_by` | null, or the sibling that a later request's matching message is matched to instead of this node: the latest model-authored sibling with the same match hash, or the latest client-authored one if there is none. In text mode, later history always continues from that sibling. In token mode, it continues from that sibling only if the turn's tokens agree with it: the turn extends a model call on that path, or the full render reproduces the sibling's tokens. Otherwise the message is stored as a client node under the same parent. That reuses a client sibling with exactly the rendered tokens, which can be this node, or else creates a new client sibling. A shadowed model-authored node never receives later history |
 | `tokens` | null in text mode, else this node's slices of the sidecars (below) |
 
@@ -145,6 +145,7 @@ path that contains it, so a node shared by several paths trains once.
 | `text_offset`, `text_bytes` | the node's text is bytes `[text_offset, text_offset + text_bytes)` of `text`; `text_offset` is null when no text was recorded |
 | `experts_offset`, `experts_rows` | the node's rows of `routed_experts`; offset null when absent |
 | `mask_offset`, `mask_rows` | the node's rows of the sampling mask (one per sampled token); offset null when absent. A node with `mask_rows` 0 has no rows even when its offset is set, and the sidecar may not exist |
+| `has_mask_logprobs` | whether the sampling mask's `logprobs` hold real values for this node's rows. Absent in records written before it existed, which read as false |
 
 ## Sidecars
 
@@ -160,7 +161,7 @@ entry for a kind is:
             "text":         {"dtype": "uint8",   "shape": [B], "offset": ...}}}
 ```
 
-`dtype` is one of `uint8`, `uint16`, `int16`, `int32`, `int64`, `float64`. To
+`dtype` is one of `uint8`, `uint16`, `int16`, `int32`, `int64`, `float32`, `float64`. To
 read an array, decompress the file and view `prod(shape)` elements of `dtype`
 starting at `offset`. Offsets are relative to the start of the decompressed
 bytes. In Node, a decompressed `Buffer` can be a slice of a larger
@@ -204,6 +205,7 @@ engine, so its row is a copy of the previous one.
 | --- | --- | --- |
 | `ids` | `[M]` int32 | support ids, all rows concatenated |
 | `offsets` | `[rows + 1]` int64 | row `r` is `ids[offsets[r]:offsets[r + 1]]` |
+| `logprobs` | `[M]` float32, optional | the sampler's logprob of each id, aligned with `ids`; present when any node has `has_mask_logprobs`, NaN in the rows of a node without |
 
 A node's rows are `[mask_offset, mask_offset + mask_rows)`, one per sampled
 token, in order.
@@ -216,7 +218,7 @@ Before compression, per token of the trajectory (`N` tokens, `S` of them sampled
 | --- | --- | --- |
 | `tokens` | per token: 4 B id + 8 B logprob + 4 B text offset + its UTF-8 text (~4 B for English BPE) ≈ 20 B | `O(N)` |
 | `experts` | per token: `layers × k × itemsize`, where `k` is the experts each token is routed to (top-k) and `itemsize` is 1 B while expert ids fit in uint8 (≤ 256 experts), 2 B above | `O(N × layers × k)` |
-| `sampling_mask` | per sampled token: `4 B × support + 8 B`, where support is at most the sampling `top_k` | `O(S × top_k)` |
+| `sampling_mask` | per sampled token: `4 B × support + 8 B`, where support is at most the sampling `top_k`, plus `4 B × support` with logprobs | `O(S × top_k)` |
 
 The total number of experts only sets `itemsize`. The document's size follows the messages' text.
 

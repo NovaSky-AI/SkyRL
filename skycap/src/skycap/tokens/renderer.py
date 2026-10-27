@@ -35,6 +35,10 @@ class Rendered:
 
 
 class TokenRenderer(Protocol):
+    """How token mode renders and parses. A renderer may also expose ``chat_template``, its chat
+    template's text, which decides whether ``developer`` messages need folding (``tokens.developer``);
+    one without it gets them as sent."""
+
     name: str
 
     def render(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]] | None) -> Rendered: ...
@@ -123,8 +127,13 @@ class RenderersRenderer:
         with ThreadPoolExecutor(max_workers=min(size, 8)) as pool:
             for slot in pool.map(lambda _: build(), range(size - 1)):
                 self._slots.put(slot)
-        with self._checkout() as (renderer, _):
+        with self._checkout() as (renderer, loaded):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
+            template = getattr(loaded, "chat_template", None)
+        if isinstance(template, dict):
+            template = template.get("default")
+        #: The tokenizer's chat template text, which ``tokens.developer`` tests for the ``developer`` role.
+        self.chat_template: str | None = template if isinstance(template, str) else None
 
     @contextmanager
     def _checkout(self) -> Iterator[tuple[Any, Any]]:
