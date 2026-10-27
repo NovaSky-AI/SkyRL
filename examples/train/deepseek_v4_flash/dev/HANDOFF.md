@@ -642,3 +642,11 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   per-trajectory salts the top gaps have mixed signs and decay smoothly to ~1 (bf16 noise).
 
   Mean |diff| is unchanged (0.014): the bulk is bf16 noise; only the prefix-cache tail goes away.
+- **10-step DAPO full FT + R3 with all fixes** (ffb2ac80: NaN prefill patch, CPU-optimizer threads,
+  per-trajectory cache salt; W&B `dsv41_flash_dapo/ftk13x1o`, log `v41-dapo-fullft6-allfixes-1793105695.log`, no
+  checkpoints). `policy/rollout_train_logprobs_abs_diff_max` per step vs the previous curve run `1sjty1ud`:
+  3.70->0.97, 4.28->0.87, 5.99->1.01, 4.68->1.03, 5.11->1.00, **12.15->8.67**, 8.94->1.60, 5.27->1.16, 1.90->0.95,
+  3.34->0.87 (mean 0.014 throughout). Reward -0.238 -> 0.415; step 612-675 s after warmup (was ~720-730 s). AIME-2024
+  avg_score 0.078 -> 0.167, pass@12 0.800 -> 0.867. Step 6 is the outlier in both runs (same data order), so one
+  step-6 prompt still trips something the salt does not cover; `v41-dapo-dump6-*` re-runs 6 steps with
+  `dump_data_batch` to find it.
