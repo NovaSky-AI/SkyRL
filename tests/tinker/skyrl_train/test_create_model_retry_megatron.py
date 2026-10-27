@@ -5,7 +5,7 @@ GPU-gated. Runs the Megatron backend in-process rather than behind a Tinker serv
 the first build fail.
 
 Run with:
-  uv run --extra tinker --extra megatron --with pytest --with pytest-timeout \\
+  uv run --isolated --extra tinker --extra megatron --with pytest --with pytest-timeout \\
     pytest -s tests/tinker/skyrl_train/test_create_model_retry_megatron.py
 """
 
@@ -40,6 +40,16 @@ from tests.tinker.skyrl_train.test_multi_lora_megatron import BASE_MODEL  # noqa
 LORA_CONFIG = types.LoraConfig(rank=8, alpha=16, seed=0)
 
 
+# Not the shared ray_init_fixture (tests/backends/skyrl_train/gpu/conftest.py): it starts Ray itself, and the
+# backend's own Ray startup inside create_model is part of what this test covers. This fixture only releases
+# every GPU before the rest of tests/tinker/skyrl_train runs in the same process.
+@pytest.fixture
+def shutdown_ray_after_test():
+    yield
+    ray.shutdown()
+
+
+@pytest.mark.usefixtures("shutdown_ray_after_test")
 def test_create_model_succeeds_after_a_failed_first_build(monkeypatch):
     num_gpus = torch.cuda.device_count()
     # The colocated placement group takes every GPU, so if the failed attempt's were still reserved,
@@ -58,16 +68,13 @@ def test_create_model_succeeds_after_a_failed_first_build(monkeypatch):
     monkeypatch.setattr(skyrl_train_backend, "SKYRL_RAY_PG_TIMEOUT_IN_S", 60)
     backend = SkyRLTrainBackend(BASE_MODEL, config)
 
-    try:
-        # Under colocate_all, the offload comes right after init_model has loaded the weights.
-        with patch.object(PPORayActorGroup, "offload_to_cpu", side_effect=RuntimeError("injected build failure")):
-            with pytest.raises(RuntimeError, match="injected build failure"):
-                backend.create_model("model-a", LORA_CONFIG)
-        # Sampling answers as if no create_model had run.
-        with pytest.raises(RuntimeError, match="Create a model before sampling"):
-            backend._ensure_inference_engines()
+    # Under colocate_all, the offload comes right after init_model has loaded the weights.
+    with patch.object(PPORayActorGroup, "offload_to_cpu", side_effect=RuntimeError("injected build failure")):
+        with pytest.raises(RuntimeError, match="injected build failure"):
+            backend.create_model("model-a", LORA_CONFIG)
+    # Sampling answers as if no create_model had run.
+    with pytest.raises(RuntimeError, match="Create a model before sampling"):
+        backend._ensure_inference_engines()
 
-        backend.create_model("model-a", LORA_CONFIG)
-        assert backend.has_model("model-a")
-    finally:
-        ray.shutdown()
+    backend.create_model("model-a", LORA_CONFIG)
+    assert backend.has_model("model-a")
