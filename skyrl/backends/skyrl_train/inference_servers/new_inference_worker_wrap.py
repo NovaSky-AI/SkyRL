@@ -173,6 +173,14 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 
 apply_pp_relay_worker_patch()
 
+# DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
+# NaN. Zero the workspace before each gather.
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
+    apply_deepseek_v41_prefill_workspace_patch,
+)
+
+apply_deepseek_v41_prefill_workspace_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
