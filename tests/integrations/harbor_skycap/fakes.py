@@ -8,7 +8,7 @@
 - ``FakeTrial``: what Harbor's ``Trial`` is to the generator. Its task path picks
   a script: a linear chat, a summarization (the history is rewritten), a
   discarded reply asked again for (mini-swe-agent's format-error retry), a
-  timeout, a crash, or a sandbox that times out starting on the first attempt
+  timeout, an agent that exits on skycap's context-length error (``overflow``), a crash, or a sandbox that times out starting on the first attempt
   (``slow_start``; "first" counts every trial of that task path since
   ``FakeTrial.configs`` was reset, so a test runs one such trial). Results carry Harbor's phase timings: the sandbox takes
   ``SETUP`` seconds to start, the agent ``AGENT`` and the verifier ``VERIFY``.
@@ -137,10 +137,10 @@ def timing(start: float, seconds: float) -> SimpleNamespace:
     )
 
 
-def verified(reward: float, exception: str | None = None, timed: bool = True) -> SimpleNamespace:
+def verified(reward: float, exception: str | None = None, timed: bool = True, message: str = "") -> SimpleNamespace:
     """A trial's result. Timed: every phase ran, except the verifier after an exception."""
     return SimpleNamespace(
-        exception_info=SimpleNamespace(exception_type=exception) if exception else None,
+        exception_info=SimpleNamespace(exception_type=exception, exception_message=message) if exception else None,
         verifier_result=None if exception else SimpleNamespace(rewards={"reward": reward}),
         environment_setup=timing(0, SETUP) if timed else None,
         agent_execution=timing(SETUP, AGENT) if timed else None,
@@ -207,6 +207,16 @@ class FakeTrial:
             history.append(await chat(session, history))
             if script == "timeout":
                 return verified(0.0, "AgentTimeoutError")
+            if script == "overflow":
+                # mini-swe-agent exiting on skycap's context-length 400: Harbor sees only a non-zero exit, and
+                # still runs the verifier.
+                result = verified(1.0)
+                result.exception_info = SimpleNamespace(
+                    exception_type="NonZeroAgentExitCodeError",
+                    exception_message="Command failed (exit 1): mini-swe-agent ...\nstdout: ... litellm."
+                    "ContextWindowExceededError: ... 'code': 'context_length_exceeded'",
+                )
+                return result
             history += [{"role": "user", "content": "ok"}]
             if script == "discard":
                 # As mini-swe-agent on a format error: the reply is dropped from the history and the

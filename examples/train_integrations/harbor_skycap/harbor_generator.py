@@ -22,6 +22,7 @@ sandbox environment that LiteLLM- and OpenAI-based agents read.
 import asyncio
 import importlib
 import os
+import re
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional
@@ -55,6 +56,13 @@ litellm.suppress_debug_info = True
 
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
 MAX_NUM_RETRIES_PER_TRIAL = 2
+
+#: How a failed trial's exception shows it ran out of context. Harbor raises its own two types for agents it
+#: classifies; an installed agent that exits on skycap's 400 (code ``context_length_exceeded``, which LiteLLM
+#: raises as its ``ContextWindowExceededError``) is only a ``NonZeroAgentExitCodeError`` whose message ends with
+#: the agent's output.
+CONTEXT_LENGTH_EXCEPTIONS = {"ContextLengthExceededError", "ContextWindowExceededError"}
+CONTEXT_LENGTH_OUTPUT = re.compile(r"context_length_exceeded|ContextWindowExceededError")
 
 #: skycap authenticates nothing, but LiteLLM won't build a client without a key.
 PLACEHOLDER_API_KEY = "skycap"
@@ -257,7 +265,10 @@ class HarborSkycapGenerator(GeneratorInterface):
                 if exception == "AgentTimeoutError":
                     # Masked, not retried, as the sibling does.
                     reward, stop_reason = 0.0, "agent_timeout"
-                elif exception == "ContextLengthExceededError":
+                elif exception in CONTEXT_LENGTH_EXCEPTIONS or (
+                    exception == "NonZeroAgentExitCodeError"
+                    and CONTEXT_LENGTH_OUTPUT.search(results.exception_info.exception_message or "")
+                ):
                     # Trains with reward 0, as the sibling does.
                     reward, stop_reason = 0.0, "context_length"
                 elif not results.verifier_result:

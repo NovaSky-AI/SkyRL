@@ -411,6 +411,18 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
 
 
 @pytest.mark.asyncio
+async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_length_trial(
+    skycap, trials, generator
+) -> None:
+    out = await generator(apply_overlong_filtering=True).generate(batch("overflow", "linear"), disable_tqdm=True)
+
+    overflow = out["trajectory_ids"].index(TrajectoryID("overflow", 0))
+    # Not the verifier's reward: the agent stopped, it didn't finish.
+    assert out["rewards"][overflow] == 0.0 and out["stop_reasons"][overflow] == "context_length"
+    assert not any(out["loss_masks"][overflow])
+
+
+@pytest.mark.asyncio
 async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials, generator) -> None:
     out = await generator().generate(batch("crash"), disable_tqdm=True)
 
