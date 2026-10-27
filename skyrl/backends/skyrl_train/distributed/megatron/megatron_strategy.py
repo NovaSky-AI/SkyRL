@@ -32,6 +32,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_grads_to_gpu,
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
+    megatron_grad_buffers_resident,
     offload_megatron_grads_to_cpu,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
@@ -321,7 +322,40 @@ class MegatronStrategy(DistributedStrategy):
             if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
 
-    def save_checkpoint(
+    def _release_grad_buffers(self, model: MegatronModelWrapper) -> bool:
+        """Free the DDP grad buffers for checkpoint I/O if they hold no gradients; return whether it did."""
+        if getattr(model, "_pending_grad_sync", None) is not None or not megatron_grad_buffers_resident(
+            model.actor_module
+        ):
+            return False
+        offload_megatron_grads_to_cpu(model.actor_module)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        return True
+
+    def save_checkpoint(self, model: MegatronModelWrapper, *args, **kwargs):
+        # The grad buffers are idle at a checkpoint; freeing them leaves room for the optimizer state copies
+        # that TE's FusedAdam.state_dict makes. They come back zeroed.
+        grads_released = self._release_grad_buffers(model)
+        try:
+            return self._save_checkpoint(model, *args, **kwargs)
+        finally:
+            if grads_released:
+                load_megatron_grads_to_gpu(model.actor_module)
+            torch.cuda.empty_cache()
+
+    def load_checkpoint(self, model: MegatronModelWrapper, *args, **kwargs):
+        # As in save_checkpoint; the buffers are restored after the loaded state dicts are freed, and the
+        # load's transient memory is returned so NCCL can allocate at the first step after a resume.
+        grads_released = self._release_grad_buffers(model)
+        try:
+            return self._load_checkpoint(model, *args, **kwargs)
+        finally:
+            if grads_released:
+                load_megatron_grads_to_gpu(model.actor_module)
+            torch.cuda.empty_cache()
+
+    def _save_checkpoint(
         self,
         model: MegatronModelWrapper,
         ckpt_dir: str,
@@ -462,7 +496,7 @@ class MegatronStrategy(DistributedStrategy):
             torch.save({"model_state_dict": model_state_dict}, adapter_path)
             self.print(f"Saved {len(model_state_dict)} LoRA adapter parameters to {adapter_path}")
 
-    def load_checkpoint(
+    def _load_checkpoint(
         self,
         model: MegatronModelWrapper,
         ckpt_dir: str,
@@ -518,6 +552,8 @@ class MegatronStrategy(DistributedStrategy):
                 "model" in state_dict
             ), f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
+            del state_dict["model"]  # free the loaded weights before the optimizer load
+            torch.cuda.empty_cache()
             self.print("Loaded model state dict.")
         else:
             self._load_lora_adapters(unwrapped_model, ckpt_dir)
