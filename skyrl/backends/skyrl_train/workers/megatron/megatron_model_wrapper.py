@@ -64,6 +64,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
+    score_centering_weight,
 )
 from skyrl.backends.skyrl_train.utils.replay_utils import (
     router_replay_schedule,
@@ -77,6 +78,8 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
     reject_unsupported_sample_support_packing,
+    score_centering_loss_inputs,
+    score_centering_metrics,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -244,7 +247,11 @@ class MegatronModelWrapper:
         # metadata layout alike) so every rank gets n pieces: with sequence parallelism the MLP sees the length
         # divided by TP, so pad to a multiple of n * TP. The packed path is not covered.
         mlp_chunks = getattr(config, "mlp_chunks_for_training", 1) or 1
-        sp_size = mpu.get_tensor_model_parallel_world_size() if getattr(config, "sequence_parallel", False) else 1
+        sp_size = (
+            mpu.get_tensor_model_parallel_world_size()
+            if mlp_chunks > 1 and getattr(config, "sequence_parallel", False)
+            else 1
+        )
         self._seq_align = mlp_chunks * sp_size if mlp_chunks > 1 else 1
         # megatron-core's DeepSeek-V4 compressed sparse attention raises on any explicit mask. On the
         # unpacked path remove_left_padding left-aligns every row, so the implicit causal mask
@@ -750,6 +757,11 @@ class MegatronModelWrapper:
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
+        centering_weight = (
+            score_centering_weight(resolved_loss_name, loss_config)
+            if self.cfg.algorithm.enable_score_centering and not forward_only
+            else None
+        )
 
         def loss_func(logits, *, data, metadata_layout: Optional[TokenMetadataLayout]):
             sequences = data["sequences"]
@@ -823,6 +835,7 @@ class MegatronModelWrapper:
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             support_entropy = None
+            support_scores = None
             if self.cfg.algorithm.enable_sample_support_replay:
                 compute_support_entropy = resolved_loss_name != "cross_entropy"
                 support_scores = compute_sample_support_scores(
@@ -841,6 +854,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     compute_entropy=compute_support_entropy,
                     entropy_requires_grad=compute_support_entropy and loss_config.use_entropy_loss,
+                    centering_weight=centering_weight,
                 )
                 token_logprobs = support_scores.logprobs
                 support_entropy = support_scores.entropy
@@ -905,6 +919,16 @@ class MegatronModelWrapper:
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
+            # Megatron's canonical positions are next-token predictions, so actions are the last columns.
+            action_positions = slice(-num_actions, None)
+            centering_inputs = None
+            loss_rollout_logprobs, score_centering_kwargs = rollout_action_logprobs, {}
+            if centering_weight is not None:
+                centering_inputs = score_centering_loss_inputs(
+                    support_scores, action_positions, rollout_action_logprobs, advantages
+                )
+                loss_rollout_logprobs = centering_inputs.sampler_logprobs
+                score_centering_kwargs = centering_inputs.loss_kwargs()
             # policy loss should be calculated based on the selected token logprobs
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
@@ -912,7 +936,8 @@ class MegatronModelWrapper:
                 advantages,
                 config=loss_config,
                 loss_mask=loss_mask,
-                rollout_logprobs=rollout_action_logprobs,
+                rollout_logprobs=loss_rollout_logprobs,
+                **score_centering_kwargs,
             )
 
             # Decoupled MTP / draft loss: soft-CE distillation of the detached-input MTP head against
@@ -1161,6 +1186,8 @@ class MegatronModelWrapper:
                 metrics["mtp_loss"] = draft_loss.detach().item()
             for k, v in loss_metrics.items():
                 metrics["loss_metrics/" + k] = v
+            if centering_inputs is not None:
+                metrics.update(score_centering_metrics(support_scores, centering_inputs, action_positions, loss_mask))
             metrics.update(
                 compute_minibatch_rollout_logprob_diff_metrics(action_log_probs, rollout_action_logprobs, loss_mask)
             )

@@ -1647,3 +1647,53 @@ def test_fused_lm_head_logprob_rejects_output_layer_lora(target_modules, raises)
             TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
     else:
         TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
+
+
+_SCORE_CENTERING_BASE = [
+    "trainer.algorithm.enable_score_centering=true",
+    "trainer.algorithm.enable_sample_support_replay=true",
+    "trainer.algorithm.policy_loss_type=rollout_is",
+    "generator.inference_engine.enable_return_sample_support_set=true",
+    "generator.sampling_params.top_k=8",
+    "trainer.strategy=megatron",
+]
+
+
+def test_score_centering_accepts_replay_rollout_is_and_a_sequence_mask():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [*_SCORE_CENTERING_BASE, "trainer.algorithm.off_policy_correction.sequence_mask_metric=geometric"]
+    )
+
+    assert cfg.trainer.algorithm.enable_score_centering
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["trainer.algorithm.policy_loss_type=reinforce"],
+        ["trainer.algorithm.policy_loss_type=cispo", "trainer.algorithm.cispo.cispo_anchor=rollout"],
+        ["trainer.algorithm.policy_loss_type=dppo"],
+    ],
+)
+def test_score_centering_accepts_every_sampler_anchored_loss(overrides):
+    cfg = SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, *overrides])
+
+    assert cfg.trainer.algorithm.enable_score_centering
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("trainer.algorithm.enable_sample_support_replay=false", "requires enable_sample_support_replay"),
+        ("trainer.algorithm.policy_loss_type=regular", "weighted relative to the sampler"),
+        ("trainer.algorithm.policy_loss_type=gspo", "weighted relative to the sampler"),
+        ("trainer.algorithm.policy_loss_type=cispo", "weighted relative to the sampler"),
+        ("trainer.algorithm.off_policy_correction.tis_ratio_type=token", "tis_ratio_type"),
+        ("trainer.algorithm.off_policy_correction.tis_ratio_type=sequence", "tis_ratio_type"),
+        ("trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5", "token_mask_is_threshold"),
+        ("trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0", "token_mask_is_threshold"),
+    ],
+)
+def test_score_centering_rejects_what_breaks_its_drift_cancellation(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, override])
