@@ -38,11 +38,33 @@ def render_model_input(model_inputs: list[ModelInput]) -> list[RenderedModelInpu
     ]
 
 
+def _decode_mm_item(b64_str: str) -> dict[str, Any]:
+    """Decode one serialized per-image item into its tensor dict.
+
+    A blob tagged with ``mm_codec.PREFIX`` was produced by the native (TorchNeuron)
+    engine and decodes via the vLLM-free safetensors codec; an untagged blob is a vLLM
+    ``mm_serde`` item. The vLLM import stays lazy so this module imports on a node
+    without vLLM installed.
+    """
+    from skyrl.backends.mm_codec import decode_mm_kwargs_item, is_native_blob
+
+    if is_native_blob(b64_str):
+        return decode_mm_kwargs_item(b64_str)
+
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+        decode_mm_kwargs_item as _vllm_decode,
+    )
+
+    return _vllm_decode(b64_str).get_data()
+
+
 def decode_mm_kwargs(mm_kwargs: dict[str, list[str]] | None) -> MultiModalKwargs:
-    """Decode raw base64-encoded multimodal kwargs from vLLM into vision arrays.
+    """Decode raw base64-encoded multimodal kwargs into vision arrays.
 
     Args:
-        mm_kwargs: Raw kwargs dict from vLLM's render endpoint, e.g. {"image": [b64_str, ...]}.
+        mm_kwargs: Raw kwargs dict, e.g. {"image": [b64_str, ...]}. Items may be vLLM
+            ``mm_serde`` blobs (vLLM engine) or ``mm_codec`` safetensors blobs (native
+            engine); both are accepted.
 
     Returns:
         MultiModalKwargs with decoded and concatenated pixel_values and image_grid_thw.
@@ -51,15 +73,10 @@ def decode_mm_kwargs(mm_kwargs: dict[str, list[str]] | None) -> MultiModalKwargs
     if not mm_kwargs or "image" not in mm_kwargs:
         return MultiModalKwargs(pixel_values=None, image_grid_thw=None)
 
-    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
-        decode_mm_kwargs_item as _vllm_decode,
-    )
-
     pv_parts: list[torch.Tensor] = []
     thw_parts: list[torch.Tensor] = []
     for b64_str in mm_kwargs["image"]:
-        item = _vllm_decode(b64_str)
-        data = item.get_data()
+        data = _decode_mm_item(b64_str)
         if "pixel_values" in data and isinstance(data["pixel_values"], torch.Tensor):
             pv_parts.append(data["pixel_values"])
         if "image_grid_thw" in data and isinstance(data["image_grid_thw"], torch.Tensor):
