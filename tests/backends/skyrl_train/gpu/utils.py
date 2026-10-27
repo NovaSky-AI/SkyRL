@@ -570,6 +570,9 @@ class InferenceEngineState:
         """
         # create a cfg copy and apply overrides
         cfg = copy.deepcopy(cfg)
+        # The default /tmp/skyrl-logs belongs to whoever created it first on a shared box. Override it before
+        # initialize_ray, which hands it to every worker (SKYRL_LOG_FILE), so the vLLM servers and router agree.
+        cfg.trainer.log_path = os.environ.get("SKYRL_TEST_LOG_PATH", cfg.trainer.log_path)
         ie_cfg = cfg.generator.inference_engine
         if model is not None:
             cfg.trainer.policy.model.path = model
@@ -635,8 +638,7 @@ class InferenceEngineState:
         setup = create_inference_servers(
             ie_cfg,
             cli_args,
-            # The default /tmp/skyrl-logs belongs to whoever created it first on a shared box.
-            log_path=os.environ.get("SKYRL_TEST_LOG_PATH", cfg.trainer.log_path),
+            log_path=cfg.trainer.log_path,
             placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
         )
         router = setup.router
