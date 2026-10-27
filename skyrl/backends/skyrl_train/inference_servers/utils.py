@@ -276,7 +276,6 @@ def _apply_engine_init_kwargs(args: Namespace, engine_kwargs: Dict[str, Any]) ->
         setattr(args, key, value)
 
 
-# TODO: Add a test for validation
 def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for the policy's vLLM servers from config."""
     from vllm.config import WeightTransferConfig

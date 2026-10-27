@@ -156,6 +156,37 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
 
 
 @pytest.mark.vllm
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            ["generator.inference_engine.engine_init_kwargs.logprobs_mode=raw_logprobs"],
+            "generator.inference_engine.engine_init_kwargs.logprobs_mode must be 'processed_logprobs'",
+        ),
+        (
+            ["generator.inference_engine.weight_sync_backend=sharded_rdt", "trainer.placement.colocate_all=true"],
+            "weight_sync_backend='sharded_rdt' requires non-colocated",
+        ),
+        (
+            [
+                "trainer.strategy=megatron",
+                "generator.inference_engine.fp8_weight_sync_mode=blockwise",
+                "generator.inference_engine.engine_init_kwargs.quantization=awq",
+            ],
+            "quantization must be 'fp8' when FP8 weight sync is enabled",
+        ),
+    ],
+)
+def test_build_vllm_cli_args_rejects_invalid_settings(overrides, message, monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
+
+    with pytest.raises(ValueError, match=message):
+        build_vllm_cli_args(SkyRLTrainConfig.from_cli_overrides(overrides))
+
+
+@pytest.mark.vllm
 def test_default_logprobs_mode_is_processed_logprobs():
     args = build_vllm_cli_args(SkyRLTrainConfig())
 
