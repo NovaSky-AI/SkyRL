@@ -143,7 +143,21 @@ def _patched_load_parameter_state_from_dp_reshardable(self, state_dict):
     ``_set_main_param_and_optimizer_states`` overwrites it with the stale one.
     ``load_parameter_state_from_fs_model_space`` already filters ``step``;
     here we save/restore it around the original method instead.
+
+    With a HybridDeviceOptimizer, ``load_state_dict`` also gives *every* param a
+    per-param ``step``, including those of the GPU sub-optimizer (TE FusedAdam),
+    which keeps its step in the param group and saves none per param. The original
+    then looks that ``step`` up in the checkpoint and raises ``KeyError``, so drop
+    it from those params first.
     """
+    if isinstance(self.optimizer, HybridDeviceOptimizer):
+        for sub_opt in self.optimizer.sub_optimizers:
+            if isinstance(sub_opt, (torch.optim.Adam, torch.optim.AdamW)):
+                continue
+            for p in sub_opt.state:
+                self.optimizer.state[self.optimizer.inner_param_to_orig_param[p]].pop("step", None)
+                sub_opt.state[p].pop("step", None)
+
     correct_step = None
     for v in self.optimizer.state.values():
         if "step" in v and isinstance(v["step"], torch.Tensor):
