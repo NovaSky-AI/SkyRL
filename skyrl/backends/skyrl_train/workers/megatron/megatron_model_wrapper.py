@@ -259,10 +259,11 @@ class MegatronModelWrapper:
         self._implicit_causal_mask_only = getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
         if self._implicit_causal_mask_only:
             # Its compressed attention (and cuDNN's indexer) also needs seqlen_q <= seqlen_k * ratio, i.e. the
-            # unpacked length padded to a multiple of the largest compression ratio as well. Trailing pad only
-            # completes the last compressed block, which only pad positions can attend to under the causal mask.
-            max_ratio = max([1, *(getattr(config, "csa_compress_ratios", None) or [])])
-            self._seq_align = math.lcm(self._seq_align, max_ratio)
+            # unpacked length padded to a multiple of every layer's compression ratio as well (ratio 0 is a
+            # sliding-window-only layer). Trailing pad only completes the last compressed block, which only pad
+            # positions can attend to under the causal mask.
+            ratios = [r for r in (getattr(config, "csa_compress_ratios", None) or []) if r > 0]
+            self._seq_align = math.lcm(self._seq_align, *ratios)
         # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
         self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
         if self._per_token_loss and any(
