@@ -137,8 +137,9 @@ def service_for(router, record_dir, **options) -> CaptureService:
 
 
 @pytest.fixture
-def trials(monkeypatch):
+def trials(monkeypatch, tmp_path):
     FakeTrial.configs = []
+    FakeTrial.trials_root = tmp_path
     monkeypatch.setattr(harbor_generator, "Trial", FakeTrial)
     return FakeTrial
 

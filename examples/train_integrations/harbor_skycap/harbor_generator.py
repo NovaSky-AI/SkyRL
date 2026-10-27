@@ -25,7 +25,10 @@ import os
 import re
 import time
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import litellm
 from harbor.agents.factory import AgentFactory
@@ -59,10 +62,34 @@ MAX_NUM_RETRIES_PER_TRIAL = 2
 
 #: How a failed trial's exception shows it ran out of context. Harbor raises its own two types for agents it
 #: classifies; an installed agent that exits on skycap's 400 (code ``context_length_exceeded``, which LiteLLM
-#: raises as its ``ContextWindowExceededError``) is only a ``NonZeroAgentExitCodeError`` whose message ends with
-#: the agent's output.
+#: may raise as a plain ``BadRequestError``) is only a ``NonZeroAgentExitCodeError``. Its message keeps just the
+#: first 1000 characters of the agent's output, which end before the error, so the end of the agent's own log in
+#: the trial directory is searched too. Rich wraps that log, possibly inside the code.
 CONTEXT_LENGTH_EXCEPTIONS = {"ContextLengthExceededError", "ContextWindowExceededError"}
-CONTEXT_LENGTH_OUTPUT = re.compile(r"context_length_exceeded|ContextWindowExceededError")
+CONTEXT_LENGTH_OUTPUT = re.compile(r"context\s*_length\s*_exceeded|ContextWindowExceededError")
+#: How much of the end of each agent log is searched.
+AGENT_LOG_TAIL_BYTES = 64 * 1024
+
+
+def _ran_out_of_context(results: Any) -> bool:
+    """Whether a trial's agent stopped on a context-length error: by Harbor's exception, its message or the agent's log."""
+    exception = results.exception_info.exception_type if results.exception_info else None
+    if exception in CONTEXT_LENGTH_EXCEPTIONS:
+        return True
+    if exception != "NonZeroAgentExitCodeError":
+        return False
+    if CONTEXT_LENGTH_OUTPUT.search(results.exception_info.exception_message or ""):
+        return True
+    uri = urlparse(getattr(results, "trial_uri", None) or "")
+    if uri.scheme != "file":
+        return False
+    for log in sorted(Path(url2pathname(uri.path), "agent").glob("*.txt")):
+        with open(log, "rb") as f:
+            f.seek(max(0, log.stat().st_size - AGENT_LOG_TAIL_BYTES))
+            if CONTEXT_LENGTH_OUTPUT.search(f.read().decode(errors="replace")):
+                return True
+    return False
+
 
 #: skycap authenticates nothing, but LiteLLM won't build a client without a key.
 PLACEHOLDER_API_KEY = "skycap"
@@ -265,10 +292,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 if exception == "AgentTimeoutError":
                     # Masked, not retried, as the sibling does.
                     reward, stop_reason = 0.0, "agent_timeout"
-                elif exception in CONTEXT_LENGTH_EXCEPTIONS or (
-                    exception == "NonZeroAgentExitCodeError"
-                    and CONTEXT_LENGTH_OUTPUT.search(results.exception_info.exception_message or "")
-                ):
+                elif await asyncio.to_thread(_ran_out_of_context, results):
                     # Trains with reward 0, as the sibling does.
                     reward, stop_reason = 0.0, "context_length"
                 elif not results.verifier_result:

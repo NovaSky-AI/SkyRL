@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -160,9 +161,11 @@ def start_timed_out() -> SimpleNamespace:
 
 
 class FakeTrial:
-    """Replaces ``harbor.trial.trial.Trial``. Every created trial's config is kept in ``configs``."""
+    """Replaces ``harbor.trial.trial.Trial``. Every created trial's config is kept in ``configs``; a trial that
+    writes an agent log does so under ``trials_root``."""
 
     configs: list[dict[str, Any]] = []
+    trials_root: Path
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
@@ -210,12 +213,20 @@ class FakeTrial:
             if script == "overflow":
                 # mini-swe-agent exiting on skycap's context-length 400: Harbor sees only a non-zero exit, and
                 # still runs the verifier.
+                # Harbor's message keeps only the start of the agent's output; the error is at the end of its
+                # log, which Rich wraps.
                 result = verified(1.0)
                 result.exception_info = SimpleNamespace(
                     exception_type="NonZeroAgentExitCodeError",
-                    exception_message="Command failed (exit 1): mini-swe-agent ...\nstdout: ... litellm."
-                    "ContextWindowExceededError: ... 'code': 'context_length_exceeded'",
+                    exception_message="Command failed (exit 1): mini-swe-agent ...\nstdout: You are a helpful"
+                    " ... [truncated]",
                 )
+                trial_dir = self.trials_root / f"overflow-{len(self.configs)}"
+                (trial_dir / "agent").mkdir(parents=True)
+                (trial_dir / "agent" / "mini-swe-agent.txt").write_text(
+                    "step 1 ...\n" * 10_000 + "litellm.BadRequestError: ... 'code': 'context\n_length_exceeded'\n"
+                )
+                result.trial_uri = trial_dir.as_uri()
                 return result
             history += [{"role": "user", "content": "ok"}]
             if script == "discard":
