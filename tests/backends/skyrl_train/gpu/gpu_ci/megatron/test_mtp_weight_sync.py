@@ -10,13 +10,17 @@ Run with::
 """
 
 import hashlib
+import os
 import re
+import tempfile
 from typing import List, Tuple
 
 import httpx
 import pytest
 import ray
 import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
@@ -26,6 +30,9 @@ from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap impo
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     RemoteInferenceClient,
+)
+from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+    MegatronPolicyWorkerBase,
 )
 from skyrl.train.config import DeltaWeightSyncConfig, SkyRLTrainConfig
 from skyrl.train.config.config import SamplingParams
@@ -57,39 +64,105 @@ PROMPTS = [
 
 
 class MtpFingerprintWorker(NewInferenceWorkerWrap):
-    """Expose live parameter hashes to the weight-sync regression test."""
+    """Compare the synced drafter with a fresh Megatron export."""
 
-    def skyrl_model_fingerprints(self):
-        result = {}
-        for label, module in (("main", self.model_runner.model), ("draft", self._skyrl_draft_model())):
-            if module is None:
-                result[label] = None
-                continue
-            result[label] = {
-                name: hashlib.sha256(param.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
-                for name, param in module.named_parameters()
-            }
-        return result
+    def skyrl_compare_draft_to_megatron_export(self, path: str):
+        draft = self._skyrl_draft_model()
+        assert draft is not None, "MTP drafter missing after weight sync"
+        before = _parameter_hashes(draft)
+        with safe_open(path, framework="pt", device="cpu") as checkpoint:
+            names = list(checkpoint.keys())
+
+            def weights(perturb):
+                for name in names:
+                    tensor = checkpoint.get_tensor(name)
+                    if perturb:
+                        assert tensor.is_floating_point(), f"cannot perturb draft tensor {name}"
+                        tensor = tensor + 16
+                    yield name, tensor
+
+            # An unchanged replay alone could mean that the loader skipped a tensor.
+            # First prove that every live draft parameter responds to the exported
+            # stream, then restore the exact Megatron export even on failure.
+            with torch.no_grad():
+                try:
+                    perturbed_loaded = draft.load_weights(weights(True))
+                    perturbed = _parameter_hashes(draft)
+                finally:
+                    restored_loaded = draft.load_weights(weights(False))
+        after = _parameter_hashes(draft)
+        return {
+            "exported": len(names),
+            "checked": len(before),
+            "missing_perturbed": sorted(before.keys() - perturbed_loaded),
+            "missing_restored": sorted(before.keys() - restored_loaded),
+            "unchanged_perturbed": sorted(name for name in before if before[name] == perturbed[name]),
+            "changed_restored": sorted(name for name in before if before[name] != after[name]),
+        }
 
 
-async def _model_fingerprints(client: RemoteInferenceClient):
-    responses = await client._call_all_servers("/collective_rpc", {"method": "skyrl_model_fingerprints"})
-    return {url: response["body"]["results"] for url, response in responses.items()}
+def _parameter_hashes(module):
+    return {
+        name: hashlib.sha256(param.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+        for name, param in module.named_parameters()
+    }
 
 
-def _assert_matching_fingerprints(before, after):
-    assert before.keys() == after.keys()
-    for url, before_workers in before.items():
-        after_workers = after[url]
-        assert len(before_workers) == len(after_workers)
-        for rank, (before_models, after_models) in enumerate(zip(before_workers, after_workers)):
-            for label in ("main", "draft"):
-                old, new = before_models[label], after_models[label]
-                assert old and new, f"{label} model missing on worker {rank} of {url}"
-                assert old.keys() == new.keys(), f"{label} parameter names changed on worker {rank} of {url}"
-                changed = [name for name in old if old[name] != new[name]]
-                assert not changed, f"{label} weights changed on worker {rank} of {url}: {changed[:10]}"
-                print(f"[mtp weight sync] {label} worker {rank}: {len(old)} parameters match bitwise")
+def _mean_response_logprobs(output):
+    return [round(sum(values) / len(values), 4) if values else None for values in output["response_logprobs"][:3]]
+
+
+class MtpExportPolicyWorker(MegatronPolicyWorkerBase):
+    """Write the exact draft weight source to the colocated node for comparison."""
+
+    def skyrl_export_draft_to_file(self):
+        tensors = {}
+        rank = torch.distributed.get_rank()
+        for name, tensor in self._build_draft_weight_source(torch.bfloat16):
+            if rank == 0:
+                tensors[name] = tensor.detach().cpu().contiguous()
+        if rank != 0:
+            return None
+        fd, path = tempfile.mkstemp(prefix="skyrl_mtp_export_", suffix=".safetensors")
+        os.close(fd)
+        save_file(tensors, path)
+        return path
+
+    def skyrl_remove_draft_export(self, path):
+        if torch.distributed.get_rank() == 0:
+            os.unlink(path)
+
+
+_MTP_EXPORT_POLICY_WORKER = ray.remote(num_gpus=1)(MtpExportPolicyWorker)
+
+
+async def _assert_draft_matches_megatron_export(client: RemoteInferenceClient, policy):
+    paths = ray.get(policy.async_run_ray_method("pass_through", "skyrl_export_draft_to_file"))
+    path = next(path for path in paths if path is not None)
+    try:
+        responses = await client._call_all_servers(
+            "/collective_rpc", {"method": "skyrl_compare_draft_to_megatron_export", "args": [path]}
+        )
+        for url, response in responses.items():
+            for rank, result in enumerate(response["body"]["results"]):
+                assert result["exported"] > 0 and result["checked"] > 0
+                assert not result["missing_perturbed"], (
+                    f"MTP draft weights not loaded from perturbed Megatron export on {url} rank {rank}: "
+                    f"{result['missing_perturbed']}"
+                )
+                assert not result[
+                    "missing_restored"
+                ], f"MTP draft weights not restored from Megatron on {url} rank {rank}: {result['missing_restored']}"
+                assert not result["unchanged_perturbed"], (
+                    f"MTP draft weights did not respond to Megatron export on {url} rank {rank}: "
+                    f"{result['unchanged_perturbed']}"
+                )
+                assert not result[
+                    "changed_restored"
+                ], f"MTP draft weights differ from Megatron on {url} rank {rank}: {result['changed_restored']}"
+                print(f"[mtp weight sync] draft worker {rank}: {result['checked']} parameters match Megatron export")
+    finally:
+        ray.get(policy.async_run_ray_method("pass_through", "skyrl_remove_draft_export", path))
 
 
 _SPEC_COUNTER_RE = re.compile(r"^vllm:spec_decode_num_(draft_tokens|accepted_tokens)(?:_total)?(?:\{[^}]*\})? (\S+)$")
@@ -192,13 +265,13 @@ async def test_megatron_mtp_weight_sync_roundtrip(
     ) as engines:
         client, pg = engines.client, engines.pg
 
-        before = await run_inference(client, prompts, sampling_params, tokenizer=tokenizer)
+        before_calls = [await run_inference(client, prompts, sampling_params, tokenizer=tokenizer) for _ in range(3)]
+        before = before_calls[0]
+        print(f"[mtp logprobs] before: {[_mean_response_logprobs(output) for output in before_calls]}")
         drafted_before, accepted_before = await _spec_decode_counters(client)
         assert drafted_before > 0, "speculative decoding is not active on the engine"
         acceptance_before = accepted_before / drafted_before
         print(f"[mtp weight sync] acceptance before sync: {acceptance_before:.3f} ({drafted_before:.0f} drafted)")
-        fingerprints_before = await _model_fingerprints(client)
-
         # Level 2 discards every weight, the drafter's included: only the sync restores them.
         await client.sleep()
         policy = init_worker_with_type(
@@ -207,17 +280,20 @@ async def test_megatron_mtp_weight_sync_roundtrip(
             colocate_all=colocate_all,
             num_gpus_per_node=megatron_tp,
             cfg=cfg,
+            worker_cls=_MTP_EXPORT_POLICY_WORKER if colocate_all else None,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client, ie_cfg))
         await client.wake_up(tags=["weights"])
         with Timer("sync_weights"):
             ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client, ie_cfg))
-        policy.offload_to_cpu()
         await client.wake_up(tags=["kv_cache"])
-        fingerprints_after = await _model_fingerprints(client)
-        _assert_matching_fingerprints(fingerprints_before, fingerprints_after)
+        if colocate_all:
+            await _assert_draft_matches_megatron_export(client, policy)
+        policy.offload_to_cpu()
 
-        after = await run_inference(client, prompts, sampling_params, tokenizer=tokenizer)
+        after_calls = [await run_inference(client, prompts, sampling_params, tokenizer=tokenizer) for _ in range(3)]
+        after = after_calls[0]
+        print(f"[mtp logprobs] after: {[_mean_response_logprobs(output) for output in after_calls]}")
         drafted_after, accepted_after = await _spec_decode_counters(client)
         drafted = drafted_after - drafted_before
         accepted = accepted_after - accepted_before
