@@ -1,7 +1,8 @@
 """The OPD trainer: ``RayPPOTrainer`` plus teacher scoring. Works with any ``GeneratorInterface``.
 
-- ``generate`` runs one ``generator.generate`` call per prompt group concurrently and scores each group
-  under the teacher as soon as its rollouts are back, so only the last groups to finish wait on the teacher.
+- ``generate_on_input_batch`` runs one ``generator.generate`` call per prompt group concurrently and scores
+  each group under the teacher as soon as its rollouts are back, so only the last groups to finish wait on the
+  teacher. The base ``generate`` then logs the rollout metrics and validates the output, as for any trainer.
 - ``postprocess_generator_output`` zeroes the rewards in pure mode, after their metrics are logged.
 - ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like ``rollout_logprobs``.
 - ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)`` on trainable
@@ -27,7 +28,6 @@ from skyrl.train.opd.utils import (
     split_generator_input,
 )
 from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.utils.trainer_utils import validate_generator_output
 
 
 class OPDTrainer(RayPPOTrainer):
@@ -49,15 +49,14 @@ class OPDTrainer(RayPPOTrainer):
         finally:
             await self.teacher_client.aclose()
 
-    @torch.no_grad()
-    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+    async def generate_on_input_batch(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """Generate every prompt's group concurrently; score each group under the teacher as it finishes.
 
         Eval batches take the base path: one ``generator.generate`` call, no teacher.
         """
         batch_metadata = input_batch.get("batch_metadata")
         if batch_metadata is not None and batch_metadata.training_phase != "train":
-            return await super().generate(input_batch)
+            return await super().generate_on_input_batch(input_batch)
 
         groups = split_generator_input(input_batch, self.cfg.generator.n_samples_per_prompt)
         rollout_done_times: List[float] = []
@@ -86,39 +85,15 @@ class OPDTrainer(RayPPOTrainer):
         )
         done = time.monotonic()
 
-        # Same tail as RayPPOTrainer.generate. concatenate_generator_outputs re-aggregates the rollout
-        # metrics over the whole batch (the fully-async trainer's path) and keeps `teacher_logprobs`
-        # as one more per-row list.
-        step_wise = self.cfg.generator.step_wise_trajectories
-        routes_expected = self.cfg.generator.inference_engine.enable_return_routed_experts
-        support_expected = self.cfg.trainer.algorithm.enable_sample_support_replay
-        support_scores_expected = self.cfg.trainer.algorithm.enable_score_centering
-        generator_output = concatenate_generator_outputs(
-            outputs,
-            step_wise=step_wise,
-            routes_expected=routes_expected,
-            support_expected=support_expected,
-            support_scores_expected=support_scores_expected,
-        )
-        if generator_output["rollout_metrics"] is not None:
-            self.all_metrics.update(generator_output["rollout_metrics"])
-        generator_output.pop("rollout_metrics", None)
-        validate_generator_output(
-            len(input_batch["prompts"]),
-            generator_output,
-            step_wise=step_wise,
-            routes_expected=routes_expected,
-            support_expected=support_expected,
-            support_scores_expected=support_scores_expected,
-        )
-
         self.all_metrics["opd/teacher_time_per_group_mean"] = (
             sum(teacher_times) / len(teacher_times) if teacher_times else 0.0
         )
         # The only teacher cost the overlap cannot hide: the groups still being scored after the last
         # rollout of the batch came back.
         self.all_metrics["opd/teacher_time_exposed"] = done - max(rollout_done_times) if rollout_done_times else 0.0
-        return generator_output
+        # One output in input order, with the rollout metrics re-aggregated over the whole batch and
+        # `teacher_logprobs` kept as one more per-row list. `generate` logs and validates it.
+        return concatenate_generator_outputs(outputs, step_wise=self.cfg.generator.step_wise_trajectories)
 
     @torch.no_grad()
     def postprocess_generator_output(
@@ -136,7 +111,8 @@ class OPDTrainer(RayPPOTrainer):
         teacher_logprobs = generator_output.pop(TEACHER_LOGPROBS_KEY, None)
         if teacher_logprobs is None:
             raise RuntimeError(
-                f"GeneratorOutput has no {TEACHER_LOGPROBS_KEY!r}: rollouts must come from OPDTrainer.generate"
+                f"GeneratorOutput has no {TEACHER_LOGPROBS_KEY!r}: rollouts must come from "
+                "OPDTrainer.generate_on_input_batch"
             )
         batch = super().convert_to_training_input(generator_output, uids)
         batch[TEACHER_LOGPROBS_KEY] = pad_teacher_logprobs(

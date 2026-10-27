@@ -6,7 +6,7 @@ Entry point: ``skyrl.train.entrypoints.main_opd``; read run scripts and document
 - ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the launched (``SkyRLTeacherClient``
   over a ``RemoteInferenceClient``) and vLLM-URL backends.
 - ``teacher_launch``: launching the teacher's vLLM deployment inside the job (``backend="skyrl"``).
-- ``trainer``: ``OPDTrainer``. Its ``generate`` runs one ``generator.generate`` call per prompt group
+- ``trainer``: ``OPDTrainer``. Its ``generate_on_input_batch`` runs one ``generator.generate`` call per prompt group
   concurrently and scores each group under the teacher as it finishes (any generator works); three
   more ``RayPPOTrainer`` overrides consume the teacher logprobs.
 - ``config``: ``trainer.teacher`` and ``trainer.algorithm.opd`` blocks, ``OPDExpConfig``, ``validate_opd_cfg``.

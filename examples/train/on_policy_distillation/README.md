@@ -108,7 +108,7 @@ divides by a constant, where the default `token_mean` divides by the batch's own
 
 ## How it works
 
-- `skyrl.train.opd.trainer.OPDTrainer.generate` splits the batch into one `GeneratorInput` per prompt
+- `skyrl.train.opd.trainer.OPDTrainer.generate_on_input_batch` splits the batch into one `GeneratorInput` per prompt
   (its `n_samples_per_prompt` rows) and runs one `generator.generate` call per group concurrently, the
   way the fully-async trainer's `_run_generate_for_a_group_loop` does. As soon as a group's rollouts
   are back it calls the teacher for each row's `prompt + response` and stores the per-token logprobs
