@@ -14,6 +14,7 @@ from typing import List, Optional, Union
 from loguru import logger
 from omegaconf import OmegaConf
 
+from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.train.config import (
     BaseConfig,
     FSDPConfig,
@@ -611,6 +612,12 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
             f"parallel is not supported for megatron"
         )
+
+    if cfg.megatron_config.optimizer_offload_to_disk.dir is not None:
+        if cfg.strategy != "megatron":
+            raise ValueError("optimizer_offload_to_disk requires strategy='megatron'.")
+        if is_cloud_path(cfg.ckpt_path):
+            raise ValueError("optimizer_offload_to_disk requires a local ckpt_path.")
 
     # ---- sequence packing checks ----
     if cfg.use_sequence_packing:

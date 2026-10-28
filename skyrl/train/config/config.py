@@ -461,8 +461,9 @@ class MegatronOptimizerOffloadToDiskConfig(BaseConfig):
     dir: Optional[str] = None
     """Node-local directory for the state files (fast NVMe; tmpfs is refused). ``None`` (default) disables the
     feature. Each run uses ``<dir>/<trainer.run_name>/rank<global rank>/``, cleared at startup and removed at the
-    end of training; a killed run's files stay until a run with the same ``run_name`` starts. Needs about
-    12 B x (local params / DP size) per GPU, or 8 B with bf16 moments."""
+    end of training. A killed run's files are not removed: a later run with the same ``run_name`` clears only the
+    rank directories of its own ranks on each node, so delete the rest by hand. Needs about 12 B x (local params /
+    DP size) per GPU, or 8 B with bf16 moments."""
     moment_storage_dtype: str = "fp32"
     """On-disk dtype of the Adam moments: ``"fp32"`` (the same numerics as the regular optimizer) or ``"bf16"``
     (12 -> 8 B/param read and written per step, not bit-identical). The main params are always stored in fp32, and

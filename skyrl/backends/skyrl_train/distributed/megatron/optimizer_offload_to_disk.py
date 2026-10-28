@@ -600,6 +600,13 @@ def build_optimizer_offloaded_to_disk(model_chunks, config, settings: OffloadToD
             optimizer = get_megatron_optimizer(config=config, model_chunks=model_chunks)
     finally:
         _build_context = None
+    if not all(
+        isinstance(opt, OffloadedDistributedOptimizer) for opt in getattr(optimizer, "chained_optimizers", [optimizer])
+    ):
+        raise RuntimeError(
+            "get_megatron_optimizer did not build an OffloadedDistributedOptimizer: this megatron-core version no "
+            "longer constructs DistributedOptimizer through the name build_optimizer_offloaded_to_disk replaces."
+        )
     return optimizer
 
 
