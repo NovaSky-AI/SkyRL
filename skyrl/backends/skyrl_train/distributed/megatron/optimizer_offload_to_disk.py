@@ -39,7 +39,6 @@ Megatron's distributed checkpoint is a marker. A checkpoint is therefore resumab
 chunk layout only, and only from a local path.
 """
 
-import atexit
 import errno
 import fcntl
 import inspect
@@ -246,7 +245,6 @@ class DiskOptimizerStateStore:
 
         self.dir = os.path.join(settings.dir, self.relative_dir)
         os.makedirs(self.dir, exist_ok=True)
-        atexit.register(shutil.rmtree, self.dir, ignore_errors=True)
         self.file = _StateFile(os.path.join(self.dir, "state.bin"), nbytes, settings.staging_buffer_mb * 1024 * 1024)
         logger.info(
             f"optimizer_offload_to_disk: {len(self.chunks)} chunks, {nbytes / 1024**3:.1f} GiB at {self.file.path}, "
