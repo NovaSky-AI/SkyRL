@@ -132,14 +132,15 @@ def _hybrid_sublayers_to_block_indices(
 
     A HybridModel splits each HF decoder block into several sub-layers (DeepSeek-V4: attention then MoE, 86
     sub-layers for 43 blocks), so a router's ``layer_number`` counts sub-layers while vLLM returns routed experts
-    per block. Only applies when the plain indices overflow the data and the sub-layer count is a whole multiple
-    of the block count.
+    per block. Decided from the model layout (the sub-layer count is a whole multiple of the block count), never
+    from the indices themselves: under pipeline parallelism an early stage's sub-layer indices all fit below the
+    block count and still need mapping.
     """
     if (
         not megatron_num_layers
+        or not global_num_layers
         or megatron_num_layers == global_num_layers
         or megatron_num_layers % global_num_layers != 0
-        or all(0 <= i < global_num_layers for i in layer_indices)
     ):
         return layer_indices
     sublayers_per_block = megatron_num_layers // global_num_layers
