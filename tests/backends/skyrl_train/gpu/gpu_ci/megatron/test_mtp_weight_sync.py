@@ -86,14 +86,16 @@ class MtpFingerprintWorker(NewInferenceWorkerWrap):
             # stream, then restore the exact Megatron export even on failure.
             with torch.no_grad():
                 try:
-                    draft.load_weights(weights(True))
+                    perturbed_loaded = draft.load_weights(weights(True))
                     perturbed = _parameter_hashes(draft)
                 finally:
-                    draft.load_weights(weights(False))
+                    restored_loaded = draft.load_weights(weights(False))
         after = _parameter_hashes(draft)
         return {
             "exported": len(names),
             "checked": len(before),
+            "missing_perturbed": sorted(before.keys() - perturbed_loaded),
+            "missing_restored": sorted(before.keys() - restored_loaded),
             "unchanged_perturbed": sorted(name for name in before if before[name] == perturbed[name]),
             "changed_restored": sorted(name for name in before if before[name] != after[name]),
         }
@@ -147,6 +149,13 @@ async def _assert_draft_matches_megatron_export(client: RemoteInferenceClient, p
         for url, response in responses.items():
             for rank, result in enumerate(response["body"]["results"]):
                 assert result["exported"] > 0 and result["checked"] > 0
+                assert not result["missing_perturbed"], (
+                    f"MTP draft weights not loaded from perturbed Megatron export on {url} rank {rank}: "
+                    f"{result['missing_perturbed']}"
+                )
+                assert not result[
+                    "missing_restored"
+                ], f"MTP draft weights not restored from Megatron on {url} rank {rank}: {result['missing_restored']}"
                 assert not result["unchanged_perturbed"], (
                     f"MTP draft weights did not respond to Megatron export on {url} rank {rank}: "
                     f"{result['unchanged_perturbed']}"
