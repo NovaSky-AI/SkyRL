@@ -1807,6 +1807,7 @@ class SFTTrainer:
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
         self._fire("on_train_start")
+        self._fire("on_epoch_start")
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
@@ -1851,6 +1852,7 @@ class SFTTrainer:
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
 
+        self._fire("on_epoch_end")
         self._fire("on_train_end")
         logger.info("Dummy SFT training complete!")
 

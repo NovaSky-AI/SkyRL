@@ -410,7 +410,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     def _build_callback_input(self, **fields) -> CallbackInput:
-        """The base trainer's input, with ``steps_per_epoch`` counted in mini-batches (one step each).
+        """The base trainer's input, with ``steps_per_epoch`` in training steps (mini-batches).
 
         With ``sample_full_batch``, ``steps_per_epoch`` is an upper bound: dropped groups can end an epoch early.
         """
@@ -582,7 +582,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                     await asyncio.to_thread(self.save_models)
                             break
 
-                        # The mini-batch is complete, so a step starts here (an exhausted epoch starts none).
                         self._fire("on_step_start")
 
                         if self.sample_full_batch:
@@ -774,6 +773,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.dispatch.finalize_pending_saves("critic")
 
         await self.finalize_metrics("success")
+        # The loop leaves global_step one past the last trained step; report the last trained step, as the
+        # synchronous trainer does.
+        self.global_step -= 1
         self._fire("on_train_end")
         self.tracker.finish()
         logger.info("Training done!")

@@ -271,7 +271,7 @@ def test_callbacks_fire_during_sft_training(monkeypatch, mock_dispatch):
 
 
 def test_callbacks_fire_during_dummy_sft_training(mock_dispatch):
-    """A 2-step dummy run (``dummy_run_full_ctx``) fires the train, step and log events, with 1-based steps."""
+    """A 2-step dummy run (``dummy_run_full_ctx``) fires the train, epoch, step and log events, with 1-based steps."""
     cfg = _build_test_sft_config()
     cfg.dummy_run_full_ctx = True
     cfg.dummy_run_max_steps = 2
@@ -289,12 +289,14 @@ def test_callbacks_fire_during_dummy_sft_training(mock_dispatch):
     event_names = [name for name, _ in recorder.events]
     assert event_names == [
         "on_train_start",
+        "on_epoch_start",
         "on_step_start",
         "on_step_end",
         "on_log",
         "on_step_start",
         "on_step_end",
         "on_log",
+        "on_epoch_end",
         "on_train_end",
     ], event_names
 
