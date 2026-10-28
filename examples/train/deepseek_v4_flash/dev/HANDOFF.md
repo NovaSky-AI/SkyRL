@@ -711,3 +711,14 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   0.0125 / 0.0121, entropy 0.50 / 0.49; policy_train 645 -> 598 s (both with memory recording on).
 - 4096 responses with both fixes, 20 steps, evals at 0/10/20, no checkpoints:
   `v41-dapo-fullft6-resp4k-memfix-1793172399.log` (W&B `dsv41_flash_dapo`, run `dsv41_flash_dapo_fullft_r3_resp4k_memfix`).
+- **Trainer PP is not available for DeepSeek-V4/V4.1** at the pinned megatron-core: `v41-slice-pp2-r3-*` (node 6,
+  6-layer slice, PP=2) fails at model build with "enable_mhc_connections does not support
+  pipeline_model_parallel_size > 1 yet" (p2p buffers are sized from hidden_size, inter-stage activations are
+  n-stream). So the PP=2 silent-misrouting case of the R3 sub-layer bug (#2562) cannot happen for DSv4/V4.1 today;
+  only the crash at PP=1 did. Upstream mHC PP support: NVIDIA/Megatron-LM#7553 (open). Static memory per rank is
+  36.6 GiB bf16 params + 36.6 GiB bf16 grads (~19.7B params at EP=48), so PP would have been the next lever.
+- Upstream NVIDIA/Megatron-LM#7521 (merged to main 2026-10-28) checkpoints the mHC projection only on the unfused
+  path; `patch_mhc_recompute_mappings.py` covers the fused path the recipes use (TODO in the patch).
+- 4096 run status: steps 1-4 fit (no OOM; before the fixes 4096 OOMed in step 1). Step-0 AIME-2024 avg_score
+  0.533, pass@12 0.933 (avg 2140 tokens; 13.3% of eval responses still hit the 4096 cap, all scored 0, vs 88% of
+  finished ones correct). Rollout reward 0.50 / 0.57 / 0.60 / 0.55 for steps 1-4; ~760 s/step.

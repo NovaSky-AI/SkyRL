@@ -9,6 +9,11 @@ hidden 4096, 80 sub-layers) that is 17.8 GiB of a 136 GiB peak at ~3.5K-token ro
 This runs ``compute_mappings`` under non-reentrant ``torch.utils.checkpoint``, which saves only its bf16 input (a
 view of the hidden states the residual path keeps anyway) and recomputes the small mapping projection in backward.
 The mapping math is deterministic, so gradients are unchanged.
+
+Upstream: NVIDIA/Megatron-LM#7521 (merged to main 2026-10-28, not in the pinned megatron-core) checkpoints the
+projection the same way, but only on the unfused path (``_projection_and_get_norm``); the fused path
+(``use_fused_mhc``, ``fused_proj_rms_compute_h``) that the DeepSeek-V4/V4.1 recipes use still keeps the fp32 copy
+there. TODO: remove once the pinned megatron-core checkpoints the fused path too.
 """
 
 from loguru import logger
