@@ -159,23 +159,30 @@ apply_distopt_mixed_dtype_group_index_patch()
 apply_clip_grads_mixed_dtype_patch()
 
 
-def drop_core_attn_recompute_for_dsv4_hybrid(provider) -> None:
-    """megatron-core's DSv4HybridAttention (DeepSeek-V4 / V4.1) asserts checkpoint_core_attention is off, which
-    selective "core_attn" recompute (and SkyRL's default) turns on: drop it, and turn recompute off if nothing
-    else is left. A no-op for every other model."""
-    if (
-        getattr(provider, "experimental_attention_variant", None) == "dsv4_hybrid"
-        and provider.recompute_granularity == "selective"
-        and "core_attn" in (provider.recompute_modules or [])
-    ):
-        provider.recompute_modules = [m for m in provider.recompute_modules if m != "core_attn"]
-        if not provider.recompute_modules:
-            provider.recompute_granularity = None
-        logger.info(
-            "DSv4 hybrid attention does not support core_attn recompute; "
-            f"recompute_granularity={provider.recompute_granularity}, "
-            f"recompute_modules={provider.recompute_modules}"
-        )
+# Selective-recompute modules an attention variant cannot take.
+_UNSUPPORTED_RECOMPUTE_MODULES = {
+    # megatron-core's DSv4HybridAttention (DeepSeek-V4 / V4.1) asserts checkpoint_core_attention is off.
+    "dsv4_hybrid": {"core_attn"},
+}
+
+
+def drop_unsupported_recompute_modules(provider) -> None:
+    """Drop the selective-recompute modules the provider's attention variant cannot take (selective "core_attn"
+    is SkyRL's default), and turn recompute off if nothing is left. A no-op for variants with no entry in
+    ``_UNSUPPORTED_RECOMPUTE_MODULES`` and for any granularity but "selective"."""
+    variant = getattr(provider, "experimental_attention_variant", None)
+    unsupported = _UNSUPPORTED_RECOMPUTE_MODULES.get(variant, set())
+    if provider.recompute_granularity != "selective" or not unsupported & set(provider.recompute_modules or []):
+        return
+    dropped = sorted(unsupported & set(provider.recompute_modules))
+    provider.recompute_modules = [m for m in provider.recompute_modules if m not in unsupported]
+    if not provider.recompute_modules:
+        provider.recompute_granularity = None
+    logger.info(
+        f"{variant} attention does not support {dropped} recompute; "
+        f"recompute_granularity={provider.recompute_granularity}, "
+        f"recompute_modules={provider.recompute_modules}"
+    )
 
 
 class MegatronWorker:
@@ -406,7 +413,7 @@ class MegatronWorker:
                 "full recompute."
             )
 
-        drop_core_attn_recompute_for_dsv4_hybrid(provider)
+        drop_unsupported_recompute_modules(provider)
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
