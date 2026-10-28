@@ -37,11 +37,13 @@ MAX_TOKENS_PER_MICROBATCH=4096
 # ~950 GDN state blocks, one per running sequence, so max_num_seqs is capped below the 1024 default.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 
-MEGATRON_TP=1
-MEGATRON_PP=1
-MEGATRON_CP=1
-MEGATRON_EP=16
-MEGATRON_ETP=1
+# Trainer parallelism. TP is 1 or 2 (TP=2 runs with sequence parallelism). At TP=4 a rank has
+# 6 query heads per KV head, which the cuDNN QSA kernels don't cover (FlexAttention fallback).
+MEGATRON_TP="${MEGATRON_TP:-1}"
+MEGATRON_PP="${MEGATRON_PP:-1}"
+MEGATRON_CP="${MEGATRON_CP:-1}"
+MEGATRON_EP="${MEGATRON_EP:-16}"
+MEGATRON_ETP="${MEGATRON_ETP:-1}"
 
 LR=1e-6
 

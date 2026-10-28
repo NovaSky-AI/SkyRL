@@ -39,6 +39,14 @@ LOGGER="${LOGGER:-wandb}"
 
 MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-30}"
 
+# Trainer parallelism. TP is 1 or 2 (TP=2 runs with sequence parallelism). At TP=4 a rank has
+# 6 query heads per KV head, which the cuDNN QSA kernels don't cover (FlexAttention fallback).
+MEGATRON_TP="${MEGATRON_TP:-1}"
+MEGATRON_PP="${MEGATRON_PP:-1}"
+MEGATRON_CP="${MEGATRON_CP:-1}"
+MEGATRON_EP="${MEGATRON_EP:-16}"
+MEGATRON_ETP="${MEGATRON_ETP:-1}"
+
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=8192
 INFERENCE_ENGINE_MAX_MODEL_LEN=10752         # prompt + response + chat-template headroom
@@ -47,7 +55,7 @@ OVERLONG_BUFFER_LEN=2048                     # penalty starts at 6144
 # held-out AIME accuracy on finished responses fell to 0.86 (0.99 at 0.5) with 33/240 finished-wrong.
 OVERLONG_BUFFER_PENALTY_FACTOR="${OVERLONG_BUFFER_PENALTY_FACTOR:-0.5}"
 
-# dp = 32 (TP=PP=CP=1), so (mini_batch * n_samples) % 32 == 0.
+# dp = 32 / (TP * PP * CP), and (mini_batch * n_samples) % dp == 0.
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
 MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-16}"   # 2 optimizer steps per batch
 N_SAMPLES_PER_PROMPT=8
@@ -100,11 +108,11 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  trainer.policy.megatron_config.tensor_model_parallel_size=1 \
-  trainer.policy.megatron_config.pipeline_model_parallel_size=1 \
-  trainer.policy.megatron_config.context_parallel_size=1 \
-  trainer.policy.megatron_config.expert_model_parallel_size=16 \
-  trainer.policy.megatron_config.expert_tensor_parallel_size=1 \
+  trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
+  trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
+  trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
+  trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
   trainer.policy.megatron_config.mtp_num_layers=0 \
   trainer.policy.megatron_config.moe_token_dispatcher_type="alltoall" \
   trainer.policy.megatron_config.moe_enable_routing_replay=$ENABLE_ROUTING_REPLAY \

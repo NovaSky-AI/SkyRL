@@ -12,9 +12,9 @@ set -x
 #
 # Megatron support is SkyRL's own (skyrl/backends/skyrl_train/patches/megatron/qwen4_exp), which
 # constrains the recipe:
-#   - CP=PP=1. TP=1 here (TP > 1 runs with sequence parallelism); scale is expert parallelism,
-#     EP=16 (expert-DP 2 on 32 GPUs). EP also row-shards the frozen ~51B-parameter PLE n-gram
-#     table (~100 GB / EP per rank, ~6.4 GB at EP=16, kept in pinned host memory).
+#   - CP=PP=1. TP=1 by default (TP=2 runs with sequence parallelism); scale is expert
+#     parallelism, EP=16 (expert-DP 2 on 32 GPUs). EP also row-shards the frozen ~51B-parameter
+#     PLE n-gram table (~100 GB / EP per rank, ~6.4 GB at EP=16, kept in pinned host memory).
 #   - Text only (language_model_only) and packed sequences (remove_microbatch_padding).
 #   - Sequences must stay within the QSA indexer budget (2048 + 3 tokens), where the indexer
 #     selects every key and attention is exactly dense; longer sequences raise. Hence the
@@ -54,11 +54,13 @@ MAX_TOKENS_PER_MICROBATCH=8192
 # ~950 GDN state blocks, one per running sequence, so max_num_seqs is capped below the 1024 default.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 
-MEGATRON_TP=1
-MEGATRON_PP=1
-MEGATRON_CP=1
-MEGATRON_EP=16
-MEGATRON_ETP=1
+# Trainer parallelism. TP is 1 or 2 (TP=2 runs with sequence parallelism). At TP=4 a rank has
+# 6 query heads per KV head, which the cuDNN QSA kernels don't cover (FlexAttention fallback).
+MEGATRON_TP="${MEGATRON_TP:-1}"
+MEGATRON_PP="${MEGATRON_PP:-1}"
+MEGATRON_CP="${MEGATRON_CP:-1}"
+MEGATRON_EP="${MEGATRON_EP:-16}"
+MEGATRON_ETP="${MEGATRON_ETP:-1}"
 
 # Frozen bf16 base ~25 GB/GPU (dense 10 + experts 15; the 6.4 GB PLE shard is in host memory).
 # Adapter-only sync (merge_lora=false, in memory): merging needs vLLM's woken weights, a
