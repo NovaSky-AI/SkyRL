@@ -159,6 +159,32 @@ apply_distopt_mixed_dtype_group_index_patch()
 apply_clip_grads_mixed_dtype_patch()
 
 
+# Selective-recompute modules an attention variant cannot take.
+_UNSUPPORTED_RECOMPUTE_MODULES = {
+    # megatron-core's DSv4HybridAttention (DeepSeek-V4 / V4.1) asserts checkpoint_core_attention is off.
+    "dsv4_hybrid": {"core_attn"},
+}
+
+
+def drop_unsupported_recompute_modules(provider) -> None:
+    """Drop the selective-recompute modules the provider's attention variant cannot take (selective "core_attn"
+    is SkyRL's default), and turn recompute off if nothing is left. A no-op for variants with no entry in
+    ``_UNSUPPORTED_RECOMPUTE_MODULES`` and for any granularity but "selective"."""
+    variant = getattr(provider, "experimental_attention_variant", None)
+    unsupported = _UNSUPPORTED_RECOMPUTE_MODULES.get(variant, set())
+    if provider.recompute_granularity != "selective" or not unsupported & set(provider.recompute_modules or []):
+        return
+    dropped = sorted(unsupported & set(provider.recompute_modules))
+    provider.recompute_modules = [m for m in provider.recompute_modules if m not in unsupported]
+    if not provider.recompute_modules:
+        provider.recompute_granularity = None
+    logger.info(
+        f"{variant} attention does not support {dropped} recompute; "
+        f"recompute_granularity={provider.recompute_granularity}, "
+        f"recompute_modules={provider.recompute_modules}"
+    )
+
+
 class MegatronWorker:
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
@@ -386,6 +412,8 @@ class MegatronWorker:
                 f"(recompute_modules={provider.recompute_modules}); mHC is not compatible with "
                 "full recompute."
             )
+
+        drop_unsupported_recompute_modules(provider)
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
@@ -1052,6 +1080,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.optimizer = None
             self.scheduler = None
         else:
+            if self.cfg.policy.megatron_config.optimizer_config_kwargs.get("optimizer_cpu_offload"):
+                # Ray starts this actor with num_cpus=1, which sets OMP_NUM_THREADS=1, so the CPU share of the
+                # optimizer (torch AdamW) would step on one thread. Use this rank's share of the node's CPUs.
+                cpu_threads = len(os.sched_getaffinity(0)) // max(1, self.cfg.placement.policy_num_gpus_per_node)
+                if torch.get_num_threads() < cpu_threads:
+                    torch.set_num_threads(cpu_threads)
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )

@@ -51,6 +51,23 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
+# 4-layer BF16 slice of deepseek-ai/DeepSeek-V4-Flash (examples/train/deepseek_v4_flash/dev/make_slice.py).
+# Not on the Hub yet; override with a local path.
+DEEPSEEK_V4_FLASH_4LAYER = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_4LAYER", "DeepSeek-V4-Flash-4layer")
+# Full model, dequantized to BF16 by make_slice.py with every layer (~530 GB). Stage 0's one-off
+# full-weights check, not a CI row: skipped unless the path is set.
+DEEPSEEK_V4_FLASH_FULL_BF16 = os.environ.get("SKYRL_DEEPSEEK_V4_FLASH_FULL_BF16")
+
+# 6-layer text-only BF16 slice of deepseek-ai/DeepSeek-V4.1-Flash-1017
+# (examples/train/deepseek_v4_flash/dev/make_slice_v41.py). Not on the Hub yet; override with a local path.
+DEEPSEEK_V41_FLASH_6LAYER = os.environ.get("SKYRL_DEEPSEEK_V41_FLASH_6LAYER", "DeepSeek-V4.1-Flash-6layer")
+
+
+def _is_deepseek_v4(model_name: str) -> bool:
+    """DeepSeek-V4-Flash or DeepSeek-V4.1-Flash (same Megatron attention family and test settings)."""
+    name = model_name.lower()
+    return "deepseek-v4-flash" in name or "deepseek-v4.1-flash" in name
+
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -137,6 +154,11 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
         cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
         cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
+    if _is_deepseek_v4(model_name):
+        # megatron-core's DSv4 hybrid attention (CSA/HCA) asserts packed_seq_params is None at the
+        # pinned rev, so run the padded path: remove_left_padding left-aligns every sequence, and
+        # the causal sliding-window/compressed attention never reaches the trailing padding.
+        cfg.trainer.remove_microbatch_padding = False
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -147,6 +169,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
+        or _is_deepseek_v4(model_name)
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -194,6 +217,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         # kernels during CUDA-graph capture, then runs the JIT kernel warmup and the FlashInfer
         # MoE autotune: ~490 s to healthy on B200, and a cold H100 CI runner exceeded the 600 s
         # default. Warm caches boot in ~2 min.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
+    if _is_deepseek_v4(model_name):
+        # Cold-cache vLLM boot JIT-compiles the DSv4 sparse-MLA / mHC / indexer kernels and
+        # autotunes the MoE before the server reports healthy.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
         )
@@ -252,7 +281,42 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # to the colocated Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if _is_deepseek_v4(model_name):
+        # 1M default context; the 4-layer slice is ~27B params (256 experts x 4 MoE layers),
+        # colocated with the Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+    if "deepseek-v4.1-flash" in model_name.lower():
+        # vLLM's SM100 default for V4.1 is the FP8-only mega attention (needs wq_b / wo_a weight scales,
+        # and permutes them once at load, which a weight sync would leave unpermuted). Serve BF16 with FlashMLA.
+        overrides["engine_init_kwargs"]["attention_backend"] = "FLASHMLA_SPARSE_DSV41"
     return overrides
+
+
+def _common_prefix_logprob_diff(gen_out_1, gen_out_2, label: str) -> torch.Tensor:
+    """Per-token |logprob| gaps over the shared prefix of two greedy generations of the same prompts."""
+    ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
+    ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
+    assert lp_1 is not None and lp_2 is not None, "the common-prefix check needs rollout logprobs"
+    diffs = []
+    divergent = 0
+    for s1, s2, l1, l2 in zip(ids_1, ids_2, lp_1, lp_2):
+        n = 0
+        for a, b in zip(s1, s2):
+            if a != b:
+                break
+            n += 1
+        if n < min(len(s1), len(s2)):
+            divergent += 1
+        diffs.extend(abs(x - y) for x, y in zip(l1[:n], l2[:n]))
+    assert diffs, "no common-prefix tokens between the two generations"
+    logprobs_diff = torch.tensor(diffs)
+    print(
+        f"{label} common-prefix logprob diff mean: {logprobs_diff.mean().item():.6f}, "
+        f"std: {logprobs_diff.std().item():.6f} over {len(diffs)} tokens "
+        f"({divergent}/{len(ids_1)} sequences diverged at a near-tie token)"
+    )
+    return logprobs_diff
 
 
 async def generate_with_vllm(
@@ -472,6 +536,77 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="glm-5.3-flash-4layer_h100_tp2_ep4_kpool_beyond_topk",
             marks=pytest.mark.h100,
         ),
+        # DeepSeek-V4-Flash, 4-layer slice of the real checkpoint (source layers 0, 2, 3, 4): a
+        # sliding-window-only layer and a CSA layer (compress ratio 4 + lightning indexer), both
+        # hash-routed (tid2eid), then an HCA layer (ratio 128) and a CSA layer with score routing
+        # (sqrtsoftplus + expert bias). mHC on every block, clamped SwiGLU, grouped low-rank output
+        # projection, attention sinks. Exercises megatron-bridge's DeepSeekV4Bridge -> HybridModel
+        # and weight sync into vLLM's deepseek_v4 model. megatron-core's DSv4HybridAttention only
+        # supports TP=1 at the pinned rev, so attention is replicated and EP shards the experts.
+        pytest.param(
+            1,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            DEEPSEEK_V4_FLASH_4LAYER,
+            5e-2,
+            1e-1,
+            None,
+            None,
+            id="deepseek-v4-flash-4layer_h100_tp1_ep4",
+            marks=pytest.mark.h100,
+        ),
+        # DeepSeek-V4.1-Flash, 6-layer text-only slice (source layers 0, 1, 2, 3, 20, 24): window-only
+        # layers with and without Engram, a ratio-2 KV/index source and its consumer, the ratio-1
+        # KV/index/candidate-block source, and a ratio-1 index source on that KV filtered by the candidate
+        # blocks. mHC with V4.1's delayed pre-mix, no hash routing. Exercises skyrl's DeepSeekV41Bridge
+        # (patches/megatron/deepseek_v41) and weight sync into vLLM's text-only deepseek_v41 class. The
+        # Engram table rows shard over the 8 ranks of the node.
+        pytest.param(
+            1,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            DEEPSEEK_V41_FLASH_6LAYER,
+            5e-2,
+            # Megatron vs vLLM: 0.12-0.24 on this slice and its sub-slices, but Megatron matches DeepSeek's own
+            # BF16 reference (inference/model.py, fake-quant off; dev/ref_logprobs_v41.py) to within 1e-3 in mean
+            # logprob (per-token 0.06-0.13) while vLLM's BF16 V4.1 path sits 0.11-0.24 from it and is
+            # systematically more confident -- a vLLM-side gap, not a trainer one. Not KV quantization: matching
+            # vLLM's fp8_ds_mla cache in Megatron does not move it. The post-sync check (5e-2) still gates the sync.
+            3e-1,
+            None,
+            None,
+            id="deepseek-v4.1-flash-6layer_tp1_ep8",
+            marks=pytest.mark.h100,
+        ),
+        pytest.param(
+            1,
+            1,
+            1,
+            8,
+            1,
+            8,
+            8,
+            DEEPSEEK_V4_FLASH_FULL_BF16,
+            5e-2,
+            1e-1,
+            None,
+            None,
+            id="deepseek-v4-flash-full-bf16_h100_tp1_ep8",
+            marks=[
+                pytest.mark.h100,
+                pytest.mark.skipif(
+                    DEEPSEEK_V4_FLASH_FULL_BF16 is None, reason="SKYRL_DEEPSEEK_V4_FLASH_FULL_BF16 not set"
+                ),
+            ],
+        ),
         pytest.param(
             2,
             1,
@@ -687,8 +822,12 @@ async def test_logprobs_matching_roundtrip(
     """
     Check that logprob diff matches acrosss vllm and megatron.
     """
-    # See the comparison branch at the end of the test.
-    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
+    # See the comparison branch at the end of the test. vLLM's DeepSeek-V4 kernels are not bit-reproducible
+    # run to run: with no weight sync at all, 52/80 greedy generations diverge and the positional diff is
+    # 0.39, while the common prefixes agree to 0.014 (the DSv4 rows' threshold is set to fail a broken sync,
+    # which measured 0.23 on prefixes).
+    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or _is_deepseek_v4(model_name)
+    resync_vs_megatron = "deepseek-v4.1-flash" in model_name.lower()
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which
@@ -816,6 +955,17 @@ async def test_logprobs_matching_roundtrip(
                 return_training_input=True,
                 max_generate_length=max_generate_length,
             )
+            if os.environ.get("SKYRL_TEST_MEASURE_VLLM_NOISE") and compare_common_prefix:
+                # Debug aid: the resync check's noise floor -- the same prompts again, no sleep or sync between.
+                (_, _, gen_out_repeat), _ = await generate_with_vllm(
+                    generator,
+                    client,
+                    model_name,
+                    tokenizer,
+                    return_training_input=True,
+                    max_generate_length=max_generate_length,
+                )
+                _common_prefix_logprob_diff(gen_out_1, gen_out_repeat, "vLLM repeat (no sync)")
             await client.sleep()
 
             if policy is None:
@@ -850,6 +1000,12 @@ async def test_logprobs_matching_roundtrip(
                 f"Megatron - mean: {logprobs_megatron_valid.mean().item():.6f}, std: {logprobs_megatron_valid.std().item():.6f}"
             )
             print(f"logprob diff mean: {logprobs_diff.mean().item():.6f}, std: {logprobs_diff.std().item():.6f}")
+            if os.environ.get("SKYRL_TEST_DUMP_LOGPROBS"):
+                # Debug aid: the exact token batch and both logprob sets, to compare against a third
+                # implementation offline (e.g. examples/train/deepseek_v4_flash/dev/ref_logprobs_v41.py).
+                dump = {k: v.cpu() for k, v in training_input.items() if isinstance(v, torch.Tensor)}
+                dump.update(response_mask=response_mask.cpu(), vllm=logprobs_t.cpu(), megatron=logprobs_megatron.cpu())
+                torch.save(dump, os.environ["SKYRL_TEST_DUMP_LOGPROBS"])
 
             assert (
                 logprobs_diff.mean().item() < megatron_threshold
@@ -867,14 +1023,35 @@ async def test_logprobs_matching_roundtrip(
             policy.offload_to_cpu(offload_optimizer=False, offload_model=True)
             await client.wake_up(tags=["kv_cache"])
 
-            response_mask_2, logprobs_t_2, gen_out_2 = await generate_with_vllm(
+            (response_mask_2, logprobs_t_2, gen_out_2), training_input_2 = await generate_with_vllm(
                 generator,
                 client,
                 model_name,
                 tokenizer,
-                return_training_input=False,
+                return_training_input=True,
                 max_generate_length=max_generate_length,
             )
+
+            if resync_vs_megatron:
+                # vLLM's DeepSeek-V4.1 serving is not reproducible run to run (the same prompts regenerated with
+                # no sync in between: 0.12 on common prefixes, 80/80 diverged), so a pre/post-sync vLLM comparison
+                # cannot tell a broken sync (zeroed attention sinks: 0.12-0.16) from noise. Score the post-sync
+                # samples with the trainer instead: synced engines must match it as well as before the sync.
+                await client.sleep()
+                policy.backload_to_gpu(backload_optimizer=False, backload_model=True)
+                results = ray.get(policy.async_run_ray_method("mesh", "forward", data=training_input_2))
+                logprobs_megatron_2 = loss_fn_outputs_to_tensor(
+                    WorkerOutput.cat(policy.actor_infos, results).loss_fn_outputs, key="logprobs"
+                )
+                mask_2 = response_mask_2.bool()
+                resync_diff = (logprobs_t_2[mask_2] - logprobs_megatron_2[mask_2]).abs()
+                _common_prefix_logprob_diff(gen_out_1, gen_out_2, "vLLM resync (informational)")
+                print(f"post-sync vLLM vs Megatron logprob diff mean: {resync_diff.mean().item():.6f}")
+                assert resync_diff.mean().item() < megatron_threshold, (
+                    f"post-sync vLLM vs Megatron diff should be less than {megatron_threshold}, "
+                    f"but is {resync_diff.mean().item():.6f}"
+                )
+                return
 
             # Compare only each sequence's common prefix when the two greedy
             # generations are expected to diverge: past a near-tie flip the two sides
@@ -883,27 +1060,7 @@ async def test_logprobs_matching_roundtrip(
             # has a flat enough distribution that 53 of 80 sequences diverged
             # (~0.93 positional vs ~0.008 on prefixes).
             if compare_common_prefix:
-                ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
-                ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
-                assert lp_1 is not None and lp_2 is not None, "resync check needs rollout logprobs"
-                diffs = []
-                divergent = 0
-                for s1, s2, l1, l2 in zip(ids_1, ids_2, lp_1, lp_2):
-                    n = 0
-                    for a, b in zip(s1, s2):
-                        if a != b:
-                            break
-                        n += 1
-                    if n < min(len(s1), len(s2)):
-                        divergent += 1
-                    diffs.extend(abs(x - y) for x, y in zip(l1[:n], l2[:n]))
-                assert diffs, "no common-prefix tokens between pre/post-sync generations"
-                logprobs_diff = torch.tensor(diffs)
-                print(
-                    f"vLLM resync common-prefix logprob diff mean: {logprobs_diff.mean().item():.6f}, "
-                    f"std: {logprobs_diff.std().item():.6f} over {len(diffs)} tokens "
-                    f"({divergent}/{len(ids_1)} sequences diverged at a near-tie token)"
-                )
+                logprobs_diff = _common_prefix_logprob_diff(gen_out_1, gen_out_2, "vLLM resync")
             else:
                 logprobs_t_valid = logprobs_t[response_mask.bool()]
                 logprobs_t_2_valid = logprobs_t_2[response_mask_2.bool()]

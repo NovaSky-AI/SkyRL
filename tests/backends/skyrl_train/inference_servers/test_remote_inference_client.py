@@ -620,6 +620,28 @@ class TestDataPlane:
         assert len(result["response_ids"]) == 2
 
     @pytest.mark.asyncio
+    async def test_generate_per_prompt_cache_salt(self, client, monkeypatch):
+        """A cache_salt list gives each prompt its own salt; a string is shared by all of them."""
+        original = client._generate_single
+        salts = []
+
+        async def recording(*args, **kwargs):
+            salts.append(kwargs.get("cache_salt"))
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(client, "_generate_single", recording)
+        prompts = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+        await client.generate({"prompt_token_ids": prompts, "cache_salt": ["s-0", "s-1", "s-2"]})
+        assert sorted(salts) == ["s-0", "s-1", "s-2"]
+
+        salts.clear()
+        await client.generate({"prompt_token_ids": prompts, "cache_salt": "shared"})
+        assert salts == ["shared"] * 3
+
+        with pytest.raises(ValueError, match="one entry per prompt"):
+            await client.generate({"prompt_token_ids": prompts, "cache_salt": ["s-0"]})
+
+    @pytest.mark.asyncio
     async def test_generate_with_session_id(self, client):
         """Test generate with session ID for consistent routing."""
         input_batch = {

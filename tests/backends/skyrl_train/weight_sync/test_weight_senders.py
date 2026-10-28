@@ -112,6 +112,25 @@ class TestPackedBufferSize:
         assert _packed_buffer_size_bytes("m", 0.0, torch.float32) == 151936 * 4096 * 4
 
 
+def test_max_param_numel_skips_tensors_that_are_never_synced(tmp_path):
+    """DeepSeek-V4.1's Engram tables stay in the inference engine; sizing the buffer for one would ask for
+    hundreds of GiB."""
+    from safetensors.torch import save_file
+
+    from skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes import max_param_numel
+
+    save_file(
+        {
+            "layers.1.engram.embed.weight": torch.zeros(64, 8),
+            "layers.1.engram.embed.scale": torch.zeros(64, 1),
+            "layers.1.engram.wkv.weight": torch.zeros(4, 8),
+            "embed.weight": torch.zeros(10, 8),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    assert max_param_numel(str(tmp_path)) == 80
+
+
 def test_the_threshold_applies_to_nccl_as_well_as_ipc():
     """``weight_transfer_threshold_cuda_ipc_GB`` sizes the packed buffer on both
     push backends, despite naming only IPC."""
