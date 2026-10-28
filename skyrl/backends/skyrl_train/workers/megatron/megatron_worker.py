@@ -67,6 +67,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype im
 from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
     apply_distopt_mixed_dtype_group_index_patch,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_recompute_mappings import (
+    apply_mhc_recompute_mappings_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
 )
@@ -154,6 +157,8 @@ apply_distopt_mixed_dtype_group_index_patch()
 apply_clip_grads_mixed_dtype_patch()
 # Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
 apply_checkpoint_without_output_frozen_inputs_patch()
+# Also recompute the mHC mappings (their fp32 input copy) under recompute_modules=[mhc].
+apply_mhc_recompute_mappings_patch()
 
 
 # Selective-recompute modules an attention variant cannot take.
