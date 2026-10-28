@@ -413,7 +413,6 @@ class DSv41HybridSelfAttention(dsv4_attn.DSv4HybridSelfAttention):
     def __init__(self, config, submodules, layer_number, *args, compress_ratio=None, **kwargs):
         ratio = config.dsv41_spec["compress_ratios"][logical_layer_id(layer_number)]
         super().__init__(config, submodules, layer_number, *args, compress_ratio=ratio, **kwargs)
-        assert not self.recompute_up_proj, "mla_up_proj recompute is not supported for DeepSeek-V4.1"
         if ratio == 1:
             # megatron-core's V4 attention keys YaRN + compress_rope_theta off ratio > 1.
             self._dsv4_rope_base = self.config.csa_compress_rotary_base
@@ -433,4 +432,15 @@ class DSv41HybridSelfAttention(dsv4_attn.DSv4HybridSelfAttention):
 
     def get_query_key_value_tensors(self, *args, **kwargs):
         with _without_q_head_norm():
-            return super().get_query_key_value_tensors(*args, **kwargs)
+            qkv = super().get_query_key_value_tensors(*args, **kwargs)
+        checkpoint = getattr(self, "qkv_up_checkpoint", None)
+        if self.recompute_up_proj and checkpoint is not None:
+            # mla_up_proj recompute re-runs the up projection in backward, outside the context above.
+            up_proj = checkpoint.run_function
+
+            def up_proj_without_q_head_norm(*inputs):
+                with _without_q_head_norm():
+                    return up_proj(*inputs)
+
+            checkpoint.run_function = up_proj_without_q_head_norm
+        return qkv
