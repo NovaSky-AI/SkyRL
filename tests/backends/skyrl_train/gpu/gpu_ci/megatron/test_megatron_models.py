@@ -191,8 +191,9 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0")
     if "kimi-k2.5" in model_name.lower():
         # Cold vLLM graph capture can exceed the default 600 s health deadline.
-        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
-            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        env.setdefault(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S",
+            os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"),
         )
     if "glm-5.3-flash" in model_name.lower():
         # On cold kernel caches the vLLM server JIT-compiles the TileLang mHC / fla KDA / DSA

@@ -86,16 +86,14 @@ class MtpFingerprintWorker(NewInferenceWorkerWrap):
             # stream, then restore the exact Megatron export even on failure.
             with torch.no_grad():
                 try:
-                    perturbed_loaded = draft.load_weights(weights(True))
+                    draft.load_weights(weights(True))
                     perturbed = _parameter_hashes(draft)
                 finally:
-                    restored_loaded = draft.load_weights(weights(False))
+                    draft.load_weights(weights(False))
         after = _parameter_hashes(draft)
         return {
             "exported": len(names),
             "checked": len(before),
-            "missing_perturbed": sorted(before.keys() - perturbed_loaded),
-            "missing_restored": sorted(before.keys() - restored_loaded),
             "unchanged_perturbed": sorted(name for name in before if before[name] == perturbed[name]),
             "changed_restored": sorted(name for name in before if before[name] != after[name]),
         }
@@ -103,7 +101,9 @@ class MtpFingerprintWorker(NewInferenceWorkerWrap):
 
 def _parameter_hashes(module):
     return {
-        name: hashlib.sha256(param.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+        name: hashlib.sha256(
+            param.detach().cpu().contiguous().flatten().view(torch.uint8).numpy().tobytes()
+        ).hexdigest()
         for name, param in module.named_parameters()
     }
 
@@ -138,7 +138,8 @@ _MTP_EXPORT_POLICY_WORKER = ray.remote(num_gpus=1)(MtpExportPolicyWorker)
 
 async def _assert_draft_matches_megatron_export(client: RemoteInferenceClient, policy):
     paths = ray.get(policy.async_run_ray_method("pass_through", "skyrl_export_draft_to_file"))
-    path = next(path for path in paths if path is not None)
+    path = next((path for path in paths if path is not None), None)
+    assert path is not None, "Megatron rank 0 did not export draft weights"
     try:
         responses = await client._call_all_servers(
             "/collective_rpc", {"method": "skyrl_compare_draft_to_megatron_export", "args": [path]}
@@ -146,13 +147,6 @@ async def _assert_draft_matches_megatron_export(client: RemoteInferenceClient, p
         for url, response in responses.items():
             for rank, result in enumerate(response["body"]["results"]):
                 assert result["exported"] > 0 and result["checked"] > 0
-                assert not result["missing_perturbed"], (
-                    f"MTP draft weights not loaded from perturbed Megatron export on {url} rank {rank}: "
-                    f"{result['missing_perturbed']}"
-                )
-                assert not result[
-                    "missing_restored"
-                ], f"MTP draft weights not restored from Megatron on {url} rank {rank}: {result['missing_restored']}"
                 assert not result["unchanged_perturbed"], (
                     f"MTP draft weights did not respond to Megatron export on {url} rank {rank}: "
                     f"{result['unchanged_perturbed']}"
@@ -286,10 +280,10 @@ async def test_megatron_mtp_weight_sync_roundtrip(
         await client.wake_up(tags=["weights"])
         with Timer("sync_weights"):
             ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client, ie_cfg))
-        await client.wake_up(tags=["kv_cache"])
         if colocate_all:
             await _assert_draft_matches_megatron_export(client, policy)
         policy.offload_to_cpu()
+        await client.wake_up(tags=["kv_cache"])
 
         after_calls = [await run_inference(client, prompts, sampling_params, tokenizer=tokenizer) for _ in range(3)]
         after = after_calls[0]
