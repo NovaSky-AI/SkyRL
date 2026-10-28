@@ -295,3 +295,27 @@ def test_router_replay_schedule_clears_after_exception(router_replay_module):
 
     assert router_replay_module.replay_backward_list == []
     assert router_replay_module.action is None
+
+
+def test_hybrid_sublayers_map_to_rollout_blocks():
+    # DeepSeek-V4 on a Megatron HybridModel: 43 blocks -> 86 sub-layers (attention, MoE); the MoE routers sit on
+    # odd sub-layers while vLLM returns routed experts per block.
+    moe_sublayers = list(range(1, 86, 2))
+    assert replay_utils._hybrid_sublayers_to_block_indices(moe_sublayers, 86, 43) == list(range(43))
+
+
+def test_hybrid_sublayers_map_on_every_pipeline_stage():
+    # With pipeline parallelism each stage maps only its own routers. Stage 0's MoE sub-layers (1, 3, ..., 41) all
+    # fit below the 43-block count and must still be mapped; stage 1's (43, ..., 85) overflow it.
+    stage0, stage1 = list(range(1, 43, 2)), list(range(43, 86, 2))
+    assert replay_utils._hybrid_sublayers_to_block_indices(stage0, 86, 43) == list(range(21))
+    assert replay_utils._hybrid_sublayers_to_block_indices(stage1, 86, 43) == list(range(21, 43))
+
+
+def test_hybrid_sublayer_mapping_leaves_other_layouts_alone():
+    # Ordinary MoE models (indices already per HF layer), non-divisible layouts and empty data are untouched.
+    assert replay_utils._hybrid_sublayers_to_block_indices([1, 2, 3], 48, 48) == [1, 2, 3]
+    assert replay_utils._hybrid_sublayers_to_block_indices([3, 5], 61, 61) == [3, 5]
+    assert replay_utils._hybrid_sublayers_to_block_indices([60, 70], 90, 47) == [60, 70]
+    assert replay_utils._hybrid_sublayers_to_block_indices([1, 2], 48, 0) == [1, 2]
+    assert replay_utils._hybrid_sublayers_to_block_indices([1, 2], None, 48) == [1, 2]
