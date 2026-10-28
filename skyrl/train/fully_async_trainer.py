@@ -410,7 +410,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     def _build_callback_input(self, **fields) -> CallbackInput:
-        """The base trainer's input, with ``steps_per_epoch`` counted in mini-batches (one step each)."""
+        """The base trainer's input, with ``steps_per_epoch`` counted in mini-batches (one step each).
+
+        With ``sample_full_batch``, ``steps_per_epoch`` is an upper bound: dropped groups can end an epoch early.
+        """
         return replace(super()._build_callback_input(**fields), steps_per_epoch=self.num_steps_per_epoch)
 
     def _build_train_dataloader_and_compute_training_steps(self):
