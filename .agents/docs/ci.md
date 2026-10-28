@@ -30,7 +30,10 @@ survives only where it names a real thing (the `skyrl_train` package, the
 
 ### GPU gating labels
 
-Apply one of these to a PR to launch the corresponding Anyscale job. The label must
+Apply one of these to a PR to launch the corresponding Anyscale job. A label runs the
+PR's code with access to CI credentials, so when reviewing a PR, carefully check the
+security implications of its changes for CI jobs before it is labelled. Agents never
+apply these labels themselves. The label must
 already exist in repo settings -- a workflow referencing a label nobody can apply
 never runs, and fails silently.
 
@@ -57,5 +60,6 @@ never runs, and fails silently.
 
 ## Gotchas
 
+- On a labelled PR, the GPU workflows take `ci/submit_anyscale_job.sh`, `ci/terminate_anyscale_jobs.sh` and the job's `ci/anyscale_*.yaml` from the base branch, not the PR. A PR's changes to those files (e.g. an image bump) are not exercised by a label; push the branch to the upstream repo and run the workflow via `workflow_dispatch` instead. Everything else, including the `ci/gpu_ci_run_*.sh` entrypoint, comes from the PR. If a workflow starts running another `ci/` file on the runner, add it to that list.
 - The `paths:` filter on each workflow gates whether CPU CI even runs. Touching only `docs/` or `examples/` skips CI.
 - The `SkyRL-JAX-*` workflows are deliberately scoped to the JAX/tx code path (`skyrl/tx`, `skyrl/backends/{backend,jax,ray_jax}.py`, `skyrl/utils`, `skyrl/tinker/types.py`, `tests/tx`), so most PRs never run them. If you touch tx, check that your files are in those `paths:` lists — and note the `push:` and `pull_request:` lists are duplicated, because GitHub Actions does not support YAML anchors.
