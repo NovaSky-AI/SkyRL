@@ -2,7 +2,7 @@ import copy
 import os
 from argparse import Namespace
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import ray
 from loguru import logger
@@ -30,7 +30,9 @@ from .utils import (
     get_pd_cli_args,
     get_pd_p2p_connector_name,
 )
-from .vllm_router import VLLMRouter
+
+if TYPE_CHECKING:
+    from .vllm_router import VLLMRouter
 
 # Base port for the vLLM server group. Overridable because another service on the
 # host (e.g. a k8s LoadBalancer) can claim port 8000 and silently hijack /wake_up,
@@ -53,7 +55,7 @@ class InferenceServerSetup:
 
     proxy_url: str
     server_urls: List[str]
-    router: Optional[VLLMRouter] = None
+    router: Optional["VLLMRouter"] = None
     server_groups: List[ServerGroup] = field(default_factory=list)
     prefill_server_groups: List[ServerGroup] = field(default_factory=list)
     decode_server_groups: List[ServerGroup] = field(default_factory=list)
