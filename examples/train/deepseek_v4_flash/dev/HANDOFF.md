@@ -682,3 +682,32 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     0.530 / 0.569 / 0.658 / 0.439 / 0.543 / 0.529 / 0.550 / 0.736 / 0.565 (2K: -0.22 -> 0.44 over 10 steps). AIME-2024
     avg_score / pass@12: step 0 0.211 / 0.833, step 10 0.333 / 0.967, step 20 0.344 / 0.833 (30 problems, pass@12 is
     noisy). Steps ~600-700 s after warmup. Largest response cap that is stable on 6 nodes; 3072 OOMs by step 4.
+
+### Activation memory for longer responses (2026-10-28)
+
+- **Where the memory goes** (`v41-dapo-memsnap3k-1793167092`, 3072 responses, `trainer.policy.record_memory=true`,
+  rank 10's last forward_backward; peak 135.7 GiB): ~73.5 GiB params / grads / other state from before the
+  recorded window, 62.2 GiB activations. Largest activation entries (80 = every attention + MoE sub-layer):
+  - 17.8 GiB `fused_mhc_kernels._torch_proj_rms_compute_h` (80): the fp32 upcast of the n-stream hidden states
+    that `HyperConnectionModule.compute_mappings` feeds the mapping projection. megatron-core's `mhc` recompute
+    (`_forward_with_checkpoint`) checkpoints only `aggregate` and calls `compute_mappings` directly, so autograd
+    keeps 2x the bf16 hidden states per sub-layer.
+  - 8.8 GiB mHC `h_post_bda` outputs (the residual stream; inherent), 7.2 GiB FlashMLA sparse out/lse,
+    7.1 GiB q up-projection output (`qkv_up_proj_and_rope_apply`), 7.1 GiB inverse-RoPE'd attention output (the
+    output projection's input), then < 2.3 GiB each.
+- **Fixes** (6da34b0e):
+  - `patches/megatron/patch_mhc_recompute_mappings.py`: runs `compute_mappings` under non-reentrant
+    `torch.utils.checkpoint` inside the `mhc` recompute path (saves only the bf16 input, a view of the hidden states
+    kept anyway). `dev/check_mhc_recompute.py` (node 6, one HyperConnectionModule, 4096 tokens): outputs and all
+    grads bit-identical, memory held after forward 321 -> 32 MiB per sub-layer. Applies to every mHC model
+    (DeepSeek-V4, V4.1, GLM-5.3); worth upstreaming to megatron-core.
+  - V4.1 now supports `mla_up_proj` recompute: the up-projection's recompute runs under the same
+    `_without_q_head_norm` context as the forward (the old assert existed because a plain recompute would
+    re-insert V4's q head norm).
+- **Measured** (`v41-dapo-memsnap3k-fix-1793169962`, same recipe + `recompute_modules=[moe,mhc,layernorm,mla_up_proj]`):
+  the mHC entry and the q up-projection entry are gone; the remaining per-sub-layer activations are the residual
+  stream, FlashMLA out/lse and the inverse-RoPE'd output. ~25 GiB less at the baseline's row length (~62 -> ~37 GiB
+  activations). Step-1 metrics match the baseline run: grad_norm 0.1114 / 0.1126, minibatch logprob diff
+  0.0125 / 0.0121, entropy 0.50 / 0.49; policy_train 645 -> 598 s (both with memory recording on).
+- 4096 responses with both fixes, 20 steps, evals at 0/10/20, no checkpoints:
+  `v41-dapo-fullft6-resp4k-memfix-1793172399.log` (W&B `dsv41_flash_dapo`, run `dsv41_flash_dapo_fullft_r3_resp4k_memfix`).
