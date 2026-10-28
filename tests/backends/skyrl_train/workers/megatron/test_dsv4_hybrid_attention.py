@@ -88,11 +88,11 @@ def _provider(variant, granularity, modules):
 )
 def test_dsv4_hybrid_drops_core_attn_recompute(modules, expected_granularity, expected_modules):
     from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-        drop_core_attn_recompute_for_dsv4_hybrid,
+        drop_unsupported_recompute_modules,
     )
 
     provider = _provider("dsv4_hybrid", "selective", list(modules))
-    drop_core_attn_recompute_for_dsv4_hybrid(provider)
+    drop_unsupported_recompute_modules(provider)
     assert provider.recompute_granularity == expected_granularity
     assert provider.recompute_modules == expected_modules
 
@@ -103,10 +103,21 @@ def test_dsv4_hybrid_drops_core_attn_recompute(modules, expected_granularity, ex
 )
 def test_core_attn_recompute_kept_elsewhere(variant, granularity):
     from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-        drop_core_attn_recompute_for_dsv4_hybrid,
+        drop_unsupported_recompute_modules,
     )
 
     provider = _provider(variant, granularity, ["core_attn", "moe"])
-    drop_core_attn_recompute_for_dsv4_hybrid(provider)
+    drop_unsupported_recompute_modules(provider)
     assert provider.recompute_granularity == granularity
     assert provider.recompute_modules == ["core_attn", "moe"]
+
+
+def test_unsupported_recompute_modules_come_from_the_variant_table(monkeypatch):
+    from skyrl.backends.skyrl_train.workers.megatron import megatron_worker
+
+    # A new variant only needs a table entry; every listed module is dropped, the rest kept.
+    monkeypatch.setitem(megatron_worker._UNSUPPORTED_RECOMPUTE_MODULES, "other_variant", {"core_attn", "mla_up_proj"})
+    provider = _provider("other_variant", "selective", ["core_attn", "moe", "mla_up_proj"])
+    megatron_worker.drop_unsupported_recompute_modules(provider)
+    assert provider.recompute_granularity == "selective"
+    assert provider.recompute_modules == ["moe"]
