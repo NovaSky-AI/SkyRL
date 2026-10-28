@@ -570,6 +570,13 @@ def handle_filter_sampling(
         if traj_uid in kept_uids_set:
             kept_traj_idxs.append(idx)
 
+    # [guard-trial patch] a batch where EVERY group is zero-variance used to crash in slice_generator_output
+    # ("indices must be non-empty"); treat it as "collected nothing, keep sampling" instead.
+    if not kept_traj_idxs:
+        collected_state.setdefault("num_prompts_in_batch", 0)
+        logger.info("Dynamic sampling: batch had no groups with reward variance; resampling")
+        return generator_output, uids, True, collected_state
+
     # Apply filtering to generator output
     filtered_output = filter_generator_output(generator_output, kept_traj_idxs)
     filtered_uids = [uids[idx] for idx in kept_traj_idxs]
