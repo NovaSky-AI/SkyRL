@@ -23,8 +23,11 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source /opt/aws_neuronx_venv_torch_neuronx_2_14_0/bin/activate
 
-# Single NeuronCore of a trn2.48xlarge (0 of 48). Pin the visible core + disable
-# the NKI trace cache (its ~10GB HBM footprint otherwise OOMs a 25.8GB core).
+# NeuronCore layout of a trn2.48xlarge (48 cores total). This env var names the
+# DRIVER's core (the in-process inference engine). The FSDP worker actor runs in a
+# separate Ray process, which is not allowed to share a core, so it claims the next
+# disjoint core in code (device.neuron_worker_core). Disable the NKI trace cache
+# (its ~10GB HBM footprint otherwise OOMs a 25.8GB core).
 export NEURON_RT_VISIBLE_CORES=0
 export NKI_ENABLE_TRACE_CACHE=0
 

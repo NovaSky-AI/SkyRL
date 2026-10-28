@@ -139,6 +139,10 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         concatenates items along dim 0, so a single item holding the full concatenation
         round-trips unchanged).
         """
+        messages = [
+            {**message, "content": self._normalize_content(message.get("content"))}
+            for message in messages
+        ]
         images = self._extract_images(messages)
         text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         if images:
@@ -163,6 +167,56 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         else:
             features["kwargs_data"] = None
         return {"token_ids": input_ids, "features": features}
+
+    @staticmethod
+    def _normalize_content(content: Any) -> Any:
+        """Normalize one message ``content`` field into a clean OpenAI content list.
+
+        Two parquet/pyarrow round-trip artifacts must be undone before the chat
+        template sees the content:
+
+        * a ``list<struct>`` content column arrives as a ``numpy.ndarray`` of dicts
+          (or a list of dicts) rather than a plain ``list``; and
+        * the struct schema is unified across heterogeneous part types, so a ``text``
+          part also carries an ``image_url: None`` key (and an ``image_url`` part a
+          ``text: None`` key).  The Qwen3.5-VL chat template treats any part whose
+          dict contains an ``image_url`` *key* (even ``None``) as an image, so those
+          spurious keys must be stripped -- otherwise the placeholder count diverges
+          from the number of images actually extracted and the processor raises
+          ``StopIteration``.
+
+        Plain-string content (text-only messages) is returned unchanged.
+        """
+        if content is None:
+            return []
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            content = [content]
+        elif hasattr(content, "tolist"):  # numpy array from a pyarrow round-trip
+            content = list(content.tolist())
+        else:
+            content = list(content)
+
+        normalized: List[Dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "image_url":
+                url = (part.get("image_url") or {}).get("url")
+                if url is not None:
+                    normalized.append({"type": "image_url", "image_url": {"url": url}})
+            elif part_type == "image":
+                image = part.get("image")
+                if image is not None:
+                    normalized.append({"type": "image", "image": image})
+            elif part_type == "text":
+                text = part.get("text")
+                if text is not None:
+                    normalized.append({"type": "text", "text": text})
+            # Unknown or empty-typed parts are dropped.
+        return normalized
 
     @staticmethod
     def _extract_images(messages: List[Dict[str, Any]]) -> List[Any]:
@@ -391,6 +445,11 @@ class NeuronInferenceEngine(InferenceEngineInterface):
 
         Follow-up 2 in the module docstring: validate this against the trainer's
         ``processed_logprobs`` computation on a neuron instance.
+
+        The per-step log-softmax/top-k/gather math runs on CPU: neuronx-cc cannot lower
+        some of these ops under an NKI context (``No backend set`` / ``No active NKI
+        context``), and the per-token results are a handful of floats anyway, so the
+        ``[batch, vocab]`` round-trip is cheaper than a compiled-graph fallback.
         """
         temperature = generate_kwargs.get("temperature")
         top_k = generate_kwargs.get("top_k")
@@ -403,11 +462,10 @@ class NeuronInferenceEngine(InferenceEngineInterface):
             active = [b for b in range(batch) if t < len(response_ids[b])]
             if not active:
                 continue
-            sampled = torch.tensor(
-                [response_ids[b][t] for b in active], device=logits_t.device, dtype=torch.long
-            )
+            logits_cpu = logits_t.detach().to("cpu").float()
+            sampled = torch.tensor([response_ids[b][t] for b in active], dtype=torch.long)
             lp = self._sampled_token_logprobs(
-                logits_t[active], sampled, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p
+                logits_cpu[active], sampled, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p
             )
             for b, value in zip(active, lp.tolist()):
                 result[b].append(value)

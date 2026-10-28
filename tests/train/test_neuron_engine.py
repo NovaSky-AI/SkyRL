@@ -144,3 +144,59 @@ def test_vlm_inputs_no_images_yields_text_only_inputs():
     assert prompt_lens == [3]
     assert "pixel_values" not in inputs
     assert "image_grid_thw" not in inputs
+
+
+# -- content normalization (parquet/pyarrow round-trip artifacts) -------------
+
+
+def test_normalize_content_passes_through_plain_string():
+    assert NeuronInferenceEngine._normalize_content("hello") == "hello"
+
+
+def test_normalize_content_none_becomes_empty_list():
+    assert NeuronInferenceEngine._normalize_content(None) == []
+
+
+def test_normalize_content_single_dict_is_wrapped():
+    part = {"type": "text", "text": "hi"}
+    assert NeuronInferenceEngine._normalize_content(part) == [{"type": "text", "text": "hi"}]
+
+
+def test_normalize_content_strips_spurious_keys_from_struct_parts():
+    # A unified pyarrow struct schema gives a text part an ``image_url: None`` key (and
+    # vice versa). The Qwen3.5-VL template treats any dict with an ``image_url`` *key*
+    # as an image, so those spurious keys must be dropped before rendering.
+    content = [
+        {"type": "text", "text": "look", "image_url": None},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}, "text": None},
+    ]
+    assert NeuronInferenceEngine._normalize_content(content) == [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+
+
+def test_normalize_content_drops_empty_and_unknown_parts():
+    content = [
+        {"type": "text", "text": None},
+        {"type": "image_url", "image_url": None},
+        {"type": "image", "image": None},
+        {"type": "mystery", "x": 1},
+        "not-a-dict",
+    ]
+    assert NeuronInferenceEngine._normalize_content(content) == []
+
+
+def test_normalize_content_handles_numpy_ndarray_of_structs():
+    numpy = pytest.importorskip("numpy")
+    arr = numpy.array(
+        [
+            {"type": "text", "text": "a", "image_url": None},
+            {"type": "text", "text": "b", "image_url": None},
+        ],
+        dtype=object,
+    )
+    assert NeuronInferenceEngine._normalize_content(arr) == [
+        {"type": "text", "text": "a"},
+        {"type": "text", "text": "b"},
+    ]

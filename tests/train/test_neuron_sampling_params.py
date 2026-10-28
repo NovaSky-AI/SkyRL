@@ -70,7 +70,15 @@ def test_neuron_sampling_params_accepts_plain_dict():
 
 def test_get_sampling_params_for_backend_dispatch():
     params = SamplingParams(max_generate_length=32)
-    assert get_sampling_params_for_backend("neuron", params)["max_new_tokens"] == 32
+    # The native neuron engine maps SkyRL params to ``generate`` kwargs *inside*
+    # ``NeuronInferenceEngine.generate`` (via ``get_neuron_sampling_params``), so the
+    # dispatch layer hands it the raw SkyRL params here -- ``max_generate_length``,
+    # ``logprobs`` and ``stop`` preserved -- rather than the already-mapped
+    # ``max_new_tokens`` kwargs. Re-mapping at this layer would be double-mapped in the
+    # engine and would drop the ``logprobs``/``stop`` keys the generators read first.
+    neuron_params = get_sampling_params_for_backend("neuron", params)
+    assert neuron_params["max_generate_length"] == 32
+    assert "logprobs" in neuron_params
     assert get_sampling_params_for_backend("vllm", params)["max_tokens"] == 32
     with pytest.raises(ValueError):
         get_sampling_params_for_backend("bogus", params)

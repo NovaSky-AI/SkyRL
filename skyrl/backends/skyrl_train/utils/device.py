@@ -11,6 +11,8 @@ CPU-only.  torch.distributed collectives use NCCL on CUDA and the CPU ``gloo`` b
 everywhere else, so :func:`collective_device` returns CPU on neuron.
 """
 
+import os
+
 import torch
 
 _backend: str | None = None
@@ -72,6 +74,22 @@ def current_device_id() -> int:
 def set_device(rank: int) -> None:
     if is_cuda():
         torch.cuda.set_device(rank)
+
+
+def neuron_worker_core(rank: int) -> int:
+    """NeuronCore id for an FSDP worker actor of ``rank``.
+
+    The driver runs the in-process inference engine on the core named by the
+    inherited ``NEURON_RT_VISIBLE_CORES``.  Each FSDP worker actor is a *separate*
+    Ray process, and a NeuronCore is not shareable across processes, so every worker
+    needs its own disjoint single core.  We read the driver's core list from the
+    inherited environment and offset workers one core above its last entry (so a
+    multi-core driver listing also leaves the workers clear of every driver core).
+    """
+    driver_cores = [
+        int(x) for x in os.environ.get("NEURON_RT_VISIBLE_CORES", "0").split(",") if x.strip()
+    ] or [0]
+    return driver_cores[-1] + 1 + rank
 
 
 def device_count() -> int:

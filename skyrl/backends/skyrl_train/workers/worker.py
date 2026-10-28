@@ -119,6 +119,12 @@ class DistributedTorchRayActor:
         # os.environ["LOCAL_RANK"] = str(self._local_rank)
         if device.is_neuron():
             os.environ["LOCAL_RANK"] = "0"
+            # The driver runs the in-process inference engine on one NeuronCore; this
+            # FSDP worker actor is a separate Ray process and a NeuronCore is not
+            # shareable across processes, so it must claim a disjoint single core before
+            # the first neuron allocation (the runtime reads NEURON_RT_VISIBLE_CORES
+            # lazily, at first use). See device.neuron_worker_core.
+            os.environ["NEURON_RT_VISIBLE_CORES"] = str(device.neuron_worker_core(self._rank))
         else:
             os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
         self.sequence_parallel_size: int = sequence_parallel_size

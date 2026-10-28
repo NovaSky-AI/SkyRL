@@ -208,7 +208,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         model_id: Optional[str] = None,
     ):
         if inference_engine_client is None:
-            inference_engine_client = self._weight_sync_inference_client
+            # CUDA workers cache the client at init_weight_sync_state; the native
+            # neuron backend never does (the engine lives on the driver), so fall
+            # back to None and let _save_lora_adapters_and_sync export without
+            # reloading.
+            inference_engine_client = getattr(self, "_weight_sync_inference_client", None)
 
         # Check if this is a LoRA model
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)

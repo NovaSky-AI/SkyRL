@@ -169,6 +169,12 @@ def get_sampling_params_for_backend(backend: str, sampling_params: Union[Samplin
     if backend == "vllm":
         return get_vllm_sampling_params(sampling_params)
     elif backend == "neuron":
-        return get_neuron_sampling_params(sampling_params)
+        # The native neuron engine maps SkyRL sampling params to transformers
+        # ``generate`` kwargs internally (``NeuronInferenceEngine.generate``), so the
+        # trainer/eval paths must hand it the *raw* SkyRL params here. Re-mapping to
+        # ``generate`` kwargs at this layer would be double-mapped in the engine, and it
+        # would also drop/rename the ``logprobs`` and ``stop`` keys the generators read
+        # (``agent_loop``) before they call the engine.
+        return _sampling_params_to_dict(sampling_params)
     else:
         raise ValueError(f"Unsupported generation backend: {backend}")

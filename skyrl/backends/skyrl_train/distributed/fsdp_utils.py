@@ -123,9 +123,9 @@ def _sync_non_persistent_buffers(model: torch.nn.Module, loaded_sd: dict):
             if buf is None:
                 continue
             if dist.get_rank() == 0:
-                src = buf.detach().to(device.current_device())
+                src = buf.detach().to(device.collective_device())
             else:
-                src = torch.empty(buf.shape, dtype=buf.dtype, device=device.current_device())
+                src = torch.empty(buf.shape, dtype=buf.dtype, device=device.collective_device())
             dist.broadcast(src, src=0)
             module._buffers[key] = src.cpu()
 
