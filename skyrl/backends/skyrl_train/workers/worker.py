@@ -150,8 +150,15 @@ class DistributedTorchRayActor:
         # it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
+        # TorchNeuron has no NCCL: collectives run on CPU via gloo. Pin the backend
+        # explicitly on neuron (consistent with create_device_mesh in fsdp_utils.py).
+        # Single-core is the only supported shape.
+        backend_override = {0: "gloo"} if device.is_neuron() else None
         device_mesh = torch.distributed.device_mesh.init_device_mesh(
-            device.backend(), mesh_shape=(dp_size, self.sequence_parallel_size), mesh_dim_names=("dp", "sp")
+            device.backend(),
+            mesh_shape=(dp_size, self.sequence_parallel_size),
+            mesh_dim_names=("dp", "sp"),
+            backend_override=backend_override,
         )
         self.device_mesh = device_mesh
         self.mesh_rank = MeshRank(
