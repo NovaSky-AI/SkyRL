@@ -30,12 +30,15 @@ def run(patched: bool):
     x = torch.randn(S, 1, N * C, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     torch.cuda.synchronize()
     before = torch.cuda.memory_allocated()
-    agg, h_res, h_post, residual = module._forward_with_checkpoint(x, CheckpointWithoutOutputManager())
+    manager = CheckpointWithoutOutputManager()
+    agg, h_res, h_post, residual = module._forward_with_checkpoint(x, manager)
+    layer_out = agg * 1.5  # stand-in for the wrapped layer, as in megatron-core's mhc recompute
+    manager.discard_all_outputs_and_register_unified_recompute(layer_out)
     held = torch.cuda.memory_allocated() - before
-    loss = agg.float().square().mean() + (h_res.float() * 3).sin().sum() + h_post.float().square().sum()
+    loss = layer_out.float().square().mean() + (h_res.float() * 3).sin().sum() + h_post.float().square().sum()
     loss.backward()
     grads = [x.grad] + [p.grad for p in module.parameters()]
-    return held, [t.detach().clone() for t in (agg, h_res, h_post)], [g.clone() for g in grads]
+    return held, [t.detach().clone() for t in (layer_out, h_res, h_post)], [g.clone() for g in grads]
 
 
 base_held, base_out, base_grads = run(False)
