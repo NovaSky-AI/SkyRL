@@ -733,3 +733,6 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
     30-problem noise; the training reward gain is mostly on DAPO-17k.
   - Recipe defaults now: `MAX_RESPONSE_LENGTH=4096`, `recompute_modules=[moe,mhc,layernorm,mla_up_proj]` in both
     V4.1 full-FT recipes (LoRA recipes unchanged: mla_up_proj not tested under LoRA).
+- **5120 responses fit** (`v41-dapo-fullft6-resp5k-1793189007.log`, 3 steps, recipe defaults otherwise): no OOM;
+  rollout reward 0.606 / 0.605 / 0.692, grad_norm 0.086-0.094, minibatch logprob diff 0.0146-0.0149, step 950 / 808
+  / 797 s (generate 174 s, policy_train 475-563 s). Not run longer: with 4096 the eval truncation is already 5-13%.
