@@ -8,15 +8,11 @@ name: SkyRL-JAX-GPU
 # Keep the two `paths:` lists below in sync -- GitHub Actions does not support
 # YAML anchors.
 #
-# Three ways this job starts, same shape as the other Anyscale workflows (see
-# gpu_skyrl.yaml):
+# Three ways this job starts:
 # - `push` to `main`, and PRs whose head branch lives on NovaSky-AI/SkyRL,
-#   auto-run (paths-gated above). Same-repo `pull_request` runs receive the
-#   repo's secrets.
-# - Fork PRs never run on the plain `pull_request` trigger: GitHub withholds
-#   repo secrets from fork-triggered events, so they would always fail at
-#   Anyscale auth. Instead a maintainer applies the `run_jax_gpu_ci` label and
-#   the `pull_request_target` trigger below runs the job with secrets.
+#   auto-run (paths-gated above).
+# - Fork PRs run only when a maintainer applies the `run_jax_gpu_ci` label,
+#   through `pull_request_target`.
 # - `workflow_dispatch` for anything else.
 on:
   push:
@@ -48,10 +44,6 @@ on:
       - 'ci/gpu_ci_run_jax.sh'
       - 'ci/submit_anyscale_job.sh'
       - '.github/workflows/gpu_jax.yaml'
-  # Fork PRs ride this trigger, not the plain one above: `pull_request_target`
-  # runs in the base-repo context, so the job below can reach the Anyscale
-  # secrets a fork `pull_request` event never gets. See the job `if:` for the
-  # label gating.
   pull_request_target:
     types: [labeled]
   workflow_dispatch:
@@ -72,12 +64,8 @@ concurrency:
 
 jobs:
   skyrl_jax_gpu_tests:
-    # Gate on the label that fired this event. `types: [labeled]` delivers one
-    # event per label added, and `github.event.label.name` tests only the label
-    # that fired, so labelling in bulk launches one run here, not one per label.
-    # Plain `pull_request` runs are restricted to same-repo branches: fork PRs
-    # get no secrets there (see the trigger comment) and would always fail at
-    # Anyscale auth.
+    # `types: [labeled]` fires one event per label added; testing
+    # `github.event.label.name` means bulk labelling starts one run, not one per label.
     if: >
       github.repository == 'NovaSky-AI/SkyRL' &&
       (
