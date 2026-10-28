@@ -125,28 +125,6 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
     return offset, num_layers
 
 
-def _hybrid_sublayers_to_block_indices(
-    layer_indices: list[int], megatron_num_layers: int | None, global_num_layers: int
-) -> list[int]:
-    """Map Megatron HybridModel sub-layer indices onto the per-block layers the rollout data is indexed by.
-
-    A HybridModel splits each HF decoder block into several sub-layers (DeepSeek-V4: attention then MoE, 86
-    sub-layers for 43 blocks), so a router's ``layer_number`` counts sub-layers while vLLM returns routed experts
-    per block. Decided from the model layout (the sub-layer count is a whole multiple of the block count), never
-    from the indices themselves: under pipeline parallelism an early stage's sub-layer indices all fit below the
-    block count and still need mapping.
-    """
-    if (
-        not megatron_num_layers
-        or not global_num_layers
-        or megatron_num_layers == global_num_layers
-        or megatron_num_layers % global_num_layers != 0
-    ):
-        return layer_indices
-    sublayers_per_block = megatron_num_layers // global_num_layers
-    return [i // sublayers_per_block for i in layer_indices]
-
-
 def _get_local_router_layer_indices(model_config, global_num_layers: int, instances: list) -> list[int]:
     local_layer_offset, local_num_layers = _get_current_pp_stage_layer_range(model_config)
     if local_num_layers == len(instances):
@@ -164,14 +142,37 @@ def _get_local_router_layer_indices(model_config, global_num_layers: int, instan
                 layer_index = local_layer_offset + local_router_index + (local_num_layers - len(instances))
             layer_indices.append(layer_index)
 
-    layer_indices = _hybrid_sublayers_to_block_indices(
-        layer_indices, getattr(model_config, "num_layers", None), global_num_layers
-    )
+    layer_indices = _hybrid_to_decoder_layer_indices(model_config, global_num_layers, layer_indices)
     if any(layer_index < 0 or layer_index >= global_num_layers for layer_index in layer_indices):
         raise ValueError(
             f"Router replay layer indices {layer_indices} out of range for data with {global_num_layers} layers"
         )
     return layer_indices
+
+
+# megatron-core's hybrid_layer_allocation.Symbols: the attention symbols ATTENTION "*", DS_ATTENTION "D", MLA "+" and
+# the DeepSeek-V4 CSA "C" / HCA "H" / WINDOW "W"; PIPE "|" and MTP_SEPARATOR "/" are separators.
+_HYBRID_ATTENTION_SYMBOLS = frozenset("*D+CHW")
+
+
+def _hybrid_to_decoder_layer_indices(model_config, global_num_layers: int, layer_indices: list[int]) -> list[int]:
+    """Map HybridModel layer indices to the inference engine's decoder-layer indices.
+
+    Router ``layer_number`` counts hybrid layers, and vLLM returns routed experts per HF decoder layer. Models whose
+    decoder layers are single hybrid layers (e.g. Nemotron-H) need no mapping. Models whose decoder layer is an
+    attention layer followed by its MLP/MoE layer (DeepSeek-V4/V4.1: ``HECEWE...``; Beam: ``*-*-*E*E...``) have one
+    decoder layer per attention symbol: hybrid layer ``h`` belongs to decoder layer ``(attention symbols in
+    pattern[:h + 1]) - 1``. Decided from the pattern, not the indices: under pipeline parallelism an early stage's
+    hybrid indices all fit below the decoder-layer count and still need mapping.
+    """
+    pattern = getattr(model_config, "hybrid_layer_pattern", None)
+    if not pattern:
+        return layer_indices
+    flat = pattern.split("/")[0].replace("|", "")
+    attention = [symbol in _HYBRID_ATTENTION_SYMBOLS for symbol in flat]
+    if global_num_layers == len(flat) or global_num_layers != sum(attention):
+        return layer_indices
+    return [sum(attention[: h + 1]) - 1 for h in layer_indices]
 
 
 def setup_per_microbatch_replay_forward(
