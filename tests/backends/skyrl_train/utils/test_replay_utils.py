@@ -297,25 +297,29 @@ def test_router_replay_schedule_clears_after_exception(router_replay_module):
     assert router_replay_module.action is None
 
 
-def test_hybrid_sublayers_map_to_rollout_blocks():
-    # DeepSeek-V4 on a Megatron HybridModel: 43 blocks -> 86 sub-layers (attention, MoE); the MoE routers sit on
-    # odd sub-layers while vLLM returns routed experts per block.
-    moe_sublayers = list(range(1, 86, 2))
-    assert replay_utils._hybrid_sublayers_to_block_indices(moe_sublayers, 86, 43) == list(range(43))
+# DeepSeek-V4 as the pinned Megatron-Bridge builds it: 43 blocks of (W/C/H attention, MoE) -> 86 hybrid layers.
+_DSV4_PATTERN = "WEWE" + "CEHE" * 20 + "CE"
 
 
-def test_hybrid_sublayers_map_on_every_pipeline_stage():
-    # With pipeline parallelism each stage maps only its own routers. Stage 0's MoE sub-layers (1, 3, ..., 41) all
-    # fit below the 43-block count and must still be mapped; stage 1's (43, ..., 85) overflow it.
-    stage0, stage1 = list(range(1, 43, 2)), list(range(43, 86, 2))
-    assert replay_utils._hybrid_sublayers_to_block_indices(stage0, 86, 43) == list(range(21))
-    assert replay_utils._hybrid_sublayers_to_block_indices(stage1, 86, 43) == list(range(21, 43))
-
-
-def test_hybrid_sublayer_mapping_leaves_other_layouts_alone():
-    # Ordinary MoE models (indices already per HF layer), non-divisible layouts and empty data are untouched.
-    assert replay_utils._hybrid_sublayers_to_block_indices([1, 2, 3], 48, 48) == [1, 2, 3]
-    assert replay_utils._hybrid_sublayers_to_block_indices([3, 5], 61, 61) == [3, 5]
-    assert replay_utils._hybrid_sublayers_to_block_indices([60, 70], 90, 47) == [60, 70]
-    assert replay_utils._hybrid_sublayers_to_block_indices([1, 2], 48, 0) == [1, 2]
-    assert replay_utils._hybrid_sublayers_to_block_indices([1, 2], None, 48) == [1, 2]
+@pytest.mark.parametrize(
+    "pattern, num_layers, hybrid, expected",
+    [
+        # DeepSeek-V4: MoE routers on every odd hybrid layer.
+        (_DSV4_PATTERN, 43, list(range(1, 86, 2)), list(range(43))),
+        # Under pipeline parallelism each stage maps only its own routers: stage 0's (1, ..., 41) all fit below the
+        # 43 decoder layers and must still be mapped; stage 1's overflow them.
+        (_DSV4_PATTERN, 43, list(range(1, 43, 2)), list(range(21))),
+        (_DSV4_PATTERN, 43, list(range(43, 86, 2)), list(range(21, 43))),
+        # Beam: decoder layer = attention + MLP/MoE pair; MoE routers at hybrid 7, 9, 11.
+        ("*-*-*-*E*E*E", 6, [7, 9, 11], [3, 4, 5]),
+        # Pipeline separators and MTP suffixes are ignored.
+        ("*-*-*-|*E*E*E/*E", 6, [7, 9, 11], [3, 4, 5]),
+        # Nemotron-H style: one decoder layer per hybrid layer, no remapping.
+        ("MEM*E", 5, [1, 4], [1, 4]),
+    ],
+)
+def test_hybrid_router_layers_map_to_decoder_layers(pattern, num_layers, hybrid, expected):
+    config = SimpleNamespace(hybrid_layer_pattern=pattern)
+    assert replay_utils._hybrid_to_decoder_layer_indices(config, num_layers, hybrid) == expected
+    # GPTModel configs have no hybrid pattern.
+    assert replay_utils._hybrid_to_decoder_layer_indices(SimpleNamespace(), num_layers, hybrid) == hybrid
