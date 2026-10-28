@@ -54,7 +54,12 @@ from skyrl.train.config.sft_config import (
     build_skyrl_config_for_sft,
 )
 from skyrl.train.dataset.pretokenized import load_from_pretokenized
-from skyrl.train.dataset.sft_dataset import ConcatSFTDataset, SFTDataset, TextDataset
+from skyrl.train.dataset.sft_dataset import (
+    ConcatSFTDataset,
+    LazyVLMDataset,
+    SFTDataset,
+    TextDataset,
+)
 from skyrl.train.generators.utils import (
     get_response_ids_and_loss_mask_from_messages,
 )
@@ -302,6 +307,72 @@ def _save_to_cache(cache_path: str, tokenized: list) -> None:
         logger.info("Cache saved successfully")
     except Exception as e:
         logger.warning(f"Failed to save cache to {cache_path}: {e}")
+
+
+def _get_lazy_vlm_index_path(cache_dir: str, cache_key: str) -> str:
+    """Path of the lazy VLM index for a cache key (``lazy_vlm_dataset``).
+
+    The index is a small JSON file holding the source-row indices and token
+    lengths that survived tokenization, a sibling of the eager cache directory
+    for the same key (``<cache_dir>/<cache_key>.lazy_vlm.json``), so the two
+    paths never collide and share one key computation.
+    """
+    return _get_cache_path(cache_dir, cache_key) + ".lazy_vlm.json"
+
+
+def _load_lazy_vlm_index(index_path: str, num_rows: int) -> Optional[tuple[list[int], list[int]]]:
+    """Load a lazy VLM index written by :func:`_save_lazy_vlm_index`.
+
+    Returns ``(indices, lengths)``, or ``None`` when the file is missing,
+    unreadable, malformed (non-integer entries, mismatched list lengths,
+    indices outside ``[0, num_rows)``, non-positive lengths) or built over a
+    source with a different row count (the same guard the eager cache lacks;
+    the cache key does not see the data). Every one of those rebuilds the
+    index instead of failing startup.
+    """
+    if not os.path.isfile(index_path):
+        return None
+    try:
+        with open(index_path) as f:
+            meta = json.load(f)
+        indices = [int(i) for i in meta["indices"]]
+        lengths = [int(n) for n in meta["lengths"]]
+        valid = (
+            meta.get("num_rows") == num_rows
+            and len(indices) == len(lengths)
+            and all(0 <= i < num_rows for i in indices)
+            and all(n > 0 for n in lengths)
+        )
+        if not valid:
+            logger.warning(f"Ignoring lazy VLM index {index_path}: it does not match the dataset ({num_rows} rows)")
+            return None
+        return indices, lengths
+    except Exception as e:
+        logger.warning(f"Failed to load lazy VLM index from {index_path}: {e}")
+        return None
+
+
+def _save_lazy_vlm_index(index_path: str, num_rows: int, indices: list[int], lengths: list[int]) -> None:
+    """Write a lazy VLM index atomically: a per-writer temp file in the same
+    directory, then ``os.replace`` onto ``index_path`` (NFS-safe like
+    :func:`_save_to_cache`; concurrent jobs sharing a cache never see a partial
+    file or each other's temp file). Failures are logged, never raised: the
+    index is an optimization for the next run."""
+    temp_path = None
+    try:
+        cache_dir = os.path.dirname(index_path) or "."
+        os.makedirs(cache_dir, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(prefix=os.path.basename(index_path) + ".", suffix=".tmp", dir=cache_dir)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"num_rows": num_rows, "indices": indices, "lengths": lengths}, f)
+        os.replace(temp_path, index_path)
+        temp_path = None
+        logger.info(f"Saved lazy VLM index ({len(indices)} examples) to {index_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save lazy VLM index to {index_path}: {e}")
+    finally:
+        if temp_path is not None and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 @functools.lru_cache(maxsize=512)
@@ -1036,7 +1107,7 @@ class SFTTrainer:
     # Data
     # ------------------------------------------------------------------ #
 
-    def _load_and_tokenize(self, dataset_name: str, dataset_split: str) -> list:
+    def _load_and_tokenize(self, dataset_name: str, dataset_split: str) -> list | SFTDataset:
         """Load and tokenize a dataset with caching support.
 
         Auto-detects the dataset format based on column names:
@@ -1055,13 +1126,22 @@ class SFTTrainer:
         - Set ``force_recache=True`` to ignore cache and re-tokenize.
         - Set ``disable_cache=True`` to disable caching entirely.
 
+        VLM datasets with ``lazy_vlm_dataset`` take the :meth:`_load_lazy_vlm`
+        path instead (same filtering, same cache key; only an index is cached).
+
         Args:
             dataset_name: HuggingFace dataset name (e.g. ``"yahma/alpaca-cleaned"``).
             dataset_split: Dataset split (e.g. ``"train[:100]"`` or ``"test"``).
 
         Returns a list of tokenized examples (dicts with ``input_ids``,
-        ``attention_mask``, ``num_actions``).
+        ``attention_mask``, ``num_actions``), or, for VLM chat datasets with
+        ``lazy_vlm_dataset``, a :class:`LazyVLMDataset` yielding the same rows.
         """
+        if self.is_vlm and self.sft_cfg.lazy_vlm_dataset:
+            lazy = self._load_lazy_vlm(dataset_name, dataset_split)
+            if lazy is not None:
+                return lazy
+
         # Check cache first (unless disabled or force_recache)
         if not self.sft_cfg.disable_cache:
             cache_dir = self.sft_cfg.cache_dir
@@ -1240,6 +1320,88 @@ class SFTTrainer:
 
             shutil.rmtree(tokenizer_cache_dir, ignore_errors=True)
 
+    def _load_lazy_vlm(self, dataset_name: str, dataset_split: str) -> Optional[LazyVLMDataset]:
+        """Load a VLM chat dataset as a :class:`LazyVLMDataset` (``lazy_vlm_dataset``).
+
+        One sequential tokenization pass over the split (the same per-row
+        :func:`tokenize_chat_example` call as the eager path, so ``None``
+        results and over-length VLM rows are dropped identically) records the
+        surviving source-row indices and their token lengths; the image tensors
+        it produces are discarded. The dataset then re-tokenizes each example
+        when it is fetched. With caching enabled, the index is stored under the
+        eager cache key as ``<key>.lazy_vlm.json`` (see
+        :func:`_get_lazy_vlm_index_path`) and a later run skips the pass.
+
+        Returns ``None`` when the dataset is not chat format (no
+        ``messages_key`` column): such rows carry no images, so the caller
+        falls back to eager tokenization.
+        """
+        logger.info(f"Loading dataset '{dataset_name}' split='{dataset_split}' (lazy VLM tokenization)...")
+        dataset = load_dataset(dataset_name, split=dataset_split)
+        columns = dataset.column_names
+        if self.sft_cfg.messages_key not in columns:
+            logger.warning(
+                f"lazy_vlm_dataset: dataset '{dataset_name}' has no '{self.sft_cfg.messages_key}' column (not chat "
+                "format) and carries no images; tokenizing it eagerly instead."
+            )
+            return None
+
+        tokenize_fn = functools.partial(
+            tokenize_chat_example,
+            tokenizer=self.tokenizer,
+            max_length=self.sft_cfg.max_length,
+            messages_key=self.sft_cfg.messages_key,
+            train_on_what=self.sft_cfg.train_on_what,
+            tools_key=self.sft_cfg.tools_key if self.sft_cfg.tools_key in columns else None,
+            system_key=self.sft_cfg.system_key if self.sft_cfg.system_key in columns else None,
+            processor=self.processor,
+        )
+        num_rows = len(dataset)
+
+        index_path = None
+        if not self.sft_cfg.disable_cache:
+            cache_key = _compute_cache_key(
+                dataset_name=dataset_name,
+                dataset_split=dataset_split,
+                model_path=self.sft_cfg.model.path,
+                max_length=self.sft_cfg.max_length,
+                messages_key=self.sft_cfg.messages_key,
+                train_on_what=self.sft_cfg.train_on_what.value,
+                tools_key=self.sft_cfg.tools_key if self.sft_cfg.tools_key else None,
+                system_key=self.sft_cfg.system_key if self.sft_cfg.system_key else None,
+            )
+            index_path = _get_lazy_vlm_index_path(self.sft_cfg.cache_dir, cache_key)
+            if not self.sft_cfg.force_recache:
+                cached = _load_lazy_vlm_index(index_path, num_rows)
+                if cached is not None:
+                    indices, lengths = cached
+                    logger.info(f"Loaded lazy VLM index from cache: {index_path} ({len(indices)} examples)")
+                    return LazyVLMDataset(dataset, indices, lengths, tokenize_fn)
+            logger.info("Cache miss or force_recache=True, tokenizing dataset...")
+            logger.info(f"Cache key: {cache_key}")
+
+        # Sequential, like eager VLM tokenization (the processor does not
+        # round-trip through the spawn-based worker pool).
+        logger.info("Tokenizing dataset (sequential, lazy VLM: keeping row indices and lengths only)...")
+        indices: list[int] = []
+        lengths: list[int] = []
+        for row, example in enumerate(dataset):
+            tokenized = tokenize_fn(example)
+            if tokenized is not None:
+                indices.append(row)
+                lengths.append(len(tokenized["input_ids"]))
+            if (row + 1) % 1000 == 0:
+                logger.info(f"Tokenized {row + 1}/{num_rows} rows ({len(indices)} kept)")
+        logger.info(
+            f"Tokenized {len(indices)} examples (filtered from {num_rows}); "
+            "image tensors are recomputed when each example is fetched"
+        )
+
+        if index_path is not None:
+            _save_lazy_vlm_index(index_path, num_rows, indices, lengths)
+
+        return LazyVLMDataset(dataset, indices, lengths, tokenize_fn)
+
     def load_dataset(self) -> SFTDataset:
         """Load the training dataset(s): pretokenized stores or tokenize-on-load.
 
@@ -1250,7 +1412,9 @@ class SFTTrainer:
         Otherwise each ``(name, split)`` pair from
         ``train_datasets``/``train_dataset_splits`` is tokenized independently
         through :meth:`_load_and_tokenize` (preserving per-dataset cache keys)
-        and wrapped in a :class:`TextDataset`.
+        and wrapped in a :class:`TextDataset`, unless it already came back as
+        an :class:`SFTDataset` (a :class:`LazyVLMDataset` under
+        ``lazy_vlm_dataset``).
 
         Returns:
             A single :class:`SFTDataset`. Multiple sources are concatenated in
@@ -1269,14 +1433,14 @@ class SFTTrainer:
                 source = self._load_and_tokenize(name, split)
                 if len(source) == 0:
                     raise ValueError(f"Training dataset '{name}' (split '{split}') tokenized to 0 examples.")
-                sources.append(TextDataset(source))
+                sources.append(source if isinstance(source, SFTDataset) else TextDataset(source))
         if len(sources) == 1:
             return sources[0]
         per_dataset = ", ".join(f"{name}={len(source)}" for name, source in zip(source_names, sources))
         logger.info(f"Concatenated {len(sources)} training datasets: {per_dataset}")
         return ConcatSFTDataset(sources)
 
-    def load_eval_datasets(self) -> Optional[list[tuple[str, list]]]:
+    def load_eval_datasets(self) -> Optional[list[tuple[str, list | SFTDataset]]]:
         """Load and tokenize the eval dataset(s), or return ``None`` if not configured.
 
         When ``eval_pretokenized_dataset_paths`` is set, each store is loaded
@@ -1287,7 +1451,9 @@ class SFTTrainer:
 
         Returns:
             One ``(name, tokenized)`` pair per eval source, where ``name``
-            namespaces the eval metrics (``eval/{name}/...``).
+            namespaces the eval metrics (``eval/{name}/...``) and ``tokenized``
+            is a list of examples or a map-style :class:`SFTDataset`
+            (pretokenized stores, :class:`LazyVLMDataset`).
         """
         if self.sft_cfg.eval_pretokenized_dataset_paths:
             return [
@@ -1296,7 +1462,7 @@ class SFTTrainer:
             ]
         if not self.sft_cfg.eval_datasets:
             return None
-        eval_sets: list[tuple[str, list]] = []
+        eval_sets: list[tuple[str, list | SFTDataset]] = []
         for name, dataset, split in zip(
             self.sft_cfg.eval_dataset_names, self.sft_cfg.eval_datasets, self.sft_cfg.eval_dataset_splits
         ):
@@ -1467,7 +1633,7 @@ class SFTTrainer:
             multiprocessing_context="spawn" if num_workers > 0 else None,
         )
 
-    def build_eval_dataloader(self, eval_tokenized: list) -> StatefulDataLoader:
+    def build_eval_dataloader(self, eval_tokenized: list | SFTDataset) -> StatefulDataLoader:
         """Build the eval ``StatefulDataLoader``.
 
         Order is sequential and the final short chunk is kept (``drop_last=False``);

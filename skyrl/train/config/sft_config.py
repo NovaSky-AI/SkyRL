@@ -254,6 +254,14 @@ class SFTConfig(BaseConfig):
     # ---- Data loading ----
     num_workers: int = 8
     """Number of worker processes for parallel tokenization during dataset loading. Set to 0 for single-threaded."""
+    lazy_vlm_dataset: bool = False
+    """Tokenize VLM (image) chat datasets lazily instead of materializing every row's ``pixel_values`` in memory.
+    One up-front pass still runs the tokenizer and image processor over the split (dropping rows that tokenize to
+    nothing or exceed ``max_length``, and recording token lengths), but only the surviving source-row indices and
+    lengths are kept (and cached as ``<cache_key>.lazy_vlm.json`` under ``cache_dir``); each example is re-tokenized
+    from the arrow-backed source when the dataloader fetches it
+    (:class:`~skyrl.train.dataset.sft_dataset.LazyVLMDataset`). Set ``dataloader_num_workers > 0`` to overlap that
+    per-fetch processing with training. Ignored for text-only models, Alpaca-format datasets and pretokenized stores."""
     async_batch_collation: bool = True
     """Overlap the next stateful-dataloader batch with the current GPU step.
 
