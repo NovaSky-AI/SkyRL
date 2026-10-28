@@ -304,6 +304,9 @@ def test_callbacks_fire_during_dummy_sft_training(mock_dispatch):
     for name, snap in recorder.events:
         snaps_by_event.setdefault(name, []).append(snap)
     assert [snap["global_step"] for snap in snaps_by_event["on_step_end"]] == [1, 2]
+    # As in the regular loop, the epoch starts at step 1 and ends at the last step.
+    assert snaps_by_event["on_epoch_start"][0]["global_step"] == 1
+    assert snaps_by_event["on_epoch_end"][0]["global_step"] == 2
     for snap in snaps_by_event["on_step_end"]:
         assert snap["has_batch"] and "loss" in snap["metrics_keys"], snap
     for snap in snaps_by_event["on_log"]:

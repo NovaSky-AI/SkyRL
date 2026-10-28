@@ -1807,11 +1807,12 @@ class SFTTrainer:
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
         self._fire("on_train_start")
+        # SkyRL starts counting at step 1
+        self.global_step = 1
         self._fire("on_epoch_start")
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
-            # SkyRL starts counting at step 1
             for step in range(1, num_steps + 1):
                 self.global_step = step
                 all_timings: dict[str, float] = {}
