@@ -93,4 +93,5 @@ python examples/train/cholec/cholec_entrypoint.py \
   trainer.dump_eval_results=true \
   trainer.ckpt_path="$CKPT_PATH" \
   trainer.algorithm.loss_reduction=token_mean_legacy \
+  trainer.flash_attn=false \
   "$@"
