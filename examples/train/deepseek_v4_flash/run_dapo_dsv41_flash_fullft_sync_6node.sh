@@ -30,9 +30,11 @@ LOGGER="${LOGGER:-wandb}"
 MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-20}"
 
 MAX_PROMPT_LENGTH=2048
-# GSM8K full FT at EP=48 peaks at ~97 GiB/GPU (fp32 main params live on the host with the precision-aware
-# optimizer); the V4.1 DAPO LoRA recipe adds ~25 GiB of activations at 2K responses.
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-2048}"
+# 73 GiB/GPU of bf16 params + grads at EP=48 (fp32 main params live on the host with the precision-aware
+# optimizer), plus activations. With mla_up_proj recompute and the mHC mapping recompute patch, 4096-token responses
+# (rows up to ~6K tokens) train for 20 steps; without them 4096 OOMs in step 1 and 3072 by step 4. At 2048, 18-35%
+# of DAPO responses are truncated and AIME-2024 scores mostly measure that.
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 INFERENCE_ENGINE_MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 512))  # + chat-template headroom
 OVERLONG_BUFFER_LEN="${OVERLONG_BUFFER_LEN:-$((MAX_RESPONSE_LENGTH / 4))}"  # penalty starts this far before the cap
 OVERLONG_BUFFER_PENALTY_FACTOR=1.0
@@ -118,9 +120,9 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.moe_enable_routing_replay=$ENABLE_ROUTING_REPLAY \
   generator.inference_engine.enable_return_routed_experts=$ENABLE_ROUTING_REPLAY \
   `# Selective recompute (DSv4 attention rejects core_attn checkpointing, mHC rejects full recompute). moe alone` \
-  `# OOMs on 8k-token rows.` \
+  `# OOMs on 8k-token rows; mla_up_proj drops the q up-projection output (~7 GiB at ~3.5K-token rows).` \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="selective" \
-  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm] \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm,mla_up_proj] \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
   `# No mlp_chunks_for_training: megatron-core then routes each sequence chunk separately, but R3 hands every` \

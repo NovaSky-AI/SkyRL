@@ -107,9 +107,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.enable_return_routed_experts=$ENABLE_ROUTING_REPLAY \
   `# Selective recompute: megatron-core's DSv4 attention rejects core_attn checkpointing and mHC` \
   `# rejects full recompute. mHC keeps 4 residual streams per sub-layer, so recompute it with the MoE` \
-  `# layers (megatron-core forbids mhc together with mlp).` \
+  `# layers (megatron-core forbids mhc together with mlp). mla_up_proj drops the q up-projection output.` \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="selective" \
-  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm] \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm,mla_up_proj] \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
   trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=64 \

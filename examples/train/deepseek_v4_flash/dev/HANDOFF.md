@@ -722,3 +722,14 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
 - 4096 run status: steps 1-4 fit (no OOM; before the fixes 4096 OOMed in step 1). Step-0 AIME-2024 avg_score
   0.533, pass@12 0.933 (avg 2140 tokens; 13.3% of eval responses still hit the 4096 cap, all scored 0, vs 88% of
   finished ones correct). Rollout reward 0.50 / 0.57 / 0.60 / 0.55 for steps 1-4; ~760 s/step.
+- **4096 responses, 20 steps, complete** (`v41-dapo-fullft6-resp4k-memfix-1793172399.log`, W&B
+  `dsv41_flash_dapo/dsv41_flash_dapo_fullft_r3_resp4k_memfix`, no checkpoints): no OOM.
+  - Rollout reward 0.499 0.568 0.599 0.547 0.674 0.525 0.442 0.609 0.657 0.678 0.623 0.653 0.678 0.745 0.576 0.651
+    0.632 0.654 0.787 0.651 (2560 run: 0.071 -> 0.565; 2048: -0.22 -> 0.44).
+  - Step time 913 (step 1) then 763 -> 668 s (responses get shorter).
+  - AIME-2024 (30 problems x 12) avg_score / pass@12 / truncated at 4096 / accuracy of finished answers:
+    step 0 0.533 / 0.933 / 13.3% / 0.88; step 10 0.572 / 0.967 / 8.1% / 0.85; step 20 0.506 / 0.933 / 5.3% / 0.79.
+    The policy learns to finish within the cap (eval avg tokens 2140 -> 1857), but AIME accuracy is flat within
+    30-problem noise; the training reward gain is mostly on DAPO-17k.
+  - Recipe defaults now: `MAX_RESPONSE_LENGTH=4096`, `recompute_modules=[moe,mhc,layernorm,mla_up_proj]` in both
+    V4.1 full-FT recipes (LoRA recipes unchanged: mla_up_proj not tested under LoRA).
