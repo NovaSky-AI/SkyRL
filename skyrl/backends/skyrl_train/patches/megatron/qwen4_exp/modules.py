@@ -564,7 +564,8 @@ def _flex_sequence_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor
         in_block = bm[qi, kv // r] & (kv < block_end)
         return ((kv <= qi) & (in_block | tail)) | ((qi >= real_len) & (kv == 0))
 
-    mask = create_block_mask(mask_mod, None, None, padded, padded, device=q.device)
+    # _compile=True builds the block mask tile by tile; eager materializes the full [padded, padded] mask.
+    mask = create_block_mask(mask_mod, None, None, padded, padded, device=q.device, _compile=True)
     q, k, v = (F.pad(t, (0, 0, 0, 0, 0, pad)).transpose(0, 1).unsqueeze(0) for t in (q, k, v))
     out = _compiled_flex_attention()(q, k, v, block_mask=mask, scale=scale, enable_gqa=True)
     return out[0, :, :length].transpose(0, 1)
