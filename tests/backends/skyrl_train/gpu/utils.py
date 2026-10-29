@@ -27,6 +27,7 @@ from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGrou
 from skyrl.backends.skyrl_train.inference_servers.setup import create_inference_servers
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     _uses_lora_weight_sync,
+    _uses_online_nvfp4_quantization,
     build_vllm_cli_args,
 )
 from skyrl.backends.skyrl_train.inference_servers.vllm_router import VLLMRouter
@@ -663,6 +664,7 @@ class InferenceEngineState:
             enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
             enable_return_sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
             uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
+            uses_online_nvfp4_quantization=_uses_online_nvfp4_quantization(cfg),
             data_parallel_size=ie_cfg.data_parallel_size,
             tokenizer=get_tokenizer(cfg.trainer.policy.model.path),
         )

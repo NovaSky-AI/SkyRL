@@ -24,6 +24,7 @@ from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
 from .utils import (
     _uses_lora_weight_sync,
+    _uses_online_nvfp4_quantization,
     build_router_args,
     build_vllm_cli_args,
     get_pd_cli_args,
@@ -340,6 +341,7 @@ def build_new_inference_client(
         enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
         enable_return_sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
+        uses_online_nvfp4_quantization=_uses_online_nvfp4_quantization(cfg),
         data_parallel_size=ie_cfg.data_parallel_size,
         tokenizer=tokenizer,
     )

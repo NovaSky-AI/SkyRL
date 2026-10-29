@@ -538,6 +538,14 @@ class RemoteInferenceClient(InferenceEngineInterface):
     and LoRA-only broadcasts cannot repopulate it. Must be kept in sync with the same gate vLLM
     uses for `enable_lora` (see `_uses_lora_weight_sync` in inference_servers/utils.py)."""
 
+    uses_online_nvfp4_quantization: bool = False
+    """True when vLLM quantizes the routed experts to NVFP4 online (``quantization=nvfp4*``,
+    e.g. ``nvfp4_per_token``). When True, `sleep()` is forced to level=1: on vLLM 0.32 a level-2
+    sleep loses NVFP4 MoE kernel state (the a1/a2 global scales and ``g1_scale_c`` are zeroed, and
+    restoring them is not enough) that the post-wake reload does not rebuild, so every rollout
+    after the first weight sync is garbage. See `_uses_online_nvfp4_quantization` in
+    inference_servers/utils.py."""
+
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
@@ -1276,6 +1284,19 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """Resume after pause."""
         return await self.resume()
 
+    def effective_sleep_level(self, level: int) -> int:
+        """The level `sleep(level)` actually uses.
+
+        Clamped to 1 when level 2 cannot be woken from correctly:
+        - LoRA weight sync (mirrors BaseVLLMInferenceEngine.sleep): level=2 discards the base
+          model with no CPU backup, and LoRA-only broadcasts cannot repopulate it.
+        - Online NVFP4 quantization: level=2 loses NVFP4 MoE kernel state that the reload does
+          not rebuild (see ``uses_online_nvfp4_quantization``).
+        """
+        if self.uses_lora_weight_sync or self.uses_online_nvfp4_quantization:
+            return min(level, 1)
+        return level
+
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Put all backends to sleep (offload weights to CPU).
@@ -1288,15 +1309,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Returns:
             Dict mapping server_url to response.
         """
-        # Mirror BaseVLLMInferenceEngine.sleep: when the trainer syncs LoRA adapters
-        # only, force level=1 so the base model survives via CPU backup. level=2
-        # discards weights with no source to restore from on wake_up(["weights"]).
-        if self.uses_lora_weight_sync and level != 1:
+        effective = self.effective_sleep_level(level)
+        if effective != level:
             logger.info(
-                "Forcing sleep level=1 (uses_lora_weight_sync=True); requested level=%d would discard the base model.",
+                "Forcing sleep level=%d (uses_lora_weight_sync=%s, uses_online_nvfp4_quantization=%s); "
+                "requested level=%d.",
+                effective,
+                self.uses_lora_weight_sync,
+                self.uses_online_nvfp4_quantization,
                 level,
             )
-            level = 1
+            level = effective
         # vLLM's /sleep pauses the scheduler (default mode "abort") and, at level >= 1, resets
         # the prefix cache including running requests. vLLM 0.31 rejected that reset with
         # routed-experts capture (`enable_return_routed_experts`) unless paused in "keep" mode;

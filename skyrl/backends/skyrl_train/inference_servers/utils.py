@@ -150,6 +150,18 @@ def _uses_lora_weight_sync(cfg: SkyRLTrainConfig) -> bool:
     return True
 
 
+def _uses_online_nvfp4_quantization(cfg: SkyRLTrainConfig) -> bool:
+    """Return True when vLLM quantizes to NVFP4 online (``quantization=nvfp4*``, e.g. ``nvfp4_per_token``).
+
+    Such engines must not sleep at level 2 (see ``RemoteInferenceClient.uses_online_nvfp4_quantization``).
+    """
+    ie_cfg = cfg.generator.inference_engine
+    for kwargs in (ie_cfg.engine_init_kwargs, ie_cfg.prefill_init_kwargs, ie_cfg.decode_init_kwargs):
+        if str((kwargs or {}).get("quantization") or "").startswith("nvfp4"):
+            return True
+    return False
+
+
 def _moe_router_topk(model_path: str) -> Optional[int]:
     """Number of experts routed per token from the HF config, or None for a dense model."""
     from transformers import AutoConfig

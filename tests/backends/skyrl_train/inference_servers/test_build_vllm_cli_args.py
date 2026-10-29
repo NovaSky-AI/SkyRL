@@ -7,6 +7,7 @@ import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     _apply_serialized_fp8_weight_sync_defaults,
+    _uses_online_nvfp4_quantization,
     build_vllm_cli_args,
     get_pd_cli_args,
     get_pd_p2p_connector_name,
@@ -155,6 +156,22 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
 
 
 @pytest.mark.vllm
+@pytest.mark.parametrize(
+    "field, quantization, expected",
+    [
+        ("engine_init_kwargs", None, False),
+        ("engine_init_kwargs", "fp8", False),
+        ("engine_init_kwargs", "nvfp4_per_token", True),
+        ("decode_init_kwargs", "nvfp4_per_token", True),
+    ],
+)
+def test_uses_online_nvfp4_quantization(field, quantization, expected):
+    cfg = SkyRLTrainConfig()
+    if quantization is not None:
+        setattr(cfg.generator.inference_engine, field, {"quantization": quantization})
+    assert _uses_online_nvfp4_quantization(cfg) is expected
+
+
 def test_default_logprobs_mode_is_processed_logprobs():
     args = build_vllm_cli_args(SkyRLTrainConfig())
 
