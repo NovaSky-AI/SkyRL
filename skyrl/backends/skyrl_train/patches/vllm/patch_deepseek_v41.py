@@ -10,7 +10,15 @@ the same name rather than a new one.
 Installed in every vLLM process (the frontend and the engine core must agree on the class). Set
 ``SKYRL_DEEPSEEK_V41_TEXT_ONLY=0`` to keep vLLM's vision-language class.
 
-Remove once vLLM registers a text-only DeepSeek-V4.1 architecture.
+TODO: remove once the pinned vLLM's own V4.1 class covers all three reasons, then serve it with
+``language_model_only=True`` (already in vLLM 0.32.0; skips the vision tower and multimodal input handling):
+- LoRA on the vision-language class: vllm-project/vllm#57245 (open; also adapts the compressor and grouped
+  output projections, which the text class's LoRA leaves out);
+- layerwise reload: vllm-project/vllm#64357 (open; drops the VL wrappers' finalize-during-load workaround and runs
+  the model-level hook once per reload, the same fix patch_deepseek_v4_reload.py backports).
+Check that the pinned ``vl_model.py`` class lists ``SupportsLoRA`` and no longer sets
+``finalizes_weights_during_load``, then drop this module, its entry point in ``pyproject.toml`` and
+``SKYRL_DEEPSEEK_V41_TEXT_ONLY``, and re-run the V4.1 roundtrip test with weight sync plus a LoRA step.
 """
 
 import os
