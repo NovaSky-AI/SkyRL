@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from collections import defaultdict
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -67,14 +68,14 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype im
 from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
     apply_distopt_mixed_dtype_group_index_patch,
 )
-from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_recompute_mappings import (
-    apply_mhc_recompute_mappings_patch,
-)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_recompute_mappings import (
+    apply_mhc_recompute_mappings_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
@@ -159,6 +160,45 @@ apply_clip_grads_mixed_dtype_patch()
 apply_checkpoint_without_output_frozen_inputs_patch()
 # Also recompute the mHC mappings (their fp32 input copy) under recompute_modules=[mhc].
 apply_mhc_recompute_mappings_patch()
+
+
+def _dev_profile_ranks() -> set:
+    return {int(r) for r in os.environ.get("SKYRL_DSV41_PROFILE_RANKS", "0").split(",") if r.strip()}
+
+
+def _dev_log_timing(name: str, call: int, seconds: float) -> None:
+    if os.environ.get("SKYRL_DSV41_STEP_TIMING") == "1":
+        logger.info(f"[dev timing] rank={torch.distributed.get_rank()} {name} call={call} {seconds:.2f}s")
+
+
+def _dev_maybe_start_profiler(call: int):
+    target = os.environ.get("SKYRL_DSV41_PROFILE_FB_CALL")
+    if not target or call != int(target) or torch.distributed.get_rank() not in _dev_profile_ranks():
+        return None
+    torch.cuda.synchronize()
+    prof = torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        record_shapes=False,
+        with_stack=False,
+    )
+    prof.__enter__()
+    logger.info(f"[dev profile] rank={torch.distributed.get_rank()} profiling forward_backward call {call}")
+    return prof
+
+
+def _dev_finish_profiler(prof, call: int, seconds: float) -> None:
+    prof.__exit__(None, None, None)
+    out_dir = os.environ.get("SKYRL_DSV41_PROFILE_DIR", "/tmp")
+    os.makedirs(out_dir, exist_ok=True)
+    rank = torch.distributed.get_rank()
+    averages = prof.key_averages()
+    path = os.path.join(out_dir, f"rank{rank}_fb{call}.txt")
+    with open(path, "w") as f:
+        f.write(f"forward_backward call {call}: {seconds:.2f}s wall\n\n")
+        f.write(averages.table(sort_by="self_cuda_time_total", row_limit=80, max_name_column_width=90))
+        f.write("\n\n")
+        f.write(averages.table(sort_by="cpu_time_total", row_limit=40, max_name_column_width=90))
+    logger.info(f"[dev profile] rank={rank} wrote {path}")
 
 
 # Selective-recompute modules an attention variant cannot take.
@@ -1268,7 +1308,30 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             m_batch["num_tokens_local"] = count
             m_batch["num_tokens_global"] = int(total.item())
 
-    def forward_backward(
+    def forward_backward(self, data: TrainingInputBatch, *args, **kwargs) -> WorkerOutput:
+        """Times each call; with ``SKYRL_DSV41_PROFILE_FB_CALL=N`` profiles the N-th call (dev, DeepSeek-V4.1 work)."""
+        self._dev_fb_calls = getattr(self, "_dev_fb_calls", 0) + 1
+        prof = _dev_maybe_start_profiler(self._dev_fb_calls)
+        start = time.perf_counter()
+        try:
+            return self._forward_backward_impl(data, *args, **kwargs)
+        finally:
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - start
+            _dev_log_timing("forward_backward", self._dev_fb_calls, elapsed)
+            if prof is not None:
+                _dev_finish_profiler(prof, self._dev_fb_calls, elapsed)
+
+    def optim_step(self) -> Optional[float]:
+        self._dev_optim_calls = getattr(self, "_dev_optim_calls", 0) + 1
+        start = time.perf_counter()
+        try:
+            return self._optim_step_impl()
+        finally:
+            torch.cuda.synchronize()
+            _dev_log_timing("optim_step", self._dev_optim_calls, time.perf_counter() - start)
+
+    def _forward_backward_impl(
         self,
         data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
@@ -1486,7 +1549,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
-    def optim_step(self) -> Optional[float]:
+    def _optim_step_impl(self) -> Optional[float]:
         """
         Perform optimizer step.
 
