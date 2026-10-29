@@ -757,3 +757,18 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   - Rollout reward 0.504 0.558 0.622 0.603 0.698 0.531 0.509 0.660 0.707 0.677 (mean 0.607) vs dual_clip mean 0.580;
     AIME-2024 at step 10 avg 0.583 / pass@12 0.967 vs 0.572 / 0.967.
   - Recipe knob `POLICY_LOSS_TYPE` (default `dual_clip`; `dppo` for the faster variant).
+- **Reload patch reshaped after upstream vLLM (2026-10-29, 11a967c8; PRs #2560 / #2566):** attention sinks load
+  through a `load_attention_sink` weight loader (vllm#57797, merged, not in 0.32.0) and the model-level hook runs
+  once per layerwise reload instead of per chunk (vllm#64357, open); the SkyRL-side `defer_model_finalize` /
+  sink stash are gone. Roundtrips pass: V4 4-layer logprob diff 0.048, post-sync vLLM resync 0.016
+  (`v4rt-reshape-1793298802.log`, node 0); V4.1 6-layer post-sync Megatron-vs-vLLM 0.262 (gate 0.3; old patch
+  0.258, sinks unpatched 0.360; `v41rt-reshape-1793298787.log`, node 6).
+- **All-rank profiling run died with a host OOM on node 0** (`v41-prof-fb-all-1793296405`): the kernel killed a
+  policy worker (anon 111 GB + shmem 312 GB, its usual footprint) with `CONSTRAINT_MEMORY_POLICY, nodemask=0`,
+  i.e. NUMA node 0 was full, not the 3.9 TB host, right after step 1 (before any profiling). Same family as the
+  earlier step-10 save OOM on node 7. Open: the workers' pinned host memory may be bound to one NUMA node.
+- **Narrow profile of one forward_backward call** (`v41-prof-fb-1793293102`, ranks 0 and 24, 4096 recipe; hook:
+  `SKYRL_DSV41_PROFILE_FB_CALL` etc.): 105 s wall, of which ~95% of GPU time is NCCL on both ranks -- AllGather
+  ~50-54 s (656 calls, ~80 ms each; consistent with the MoE alltoall dispatcher's per-layer token-count gather,
+  80 per micro-batch, plus Engram's) and all-to-all ~39 s (2880 calls); ~4 s of compute per rank; CPU waits 79 s in
+  cudaEventSynchronize. The per-layer sync points wait on the slowest of 48 ranks; which rank and why is open.
