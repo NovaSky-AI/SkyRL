@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from flash_attn.bert_padding import pad_input, unpad_input
 from loguru import logger
 from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
@@ -47,6 +46,19 @@ from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
 )
+
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input
+except ImportError:
+    # flash-attn is CUDA/ROCm-only. On XPU, transformers loads FA2 from the kernels hub
+    # (kernels-community/flash-attn2), whose builds for torch >= 2.13 no longer ship
+    # bert_padding, so use transformers' identical helpers.
+    from transformers.modeling_flash_attention_utils import (
+        _pad_input as pad_input,
+    )
+    from transformers.modeling_flash_attention_utils import (
+        _unpad_input as unpad_input,
+    )
 
 
 @dataclass(frozen=True)

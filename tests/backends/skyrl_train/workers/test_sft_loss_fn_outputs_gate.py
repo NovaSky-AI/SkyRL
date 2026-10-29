@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.utils.device import device_type
 from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
 from skyrl.train.config import SkyRLTrainConfig
@@ -84,7 +85,7 @@ def _run_forward_backward_micro(return_per_token_outputs=True, loss_fn_config=No
     action_log_probs = torch.full((BATCH_SIZE, NUM_ACTIONS), -0.5)
     _patch_model(worker, action_log_probs)
     experience = _make_experience()
-    with patch("torch.cuda.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
+    with patch(f"torch.{device_type()}.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
         return worker._forward_backward_micro(
             experience,
             microbatch_weight=1.0,
@@ -100,7 +101,7 @@ def _run_forward_micro_with_loss(return_per_token_outputs=True, loss_fn_config=N
     action_log_probs = torch.full((BATCH_SIZE, NUM_ACTIONS), -0.5)
     _patch_model(worker, action_log_probs)
     experience = _make_experience()
-    with patch("torch.cuda.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
+    with patch(f"torch.{device_type()}.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
         return worker._forward_micro_with_loss(
             experience,
             loss_fn="cross_entropy",
@@ -126,7 +127,7 @@ def _run_forward_backward_micro_rl(return_per_token_outputs=True):
     experience = _make_experience()
     experience.action_log_probs = torch.full((BATCH_SIZE, NUM_ACTIONS), -0.5)
     experience.advantages = torch.ones(BATCH_SIZE, NUM_ACTIONS)
-    with patch("torch.cuda.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
+    with patch(f"torch.{device_type()}.current_device", return_value="cpu"), patch("torch.autocast", MagicMock()):
         return worker._forward_backward_micro(
             experience,
             microbatch_weight=1.0,

@@ -1,8 +1,11 @@
 import pytest
 import torch
-from flash_attn.bert_padding import pad_input, unpad_input
 
-from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
+from skyrl.backends.skyrl_train.workers.model_wrapper import (
+    HFModelWrapper,
+    pad_input,
+    unpad_input,
+)
 
 
 @pytest.fixture

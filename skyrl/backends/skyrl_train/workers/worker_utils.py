@@ -12,6 +12,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     make_packed_field_padding,
     packed_dummy_row_segments,
 )
+from skyrl.backends.skyrl_train.utils.device import device_type
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
@@ -366,8 +367,8 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             return local_num_microbatches
 
         # Get the maximum number of batches across all DP workers
-        if torch.cuda.is_available():
-            device = torch.cuda.current_device()
+        if torch.get_device_module(device_type()).is_available():
+            device = torch.get_device_module(device_type()).current_device()
         else:
             device = torch.device("cpu")
         num_microbatches_tensor = torch.tensor(local_num_microbatches, dtype=torch.long, device=device)

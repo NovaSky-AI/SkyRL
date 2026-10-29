@@ -18,6 +18,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
+from skyrl.backends.skyrl_train.utils.device import device_type
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
@@ -216,7 +217,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # PolicyWorkerBase) basename-guards against a malformed model_id
             # escaping lora_sync_path even though api.py already validates IDs.
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
-            torch.cuda.empty_cache()
+            torch.get_device_module(device_type()).empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
@@ -224,7 +225,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if cache_reset_task is not None:
                 await cache_reset_task
             if self.cfg.placement.colocate_all:
-                torch.cuda.empty_cache()
+                torch.get_device_module(device_type()).empty_cache()
             torch.distributed.barrier()
             return
 

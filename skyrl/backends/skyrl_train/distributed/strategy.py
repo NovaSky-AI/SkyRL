@@ -10,6 +10,7 @@ from loguru import logger
 from torch import distributed as dist
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
 
+from skyrl.backends.skyrl_train.utils.device import device_type
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.utils.tok import check_is_vlm, get_processor
 
@@ -81,7 +82,7 @@ class DistributedStrategy(ABC):
             is_cpu_tensor = data.device.type == "cpu"
 
             if is_cpu_tensor:
-                data = data.to(torch.cuda.current_device())
+                data = data.to(torch.get_device_module(device_type()).current_device())
             if op == "mean":
                 group_size = dist.get_world_size(group) if group is not None else self.world_size
                 data /= group_size
@@ -108,8 +109,11 @@ class DistributedStrategy(ABC):
                 data = torch.Tensor([data])
             is_cpu_tensor = data.device.type == "cpu"
 
-            ret = [torch.zeros_like(data).to(torch.cuda.current_device()) for _ in range(self.world_size)]
-            dist.all_gather(ret, data.to(torch.cuda.current_device()))
+            ret = [
+                torch.zeros_like(data).to(torch.get_device_module(device_type()).current_device())
+                for _ in range(self.world_size)
+            ]
+            dist.all_gather(ret, data.to(torch.get_device_module(device_type()).current_device()))
             return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
 
     def save_hf_configs(self, model_config: PretrainedConfig, hf_dir: str, tokenizer: PreTrainedTokenizer = None):
@@ -161,9 +165,12 @@ class DistributedStrategy(ABC):
             "random": random.getstate(),
         }
 
-        # Only save CUDA RNG state if CUDA is available and being used
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            rng_state["cuda"] = torch.cuda.get_rng_state()
+        # Only save the accelerator RNG state if an accelerator is available and being used
+        if (
+            torch.get_device_module(device_type()).is_available()
+            and torch.get_device_module(device_type()).device_count() > 0
+        ):
+            rng_state[device_type()] = torch.get_device_module(device_type()).get_rng_state()
 
         return rng_state
 
@@ -174,6 +181,10 @@ class DistributedStrategy(ABC):
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
-        # Only restore CUDA RNG state if it was saved and CUDA is available
-        if "cuda" in rng_state and torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            torch.cuda.set_rng_state(rng_state["cuda"])
+        # Only restore the accelerator RNG state if it was saved and the accelerator is available
+        if (
+            device_type() in rng_state
+            and torch.get_device_module(device_type()).is_available()
+            and torch.get_device_module(device_type()).device_count() > 0
+        ):
+            torch.get_device_module(device_type()).set_rng_state(rng_state[device_type()])

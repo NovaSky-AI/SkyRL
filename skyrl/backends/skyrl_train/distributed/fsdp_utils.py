@@ -27,6 +27,7 @@ from peft.utils.save_and_load import get_peft_model_state_dict
 from torch.distributed import DeviceMesh
 from torch.distributed.device_mesh import init_device_mesh
 
+from skyrl.backends.skyrl_train.utils.device import device_type
 from skyrl.train.config import FSDPConfig
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
@@ -49,8 +50,8 @@ else:
 
 def init_fn(x: torch.nn.Module):
     if torch.distributed.get_rank() != 0:
-        x = x.to_empty(device=torch.cuda.current_device(), recurse=False)
-        torch.cuda.empty_cache()
+        x = x.to_empty(device=torch.get_device_module(device_type()).current_device(), recurse=False)
+        torch.get_device_module(device_type()).empty_cache()
     return x
 
 
@@ -75,12 +76,12 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
                 module._buffers[key] = torch.empty(buf.shape, dtype=buf.dtype, device="cpu")
     model.to("cpu", non_blocking=True)
     if empty_cache:
-        torch.cuda.empty_cache()
+        torch.get_device_module(device_type()).empty_cache()
 
 
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
-    device = torch.cuda.current_device()
+    device = torch.get_device_module(device_type()).current_device()
     model.to(device, non_blocking=True)
 
 
@@ -122,9 +123,9 @@ def _sync_non_persistent_buffers(model: torch.nn.Module, loaded_sd: dict):
             if buf is None:
                 continue
             if dist.get_rank() == 0:
-                src = buf.detach().cuda()
+                src = buf.detach().to(device_type())
             else:
-                src = torch.empty(buf.shape, dtype=buf.dtype, device="cuda")
+                src = torch.empty(buf.shape, dtype=buf.dtype, device=device_type())
             dist.broadcast(src, src=0)
             module._buffers[key] = src.cpu()
 
@@ -246,17 +247,17 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
     total_norm = _get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
-    total_norm = total_norm.to(torch.cuda.current_device(), non_blocking=True)
+    total_norm = total_norm.to(torch.get_device_module(device_type()).current_device(), non_blocking=True)
     _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
 
 
 def create_device_mesh(world_size, fsdp_size):
     if fsdp_size < 0 or fsdp_size >= world_size:
-        device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
+        device_mesh = init_device_mesh(device_type(), mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
     else:
         device_mesh = init_device_mesh(
-            "cuda", mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
+            device_type(), mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
         )
     return device_mesh
 
@@ -355,7 +356,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
                 for param_name, param in sub_lora_params.items()
             }
             lora_params.update(sub_lora_params)
-            torch.cuda.empty_cache()
+            torch.get_device_module(device_type()).empty_cache()
     return lora_params
 
 
@@ -369,5 +370,5 @@ def collect_lora_params(module) -> OrderedDict:
         name: param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
         for name, param in lora_params.items()
     }
-    torch.cuda.empty_cache()
+    torch.get_device_module(device_type()).empty_cache()
     return lora_params
