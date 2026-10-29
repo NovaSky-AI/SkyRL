@@ -77,9 +77,14 @@ transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerC
 lora_config:
   # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
   lora_type: "lora"
+  # with TP > 1, lets the LoRA adapters on linear_qkv / linear_fc1 contribute to the input gradient under
+  # sequence parallelism (https://github.com/NVIDIA-NeMo/Megatron-Bridge/issues/6453). Only for lora_type "lora".
+  sequence_parallel_input_regather: true
 # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
-# this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
-empty_cuda_cache: true
+# this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer.
+# null (default): on, unless the optimizer is fully offloaded to CPU (optimizer_cpu_offload with
+# optimizer_offload_fraction 1.0), where emptying only makes the next forward map the memory again.
+empty_cuda_cache: null
 
 ```
 

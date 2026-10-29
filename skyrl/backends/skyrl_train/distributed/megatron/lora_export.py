@@ -11,6 +11,15 @@ LORA_A_SUFFIX = ".lora_A.weight"
 LORA_B_SUFFIX = ".lora_B.weight"
 
 
+def normalized_moe_expert_lora_rank(lora_rank: int, moe_router_topk: int, expert_tensor_parallel_size: int = 1) -> int:
+    """Return the expert LoRA rank Megatron-Bridge trains with ``normalize_moe_lora``.
+
+    ``lora_rank // moe_router_topk``, rounded up to a multiple of the expert tensor parallel size.
+    """
+    etp = expert_tensor_parallel_size
+    return -(-(lora_rank // moe_router_topk) // etp) * etp
+
+
 def lora_rank_from_tensors(lora_a: Optional[torch.Tensor], lora_b: torch.Tensor) -> int:
     """Return the LoRA rank encoded in a ``lora_B`` (and, if given, ``lora_A``) tensor.
 

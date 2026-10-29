@@ -132,6 +132,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_glm5next_lora_packing import 
 )
 
 apply_glm5next_lora_packing_patch()
+
+# MoE expert LoRA slots sized at the expert adapter rank (additional_config.max_expert_lora_rank).
+# Installed here for the same reason as the patches above: the slots are allocated at model init.
+from skyrl.backends.skyrl_train.patches.vllm.patch_moe_expert_lora_rank import (  # noqa: E402
+    apply_moe_expert_lora_rank_patch,
+)
+
+apply_moe_expert_lora_rank_patch()
+
 # Runs in every vLLM worker process before the model is loaded, so the
 # LoRA-capability declaration is in place for the supports_lora() gate.
 from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E402
@@ -148,13 +157,29 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import ( 
 
 apply_per_block_fp8_param_patch()
 
-# R3 on monolithic MoE kernels (FlashInfer TRT-LLM FP8): the routed-experts capture callback is
-# bound once at startup and lost when a weight sync rebuilds the kernel (vllm#59449 / #59455).
-from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import (  # noqa: E402
-    apply_routed_experts_rebind_patch,
+# R3 with inference PP > 1: relay each stage's routes to the next so the last stage returns every
+# layer (pass-through at PP=1; a no-op when vLLM relays natively).
+from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (  # noqa: E402
+    apply_pp_relay_worker_patch,
 )
 
-apply_routed_experts_rebind_patch()
+apply_pp_relay_worker_patch()
+
+# A PP stage with no layers of some KV cache group gets cache tensors for layers it does not own (DeepSeek-V4.1 at PP=2).
+# TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.32.0).
+from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import (  # noqa: E402
+    apply_pp_kv_cache_projection_patch,
+)
+
+apply_pp_kv_cache_projection_patch()
+
+# DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
+# NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#60613 is in the pinned vLLM.
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
+    apply_deepseek_v41_prefill_workspace_patch,
+)
+
+apply_deepseek_v41_prefill_workspace_patch()
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"

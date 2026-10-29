@@ -78,7 +78,8 @@ def patch_topk_router_layer_number():
 
 
 def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> list[torch.Tensor]:
-    per_layer = rollout_expert_indices.permute(2, 0, 1, 3).contiguous().to(torch.int32)
+    # Megatron flattens router logits in [sequence, batch] order.
+    per_layer = rollout_expert_indices.permute(2, 1, 0, 3).contiguous().to(torch.int32)
     return list(per_layer.flatten(1, 2).unbind(0))
 
 

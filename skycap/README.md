@@ -34,7 +34,16 @@ The engine is vLLM, over its own `/inference/v1/generate`. Another engine's wire
 is a subclass of `skycap.tokens.engine.VLLMEngine`.
 
 By default a reply is parsed: a thinking model's reasoning comes back as
-`reasoning_content`, and tool calls as `tool_calls`. Add `--use-raw-content`
+`reasoning_content`, and extracted tool calls as `tool_calls`. As with OpenAI
+chat completions, receiving a tool call does not guarantee schema-valid
+arguments. An XML argument that fails numeric conversion stays a string in the
+extracted argument object, matching vLLM's Qwen-style parser. The caller decides
+how to validate and handle it. Calls rejected by the parser as unknown tools,
+unparseable JSON, missing names, or broken framing are retained as raw attempt
+text in `content`; they do not become `tool_calls` or promote the finish reason.
+Skycap does not repair calls, supply feedback, or retry them.
+
+Add `--use-raw-content`
 when the harness was written against a vLLM server with no reasoning or tool
 parser. Replies then match that server's: the completion's own text as
 `content`, with thinking inline and tool calls unparsed, and
@@ -42,6 +51,51 @@ parser. Replies then match that server's: the completion's own text as
 `reasoning_content` (Terminus-2 through LiteLLM, for example) then sends each
 turn back unchanged, and a thinking model's history stays one path. With parsed
 replies, every replayed turn would lose its thinking and fork the graph.
+
+### Images
+
+A vision-language model's messages carry images as OpenAI `image_url` content
+parts. The renderer processes them with the model's Hugging Face processor and
+lays out their placeholder tokens; every call sends the engine all the images
+in its prompt (vLLM's `features`), and each image is stored on the message
+node that sent it. A sample lists its path's images in order, with their
+placeholder offsets in `input_ids` and the processor's arrays, which is what
+training needs. The arrays are the model family's own (`pixel_values` and
+`image_grid_thw` for Qwen-VL, `pixel_values` and `image_position_ids` for Gemma
+4), and a placeholder count isn't always an embedding count (Kimi K2.5 has one
+placeholder per image):
+
+```bash
+uv sync --extra tokens --extra multimodal   # plus torch and torchvision, for the processor
+uv run skycap serve --mode tokens --upstream-url http://engine:8000 \
+  --tokenizer Qwen/Qwen3-VL-8B-Instruct --record-dir ./record
+```
+
+`--processor-kwargs` (a JSON object) must be the engine's `mm_processor_kwargs`,
+e.g. `'{"max_pixels": 1003520}'`; without it the processor's defaults are used.
+An image processed differently has a different number of placeholders than the
+engine expects, so before the first call with images skycap sends the engine a
+text prompt and a few image prompts (`/v1/chat/completions`, one token each); if
+an image's prompt token count differs, calls with images get a 400. Encoding the images for the engine needs
+`vllm` installed beside skycap; a model whose images can't be encoded serves
+text only, and a call with images gets a 400.
+
+### APIs
+
+A trajectory serves two OpenAI APIs, each at its own path under its base URL:
+Chat Completions (`/chat/completions`) and Responses (`/responses`), the API
+Codex speaks. Text mode forwards a call to the same path on the upstream. In
+token mode, Responses items are regrouped into chat-template turns by vLLM's
+rule and the reply goes back as items (`skycap.dialects.openai_responses`);
+`--use-raw-content` is refused there, since a Responses client acts only on
+parsed items. A `developer` message is folded into the leading `system` message
+when the tokenizer's chat template has no such role, as vLLM does, for either
+API. Each call records its API as `calls[].dialect`.
+
+A reply cut off at its token limit goes back as the API defines it,
+`status: "incomplete"` with reason `max_output_tokens`, and is recorded with
+`finish_reason: "length"`. What a client does with it is the harness's
+concern: Codex, for one, treats it as an error, retries, and fails the turn.
 
 ## Embed a server
 
@@ -69,7 +123,7 @@ subclass), which is the one piece an embedder supplies.
 A harness that runs outside the server's network, such as an agent inside a
 remote sandbox (Daytona, Modal), can't reach the server's own URL. With an
 exposure, the server listens a second time with the harness routes alone
-(`/t/{id}/v1/chat/completions` and `/models`; no control plane is routed
+(`/t/{id}/v1/chat/completions`, `/responses` and `/models`; no control plane is routed
 there), and the exposure makes that listener reachable:
 
 ```bash
@@ -175,7 +229,8 @@ async with pool.trajectory({"task": "t1", "step": 3}) as trajectory:
 result.status          # "finished", or "failed" if a turn couldn't be attributed exactly
 for sample in result.samples:
     sample.input_ids, sample.loss_mask, sample.logprobs
-    sample.routed_experts, sample.sampling_mask
+    sample.routed_experts, sample.sampling_mask, sample.media
+    sample.sampling_mask_logprobs  # when the engine returns the sampler's logprob of each support id
 ```
 
 Creates go round-robin over the servers, and each trajectory's URL names its

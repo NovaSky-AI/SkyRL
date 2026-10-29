@@ -15,7 +15,7 @@ import pytest
 import ray
 
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertTrace
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_DTYPE
+from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.utils.trainer_utils import (
@@ -33,6 +33,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
+from tests.backends.skyrl_train.sample_support_helpers import csr
 from tests.train.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -1166,7 +1167,7 @@ def _routes(num_rows):
 
 
 def _support(num_rows):
-    return np.zeros((num_rows, 3), dtype=SAMPLE_SUPPORT_DTYPE)
+    return CompactSampleSupport.empty(num_rows, 3)
 
 
 @pytest.mark.parametrize(
@@ -1240,7 +1241,7 @@ def test_validate_generator_output_rejects_none_route_entry():
         validate_generator_output(num_prompts=2, generator_output=output)
 
 
-def test_validate_generator_output_accepts_dense_sample_support():
+def test_validate_generator_output_accepts_csr_sample_support():
     output = _make_side_channel_output(rollout_sample_support=[_support(2), _support(2)])
 
     validate_generator_output(num_prompts=2, generator_output=output)
@@ -1324,6 +1325,35 @@ def test_validate_generator_output_accepts_routes_when_r3_is_on():
     output = _make_side_channel_output(rollout_expert_indices=[_routes(5), _routes(4)])
 
     validate_generator_output(num_prompts=2, generator_output=output, routes_expected=True)
+
+
+def test_validate_generator_output_refuses_a_trainable_batch_without_support_when_replay_is_on():
+    """A generator that never captures support fails here, not in the trainer's worker."""
+    output = _make_side_channel_output()
+
+    with pytest.raises(AssertionError, match="returned no rollout_sample_support"):
+        validate_generator_output(num_prompts=2, generator_output=output, support_expected=True)
+    validate_generator_output(
+        num_prompts=2, generator_output=_make_side_channel_output(loss_masks=[[0, 0], [0, 0]]), support_expected=True
+    )
+    validate_generator_output(
+        num_prompts=2,
+        generator_output=_make_side_channel_output(rollout_sample_support=[_support(2), _support(2)]),
+        support_expected=True,
+    )
+
+
+def test_validate_generator_output_requires_member_logprobs_when_score_centering_is_on():
+    scored = csr([[10, 11], [12, -1]], [[-0.1, -2.0], [0.0, 0.0]])
+    unscored = csr([[12, 13], [14, -1]])
+    output = _make_side_channel_output(rollout_sample_support=[scored, unscored])
+
+    with pytest.raises(AssertionError, match=r"1 rollout_sample_support entries \(first: 1\)"):
+        validate_generator_output(num_prompts=2, generator_output=output, support_scores_expected=True)
+    validate_generator_output(num_prompts=2, generator_output=output)
+    # A placeholder row with no members has nothing to score.
+    placeholder = _make_side_channel_output(rollout_sample_support=[scored, _support(2)])
+    validate_generator_output(num_prompts=2, generator_output=placeholder, support_scores_expected=True)
 
 
 def test_validate_generator_output_allows_sample_support_under_step_wise():

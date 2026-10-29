@@ -678,7 +678,12 @@ def zero_variance_filter(
 
 
 def validate_generator_output(
-    num_prompts: int, generator_output: GeneratorOutput, step_wise: bool = False, routes_expected: bool = False
+    num_prompts: int,
+    generator_output: GeneratorOutput,
+    step_wise: bool = False,
+    routes_expected: bool = False,
+    support_expected: bool = False,
+    support_scores_expected: bool = False,
 ):
     """Validate the generator output.
 
@@ -690,6 +695,11 @@ def validate_generator_output(
             because each trajectory is expanded into multiple per-turn samples.
         routes_expected: R3 is on for this batch, so a batch that trains anything must carry
             routed experts. Without them the trainer would silently skip replay.
+        support_expected: sample-support replay is on, so a batch that trains anything must carry
+            sampler support. Checked here so a generator that never captures it fails right
+            after generation rather than in the trainer's worker.
+        support_scores_expected: score centering is on, so every support present must carry the
+            sampler's member logprobs.
     """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
@@ -768,6 +778,23 @@ def validate_generator_output(
             "generator.inference_engine.enable_return_routed_experts=True, but the generator returned no "
             "rollout_expert_indices for a batch with trainable tokens, so routing replay would silently be "
             "skipped. Use a generator that returns routed experts, or disable R3."
+        )
+    if support_expected and generator_output.get(SAMPLE_SUPPORT_FIELD) is None:
+        assert not any(any(mask) for mask in generator_output["loss_masks"]), (
+            "trainer.algorithm.enable_sample_support_replay=True, but the generator returned no "
+            f"{SAMPLE_SUPPORT_FIELD} for a batch with trainable tokens. Use a generator that captures "
+            "sampler support (it must call generate with return_sample_support), or disable replay."
+        )
+    if support_scores_expected and generator_output.get(SAMPLE_SUPPORT_FIELD) is not None:
+        # A support with no members (a placeholder row) has nothing to score.
+        unscored = [
+            i
+            for i, support in enumerate(generator_output[SAMPLE_SUPPORT_FIELD])
+            if support.logprobs is None and support.num_members
+        ]
+        assert not unscored, (
+            f"trainer.algorithm.enable_score_centering=True, but {len(unscored)} {SAMPLE_SUPPORT_FIELD} entries "
+            f"(first: {unscored[0]}) carry no sampler member logprobs"
         )
 
     if step_wise:

@@ -113,8 +113,9 @@ class SkyRLLoraConfig(BaseConfig):
     ``"memory"`` ships the adapter tensors through the configured
     ``generator.inference_engine.weight_sync_backend`` transport (``nccl``: NCCL broadcast when
     non-colocated, CUDA IPC when colocated) and vLLM builds the adapter from the received GPU
-    tensors; nothing is written. Shared expert adapters are sent once and aliased on the receiver.
-    Megatron only."""
+    tensors; nothing is written. Once the adapter is copied into vLLM's LoRA slots, the built
+    adapter and the received tensors move to pinned host memory, where ``"disk"`` keeps the built
+    adapter. Shared expert adapters are sent once and aliased on the receiver. Megatron only."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
@@ -139,6 +140,25 @@ class SkyRLLoraConfig(BaseConfig):
     """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
     ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
     >= ``max_loras`` if explicitly set."""
+
+    init_adapter_path: Optional[str] = None
+    """HuggingFace PEFT LoRA adapter directory that initializes the policy's adapter weights.
+    The directory (local or cloud) holds ``adapter_config.json`` and ``adapter_model.safetensors``,
+    e.g. a SkyRL ``lora_adapter`` checkpoint export or a Tinker sampler checkpoint converted with
+    ``tinker_cookbook.weights.build_lora_adapter``. ``rank`` and ``alpha`` must match the adapter's
+    ``r`` and ``lora_alpha``; with ``target_modules="all-linear"`` the targets are taken from the
+    adapter, otherwise the given list must cover every module the adapter trains. The optimizer and
+    LR schedule start fresh. PEFT ``rank_pattern`` / ``alpha_pattern`` are honored; on Megatron a
+    module that fuses several adapted HF projections (``linear_qkv``, GatedDeltaNet ``in_proj``,
+    ``linear_fc1``) is built at the sum of their ranks with a block-diagonal ``lora_B``, so it
+    computes the same function as the separate adapters. Tinker's ``linear_attn.in_proj_q/k/v``
+    keys are folded into ``in_proj_qkv`` the same way. Megatron only."""
+
+    max_lora_rank: Optional[int] = None
+    """vLLM ``max_lora_rank`` for adapter-only weight sync; defaults to ``rank``. Must be at least
+    the largest per-module rank, which exceeds ``rank`` when ``init_adapter_path`` carries a
+    ``rank_pattern`` or when Megatron (``merge_lora=false``) fuses several adapted projections into
+    one module. vLLM accepts 8, 16, 32, 64, 128, 256, 320 or 512."""
 
 
 @dataclass
@@ -455,7 +475,23 @@ class MegatronLoraConfig(BaseConfig):
     folds ``rank / effective_rank`` into the reduced-rank ``lora_B`` tensors
     before writing them (``fold_lora_rank_scale_for_vllm``) so the sampled
     policy matches the trained one. The synced adapter is a vLLM-layout
-    artifact, not a loadable HF PEFT checkpoint."""
+    artifact, not a loadable HF PEFT checkpoint.
+
+    With ``merge_lora=False``, set ``generator.inference_engine.scale_moe_lora_rank=true`` to size the
+    inference engine's expert LoRA slots at the reduced expert rank."""
+    sequence_parallel_input_regather: bool = True
+    """Maps to Megatron-Bridge ``LoRA(sequence_parallel_input_regather=...)``. Only used with
+    ``lora_type="lora"`` (``CanonicalLoRA`` does not take it), and only has an effect with sequence parallelism
+    (``tensor_model_parallel_size > 1``).
+
+    With sequence parallelism, the LoRA adapters on ``linear_qkv`` and on LayerNorm-fused ``linear_fc1`` read the
+    LayerNorm output of the Transformer Engine ``LayerNormLinear`` module they wrap. When this is ``False``, the
+    adapter reads the TP all-gathered LayerNorm output and its input gradient is dropped, so the gradient passed
+    to earlier layers is missing the LoRA branch's term
+    (https://github.com/NVIDIA-NeMo/Megatron-Bridge/issues/6453). When this is ``True``, the adapter reads the
+    sequence-local LayerNorm output and does its own all-gather, whose backward reduce-scatters the adapter's
+    input gradient into the module's input gradient. This adds an all-gather in forward and a reduce-scatter in
+    backward for the adapter input."""
 
 
 DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
@@ -567,9 +603,15 @@ class MegatronConfig(BaseConfig):
     here directly overrides them. The block-scale env contract
     (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
     validated per architecture at startup and forwarded to all Ray actors."""
-    empty_cuda_cache: Optional[bool] = True
+    empty_cuda_cache: Optional[bool] = None
     """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
-    This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer."""
+    This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer.
+
+    ``None`` (default) empties it unless the optimizer is fully offloaded to CPU
+    (``optimizer_cpu_offload=True`` with ``optimizer_offload_fraction=1.0``): the optimizer step then
+    allocates little GPU memory, and under ``expandable_segments`` the empty releases every cached page
+    to the driver, which the next forward pass maps again (seconds per step at high memory use).
+    ``True`` / ``False`` force it on / off. Forward-only passes empty the cache unless this is ``False``."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use
@@ -648,6 +690,15 @@ class MegatronConfig(BaseConfig):
             self.optimizer_config_kwargs = {}
         for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
             self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
+
+    def empty_cuda_cache_after_backward(self) -> bool:
+        """Whether to empty the CUDA cache after the forward/backward pass (resolves ``empty_cuda_cache=None``)."""
+        if self.empty_cuda_cache is not None:
+            return self.empty_cuda_cache
+        optimizer_on_cpu = bool(self.optimizer_config_kwargs.get("optimizer_cpu_offload")) and (
+            float(self.optimizer_config_kwargs.get("optimizer_offload_fraction") or 0.0) >= 1.0
+        )
+        return not optimizer_on_cpu
 
 
 # ---------------------------------------------------------------------------
@@ -953,6 +1004,8 @@ class AlgorithmConfig(BaseConfig):
     - ``"dppo"``: DPPO, from Rethinking the Trust Region in LLM Reinforcement Learning
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability
       divergences rather than probability ratios, improving on PPO clipping behavior.
+    - ``"reinforce"``: plain policy gradient ``-A log π`` with no importance ratio, the objective
+      score centering builds on (https://arxiv.org/abs/2609.20807).
     """
     loss_reduction: str = "token_mean"
     """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
@@ -1000,6 +1053,20 @@ class AlgorithmConfig(BaseConfig):
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
+    enable_score_centering: bool = False
+    """Score centering (https://arxiv.org/abs/2609.20807): subtract each token's expected weighted
+    score under the sampler, cancelling the drift a training-inference mismatch adds to the policy
+    gradient.
+
+    The expectation runs over the recorded support with the sampler's processed logprobs, which is
+    exact under top-k/top-p sampling, and weights every member with the loss's own weight on the
+    sampled token. That weight must be relative to the sampler, so this requires
+    ``enable_sample_support_replay`` and a loss with no ratio or a rollout-anchored one:
+    ``"reinforce"`` (``f = 1``), ``"rollout_is"`` (its band), ``"cispo"`` with
+    ``cispo_anchor="rollout"`` (its clamp) or ``"dppo"`` (its trust region). Incompatible with
+    ``off_policy_correction.tis_ratio_type`` and the token-mask IS thresholds, which weight only the
+    sampled token by ``π_old / π_rollout``; sequence and outlier masks apply to both terms but are
+    approximate, because each depends on the sampled token's own ratio."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1263,6 +1330,11 @@ class InferenceEngineConfig(BaseConfig):
     Enabling this trades performance for stability; leaving it off (the default) is faster but may affect convergence
     for long-running or long-context training jobs."""
     fully_sharded_loras: bool = False
+    scale_moe_lora_rank: bool = False
+    """Size the inference engine's MoE expert LoRA slots at the expert rank the trainer exports:
+    ``rank // top_k``, rounded up to a multiple of the expert tensor parallel size. Other LoRA slots keep
+    ``trainer.policy.model.lora.rank``. Requires ``trainer.strategy="megatron"``, ``lora.rank > 0``,
+    ``megatron_config.lora_config.merge_lora=false`` and ``megatron_config.lora_config.normalize_moe_lora=true``."""
     enable_ray_prometheus_stats: bool = True
     """Enable Ray Prometheus stats logger for inference engine metrics (vLLM v1 only)."""
     gpu_memory_utilization: float = 0.8
@@ -1298,7 +1370,8 @@ class InferenceEngineConfig(BaseConfig):
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine.
     Names must match the engine's args. Applied last, so they silently override config-derived
-    engine args (e.g. ``tensor_parallel_size``).
+    engine args (e.g. ``tensor_parallel_size``). The exception is ``logprobs_mode``, which is
+    always ``"processed_logprobs"``; any other value is rejected.
 
     For HuggingFace config overrides such as RoPE scaling, use
     ``engine_init_kwargs.hf_overrides.rope_parameters`` and set the matching trainer-side override
@@ -1325,7 +1398,8 @@ class InferenceEngineConfig(BaseConfig):
     """Pass-through kwargs for the vLLM engine, applied only to prefill engines when
     ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs``: provide role-specific
     kwargs (including shared ones like ``kv_transfer_config``) via ``prefill_init_kwargs`` /
-    ``decode_init_kwargs`` instead."""
+    ``decode_init_kwargs`` instead. As with ``engine_init_kwargs``, ``logprobs_mode`` must be
+    ``"processed_logprobs"``."""
     decode_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine, applied only to decode engines when
     ``enable_pd=True``. Mutually exclusive with ``engine_init_kwargs`` (see ``prefill_init_kwargs``)."""
@@ -1515,6 +1589,8 @@ class TrainerConfig(BaseConfig):
     For sharded multi-node HF exports with ``policy.megatron_config.hf_export_config.distributed_save=True``, this must
     be a shared filesystem path visible to all Megatron ranks."""
     bf16: bool = True
+    """Load models in bf16. FSDP: the ref model and a LoRA policy's frozen base (the adapters stay fp32).
+    Megatron: the policy and ref models, including LoRA adapters. ``False`` uses fp32."""
     epochs: int = 1
     """Number of epochs (passes over the full dataset)."""
     max_training_steps: Optional[int] = None
@@ -1683,6 +1759,18 @@ class TrainerConfig(BaseConfig):
             raise ValueError(
                 "fused_lm_head_logprob=True is only supported with the Megatron backend, "
                 f"got strategy={self.strategy!r}."
+            )
+        lora = self.policy.model.lora
+        if (
+            self.fused_lm_head_logprob
+            and lora.rank > 0
+            and isinstance(lora.target_modules, (list, tuple))
+            and "output_layer" in lora.target_modules
+        ):
+            raise ValueError(
+                "fused_lm_head_logprob=True reads output_layer.weight directly and would skip the LoRA "
+                "adapter on output_layer; remove output_layer from trainer.policy.model.lora.target_modules "
+                "or disable fused_lm_head_logprob."
             )
         if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
             raise ValueError(
@@ -1899,6 +1987,33 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError(
                     "sample-support replay requires generator.use_conversation_multi_turn=True because "
                     "use_conversation_multi_turn=False appends a synthetic loss-active EOS without captured support"
+                )
+
+        algorithm = self.trainer.algorithm
+        if algorithm.enable_score_centering:
+            from skyrl.backends.skyrl_train.utils.ppo_utils import (
+                score_centering_weight,
+            )
+
+            if not algorithm.enable_sample_support_replay:
+                raise ValueError("trainer.algorithm.enable_score_centering requires enable_sample_support_replay")
+            # Raises for a loss whose weight is not relative to the sampler.
+            score_centering_weight(algorithm.policy_loss_type, algorithm)
+            off_policy = algorithm.off_policy_correction
+            if off_policy.tis_ratio_type is not None:
+                raise ValueError(
+                    "score centering does not compose with off_policy_correction.tis_ratio_type, which weights "
+                    "only the sampled token by pi_old / pi_rollout; the loss's own weight is the importance "
+                    "correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
+                )
+            if (
+                off_policy.token_mask_is_threshold_low is not None
+                or off_policy.token_mask_is_threshold_high is not None
+            ):
+                raise ValueError(
+                    "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
+                    "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
+                    "importance weight that score centering applies to every support member"
                 )
 
         # Eval requests opt out of capture and do not use these constraints.

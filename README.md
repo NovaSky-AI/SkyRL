@@ -35,6 +35,7 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 For a list of supported models, see our [Supported Models](https://docs.skyrl.ai/docs/getting-started/supported_models) docs.
 
 # News
+- **[2026/10/16]** 🎉 SkyRL has Day 0 support for Beam, Reflection AI's 501B-A23B MoE model: LoRA, full fine-tuning and MXFP8 RL recipes on the `beam-release` branch! [[Blog](https://blog.skyrl.ai/blog/day-0-beam)] [[Docs](https://docs.skyrl.ai/docs/examples/beam)] [[Code](https://github.com/NovaSky-AI/SkyRL/tree/beam-release/examples/train/models/reflection/beam)]
 - **[2026/09/01]** 🎉 We released an E2E recipe for long horizon knowledge work on SkyRL on the APEX-Agents dataset in collaboration with Mercor [[tweet](https://x.com/edwardjhu/status/2094897903290757588)] [[blog](https://www.mercor.com/blog/training-frontier-knowledge-work-agents-a-397b-rl-training-guide-with-skyrl/)]
 - **[2026/08/18]** 🎉 SkyRL is hosting it's first meetup at the Anyscale SF office! [[Link](https://luma.com/y4ahouh6)]
 - **[2026/07/16]** 🎉 SkyRL v0.3.0 is released [[Blog](https://novasky-ai.notion.site/skyrl-v03)]

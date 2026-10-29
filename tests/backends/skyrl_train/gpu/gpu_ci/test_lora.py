@@ -8,21 +8,28 @@ uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train
 # Only the adapter-only rows (merge_lora=false), disk and in-memory sync:
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron_adapter"
 
+# Repeated colocated in-memory LoRA syncs free the trainer's packed CUDA IPC buffer:
+uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "packed_ipc_buffer"
+
 Multi-LoRA serving tests live separately in
 ``tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_multi_lora_serving.py``
 since they exercise the inference-server LoRA control plane, not the
 trainer + weight-sync path covered here.
 """
 
+import glob
 import os
+import pickle
 
 import pytest
 import ray
+import torch
 
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
@@ -186,3 +193,124 @@ async def test_policy_local_engines_e2e(
     elif needs_vllm_lora and lora_sync_mode == "memory":
         assert not os.path.exists(lora_sync_path), f"in-memory LoRA sync wrote to {lora_sync_path}"
     # megatron + merge_lora syncs merged full weights and never touches lora_sync_path.
+
+
+def _count_packed_ipc_buffers(snapshot_path: str) -> int:
+    """Counts live allocator blocks allocated in vLLM's ``packed_ipc_producer``.
+
+    These are the trainer's packed CUDA IPC staging buffers.
+    """
+    with open(snapshot_path, "rb") as f:
+        snapshot = pickle.load(f)
+    return sum(
+        1
+        for segment in snapshot["segments"]
+        for block in segment["blocks"]
+        if block["state"] == "active_allocated"
+        and any(frame.get("name") == "packed_ipc_producer" for frame in block.get("frames", []))
+    )
+
+
+@pytest.mark.megatron
+@pytest.mark.asyncio
+async def test_colocated_memory_lora_sync_frees_packed_ipc_buffer(ray_init_fixture, tmp_path):
+    """
+    Colocated in-memory LoRA sync streams the adapter through a packed CUDA IPC
+    buffer that each trainer rank allocates per sync. The trainer can free it
+    only after the colocated vLLM worker releases its mapping, so after every
+    sync no live block allocated by ``packed_ipc_producer`` may remain.
+
+    Live blocks are read from the ``trainer.policy.record_memory`` snapshots,
+    which carry each block's allocation stack.
+    """
+    num_syncs = 3
+    cfg = get_test_actor_config(
+        strategy="megatron",
+        enable_lora=True,
+        colocate_all=True,
+        weight_sync_backend="nccl",
+        tp_size=2,
+        merge_lora=False,
+        lora_sync_mode="memory",
+        lora_sync_path=str(tmp_path / "lora_sync"),
+    )
+    cfg.trainer.policy.record_memory = True
+    cfg.trainer.ckpt_path = str(tmp_path / "ckpt")
+    cfg.trainer.log_path = str(tmp_path / "logs")
+    snapshot_dir = os.path.join(cfg.trainer.ckpt_path, "memory_snapshots")
+
+    async with InferenceEngineState.create(
+        cfg=cfg,
+        model=MODEL,
+        use_local=True,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+        colocate_all=True,
+        sleep_level=1,
+        enable_lora=True,
+    ) as engines:
+        client, pg = engines.client, engines.pg
+
+        await client.sleep(level=1)
+
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=pg,
+            colocate_all=True,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+            cfg=cfg,
+        )
+        await client.wake_up(tags=["weights"])
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+            )
+        )
+
+        buffers_per_sync = []
+        for sync in range(num_syncs):
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+                )
+            )
+            ray.get(policy.async_run_ray_method("pass_through", "save_memory_snapshot", tag=f"sync{sync}"))
+            snapshots = sorted(glob.glob(os.path.join(snapshot_dir, f"rank_*_sync{sync}_*.pickle")))
+            assert len(snapshots) == cfg.generator.inference_engine.tensor_parallel_size, snapshots
+            buffers_per_sync.append([_count_packed_ipc_buffers(path) for path in snapshots])
+
+        # The synced adapter still serves after the repeated syncs.
+        policy.offload_to_cpu()
+        await client.wake_up(tags=["kv_cache"])
+        await client.reset_prefix_cache()
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
+        outputs = await run_inference(
+            client, get_test_prompts(MODEL), sampling_params, model=resolve_policy_model_name(cfg)
+        )
+        assert all(outputs["responses"])
+
+    # One list per sync, one count per trainer rank.
+    assert buffers_per_sync == [[0, 0]] * num_syncs, buffers_per_sync
+
+
+class ParamDtypePolicyWorkerBase(FSDPPolicyWorkerBase):
+    def param_dtypes(self) -> dict[str, set[torch.dtype]]:
+        """Returns the dtypes of this rank's frozen and trainable parameters."""
+        params = list(self.model.parameters())
+        return {
+            "frozen": {p.dtype for p in params if not p.requires_grad},
+            "trainable": {p.dtype for p in params if p.requires_grad},
+        }
+
+
+ParamDtypePolicyWorker = ray.remote(num_gpus=1)(ParamDtypePolicyWorkerBase)
+
+
+def test_fsdp_lora_base_loaded_in_bf16(ray_init_fixture):
+    """An FSDP LoRA policy stores the frozen base in bf16 and the adapters in fp32."""
+    cfg = get_test_actor_config(strategy="fsdp", enable_lora=True)
+    policy = init_worker_with_type("policy", num_gpus_per_node=1, cfg=cfg, worker_cls=ParamDtypePolicyWorker)
+
+    dtypes = ray.get(policy.async_run_ray_method("pass_through", "param_dtypes"))
+    assert dtypes == [{"frozen": {torch.bfloat16}, "trainable": {torch.float32}}]

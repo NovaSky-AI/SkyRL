@@ -10,17 +10,20 @@ import numpy as np
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.routed_experts import ROUTED_EXPERT_DTYPES
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
+    CompactSampleSupport,
 )
 from skyrl.train.dataset.preprocess import (
     ROUTED_EXPERT_TORCH_DTYPES,
+    build_sample_support,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
+from tests.backends.skyrl_train.sample_support_helpers import csr
 
 
 # NOTE (sumanthrh): the tests in this file are hardcoded to use the below character-level tokenizer
@@ -590,20 +593,24 @@ SAMPLE_SUPPORT_TOP_K = 3
 SAMPLE_SUPPORT_LENGTHS = [(2, 3), (9, 2), (5, 5), (1, 1)]
 
 
-def _make_sample_support(lengths: List[tuple], *, seed: int = 0) -> List[np.ndarray]:
-    """One dense ``[response_len, top_k]`` support block per trajectory, some rows padded."""
+def _make_sample_support_grids(lengths: List[tuple], *, seed: int = 0) -> List[np.ndarray]:
+    """One ``[response_len, top_k]`` grid per trajectory; ``-1`` marks an absent member."""
     rng = np.random.default_rng(seed)
-    support = []
+    grids = []
     for _, response_len in lengths:
         rows = rng.integers(0, 32_000, size=(response_len, SAMPLE_SUPPORT_TOP_K), dtype=np.int64)
-        # A padded row (nothing captured) and a partially-filled row, as the sampler emits.
-        rows[0] = SAMPLE_SUPPORT_PADDING
-        rows[-1, -1] = SAMPLE_SUPPORT_PADDING
-        support.append(rows.astype(SAMPLE_SUPPORT_DTYPE))
-    return support
+        # An empty row (nothing captured) and a partially-filled row, as the sampler emits.
+        rows[0] = -1
+        rows[-1, -1] = -1
+        grids.append(rows)
+    return grids
 
 
-def _convert_with_support(tokenizer, lengths: List[tuple], support: List[np.ndarray]):
+def _make_sample_support(lengths: List[tuple], *, seed: int = 0) -> List[CompactSampleSupport]:
+    return [csr(rows) for rows in _make_sample_support_grids(lengths, seed=seed)]
+
+
+def _convert_with_support(tokenizer, lengths: List[tuple], support: List[CompactSampleSupport]):
     prompts = [list(range(1, prompt_len + 1)) for prompt_len, _ in lengths]
     responses = [list(range(100, 100 + response_len)) for _, response_len in lengths]
     return convert_prompts_responses_to_batch_tensors(
@@ -618,26 +625,29 @@ def _convert_with_support(tokenizer, lengths: List[tuple], support: List[np.ndar
 
 def test_sample_support_packs_to_the_response_tokens(tokenizer):
     """One segment per trajectory, holding exactly its response tokens."""
-    support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
+    grids = _make_sample_support_grids(SAMPLE_SUPPORT_LENGTHS)
 
-    *_, packed = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
+    *_, packed = _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, [csr(rows) for rows in grids])
 
     response_lens = [response_len for _, response_len in SAMPLE_SUPPORT_LENGTHS]
-    assert packed.values.shape == (sum(response_lens), SAMPLE_SUPPORT_TOP_K)
-    assert packed.dtype == SAMPLE_SUPPORT_TORCH_DTYPE
+    assert isinstance(packed, PackedRaggedTensor)
+    assert packed.num_rows == sum(response_lens)
+    assert packed.column_dtypes == (SAMPLE_SUPPORT_TORCH_DTYPE,)
     assert packed.sequence_lengths.tolist() == response_lens
-    for index, rows in enumerate(support):
-        assert torch.equal(packed.segment(index), torch.from_numpy(rows))
+    for index, row in enumerate(np.concatenate(grids, axis=0)):
+        assert packed.row(index).tolist() == row[row >= 0].tolist()
 
 
 def test_sample_support_accepts_read_only_arrays(tokenizer):
+    """Wire-decoded support views the response body, which is read-only."""
     lengths = [(2, 2)]
-    rows = np.asarray([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=SAMPLE_SUPPORT_DTYPE)
-    rows.flags.writeable = False
+    support = csr([[1, 2, 3], [4, 5, -1]])
+    support.token_ids.flags.writeable = False
+    support.offsets.flags.writeable = False
 
-    *_, packed = _convert_with_support(tokenizer, lengths, [rows[:2]])
+    *_, packed = _convert_with_support(tokenizer, lengths, [support])
 
-    assert packed.segment(0).tolist() == [[1, 2, 3], [4, 5, 6]]
+    assert [packed.row(index).tolist() for index in range(2)] == [[1, 2, 3], [4, 5]]
 
 
 def test_sample_support_rejects_a_row_count_that_is_not_the_response_length(tokenizer):
@@ -648,26 +658,20 @@ def test_sample_support_rejects_a_row_count_that_is_not_the_response_length(toke
         _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
 
 
-def test_sample_support_rejects_a_ragged_width(tokenizer):
+def test_sample_support_rejects_a_mixed_top_k(tokenizer):
     support = _make_sample_support(SAMPLE_SUPPORT_LENGTHS)
-    support[2] = support[2][:, :-1]
+    support[2] = csr(_make_sample_support_grids(SAMPLE_SUPPORT_LENGTHS)[2][:, :-1])
 
     with pytest.raises(ValueError, match="must share top_k"):
         _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
 
 
-def test_sample_support_rejects_nested_lists(tokenizer):
-    support = [rows.tolist() for rows in _make_sample_support(SAMPLE_SUPPORT_LENGTHS)]
+@pytest.mark.parametrize("form", ["nested_lists", "dense_grid"])
+def test_sample_support_rejects_anything_but_csr(tokenizer, form):
+    grids = [rows.astype(SAMPLE_SUPPORT_DTYPE) for rows in _make_sample_support_grids(SAMPLE_SUPPORT_LENGTHS)]
+    support = [rows.tolist() for rows in grids] if form == "nested_lists" else grids
 
-    with pytest.raises(TypeError, match="NumPy arrays"):
-        _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
-
-
-@pytest.mark.parametrize("dtype", [np.int16, np.int64])
-def test_sample_support_rejects_non_canonical_dtypes(tokenizer, dtype):
-    support = [rows.astype(dtype) for rows in _make_sample_support(SAMPLE_SUPPORT_LENGTHS)]
-
-    with pytest.raises(ValueError, match="canonical sample-support dtype"):
+    with pytest.raises(TypeError, match="must be CompactSampleSupport"):
         _convert_with_support(tokenizer, SAMPLE_SUPPORT_LENGTHS, support)
 
 
@@ -687,3 +691,32 @@ def test_sample_support_none_when_not_provided(tokenizer):
         loss_masks=[[1]],
     )
     assert packed is None
+
+
+def test_build_sample_support_keeps_empty_rows():
+    support = csr([[5, 6, 7, 8], [9, -1, -1, -1], [-1, -1, -1, -1]])
+    ragged = build_sample_support([support], np.asarray([3]))
+
+    assert isinstance(ragged, PackedRaggedTensor)
+    assert ragged.sequence_lengths.tolist() == [3]
+    assert ragged.row_lengths.tolist() == [4, 1, 0]
+    assert ragged.row(0).tolist() == [5, 6, 7, 8]
+    assert ragged.row(2).tolist() == []
+    assert ragged.column_dtypes == (SAMPLE_SUPPORT_TORCH_DTYPE,)
+    assert ragged.num_members == 5
+
+
+def test_convert_batch_tensors_always_carries_csr_support(tokenizer):
+    support = [csr([[1, 2, -1], [3, -1, -1]])] * 2
+
+    *_, ragged = convert_prompts_responses_to_batch_tensors(
+        tokenizer.pad_token_id,
+        prompts=[[10], [20]],
+        responses=[[11, 12], [21, 22]],
+        rewards=[[0.0, 0.0], [0.0, 0.0]],
+        loss_masks=[[1, 1], [1, 1]],
+        rollout_sample_support=support,
+    )
+    assert isinstance(ragged, PackedRaggedTensor)
+    assert ragged.row_lengths.tolist() == [2, 1, 2, 1]
+    assert ragged.sequence_lengths.tolist() == [2, 2]
