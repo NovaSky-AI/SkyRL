@@ -52,6 +52,8 @@ LR=1e-6
 # custom_all_reduce.cuh:164 'invalid argument'.
 ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "disable_custom_all_reduce": true}'
 RUN_NAME="qwen3_8_flash_next_gsm8k_fullft_ep${MEGATRON_EP}"
+# fla's TileLang GDN backward aborts on Blackwell; these recipes target B200, so default to Triton.
+export FLA_TILELANG="${FLA_TILELANG:-0}"
 
 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \

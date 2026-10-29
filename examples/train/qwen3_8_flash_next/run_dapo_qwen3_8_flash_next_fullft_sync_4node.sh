@@ -25,6 +25,8 @@ export SKYRL_GENERATE_CONCURRENCY_PER_ENGINE=128
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 # Otherwise redirect_actor_output_to_file() swallows vLLM's errors.
 export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
+# fla's TileLang GDN backward aborts on Blackwell; these recipes target B200, so default to Triton.
+export FLA_TILELANG="${FLA_TILELANG:-0}"
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"
