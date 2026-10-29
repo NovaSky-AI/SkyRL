@@ -957,6 +957,28 @@ class TestControlPlane:
             assert response["body"]["tags"] == ["weights", "kv_cache"]
 
     @pytest.mark.asyncio
+    async def test_sleep_forced_to_level_1_for_online_nvfp4(self, mock_servers):
+        """Online NVFP4 engines never sleep at level 2: it loses MoE kernel state the reload does not rebuild."""
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=1,
+            uses_online_nvfp4_quantization=True,
+        )
+        try:
+            assert client.effective_sleep_level(2) == 1
+            assert client.effective_sleep_level(1) == 1
+            result = await client.sleep(level=2)
+            for response in result.values():
+                assert response["body"]["level"] == 1
+        finally:
+            await client.teardown()
+
+    def test_effective_sleep_level_unclamped_by_default(self, client):
+        assert client.effective_sleep_level(2) == 2
+        assert client.effective_sleep_level(1) == 1
+
+    @pytest.mark.asyncio
     async def test_is_sleeping(self, client):
         """Test is_sleeping fans out to all servers and unwraps response bodies."""
         assert await client.is_sleeping() is False

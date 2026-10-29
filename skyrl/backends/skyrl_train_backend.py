@@ -450,8 +450,8 @@ class SkyRLTrainBackend(AbstractBackend):
         if is_colocated and not self._adapter_only_sync:
             asyncio.run(client.sleep())
             # Record the effective level: sleep() defaults to 2 but the client
-            # clamps to 1 when LoRA weight sync keeps a CPU base-model backup.
-            self._engines_sleep_level = 1 if client.uses_lora_weight_sync else 2
+            # clamps to 1 for LoRA weight sync and online NVFP4 quantization.
+            self._engines_sleep_level = client.effective_sleep_level(2)
 
     def _create_render_client(self) -> RendererClientProtocol:
         """Return a client for vLLM's ``/v1/chat/completions/render``.
@@ -974,7 +974,7 @@ class SkyRLTrainBackend(AbstractBackend):
             # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
             sleep_level = 1 if lora_cfg and lora_cfg.rank > 0 else 2
             asyncio.run(self._inference_engine_client.sleep(level=sleep_level))
-            self._engines_sleep_level = sleep_level
+            self._engines_sleep_level = self._inference_engine_client.effective_sleep_level(sleep_level)
 
     def _wake_inference_engines_for_sampling(self) -> str | None:
         """Wake colocated engines before serving sample requests.
