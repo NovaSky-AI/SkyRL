@@ -312,6 +312,26 @@ def test_fused_sample_support_matches_torch_candidate_projection(
     torch.testing.assert_close(actual[2].float(), expected[2].float(), atol=4e-2, rtol=4e-2)
 
 
+def test_fused_sample_support_projection_accepts_strided_operands():
+    """A transposed LM-head weight and a strided hidden view project without a copy."""
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_sample_support_triton import (
+        candidate_projection,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(125)
+    vocab, num_rows, num_pairs = 1024, 9, 300
+    hidden = torch.randn(num_rows, 2 * H, device=device)[:, ::2]
+    weight = torch.randn(H, vocab, device=device).t()
+    assert not hidden.is_contiguous() and not weight.is_contiguous()
+    row_ids = torch.randint(0, num_rows, (num_pairs,), device=device)
+    token_ids = torch.randint(0, vocab, (num_pairs,), device=device)
+
+    actual = candidate_projection(hidden, weight, row_ids, token_ids, temperature=0.7)
+    expected = (hidden[row_ids] * weight[token_ids]).sum(-1) / 0.7
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+
 # ---------------------------------------------------------------------------
 # TP>1: vocab-parallel correctness via torchrun (spawned as a subprocess).
 # ---------------------------------------------------------------------------
