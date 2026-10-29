@@ -14,6 +14,11 @@ NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 MODEL_NAME="Qwen/Qwen3-0.6B"
 
+INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
+
+MEGATRON_TP=1
+MEGATRON_PP=2
+
 # Node-local NVMe with room for 12 B x (params / DP size) per GPU; tmpfs is refused.
 OPTIMIZER_STATE_DIR="/mnt/local_storage/skyrl_optimizer_state"
 
@@ -27,8 +32,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
-  trainer.policy.megatron_config.tensor_model_parallel_size=1 \
-  trainer.policy.megatron_config.pipeline_model_parallel_size=2 \
+  trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.optimizer_offload_to_disk.dir="$OPTIMIZER_STATE_DIR" \
   trainer.remove_microbatch_padding=true \
   trainer.epochs=20 \
@@ -45,7 +50,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=false \
-  generator.inference_engine.backend=vllm \
+  generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.batched=true \

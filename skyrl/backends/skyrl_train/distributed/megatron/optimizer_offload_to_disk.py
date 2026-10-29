@@ -50,8 +50,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
+import megatron.core.optimizer as mcore_optimizer
 import torch
 from loguru import logger
+from megatron.core.optimizer import Adam, get_megatron_optimizer
 from megatron.core.optimizer import distrib_optimizer as _distrib_optimizer_module
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 
@@ -200,7 +202,6 @@ class DiskOptimizerStateStore:
     def __init__(self, dist_opt: DistributedOptimizer, settings: OffloadToDiskSettings, index: int):
         from megatron.core.fp4_utils import is_nvfp4tensor
         from megatron.core.fp8_utils import is_float8tensor
-        from megatron.core.optimizer import Adam
 
         self.dist_opt = dist_opt
         self.index = index
@@ -313,8 +314,6 @@ class DiskOptimizerStateStore:
 
     def _adam(self, chunk: _Chunk, state: dict):
         """The regular optimizer's Adam over this chunk's runs, with each run's param group hyperparameters."""
-        from megatron.core.optimizer import Adam
-
         grads = self._grad_data(chunk)
         params_by_group: dict = {}
         moments = {}
@@ -537,8 +536,6 @@ class OffloadedDistributedOptimizer(DistributedOptimizer):
 @contextmanager
 def _construct_distributed_optimizer_as(cls) -> Iterator[None]:
     """Make megatron-core's ``get_megatron_optimizer``, which looks ``DistributedOptimizer`` up by name, build ``cls``."""
-    import megatron.core.optimizer as mcore_optimizer
-
     original = mcore_optimizer.DistributedOptimizer
     mcore_optimizer.DistributedOptimizer = cls
     try:
@@ -579,7 +576,6 @@ def _unlock_rank_dir(rank_dir: str) -> None:
 def build_optimizer_offloaded_to_disk(model_chunks, config, settings: OffloadToDiskSettings):
     """``get_megatron_optimizer`` with every ``DistributedOptimizer`` built as an ``OffloadedDistributedOptimizer``."""
     global _build_context
-    from megatron.core.optimizer import get_megatron_optimizer
 
     if not config.use_distributed_optimizer:
         raise ValueError("optimizer_offload_to_disk requires use_distributed_optimizer=True")

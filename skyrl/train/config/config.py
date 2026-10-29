@@ -459,18 +459,19 @@ class MegatronOptimizerOffloadToDiskConfig(BaseConfig):
     Implementation: ``skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py``."""
 
     dir: Optional[str] = None
-    """Node-local directory for the state files (fast NVMe; tmpfs is refused). ``None`` (default) disables the
-    feature. Each run uses ``<dir>/<trainer.run_name>/rank<global rank>/``, cleared at startup and removed at the
-    end of training. A killed run's files are not removed: a later run with the same ``run_name`` clears only the
-    rank directories of its own ranks on each node, so delete the rest by hand. Needs about 12 B x (local params /
-    DP size) per GPU, or 8 B with bf16 moments."""
+    """Node-local directory for the state files; ``None`` (default) disables offloading.
+
+    Use fast NVMe; tmpfs is refused. Each run uses ``<dir>/<run_name>/rank<global rank>/``, cleared at startup and
+    removed at the end of training. Needs about 12 B x (local params / DP size) per GPU, or 8 B with bf16 moments."""
     moment_storage_dtype: str = "fp32"
-    """On-disk dtype of the Adam moments: ``"fp32"`` (the same numerics as the regular optimizer) or ``"bf16"``
-    (12 -> 8 B/param read and written per step, not bit-identical). The main params are always stored in fp32, and
-    the step always computes in fp32."""
+    """On-disk dtype of the Adam moments: ``"fp32"`` or ``"bf16"``.
+
+    ``"fp32"`` gives the same numerics as the regular optimizer; ``"bf16"`` reads and writes 8 instead of 12 B/param
+    per step and is not bit-identical. The main params are always stored in fp32, and the step computes in fp32."""
     staging_buffer_mb: int = 256
-    """Size of the pinned host staging buffer for the disk <-> GPU transfers, per rank and optimizer (MoE models
-    have a dense and an expert optimizer)."""
+    """Size in MB of the pinned host staging buffer for disk <-> GPU transfers, per rank and optimizer.
+
+    MoE models have a dense and an expert optimizer, so two buffers per rank."""
 
     def __post_init__(self) -> None:
         if self.moment_storage_dtype not in ("fp32", "bf16"):

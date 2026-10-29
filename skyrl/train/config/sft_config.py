@@ -14,7 +14,6 @@ from typing import List, Optional, Union
 from loguru import logger
 from omegaconf import OmegaConf
 
-from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.train.config import (
     BaseConfig,
     FSDPConfig,
@@ -614,6 +613,8 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
         )
 
     if cfg.megatron_config.optimizer_offload_to_disk.dir is not None:
+        from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
+
         if cfg.strategy != "megatron":
             raise ValueError("optimizer_offload_to_disk requires strategy='megatron'.")
         if is_cloud_path(cfg.ckpt_path):

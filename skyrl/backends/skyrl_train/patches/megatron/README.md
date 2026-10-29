@@ -324,7 +324,9 @@ raises if the line does not appear exactly once.
 - **Landed?** Obsolete once `OptimizerConfig` has a field to defer main-param allocation (e.g.
   `defer_main_param_initialization`).
 - **Remove:** `_deferred_build_model_and_main_param_groups` and its installation in
-  `build_optimizer_offloaded_to_disk`; set the config field instead.
+  `build_optimizer_offloaded_to_disk`, `test_deferred_build_method_is_generated_from_installed_megatron` in
+  `tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py`, and the sentence on the generated
+  method in `.agents/docs/backends/megatron.md`; set the config field instead.
 - **Verify:** `tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py` and
   `tests/backends/skyrl_train/gpu/gpu_ci/test_optimizer_offload_to_disk.py` (2 GPUs).
 
@@ -336,7 +338,6 @@ Use `RAY_ADDRESS=local` if a Ray cluster is already up on the box. Don't put `--
 ```bash
 # CPU
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/patches/megatron/mcore_ext/test_dsa_kpool_math.py
-uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py
 
 # GPU (4+ GPUs): kernels, KDA/mHC vs HF, and the three GLM roundtrip rows vs vLLM
 uv run --isolated --extra dev --extra megatron pytest -s -v -m "h100 or not h100" \
