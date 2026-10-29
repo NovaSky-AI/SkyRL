@@ -368,6 +368,11 @@ class NewInferenceWorkerWrap:
 
         The drafter's buffers are saved too: the weight sync reloads its
         parameters, but nothing else restores its buffers.
+
+        Since vLLM 0.32.0, KV-init runtime state and CUDA graph memory live in their
+        own ``runtime`` / ``cudagraph`` pools. They are always offloaded (as in
+        CuMemBackend.suspend), since any wake remaps them and discarding them leaves
+        the next forward reading garbage (illegal memory access).
         """
         from vllm.device_allocator import get_mem_allocator_instance
 
@@ -376,7 +381,8 @@ class NewInferenceWorkerWrap:
         self._skyrl_saved_draft_buffers = (
             {name: buf.cpu().clone() for name, buf in draft.named_buffers()} if draft is not None else {}
         )
-        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",) if offload_kv else ())
+        offload_tags = ("runtime", "cudagraph", "kv_cache") if offload_kv else ("runtime", "cudagraph")
+        get_mem_allocator_instance().sleep(offload_tags=offload_tags)
 
     def skyrl_wake_for_weight_sync(self, tags: list) -> None:
         """Wake the given allocator tags, restoring CPU-backed contents.
