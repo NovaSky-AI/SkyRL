@@ -153,7 +153,7 @@ def main():
         if not small_ple and len(kept) == len(ks) and all("ple.ple_embedding.ngram_embedding" in k for k in ks):
             link = os.path.join(dst, f)
             if not os.path.lexists(link):
-                os.symlink(os.path.join(src, f), link)
+                os.symlink(os.path.abspath(os.path.join(src, f)), link)
             new_wm.update({k: f for k in kept})
         else:
             copy[f].extend(kept)
