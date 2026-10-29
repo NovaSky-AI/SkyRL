@@ -128,17 +128,17 @@ fsdp = [
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm100a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm103a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm120f==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm80==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm89==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm90a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm100a==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm103a==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm120f==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm80==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm89==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm90a==0.7.0.post1; sys_platform == 'linux'",
     "flashinfer-jit-cache-sm110a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "flashinfer-jit-cache-sm121a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-cubin==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.7.0.post1; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -176,21 +176,21 @@ megatron = [
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.7.0.post1; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core; sys_platform == 'linux'",
     "nvidia-resiliency-ext; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm100a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm103a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm120f==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm80==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm89==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache-sm90a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm100a==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm103a==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm120f==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm80==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm89==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm90a==0.7.0.post1; sys_platform == 'linux'",
     "flashinfer-jit-cache-sm110a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "flashinfer-jit-cache-sm121a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-cubin==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.7.0.post1; sys_platform == 'linux'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
@@ -332,15 +332,16 @@ override-dependencies = [
     # From 0.7 `flashinfer-jit-cache` is a metadata-only package that depends on
     # per-arch `flashinfer-jit-cache-sm*` packages, published only on the cu130
     # index; they are declared directly in the `fsdp` / `megatron` extras so that
-    # their [tool.uv.sources] entries are honored. The x86_64 meta wheel needs
-    # sm80/89/90a/100a/103a/120f; the aarch64 one additionally needs sm110a and
-    # sm121a, which have no x86_64 wheels. uv applies one wheel's metadata to every
-    # platform, so those two are scoped to aarch64 here or x86_64 fails to resolve.
-    "flashinfer-python==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # their [tool.uv.sources] entries are honored. Both the x86_64 and the aarch64
+    # (GB200/GB300) meta wheels need sm80/89/90a/100a/103a/120f; the aarch64 one
+    # additionally needs sm110a and sm121a, which have no x86_64 wheels. uv applies
+    # one wheel's metadata to every platform, so those two are scoped to aarch64
+    # here or x86_64 fails to resolve.
+    "flashinfer-python==0.7.0.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.7.0.post1; sys_platform == 'linux'",
     "flashinfer-jit-cache-sm110a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "flashinfer-jit-cache-sm121a==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-cubin==0.7.0.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.7.0.post1; sys_platform == 'linux'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
     # vLLM 0.32.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
     # overridden here; these two MUST be bumped together.
