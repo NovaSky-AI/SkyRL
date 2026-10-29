@@ -772,3 +772,13 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   ~50-54 s (656 calls, ~80 ms each; consistent with the MoE alltoall dispatcher's per-layer token-count gather,
   80 per micro-batch, plus Engram's) and all-to-all ~39 s (2880 calls); ~4 s of compute per rank; CPU waits 79 s in
   cudaEventSynchronize. The per-layer sync points wait on the slowest of 48 ranks; which rank and why is open.
+- **Prefix-cache logprob drift root cause: vLLM's `swa_bounded_replay` (default on for V4.1).** On a prefix hit the
+  sliding-window KV is not cached but rebuilt by recomputing the hit's last window, which is inexact past the first
+  layer (exact needs W + L(W-1) tokens; vllm#62365 makes it exact only under VLLM_BATCH_INVARIANT=1).
+  `dev/decode_vs_prefill_v41.py --prefix-caching --repeats 12` (outlier_rows.pt, full BF16 model, node 6):
+  default 52 tokens > 1 of 671,571 (7.7e-5, max 2.81, `v41-swareplay-1793308743-on.log`) vs
+  `--no-swa-bounded-replay` 14 of 675,353 (2.1e-5, max 1.94; `-off.log`) = the no-prefix-caching floor (~2e-5).
+  Filed vllm-project/vllm#64584. Alternative to the per-trajectory cache salt (#2568) that keeps prompt sharing:
+  `engine_init_kwargs` `"swa_bounded_replay": false` (not yet tried in a training run).
+- Note: `dev/prefix_hit_vs_fresh_v41.py` (forced hit via cache salts) reported `num_cached_tokens` 0 for the hit
+  requests, so its result is inconclusive; the decode_vs_prefill A/B above is the evidence.
