@@ -1504,6 +1504,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.optimizer is None:
             raise RuntimeError("optim_step called but policy.inference_only_init=True (no optimizer constructed)")
 
+        # The grad sync updates the MoE router expert bias, which is in the checkpoint,
+        # so a pending streaming checkpoint write must end first.
+        self.strategy.finish_streaming_save()
+
         # Reduce gradients across DP (and TP/PP for layernorm/embedding grads) for the
         # whole accumulated window. Deferred out of forward_backward because the reduce
         # is not idempotent -- running it per call corrupts gradients once a window

@@ -668,6 +668,20 @@ class MegatronConfig(BaseConfig):
     Off by default: prestaging shrinks the rank's blocking
     window but delays the background write (per-tensor shared-memory handoff cost).
     See ``_stage_async_request_to_host``."""
+    async_save_streaming_write: bool = False
+    """With ``async_dist_ckpt_save``, write the checkpoint from a background thread of the
+    training rank, without a host copy of all shards.
+
+    The default async save copies every shard to host memory before the background write.
+    Use this option when that copy does not fit in host memory. The thread reads the live
+    model and optimizer tensors while it writes, and copies one tensor at a time to host
+    memory. Training continues until the next step that changes those tensors (the optimizer
+    step with its gradient sync, an offload or a backload). That step waits for the write to
+    end. Only the work before that step overlaps the write, so the gain is small when the
+    trainer offloads its state right after the checkpoint, as with ``colocate_all``.
+
+    Requires ``async_dist_ckpt_save=True``. Not supported with ``async_save_prestage_to_cpu``,
+    LoRA, or ``ddp_config.overlap_param_gather``. The on-disk format does not change."""
 
     def __post_init__(self):
         # Backfill defaults for any keys the user didn't override so an override dict
