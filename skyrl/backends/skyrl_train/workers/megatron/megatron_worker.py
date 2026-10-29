@@ -1087,6 +1087,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.optimizer = None
             self.scheduler = None
         else:
+            if self.cfg.policy.megatron_config.optimizer_config_kwargs.get("optimizer_cpu_offload"):
+                # Ray starts this actor with num_cpus=1, which sets OMP_NUM_THREADS=1, so the CPU share of the
+                # optimizer (torch AdamW) would step on one thread. Use this rank's share of the node's CPUs.
+                cpu_threads = len(os.sched_getaffinity(0)) // max(1, self.cfg.placement.policy_num_gpus_per_node)
+                if torch.get_num_threads() < cpu_threads:
+                    torch.set_num_threads(cpu_threads)
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
