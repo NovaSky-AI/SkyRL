@@ -88,6 +88,10 @@ def apply_deepseek_v4_reload_patch() -> bool:
         pass
     try:
         # DeepSeek-V4.1 (text-only class; see patch_deepseek_v41.py) has its own copies of all three.
+        # TODO: remove this target with the rest of the module. vllm#57797 also gives V4.1's sinks the loader
+        # (``make_attention_sink`` in deepseek_v41/attention.py); vllm#64357 moves V4.1's hook and Engram page-cache
+        # step out of ``DeepseekV41LLMForCausalLM.load_weights`` (check it no longer calls
+        # ``process_weights_after_loading``).
         from vllm.models.deepseek_v41 import attention as v41_attention
         from vllm.models.deepseek_v41.nvidia import model as v41_model
 
