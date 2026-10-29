@@ -192,7 +192,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 # Native neuron backend: the engine lives on the driver and reloads
                 # this exported path after ``broadcast_to_inference_engines`` returns
                 # (see ``WorkerDispatch._neuron_save_weights_for_sampler``). Export-only.
-                pass
+                # A missing client is only valid on neuron; on CUDA it is a hard failure.
+                assert device.is_neuron(), "inference_engine_client is None on a non-neuron backend"
             elif isinstance(inference_engine_client, RemoteInferenceClient):
                 await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
             else:

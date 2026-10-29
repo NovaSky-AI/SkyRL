@@ -318,31 +318,31 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         seq_len = self.data["sequences"].shape[1]
         num_actions = self.data.metadata["response_length"]
         batch_size = 1
-        device = self.data["sequences"].device
+        dev = self.data["sequences"].device
 
         # Keep the full seq_len for shape uniformity, but mark only a single token as
         # valid in the attention mask to keep the row non-degenerate.
-        attention_mask = torch.zeros((batch_size, seq_len), dtype=int, device=device)
+        attention_mask = torch.zeros((batch_size, seq_len), dtype=int, device=dev)
         attention_mask[:, 0] = 1
 
         data = TrainingInputBatch(
             {
-                "sequences": torch.randint(0, 100, (batch_size, seq_len), device=device),
+                "sequences": torch.randint(0, 100, (batch_size, seq_len), device=dev),
                 "attention_mask": attention_mask,
-                "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device=device),
-                "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device=device),
-                "values": 0.5 * torch.ones((batch_size, num_actions), device=device),
-                "returns": 0.5 * torch.ones((batch_size, num_actions), device=device),
-                "advantages": 0.6 * torch.ones((batch_size, num_actions), device=device),
+                "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device=dev),
+                "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device=dev),
+                "values": 0.5 * torch.ones((batch_size, num_actions), device=dev),
+                "returns": 0.5 * torch.ones((batch_size, num_actions), device=dev),
+                "advantages": 0.6 * torch.ones((batch_size, num_actions), device=dev),
                 # Loss mask is all zeros so padding samples don't contribute to the loss.
-                "loss_mask": torch.zeros((batch_size, num_actions), dtype=int, device=device),
-                "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
+                "loss_mask": torch.zeros((batch_size, num_actions), dtype=int, device=dev),
+                "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=dev),
             }
         )
         # Add optional fields to the padding batch.
         if self.data.get("rollout_logprobs") is not None:
             ref_tensor = self.data["rollout_logprobs"]
-            data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
+            data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=dev)
         for key in PACKED_FIELD_PADDING:
             # Per-token fields cover the dummy attended token; response fields do not.
             if self.data.get(key) is not None:

@@ -18,16 +18,19 @@ skyrl/backends/mm_codec.py  # vLLM-free safetensors codec for multimodal kwargs_
 
 ## Install
 
-Two steps. `torch` comes from `torch-neuronx`, which is published on the AWS Neuron index,
-not PyPI, and must be installed first so the `neuron` extra resolves against it:
+`torch` comes from `torch-neuronx`, which is published on the AWS Neuron index, not
+PyPI. `uv run --isolated` builds a fresh environment per invocation, so a system-level
+`pip install torch-neuronx` is **not** visible to it — the Neuron index must be passed to
+`uv` itself so `torch-neuronx` resolves inside the isolated env alongside the extra:
 
 ```bash
-# 1. torch-neuronx (provides the patched torch + the neuron runtime)
-pip install torch-neuronx --index-url https://pip.repos.neuron.amazonaws.com
-
-# 2. the skyrl neuron extra (no vLLM, no CUDA torch)
-uv run --isolated --extra neuron ...
+uv run --isolated --extra neuron \
+  --extra-index-url https://pip.repos.neuron.amazonaws.com \
+  -m skyrl.train.entrypoints.main_base ...
 ```
+
+(Keep the default PyPI index for everything else; the AWS Neuron index only supplies
+`torch-neuronx` and its runtime deps.)
 
 The `neuron` extra mirrors `skyrl-train` minus the CUDA/vLLM-only pieces
 (`vllm-router`, `flash-attn`, `flash-linear-attention`, `causal-conv1d`, `nixl`).
@@ -64,8 +67,14 @@ engine is a single in-process instance on the driver.
   trainer-send transport and has no neuron equivalent. The engine's `update_named_weights`
   already accepts a full state-dict, but the trainer side must gather full FSDP weights and
   hand them to the in-process engine. See the RFC open question on full-weight sync.
-- **Processed-logprob exactness**: `_sampled_token_logprobs` re-implements transformers'
-  sampling filters; to be validated bit-for-bit against the trainer's `processed_logprobs`.
+- **Processed logprobs**: exact. `generate(output_scores=True)` returns the fully-processed
+  per-step logits (temperature / top-k / top-p / min-p / penalties already applied), so the
+  response logprob of the sampled token is `log_softmax(scores)[sampled]` — bit-for-bit the
+  distribution the token was actually drawn from, with no filter re-implementation.
+- **Qwen3.5-VL device-safety patches**: `patches/neuron/qwen3_5_vl.py` fixes three vision-tower
+  paths that crash on neuron (vision RoPE `inv_freq` device-follow, and two dynamic
+  `repeat_interleave` calls forced onto CPU). Applied from both the in-process engine and the
+  FSDP worker's `HFModelWrapper` VLM branch; no-op off neuron.
 
 ## Gotchas
 

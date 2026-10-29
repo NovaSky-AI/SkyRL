@@ -79,7 +79,10 @@ class DistributedStrategy(ABC):
             if not isinstance(data, torch.Tensor):
                 data = torch.Tensor([data])
                 is_tensor = False
-            is_cpu_tensor = data.device.type == "cpu"
+            # Remember the caller's device so the result is returned there. On neuron the
+            # collective runs on CPU (gloo), so a neuron-device input must be moved back
+            # after the reduction rather than silently returning a CPU tensor.
+            orig_device = data.device
 
             data = data.to(device.collective_device())
             if op == "mean":
@@ -92,8 +95,8 @@ class DistributedStrategy(ABC):
                 dist.all_reduce(data, op=dist.ReduceOp.MIN, group=group)
             elif op == "sum":
                 dist.all_reduce(data, op=dist.ReduceOp.SUM, group=group)
-            if is_cpu_tensor:
-                data = data.cpu()
+            if data.device != orig_device:
+                data = data.to(orig_device)
             return data.item() if not is_tensor else data
 
     def all_gather(self, data: DataT) -> DataT:
@@ -106,12 +109,16 @@ class DistributedStrategy(ABC):
         else:
             if not isinstance(data, torch.Tensor):
                 data = torch.Tensor([data])
-            is_cpu_tensor = data.device.type == "cpu"
+            # Remember the caller's device so the result is returned there. On neuron the
+            # collective runs on CPU (gloo), so a neuron-device input must be moved back
+            # after the gather rather than silently returning a CPU tensor.
+            orig_device = data.device
 
             col_dev = device.collective_device()
             ret = [torch.zeros_like(data).to(col_dev) for _ in range(self.world_size)]
             dist.all_gather(ret, data.to(col_dev))
-            return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
+            result = torch.cat(ret)
+            return result.to(orig_device) if result.device != orig_device else result
 
     def save_hf_configs(self, model_config: PretrainedConfig, hf_dir: str, tokenizer: PreTrainedTokenizer = None):
         """

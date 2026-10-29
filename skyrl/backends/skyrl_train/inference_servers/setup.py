@@ -19,8 +19,8 @@ from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
 )
 
-from .common import SERVER_PORT_STRIDE
 from .base import InferenceEngineInterface
+from .common import SERVER_PORT_STRIDE
 from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
 from .utils import (
@@ -272,7 +272,10 @@ def build_new_inference_client(
 ) -> Tuple[InferenceEngineInterface, InferenceServerSetup]:
     """Build the new HTTP-based inference client and supporting state.
 
-    Resolves the ``(external_proxy_url, external_server_urls)`` matrix:
+    The native neuron backend short-circuits here: it returns an in-process
+    ``NeuronInferenceEngine`` with no server groups, router, or proxy (there is no
+    vLLM on Trainium). Otherwise resolves the ``(external_proxy_url,
+    external_server_urls)`` matrix:
     both set means fully external (reuse both as-is); proxy only means
     the external proxy serves both data and control planes; servers
     only spawns an internal router over the external servers; neither
@@ -325,6 +328,8 @@ def build_new_inference_client(
         logger.info(f"HTTP Inference: Using external proxy for both data and " f"control plane - proxy_url={proxy_url}")
         server_setup = InferenceServerSetup(proxy_url=proxy_url, server_urls=server_urls)
     elif has_external_servers and not has_external_proxy:
+        from .vllm_router import VLLMRouter
+
         server_urls = list(external_server_urls)
         router_args = build_router_args(ie_cfg, server_urls=server_urls)
         router = VLLMRouter(router_args, log_path=cfg.trainer.log_path)

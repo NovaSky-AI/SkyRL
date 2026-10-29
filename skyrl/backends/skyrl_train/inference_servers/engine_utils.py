@@ -122,7 +122,7 @@ def get_neuron_sampling_params(sampling_params: Union[SamplingParams, DictConfig
     the keys are transformers ``generate`` arguments rather than vLLM fields.
 
     ``logprobs`` is deliberately dropped here: the native engine always computes
-    prompt/response logprobs via ``output_logits``, so the vLLM ``logprobs`` key has
+    prompt/response logprobs via ``output_scores=True``, so the vLLM ``logprobs`` key has
     no ``generate`` equivalent.
 
     ``do_sample`` is derived from ``temperature`` to match vLLM semantics: transformers
@@ -131,14 +131,18 @@ def get_neuron_sampling_params(sampling_params: Union[SamplingParams, DictConfig
     """
     params = _sampling_params_to_dict(sampling_params)
 
-    stop_val = params.get("stop")
     generate_kwargs: Dict[str, Any] = {
         "max_new_tokens": params.get("max_generate_length"),
         "temperature": params.get("temperature"),
         "top_p": params.get("top_p"),
-        "repetition_penalty": params.get("repetition_penalty"),
-        "stop_strings": list(stop_val) if stop_val is not None else None,
     }
+
+    stop_val = params.get("stop")
+    if stop_val is not None:
+        # ``generate`` requires ``tokenizer`` for ``stop_strings``; the engine passes
+        # its tokenizer, so a non-empty stop list works (and ``None`` is left unset
+        # rather than emitted as a dead key).
+        generate_kwargs["stop_strings"] = list(stop_val)
 
     temperature = params.get("temperature")
     if temperature is not None:

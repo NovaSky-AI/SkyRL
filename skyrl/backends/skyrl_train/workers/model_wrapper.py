@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
+
 try:
     from flash_attn.bert_padding import pad_input, unpad_input
 except ImportError:  # e.g. the native neuron backend, where flash-attn (CUDA-only) is absent
@@ -34,6 +35,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberWeight
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
@@ -197,6 +199,16 @@ class HFModelWrapper(nn.Module):
                     )
                     # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
                     model_class = AutoModelForImageTextToText
+                    # Qwen3.5-VL's vision tower has device-unsafe RoPE / repeat_interleave
+                    # paths that crash on TorchNeuron. Apply the shared device-safety patch
+                    # before the model is built (idempotent, no-op off neuron, and gated on
+                    # the model type so unrelated VLMs are never monkeypatched).
+                    if device.is_neuron() and getattr(model_config, "model_type", None) == "qwen3_5":
+                        from skyrl.backends.skyrl_train.patches.neuron.qwen3_5_vl import (
+                            apply_qwen3_5_vl_device_patch,
+                        )
+
+                        apply_qwen3_5_vl_device_patch()
 
             model_config._attn_implementation = self.attn_implementation
 

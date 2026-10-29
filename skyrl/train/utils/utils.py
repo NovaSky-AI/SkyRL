@@ -21,7 +21,6 @@ from ray.util.placement_group import (
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     has_visible_cuda_device,
     is_blackwell_or_newer,
@@ -30,6 +29,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
     BLOCKWISE_FP8,
@@ -607,6 +607,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         assert (
             cfg.generator.inference_engine.weight_sync_backend != "delta"
         ), "Delta weight sync is not yet supported for LoRA"
+
+    # The native neuron engine runs in-process on the driver (no separate server
+    # actors to colocate), so colocation is meaningless and its placement-group math
+    # (which assumes GPU bundles) would hang or mis-place workers. Reject it up front.
+    if cfg.generator.inference_engine.backend == "neuron" and cfg.trainer.placement.colocate_all:
+        raise ValueError(
+            "generator.inference_engine.backend='neuron' does not support placement.colocate_all=true: "
+            "the native engine runs in-process on the driver and has no server actors to colocate. "
+            "Set placement.colocate_all=false."
+        )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:

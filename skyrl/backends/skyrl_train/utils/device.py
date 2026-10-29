@@ -46,10 +46,6 @@ def is_neuron() -> bool:
     return backend() == "neuron"
 
 
-def is_accelerator() -> bool:
-    return is_cuda() or is_neuron()
-
-
 def _neuronx():
     import torch_neuronx
 
@@ -76,7 +72,7 @@ def set_device(rank: int) -> None:
         torch.cuda.set_device(rank)
 
 
-def neuron_worker_core(rank: int) -> int:
+def neuron_worker_core(rank: int, world_size: int = 1) -> int:
     """NeuronCore id for an FSDP worker actor of ``rank``.
 
     The driver runs the in-process inference engine on the core named by the
@@ -85,7 +81,16 @@ def neuron_worker_core(rank: int) -> int:
     needs its own disjoint single core.  We read the driver's core list from the
     inherited environment and offset workers one core above its last entry (so a
     multi-core driver listing also leaves the workers clear of every driver core).
+
+    Single-node only: this offset assumes every worker shares the driver's node and
+    therefore the same core namespace.  On multi-node the scheduler pins each node's
+    ``NEURON_RT_VISIBLE_CORES`` independently, so this driver-derived offset is not
+    valid and is rejected via ``world_size``.
     """
+    assert world_size == 1, (
+        "neuron_worker_core only supports single-node (world_size == 1); "
+        "multi-node neuron is not wired for per-node core pinning"
+    )
     driver_cores = [
         int(x) for x in os.environ.get("NEURON_RT_VISIBLE_CORES", "0").split(",") if x.strip()
     ] or [0]
@@ -161,12 +166,16 @@ def ray_actor_options(num_accelerators: float, resources: dict | None = None) ->
     the caller's ``resources`` through unchanged.  Neuron has no ``num_gpus`` sugar:
     it reserves the ``neuron_cores`` custom resource, requests a single CPU, and
     forces ``num_gpus=0`` (overriding any ``@ray.remote(num_gpus=1)`` class default).
+    Any caller-supplied resources are preserved and merged with the ``neuron_cores``
+    request rather than dropped.
     """
     if is_neuron():
+        resources = dict(resources or {})
+        resources["neuron_cores"] = num_accelerators
         return {
             "num_cpus": 1,
             "num_gpus": 0,
-            "resources": {"neuron_cores": num_accelerators},
+            "resources": resources,
         }
     return {
         "num_cpus": num_accelerators,

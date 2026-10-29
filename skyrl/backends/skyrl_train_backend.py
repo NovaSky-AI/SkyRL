@@ -461,13 +461,18 @@ class SkyRLTrainBackend(AbstractBackend):
         - Inference engines already initialized (e.g. VLM RL, where sampling
           brought them up): reuse ``RemoteInferenceClient`` so render requests
           fan out across all engine API servers rather than funneling through
-          a single driver-local process.
+          a single driver-local process. The native neuron engine is the
+          exception: its ``render_chat_completion`` implements the RL generator's
+          full-conversation contract (token ids + a single ``kwargs_data`` blob),
+          not vLLM's per-image render contract that :class:`VLLMRenderer` parses
+          (``mm_placeholders`` offsets + per-image ``kwargs_data`` items), so it
+          must never be handed to ``VLLMRenderer``.
         - Engines not initialized (e.g. VLM SFT): lazily start a CPU-only
           render server. It loads just the tokenizer and HF processor (no
           weights, no KV cache, no GPU), keeping the training path
           (forward / forward_backward) free of inference-engine startup.
         """
-        if self._inference_engines_initialized:
+        if self._inference_engines_initialized and self._cfg.generator.inference_engine.backend != "neuron":
             return self._inference_engine_client
 
         from skyrl.backends.skyrl_train.inference_servers.render_server import (

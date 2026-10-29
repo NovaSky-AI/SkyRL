@@ -27,7 +27,9 @@ def test_neuron_sampling_params_maps_generate_kwargs():
     assert kwargs["top_p"] == 0.9
     assert kwargs["top_k"] == 50
     assert kwargs["min_p"] == 0.05
-    assert kwargs["repetition_penalty"] == 1.2
+    # ``repetition_penalty`` is NOT forwarded by the typed-params path (matching vLLM);
+    # it flows only through ``additional_kwargs`` per the SamplingParams docstring.
+    assert "repetition_penalty" not in kwargs
     assert kwargs["stop_strings"] == ["<|im_end|>"]
     # `logprobs` is a vLLM field with no `generate` equivalent; it must not leak.
     assert "logprobs" not in kwargs
@@ -38,9 +40,17 @@ def test_neuron_sampling_params_skips_disabled_knobs():
     kwargs = get_neuron_sampling_params(params)
     assert "top_k" not in kwargs
     assert "min_p" not in kwargs
-    assert kwargs["stop_strings"] is None
+    # No stop strings: the key is left unset rather than emitted as a dead ``None``.
+    assert "stop_strings" not in kwargs
     # temperature=1.0 must sample (vLLM semantics), not fall back to greedy.
     assert kwargs["do_sample"] is True
+
+
+def test_neuron_sampling_params_forwards_repetition_penalty_via_additional_kwargs():
+    # The only supported path for repetition_penalty (mirrors vLLM): extra kwargs.
+    params = SamplingParams(repetition_penalty=1.0, additional_kwargs={"repetition_penalty": 1.3})
+    kwargs = get_neuron_sampling_params(params)
+    assert kwargs["repetition_penalty"] == 1.3
 
 
 def test_neuron_sampling_params_accepts_plain_dict():

@@ -8,16 +8,18 @@ ships no weight-synchronization path for RL, while ``torch-neuronx`` exposes a p
 TRL GRPO leg uses).
 
 This first cut implements the *text* RL path end-to-end, plus the multimodal
-(VLM) path over a vLLM-free codec.  Two follow-ups remain:
+(VLM) path over a vLLM-free codec.
 
-1. **Processed-logprob exactness** -- ``_sampled_token_logprobs`` re-implements
-   transformers' sampling filters (temperature/top-k/min-p/top-p) to reproduce vLLM's
-   "processed logprob of the sampled token".  It must be validated bit-for-bit against
-   the trainer's ``processed_logprobs`` forward on a neuron instance.
-2. **Full-weight sync routing** -- SkyRL syncs full weights by bypassing
-   ``InferenceEngineInterface`` (vLLM's own trainer engine).  Routing that through
-   ``update_named_weights`` (and placing the engine relative to the FSDP workers) is a
-   separate change; LoRA sync already flows through this interface.
+**Processed logprobs.** ``model.generate(output_scores=True)`` returns the
+fully-processed per-step logits the sampler softmaxes before drawing a token, so the
+response logprob of the sampled token is ``log_softmax(scores)[sampled]`` -- bit-for-bit
+the distribution the token was actually drawn from, with no filter re-implementation.
+
+**Weight sync.** LoRA sync flows through ``update_named_weights`` (the driver reloads the
+exported adapter). Full-weight (non-LoRA) sync is not wired: the FSDP worker has no
+engine handle under the neuron backend, and ``WorkerDispatch._neuron_save_weights_for_sampler``
+raises ``NotImplementedError`` for ``lora.rank <= 0``. The engine's ``update_named_weights``
+full-weight branch is present but unreached until that routing is added.
 
 The VLM path uses ``skyrl.backends.mm_codec`` (safetensors + a ``skyrl:torch:`` prefix)
 for ``kwargs_data`` instead of vLLM's ``mm_serde``, so it does not require vLLM.
@@ -37,7 +39,9 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl.backends.skyrl_train.inference_servers.engine_utils import get_neuron_sampling_params
+from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
+    get_neuron_sampling_params,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import LoraLoadRequest
 from skyrl.utils.tok import check_is_vlm, get_processor, get_tokenizer
 
@@ -72,17 +76,45 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         self._model = self._base_model
         self._adapters: Dict[str, Any] = {}
         self._active_lora_name: Optional[str] = None
+        # ``model.generate`` is not thread-safe and the caller fans out every prompt in
+        # a batch concurrently, so serialize generation (and the adapter swap it races
+        # with) on the driver. On a single NeuronCore this is also the right memory
+        # shape: no concurrent forward passes.
+        self._generate_lock = asyncio.Lock()
 
     # -- construction ---------------------------------------------------------
 
     def _load_base_model(self, model_path: str, attn_implementation: Optional[str]):
-        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+        from transformers import (
+            AutoConfig,
+            AutoModelForCausalLM,
+            AutoModelForImageTextToText,
+        )
 
         load_kwargs: Dict[str, Any] = {"trust_remote_code": True, "torch_dtype": self._torch_dtype}
         if attn_implementation is not None:
             load_kwargs["attn_implementation"] = attn_implementation
 
         if self._is_vlm:
+            # Qwen3.5-VL's vision tower has device-unsafe RoPE / repeat_interleave paths
+            # that crash on TorchNeuron. Apply the shared device-safety patch before the
+            # model is built -- but only for the model family it targets. The patch module
+            # is absent on transformers releases predating Qwen3.5 (the base floor is
+            # >=5.6.1), so importing it unconditionally would crash every VLM load there.
+            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            if config.model_type == "qwen3_5":
+                try:
+                    from skyrl.backends.skyrl_train.patches.neuron.qwen3_5_vl import (
+                        apply_qwen3_5_vl_device_patch,
+                    )
+
+                    apply_qwen3_5_vl_device_patch()
+                except ImportError:
+                    logger.warning(
+                        "Qwen3.5-VL detected but the neuron device-safety patch is unavailable "
+                        "on this transformers release; running unpatched."
+                    )
+            load_kwargs["config"] = config
             self._processor = self._processor if self._processor is not None else get_processor(model_path)
             return AutoModelForImageTextToText.from_pretrained(model_path, **load_kwargs)
         return AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
@@ -103,15 +135,20 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         sampling_params = input_batch.get("sampling_params") or {}
         generate_kwargs = get_neuron_sampling_params(sampling_params)
 
-        if model is not None and model != self._model_path:
-            if model not in self._adapters:
-                raise ValueError(f"Unknown LoRA adapter requested for sampling: {model!r}")
-            if model != self._active_lora_name:
-                self._model = self._adapters[model]
-                self._active_lora_name = model
+        # ``model.generate`` is not thread-safe and mutates ``self._model`` when an
+        # adapter is switched, so serialize the whole swap+generate critical section.
+        # The caller fans out every prompt in a batch, so this also stops the default
+        # executor's threads from issuing concurrent forwards on one NeuronCore.
+        async with self._generate_lock:
+            if model is not None and model != self._model_path:
+                if model not in self._adapters:
+                    raise ValueError(f"Unknown LoRA adapter requested for sampling: {model!r}")
+                if model != self._active_lora_name:
+                    self._model = self._adapters[model]
+                    self._active_lora_name = model
 
-        # ``model.generate`` is a blocking call; keep the driver's event loop free.
-        return await asyncio.to_thread(self._generate_sync, prompt_token_ids, generate_kwargs, mm_features)
+            # ``model.generate`` is a blocking call; keep the driver's event loop free.
+            return await asyncio.to_thread(self._generate_sync, prompt_token_ids, generate_kwargs, mm_features)
 
     def get_endpoint_url(self) -> str:
         raise NotImplementedError("The native engine has no HTTP endpoint; it runs in-process.")
@@ -281,21 +318,27 @@ class NeuronInferenceEngine(InferenceEngineInterface):
             await self.load_lora_adapter(request.lora_name, request.lora_path)
             return
 
-        # Full-weight update: ``request`` maps HF state-dict names to tensors.
-        state_dict = {}
-        for name, value in request.items():
-            if torch.is_tensor(value):
-                state_dict[name] = value.to(self._device)
-            else:
-                state_dict[name] = torch.tensor(value, device=self._device)
-        self._base_model.load_state_dict(state_dict, strict=False)
-        logger.info("NeuronInferenceEngine updated %d named weights in-place.", len(state_dict))
+        # Full-weight (non-LoRA) sync is not wired: the FSDP worker has no engine handle
+        # under the neuron backend and `WorkerDispatch._neuron_save_weights_for_sampler`
+        # already raises `NotImplementedError` for `lora.rank <= 0`. Refuse loudly here
+        # rather than half-applying a state dict into the raw base model (which would
+        # bypass the active PeftModel and silently drop key/shape mismatches).
+        raise NotImplementedError(
+            "NeuronInferenceEngine only supports LoRA weight sync; full-weight sync is not wired."
+        )
 
     async def load_lora_adapter(self, lora_name: str, lora_path: str) -> Dict[str, Any]:
+        # A single-tenant run re-exports the adapter under the same name after every
+        # train step. A cached PeftModel keeps the step-0 tensors, so on a repeat name
+        # reload the freshly exported safetensors into the existing adapter instead of
+        # short-circuiting.
         if lora_name in self._adapters:
-            self._model = self._adapters[lora_name]
+            adapter = self._adapters[lora_name]
+            adapter.load_adapter(lora_path, adapter_name=lora_name, is_trainable=False)
+            self._model = adapter
             self._active_lora_name = lora_name
-            return {"status": "already_loaded", "lora_name": lora_name}
+            logger.info("Reloaded LoRA adapter %r from %s", lora_name, lora_path)
+            return {"status": "reloaded", "lora_name": lora_name}
 
         from peft import PeftModel
 
@@ -307,6 +350,7 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         self._adapters[lora_name] = adapter
         self._model = adapter
         self._active_lora_name = lora_name
+        logger.info("Loaded LoRA adapter %r from %s", lora_name, lora_path)
         return {"status": "ok", "lora_name": lora_name}
 
     async def teardown(self) -> None:
@@ -351,29 +395,48 @@ class NeuronInferenceEngine(InferenceEngineInterface):
 
         outputs = self._model.generate(
             **inputs,
-            output_logits=True,
+            output_scores=True,
             return_dict_in_generate=True,
+            tokenizer=self._tokenizer,
             **generate_kwargs,
         )
         sequences = outputs.sequences  # [batch, padded_prompt + generated], right-padded
 
         max_new_tokens = generate_kwargs.get("max_new_tokens")
         eos_id = self._tokenizer.eos_token_id
-        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
+        pad_id = self._tokenizer.pad_token_id
+        if pad_id is None:
+            # A tokenizer with no pad token (common in the Qwen family) still needs a
+            # value to identify the right-padding ``generate`` appends; transformers
+            # itself falls back to EOS there. Keep the two distinct below so a real EOS
+            # stop token is not stripped.
+            pad_id = eos_id
+
+        # ``sequences`` is ``[batch, input_width + max_new_tokens]``: the padded prompt
+        # (real tokens left-aligned, ``pad_id`` right-filling to ``max(prompt_lens)``)
+        # followed by the generated tokens (right-padded with ``pad_id``). Slice from the
+        # padded input width so only generated tokens remain; do not slice from
+        # ``prompt_lens[b]`` (that leaves prompt-side pads at the head of shorter prompts).
+        input_width = max(prompt_lens)
 
         response_ids: List[List[int]] = []
         responses: List[str] = []
         stop_reasons: List[str] = []
         for b in range(batch):
-            ids = sequences[b, prompt_lens[b] :].tolist()
-            ids = [t for t in ids if t != pad_id]
+            ids = sequences[b, input_width:].tolist()
+            # Strip only the trailing pad tokens ``generate`` appends after the response.
+            # Do not strip EOS: the vLLM path sets ``include_stop_str_in_output=True``, so
+            # the terminating EOS must survive for stop-reason and loss-mask parity.
+            if pad_id is not None and pad_id != eos_id:
+                while ids and ids[-1] == pad_id:
+                    ids.pop()
             if eos_id is not None and eos_id in ids:
                 ids = ids[: ids.index(eos_id) + 1]
             response_ids.append(ids)
             responses.append(self._tokenizer.decode(ids, skip_special_tokens=True))
             stop_reasons.append("length" if max_new_tokens is not None and len(ids) >= max_new_tokens else "stop")
 
-        response_logprobs = self._response_logprobs(outputs.logits, response_ids, generate_kwargs)
+        response_logprobs = self._response_logprobs(outputs.scores, response_ids)
 
         return InferenceEngineOutput(
             responses=responses,
@@ -390,7 +453,9 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         prompt_lens = [len(ids) for ids in prompt_token_ids]
         max_prompt_len = max(prompt_lens)
 
-        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
+        pad_id = self._tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self._tokenizer.eos_token_id
         input_ids = torch.tensor(
             [ids + [pad_id] * (max_prompt_len - len(ids)) for ids in prompt_token_ids],
             device=self._device,
@@ -410,11 +475,14 @@ class NeuronInferenceEngine(InferenceEngineInterface):
     ) -> Tuple[Dict[str, torch.Tensor], List[int]]:
         """Rebuild a single-sample VLM ``generate`` input from token ids + encoded vision tensors.
 
-        The VLM generator runs unbatched (``batched=False``), so there is exactly one
-        sample and no padding: the input is the sample's token ids plus the vision tensors
+        The VLM generator runs unbatched (``batched=False``), so exactly one sample and
+        one ``mm_features`` entry are expected; the invariant is asserted rather than
+        silently truncating. The input is the sample's token ids plus the vision tensors
         the render step stashed in ``kwargs_data``. Those tensors were produced by the
         processor and are replayed verbatim, so their layout is whatever the model expects.
         """
+        assert len(prompt_token_ids) == 1, "VLM generation is single-sample (batched=False)"
+        assert len(mm_features) == 1, "VLM generation expects exactly one mm_features entry"
         sample_ids = prompt_token_ids[0]
         input_ids = torch.tensor([sample_ids], device=self._device, dtype=torch.long)
         inputs: Dict[str, torch.Tensor] = {
@@ -437,80 +505,29 @@ class NeuronInferenceEngine(InferenceEngineInterface):
 
     def _response_logprobs(
         self,
-        step_logits: Tuple[torch.Tensor, ...],
+        step_scores: Tuple[torch.Tensor, ...],
         response_ids: List[List[int]],
-        generate_kwargs: Dict[str, Any],
     ) -> List[List[float]]:
         """Per-token logprob of the sampled token, aligned 1:1 with ``response_ids``.
 
-        Follow-up 2 in the module docstring: validate this against the trainer's
-        ``processed_logprobs`` computation on a neuron instance.
+        ``model.generate(output_scores=True)`` returns the fully-processed per-step
+        logits -- temperature / top-k / top-p / min-p / penalties already applied -- that
+        the sampler softmaxes before drawing a token, so ``log_softmax(scores)[sampled]``
+        is bit-for-bit the distribution the token was actually drawn from.
 
-        The per-step log-softmax/top-k/gather math runs on CPU: neuronx-cc cannot lower
-        some of these ops under an NKI context (``No backend set`` / ``No active NKI
-        context``), and the per-token results are a handful of floats anyway, so the
-        ``[batch, vocab]`` round-trip is cheaper than a compiled-graph fallback.
+        The ``[batch, vocab]`` log-softmax runs on CPU: neuronx-cc cannot lower it under
+        an NKI context, and per-token results are a handful of floats, so the round-trip
+        is cheaper than a compiled-graph fallback.
         """
-        temperature = generate_kwargs.get("temperature")
-        top_k = generate_kwargs.get("top_k")
-        top_p = generate_kwargs.get("top_p")
-        min_p = generate_kwargs.get("min_p")
-
         batch = len(response_ids)
         result: List[List[float]] = [[] for _ in range(batch)]
-        for t, logits_t in enumerate(step_logits):
+        for t, scores_t in enumerate(step_scores):
             active = [b for b in range(batch) if t < len(response_ids[b])]
             if not active:
                 continue
-            logits_cpu = logits_t.detach().to("cpu").float()
+            scores_cpu = scores_t.detach().to("cpu").float()
             sampled = torch.tensor([response_ids[b][t] for b in active], dtype=torch.long)
-            lp = self._sampled_token_logprobs(
-                logits_cpu[active], sampled, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p
-            )
+            lp = scores_cpu[active].log_softmax(dim=-1).gather(dim=-1, index=sampled.unsqueeze(-1)).squeeze(-1)
             for b, value in zip(active, lp.tolist()):
                 result[b].append(value)
         return result
-
-    @staticmethod
-    def _sampled_token_logprobs(
-        logits: torch.Tensor,
-        sampled_ids: torch.Tensor,
-        *,
-        temperature: Optional[float],
-        top_k: Optional[float],
-        top_p: Optional[float],
-        min_p: Optional[float],
-    ) -> torch.Tensor:
-        """Log-prob of each sampled token under the (filtered) sampling distribution.
-
-        Mirrors transformers' sampling filter order: temperature, top-k, min-p, top-p,
-        then softmax.  Returns one log-prob per row of ``logits``.
-        """
-        logits = logits.float()
-        if temperature is not None and temperature != 1.0:
-            logits = logits / temperature
-
-        vocab = logits.size(-1)
-        if top_k is not None and top_k > 0:
-            top_k = min(int(top_k), vocab)
-            kth = torch.topk(logits, top_k, dim=-1).values[..., -1, None]
-            logits = logits.masked_fill(logits < kth, float("-inf"))
-
-        if min_p is not None and min_p > 0:
-            probs = logits.softmax(dim=-1)
-            threshold = probs.max(dim=-1, keepdim=True).values * min_p
-            logits = logits.masked_fill(probs < threshold, float("-inf"))
-
-        if top_p is not None and top_p < 1.0:
-            probs = logits.softmax(dim=-1)
-            sorted_probs, sorted_idx = probs.sort(dim=-1, descending=True)
-            cumsum = sorted_probs.cumsum(dim=-1)
-            # ``cumsum - sorted_probs`` is the cumulative mass of tokens strictly above
-            # this one in sorted order; when it already exceeds ``top_p``, this token and
-            # everything below it are cut. This mirrors transformers' ``_sample`` filter.
-            remove = cumsum - sorted_probs > top_p
-            idx_to_remove = remove.scatter(dim=-1, index=sorted_idx, src=remove)
-            logits = logits.masked_fill(idx_to_remove, float("-inf"))
-
-        log_probs = logits.log_softmax(dim=-1)
-        return log_probs.gather(dim=-1, index=sampled_ids.unsqueeze(-1)).squeeze(-1)
