@@ -281,6 +281,8 @@ version = {attr = "skyrl.__version__"}
 # Installs the R3 pipeline-parallel config patch in every vLLM process (incl. the engine core); no-op unless
 # SKYRL_R3_PP_RELAY=1 (set by the server actor for R3 with PP > 1).
 skyrl_r3_pp_relay = "skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay:vllm_general_plugin"
+# Serves DeepSeek-V4.1 with vLLM's text-only (LoRA-capable) class; SKYRL_DEEPSEEK_V41_TEXT_ONLY=0 opts out.
+skyrl_deepseek_v41 = "skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41:vllm_general_plugin"
 
 [tool.uv]
 # Resolve only the Linux architectures covered by the CUDA wheels, plus the
