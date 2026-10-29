@@ -409,8 +409,8 @@ def validate_old_logprobs_from_update_forward(cfg: SkyRLTrainConfig) -> None:
     t = cfg.trainer
     if not t.old_logprobs_from_update_forward:
         return
-    if t.strategy != "fsdp":
-        raise ValueError("old_logprobs_from_update_forward is implemented for strategy=fsdp only")
+    if t.strategy not in ("fsdp", "megatron"):
+        raise ValueError("old_logprobs_from_update_forward is implemented for strategy=fsdp and megatron only")
     if t.policy_mini_batch_size != t.train_batch_size or t.update_epochs_per_batch != 1:
         raise ValueError(
             "old_logprobs_from_update_forward needs one optimizer update per batch: "

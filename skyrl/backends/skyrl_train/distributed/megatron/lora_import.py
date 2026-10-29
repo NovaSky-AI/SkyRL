@@ -35,11 +35,13 @@ from skyrl.backends.skyrl_train.distributed.lora_import import (
     LoraPiece,
     PeftLoraAdapter,
     canonical_module_name,
+    expert_factor_for_param,
     hf_name_variants,
     stack_lora_pieces,
 )
 
 _WEIGHT_SUFFIX_RE = re.compile(r"\.weight\d*$")
+_EXPERT_WEIGHT_RE = re.compile(r"\.weight(\d+)$")
 
 
 @dataclass
@@ -85,6 +87,8 @@ class MegatronLoraImportPlan:
     constituents: Dict[str, List[str]]
     """HF base weight names each Megatron module fuses, in the bridge's order."""
     max_rank: int
+    expert_index: Dict[str, int] = field(default_factory=dict)
+    """Global expert of each grouped-expert piece (keyed by :attr:`LoraPiece.module`)."""
 
 
 def _mapping_registry(bridge):
@@ -132,6 +136,8 @@ def plan_megatron_lora_import(
 
     groups: Dict[str, List[LoraPiece]] = {}
     constituents: Dict[str, List[str]] = {}
+    expert_index: Dict[str, int] = {}
+    position: Dict[str, int] = {}
     unmatched: List[str] = []
     for module, piece in adapter.pieces.items():
         mapping = _lookup_megatron_param(registry, module)
@@ -140,10 +146,16 @@ def plan_megatron_lora_import(
             continue
         megatron_module = _WEIGHT_SUFFIX_RE.sub("", mapping.megatron_param)
         if is_expert_linear(megatron_module):
-            raise NotImplementedError(
-                f"init_adapter_path: {module} targets MoE expert module {megatron_module}; importing "
-                "expert LoRA adapters into Megatron is not supported"
-            )
+            expert = _EXPERT_WEIGHT_RE.search(mapping.megatron_param)
+            if expert is None or ".local_experts." in megatron_module:
+                raise NotImplementedError(
+                    f"init_adapter_path: {module} targets {mapping.megatron_param}; only grouped-expert "
+                    "(weight<expert>) adapters can be imported"
+                )
+            expert_index[module] = int(expert.group(1))
+            names = [canonical_module_name(_WEIGHT_SUFFIX_RE.sub("", n)) for n in _hf_param_names(mapping)]
+            own = canonical_module_name(module)
+            position[module] = names.index(own) if own in names else len(names)
         groups.setdefault(megatron_module, []).append(piece)
         constituents.setdefault(megatron_module, _hf_param_names(mapping))
     if unmatched:
@@ -154,12 +166,25 @@ def plan_megatron_lora_import(
 
     # Order each group by the bridge's constituent order so ranks stack deterministically.
     for megatron_module, pieces in groups.items():
+        if is_expert_linear(megatron_module):
+            pieces.sort(key=lambda p: (expert_index[p.module], position[p.module]))
+            continue
         order = {
             canonical_module_name(_WEIGHT_SUFFIX_RE.sub("", n)): i for i, n in enumerate(constituents[megatron_module])
         }
         pieces.sort(key=lambda p: order.get(canonical_module_name(p.module), len(order)))
 
-    dims_by_module = {m: fused_rank(pieces, tp_size) for m, pieces in groups.items()}
+    dims_by_module: Dict[str, int] = {}
+    for megatron_module, pieces in groups.items():
+        if not is_expert_linear(megatron_module):
+            dims_by_module[megatron_module] = fused_rank(pieces, tp_size)
+            continue
+        expert_ranks = {fused_rank(p, 1) for p in _pieces_by_expert(pieces, expert_index).values()}
+        if len(expert_ranks) != 1:
+            raise ValueError(
+                f"init_adapter_path: {megatron_module} experts have different ranks {sorted(expert_ranks)}"
+            )
+        dims_by_module[megatron_module] = expert_ranks.pop()
     dims_by_leaf: Dict[str, set] = {}
     for megatron_module, dim in dims_by_module.items():
         dims_by_leaf.setdefault(megatron_module.rsplit(".", 1)[-1], set()).add(dim)
@@ -195,7 +220,15 @@ def plan_megatron_lora_import(
         groups=groups,
         constituents=constituents,
         max_rank=max(dims_by_module.values()),
+        expert_index=expert_index,
     )
+
+
+def _pieces_by_expert(pieces: Sequence[LoraPiece], expert_index: Dict[str, int]) -> Dict[int, List[LoraPiece]]:
+    by_expert: Dict[int, List[LoraPiece]] = {}
+    for piece in pieces:
+        by_expert.setdefault(expert_index[piece.module], []).append(piece)
+    return by_expert
 
 
 def _global_out_features(task, tp_size: int) -> int:
@@ -246,10 +279,14 @@ def load_peft_adapter_into_megatron(
         for task in tasks:
             if task.adapter_key is not None:
                 raise NotImplementedError("init_adapter_path requires lora_type='lora' (canonical_lora unsupported)")
-            if task.requires_expert_splits or is_expert_linear(base_prefix):
-                raise NotImplementedError(f"init_adapter_path: expert adapter {base_prefix} is not supported")
             if task.linear_in_task.megatron_module is None:
                 continue  # lives on another pipeline stage
+            if is_expert_linear(base_prefix):
+                _load_grouped_expert_adapter(
+                    model_bridge, registry, unwrapped, base_prefix, task, pieces, plan, lora_cls
+                )
+                loaded += 1
+                continue
             chunk = unwrapped[task.linear_in_task.vp_stage or 0]
             base_hf_names = model_bridge._get_base_hf_param_names_for_adapter(registry, base_prefix, None, ".weight")
             rank = _global_rank(task.linear_in_task, tp_size)
@@ -286,6 +323,54 @@ def load_peft_adapter_into_megatron(
     return stats
 
 
+def _load_grouped_expert_adapter(model_bridge, registry, unwrapped, base_prefix, task, pieces, plan, lora_cls) -> None:
+    """Place a grouped-expert adapter: the inverse of the bridge's adapter export.
+
+    Each side is either one factor shared by every expert (``experts_shared_outer_loras``: ``linear_in`` of
+    ``linear_fc1``, ``linear_out`` of ``linear_fc2``) or a ``(local_experts, ...)`` pack. The file has one key
+    per global expert; a shared side must be bit-identical across all of them, since the model holds only one.
+    """
+    if mpu.get_expert_tensor_parallel_world_size() != 1:
+        raise NotImplementedError(f"init_adapter_path: {base_prefix}: expert_tensor_parallel_size > 1")
+    num_experts = int(unwrapped[0].config.num_moe_experts)
+    by_expert = _pieces_by_expert(pieces, plan.expert_index)
+    missing = sorted(set(range(num_experts)) - set(by_expert))
+    if missing:
+        raise ValueError(f"init_adapter_path: {base_prefix} adapter has no tensors for experts {missing[:8]}")
+    w_in = task.linear_in_task.param_weight
+    w_out = task.linear_out_task.param_weight
+    rank = int(w_in.shape[-2])
+    target_scale = float(lora_cls.alpha) / rank
+    out_features = int(w_out.shape[-2])
+    lora_a: Dict[int, torch.Tensor] = {}
+    lora_b: Dict[int, torch.Tensor] = {}
+    for expert, expert_pieces in by_expert.items():
+        stacked = stack_lora_pieces(expert_pieces, target_scale=target_scale)
+        if stacked.rank != rank:
+            raise ValueError(
+                f"init_adapter_path: {base_prefix} expert {expert} needs rank {stacked.rank} but the model has {rank}; "
+                "a fused gate/up adapter has one lora_A, so both projections' lora_A must be bit-identical"
+            )
+        base_hf_names = model_bridge._get_base_hf_param_names_for_adapter(
+            registry, base_prefix, None, f".weight{expert}"
+        )
+        lora_a[expert] = stacked.lora_a
+        lora_b[expert] = _place_lora_b(
+            model_bridge,
+            unwrapped,
+            base_prefix,
+            base_hf_names,
+            expert_pieces,
+            stacked.lora_bs,
+            out_features,
+            rank,
+            is_expert=True,
+        )
+    ep_rank = mpu.get_expert_model_parallel_rank()
+    for weight, factors, side in ((w_in, lora_a, "lora_A"), (w_out, lora_b, "lora_B")):
+        weight.data.copy_(expert_factor_for_param(factors, tuple(weight.shape), ep_rank, f"{base_prefix} {side}"))
+
+
 def _place_lora_b(
     model_bridge,
     unwrapped,
@@ -295,6 +380,7 @@ def _place_lora_b(
     lora_bs: Sequence[torch.Tensor],
     out_features: int,
     rank: int,
+    is_expert: bool = False,
 ) -> torch.Tensor:
     """Assemble the fused ``lora_B`` (``out_features`` x ``rank``) in Megatron's row layout."""
     by_canonical: Dict[str, torch.Tensor] = {}
@@ -302,7 +388,7 @@ def _place_lora_b(
         by_canonical[canonical_module_name(piece.module)] = lora_b
 
     index = torch.arange(out_features, dtype=torch.int64).unsqueeze(1)
-    slices = model_bridge._get_fused_adapter_linear_out_slices(unwrapped, base_hf_names, index, is_expert=False)
+    slices = model_bridge._get_fused_adapter_linear_out_slices(unwrapped, base_hf_names, index, is_expert=is_expert)
     lora_b_full = torch.zeros(out_features, rank, dtype=torch.float32)
     if slices is None:
         if len(base_hf_names) != 1 or len(lora_bs) != 1:
@@ -334,3 +420,31 @@ def _place_lora_b(
     if unplaced:
         raise ValueError(f"init_adapter_path: {unplaced} are not constituents of {base_prefix} ({base_hf_names})")
     return lora_b_full
+
+
+def load_peft_adapter_dir_into_megatron(
+    bridge, model_chunks: List[torch.nn.Module], path: str, lora_cls: LoRA
+) -> Dict[str, Any]:
+    """Load a PEFT adapter directory into an already built LoRA model (e.g. the trainer's own export).
+
+    The model's adapters must already have the ranks the adapter needs. Scales are exact: each module's
+    ``lora_B`` is multiplied by the adapter's ``lora_alpha / r`` over the model's ``alpha / rank``, so a
+    folded export (``lora_alpha == r``, scale in ``lora_B``) and an unfolded PEFT file both load.
+    """
+    from skyrl.backends.skyrl_train.distributed.lora_import import (
+        normalize_peft_adapter,
+        read_peft_adapter,
+    )
+
+    adapter = normalize_peft_adapter(read_peft_adapter(path))
+    plan = plan_megatron_lora_import(
+        bridge,
+        adapter,
+        tp_size=mpu.get_tensor_model_parallel_world_size(),
+        pp_size=mpu.get_pipeline_model_parallel_world_size(),
+        target_modules=list(lora_cls.target_modules),
+    )
+    wrong = {m: d for m, d in plan.module_dims.items() if d != lora_cls.dim_for(m)}
+    if wrong:
+        raise ValueError(f"{path}: adapter ranks {wrong} differ from the model's LoRA ranks")
+    return load_peft_adapter_into_megatron(bridge, model_chunks, plan, lora_cls)

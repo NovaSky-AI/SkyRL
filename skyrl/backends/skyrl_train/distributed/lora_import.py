@@ -494,3 +494,34 @@ def check_adapter_matches_config(adapter: PeftLoraAdapter, rank: int, alpha: flo
 
 def with_pieces(adapter: PeftLoraAdapter, pieces: Dict[str, LoraPiece]) -> PeftLoraAdapter:
     return replace(adapter, pieces=pieces)
+
+
+def expert_factor_for_param(
+    factors: Mapping[int, torch.Tensor], param_shape: Tuple[int, ...], ep_rank: int, what: str
+) -> torch.Tensor:
+    """One grouped-expert LoRA factor for this rank's parameter, from one tensor per global expert.
+
+    ``param_shape`` 2-D: the factor is shared by every expert (shared-outer), so every expert's tensor must be
+    bit-identical; 3-D ``(local_experts, ...)``: this EP rank's experts ``ep_rank * local + j``.
+    """
+    num_experts = len(factors)
+    if sorted(factors) != list(range(num_experts)):
+        raise ValueError(f"{what}: expected one tensor per expert 0..{num_experts - 1}, got {sorted(factors)[:8]}")
+    if len(param_shape) == 2:
+        first = factors[0]
+        differ = [e for e in range(1, num_experts) if not torch.equal(factors[e], first)]
+        if differ:
+            raise ValueError(
+                f"{what}: the model shares this factor across experts, but experts {differ[:8]} differ from expert 0"
+            )
+        out = first
+    elif len(param_shape) == 3:
+        local = param_shape[0]
+        if (ep_rank + 1) * local > num_experts:
+            raise ValueError(f"{what}: EP rank {ep_rank} x {local} local experts exceeds {num_experts} experts")
+        out = torch.stack([factors[ep_rank * local + j] for j in range(local)])
+    else:
+        raise ValueError(f"{what}: unexpected parameter shape {param_shape}")
+    if tuple(out.shape) != tuple(param_shape):
+        raise ValueError(f"{what}: factor shape {tuple(out.shape)} != parameter shape {tuple(param_shape)}")
+    return out

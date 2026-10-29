@@ -880,6 +880,9 @@ class MegatronModelWrapper:
                 )
 
             action_log_probs = token_logprobs[:, -num_actions:]
+            if self.cfg.old_logprobs_from_update_forward:
+                # One update per batch: this forward runs on the old policy's parameters.
+                old_action_log_probs = action_log_probs.detach()
 
             # policy loss should be calculated based on the selected token logprobs
             policy_loss, loss_metrics = current_loss_fn(

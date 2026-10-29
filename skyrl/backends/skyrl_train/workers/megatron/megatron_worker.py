@@ -1672,6 +1672,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
             ),
+            num_moe_experts=num_moe_experts,
         )
 
     async def _save_lora_adapters_and_sync(

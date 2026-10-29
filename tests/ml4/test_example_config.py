@@ -119,7 +119,10 @@ def test_old_logprobs_from_update_forward_needs_one_update_per_batch(cfg):
     from skyrl.train.utils.utils import validate_old_logprobs_from_update_forward
 
     validate_old_logprobs_from_update_forward(cfg)
-    for key, value in [("policy_mini_batch_size", 16), ("update_epochs_per_batch", 2), ("strategy", "megatron")]:
+    mega = copy.deepcopy(cfg)
+    mega.trainer.strategy = "megatron"
+    validate_old_logprobs_from_update_forward(mega)
+    for key, value in [("policy_mini_batch_size", 16), ("update_epochs_per_batch", 2), ("strategy", "deepspeed")]:
         bad = copy.deepcopy(cfg)
         setattr(bad.trainer, key, value)
         with pytest.raises(ValueError, match="old_logprobs_from_update_forward"):

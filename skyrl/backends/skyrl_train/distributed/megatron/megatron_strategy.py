@@ -359,8 +359,10 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        # Save RNG state.
+        # Save RNG state. "rng" is common state, which dist_checkpointing keeps from rank 0 only;
+        # "rng_per_rank" holds every rank's own generators (and Megatron's CUDA RNG tracker).
         sharded_state_dict["rng"] = self.get_rng_state()
+        sharded_state_dict["rng_per_rank"] = self._rank_rng_object(self._rank_rng_state())
 
         # Save the checkpoint across ranks in parallel.
         save_strategy = get_default_save_sharded_strategy("torch_dist")
@@ -495,6 +497,8 @@ class MegatronStrategy(DistributedStrategy):
                 )
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
+        if not io.is_cloud_path(ckpt_dir) and self._checkpoint_has_rank_rng(ckpt_dir):
+            sharded_state_dict["rng_per_rank"] = self._rank_rng_object(None)
 
         if io.is_cloud_path(ckpt_dir):
             state_dict = self._load_dist_checkpoint_from_cloud(ckpt_dir, sharded_state_dict)
@@ -533,11 +537,43 @@ class MegatronStrategy(DistributedStrategy):
             scheduler.load_state_dict(state_dict["lr_scheduler"])
             self.print("Loaded LR scheduler state dict.")
 
-        # Load RNG state, if present.
-        if "rng" in state_dict:
+        # Load RNG state, if present: this rank's own, else (older checkpoints) rank 0's.
+        if "rng_per_rank" in state_dict:
+            self._load_rank_rng_state(state_dict["rng_per_rank"])
+        elif "rng" in state_dict:
             self.load_rng_state(state_dict["rng"])
 
         return ckpt_dir, {}
+
+    _RANK_RNG_KEY = "rng_state_per_rank"
+
+    @classmethod
+    def _rank_rng_object(cls, state):
+        """This rank's RNG state as a sharded object: one shard per global rank, none replicated."""
+        from megatron.core.dist_checkpointing.mapping import ShardedObject
+
+        return ShardedObject(cls._RANK_RNG_KEY, state, (dist.get_world_size(),), (dist.get_rank(),), replica_id=0)
+
+    def _rank_rng_state(self) -> dict:
+        from megatron.core import tensor_parallel
+
+        state = self.get_rng_state()
+        state["megatron_cuda_rng_tracker"] = tensor_parallel.get_cuda_rng_tracker().get_states()
+        return state
+
+    def _load_rank_rng_state(self, state: dict) -> None:
+        from megatron.core import tensor_parallel
+
+        self.load_rng_state(state)
+        if "megatron_cuda_rng_tracker" in state:
+            tensor_parallel.get_cuda_rng_tracker().set_states(state["megatron_cuda_rng_tracker"])
+
+    @classmethod
+    def _checkpoint_has_rank_rng(cls, ckpt_dir: str) -> bool:
+        """Whether the checkpoint holds this rank's own RNG shard (saved by the same world size)."""
+        from megatron.core.dist_checkpointing.serialization import load_sharded_metadata
+
+        return cls._rank_rng_object(None).unique_key in load_sharded_metadata(ckpt_dir)
 
     _SHARD_FILE_PATTERN = re.compile(r"__(\d+)_\d+\.distcp$")
 

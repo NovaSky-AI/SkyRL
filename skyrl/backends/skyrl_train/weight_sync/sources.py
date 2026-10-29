@@ -315,15 +315,29 @@ class LoraAdapterWeightSource(WeightSource):
         return [ParamMeta(name, self._dtype, tuple(t.shape)) for name, t in to_send.items()]
 
     def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        to_send, _, _ = self._prepared_state()
+        from skyrl.backends.skyrl_train.weight_sync import lora_manifest
+
+        to_send, aliases, adapter_config = self._prepared_state()
         # See FsdpWeightSource.__iter__ on the device.
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
+        manifest = (
+            {}
+            if lora_manifest.enabled() and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
+            else None
+        )
         try:
             for name, tensor in to_send.items():
                 # Cast here, so what the receiver stages is already in the wire
                 # dtype and vLLM's per-key `.to()` is a no-op that keeps expanded
                 # aliases sharing one storage.
-                yield name, tensor.to(device=device, dtype=self._dtype, non_blocking=True).detach().contiguous()
+                out = tensor.to(device=device, dtype=self._dtype, non_blocking=True).detach().contiguous()
+                if manifest is not None:
+                    manifest[name] = lora_manifest.tensor_entry(out)
+                yield name, out
+            if manifest is not None:
+                for public_key, sent_key in aliases.items():
+                    manifest[public_key] = manifest[sent_key]
+                lora_manifest.write("sender", self._lora_name or "unnamed", manifest, adapter_config)
         finally:
             # The next sync re-exports; nothing from this one is worth keeping.
             self._prepared = None
@@ -355,15 +369,21 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         actor_module: Any,
         lora_cls: Any,
         base_model_name_or_path: str,
+        num_moe_experts: Optional[int] = None,
     ) -> None:
         super().__init__(dtype=dtype, experts_per_shared_adapter=experts_per_shared_adapter)
+        self._num_moe_experts = num_moe_experts
         self._bridge = bridge
         self._actor_module = actor_module
         self._lora_cls = lora_cls
         self._base_model_name_or_path = base_model_name_or_path
 
     def export_adapter_stream(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        for name, tensor in self._bridge.export_adapter_weights(self._actor_module, cpu=False, show_progress=False):
+        # Staged on the host: in a colocated sync the export runs after the engines woke their weights, and the
+        # whole deduplicated adapter on the trainer GPU on top of the trainer's offload residual overflows a
+        # 184 GiB GPU on the full ML4 model (EP32: engine 128 GiB + trainer 29 GiB + adapter). ``__iter__``
+        # moves one tensor at a time to the device.
+        for name, tensor in self._bridge.export_adapter_weights(self._actor_module, cpu=True, show_progress=False):
             yield f"base_model.model.{name}", tensor
 
     def finalize_adapter(
@@ -401,7 +421,7 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         # staged tensors are handed to it by reference and reused for LRU reloads.
         # Fold that scale here and publish lora_alpha == r so vLLM's scale is 1.
         adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self._lora_cls.alpha)
-        adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
+        adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state, num_moe_experts=self._num_moe_experts)
         target_modules = sorted(set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"})
         adapter_config = mark_alpha_folded(
             build_adapter_config_dict(

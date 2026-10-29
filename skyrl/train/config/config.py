@@ -1664,7 +1664,7 @@ class TrainerConfig(BaseConfig):
     update per training batch (``policy_mini_batch_size == train_batch_size``,
     ``update_epochs_per_batch == 1``): the parameters of that forward are the old policy, so
     the PPO ratio is exactly 1 and the gradient, off-policy correction (TIS) weights and
-    metrics are those of an exact recompute. FSDP only."""
+    metrics are those of an exact recompute. FSDP and Megatron."""
     update_ref_every_epoch: bool = False
     """Re-sync the reference model from the policy model at every epoch boundary."""
     remove_microbatch_padding: bool = True

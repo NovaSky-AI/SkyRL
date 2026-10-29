@@ -71,6 +71,7 @@ trainer.train_batch_size: 32
 trainer.policy_mini_batch_size: 32
 trainer.update_epochs_per_batch: 1
 trainer.recompute_old_logprobs_per_minibatch: true
+trainer.old_logprobs_from_update_forward: true   # (default false)
 trainer.micro_train_batch_size_per_gpu: 2
 trainer.micro_forward_batch_size_per_gpu: 4
 generator.n_samples_per_prompt: 8
