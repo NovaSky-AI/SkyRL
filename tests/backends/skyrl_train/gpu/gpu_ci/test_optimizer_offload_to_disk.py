@@ -70,6 +70,7 @@ def build_model(moe: bool, seed: int):
         params_dtype=torch.bfloat16,
         hidden_dropout=0.0,
         attention_dropout=0.0,
+        attention_backend="unfused",
     )
     spec = get_gpt_layer_with_transformer_engine_spec(num_experts=config.num_moe_experts, moe_grouped_gemm=moe)
     model = GPTModel(config=config, transformer_layer_spec=spec, vocab_size=256, max_sequence_length=64).cuda()
