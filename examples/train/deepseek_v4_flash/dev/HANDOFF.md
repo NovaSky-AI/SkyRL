@@ -418,7 +418,7 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   - vLLM's V4.1 serving is not reproducible run to run: regenerating the same prompts with no sync gives 0.121 on
     common prefixes (80/80 diverge), so the pre/post-sync vLLM comparison is noise for this model. The V4.1 row
     gates the sync on post-sync vLLM vs Megatron instead (`resync_vs_megatron`). Negative control
-    (`SKYRL_DEBUG_SKIP_SINK_STASH=1`, zeroed sinks): post-sync 0.360 -> fails the 0.3 gate (with the fix: 0.258).
+    (`SKYRL_DEBUG_SKIP_SINK_LOADER=1`, zeroed sinks): post-sync 0.360 -> fails the 0.3 gate (with the fix: 0.258).
 - Stage 1 (GSM8K LoRA, full model) setup:
   - Full text-only BF16 copy `models/DeepSeek-V4.1-Flash-bf16` (1.2 TB, 263 shards; `make_slice_v41.py <out>
     $(seq -s, 0 39)`, ~1 h) on nodes 5, 6, 7.
