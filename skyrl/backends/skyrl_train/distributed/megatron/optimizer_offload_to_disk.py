@@ -332,6 +332,8 @@ class DiskOptimizerStateStore:
             if chunk.main_on_disk:
                 self._param_data(chunk).copy_(state["main"])
             self._store_chunk(chunk, state)
+            # Free this chunk before the next load allocates one, so the GPU holds one chunk at a time.
+            del state
         self.steps += 1
 
     @torch.no_grad()
@@ -341,6 +343,7 @@ class DiskOptimizerStateStore:
                 main = torch.empty(chunk.numel, dtype=torch.float32, device=torch.cuda.current_device())
                 self.file.read(chunk.offset, main)
                 self._param_data(chunk).copy_(main)
+                del main
 
     @torch.no_grad()
     def write_main_params(self) -> int:
