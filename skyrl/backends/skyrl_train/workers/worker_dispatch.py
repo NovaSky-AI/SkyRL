@@ -753,9 +753,14 @@ class WorkerDispatch:
             return
 
         if adapter_only_sync:
+            # The engines wake only their weights for the sync, so the trainer
+            # has to give up its frozen masters; the optimizer state (and the
+            # adapter grads) of a LoRA run is small and stays resident unless
+            # optimizer_config.offload_after_step asks for it to move.
+            offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
             for model, state in self._gpu_state.items():
-                if state.model_on_gpu or state.optimizer_on_gpu:
-                    self._offload(model, offload_optimizer=True, offload_model=True)
+                if state.model_on_gpu or (offload_optimizer and state.optimizer_on_gpu):
+                    self._offload(model, offload_optimizer=offload_optimizer, offload_model=True)
             self.empty_cache("policy")
             return
 

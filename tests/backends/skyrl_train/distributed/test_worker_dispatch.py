@@ -269,6 +269,7 @@ def _adapter_sync_dispatch(*, model_on_gpu: bool, optimizer_on_gpu: bool = False
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.model.lora.rank = 32
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
+    cfg.trainer.policy.optimizer_config = SimpleNamespace(offload_after_step=True)
     dispatch = WorkerDispatch.__new__(WorkerDispatch)
     dispatch.colocate_all = True
     dispatch.cfg = cfg
@@ -409,6 +410,26 @@ async def test_prepare_for_adapter_only_sync_offloads_all_tracked_trainer_state(
     dispatch._inference_engine_client.sleep.assert_not_awaited()
     dispatch._inference_engine_client.wake_up.assert_not_awaited()
     dispatch.empty_cache.assert_called_once_with("policy")
+
+
+@pytest.mark.parametrize(
+    ("initial_state", "expected_state", "expected_calls"),
+    [
+        ({"policy": (True, True)}, {"policy": (False, True)}, [("offload", "policy", False, True)]),
+        ({"policy": (False, True)}, {"policy": (False, True)}, []),
+    ],
+    ids=["after-train-frees-masters-only", "masters-already-off"],
+)
+@pytest.mark.asyncio
+async def test_prepare_for_adapter_only_sync_keeps_optimizer_when_not_offloaded_after_step(
+    initial_state, expected_state, expected_calls
+):
+    dispatch, calls = _prepare_sync_dispatch(initial_state, offload_after_step=False)
+
+    await dispatch._prepare_for_weight_sync(adapter_only_sync=True)
+
+    assert _gpu_state_snapshot(dispatch) == expected_state
+    assert calls == expected_calls
 
 
 @pytest.mark.parametrize(

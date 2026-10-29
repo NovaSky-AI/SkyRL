@@ -249,6 +249,28 @@ def test_ipc_engine_lora_round_releases_packed_buffer_mapping(monkeypatch):
     assert mapping_ref() is None
 
 
+@pytest.mark.parametrize("packed", [True, False], ids=["packed-private-clones", "unpacked-trainer-views"])
+def test_ipc_engine_copies_only_views_of_shared_memory(packed):
+    """vLLM's packed IPC consumer already clones every tensor out of the shared buffer, so staging keeps
+    them; the unpacked path hands over views of trainer memory, which staging must copy."""
+    pytest.importorskip("vllm", reason="the receive engine subclasses vLLM's IPC engine")
+    from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
+        get_skyrl_ipc_engine,
+    )
+
+    vllm_config = SimpleNamespace(parallel_config=None, model_config=None, lora_config=object())
+    engine = get_skyrl_ipc_engine()(None, vllm_config, torch.device("cpu"), _FakeModel([]))
+    engine.packed = packed
+    engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {}, {}))
+    engine.start_weight_update()
+    received = torch.arange(4, dtype=torch.float32)
+    with engine.skyrl_lora_staging():
+        engine.model.load_weights([("a", received)])
+    staged = engine._skyrl_lora_staged["a"]
+    assert torch.equal(staged, received)
+    assert (staged.data_ptr() == received.data_ptr()) == packed
+
+
 class TestStagingRegistry:
     def test_stage_and_discard(self):
         patch.stage_in_memory_adapter("a", {"k": torch.ones(1)}, {"r": 1})

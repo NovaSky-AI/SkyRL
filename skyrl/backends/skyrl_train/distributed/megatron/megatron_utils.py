@@ -23,6 +23,7 @@
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 import torch
@@ -279,6 +280,7 @@ def freeze_dsa_indexer(model_or_models: Union[nn.Module, List[nn.Module]]):
 def _convert_moe_experts_lora_to_vllm(
     adapter_state: Dict[str, "torch.Tensor"],
     num_moe_experts: Optional[int] = None,
+    share_replicas: bool = False,
 ) -> Dict[str, "torch.Tensor"]:
     """Rewrite fused-MoE expert LoRA tensors into the layout vLLM expects.
 
@@ -297,6 +299,11 @@ def _convert_moe_experts_lora_to_vllm(
     identical since every expert applies the same matrix): for packed-HF models
     it joins the flat-layout rewrite above; for per-expert-HF models (keys like
     ``...experts.<idx>.gate_proj``) it is replicated into per-expert indexed keys.
+
+    ``share_replicas``: the per-expert replicas of a shared factor are one view
+    of the shared tensor instead of a clone each. For callers that alias
+    identical storage instead of copying it (the in-memory sync); a file writer
+    needs the clones.
     """
     uses_indexed_expert_keys = any(re.search(r"\.mlp\.experts\.\d+\.", key) for key in adapter_state)
 
@@ -329,8 +336,11 @@ def _convert_moe_experts_lora_to_vllm(
             # Per-expert-HF model: replicate the shared side into the indexed
             # per-expert keys vLLM's PEFT loader parses.
             insert_pos = key.rindex(".mlp.experts.") + len(".mlp.experts.")
+            shared = tensor[0]
             for expert_idx in range(_require_num_moe_experts(key, num_moe_experts)):
-                converted[f"{key[:insert_pos]}{expert_idx}.{key[insert_pos:]}"] = tensor[0].clone()
+                converted[f"{key[:insert_pos]}{expert_idx}.{key[insert_pos:]}"] = (
+                    shared if share_replicas else shared.clone()
+                )
             continue
 
         converted[key] = tensor
@@ -421,8 +431,163 @@ def _frozen_offload_file(name: str) -> str:
     return os.path.join(rank_dir, f"{key}-{os.getpid()}.bin")
 
 
+_MADV_POPULATE_READ = 22
+
+
+def _populate_offload_mapping(param) -> None:
+    """Map every page of a file-backed offload copy in one ``madvise(MADV_POPULATE_READ)``.
+
+    The H2D restore otherwise faults the mapping in page by page from inside the
+    copy, at about 2 GB/s (25 s for a 50 GiB rank); populated first, the same
+    restore runs at 40-100 GB/s. Pages already mapped cost a page-table walk;
+    pages the kernel reclaimed are read back in bulk. Kernels without the advice
+    (< 5.14) keep the lazy path.
+    """
+    import ctypes
+
+    data = param._offload_cpu_data
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.madvise(
+        ctypes.c_void_p(data.data_ptr()),
+        ctypes.c_size_t(data.numel() * data.element_size()),
+        _MADV_POPULATE_READ,
+    )
+
+
+def _shared_offload_token() -> Optional[str]:
+    """Identifies this training launch on a node: the Ray job (all trainer ranks of one run share it),
+    or ``SKYRL_FROZEN_OFFLOAD_TOKEN``. None (or ``SKYRL_FROZEN_OFFLOAD_SHARED=0``) disables node-shared
+    offload copies."""
+    if os.environ.get("SKYRL_FROZEN_OFFLOAD_SHARED", "1") == "0":
+        return None
+    token = os.environ.get("SKYRL_FROZEN_OFFLOAD_TOKEN")
+    if token:
+        return token
+    try:
+        import ray
+
+        if ray.is_initialized():
+            return ray.get_runtime_context().get_job_id()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _shared_offload_key(name: str, param) -> Optional[str]:
+    """Key of a frozen param whose bytes every data-parallel replica holds, else None.
+
+    Expert weights differ per expert-parallel rank and are never shared. Dense weights are the same
+    on every rank of a (pipeline stage, tensor shard); the key carries both because layer names
+    are stage-local. The bytes are still compared before a shared copy is used.
+    """
+    import hashlib
+
+    if ".experts." in name or not getattr(param, "allreduce", True):
+        return None
+    try:
+        pp, tp = mpu.get_pipeline_model_parallel_rank(), mpu.get_tensor_model_parallel_rank()
+    except Exception:  # noqa: BLE001
+        pp = tp = 0
+    ident = f"{name}|pp{pp}|tp{tp}|{param.dtype}|{tuple(param.shape)}"
+    return hashlib.sha1(ident.encode()).hexdigest()[:24]
+
+
+_SHARED_WAIT_S = float(os.environ.get("SKYRL_FROZEN_OFFLOAD_SHARED_WAIT_S", "900"))
+
+
+def _offload_frozen_param_to_shared_file(name: str, param) -> bool:
+    """Map a node-wide copy of a data-parallel-replicated frozen param, writing it if no rank has yet.
+
+    Every trainer rank on a node holds the same dense frozen weights (36 GiB per rank on ML4 at
+    TP1/EP32), so private copies keep 4x the page cache of one. The first rank to take the lock
+    writes the file (atomic rename); the others wait for it, map it shared, and use it only if it
+    holds exactly their bytes. The files live until the process exits (other ranks may still be
+    opening them) until every rank has mapped its copies: the writer unlinks its files after the
+    collective barrier at the end of the first offload (``_unlink_shared_offload_files``); the mappings
+    keep the inodes alive. Returns False to fall back to a private copy.
+    """
+    token, key = _shared_offload_token(), _shared_offload_key(name, param)
+    if token is None or key is None:
+        return False
+    data = param.data.detach()
+    nbytes = data.numel() * data.element_size()
+    shared_dir = os.path.join(_FROZEN_OFFLOAD_DIR, f"shared-{token}")
+    os.makedirs(shared_dir, exist_ok=True)
+    final = os.path.join(shared_dir, f"{key}.bin")
+    if not os.path.exists(final):
+        try:
+            fd = os.open(final + ".lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            fd = None
+        if fd is not None:
+            os.close(fd)
+            tmp = f"{final}.{os.getpid()}.tmp"
+            with open(tmp, "wb") as f:
+                f.write(data.contiguous().view(torch.uint8).flatten().cpu().numpy())
+            os.rename(tmp, final)
+            _shared_offload_written.extend([final, final + ".lock"])
+        else:
+            deadline = time.time() + _SHARED_WAIT_S
+            while not os.path.exists(final):
+                if time.time() > deadline:
+                    return False
+                time.sleep(0.2)
+    if os.path.getsize(final) != nbytes:
+        return False
+    mapped = torch.from_file(final, shared=True, size=nbytes, dtype=torch.uint8).view(data.dtype).view(data.shape)
+    param._offload_cpu_data = mapped
+    _populate_offload_mapping(param)
+    if not _equal_in_chunks(mapped, data):
+        del param._offload_cpu_data
+        logging.getLogger(__name__).warning("node-shared offload copy of %s differs from this rank; private copy", name)
+        return False
+    param._offload_file_backed = True
+    _shared_offload_bytes[0] += nbytes
+    return True
+
+
+def _equal_in_chunks(host, dev, chunk_bytes: int = 256 * 2**20) -> bool:
+    """Bitwise comparison of a host tensor with a device tensor, staging at most ``chunk_bytes`` on the device."""
+    h, d = host.reshape(-1).view(torch.uint8), dev.reshape(-1).view(torch.uint8)
+    for i in range(0, h.numel(), chunk_bytes):
+        if not torch.equal(h[i : i + chunk_bytes].to(d.device), d[i : i + chunk_bytes]):
+            return False
+    return True
+
+
+# Node-shared offload files this rank wrote, unlinked once every rank has mapped its copies.
+_shared_offload_written: List[str] = []
+_shared_offload_barrier_done = False
+_shared_offload_bytes = [0]
+
+
+def _unlink_shared_offload_files() -> None:
+    """After the first offload of the frozen weights, wait for every rank, then unlink the shared files
+    this rank wrote. Every rank offloads its frozen weights in the same (first) call, so the barrier is
+    collective; the mappings keep the inodes and their page cache alive."""
+    global _shared_offload_barrier_done
+    if _shared_offload_barrier_done:
+        return
+    _shared_offload_barrier_done = True
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    for path in _shared_offload_written:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    _shared_offload_written.clear()
+    logging.getLogger(__name__).info(
+        "frozen offload: %.2f GiB mapped from node-shared files", _shared_offload_bytes[0] / 2**30
+    )
+
+
 def _offload_frozen_param_to_file(name: str, param) -> bool:
     """Move a frozen param's data to a file-backed mmap CPU tensor.
+
+    The mapping is shared (MAP_SHARED): a private mapping becomes anonymous memory once the H2D copy of the
+    restore touches it (measured: a 16 GiB restore added 16 GiB AnonPages), which is the RAM this offload
+    exists to avoid. Nothing writes the CPU copy, so the shared mapping stays clean page cache.
 
     The backing file is unlinked as soon as it is mapped: the mapping pins the
     inode (whose pages stay clean, evictable page cache) until the process
@@ -437,6 +602,8 @@ def _offload_frozen_param_to_file(name: str, param) -> bool:
         return False
     path = None
     try:
+        if _offload_frozen_param_to_shared_file(name, param):
+            return True
         data = param.data.detach()
         nbytes = data.numel() * data.element_size()
         path = _frozen_offload_file(name)
@@ -447,12 +614,13 @@ def _offload_frozen_param_to_file(name: str, param) -> bool:
             f.write(data.contiguous().view(torch.uint8).flatten().cpu().numpy())
         try:
             mapped = (
-                torch.from_file(path, shared=False, size=nbytes, dtype=torch.uint8).view(data.dtype).view(data.shape)
+                torch.from_file(path, shared=True, size=nbytes, dtype=torch.uint8).view(data.dtype).view(data.shape)
             )
         finally:
             os.unlink(path)
             path = None
         param._offload_cpu_data = mapped
+        param._offload_file_backed = True
         return True
     except (OSError, RuntimeError) as exc:
         if path is not None:
@@ -499,6 +667,7 @@ def offload_megatron_model_to_cpu(models, is_lora: bool = False):
             # (clean, evictable page cache) over pinned RAM; see
             # _offload_frozen_param_to_file.
             use_file_offload = _frozen_offload_enabled()
+            offloaded_frozen = False
             for name, param in model_chunk.named_parameters():
                 if (
                     param.is_cuda
@@ -514,8 +683,11 @@ def offload_megatron_model_to_cpu(models, is_lora: bool = False):
                     elif not (use_file_offload and _offload_frozen_param_to_file(name, param)):
                         cpu_tensor = param.data.detach().cpu().pin_memory()
                         param._offload_cpu_data = cpu_tensor
+                    offloaded_frozen = True
                     param._offload_cuda_numel = param.data.numel()
                     param.data = torch.empty(0, dtype=param.data.dtype, device=param.data.device)
+            if offloaded_frozen and use_file_offload:
+                _unlink_shared_offload_files()
         else:
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to("cpu", non_blocking=True)
@@ -534,6 +706,8 @@ def load_megatron_model_to_gpu(models, is_lora: bool = False):
             device_id = torch.cuda.current_device()
             for name, param in model_chunk.named_parameters():
                 if hasattr(param, "_offload_cpu_data") and param.data.storage().size() == 0:
+                    if getattr(param, "_offload_file_backed", False):
+                        _populate_offload_mapping(param)
                     restored = param._offload_cpu_data.to(device_id, non_blocking=True)
                     param.data = restored
         else:

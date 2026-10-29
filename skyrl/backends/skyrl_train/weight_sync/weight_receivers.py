@@ -188,12 +188,21 @@ class SkyrlLoraStagingMixin:
     def skyrl_begin_lora_update(self) -> None:
         self._skyrl_lora_staged = {}
 
+    def skyrl_received_tensors_are_private(self) -> bool:
+        """Whether ``receive_weights`` hands ``load_weights`` tensors nothing else references.
+
+        Then staging keeps them as they are. Otherwise they are views of a
+        receive buffer the transport reuses, and staging copies them.
+        """
+        return False
+
     @contextmanager
     def skyrl_lora_staging(self) -> Iterator[None]:
         """Install a proxy whose ``load_weights`` stages instead of loading."""
         staged = self._skyrl_lora_staged
         if staged is None:
             raise RuntimeError("skyrl_begin_lora_update must run before receiving a LoRA stream.")
+        private = self.skyrl_received_tensors_are_private()
         model = self.model
 
         def load_weights(weights: Any, **kwargs: Any) -> set:
@@ -204,7 +213,7 @@ class SkyrlLoraStagingMixin:
                 # The transport buffers (the IPC-mapped view, the packed NCCL
                 # buffer) are reused or freed right after the chunk, so the
                 # private copy is required, not an optimization.
-                staged[name] = tensor.detach().clone()
+                staged[name] = tensor.detach() if private else tensor.detach().clone()
                 loaded.add(name)
             return loaded
 
@@ -309,6 +318,11 @@ def _build_skyrl_ipc_engine() -> type:
 
     class SkyrlIPCWeightTransferEngine(SkyrlReceiveLifecycleMixin, IPCWeightTransferEngine):
         """vLLM's CUDA IPC receive engine plus SkyRL receive targets."""
+
+        def skyrl_received_tensors_are_private(self) -> bool:
+            # The packed consumer clones every tensor out of the shared IPC
+            # buffer; the unpacked path hands over views of trainer memory.
+            return self.packed
 
         def skyrl_release_receive_buffers(self) -> None:
             # The importer holds this worker's mapping of the trainer's packed

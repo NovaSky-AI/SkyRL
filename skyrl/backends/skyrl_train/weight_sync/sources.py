@@ -208,6 +208,41 @@ class SerializedFp8WeightSource(WeightSource):
         yield from self._serialized()
 
 
+def alias_identical_views(
+    to_send: Dict[str, torch.Tensor], aliases: Dict[str, str]
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, str]]:
+    """Send each distinct tensor view once; alias the keys that are the same view.
+
+    Keys whose tensors share storage, offset, shape, stride and dtype hold the
+    same bytes by construction (e.g. the per-expert replicas of a shared-outer
+    factor), so only the first is sent. Existing aliases onto a key that becomes
+    an alias are re-pointed at its canonical key.
+    """
+    canonical_by_view: Dict[Tuple[Any, ...], str] = {}
+    remap: Dict[str, str] = {}
+    kept: Dict[str, torch.Tensor] = {}
+    for key, tensor in to_send.items():
+        view = (
+            tensor.device,
+            tensor.untyped_storage().data_ptr(),
+            tensor.storage_offset(),
+            tensor.dtype,
+            tuple(tensor.shape),
+            tensor.stride(),
+        )
+        canonical = canonical_by_view.get(view)
+        if canonical is None or tensor.numel() == 0:
+            canonical_by_view[view] = key
+            kept[key] = tensor
+        else:
+            remap[key] = canonical
+    if not remap:
+        return to_send, aliases
+    merged = {public: remap.get(sent, sent) for public, sent in aliases.items()}
+    merged.update(remap)
+    return kept, merged
+
+
 class LoraAdapterWeightSource(WeightSource):
     """``WeightSource`` whose stream is a PEFT adapter rather than the model.
 
@@ -279,6 +314,7 @@ class LoraAdapterWeightSource(WeightSource):
         missing = set(aliases.values()) - set(to_send)
         if missing:
             raise RuntimeError(f"finalize_adapter dropped aliased keys: {sorted(missing)[:5]}")
+        to_send, aliases = alias_identical_views(to_send, aliases)
         self._prepared = (to_send, aliases, adapter_config)
 
     def _prepared_state(self) -> Tuple[Dict[str, torch.Tensor], Dict[str, str], Dict[str, Any]]:
@@ -421,7 +457,9 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         # staged tensors are handed to it by reference and reused for LRU reloads.
         # Fold that scale here and publish lora_alpha == r so vLLM's scale is 1.
         adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self._lora_cls.alpha)
-        adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state, num_moe_experts=self._num_moe_experts)
+        adapter_state = _convert_moe_experts_lora_to_vllm(
+            adapter_state, num_moe_experts=self._num_moe_experts, share_replicas=True
+        )
         target_modules = sorted(set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"})
         adapter_config = mark_alpha_folded(
             build_adapter_config_dict(

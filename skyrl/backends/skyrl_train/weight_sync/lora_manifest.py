@@ -1,8 +1,14 @@
 """Opt-in LoRA sync manifests: name, shape, dtype, bytes and sha256 of every adapter tensor.
 
 Set ``SKYRL_LORA_MANIFEST_DIR`` to record what the trainer put on the wire
-(``FsdpLoraAdapterSource``, rank 0) and what each vLLM worker built the adapter
+(the LoRA weight sources, rank 0) and what each vLLM worker built the adapter
 from (``patch_lora_in_memory``). Unset, nothing is computed.
+
+Hashing the full adapter costs tens of seconds per sync on large MoE adapters
+(sender and every worker). ``SKYRL_LORA_MANIFEST_EVERY=N`` records the first
+sync and every N-th one after it: each process counts its own syncs, and the
+sender and the workers see the same sequence of syncs, so the recorded rounds
+still pair up by their per-process counter.
 """
 
 import hashlib
@@ -14,11 +20,17 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import torch
 
 ENV = "SKYRL_LORA_MANIFEST_DIR"
+EVERY_ENV = "SKYRL_LORA_MANIFEST_EVERY"
 _COUNTER = itertools.count()
+_SYNCS = itertools.count()
 
 
 def enabled() -> bool:
-    return bool(os.environ.get(ENV))
+    """Whether to record this sync. Call once per sync (it counts them)."""
+    if not os.environ.get(ENV):
+        return False
+    every = max(1, int(os.environ.get(EVERY_ENV) or 1))
+    return next(_SYNCS) % every == 0
 
 
 def tensor_entry(t: torch.Tensor) -> Dict[str, Any]:
