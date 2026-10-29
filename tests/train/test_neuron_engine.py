@@ -104,13 +104,19 @@ def test_extract_images_collects_in_conversation_order():
     from PIL import Image
 
     messages = [
-        {"role": "user", "content": [
-            {"type": "text", "text": "look"},
-            {"type": "image_url", "image_url": {"url": _png_data_uri()}},
-        ]},
-        {"role": "user", "content": [
-            {"type": "image", "image": _png_data_uri("green")},
-        ]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": _png_data_uri()}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": _png_data_uri("green")},
+            ],
+        },
         {"role": "user", "content": "text-only message"},
     ]
     images = NeuronInferenceEngine._extract_images(messages)
@@ -198,3 +204,58 @@ def test_normalize_content_handles_numpy_ndarray_of_structs():
         {"type": "text", "text": "a"},
         {"type": "text", "text": "b"},
     ]
+
+
+# -- token id list normalization (transformers 4.x vs 5.x) --------------------
+
+
+def test_as_token_id_list_passthrough_flat_list():
+    # transformers 4.x: ``apply_chat_template(tokenize=True)`` returned ``List[int]``.
+    assert NeuronInferenceEngine._as_token_id_list([7, 8, 9]) == [7, 8, 9]
+
+
+def test_as_token_id_list_unwraps_batch_encoding_flat_input_ids():
+    # transformers >= 5.0 returns a ``BatchEncoding`` (a ``UserDict``) whose
+    # ``input_ids`` is a flat list for a single conversation.
+    from collections import UserDict
+
+    enc = UserDict({"input_ids": [7, 8, 9], "attention_mask": [1, 1, 1]})
+    assert NeuronInferenceEngine._as_token_id_list(enc) == [7, 8, 9]
+
+
+def test_as_token_id_list_unwraps_batch_encoding_batched_input_ids():
+    # A batched template call returns a list of lists; the caller renders one
+    # conversation, so the batch dimension must be dropped.
+    from collections import UserDict
+
+    enc = UserDict({"input_ids": [[7, 8, 9]], "attention_mask": [[1, 1, 1]]})
+    assert NeuronInferenceEngine._as_token_id_list(enc) == [7, 8, 9]
+
+
+def test_as_token_id_list_unwraps_tensor_flat_and_batched():
+    # ``return_tensors="pt"`` yields tensors; both flat and batched shapes normalize.
+    assert NeuronInferenceEngine._as_token_id_list(torch.tensor([7, 8, 9])) == [7, 8, 9]
+    assert NeuronInferenceEngine._as_token_id_list(torch.tensor([[7, 8, 9]])) == [7, 8, 9]
+
+
+def test_teardown_releases_neuron_device_cache(monkeypatch):
+    # torch-neuronx has no ``reset()``; teardown must call ``empty_cache()`` (the
+    # device-memory analog of ``torch.cuda.empty_cache()``) and drop the model refs.
+    import asyncio
+    import sys
+    import types
+
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch_neuronx", types.SimpleNamespace(empty_cache=lambda: calls.append(True)))
+
+    engine = object.__new__(NeuronInferenceEngine)
+    engine._device = "neuron"
+    engine._model = object()
+    engine._base_model = object()
+    engine._adapters = {}
+
+    asyncio.run(engine.teardown())
+
+    assert calls == [True]
+    assert not hasattr(engine, "_model")
+    assert not hasattr(engine, "_base_model")

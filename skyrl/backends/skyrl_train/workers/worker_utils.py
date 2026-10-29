@@ -352,7 +352,7 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                     segment_lengths=packed_dummy_row_segments(key, batch_size),
                 )
         if self.data.get("router_padding_mask") is not None:
-            data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
+            data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=dev)
         data.metadata = {}
         if self.data.metadata:
             data.metadata.update(self.data.metadata)

@@ -163,7 +163,28 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         if self._is_vlm:
             return self._render_vlm(messages)
         token_ids = self._tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+        token_ids = self._as_token_id_list(token_ids)
         return {"token_ids": token_ids, "features": None}
+
+    @staticmethod
+    def _as_token_id_list(token_ids: Any) -> List[int]:
+        """Normalize ``apply_chat_template`` output to a flat ``List[int]``.
+
+        transformers 4.x returned the tokenized prompt directly as ``List[int]``;
+        transformers >= 5.0 returns a ``BatchEncoding`` (a ``UserDict``) whose
+        ``input_ids`` is a flat list for a single conversation and a list of lists for a
+        batch.  The caller wraps the result into a single-sample batch, so a flat
+        ``List[int]`` must come out.
+        """
+        if not isinstance(token_ids, (list, tuple, torch.Tensor)):
+            # transformers >= 5.0 ``BatchEncoding``.
+            token_ids = token_ids["input_ids"]
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+        if token_ids and isinstance(token_ids[0], (list, tuple)):
+            # A batched template call returns a list of lists; unwrap the batch dim.
+            token_ids = token_ids[0]
+        return [int(t) for t in token_ids]
 
     def _render_vlm(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Render a VLM conversation to token ids + encoded vision tensors.
@@ -176,10 +197,7 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         concatenates items along dim 0, so a single item holding the full concatenation
         round-trips unchanged).
         """
-        messages = [
-            {**message, "content": self._normalize_content(message.get("content"))}
-            for message in messages
-        ]
+        messages = [{**message, "content": self._normalize_content(message.get("content"))} for message in messages]
         images = self._extract_images(messages)
         text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         if images:
@@ -342,9 +360,7 @@ class NeuronInferenceEngine(InferenceEngineInterface):
 
         from peft import PeftModel
 
-        adapter = PeftModel.from_pretrained(
-            self._base_model, lora_path, adapter_name=lora_name, is_trainable=False
-        )
+        adapter = PeftModel.from_pretrained(self._base_model, lora_path, adapter_name=lora_name, is_trainable=False)
         adapter.to(self._device)
         adapter.eval()
         self._adapters[lora_name] = adapter
@@ -360,7 +376,10 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         if self._device == "neuron":
             import torch_neuronx  # noqa: F401
 
-            torch_neuronx.reset()  # type: ignore[attr-defined]
+            # torch-neuronx has no ``reset()``; ``empty_cache()`` releases the
+            # device memory allocator's cached blocks (the analog of
+            # ``torch.cuda.empty_cache()``).
+            torch_neuronx.empty_cache()
 
     async def reset_prefix_cache(self, reset_running_requests: bool = False) -> None:
         # transformers has no persistent prefix cache in this serving mode.

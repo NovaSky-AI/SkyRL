@@ -15,13 +15,14 @@ def test_apply_is_idempotent(monkeypatch):
     seen = []
     monkeypatch.setattr(qwen3_5_vl, "_APPLIED", False)
     monkeypatch.setattr(qwen3_5_vl, "_patch_vision_rope", lambda: seen.append("rope"))
+    monkeypatch.setattr(qwen3_5_vl, "_patch_text_rope", lambda: seen.append("text_rope"))
     monkeypatch.setattr(qwen3_5_vl, "_patch_vision_interp", lambda: seen.append("interp"))
     monkeypatch.setattr(qwen3_5_vl, "_patch_vision_seqlens", lambda: seen.append("seqlens"))
 
     qwen3_5_vl.apply_qwen3_5_vl_device_patch()
     qwen3_5_vl.apply_qwen3_5_vl_device_patch()
 
-    assert seen == ["rope", "interp", "seqlens"]
+    assert seen == ["rope", "text_rope", "interp", "seqlens"]
 
 
 def test_rope_patch_moves_inv_freq_when_device_mismatches(monkeypatch):
@@ -60,6 +61,49 @@ def test_rope_patch_is_transparent_when_same_device(monkeypatch):
     qwen3_5_vl._patch_vision_rope()
 
     inst = _FakeRotaryEmbedding()
+    out = inst.forward(torch.tensor([0.0]), torch.tensor([1]))
+
+    assert out == "orig"
+    assert inst.inv_freq.device.type == "cpu"
+
+
+def test_text_rope_patch_moves_inv_freq_and_position_ids_when_device_mismatches(monkeypatch):
+    import transformers.models.qwen3_5.modeling_qwen3_5 as mq
+
+    class _FakeTextRotaryEmbedding:
+        def __init__(self):
+            self.inv_freq = torch.tensor([1.0, 2.0])  # CPU
+
+        def forward(self, x, position_ids):
+            return (x, position_ids, self.inv_freq)
+
+    monkeypatch.setattr(mq, "Qwen3_5TextRotaryEmbedding", _FakeTextRotaryEmbedding)
+    qwen3_5_vl._patch_text_rope()
+
+    inst = _FakeTextRotaryEmbedding()
+    x = torch.tensor([0.0], device="meta")
+    position_ids = torch.tensor([1])  # CPU
+    out = inst.forward(x, position_ids)
+
+    assert inst.inv_freq.device.type == "meta"
+    assert out[1].device.type == "meta"
+    assert out[2] is inst.inv_freq
+
+
+def test_text_rope_patch_is_transparent_when_same_device(monkeypatch):
+    import transformers.models.qwen3_5.modeling_qwen3_5 as mq
+
+    class _FakeTextRotaryEmbedding:
+        def __init__(self):
+            self.inv_freq = torch.tensor([1.0, 2.0])
+
+        def forward(self, x, position_ids):
+            return "orig"
+
+    monkeypatch.setattr(mq, "Qwen3_5TextRotaryEmbedding", _FakeTextRotaryEmbedding)
+    qwen3_5_vl._patch_text_rope()
+
+    inst = _FakeTextRotaryEmbedding()
     out = inst.forward(torch.tensor([0.0]), torch.tensor([1]))
 
     assert out == "orig"

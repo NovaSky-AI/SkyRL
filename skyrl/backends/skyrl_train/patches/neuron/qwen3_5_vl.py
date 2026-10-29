@@ -1,26 +1,31 @@
-"""Neuron device-safety patches for the Qwen3.5-VL vision tower.
+"""Neuron device-safety patches for the Qwen3.5-VL model.
 
-The Qwen3.5-VL vision tower does three things the TorchNeuron (Trainium2) eager
-runtime cannot do, or does not do safely:
+The Qwen3.5-VL model does several things the TorchNeuron (Trainium2) eager runtime
+cannot do, or does not do safely:
 
 1. ``Qwen3_5VisionRotaryEmbedding`` registers ``inv_freq`` as a *non-persistent*
    buffer. Under FSDP ``cpu_offload`` that buffer is left on CPU while activations
    are on the accelerator, and the vision RoPE forward multiplies
    ``position_ids * self.inv_freq`` without moving the buffer to the tensor's
-   device -- unlike the *text* rotary embedding, which already does ``.to(x.device)``.
-2. ``get_vision_interpolation_indices_and_weights`` calls ``torch.repeat_interleave``
+   device. The patch moves the buffer onto ``position_ids.device``.
+2. ``Qwen3_5TextRotaryEmbedding`` (the *language* model's MROPE) has the same
+   non-persistent ``inv_freq`` buffer problem as the vision RoPE, *and* its VLM forward
+   builds the 4-grid ``position_ids`` partly on CPU (the spatial grids come from the
+   vision helpers, which fall back to CPU for their ``repeat_interleave``). The text
+   RoPE forward then does an unsynchronized ``inv_freq @ position_ids`` matmul. The
+   patch moves both onto ``x.device`` (the activation device).
+3. ``get_vision_interpolation_indices_and_weights`` calls ``torch.repeat_interleave``
    with a dynamic ``repeats`` tensor, which neuronx-cc cannot lower (BIRCodeGenLoop
    crash). It falls back to CPU in eager mode; forcing it onto CPU is a sync change,
    not a correctness change.
-3. ``get_vision_cu_seqlens`` builds per-frame attention boundaries with the same
+4. ``get_vision_cu_seqlens`` builds per-frame attention boundaries with the same
    dynamic ``repeat_interleave``, which neuronx-cc cannot lower ("No active NKI
    context"). The tiny ``(num_frames+1,)`` result is computed on CPU and moved back.
 
 Every patch inspects the tensor device at call time rather than a cached global
 backend flag, so the module is a safe no-op off neuron (the two ``repeat_interleave``
 wrappers return the original result unchanged unless the tensor is on ``neuron``; the
-RoPE wrapper only moves the buffer when there is a real device mismatch, which is the
-same fix the text rotary embedding already applies on every accelerator).
+two RoPE wrappers only move a tensor when there is a real device mismatch).
 """
 
 from loguru import logger
@@ -54,6 +59,42 @@ def _patch_vision_rope() -> None:
 
     cls.forward = _forward
     logger.info("Patched Qwen3_5VisionRotaryEmbedding.forward (device-safe inv_freq)")
+
+
+def _patch_text_rope() -> None:
+    """Make the Qwen3.5 *text* RoPE device-safe under FSDP ``cpu_offload``.
+
+    ``Qwen3_5TextRotaryEmbedding`` registers ``inv_freq`` as a *non-persistent* buffer,
+    exactly like the vision RoPE, so FSDP ``cpu_offload`` leaves it on CPU while
+    ``hidden_states`` live on the accelerator.  The VLM forward also builds the 4-grid
+    MROPE ``position_ids`` (text + temporal + height + width) partly on CPU (the spatial
+    grids come from the vision helpers, which fall back to CPU for their
+    ``repeat_interleave``).  Its ``forward`` then does an unsynchronized
+    ``inv_freq @ position_ids`` matmul without moving either operand.  Move both onto
+    ``x.device`` (the activation device) before delegating, and leave the original
+    forward otherwise untouched.
+    """
+    import torch
+    import transformers.models.qwen3_5.modeling_qwen3_5 as _qwen35
+
+    cls = getattr(_qwen35, "Qwen3_5TextRotaryEmbedding", None)
+    if cls is None:
+        logger.warning("Qwen3_5TextRotaryEmbedding not found; skipping text RoPE device patch")
+        return
+
+    _orig_forward = cls.forward
+
+    @torch.no_grad()
+    def _forward(self, x, position_ids):
+        dev = x.device
+        if self.inv_freq.device != dev:
+            self.inv_freq = self.inv_freq.to(dev)
+        if position_ids.device != dev:
+            position_ids = position_ids.to(dev)
+        return _orig_forward(self, x, position_ids)
+
+    cls.forward = _forward
+    logger.info("Patched Qwen3_5TextRotaryEmbedding.forward (device-safe inv_freq + position_ids)")
 
 
 def _patch_vision_interp() -> None:
@@ -101,6 +142,7 @@ def apply_qwen3_5_vl_device_patch() -> None:
     if _APPLIED:
         return
     _patch_vision_rope()
+    _patch_text_rope()
     _patch_vision_interp()
     _patch_vision_seqlens()
     _APPLIED = True
