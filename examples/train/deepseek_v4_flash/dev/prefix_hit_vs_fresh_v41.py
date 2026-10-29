@@ -17,13 +17,9 @@ import argparse
 import torch
 
 
-def _apply_skyrl_workspace_patch(worker) -> bool:
-    # The V4.1 prefill NaN fix (vllm#60613, not in 0.32.0); NaN first tokens would confound the comparison.
-    from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (
-        apply_deepseek_v41_prefill_workspace_patch,
-    )
-
-    return apply_deepseek_v41_prefill_workspace_patch()
+# SkyRL's worker extension installs SkyRL's vLLM patches in every worker at import, as on the rollout engines,
+# including the V4.1 prefill NaN fix (vllm#60613, not in 0.32.0) whose NaN first tokens would confound this.
+WORKER_EXTENSION = "skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap"
 
 
 def compare(a, b):
@@ -74,8 +70,8 @@ def main():
         enable_prefix_caching=True,
         attention_backend="FLASHMLA_SPARSE_DSV41",
         seed=0,
+        worker_extension_cls=WORKER_EXTENSION,
     )
-    print("PHF workspace patch:", llm.collective_rpc(_apply_skyrl_workspace_patch), flush=True)
     greedy = SamplingParams(temperature=0.0, max_tokens=args.max_tokens, logprobs=0)
 
     def run(tag, params=greedy):
