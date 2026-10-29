@@ -2,6 +2,7 @@
 # ML4 GRPO on DAPO-Math-17K with AIME-2024 validation: FSDP2 + PEFT LoRA, colocated vLLM.
 # Recipe values live in ml4_dapo_lora_fsdp.yaml; this script adds the paths and any extra
 # overrides passed as arguments (key=value, applied last).
+# ML4_RECIPE=ml4_dapo_lora_megatron.yaml runs the Megatron backend recipe instead.
 #
 # Prerequisites:
 #   - SkyRL installed into the image's Python env (vLLM from the image), Ray cluster up on all nodes.
@@ -23,6 +24,7 @@ CKPT_DIR=${CKPT_DIR:-"$HOME/ckpts/ml4_dapo_lora_fsdp"}
 EXPORT_DIR=${EXPORT_DIR:-"$HOME/exports/ml4_dapo_lora_fsdp"}
 PYTHON=${PYTHON:-python}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+RECIPE_YAML=${ML4_RECIPE:-ml4_dapo_lora_fsdp.yaml}
 
 # Opt-in (ML4_LORA_SPLITK1=1): LoRA shrink with split_k=1 ($HERE/lora_tuned/NVIDIA_GB200_SHRINK.json) for
 # bitwise-repeatable rollout. Default is vLLM's split_k=64/8: correct, but fp32 atomics make the last bits vary.
@@ -42,7 +44,7 @@ mapfile -t RECIPE < <("$PYTHON" -c '
 import sys, yaml
 from skyrl.train.config.config import overrides_dict_to_dotlist
 print("\n".join(overrides_dict_to_dotlist(yaml.safe_load(open(sys.argv[1])))))
-' "$HERE/ml4_dapo_lora_fsdp.yaml")
+' "$HERE/$RECIPE_YAML")
 
 "$PYTHON" -m skyrl.train.entrypoints.main_base \
   "${RECIPE[@]}" \

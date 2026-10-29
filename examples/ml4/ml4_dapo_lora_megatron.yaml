@@ -1,0 +1,127 @@
+# ML4 GRPO on DAPO-Math-17K, AIME-2024 validation; SkyRL Megatron backend + Megatron-Bridge LoRA.
+# Same algorithm, batch, lengths, sampling, rollout and LoRA hyperparameters as ml4_dapo_lora_fsdp.yaml;
+# only the trainer backend section differs. Run it with
+# ML4_RECIPE=ml4_dapo_lora_megatron.yaml bash examples/ml4/run_ml4_dapo_lora_fsdp.sh (sets the paths).
+# Megatron requirements of the ML4 model (patches/megatron/ml4): THD packing, selective recompute, TP=1
+# (no sequence parallelism yet), explicit LoRA targets, no fused lm-head logprob (it skips the logit cap).
+
+# --- data / reward ---
+environment.env_class: aime
+generator.batched: true
+
+# --- model ---
+trainer.strategy: megatron
+trainer.policy.megatron_config.model_config_kwargs:
+  model_config:
+    fp8_kv_cache: true                     # rollout FP8 latent KV (kv_cache_dtype below); the model simulates it
+    rollout_moe_activation: &moe_act nvfp4_per_token   # NVFP4 QAT = rollout moe.activation (aliased below)
+    rollout_tp: 8                          # = generator.inference_engine.tensor_parallel_size (FC2 quant shards)
+    rollout_moe_tp: 8
+trainer.policy.megatron_config.tensor_model_parallel_size: 1
+trainer.policy.megatron_config.pipeline_model_parallel_size: 1
+trainer.policy.megatron_config.context_parallel_size: 1
+trainer.policy.megatron_config.expert_model_parallel_size: 32
+trainer.policy.megatron_config.moe_token_dispatcher_type: alltoall
+trainer.policy.megatron_config.moe_enable_routing_replay: true      # R3 (vLLM routed experts replayed)
+trainer.policy.megatron_config.transformer_config_kwargs:
+  recompute_granularity: selective
+  recompute_modules: [core_attn, moe]
+  recompute_method: null
+  recompute_num_layers: null
+  gradient_accumulation_fusion: false
+trainer.policy.megatron_config.lora_config.merge_lora: false          # frozen NVFP4 base; adapter synced to vLLM
+trainer.policy.megatron_config.lora_config.experts_shared_outer_loras: true
+trainer.policy.megatron_config.lora_config.normalize_moe_lora: false  # rank 32 per expert, as FSDP
+trainer.fused_lm_head_logprob: false
+trainer.flash_attn: false
+trainer.remove_microbatch_padding: true  # THD packing (required by the ML4 Megatron model)
+trainer.gradient_checkpointing: true
+trainer.bf16: true
+
+# --- LoRA (rank/alpha baseline-fixed; Megatron module names of the FSDP targets
+#     q_proj, kv_a_proj_with_mqa, o_proj, dense/shared/routed gate+up (fused fc1) and down) ---
+trainer.policy.model.lora.rank: 32
+trainer.policy.model.lora.alpha: 64
+trainer.policy.model.lora.dropout: 0.0
+trainer.policy.model.lora.target_modules: [linear_q_proj, linear_kv_down_proj, linear_proj, linear_fc1, linear_fc2]
+trainer.policy.model.lora.sync_mode: memory
+
+# --- algorithm ---
+trainer.algorithm.advantage_estimator: grpo
+trainer.algorithm.grpo_norm_by_std: true
+trainer.algorithm.loss_reduction: sequence_mean
+trainer.algorithm.eps_clip_low: 0.2
+trainer.algorithm.eps_clip_high: 0.28
+trainer.algorithm.use_kl_loss: false
+trainer.algorithm.use_kl_in_reward: false
+trainer.algorithm.use_entropy_loss: false
+trainer.algorithm.off_policy_correction.tis_ratio_type: token
+trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high: 2.0
+
+# --- optimizer ---
+trainer.policy.optimizer_config.lr: 1.0e-5
+trainer.policy.optimizer_config.adam_betas: [0.9, 0.98]
+trainer.policy.optimizer_config.weight_decay: 0.1
+trainer.policy.optimizer_config.max_grad_norm: 1.0
+trainer.policy.optimizer_config.scheduler: constant_with_warmup
+trainer.policy.optimizer_config.num_warmup_steps: 0
+
+# --- batch: P=32 prompts x G=8, one update per rollout ---
+trainer.train_batch_size: 32
+trainer.policy_mini_batch_size: 32
+trainer.update_epochs_per_batch: 1
+trainer.recompute_old_logprobs_per_minibatch: true
+trainer.micro_train_batch_size_per_gpu: 2
+trainer.micro_forward_batch_size_per_gpu: 4
+generator.n_samples_per_prompt: 8
+
+# --- lengths / sampling ---
+trainer.max_prompt_length: 2048
+generator.sampling_params.max_generate_length: 4096
+generator.sampling_params.temperature: 1.0
+generator.sampling_params.top_p: 1.0
+generator.sampling_params.logprobs: 1
+
+# --- eval ---
+generator.eval_n_samples_per_prompt: 8
+generator.eval_sampling_params:
+  temperature: 1.0
+  top_p: 1.0
+  max_generate_length: 4096
+trainer.eval_before_train: true
+trainer.eval_interval: 10
+
+# --- schedule / checkpoints ---
+trainer.max_training_steps: 200
+trainer.ckpt_interval: 5
+trainer.max_ckpts_to_keep: 2
+trainer.seed: 42
+
+# --- placement ---
+trainer.placement.colocate_all: true
+trainer.placement.policy_num_nodes: 8
+trainer.placement.policy_num_gpus_per_node: 4
+
+# --- rollout: same as the FSDP recipe ---
+generator.inference_engine.backend: vllm
+generator.inference_engine.run_engines_locally: true
+generator.inference_engine.num_engines: 4
+generator.inference_engine.tensor_parallel_size: 8
+generator.inference_engine.enforce_eager: false
+generator.inference_engine.weight_sync_backend: nccl
+generator.inference_engine.enable_return_routed_experts: true
+generator.inference_engine.engine_init_kwargs:
+  enable_prefix_caching: true
+  moe_backend: flashinfer_trtllm
+  quantization_config: {moe: {activation: *moe_act}}
+  tokenizer_mode: mistral
+  config_format: mistral
+  load_format: mistral
+  kv_cache_dtype: fp8_ds_mla
+  max_model_len: 6144
+  limit_mm_per_prompt: {image: 0}
+  lora_target_modules: [q_proj, kv_a_proj_with_mqa, o_proj, gate_up_proj, down_proj, experts]
+
+trainer.logger: console
+trainer.project_name: ml4_dapo
+trainer.run_name: ml4_dapo_lora_megatron

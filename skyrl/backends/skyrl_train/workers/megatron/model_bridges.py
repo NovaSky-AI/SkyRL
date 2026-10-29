@@ -30,6 +30,10 @@ try:
     # registers the bridge for ``Glm5NextForConditionalGeneration`` -> GPTModel.
     import skyrl.backends.skyrl_train.patches.megatron.glm5_next.bridge  # noqa: F401
 
+    # Mistral Large 4 (ML4): MLA + DSA MoE with cross-layer KV sharing. Importing registers the
+    # bridge for ``ML4ForCausalLM`` -> GPTModel.
+    import skyrl.backends.skyrl_train.patches.megatron.ml4.bridge  # noqa: F401
+
     @MegatronModelBridge.register_bridge(
         source="Glm4MoeLiteForCausalLM",
         target=GPTModel,

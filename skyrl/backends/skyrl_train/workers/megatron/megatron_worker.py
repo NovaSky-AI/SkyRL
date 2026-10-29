@@ -266,6 +266,13 @@ class MegatronWorker:
                 f"(logical model / inference checkpoint: {model_path})"
             )
         bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
+        # The bridge reads its own copy of the HF config; give it the same model_config overrides
+        # as `hf_config` (e.g. ML4's rollout_moe_activation / fp8_kv_cache, which select the model's
+        # numerics), so the built model and the config the run records agree.
+        bridge_cfg = getattr(getattr(bridge, "hf_pretrained", None), "config", None)
+        if bridge_cfg is not None:
+            for k, v in model_config_kwargs.get("model_config", {}).items():
+                setattr(bridge_cfg, k, v)
 
         # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
         # path instead of the VL Qwen3VLModel, so the vision tower is not built.

@@ -11,6 +11,7 @@ repos:
     rev: 24.10.0
     hooks:
       - id: black
+        exclude: ^skyrl/backends/skyrl_train/patches/megatron/ml4/ml4_train/
 
   # Detect secrets and sensitive information
   - repo: https://github.com/gitleaks/gitleaks

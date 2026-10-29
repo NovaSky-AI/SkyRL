@@ -230,6 +230,10 @@ class MegatronModelWrapper:
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
         self._fused_lm_head = bool(getattr(self.cfg, "fused_lm_head_logprob", False))
         self._fused_lm_head_backend = getattr(self.cfg, "fused_lm_head_logprob_backend", "torch")
+        if self._fused_lm_head and getattr(get_model_config(self.actor_module[0]), "final_logit_softcapping", None):
+            # The fused path reads output_layer.weight and bypasses the output layer, so a final
+            # logit cap (ML4's tanh cap) would be skipped.
+            raise ValueError("fused_lm_head_logprob does not apply final_logit_softcapping; disable it for this model")
         # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
         # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
         self._pending_grad_sync: Optional[dict] = None
