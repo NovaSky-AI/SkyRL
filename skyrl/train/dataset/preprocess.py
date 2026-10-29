@@ -489,3 +489,23 @@ def compute_prompt_mini_batch_boundaries(
             assert end - start == expected_num_seq_in_mini_batch
 
     return boundaries
+
+
+def balanced_dp_order(lengths: List[int], dp_size: int) -> List[int]:
+    """Order of ``lengths`` whose ``dp_size`` contiguous equal slices have nearly equal sums.
+
+    Longest-first greedy with a cardinality cap: each item goes to the slice with the smallest
+    total among those not yet full. Deterministic (ties keep index order). ``len(lengths)`` must
+    be divisible by ``dp_size``.
+    """
+    n = len(lengths)
+    if dp_size <= 0 or n % dp_size:
+        raise ValueError(f"{n} samples cannot be split evenly across {dp_size} DP ranks")
+    per_rank = n // dp_size
+    bins: List[List[int]] = [[] for _ in range(dp_size)]
+    totals = [0] * dp_size
+    for idx in sorted(range(n), key=lambda i: (-lengths[i], i)):
+        b = min((r for r in range(dp_size) if len(bins[r]) < per_rank), key=lambda r: (totals[r], r))
+        bins[b].append(idx)
+        totals[b] += lengths[idx]
+    return [idx for b in bins for idx in sorted(b)]

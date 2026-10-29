@@ -1652,6 +1652,16 @@ class TrainerConfig(BaseConfig):
     longer than ``max_tokens_per_microbatch`` is placed alone in its own microbatch that exceeds the
     cap (no error, no truncation). The true peak microbatch size is therefore
     ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``."""
+    balance_dp_tokens: bool = False
+    """Reorder the samples of each training mini-batch so every DP rank gets the same number of
+    samples with nearly equal token totals, instead of contiguous slices. Under expert
+    parallelism every micro-batch step waits for the rank with the most tokens, and token-capped
+    micro-batching makes every rank run as many micro-batches as the longest rank (padding
+    micro-batches included), so contiguous slices of long and short answers cost the longest
+    rank's work on every rank. The loss is normalized over the global mini-batch, so the order
+    changes only floating-point summation order. Applies to the training step only; requires
+    that no separate forward pass has to match its partition (``old_logprobs_from_update_forward``
+    or ``recompute_old_logprobs_per_minibatch=false``)."""
     recompute_old_logprobs_per_minibatch: bool = True
     """When True, recomputes policy/ref model logprobs (and critic values) per mini-batch using
     the same mini-batch + DP partition as the training step. When False, a single full-batch forward is run.

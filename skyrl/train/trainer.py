@@ -54,6 +54,7 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
+    balanced_dp_order,
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
@@ -1577,6 +1578,35 @@ class RayPPOTrainer:
         data["advantages"] = normalized_advantages
         return data
 
+    def _balance_dp_tokens(
+        self, model: str, data: TrainingInputBatch, boundaries: List[Tuple[int, int]]
+    ) -> TrainingInputBatch:
+        """Reorder each mini-batch so its contiguous per-DP-rank slices carry nearly equal tokens.
+
+        See ``TrainerConfig.balance_dp_tokens``. Mini-batches stay where they are; a mini-batch
+        that the dispatcher would pad (size not divisible by the DP size) keeps its order.
+        """
+        cfg = self.cfg.trainer
+        if cfg.recompute_old_logprobs_per_minibatch and not cfg.old_logprobs_from_update_forward:
+            raise ValueError(
+                "trainer.balance_dp_tokens changes the training step's DP partition, which the separate "
+                "old-logprob forward (recompute_old_logprobs_per_minibatch) must match; use it with "
+                "old_logprobs_from_update_forward=true or recompute_old_logprobs_per_minibatch=false"
+            )
+        dp_size = self.dispatch.dp_size(model)
+        lengths = data["attention_mask"].sum(dim=-1).tolist()
+        order: List[int] = []
+        for start, end in boundaries:
+            if (end - start) % dp_size:
+                order.extend(range(start, end))
+            else:
+                order.extend(start + i for i in balanced_dp_order(lengths[start:end], dp_size))
+        if order == list(range(len(data))):
+            return data
+        if sorted(order) != list(range(len(data))):
+            raise ValueError("mini-batch boundaries must tile the training batch")
+        return TrainingInputBatch.cat([data.slice(i, i + 1) for i in order])
+
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Execute training step using forward_backward + optim_step.
@@ -1600,6 +1630,9 @@ class RayPPOTrainer:
             # Normalize advantages for policy training; critic training does not need this
             prompt_boundaries = data.metadata.get("policy_prompt_boundaries")
             data = self._normalize_advantages(data, boundaries, prompt_boundaries)
+
+        if self.cfg.trainer.balance_dp_tokens:
+            data = self._balance_dp_tokens(model, data, boundaries)
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
