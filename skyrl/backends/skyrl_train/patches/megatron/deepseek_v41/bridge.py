@@ -9,6 +9,8 @@ built or mapped. The Engram tables are frozen buffers loaded by ``engram.py`` an
 its own copy), so weight sync skips them.
 """
 
+import os
+
 from megatron.bridge.models.conversion.mapping_registry import MegatronMappingRegistry
 from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.bridge.models.conversion.param_mapping import (
@@ -61,6 +63,16 @@ def _layer_roles(hf_config):
     return n, ratios, kv_sources, index_sources
 
 
+def _local_checkpoint_dir(name_or_path: str) -> str:
+    """Engram reads ``tokenizer.json`` and its table rows from checkpoint files: resolve a Hub repo ID to its local
+    snapshot (downloaded already when the bridge loaded the weights)."""
+    if os.path.isdir(name_or_path):
+        return name_or_path
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(name_or_path)
+
+
 @MegatronModelBridge.register_bridge(
     source="DeepseekV41ForCausalLM",
     target=HybridModel,
@@ -74,7 +86,7 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
         hf_config = hf_pretrained.config
         _, ratios, kv_sources, index_sources = _layer_roles(hf_config)
         # The V4 provider logic wants V4's ratio symbols (window / CSA) and no hash or MTP layers; the real
-        # V4.1 ratios go to ``dsv41_spec``.
+        # V4.1 ratios go to ``csa2_compress_ratios``.
         saved = {
             key: getattr(hf_config, key, None)
             for key in ("compress_ratios", "num_hash_layers", "num_nextn_predict_layers")
@@ -97,7 +109,7 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
 
         engram = None
         if getattr(hf_config, "engram_layer_ids", None):
-            path = str(hf_pretrained.model_name_or_path)
+            path = _local_checkpoint_dir(str(hf_pretrained.model_name_or_path))
             engram = EngramSpec(
                 layer_ids=tuple(hf_config.engram_layer_ids),
                 num_embeddings=tuple(hf_config.engram_num_embeddings),
@@ -110,16 +122,20 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
                 tokenizer_path=path,
                 hf_path=path,
             )
-        provider.dsv41_spec = {
-            "compress_ratios": ratios,
-            "kv_source_layers": sorted(kv_sources),
-            "index_source_layers": sorted(index_sources),
-            "candidate_source_layer": int(getattr(hf_config, "candidate_source_layer_id", -1)),
-            "candidate_topk_blocks": int(getattr(hf_config, "candidate_topk_blocks", 0)),
-            "candidate_block_size": int(getattr(hf_config, "candidate_block_size", 0)),
-            "engram": engram,
-            "engram_group_size": ENGRAM_GROUP_SIZE,
-        }
+        # V4.1 attention roles under upstream's names (NVIDIA/Megatron-LM#8224: ``dsv4_version`` + ``csa2_*``), as
+        # logical DeepSeek layer ids. Upstream keeps the V4.1 ratios in ``csa_compress_ratios``, which the pinned
+        # TransformerConfig limits to 0 / 4 / 128 (the V4 placeholders above build the layer pattern).
+        candidate_source = int(getattr(hf_config, "candidate_source_layer_id", -1))
+        provider.dsv4_version = "v4.1"
+        provider.csa2_compress_ratios = ratios
+        provider.csa2_kv_source_layers = sorted(kv_sources)
+        provider.csa2_index_source_layers = sorted(index_sources)
+        provider.csa2_candidate_source_layer = candidate_source if candidate_source >= 0 else None
+        provider.csa2_candidate_topk_blocks = int(getattr(hf_config, "candidate_topk_blocks", 0))
+        provider.csa2_candidate_block_size = int(getattr(hf_config, "candidate_block_size", 0))
+        # Engram is a separate upstream PR (NVIDIA/Megatron-LM#8225), so it stays apart from the attention roles.
+        provider.dsv41_engram = engram
+        provider.dsv41_engram_group_size = ENGRAM_GROUP_SIZE
         return provider
 
     def mapping_registry(self) -> MegatronMappingRegistry:

@@ -10,7 +10,7 @@ from megatron.core.models.hybrid.hybrid_layer_specs import (
 )
 
 from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.attention import (
-    DSv41CompressedSparseAttention,
+    CompressedSparseAttention2,
     DSv41HybridSelfAttention,
 )
 
@@ -22,5 +22,5 @@ def deepseek_v41_hybrid_stack_spec():
         layer_spec = getattr(spec.submodules, name)
         attention = layer_spec.submodules.self_attention
         attention.module = DSv41HybridSelfAttention
-        attention.submodules.core_attention = partial(DSv41CompressedSparseAttention)
+        attention.submodules.core_attention = partial(CompressedSparseAttention2)
     return spec

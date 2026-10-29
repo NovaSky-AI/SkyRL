@@ -19,15 +19,31 @@ KV a source publishes stays in the autograd graph, so consumer layers backpropag
 compressor. The reference's FP8/FP4 activation fake-quant (KV cache, indexer q/k) is not reproduced,
 like megatron-core's V4.
 
-Layer roles come from ``config.dsv41_spec`` (logical DeepSeek layer ids; set by the bridge). Megatron's
-hybrid stack splits each DeepSeek block into an attention layer and a MoE layer, so logical layer
+Interface follows upstream megatron-core's V4.1 work (NVIDIA/Megatron-LM#8224 "CSA2", stacked under #8226; open,
+not in the pinned megatron-core), so moving to it later is mostly deleting this file:
+
+- ``config.dsv4_version == "v4.1"`` gates the V4.1 deltas; layer roles are the ``csa2_kv_source_layers`` /
+  ``csa2_index_source_layers`` / ``csa2_candidate_source_layer`` / ``csa2_candidate_topk_blocks`` /
+  ``csa2_candidate_block_size`` config fields (set by the bridge; logical DeepSeek layer ids). Upstream keeps the
+  V4.1 ratios in ``csa_compress_ratios``; the pinned ``TransformerConfig`` only accepts 0 / 4 / 128 there (the bridge
+  stores V4 placeholders to build the layer pattern), so the real ratios are ``config.csa2_compress_ratios``.
+- ``CompressedSparseAttention2`` / ``CSA2Compressor`` / ``CSA2Indexer`` and the shared ``CSA2State`` use upstream's
+  names. Upstream passes the state as a ``csa2_state`` forward argument from the stack; the pinned
+  ``DSv4HybridSelfAttention`` does not forward one, so it defaults to the model forward's state (``forward_state``).
+
+Megatron's hybrid stack splits each DeepSeek block into an attention layer and a MoE layer, so logical layer
 ``(layer_number - 1) // 2`` owns attention hybrid layer ``layer_number``.
+
+Beyond upstream: selective recompute (``mla_up_proj`` recompute keeps V4.1's q path) and the optional KV
+fake-quant below.
 """
 
 import copy
 import os
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
@@ -100,31 +116,43 @@ def fake_quant_fp4_e4m3(x: torch.Tensor, block: int = 16) -> torch.Tensor:
     return _straight_through(x, y)
 
 
-class SharedAttentionState:
-    """What source layers hand to later layers within one model forward (the reference's
-    ``SharedAttentionRuntime``). Layers run in order and every source writes before its consumers read.
-    ``begin_forward`` clears it at the start of each model forward."""
+@dataclass
+class CSA2State:
+    """Attention tensors source layers hand to later layers within one model forward (upstream ``CSA2State``,
+    NVIDIA/Megatron-LM#8224; the reference's ``SharedAttentionRuntime``). Same field names and meaning as upstream
+    for the subset used here. Layers run in order and every source writes before its consumers read."""
+
+    global_kv: Optional[torch.Tensor] = None  # [n_c, b, head_dim], RoPE'd, in the autograd graph
+    compress_ratio: Optional[int] = None
+    indexer_k: Optional[torch.Tensor] = None  # [n_c, b, index_head_dim], RoPE'd, detached
+    global_indices: Optional[torch.Tensor] = None  # [b, sq, topk] int32 compressed positions, -1 = none
+    candidates: Optional[torch.Tensor] = None  # [sq, b, n_c] bool
+
+
+class ForwardState:
+    """Per-model-forward state, reset when ``HybridModel.forward`` starts (``model.py``): the attention's
+    ``CSA2State`` plus the model-level mHC pre-mix and Engram hashes (upstream keeps those with the stack, #8226)."""
 
     def __init__(self):
         self.reset()
 
     def reset(self):
-        self.compress_kv = None  # [n_c, b, head_dim], RoPE'd, in the autograd graph
-        self.compress_ratio = None
-        self.index_k = None  # [n_c, b, index_head_dim], RoPE'd, detached
-        self.topk_idxs = None  # [b, sq, topk] int32 compressed positions, -1 = none
-        self.candidates = None  # [sq, b, n_c] bool
-        self.pending_pre = None  # [s, b, hc] mHC pre-mix for the next sublayer (model.py)
-        self.engram_hashes = None  # [s, b, n_engram_layers, cols] (model.py)
+        self.csa2 = CSA2State()
+        self.pending_pre = None  # [s, b, hc] mHC pre-mix for the next sublayer
+        self.engram_hashes = None  # [s, b, n_engram_layers, cols]
 
 
 _state = threading.local()
 
 
-def shared_state() -> SharedAttentionState:
+def forward_state() -> ForwardState:
     if not hasattr(_state, "value"):
-        _state.value = SharedAttentionState()
+        _state.value = ForwardState()
     return _state.value
+
+
+def is_v41(config) -> bool:
+    return getattr(config, "dsv4_version", None) == "v4.1"
 
 
 def logical_layer_id(layer_number: int) -> int:
@@ -175,7 +203,7 @@ def _duplicated_linear(config, in_features, out_features, name):
     )
 
 
-class DSv41Compressor(MegatronModule):
+class CSA2Compressor(MegatronModule):
     """Pools ``compress_ratio`` consecutive tokens into one KV latent (reference ``Compressor``).
 
     Returns the normalized latent before RoPE, ``[sq // ratio, b, head_dim]``, or None when the sequence
@@ -209,7 +237,7 @@ class DSv41Compressor(MegatronModule):
         return self.norm(_pool_compressor_values(kv, score, x.dtype))
 
 
-class DSv41Indexer(MegatronModule):
+class CSA2Indexer(MegatronModule):
     """Scores compressed positions for each query and keeps the top-k (reference ``Indexer``)."""
 
     def __init__(self, config, owns_k: bool, name=None):
@@ -228,13 +256,19 @@ class DSv41Indexer(MegatronModule):
         if owns_k:
             self.linear_wk = _duplicated_linear(config, config.v_head_dim, self.head_dim, f"{name}.linear_wk")
             self.k_norm = _rms_norm_module(config, self.head_dim)
+        # As megatron-core main's DSA indexer: top-k selection runs under no_grad, so without an indexer loss these
+        # parameters never get a gradient; keep them out of DDP / optimizer bookkeeping (overlap_grad_reduce would
+        # otherwise wait on hooks that never fire).
+        if (getattr(config, "dsa_indexer_loss_coeff", None) or 0.0) <= 0:
+            for param in self.parameters():
+                param.requires_grad_(False)
 
 
-class DSv41CompressedSparseAttention(MegatronModule):
+class CompressedSparseAttention2(MegatronModule):
     """Sliding-window attention plus, on compressed layers, ``index_topk`` positions of the shared
     compressed KV. Constructor signature matches megatron-core's ``CompressedSparseAttention`` so the V4
     attention module can build it; ``compress_ratio`` from the hybrid symbol is ignored in favour of
-    ``config.dsv41_spec``."""
+    the ``csa2_*`` config fields."""
 
     def __init__(
         self,
@@ -259,16 +293,21 @@ class DSv41CompressedSparseAttention(MegatronModule):
         assert pg_collection is not None and pg_collection.tp.size() == 1, "DeepSeek-V4.1 attention is TP=1 only"
         assert pg_collection.cp.size() == 1, "DeepSeek-V4.1 attention does not support context parallelism"
         self.pg_collection = pg_collection
-        spec = config.dsv41_spec
+        assert is_v41(config), "CompressedSparseAttention2 requires config.dsv4_version == 'v4.1'"
+        # Cross-layer sharing goes through one per-forward state (forward_state), which full / block recompute
+        # (layers re-run in backward) and pipeline microbatch interleaving would read stale. megatron-core rejects
+        # both for mHC models today; upstream's explicit CSA2 state (NVIDIA/Megatron-LM#7678) is the general fix.
+        assert config.recompute_granularity != "full", "DeepSeek-V4.1 attention does not support full recompute"
+        assert (config.pipeline_model_parallel_size or 1) == 1, "DeepSeek-V4.1 attention requires trainer PP=1"
         self.layer_id = logical_layer_id(layer_number)
-        self.compress_ratio = spec["compress_ratios"][self.layer_id]
-        self.is_kv_source = self.compress_ratio > 0 and self.layer_id in spec["kv_source_layers"]
-        self.is_index_source = self.compress_ratio > 0 and self.layer_id in spec["index_source_layers"]
-        candidate_source = spec["candidate_source_layer"]
-        self.is_candidate_source = self.layer_id == candidate_source
-        self.uses_candidates = 0 <= candidate_source < self.layer_id
-        self.candidate_topk_blocks = spec["candidate_topk_blocks"]
-        self.candidate_block_size = spec["candidate_block_size"]
+        self.compress_ratio = config.csa2_compress_ratios[self.layer_id]
+        self.is_kv_source = self.compress_ratio > 0 and self.layer_id in config.csa2_kv_source_layers
+        self.is_index_source = self.compress_ratio > 0 and self.layer_id in config.csa2_index_source_layers
+        candidate_source = config.csa2_candidate_source_layer  # None disables hierarchical candidates
+        self.is_candidate_source = candidate_source is not None and self.layer_id == candidate_source
+        self.uses_candidates = candidate_source is not None and candidate_source < self.layer_id
+        self.candidate_topk_blocks = config.csa2_candidate_topk_blocks
+        self.candidate_block_size = config.csa2_candidate_block_size
         self.window_size = config.csa_window_size
         self.num_attention_heads = config.num_attention_heads
         self.softmax_scale = softmax_scale if softmax_scale is not None else config.v_head_dim**-0.5
@@ -277,12 +316,12 @@ class DSv41CompressedSparseAttention(MegatronModule):
         self.rotary_pos_emb = rotary_pos_emb
         self.attn_sink = mark_keep_in_fp32(nn.Parameter(torch.zeros(self.num_attention_heads, dtype=torch.float32)))
         self.compressor = (
-            DSv41Compressor(config, self.compress_ratio, config.v_head_dim, name=f"{name}.compressor")
+            CSA2Compressor(config, self.compress_ratio, config.v_head_dim, name=f"{name}.compressor")
             if self.is_kv_source
             else None
         )
         self.indexer = (
-            DSv41Indexer(config, owns_k=self.is_kv_source, name=f"{name}.indexer") if self.is_index_source else None
+            CSA2Indexer(config, owns_k=self.is_kv_source, name=f"{name}.indexer") if self.is_index_source else None
         )
 
     def _rope(self, x, n, ratio):
@@ -308,7 +347,7 @@ class DSv41CompressedSparseAttention(MegatronModule):
         q = self._rope(q, sq, 1).float()
         weights, _ = indexer.linear_weights_proj(x.detach())
         weights = weights.float() * (indexer.softmax_scale * indexer.n_heads**-0.5)
-        k = state.index_k.float()  # [n_c, b, d]
+        k = state.indexer_k.float()  # [n_c, b, d]
         topk = min(indexer.index_topk, n_c)
         positions = torch.arange(n_c, device=x.device)
         candidates = [] if self.is_candidate_source else None
@@ -344,6 +383,7 @@ class DSv41CompressedSparseAttention(MegatronModule):
         attn_mask_type=None,
         attention_bias=None,
         packed_seq_params=None,
+        csa2_state: Optional[CSA2State] = None,
     ):
         assert attention_mask is None, "DeepSeek-V4.1 attention uses an implicit causal mask"
         assert packed_seq_params is None, "packed sequences are not supported for DeepSeek-V4.1 attention"
@@ -357,35 +397,36 @@ class DSv41CompressedSparseAttention(MegatronModule):
         compressed_idxs = None
         kv_full = kv
         if self.compress_ratio:
-            state = shared_state()
+            # Upstream's stack passes csa2_state; the pinned DSv4HybridSelfAttention does not, so use this forward's.
+            state = csa2_state if csa2_state is not None else forward_state().csa2
             ratio = self.compress_ratio
             if self.is_kv_source:
                 latent = self.compressor(x)
                 state.compress_ratio = ratio
                 if latent is None:
-                    state.compress_kv = state.index_k = None
+                    state.global_kv = state.indexer_k = None
                 else:
                     n_c = latent.size(0)
                     if self.indexer is not None:
                         with torch.no_grad():
                             k, _ = self.indexer.linear_wk(latent.detach())
-                            state.index_k = self._rope(self.indexer.k_norm(k), n_c, ratio)
-                    state.compress_kv = self._rope(latent, n_c, ratio)
+                            state.indexer_k = self._rope(self.indexer.k_norm(k), n_c, ratio)
+                    state.global_kv = self._rope(latent, n_c, ratio)
                     if FAKE_QUANT_KV == "vllm":
-                        state.compress_kv = fake_quant_fp8_ds_mla(
-                            state.compress_kv, state.compress_kv.size(-1) - self.config.qk_pos_emb_head_dim
+                        state.global_kv = fake_quant_fp8_ds_mla(
+                            state.global_kv, state.global_kv.size(-1) - self.config.qk_pos_emb_head_dim
                         )
                     elif FAKE_QUANT_KV == "reference":
-                        state.compress_kv = fake_quant_fp4_e4m3(state.compress_kv)
+                        state.global_kv = fake_quant_fp4_e4m3(state.global_kv)
             assert (
                 state.compress_ratio == ratio
             ), f"layer {self.layer_id} (ratio {ratio}) reads compressed KV of ratio {state.compress_ratio}"
-            if state.compress_kv is not None:
-                n_c = state.compress_kv.size(0)
+            if state.global_kv is not None:
+                n_c = state.global_kv.size(0)
                 if self.is_index_source:
-                    state.topk_idxs = self._select_topk(x, qr, state, sq, n_c)
-                compressed_idxs = torch.where(state.topk_idxs >= 0, state.topk_idxs + sq, -1)
-                kv_full = torch.cat([kv, state.compress_kv], dim=0)
+                    state.global_indices = self._select_topk(x, qr, state, sq, n_c)
+                compressed_idxs = torch.where(state.global_indices >= 0, state.global_indices + sq, -1)
+                kv_full = torch.cat([kv, state.global_kv], dim=0)
 
         groups = (window_idxs,) if compressed_idxs is None else (window_idxs, compressed_idxs)
         if self.use_fused_kernels:
@@ -411,10 +452,11 @@ class DSv41HybridSelfAttention(dsv4_attn.DSv4HybridSelfAttention):
     """V4 attention minus the per-head query RMS norm, with compressed RoPE on every compressed layer."""
 
     def __init__(self, config, submodules, layer_number, *args, compress_ratio=None, **kwargs):
-        ratio = config.dsv41_spec["compress_ratios"][logical_layer_id(layer_number)]
+        ratio = config.csa2_compress_ratios[logical_layer_id(layer_number)]
         super().__init__(config, submodules, layer_number, *args, compress_ratio=ratio, **kwargs)
-        if ratio == 1:
-            # megatron-core's V4 attention keys YaRN + compress_rope_theta off ratio > 1.
+        if is_v41(config) and ratio == 1:
+            # megatron-core's V4 attention keys YaRN + compress_rope_theta off ratio > 1; upstream V4.1 uses
+            # ``use_compressed_yarn = compress_ratio > (0 if config.dsv4_version == "v4.1" else 1)``.
             self._dsv4_rope_base = self.config.csa_compress_rotary_base
             self._dsv4_uses_yarn_rope = True
             self.rotary_pos_emb = YarnRotaryEmbedding(
@@ -431,6 +473,9 @@ class DSv41HybridSelfAttention(dsv4_attn.DSv4HybridSelfAttention):
         self.core_attention.rotary_pos_emb = self.rotary_pos_emb
 
     def get_query_key_value_tensors(self, *args, **kwargs):
+        # Upstream: ``if config.dsv4_version != "v4.1": q = _q_rms_norm(q, ...)`` inside the up projection.
+        if not is_v41(self.config):
+            return super().get_query_key_value_tensors(*args, **kwargs)
         with _without_q_head_norm():
             qkv = super().get_query_key_value_tensors(*args, **kwargs)
         checkpoint = getattr(self, "qkv_up_checkpoint", None)

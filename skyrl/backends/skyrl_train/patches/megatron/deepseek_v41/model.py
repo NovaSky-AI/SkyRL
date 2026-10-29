@@ -1,4 +1,4 @@
-"""DeepSeek-V4.1 changes to megatron-core's mHC ``HybridModel`` (all keyed on ``config.dsv41_spec``).
+"""DeepSeek-V4.1 changes to megatron-core's mHC ``HybridModel`` (all keyed on ``config.dsv4_version == "v4.1"``).
 
 Parity reference: ``Block.forward`` / ``Transformer.forward`` in the checkpoint's ``inference/model.py``.
 
@@ -9,8 +9,8 @@ Parity reference: ``Block.forward`` / ``Transformer.forward`` in the checkpoint'
   The stack's ``hc_head_*`` parameters are removed.
 - Engram: ``engram_layer_ids`` add an n-gram lookup to the mHC streams before the block's attention.
 
-Per-forward state (the pending ``pre``, engram hash ids, the shared compressed KV / top-k in
-``attention.shared_state()``) is reset when ``HybridModel.forward`` starts.
+Per-forward state (``attention.forward_state()``: the attention's ``CSA2State``, the pending ``pre``, engram hash
+ids) is reset when ``HybridModel.forward`` starts.
 """
 
 import functools
@@ -19,8 +19,9 @@ import os
 import torch
 
 from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.attention import (
+    forward_state,
+    is_v41,
     logical_layer_id,
-    shared_state,
 )
 
 _APPLIED = False
@@ -35,8 +36,9 @@ def get_hasher(engram_spec):
     return NgramHasher(engram_spec)
 
 
-def _spec(config):
-    return getattr(config, "dsv41_spec", None)
+def _engram(config):
+    """Engram settings (upstream: NVIDIA/Megatron-LM#8225), kept apart from the CSA2 attention roles."""
+    return getattr(config, "dsv41_engram", None)
 
 
 def apply_deepseek_v41_patches() -> bool:
@@ -64,12 +66,12 @@ def apply_deepseek_v41_patches() -> bool:
 
     @functools.wraps(model_forward)
     def forward(self, input_ids, *args, **kwargs):
-        spec = _spec(self.config)
-        if spec is not None:
-            state = shared_state()
+        if is_v41(self.config):
+            state = forward_state()
             state.reset()
-            if spec.get("engram") is not None and input_ids is not None:
-                hasher = get_hasher(spec["engram"])
+            engram = _engram(self.config)
+            if engram is not None and input_ids is not None:
+                hasher = get_hasher(engram)
                 # [b, s, L, cols] -> [s, b, L, cols] to match the [s, b, ...] activations.
                 state.engram_hashes = hasher(input_ids).transpose(0, 1).contiguous()
         return model_forward(self, input_ids, *args, **kwargs)
@@ -82,9 +84,9 @@ def apply_deepseek_v41_patches() -> bool:
     @functools.wraps(compute_mappings)
     def delayed_compute_mappings(self, x):
         h_pre, h_post, h_res = compute_mappings(self, x)
-        if _spec(self.config) is None:
+        if not is_v41(self.config):
             return h_pre, h_post, h_res
-        state = shared_state()
+        state = forward_state()
         used = getattr(state, "pending_pre", None)
         if used is None:
             used = torch.zeros_like(h_pre)
@@ -101,7 +103,7 @@ def apply_deepseek_v41_patches() -> bool:
     def output_contract(hidden_states, head_fn, base, scale, n, eps):
         if head_fn is not None:
             return contract(hidden_states, head_fn, base, scale, n, eps)
-        pre = shared_state().pending_pre.float()
+        pre = forward_state().pending_pre.float()
         streams = hidden_states.float().view(*hidden_states.shape[:-1], n, -1)
         return torch.sum(pre.unsqueeze(-1) * streams, dim=-2).to(hidden_states.dtype)
 
@@ -112,7 +114,7 @@ def apply_deepseek_v41_patches() -> bool:
     @functools.wraps(stack_init)
     def init_stack(self, config, *args, **kwargs):
         stack_init(self, config, *args, **kwargs)
-        if _spec(config) is not None and hasattr(self, "hc_head_fn"):
+        if is_v41(config) and hasattr(self, "hc_head_fn"):
             self.hc_head_fn = None
             self.hc_head_base = None
             self.hc_head_scale = None
@@ -127,17 +129,17 @@ def apply_deepseek_v41_patches() -> bool:
     def init_layer(self, config, layer, *args, **kwargs):
         layer_init(self, config, layer, *args, **kwargs)
         self.engram = None
-        spec = _spec(config)
-        if spec is None or spec.get("engram") is None or self.layer_number % 2 == 0:
+        engram = _engram(config) if is_v41(config) else None
+        if engram is None or self.layer_number % 2 == 0:
             return
         layer_id = logical_layer_id(self.layer_number)
-        if layer_id in spec["engram"].layer_ids:
+        if layer_id in engram.layer_ids:
             from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.engram import (
                 DSv41Engram,
             )
 
-            self.engram = DSv41Engram(config, layer_id, spec["engram"], group_size=spec["engram_group_size"])
-            self.engram_hash_index = spec["engram"].layer_ids.index(layer_id)
+            self.engram = DSv41Engram(config, layer_id, engram, group_size=config.dsv41_engram_group_size)
+            self.engram_hash_index = engram.layer_ids.index(layer_id)
 
     layer_cls.__init__ = init_layer
 
@@ -146,7 +148,7 @@ def apply_deepseek_v41_patches() -> bool:
     @functools.wraps(layer_forward)
     def forward_layer(self, hidden_states, *args, **kwargs):
         if getattr(self, "engram", None) is not None:
-            hashes = shared_state().engram_hashes
+            hashes = forward_state().engram_hashes
             assert hashes is not None, "DeepSeek-V4.1 engram needs the model's input_ids"
             hidden_states = self.engram(hidden_states, hashes[:, :, self.engram_hash_index])
         return layer_forward(self, hidden_states, *args, **kwargs)
