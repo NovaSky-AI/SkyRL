@@ -121,8 +121,10 @@ def main():
     args = p.parse_args()
     src, dst, n = args.src, args.dst, args.num_layers
     os.makedirs(dst, exist_ok=True)
-    wm = json.load(open(os.path.join(src, "model.safetensors.index.json")))["weight_map"]
-    cfg = json.load(open(os.path.join(src, "config.json")))
+    with open(os.path.join(src, "model.safetensors.index.json")) as f:
+        wm = json.load(f)["weight_map"]
+    with open(os.path.join(src, "config.json")) as f:
+        cfg = json.load(f)
     t = cfg["text_config"]
     small_ple = args.ple_vocab_base > 0
 
@@ -174,17 +176,15 @@ def main():
         t["ngram_vocab_size_base"] = args.ple_vocab_base
         t["split_ngram_parts"] = args.ple_split_parts
 
-    json.dump(
-        {"metadata": {}, "weight_map": dict(sorted(new_wm.items()))},
-        open(os.path.join(dst, "model.safetensors.index.json"), "w"),
-        indent=1,
-    )
+    with open(os.path.join(dst, "model.safetensors.index.json"), "w") as f:
+        json.dump({"metadata": {}, "weight_map": dict(sorted(new_wm.items()))}, f, indent=1)
     t["num_hidden_layers"] = n
     t["layer_types"] = t["layer_types"][:n]
     t["ple_layer_ids"] = [i for i in t["ple_layer_ids"] if i <= n]
     t["mtp_num_hidden_layers"] = 0
     t.pop("mtp", None)
-    json.dump(cfg, open(os.path.join(dst, "config.json"), "w"), indent=2)
+    with open(os.path.join(dst, "config.json"), "w") as f:
+        json.dump(cfg, f, indent=2)
     for f in os.listdir(src):
         if not f.endswith(".safetensors") and f not in ("config.json", "model.safetensors.index.json"):
             if not f.startswith("."):

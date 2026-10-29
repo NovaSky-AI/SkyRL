@@ -61,9 +61,11 @@ def write_safetensors(path, tensors):
 
 
 def complete(export_dir, base_dir):
-    base_map = json.load(open(os.path.join(base_dir, INDEX)))["weight_map"]
+    with open(os.path.join(base_dir, INDEX)) as f:
+        base_map = json.load(f)["weight_map"]
     index_path = os.path.join(export_dir, INDEX)
-    export_index = json.load(open(index_path))
+    with open(index_path) as f:
+        export_index = json.load(f)
     backup = os.path.join(export_dir, "model.safetensors.index.export_orig.json")
     if not os.path.exists(backup):
         shutil.copyfile(index_path, backup)
