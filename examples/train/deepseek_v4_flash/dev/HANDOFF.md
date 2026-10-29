@@ -736,3 +736,15 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
 - **5120 responses fit** (`v41-dapo-fullft6-resp5k-1793189007.log`, 3 steps, recipe defaults otherwise): no OOM;
   rollout reward 0.606 / 0.605 / 0.692, grad_norm 0.086-0.094, minibatch logprob diff 0.0146-0.0149, step 950 / 808
   / 797 s (generate 174 s, policy_train 475-563 s). Not run longer: with 4096 the eval truncation is already 5-13%.
+
+### Throughput pass (2026-10-29)
+
+- **Torch profiler over a whole step is unusable at this scale.** `v41-prof4k-1793259927` (4096 recipe,
+  `torch_profiler_config` enable, rank 0, skip_first=1, active=1, `export_type=stacks`): the profiler window is one
+  trainer step (fwd_logprobs + policy_train, ~10 min); after step 2's policy_train rank 0 (node 5) spent > 30 min
+  at 100-200% CPU building the stacks export while its RSS grew from ~345 to ~620 GB (host OOM risk), all other
+  ranks idle. Stopped the driver (SIGINT did not stop it; SIGTERM did). Step timings before that: step 1 916 s
+  (generate 155, fwd_logprobs 120, policy_train 557, sync 74-79), step 2 policy_train 458 s, fwd_logprobs 70 s.
+  Profile a shorter window instead (e.g. a few micro-batches), or use nsys.
+- DPPO A/B (skips the old-logprob forward): `v41-dapo-dppo4k-1793265949.log`, `policy_loss_type=dppo`, 10 steps,
+  eval at 10, vs the dual_clip 4096 run `dsv41_flash_dapo_fullft_r3_resp4k_memfix`.
