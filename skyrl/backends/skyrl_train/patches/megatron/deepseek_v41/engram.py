@@ -24,9 +24,11 @@ import torch.distributed as dist
 from megatron.core.transformer.module import MegatronModule
 
 _ENGRAM_GROUPS = {}
-# Where each rank keeps its table shard: "gpu" (default) or "cpu" (pinned host memory, ~25 GiB/GPU saved for the
-# two full-model tables; each lookup then gathers its rows on the host, a few hundred MB per microbatch).
-ENGRAM_TABLE_DEVICE = os.environ.get("SKYRL_DSV41_ENGRAM_TABLE_DEVICE", "gpu")
+# Where each rank keeps its table shard: "cpu" (default; pinned host memory, ~25 GiB/GPU saved for the two
+# full-model tables; each lookup then gathers its rows on the host, a few hundred MB per microbatch) or "gpu". The
+# tables are not Megatron parameters, so the trainer's offload never moves them: with "gpu" they stay on the device
+# while a colocated inference engine is awake.
+ENGRAM_TABLE_DEVICE = os.environ.get("SKYRL_DSV41_ENGRAM_TABLE_DEVICE", "cpu")
 
 
 def _find_next_prime(start: int, seen: set) -> int:

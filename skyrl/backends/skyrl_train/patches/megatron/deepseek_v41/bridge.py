@@ -9,6 +9,8 @@ built or mapped. The Engram tables are frozen buffers loaded by ``engram.py`` an
 its own copy), so weight sync skips them.
 """
 
+import os
+
 from megatron.bridge.models.conversion.mapping_registry import MegatronMappingRegistry
 from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.bridge.models.conversion.param_mapping import (
@@ -61,6 +63,16 @@ def _layer_roles(hf_config):
     return n, ratios, kv_sources, index_sources
 
 
+def _local_checkpoint_dir(name_or_path: str) -> str:
+    """Engram reads ``tokenizer.json`` and its table rows from checkpoint files: resolve a Hub repo ID to its local
+    snapshot (downloaded already when the bridge loaded the weights)."""
+    if os.path.isdir(name_or_path):
+        return name_or_path
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(name_or_path)
+
+
 @MegatronModelBridge.register_bridge(
     source="DeepseekV41ForCausalLM",
     target=HybridModel,
@@ -97,7 +109,7 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
 
         engram = None
         if getattr(hf_config, "engram_layer_ids", None):
-            path = str(hf_pretrained.model_name_or_path)
+            path = _local_checkpoint_dir(str(hf_pretrained.model_name_or_path))
             engram = EngramSpec(
                 layer_ids=tuple(hf_config.engram_layer_ids),
                 num_embeddings=tuple(hf_config.engram_num_embeddings),

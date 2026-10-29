@@ -256,6 +256,12 @@ class CSA2Indexer(MegatronModule):
         if owns_k:
             self.linear_wk = _duplicated_linear(config, config.v_head_dim, self.head_dim, f"{name}.linear_wk")
             self.k_norm = _rms_norm_module(config, self.head_dim)
+        # As megatron-core main's DSA indexer: top-k selection runs under no_grad, so without an indexer loss these
+        # parameters never get a gradient; keep them out of DDP / optimizer bookkeeping (overlap_grad_reduce would
+        # otherwise wait on hooks that never fire).
+        if (getattr(config, "dsa_indexer_loss_coeff", None) or 0.0) <= 0:
+            for param in self.parameters():
+                param.requires_grad_(False)
 
 
 class CompressedSparseAttention2(MegatronModule):
@@ -288,6 +294,11 @@ class CompressedSparseAttention2(MegatronModule):
         assert pg_collection.cp.size() == 1, "DeepSeek-V4.1 attention does not support context parallelism"
         self.pg_collection = pg_collection
         assert is_v41(config), "CompressedSparseAttention2 requires config.dsv4_version == 'v4.1'"
+        # Cross-layer sharing goes through one per-forward state (forward_state), which full / block recompute
+        # (layers re-run in backward) and pipeline microbatch interleaving would read stale. megatron-core rejects
+        # both for mHC models today; upstream's explicit CSA2 state (NVIDIA/Megatron-LM#7678) is the general fix.
+        assert config.recompute_granularity != "full", "DeepSeek-V4.1 attention does not support full recompute"
+        assert (config.pipeline_model_parallel_size or 1) == 1, "DeepSeek-V4.1 attention requires trainer PP=1"
         self.layer_id = logical_layer_id(layer_number)
         self.compress_ratio = config.csa2_compress_ratios[self.layer_id]
         self.is_kv_source = self.compress_ratio > 0 and self.layer_id in config.csa2_kv_source_layers
