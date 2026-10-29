@@ -165,8 +165,9 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 
 apply_pp_relay_worker_patch()
 
-# DeepSeek-V4's load_weights runs its model-level finalize after every chunk, against layers vLLM's
-# layerwise reload still holds on meta; defer it to the end of the weight sync.
+# DeepSeek-V4 under layerwise reload (weight sync): load attention sinks through a weight loader and run the
+# model-level finalize once per reload, as vllm-project/vllm#57797 (merged) and #64357 (open) do upstream.
+# TODO: remove once the pinned vLLM includes both (see the module docstring).
 from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (  # noqa: E402
     apply_deepseek_v4_reload_patch,
 )
