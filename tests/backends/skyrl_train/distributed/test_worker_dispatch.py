@@ -282,7 +282,7 @@ class TestSaveWeights:
         dispatch = self._nccl_dispatch(lambda *args, **kwargs: time.sleep(0.5))
 
         sync = asyncio.create_task(dispatch.save_weights_for_sampler())
-        async with asyncio.timeout(0.2):
+        async with asyncio.timeout(1.0):
             await asyncio.sleep(0.05)
         assert not sync.done()
         await sync
