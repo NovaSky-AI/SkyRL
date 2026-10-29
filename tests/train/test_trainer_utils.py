@@ -33,6 +33,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
+from tests.backends.skyrl_train.sample_support_helpers import csr
 from tests.train.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -1340,6 +1341,19 @@ def test_validate_generator_output_refuses_a_trainable_batch_without_support_whe
         generator_output=_make_side_channel_output(rollout_sample_support=[_support(2), _support(2)]),
         support_expected=True,
     )
+
+
+def test_validate_generator_output_requires_member_logprobs_when_score_centering_is_on():
+    scored = csr([[10, 11], [12, -1]], [[-0.1, -2.0], [0.0, 0.0]])
+    unscored = csr([[12, 13], [14, -1]])
+    output = _make_side_channel_output(rollout_sample_support=[scored, unscored])
+
+    with pytest.raises(AssertionError, match=r"1 rollout_sample_support entries \(first: 1\)"):
+        validate_generator_output(num_prompts=2, generator_output=output, support_scores_expected=True)
+    validate_generator_output(num_prompts=2, generator_output=output)
+    # A placeholder row with no members has nothing to score.
+    placeholder = _make_side_channel_output(rollout_sample_support=[scored, _support(2)])
+    validate_generator_output(num_prompts=2, generator_output=placeholder, support_scores_expected=True)
 
 
 def test_validate_generator_output_allows_sample_support_under_step_wise():

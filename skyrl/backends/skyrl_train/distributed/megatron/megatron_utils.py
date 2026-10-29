@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 import re
 from typing import Any, Dict, Iterator, List, Optional, Union
@@ -848,10 +849,14 @@ def remove_left_padding(
     pre_process: bool = True,
     fp8_enabled: bool = False,
     fp8_recipe: Optional[str] = None,
+    seq_align: int = 1,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
     return new_input_ids, new_attention_mask, new_position_ids
+
+    ``seq_align`` additionally rounds the padded length up to a multiple of it (combined with the
+    TP / FP8 alignment by lcm), e.g. ``mlp_chunks_for_training`` so every rank splits into as many chunks.
     """
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
@@ -864,6 +869,7 @@ def remove_left_padding(
     align_size = get_unpacked_seq_align_size(
         mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe
     )
+    align_size = math.lcm(align_size, seq_align)
     pad_size = (align_size - seq_len % align_size) % align_size
     seq_len = seq_len + pad_size
     shape[1] = seq_len

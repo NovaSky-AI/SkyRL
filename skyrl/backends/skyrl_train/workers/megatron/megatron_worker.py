@@ -58,6 +58,15 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_checkpoint_without_output_frozen_inputs import (
+    apply_checkpoint_without_output_frozen_inputs_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype import (
+    apply_clip_grads_mixed_dtype_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
+    apply_distopt_mixed_dtype_group_index_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
 )
@@ -105,6 +114,9 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
+from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
+    sync_params_for_export,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
@@ -137,6 +149,40 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
+# Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
+apply_checkpoint_without_output_frozen_inputs_patch()
+# Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
+# TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
+apply_distopt_mixed_dtype_group_index_patch()
+# Grad norm / clip over mixed fp32/bf16 decoupled grads (precision-aware optimizer on mHC models).
+# TODO: remove once NVIDIA/Megatron-LM#7279 is in the pinned megatron-core (see patches/megatron/README.md).
+apply_clip_grads_mixed_dtype_patch()
+
+
+# Selective-recompute modules an attention variant cannot take.
+_UNSUPPORTED_RECOMPUTE_MODULES = {
+    # megatron-core's DSv4HybridAttention (DeepSeek-V4 / V4.1) asserts checkpoint_core_attention is off.
+    "dsv4_hybrid": {"core_attn"},
+}
+
+
+def drop_unsupported_recompute_modules(provider) -> None:
+    """Drop the selective-recompute modules the provider's attention variant cannot take (selective "core_attn"
+    is SkyRL's default), and turn recompute off if nothing is left. A no-op for variants with no entry in
+    ``_UNSUPPORTED_RECOMPUTE_MODULES`` and for any granularity but "selective"."""
+    variant = getattr(provider, "experimental_attention_variant", None)
+    unsupported = _UNSUPPORTED_RECOMPUTE_MODULES.get(variant, set())
+    if provider.recompute_granularity != "selective" or not unsupported & set(provider.recompute_modules or []):
+        return
+    dropped = sorted(unsupported & set(provider.recompute_modules))
+    provider.recompute_modules = [m for m in provider.recompute_modules if m not in unsupported]
+    if not provider.recompute_modules:
+        provider.recompute_granularity = None
+    logger.info(
+        f"{variant} attention does not support {dropped} recompute; "
+        f"recompute_granularity={provider.recompute_granularity}, "
+        f"recompute_modules={provider.recompute_modules}"
+    )
 
 
 class MegatronWorker:
@@ -373,6 +419,8 @@ class MegatronWorker:
                 f"(recompute_modules={provider.recompute_modules}); mHC is not compatible with "
                 "full recompute."
             )
+
+        drop_unsupported_recompute_modules(provider)
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
@@ -877,6 +925,7 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
+        sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
         # Save model in HuggingFace safetensors format
         hf_export = self.megatron_config.hf_export_config
         self.strategy.save_hf_model(
@@ -1870,6 +1919,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         inference_engine_cfg: "InferenceEngineConfig",
         model_id: Optional[str] = None,
     ):
+        sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
         if inference_engine_client is None:
             inference_engine_client = self._weight_sync_inference_client
 

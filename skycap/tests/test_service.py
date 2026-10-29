@@ -66,3 +66,10 @@ def test_bad_options_are_refused_before_anything_starts() -> None:
         build_backend("http://x", mode="tokens", tokenizer="t", renderer=FakeRenderer())
     with pytest.raises(TypeError):
         CaptureService("http://x", unknown_option=1)
+
+
+def test_processor_kwargs_must_be_a_mapping() -> None:
+    from skycap.service import build_backend
+
+    with pytest.raises(ValueError, match="processor_kwargs must be a mapping"):
+        build_backend("http://engine", mode="tokens", tokenizer="unused", processor_kwargs=["not", "a", "mapping"])

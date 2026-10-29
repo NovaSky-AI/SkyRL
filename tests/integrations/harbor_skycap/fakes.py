@@ -28,6 +28,7 @@ from skycap.tokens.renderer import Rendered, join_pieces
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_routed_experts,
     pack_sample_support,
+    pack_sample_support_logprobs,
 )
 from tests.backends.skyrl_train.sample_support_helpers import csr
 
@@ -35,6 +36,7 @@ START, END, NL = 1, 2, 3
 SETUP, AGENT, VERIFY, START_TIMEOUT = 5.0, 10.0, 2.0, 600.0
 EPOCH = datetime(2026, 1, 1)
 LAYERS, EXPERTS_PER_TOKEN, TOP_K = 2, 2, 3
+SAMPLED_LOGPROB, NEIGHBOUR_LOGPROB = float(np.log(np.float32(0.75))), float(np.log(np.float32(0.25)))
 
 
 def encode(text: str) -> list[int]:
@@ -61,7 +63,7 @@ class FakeRenderer:
         prompt = [START, *encode("assistant"), NL]
         return Rendered(token_ids=tokens + prompt, tail_indices=indices + [-1] * len(prompt))
 
-    def bridge(self, previous_prompt, previous_completion, new_messages, tools) -> Rendered | None:
+    def bridge(self, previous_prompt, previous_completion, new_messages, tools, previous_media=()) -> Rendered | None:
         if not previous_completion or previous_completion[-1] != END:
             return None
         if any(m.get("role") == "assistant" for m in new_messages):
@@ -125,7 +127,12 @@ class MockRouter:
             support = np.full((len(completion), TOP_K), -1, dtype=np.int32)
             support[:, 0] = completion
             support[:, 1] = np.asarray(completion) + 1
-            choice["rollout_sample_support"] = pack_sample_support(csr(support))
+            # The sampled token, then its neighbour: log(0.75) and log(0.25), so each row sums to 1.
+            scores = np.broadcast_to(np.array([SAMPLED_LOGPROB, NEIGHBOUR_LOGPROB, 0.0]), support.shape)
+            rows = csr(support, scores)
+            choice["rollout_sample_support"] = pack_sample_support(rows)
+            if body.get("return_sample_support_logprobs"):
+                choice["rollout_sample_support_logprobs"] = pack_sample_support_logprobs(rows)
         return web.Response(body=orjson.dumps({"choices": [choice]}), content_type="application/json")
 
     async def finish_session(self, request: web.Request) -> web.Response:

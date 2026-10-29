@@ -29,7 +29,10 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
+| `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
+| `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py` | `patch_checkpoint_without_output_frozen_inputs.py`; the unpatched case doubles as the landed check |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 
@@ -295,6 +298,29 @@ Shared-expert LoRA forward scaling under shared-expert overlap. It only activate
 - **Remove:** the module-level `apply_shared_expert_lora_tp_patch()` call and import in
   `megatron_worker.py`, the module, and its two-rank GPU test.
 
+### `patch_distopt_mixed_dtype_group_index.py`: NVIDIA/Megatron-LM#2872 (and #5835 on `dev`)
+
+`DistributedOptimizer` records each model param's main-param position in grad-buffer order (bf16 buffer, then
+fp32), then installs each optimizer group as `[*fp32 shards, *fp32-from-float16 shards]`. In a group that mixes
+dtypes (DeepSeek-V4/V4.1 mHC `mapping_proj` and compressor `ape`, GLM-5.3 mHC) every lookup lands one param off,
+and full-finetune checkpoint save fails with a shape mismatch in `sharded_param_state_*`. The patch rebuilds
+`model_param_group_index_map` from `model_fp32_groups` / `model_float16_groups` after `__init__`.
+- **Landed?** `DistributedOptimizer.__init__` rebuilds the map itself (#2872 on `main`; #5835 merged 2026-07-18
+  into `dev` only, so not in a `main` pin).
+- **Remove:** the `apply_distopt_mixed_dtype_group_index_patch()` call and import in `megatron_worker.py`, the
+  module, and `patches/megatron/test_distopt_mixed_dtype_group_index.py`.
+
+### `patch_clip_grads_mixed_dtype.py`: NVIDIA/Megatron-LM#7279 (issue #7338)
+
+With the precision-aware optimizer the grads passed to `get_grad_norm_fp32` / `clip_grad_by_total_norm_fp32` keep
+each param's dtype, so models with fp32-kept params hand one fused multi-tensor launch a mixed bf16/fp32 list and
+the first step dies with "CUDA error: an illegal memory access". The patch wraps `clip_grads.multi_tensor_applier`
+to launch once per dtype and recombine the L2 norm as sqrt(sum of squared group norms); #7279 does the same inside
+the two functions (`_group_grads_by_dtype`).
+- **Landed?** `clip_grads.py` has `_group_grads_by_dtype` (or otherwise splits by dtype before each launch).
+- **Remove:** the `apply_clip_grads_mixed_dtype_patch()` call and import in `megatron_worker.py`, the module, and
+  `patches/megatron/test_clip_grads_mixed_dtype.py`.
+
 ### `patch_dsa_hybrid_indexer.py`: SkyRL-only, no upstream counterpart
 
 Opt-in (`SKYRL_DSA_INDEXER_BACKEND=tilelang` with `dsa_kernel_backend="cudnn"`): resolves the
@@ -309,6 +335,21 @@ k-pool indexer (`index_kpool > 1`) selects through `fused_qk_topk_kpool` and byp
 - **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
+
+### `patch_checkpoint_without_output_frozen_inputs.py`: no upstream PR yet
+
+`CheckpointWithoutOutput` (the `mhc` / `layernorm` / `moe_act` selective-recompute modules) saves its
+inputs with `save_for_backward`, which keeps nothing when none of them requires grad, but its recompute
+hook still fires once a later consumer is trainable. Under LoRA (frozen embeddings and early base weights,
+trainable adapters after the first mHC / layernorm block) backward then runs off the end of
+`ctx.saved_tensors`: `RuntimeError: coroutine raised StopIteration` (DeepSeek-V4 LoRA with
+`recompute_modules=[..., mhc, layernorm]`). The patch keeps references to such inputs on the ctx and
+recomputes from them. Applied unconditionally at `megatron_worker.py` import.
+- **Landed?** megatron-core recomputes (or keeps) inputs that do not require grad: the GPU test
+  `test_unpatched_recompute_fails_on_frozen_inputs` then fails because backward no longer raises.
+- **Remove:** the module-level `apply_checkpoint_without_output_frozen_inputs_patch()` call and import in
+  `megatron_worker.py`, the module, and
+  `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py`.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 

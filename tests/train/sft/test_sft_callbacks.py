@@ -268,3 +268,50 @@ def test_callbacks_fire_during_sft_training(monkeypatch, mock_dispatch):
             continue
         assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
         assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"
+
+
+def test_callbacks_fire_during_dummy_sft_training(mock_dispatch):
+    """A 2-step dummy run (``dummy_run_full_ctx``) fires the train, epoch, step and log events, with 1-based steps."""
+    cfg = _build_test_sft_config()
+    cfg.dummy_run_full_ctx = True
+    cfg.dummy_run_max_steps = 2
+    skyrl_cfg = build_skyrl_config_for_sft(cfg)
+
+    recorder = RecorderCallback()
+    trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg, callbacks=[recorder])
+    attach_mock_sft_deps(trainer, mock_dispatch)
+    trainer.tokenizer.vocab_size = 32
+    tracker = MagicMock()
+    trainer.tracker = tracker
+
+    trainer.train()
+
+    event_names = [name for name, _ in recorder.events]
+    assert event_names == [
+        "on_train_start",
+        "on_epoch_start",
+        "on_step_start",
+        "on_step_end",
+        "on_log",
+        "on_step_start",
+        "on_step_end",
+        "on_log",
+        "on_epoch_end",
+        "on_train_end",
+    ], event_names
+
+    snaps_by_event: dict[str, list[dict]] = {}
+    for name, snap in recorder.events:
+        snaps_by_event.setdefault(name, []).append(snap)
+    assert [snap["global_step"] for snap in snaps_by_event["on_step_end"]] == [1, 2]
+    # As in the regular loop, the epoch starts at step 1 and ends at the last step.
+    assert snaps_by_event["on_epoch_start"][0]["global_step"] == 1
+    assert snaps_by_event["on_epoch_end"][0]["global_step"] == 2
+    for snap in snaps_by_event["on_step_end"]:
+        assert snap["has_batch"] and "loss" in snap["metrics_keys"], snap
+    for snap in snaps_by_event["on_log"]:
+        assert "train/loss" in snap["logs_keys"], snap["logs_keys"]
+    # Callbacks and the tracker see the same step numbers.
+    assert [call.kwargs["step"] for call in tracker.log.call_args_list] == [1, 2]
+    for name, snap in recorder.events:
+        assert (snap["total_steps"], snap["steps_per_epoch"], snap["epoch"]) == (2, 2, 0), (name, snap)

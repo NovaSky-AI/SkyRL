@@ -11,6 +11,7 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
@@ -39,6 +40,16 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
     # that can OOM on L4s. For more details, see: https://github.com/NovaSky-AI/SkyRL/pull/1221
     cfg.generator.inference_engine.gpu_memory_utilization = 0.7
     return cfg
+
+
+@pytest.fixture
+def policy_local_engines_ray_init(request):
+    model = request.node.callspec.params["model"]
+    extra_env_vars = (
+        {"SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S": "1800"} if model == QWEN_LARGE_MOE_MODEL else None
+    )
+    with ray_init(extra_env_vars=extra_env_vars):
+        yield
 
 
 @pytest.mark.asyncio
@@ -93,7 +104,7 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
     ],
 )
 async def test_policy_local_engines_e2e(
-    ray_init_fixture,
+    policy_local_engines_ray_init,
     colocate_all,
     weight_sync_backend,
     strategy,

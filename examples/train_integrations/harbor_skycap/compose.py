@@ -38,6 +38,7 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
+    SAMPLE_SUPPORT_LOGPROBS_DTYPE,
     CompactSampleSupport,
 )
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
@@ -70,6 +71,8 @@ class _Row:
     loss_mask: List[int]
     logprobs: List[float]
     support: Optional[List[List[int]]] = None
+    # Row for row with ``support``, the sampler's logprob of each id (score centering).
+    support_logprobs: Optional[List[List[float]]] = None
     routes: Optional[RoutedExpertIndices] = None
     placeholder: bool = False
 
@@ -90,6 +93,7 @@ def split(sample: Sample) -> Optional[_Row]:
             list(sample.logprobs[first:]) if sample.logprobs is not None else [0.0] * (len(sample.input_ids) - first)
         ),
         support=sample.sampling_mask[first:] if sample.sampling_mask is not None else None,
+        support_logprobs=sample.sampling_mask_logprobs[first:] if sample.sampling_mask_logprobs is not None else None,
         routes=_routes(sample),
     )
 
@@ -184,6 +188,9 @@ def _sample_support(
         return None
     if any(row.support is None for row in real):
         raise ValueError("some captured paths have sampler support and some don't")
+    scored = any(row.support_logprobs is not None for row in real)
+    if scored and any(row.support_logprobs is None for row in real):
+        raise ValueError("some captured paths have sampler support logprobs and some don't")
     widest = max((len(ids) for row in real for ids in row.support), default=1)
     if top_k > 0 and widest > top_k:
         raise ValueError(f"a sampler support row has {widest} ids, more than top_k={top_k}")
@@ -194,7 +201,13 @@ def _sample_support(
             ids = list(row.support or ())
             lengths = [len(token_ids) for token_ids in ids] + [0] * (len(row.response) - len(ids))
             members = np.array([token_id for token_ids in ids for token_id in token_ids], dtype=SAMPLE_SUPPORT_DTYPE)
-            supports.append(CompactSampleSupport.from_token_ids(members, lengths, top_k=top_k))
+            logprobs = None
+            if scored:
+                logprobs = np.array(
+                    [value for values in row.support_logprobs or () for value in values],
+                    dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE,
+                )
+            supports.append(CompactSampleSupport.from_token_ids(members, lengths, top_k=top_k, logprobs=logprobs))
     return supports
 
 

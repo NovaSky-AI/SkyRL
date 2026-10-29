@@ -1,6 +1,6 @@
-"""CPU test: callbacks fire end-to-end during a RayPPOTrainer training run.
+"""CPU tests: callbacks fire end-to-end during RayPPOTrainer and FullyAsyncRayPPOTrainer training runs.
 
-Runs 2 training steps (1 epoch over a 4-example dummy dataset, train_batch_size=2)
+Each run is 2 training steps (1 epoch over a 4-example dummy dataset, train_batch_size=2)
 with three callbacks registered:
   * RecorderCallback — snapshots every event for sequence + payload assertions.
   * ForceEvaluateAtStep — sets ``control.should_evaluate = True`` on the
@@ -8,15 +8,16 @@ with three callbacks registered:
     ``eval_interval=2`` step 1 would not normally eval, so any eval event
     seen at step 1 comes from this callback.
   * ForceSaveAtStep — sets ``control.should_save = True`` on the on_step_end
-    of step 2, exercising the callback-driven save path.
+    of a given step, exercising the callback-driven save path.
 
 Mocks generation, the inference engine, and the GPU-heavy worker methods so
-the test only exercises the orchestration in ``RayPPOTrainer.train()``.
+the tests only exercise the orchestration in the trainers' ``train()``.
 
 uv run --isolated --extra dev pytest tests/train/test_rl_callbacks.py -v
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import torch
@@ -429,3 +430,117 @@ def test_step_in_flight_at_epoch_boundary_is_abandoned_cleanly(monkeypatch):
     assert trainer.dynamic_sampling_state is None
     assert not trainer.all_metrics
     assert not trainer.all_timings
+
+
+def test_callbacks_fire_during_fully_async_training(monkeypatch):
+    """A 2-step fully-async run fires every relevant event, in order, with the right payloads.
+
+    Generation is stubbed: each step's mini-batch comes straight from ``_collect_generation_mini_batch``, so the
+    test only exercises the orchestration in ``FullyAsyncRayPPOTrainer.train()``.
+    """
+    from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+
+    cfg = _build_test_cfg()
+    cfg.trainer.fully_async.enabled = True
+    cfg.trainer.fully_async.num_parallel_generation_workers = cfg.trainer.train_batch_size
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+    cfg.trainer.algorithm.policy_loss_type = "rollout_is"
+    cfg.generator.batched = False
+    cfg.trainer.eval_before_train = True
+    # Saves at step 2 (interval and epoch end), so the step-1 save comes only from the force-save callback.
+    cfg.trainer.ckpt_interval = 2
+
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 2
+
+    recorder = RecorderCallback()
+    trainer = FullyAsyncRayPPOTrainer(
+        cfg=cfg,
+        tracker=MagicMock(),
+        tokenizer=tokenizer,
+        # One prompt per draw and mini-batches of train_batch_size=2 prompts -> 4 prompts give 2 steps.
+        train_dataset=DummyDataset(size=4),
+        eval_dataset=DummyDataset(size=2),
+        inference_engine_client=None,
+        generator=MagicMock(),
+        callbacks=[recorder, ForceEvaluateAtStep(step=1), ForceSaveAtStep(step=1)],
+    )
+
+    dispatch_mock = MagicMock()
+    dispatch_mock.save_weights_for_sampler = AsyncMock(return_value=None)
+    dispatch_mock.get_timing_metrics = MagicMock(return_value={})
+    trainer.dispatch = dispatch_mock
+
+    monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
+    monkeypatch.setattr(trainer, "_run_generate_for_a_group_loop", AsyncMock(return_value=None))
+    step_groups = iter([["uid-0", "uid-1"], ["uid-2", "uid-3"]])
+
+    async def _collect(*_args, **_kwargs):
+        return [SimpleNamespace(uid=uid) for uid in next(step_groups)], [], False
+
+    monkeypatch.setattr(trainer, "_collect_generation_mini_batch", _collect)
+    monkeypatch.setattr(
+        trainer, "convert_generation_group_mini_batch_to_training_input", lambda *_args: _stub_training_input()
+    )
+    monkeypatch.setattr(trainer, "_run_training", AsyncMock(return_value={"policy_loss": 0.42}))
+    monkeypatch.setattr(trainer, "eval", AsyncMock(return_value={"eval/score": 0.5}))
+    monkeypatch.setattr(trainer, "save_checkpoints", lambda: _FAKE_CKPT_PATH)
+    # The stubbed collection bypasses the staleness accounting this epoch-end check validates.
+    monkeypatch.setattr(trainer._staleness_manager, "validate_state_at_epoch_end", AsyncMock(return_value=None))
+
+    asyncio.run(trainer.train())
+
+    event_names = [name for name, _ in recorder.events]
+    # Unlike the synchronous trainer, the fully-async loop evaluates before it checkpoints.
+    expected = [
+        "on_train_start",
+        # --- eval before train ---
+        "on_eval_start",
+        "on_eval_end",
+        "on_log",
+        "on_epoch_start",
+        # --- step 1 ---
+        "on_step_start",
+        "on_step_end",
+        "on_eval_start",  # forced
+        "on_eval_end",
+        "on_save",  # forced
+        "on_log",
+        # --- step 2 ---
+        "on_step_start",
+        "on_step_end",
+        "on_eval_start",  # interval
+        "on_eval_end",
+        "on_save",  # interval
+        "on_log",
+        # --- epoch boundary + cleanup ---
+        "on_epoch_end",
+        "on_save",  # final
+        "on_train_end",
+    ]
+    assert event_names == expected, f"unexpected event sequence: {event_names}"
+
+    snaps_by_event: dict[str, list[dict]] = {}
+    for name, snap in recorder.events:
+        snaps_by_event.setdefault(name, []).append(snap)
+
+    for snap in snaps_by_event["on_step_end"]:
+        assert snap["has_batch"], "on_step_end should see the training batch"
+        assert "policy_loss" in snap["metrics_keys"], snap["metrics_keys"]
+    assert [snap["global_step"] for snap in snaps_by_event["on_eval_end"]] == [0, 1, 2]
+    assert set(snaps_by_event["on_log"][0]["logs_keys"]) == {"eval/score"}
+    # One on_log per step carries the step's metrics, eval metrics and timings together.
+    for snap in snaps_by_event["on_log"][1:]:
+        assert {"trainer/epoch", "trainer/global_step", "eval/score"} <= set(snap["logs_keys"]), snap["logs_keys"]
+        assert any(key.startswith("timing/") for key in snap["logs_keys"]), snap["logs_keys"]
+    # The final save runs after the loop has advanced global_step past the last trained step.
+    assert [(snap["global_step"], snap["ckpt_path"]) for snap in snaps_by_event["on_save"]] == [
+        (1, _FAKE_CKPT_PATH),
+        (2, _FAKE_CKPT_PATH),
+        (3, _FAKE_CKPT_PATH),
+    ]
+    assert snaps_by_event["on_train_end"][0]["global_step"] == 2
+    for name, snap in recorder.events:
+        assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
+        assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"

@@ -5,6 +5,7 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 import os
 from typing import Any, Dict
 
+import numpy as np
 import pytest
 from loguru import logger
 from transformers import AutoTokenizer
@@ -42,8 +43,10 @@ def get_test_config(
     get_logprobs,
     enable_return_routed_experts,
     enable_return_sample_support_set=False,
+    enable_score_centering=False,
 ):
     cfg = SkyRLTrainConfig()
+    cfg.trainer.algorithm.enable_score_centering = enable_score_centering
     cfg.trainer.policy.model.path = model
     cfg.generator.sampling_params = SamplingParams(
         max_generate_length=max_generate_length,
@@ -129,6 +132,7 @@ async def run_generator_end_to_end(
     get_logprobs: bool = False,
     enable_return_routed_experts: bool = False,
     enable_return_sample_support_set: bool = False,
+    enable_score_centering: bool = False,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -149,6 +153,7 @@ async def run_generator_end_to_end(
         get_logprobs,
         enable_return_routed_experts,
         enable_return_sample_support_set,
+        enable_score_centering,
     )
 
     # Use InferenceEngineState to launch and clean up local inference servers.
@@ -519,8 +524,10 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
-    """Capture top-p/top-k support through the multi-turn agent-loop trace."""
+@pytest.mark.parametrize("score_centering", [False, True], ids=["support", "support-and-logprobs"])
+async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture, score_centering):
+    """Capture top-p/top-k support, and with score centering each member's sampler logprob, through
+    the multi-turn agent-loop trace."""
     num_prompts = 5
     n_samples_per_prompt = 2
     generator_output: GeneratorOutput = await run_generator_end_to_end(
@@ -540,7 +547,9 @@ async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
         max_env_workers=0,
         is_step_wise=False,
         temperature=1.0,
+        get_logprobs=score_centering,
         enable_return_sample_support_set=True,
+        enable_score_centering=score_centering,
     )
 
     rollout_sample_support = generator_output["rollout_sample_support"]
@@ -562,3 +571,26 @@ async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
                 assert token_id in members
             else:
                 assert members == []
+        assert (support.logprobs is not None) == score_centering
+    if score_centering:
+        _assert_member_logprobs_are_the_samplers(generator_output)
+
+
+def _assert_member_logprobs_are_the_samplers(generator_output: GeneratorOutput) -> None:
+    """Each scored row is a processed distribution over its members, and its sampled member's score
+    is the rollout logprob of the sampled token."""
+    for response_ids, loss_mask, logprobs, support in zip(
+        generator_output["response_ids"],
+        generator_output["loss_masks"],
+        generator_output["rollout_logprobs"],
+        generator_output["rollout_sample_support"],
+    ):
+        assert support.logprobs.dtype == np.float32 and np.isfinite(support.logprobs).all()
+        for row, (token_id, is_loss_active, logprob) in enumerate(zip(response_ids, loss_mask, logprobs)):
+            if not is_loss_active:
+                continue
+            start, stop = support.offsets[row], support.offsets[row + 1]
+            members = support.token_ids[start:stop].tolist()
+            scores = support.logprobs[start:stop]
+            assert (scores <= 0).all() and np.exp(scores.astype(np.float64)).sum() <= 1 + 1e-3
+            assert scores[members.index(token_id)] == pytest.approx(logprob, abs=1e-5)
