@@ -6,7 +6,8 @@ decode path. This samples a response for each prompt (the prompt part of ``rows.
 ``prompt_logprobs`` in one prefill, and compares the two per token. Engine knobs bisect the decode path.
 
     uv run --isolated --extra megatron python decode_vs_prefill_v41.py <model> <rows.pt> \\
-        [--prefix-caching] [--enforce-eager] [--max-num-seqs N] [--max-tokens 1024] [--repeats 2] [--skyrl-workspace-patch]
+        [--prefix-caching] [--no-swa-bounded-replay] [--enforce-eager] [--max-num-seqs N] [--max-tokens 1024] [--repeats 2]
+        [--skyrl-patches]
 """
 
 import argparse
@@ -14,12 +15,8 @@ import argparse
 import torch
 
 
-def _apply_skyrl_workspace_patch(worker) -> bool:
-    from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (
-        apply_deepseek_v41_prefill_workspace_patch,
-    )
-
-    return apply_deepseek_v41_prefill_workspace_patch()
+# SkyRL's worker extension installs SkyRL's vLLM patches in every worker at import (incl. the V4.1 prefill NaN fix).
+WORKER_EXTENSION = "skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap"
 
 
 def main():
@@ -32,7 +29,12 @@ def main():
     p.add_argument("--repeats", type=int, default=2, help="samples per prompt")
     p.add_argument("--enforce-eager", action="store_true")
     p.add_argument("--max-num-seqs", type=int, default=0)
-    p.add_argument("--skyrl-workspace-patch", action="store_true")
+    p.add_argument("--skyrl-patches", action="store_true", help="load SkyRL's vLLM patches (worker extension)")
+    p.add_argument(
+        "--no-swa-bounded-replay",
+        action="store_true",
+        help="keep V4.1's sliding-window KV in the prefix cache instead of recomputing the hit's last window",
+    )
     p.add_argument(
         "--prefix-caching",
         action="store_true",
@@ -47,6 +49,10 @@ def main():
     prompts = [ids[: len(ids) - L] for ids, L in zip(rows["input_ids"], rows["resp_len"])]
     prompts = list(dict.fromkeys(tuple(x) for x in prompts))  # 12 samples per prompt share it
     extra = {"max_num_seqs": args.max_num_seqs} if args.max_num_seqs else {}
+    if args.skyrl_patches:
+        extra["worker_extension_cls"] = WORKER_EXTENSION
+    if args.no_swa_bounded_replay:
+        extra["swa_bounded_replay"] = False
     llm = LLM(
         model=args.model,
         tensor_parallel_size=args.tp,
@@ -59,8 +65,7 @@ def main():
         seed=0,
         **extra,
     )
-    if args.skyrl_workspace_patch:
-        print("DVP workspace patch:", llm.collective_rpc(_apply_skyrl_workspace_patch), flush=True)
+    print(f"DVP prefix_caching={args.prefix_caching} swa_bounded_replay={not args.no_swa_bounded_replay}", flush=True)
 
     gen = SamplingParams(temperature=1.0, top_p=1.0, max_tokens=args.max_tokens, logprobs=0, n=args.repeats, seed=1)
     outs = llm.generate([TokensPrompt(prompt_token_ids=list(x)) for x in prompts], gen)
