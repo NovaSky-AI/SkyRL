@@ -94,8 +94,8 @@ def candidate_projection(
         raise ValueError("row_ids and token_ids must be matching 1-D tensors")
     if temperature <= 0:
         raise ValueError(f"temperature must be positive, got {temperature}")
-    if not hidden.is_contiguous() or not weight.is_contiguous():
-        raise ValueError("hidden and weight must be contiguous")
+    # The kernel indexes hidden and weight by stride, so views (e.g. a transposed or tied
+    # LM-head weight) need no copy; the pair ids are read as flat arrays.
     if not row_ids.is_contiguous() or not token_ids.is_contiguous():
         raise ValueError("row_ids and token_ids must be contiguous")
     if row_ids.device != hidden.device or token_ids.device != hidden.device or weight.device != hidden.device:
