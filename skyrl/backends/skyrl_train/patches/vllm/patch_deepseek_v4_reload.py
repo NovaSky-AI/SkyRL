@@ -1,166 +1,208 @@
 """Runtime patch: make vLLM's DeepSeek-V4 and V4.1 models survive a weight-sync reload.
 
-vLLM's layerwise reload holds every layer on the meta device until that layer's ``weight_loader``
-calls have received all of its weights. Two pieces of ``DeepseekV4ForCausalLM`` loading don't fit it:
+vLLM's layerwise reload holds every layer on the meta device until that layer's ``weight_loader`` calls have
+received all of its weights. Two pieces of ``DeepseekV4ForCausalLM`` loading don't fit it. This backports the
+upstream vLLM fix for each, in the upstream shape, to the pinned vLLM (0.32.0):
 
-1. **Model-level finalize.** ``DeepseekV4ForCausalLM.load_weights`` ends every call with
-   ``process_weights_after_loading`` (``finalize_mega_moe_weights`` + ``finalize_mhc_broadcast_weights``,
-   which derives layer 0's ``hc_attn_fn_broadcast`` from ``hc_attn_fn``). A weight sync calls
-   ``load_weights`` once per received chunk, so the first chunk finalizes against a meta
-   ``hc_attn_fn`` (``NotImplementedError: Cannot copy out of meta tensor; no data!``), and
-   ``finalize_layerwise_reload`` never re-runs the model-level hook. While a SkyRL receive is loading
-   (``defer_model_finalize``) the hook only marks itself pending; ``run_deferred_model_finalize`` runs
-   it once after vLLM's layerwise finalize, as a fresh load does.
+1. **Attention sinks** (vllm-project/vllm#57797, merged to main 2026-10-14). ``DeepseekV4Model.load_weights``
+   writes ``attn_sink`` with a direct ``params_dict[name][:n].copy_()`` instead of a weight loader, so under
+   layerwise reload the copy lands in the meta placeholder and is dropped (after a level-2 sleep every sink then
+   serves as 0). As upstream, each ``DeepseekV4Attention.attn_sink`` gets ``load_attention_sink`` as its weight
+   loader (this rank's heads, ``-inf`` padding) and the model loads sinks through it, so the layerwise reload
+   buffers a sink like any other weight until its layer is materialized.
 
-2. **Attention sinks.** ``DeepseekV4Model.load_weights`` writes ``attn_sink`` with a direct
-   ``params_dict[name][:n].copy_()`` instead of the parameter's ``weight_loader``. Under layerwise
-   reload that copy lands in the meta placeholder and is dropped; the attention module logs
-   ``Failed to load weights`` and gets its pre-reload storage back. After a level-2 sleep that storage
-   is zeroed, so every sink -- real heads and the ``-inf`` padding heads -- serves as 0. Here the sink
-   tensors are taken out of the stream (always during a SkyRL receive, whose chunk order decides whether the
-   layer is still on meta; otherwise when their parameter is on meta) and written into the restored
-   parameter (same per-rank head slice, ``-inf`` padding) by ``run_deferred_model_finalize``. Applies to
-   DeepSeek-V4 and to V4.1's text model (same loader); without it V4.1's post-sync logprobs drift by 0.12-0.16.
+2. **Model-level finalize** (vllm-project/vllm#64357, open). ``DeepseekV4ForCausalLM.load_weights`` ends every
+   call with ``process_weights_after_loading`` (MegaMoE finalize + the mHC broadcast derived from layer 0's
+   ``hc_attn_fn``). A weight sync calls ``load_weights`` once per chunk, so that runs against layers still on meta
+   (``NotImplementedError: Cannot copy out of meta tensor; no data!``), and ``finalize_layerwise_reload`` never runs
+   the model-level hook. As upstream, ``load_weights`` no longer runs the hook (the cold-load path already runs it
+   once) and ``finalize_layerwise_reload`` runs it once at the end of every reload (``finalize_model_weights``).
+   Unlike upstream, the reload hook is limited to the classes patched here. As upstream, V4.1's Engram page-cache
+   drop and huge-page collapse move from ``load_weights`` into the hook.
 
-Remove once vLLM loads ``attn_sink`` through a weight loader and runs the model-level finalize once at
-the end of a layerwise reload.
+Both apply to DeepSeek-V4 and to V4.1's text model (``vllm.models.deepseek_v41``, same loaders); without the sink
+loader V4.1's post-sync logprobs drift by 0.12-0.16.
+
+TODO: remove each half once the pinned vLLM includes it: #57797 (``make_attention_sink`` in
+``model_executor/model_loader/weight_utils.py``) and #64357 (``finalize_layerwise_reload`` calls
+``finalize_model_weights``).
 """
 
 import os
-from contextlib import contextmanager
+import sys
+from itertools import islice
 from typing import Any, Iterable, Iterator, Tuple
 
 from loguru import logger
 
 _PATCHED = False
-# Set while a SkyRL weight-sync receive is loading (defer_model_finalize); the model's load_weights then stashes
-# every attention sink instead of only those it finds on meta.
-_IN_SYNC_LOAD = 0
-_DEFER_ATTR = "_skyrl_defer_model_finalize"
-_PENDING_ATTR = "_skyrl_model_finalize_pending"
-_SINK_STASH_ATTR = "_skyrl_pending_attn_sinks"
+# Classes whose model-level hook runs after a layerwise reload.
+_FINALIZE_AFTER_RELOAD: tuple = ()
+
+
+def load_attention_sink(param, loaded_weight) -> None:
+    """vllm#57797's loader: this rank's heads of a global sink; padded heads are set to -inf."""
+    from vllm.distributed import (
+        get_tensor_model_parallel_rank,
+        get_tensor_model_parallel_world_size,
+    )
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    tp_size = get_tensor_model_parallel_world_size()
+    heads = loaded_weight.numel()
+    if heads % tp_size:
+        raise ValueError(f"Attention sink heads ({heads}) must be divisible by tp_size ({tp_size})")
+    local_heads = heads // tp_size
+    start = get_tensor_model_parallel_rank() * local_heads
+    default_weight_loader(param[:local_heads], loaded_weight.narrow(0, start, local_heads))
+    param.data[local_heads:].fill_(-float("inf"))
+
+
+def finalize_model_weights(model: Any) -> None:
+    """vllm#64357's model-level post-load hook, for the classes patched here."""
+    if isinstance(model, _FINALIZE_AFTER_RELOAD):
+        model.process_weights_after_loading()
 
 
 def apply_deepseek_v4_reload_patch() -> bool:
     """Install the patch once per process. Returns True if installed."""
-    global _PATCHED
+    global _PATCHED, _FINALIZE_AFTER_RELOAD
     if _PATCHED:
         return False
-    pairs = []
+    # (attention class, model class, causal LM class, AutoWeightsLoader, extra post-load step)
+    targets = []
     try:
-        from vllm.models.deepseek_v4.nvidia.model import (
-            DeepseekV4ForCausalLM,
-            DeepseekV4Model,
-        )
+        from vllm.models.deepseek_v4 import attention as v4_attention
+        from vllm.models.deepseek_v4.nvidia import model as v4_model
 
-        pairs.append((DeepseekV4ForCausalLM, DeepseekV4Model))
+        targets.append(
+            (
+                v4_attention.DeepseekV4Attention,
+                v4_model.DeepseekV4Model,
+                v4_model.DeepseekV4ForCausalLM,
+                v4_model.AutoWeightsLoader,
+                None,
+            )
+        )
     except ImportError:
         pass
     try:
-        # DeepSeek-V4.1 (text-only class; see patch_deepseek_v41.py) has its own copies of both.
-        from vllm.models.deepseek_v41.nvidia.model import (
-            DeepseekV4Model as DeepseekV41Model,
-        )
-        from vllm.models.deepseek_v41.nvidia.model import (
-            DeepseekV41LLMForCausalLM,
-        )
+        # DeepSeek-V4.1 (text-only class; see patch_deepseek_v41.py) has its own copies of all three.
+        from vllm.models.deepseek_v41 import attention as v41_attention
+        from vllm.models.deepseek_v41.nvidia import model as v41_model
 
-        pairs.append((DeepseekV41LLMForCausalLM, DeepseekV41Model))
+        targets.append(
+            (
+                v41_attention.DeepseekV4Attention,
+                v41_model.DeepseekV4Model,
+                v41_model.DeepseekV41LLMForCausalLM,
+                v41_model.AutoWeightsLoader,
+                _collapse_engram_pages,
+            )
+        )
     except ImportError:
         pass
-    if not pairs:
+    if not targets:
         return False
-    for causal_lm_cls, model_cls in pairs:
-        _patch_classes(causal_lm_cls, model_cls)
+    # SKYRL_DEBUG_SKIP_SINK_LOADER=1 leaves vLLM's sink loading alone: a negative control for the sync tests.
+    skip_sinks = os.environ.get("SKYRL_DEBUG_SKIP_SINK_LOADER") == "1"
+    for attention_cls, model_cls, causal_lm_cls, auto_weights_loader, after_loading in targets:
+        if not skip_sinks:
+            _patch_attention_sink(attention_cls)
+            _patch_sink_loading(model_cls)
+        _patch_load_weights(causal_lm_cls, auto_weights_loader, after_loading)
+    _FINALIZE_AFTER_RELOAD = tuple(target[2] for target in targets)
+    _patch_finalize_layerwise_reload()
     _PATCHED = True
-    logger.info("Installed DeepSeek-V4/V4.1 weight-sync reload patch (deferred finalize, attention sinks)")
+    logger.info("Installed DeepSeek-V4/V4.1 weight-sync reload patch (vllm#57797 sink loader, vllm#64357 finalize)")
     return True
 
 
-def _patch_classes(causal_lm_cls, model_cls) -> None:
-    original_finalize = causal_lm_cls.process_weights_after_loading
+def _patch_attention_sink(attention_cls) -> None:
+    original_init = attention_cls.__init__
 
-    def process_weights_after_loading(self) -> None:
-        if getattr(self, _DEFER_ATTR, False):
-            setattr(self, _PENDING_ATTR, True)
-            return
-        original_finalize(self)
+    def __init__(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        # vllm#57797: make_attention_sink registers the sink's TP weight loader.
+        self.attn_sink.weight_loader = load_attention_sink
 
+    attention_cls.__init__ = __init__
+
+
+def _patch_sink_loading(model_cls) -> None:
     original_load = model_cls.load_weights
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]) -> set:
-        params = None
-        stashed: dict = self.__dict__.setdefault(_SINK_STASH_ATTR, {})
-        stashed_now = set()
+        # vllm#57797 drops the direct-copy sink branch; sinks go through their weight loader.
+        params = dict(self.named_parameters())
+        loaded = set()
 
-        def without_meta_sinks() -> Iterator[Tuple[str, Any]]:
-            nonlocal params
+        def without_sinks() -> Iterator[Tuple[str, Any]]:
             for name, weight in weights:
                 if "attn_sink" in name:
-                    if params is None:
-                        params = dict(self.named_parameters())
                     param = params.get(name)
-                    # During a sync, whether a sink's layer is still held on meta when the sink arrives depends on
-                    # the chunk order (a direct copy into a materialized-then-restored layer is lost the same
-                    # way), so stash them all and write them after the layerwise finalize.
-                    if param is not None and (param.is_meta or _IN_SYNC_LOAD):
-                        stashed[name] = weight.detach().clone()
-                        stashed_now.add(name)
-                        continue
+                    if param is not None:  # no parameter on a pipeline stage that doesn't own the layer
+                        param.weight_loader(param, weight)
+                        loaded.add(name)
+                    continue
                 yield name, weight
 
-        return original_load(self, without_meta_sinks()) | stashed_now
+        return original_load(self, without_sinks()) | loaded
+
+    model_cls.load_weights = load_weights
+
+
+def _patch_load_weights(causal_lm_cls, auto_weights_loader, after_loading=None) -> None:
+    def load_weights(self, weights: Iterable[Tuple[str, Any]]) -> set:
+        # vllm#64357: load only; the model-level hook runs once after the whole load or reload.
+        return auto_weights_loader(self).load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    causal_lm_cls.load_weights = load_weights
+    if after_loading is None:
+        return
+    original_hook = causal_lm_cls.process_weights_after_loading
+
+    def process_weights_after_loading(self) -> None:
+        original_hook(self)
+        after_loading(self)
 
     causal_lm_cls.process_weights_after_loading = process_weights_after_loading
-    # SKYRL_DEBUG_SKIP_SINK_STASH=1 leaves vLLM's sink loading alone: a negative control for the sync tests.
-    if os.environ.get("SKYRL_DEBUG_SKIP_SINK_STASH") != "1":
-        model_cls.load_weights = load_weights
 
 
-@contextmanager
-def defer_model_finalize(model: Any) -> Iterator[None]:
-    """Make a patched model's ``process_weights_after_loading`` a pending marker for the duration."""
-    global _IN_SYNC_LOAD
-    setattr(model, _DEFER_ATTR, True)
-    _IN_SYNC_LOAD += 1
-    try:
-        yield
-    finally:
-        _IN_SYNC_LOAD -= 1
-        setattr(model, _DEFER_ATTR, False)
+def _collapse_engram_pages(model) -> None:
+    """V4.1's post-load Engram step, moved from load_weights into the hook as in vllm#64357."""
+    from vllm.model_executor.model_loader.weight_utils import drop_checkpoint_cache
 
-
-def _apply_stashed_attn_sinks(model: Any) -> None:
-    modules = getattr(model, "modules", None)
-    if modules is None:
-        return
-    for module in modules():
-        stashed = module.__dict__.get(_SINK_STASH_ATTR)
-        if not stashed:
-            continue
-        import torch
-        from vllm.distributed import (
-            get_tensor_model_parallel_rank,
-            get_tensor_model_parallel_world_size,
+    config = model.model.vllm_config
+    if config.engram_config and config.engram_config.use_thp:
+        # Loading weights refills the file cache; release it before MADV_COLLAPSE.
+        model_config = config.model_config
+        drop_checkpoint_cache(
+            model_config.model_weights or model_config.model,
+            revision=model_config.revision,
+            cache_dir=config.load_config.download_dir,
         )
-
-        # Same per-rank head slice as DeepseekV4Model.load_weights.
-        n_local_head = module.config.num_attention_heads // get_tensor_model_parallel_world_size()
-        start = n_local_head * get_tensor_model_parallel_rank()
-        params = dict(module.named_parameters())
-        with torch.no_grad():
-            for name, weight in stashed.items():
-                param = params[name]
-                narrow = weight[start : start + n_local_head]
-                param[narrow.shape[0] :].fill_(-float("inf"))
-                param[: narrow.shape[0]].copy_(narrow)
-        logger.info(f"Restored {len(stashed)} DeepSeek-V4 attention sinks after layerwise reload")
-        stashed.clear()
+        for layer in islice(model.model.layers, model.model.start_layer, model.model.end_layer):
+            if layer.engram is not None:
+                layer.engram.embed_tokens.collapse_huge_pages()
 
 
-def run_deferred_model_finalize(model: Any) -> None:
-    """After vLLM's layerwise finalize: restore stashed sinks, then run a pending model-level finalize."""
-    _apply_stashed_attn_sinks(model)
-    if getattr(model, _PENDING_ATTR, False):
-        setattr(model, _PENDING_ATTR, False)
-        model.process_weights_after_loading()
+def _patch_finalize_layerwise_reload() -> None:
+    import vllm.model_executor.model_loader.reload as reload_pkg
+    from vllm.model_executor.model_loader.reload import layerwise
+
+    original = layerwise.finalize_layerwise_reload
+
+    def finalize_layerwise_reload(model, model_config):
+        original(model, model_config)
+        finalize_model_weights(model)
+
+    # Modules that imported the function by name before this patch ran.
+    for module in (
+        layerwise,
+        reload_pkg,
+        sys.modules.get("vllm.model_executor.model_loader.reload.torchao_decorator"),
+        sys.modules.get("vllm.v1.worker.gpu_model_runner"),
+    ):
+        if module is not None and getattr(module, "finalize_layerwise_reload", None) is original:
+            module.finalize_layerwise_reload = finalize_layerwise_reload
