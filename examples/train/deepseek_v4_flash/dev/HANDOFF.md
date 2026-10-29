@@ -748,3 +748,12 @@ repo at `~/avigyabb/SkyRL-dsv4`; not in the DSv4 Ray cluster):
   Profile a shorter window instead (e.g. a few micro-batches), or use nsys.
 - DPPO A/B (skips the old-logprob forward): `v41-dapo-dppo4k-1793265949.log`, `policy_loss_type=dppo`, 10 steps,
   eval at 10, vs the dual_clip 4096 run `dsv41_flash_dapo_fullft_r3_resp4k_memfix`.
+- **DPPO A/B result** (`v41-dapo-dppo4k-1793265949`, W&B `dsv41_flash_dapo/dsv41_flash_dapo_fullft_r3_resp4k_dppo`, same
+  data order as the dual_clip run):
+  - Step time 853 725 719 713 678 689 722 692 686 668 s vs dual_clip 913 763 755 762 734 757 782 744 730 726 s:
+    7145 vs 7666 s over 10 steps (-6.8%). fwd_logprobs drops from 70-120 s to 0.01 s, but policy_train grows by
+    ~40-65 s (the model's GPU onload after rollout moves from the logprob forward into policy_train), so the net
+    saving is ~50 s/step, not the whole forward.
+  - Rollout reward 0.504 0.558 0.622 0.603 0.698 0.531 0.509 0.660 0.707 0.677 (mean 0.607) vs dual_clip mean 0.580;
+    AIME-2024 at step 10 avg 0.583 / pass@12 0.967 vs 0.572 / 0.967.
+  - Recipe knob `POLICY_LOSS_TYPE` (default `dual_clip`; `dppo` for the faster variant).

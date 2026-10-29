@@ -50,6 +50,9 @@ EVAL_N_SAMPLES_PER_PROMPT=12
 ENABLE_ROUTING_REPLAY="${ENABLE_ROUTING_REPLAY:-true}"
 
 # DAPO algorithm knobs
+# POLICY_LOSS_TYPE=dppo uses the rollout logprobs as the behavior policy, so SkyRL skips the old-logprob forward:
+# -7% step time at 4096 responses with the same reward curve and AIME-2024 score over 10 steps (dev/HANDOFF.md).
+POLICY_LOSS_TYPE="${POLICY_LOSS_TYPE:-dual_clip}"
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
 CLIP_RATIO_C=10.0
@@ -96,7 +99,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.val_data="['$TEST_FILE']" \
   trainer.strategy=megatron \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.policy_loss_type="dual_clip" \
+  trainer.algorithm.policy_loss_type="$POLICY_LOSS_TYPE" \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
