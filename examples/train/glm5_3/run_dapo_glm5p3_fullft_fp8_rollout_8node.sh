@@ -174,6 +174,9 @@ ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', '"$MO
 
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
 export SKYRL_GENERATE_CONCURRENCY_PER_ENGINE=128
+# Load synced weights into each vLLM layer's local shard as they arrive instead of buffering them
+# unsharded (~19 GiB per MoE layer per TP rank); colocated full-weight syncs OOM without it.
+export SKYRL_VLLM_EAGER_LAYERWISE_RELOAD="${SKYRL_VLLM_EAGER_LAYERWISE_RELOAD:-1}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.3}"
 # Ray gives each policy actor num_cpus=1, so OMP_NUM_THREADS would default to 1 and the
 # CPU-offloaded Adam step would run single-threaded; 12 halves it (B200 nodes: 14 cores/GPU).

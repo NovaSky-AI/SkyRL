@@ -97,6 +97,9 @@ ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout
 
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
 export SKYRL_GENERATE_CONCURRENCY_PER_ENGINE=128
+# Load synced weights into each vLLM layer's local shard as they arrive instead of buffering them
+# unsharded (~19 GiB per MoE layer per TP rank); colocated full-weight syncs OOM without it.
+export SKYRL_VLLM_EAGER_LAYERWISE_RELOAD="${SKYRL_VLLM_EAGER_LAYERWISE_RELOAD:-1}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.3}"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export SKYRL_VLLM_START_PORT="${SKYRL_VLLM_START_PORT:-8400}"

@@ -25,7 +25,8 @@ and does not fit a B200; FP8 is ~89 GiB/GPU. No `fp8_weight_sync_mode`.
 - `patches/vllm/patch_per_block_fp8_param.py` — `quantization=fp8_per_block` crashed on the
   first sync (`InternalTorchDynamoError: RecursionError`): the torch.compile'd
   `per_block_cast_to_fp8` was handed a vLLM parameter subclass. The patch passes `.data`.
-- Both are installed from `inference_servers/new_inference_worker_wrap.py`.
+- Both are installed from `inference_servers/new_inference_worker_wrap.py`. The eager-reload patch
+  is opt-in (`SKYRL_VLLM_EAGER_LAYERWISE_RELOAD=1`, which both recipes set); the FP8 one is always on.
 - R3 on the FlashInfer TRT-LLM FP8 MoE kernel needs vllm-project/vllm#59455 (fixes #59449), which
   ships in vLLM 0.32.0. This branch carried it as `patch_routed_experts_rebind` while it was on
   vLLM 0.30: the routed-experts capture callback was bound once at startup and lost when a weight

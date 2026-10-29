@@ -70,6 +70,21 @@ once; the rest queue locally and proceed as slots free up.
 Set to 0 to disable throttling (all tasks fire immediately).
 """
 
+SKYRL_VLLM_EAGER_LAYERWISE_RELOAD = str(os.environ.get("SKYRL_VLLM_EAGER_LAYERWISE_RELOAD", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+Install ``patches/vllm/patch_layerwise_reload_eager.py`` in the vLLM workers. During a
+full-weight sync, vLLM's layerwise reload holds every incoming tensor at its unsharded size
+until the whole layer has arrived; the patch loads each one into the local shard as it arrives.
+This lowers the sync-time memory peak, which matters for large MoE layers in colocated runs
+(~19 GiB per GLM-5.3 MoE layer per TP rank).
+
+Default: False. Set ``SKYRL_VLLM_EAGER_LAYERWISE_RELOAD=1`` to enable it.
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tinker
 # ─────────────────────────────────────────────────────────────────────────────

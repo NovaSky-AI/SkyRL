@@ -159,12 +159,15 @@ apply_per_block_fp8_param_patch()
 
 # Full-weight syncs go through vLLM's layerwise reload, which buffers each incoming tensor at
 # its unsharded size until the whole layer has arrived (~19 GiB per GLM-5.3 MoE layer on every
-# TP rank). Load them into the local shard as they arrive instead.
-from skyrl.backends.skyrl_train.patches.vllm.patch_layerwise_reload_eager import (  # noqa: E402
-    apply_layerwise_reload_eager_patch,
-)
+# TP rank). Opt in to loading them into the local shard as they arrive instead.
+from skyrl.env_vars import SKYRL_VLLM_EAGER_LAYERWISE_RELOAD  # noqa: E402
 
-apply_layerwise_reload_eager_patch()
+if SKYRL_VLLM_EAGER_LAYERWISE_RELOAD:
+    from skyrl.backends.skyrl_train.patches.vllm.patch_layerwise_reload_eager import (  # noqa: E402
+        apply_layerwise_reload_eager_patch,
+    )
+
+    apply_layerwise_reload_eager_patch()
 
 # R3 with inference PP > 1: relay each stage's routes to the next so the last stage returns every
 # layer (pass-through at PP=1; a no-op when vLLM relays natively).
