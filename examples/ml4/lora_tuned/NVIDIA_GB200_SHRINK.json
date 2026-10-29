@@ -1,0 +1,55 @@
+{
+ "1": {
+  "1": {
+   "1": {
+    "6144": {
+     "32": {
+      "block_m": 32,
+      "block_n": 16,
+      "block_k": 256,
+      "split_k": 1,
+      "num_warps": 4,
+      "num_ctas": 1,
+      "group_size_m": 8,
+      "num_stages": 2,
+      "max_nreg": null
+     }
+    }
+   }
+  },
+  "2": {
+   "1": {
+    "6144": {
+     "32": {
+      "block_m": 32,
+      "block_n": 16,
+      "block_k": 256,
+      "split_k": 1,
+      "num_warps": 4,
+      "num_ctas": 1,
+      "group_size_m": 8,
+      "num_stages": 2,
+      "max_nreg": null
+     }
+    }
+   }
+  },
+  "3": {
+   "1": {
+    "6144": {
+     "32": {
+      "block_m": 32,
+      "block_n": 16,
+      "block_k": 256,
+      "split_k": 1,
+      "num_warps": 4,
+      "num_ctas": 1,
+      "group_size_m": 8,
+      "num_stages": 2,
+      "max_nreg": null
+     }
+    }
+   }
+  }
+ }
+}

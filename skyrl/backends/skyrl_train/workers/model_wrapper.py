@@ -3,6 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
+import re
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -10,7 +11,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from flash_attn.bert_padding import pad_input, unpad_input
+
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input
+except ImportError:  # only the packed path (remove_microbatch_padding) uses them
+    pad_input = unpad_input = None
 from loguru import logger
 from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
@@ -31,6 +36,14 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils import remote_code_identity
+from skyrl.backends.skyrl_train.utils.fsdp_router_replay import (
+    build_replay_plan,
+    find_replay_routers,
+    install_replay,
+    replay_metrics,
+)
+from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
     PackedSampleSupport,
@@ -98,6 +111,74 @@ class _SampleSupportChannels:
         )
 
 
+def init_meta_lora_adapters(model: nn.Module) -> None:
+    """Materialize meta-device LoRA adapters on CPU and run PEFT's own init on them.
+
+    ``get_peft_model`` moves each adapter to its base layer's device, so on a meta-initialized base the
+    adapters are meta too. Ranks are seeded identically, so every rank produces the same values.
+    """
+    for module in model.modules():
+        if not isinstance(module, LoraLayer):
+            continue
+        for adapter_name in list(module.lora_A.keys()):
+            for layer_name in module.adapter_layer_names:
+                layers = getattr(module, layer_name, None)
+                if isinstance(layers, nn.ModuleDict) and adapter_name in layers:
+                    layers[adapter_name].to_empty(device="cpu")
+                elif layers is not None and adapter_name in layers:
+                    raise NotImplementedError(f"meta-initialized {layer_name} adapters are not supported")
+            module.reset_lora_parameters(adapter_name, model.peft_config[adapter_name].init_lora_weights)
+
+
+# Per-expert PEFT linears and the factor each one shares (Megatron-Bridge SharedOuterGroupedExpertAdapter:
+# fc1 (gate_up) lora_A and fc2 (down) lora_B shared, fc1 lora_B and fc2 lora_A per expert).
+_PER_EXPERT_LINEAR = re.compile(r"(?P<experts>.*\.experts)\.\d+\.(?P<proj>gate_proj|up_proj|down_proj)")
+_SHARED_OUTER_SIDE = {"gate_proj": "lora_A", "up_proj": "lora_A", "down_proj": "lora_B"}
+
+
+def tie_shared_outer_expert_loras(model: nn.Module) -> int:
+    """Shared-outer expert LoRA: within each experts list, point every expert's outer factor at expert 0's.
+
+    Expert 0's factor keeps its PEFT init (lora_A as configured, lora_B zero), as Megatron-Bridge inits its
+    shared side. The shared factor is one parameter (one optimizer state, one checkpoint entry, gradients
+    summed over experts by autograd); ``state_dict`` still has one key per expert, so the PEFT state dict
+    is the expanded per-expert adapter. Call before FSDP sharding. Returns the number of shared factors.
+    """
+    groups = _shared_outer_groups(model)
+    for (experts, proj, adapter), layers in groups.items():
+        owner = layers[0].weight
+        for layer in layers[1:]:
+            if owner.shape != layer.weight.shape:
+                raise ValueError(f"{experts}.{proj}: {tuple(layer.weight.shape)} vs shared {tuple(owner.shape)}")
+            layer.weight = owner
+    if not groups:
+        raise ValueError("experts_shared_outer_loras: no per-expert LoRA linears (`...experts.<e>.<proj>`)")
+    return len(groups)
+
+
+def _shared_outer_groups(model: nn.Module) -> dict:
+    groups = {}
+    for name, module in model.named_modules():
+        m = _PER_EXPERT_LINEAR.fullmatch(name)
+        if m is None or not isinstance(module, LoraLayer):
+            continue
+        for adapter, layer in getattr(module, _SHARED_OUTER_SIDE[m["proj"]]).items():
+            groups.setdefault((m["experts"], m["proj"], adapter), []).append(layer)
+    return groups
+
+
+def check_shared_outer_ties(model: nn.Module, expected: int, where: str) -> None:
+    """Raise unless ``model`` still has ``expected`` shared-outer factors, each one parameter object
+    across its experts. Sharding, ``Module.to``/``to_empty`` or a state-dict load that rebuilds
+    parameters silently unties them (every expert then trains its own copy)."""
+    groups = _shared_outer_groups(model)
+    tied = sum(all(layer.weight is layers[0].weight for layer in layers) for layers in groups.values())
+    if len(groups) != expected or tied != expected:
+        raise RuntimeError(
+            f"experts_shared_outer_loras {where}: {tied} of {len(groups)} factor groups tied, expected {expected}"
+        )
+
+
 class HFModelWrapper(nn.Module):
     """
     Base class for wrapped HF models in reinforcement learning.
@@ -118,6 +199,9 @@ class HFModelWrapper(nn.Module):
         device_map (dict, optional): Device mapping for loading the model onto specific devices. Defaults to None.
         packing_samples (bool, optional): Whether to pack samples during training. Defaults to False.
         temperature (float, optional): Temperature for action selection. Defaults to 1.0.
+        meta_init_adapters (bool, optional): With ``meta_init``, materialize and initialize the LoRA adapters
+            on CPU so that only the base weights stay on meta (for ``ModelConfig.sharded_load_fn``, which loads
+            base weights only). Defaults to False.
         use_liger_kernel (bool, optional): Whether to use Liger Kernel for the model. Defaults to False.
     """
 
@@ -142,20 +226,28 @@ class HFModelWrapper(nn.Module):
         use_torch_compile: bool = False,
         model_config_kwargs: dict = {},
         meta_init: bool = False,
+        meta_init_adapters: bool = False,
         language_model_only: bool = False,
         logprobs_chunk_size: int = 1024,
+        experts_shared_outer_loras: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
+        self.shared_outer_factors = 0  # tie_shared_outer_expert_loras count; checked after FSDP init / load
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
+        # An explicit `attn_implementation` in `model_config_kwargs` (e.g. "eager" for remote-code models that
+        # declare neither sdpa nor flash-attention support) takes precedence over `use_flash_attention_2`.
+        self.attn_implementation = model_config_kwargs.get("attn_implementation") or (
+            "flash_attention_2" if use_flash_attention_2 else "sdpa"
+        )
         self.remove_microbatch_padding = remove_microbatch_padding
         self.is_vlm = False
         if remove_microbatch_padding:
             assert (
                 self.attn_implementation == "flash_attention_2"
             ), "Flash attention 2 should be used for `remove_microbatch_padding`"
+            assert unpad_input is not None, "`remove_microbatch_padding` needs the flash_attn package"
 
         if isinstance(pretrain_or_model, str):
             if load_in_4bit:
@@ -207,12 +299,15 @@ class HFModelWrapper(nn.Module):
                 # Otherwise, e.g., non-rank-0's `inv_freq` is bf16 while rank-0's stays fp32,
                 # so the init-time rank-0→all broadcast that seeds these buffers copies
                 # rank-0's fp32 bytes into that half-width bf16 buffer as huge garbage values
-                non_persistent_names = {n for n, _ in self.model.named_non_persistent_buffers()}
-                for p in self.model.parameters():
-                    p.data = p.data.to(target_dtype)
-                for name, buf in self.model.named_buffers():
-                    if name not in non_persistent_names:
-                        buf.data = buf.data.to(target_dtype)
+                # `Module.to` casts floating-point tensors only (integer params such as packed
+                # quantized weights keep their dtype) and goes through each module's `_apply`,
+                # so a module that keeps some buffers in fp32 does so here too, as it would
+                # under `from_pretrained(torch_dtype=...)`.
+                non_persistent = dict(self.model.named_non_persistent_buffers())
+                self.model.to(target_dtype)
+                for name, buf in non_persistent.items():
+                    module_name, _, leaf = name.rpartition(".")
+                    self.model.get_submodule(module_name)._buffers[leaf] = buf
             else:
                 self.model = model_class.from_pretrained(
                     pretrain_or_model,
@@ -223,6 +318,12 @@ class HFModelWrapper(nn.Module):
                     torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                     device_map=device_map,
                 )
+
+            # trust_remote_code identity (SKYRL_REMOTE_CODE_SPEC, required for custom model code): the imported code is the frozen one
+            identity = remote_code_identity.check_files(self.model)
+            if identity is not None:
+                logger.info(f"[remote code] frozen files verified: {sorted(identity)}")
+                remote_code_identity.install_proof(self.model)
 
             # gpt oss
             if Version(transformers.__version__) >= Version("4.56.2"):
@@ -262,6 +363,11 @@ class HFModelWrapper(nn.Module):
                     init_lora_weights=True if lora_init_method == "kaiming" else lora_init_method,
                 )
                 self.model = get_peft_model(self.model, lora_config)
+                if meta_init and meta_init_adapters:
+                    init_meta_lora_adapters(self.model)
+                if experts_shared_outer_loras:
+                    n = self.shared_outer_factors = tie_shared_outer_expert_loras(self.model)
+                    logger.info(f"[LoRA] shared-outer expert factors: {n} shared tensors")
 
                 if load_in_4bit:
                     for name, module in self.model.named_modules():
@@ -318,6 +424,9 @@ class HFModelWrapper(nn.Module):
         sample_support: Optional[PackedSampleSupport] = None,
         loss_mask: Optional[torch.Tensor] = None,
         enable_sample_support_replay: bool = False,
+        rollout_expert_indices: Optional[PackedTensor] = None,
+        router_padding_mask: Optional[torch.Tensor] = None,
+        enable_router_replay: bool = False,
     ) -> torch.Tensor:
         """Returns action log probs"""
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
@@ -347,6 +456,10 @@ class HFModelWrapper(nn.Module):
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
+        replay_routers, replay_plan = self._router_replay_plan(
+            enable_router_replay, rollout_expert_indices, router_padding_mask, attention_mask, loss_mask
+        )
+
         sequences_fwd = sequences
         position_ids_fwd = position_ids
         attention_mask_fwd = attention_mask
@@ -366,8 +479,19 @@ class HFModelWrapper(nn.Module):
                 attention_mask_fwd = None  # no attention mask with FA 2
 
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
+        # Remote-code models with `config.logprob_chunk_size > 0` (e.g. ML4) return chunked
+        # token logprobs for `logprob_labels` instead of full-vocab logits.
+        model_logprobs = (
+            getattr(getattr(self.model, "config", None), "logprob_chunk_size", 0) > 0
+            and not self.is_vlm
+            and support_channels is None
+            and self.sequence_parallel_size == 1
+        )
         if support_channels is not None:
             support_channels = support_channels.roll_to_logit_positions()
+        if replay_routers:
+            # Stays installed until the next forward, so activation-checkpoint recompute replays too.
+            install_replay(replay_routers, replay_plan, nnz_indices if self.remove_microbatch_padding else None)
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
             attention_mask_fwd = None if self.remove_microbatch_padding else attention_mask_fwd
@@ -403,6 +527,18 @@ class HFModelWrapper(nn.Module):
                 position_ids=None,
                 **vlm_kwargs,
             )
+        elif model_logprobs:
+            # The model computes token logprobs from its hidden states in chunks (no full logits).
+            packed_fa2 = self.remove_microbatch_padding and self.attn_implementation == "flash_attention_2"
+            output = self.model(
+                sequences_fwd,
+                attention_mask=None if packed_fa2 else attention_mask_fwd,
+                position_ids=position_ids_fwd,
+                logprob_labels=sequences_rolled,
+                logprob_temperature=temperature,
+                return_entropy=compute_entropy,
+                entropy_requires_grad=compute_entropy and entropy_requires_grad,
+            )
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
         elif self.remove_microbatch_padding and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
@@ -410,12 +546,18 @@ class HFModelWrapper(nn.Module):
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
         else:
             output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+        if replay_plan is not None:
+            self.last_router_replay_metrics = replay_metrics(replay_routers, replay_plan)
 
-        logits_BSV = output["logits"]
-        logits_BSV.div_(temperature)
+        logits_BSV = None
+        if not model_logprobs:
+            logits_BSV = output["logits"]
+            logits_BSV.div_(temperature)
 
         support_entropy = None
-        if support_channels is not None:
+        if model_logprobs:
+            log_probs = output["log_probs"]
+        elif support_channels is not None:
             # FSDP supplies unsharded, temperature-scaled logits.
             support_scores = score_aligned_sample_support(
                 logits_BSV,
@@ -457,6 +599,12 @@ class HFModelWrapper(nn.Module):
         if compute_entropy:
             if support_entropy is not None:
                 output["entropy"] = to_canonical_batch_positions(support_entropy)
+            elif model_logprobs:
+                padding_mask = None if self.remove_microbatch_padding else attention_mask_fwd
+                entropy = output["entropy"]
+                output["entropy"] = to_canonical_batch_positions(
+                    entropy if padding_mask is None else entropy * padding_mask
+                )
             else:
                 padding_mask = None if self.remove_microbatch_padding else attention_mask_fwd
                 output["entropy"] = to_canonical_batch_positions(
@@ -479,6 +627,33 @@ class HFModelWrapper(nn.Module):
             return (action_log_probs, output)
         else:
             return action_log_probs
+
+    def _router_replay_plan(self, enabled, rollout_expert_indices, router_padding_mask, attention_mask, loss_mask):
+        """R3 for FSDP: routers of this model and the validated replay plan (None when off)."""
+        if not hasattr(self, "_replay_routers"):
+            self._replay_routers = find_replay_routers(self.model)
+        if not enabled:
+            return self._replay_routers, None
+        if not self._replay_routers:
+            raise ValueError("router replay is enabled but the model has no replay-capable MoE router")
+        if rollout_expert_indices is None or router_padding_mask is None:
+            raise ValueError("router replay is enabled but the micro-batch has no rollout expert indices")
+        if self.sequence_parallel_size > 1:
+            raise ValueError("router replay on FSDP does not support sequence parallelism")
+        cfg = self.model.config
+        keys = ("n_routed_experts", "num_experts", "num_local_experts")
+        num_experts = next((getattr(cfg, k) for k in keys if getattr(cfg, k, None)), None)
+        if num_experts is None:
+            raise ValueError("router replay needs the expert count in the model config")
+        plan = build_replay_plan(
+            rollout_expert_indices,
+            attention_mask,
+            router_padding_mask,
+            sorted(self._replay_routers),
+            num_experts,
+            loss_mask=loss_mask,
+        )
+        return self._replay_routers, plan
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)

@@ -404,6 +404,37 @@ def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_
         )
 
 
+def validate_old_logprobs_from_update_forward(cfg: SkyRLTrainConfig) -> None:
+    """Old logprobs = the update forward's own (detached): exact only for one update per batch."""
+    t = cfg.trainer
+    if not t.old_logprobs_from_update_forward:
+        return
+    if t.strategy != "fsdp":
+        raise ValueError("old_logprobs_from_update_forward is implemented for strategy=fsdp only")
+    if t.policy_mini_batch_size != t.train_batch_size or t.update_epochs_per_batch != 1:
+        raise ValueError(
+            "old_logprobs_from_update_forward needs one optimizer update per batch: "
+            f"policy_mini_batch_size ({t.policy_mini_batch_size}) == train_batch_size ({t.train_batch_size}) "
+            f"and update_epochs_per_batch ({t.update_epochs_per_batch}) == 1"
+        )
+    if t.algorithm.use_kl_in_reward:
+        raise ValueError("old_logprobs_from_update_forward: use_kl_in_reward reads the old logprobs before the update")
+
+
+def validate_ml4_kv_cache_dtype(cfg: SkyRLTrainConfig) -> None:
+    """ML4 (``fp8_kv_cache`` in model_config_kwargs): every engine's kv_cache_dtype must be the
+    cache format the trainer simulates (ml4_train.rollout_check)."""
+    mk = cfg.trainer.policy.model_config_kwargs or {}
+    if "fp8_kv_cache" not in mk:
+        return
+    from ml4_train.rollout_check import check_kv_cache_dtype
+
+    ie = cfg.generator.inference_engine
+    kwargs = [kw for kw in (ie.prefill_init_kwargs, ie.decode_init_kwargs) if kw] or [ie.engine_init_kwargs or {}]
+    for kw in kwargs:
+        check_kv_cache_dtype(mk["fp8_kv_cache"], kw.get("kv_cache_dtype"))
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -423,6 +454,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
+    validate_ml4_kv_cache_dtype(cfg)
 
     # Multi-Token Prediction (MTP): the high-level `trainer.mtp` knob is the single source of truth.
     # Propagate it to the training side (Megatron MTP heads + decoupled draft loss) and the inference
@@ -450,6 +482,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         cfg.trainer.algorithm.use_kl_in_reward and cfg.trainer.algorithm.use_kl_loss
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+
+    validate_old_logprobs_from_update_forward(cfg)
 
     if cfg.trainer.policy.language_model_only:
         assert (
@@ -595,6 +629,11 @@ def validate_cfg(cfg: SkyRLTrainConfig):
                 "`megatron_config.lora_config.experts_shared_outer_loras` is only supported with "
                 f'`lora_type="lora"`, got lora_type="{megatron_lora_cfg.lora_type}"'
             )
+        if cfg.trainer.policy.model.lora.experts_shared_outer_loras and cfg.trainer.strategy == "megatron":
+            raise ValueError(
+                "`policy.model.lora.experts_shared_outer_loras` is FSDP only; on Megatron set "
+                "`megatron_config.lora_config.experts_shared_outer_loras`"
+            )
 
         # delta weight sync is not yet supported
         # TODO (sumanthrh): Delta weight sync should be naturally supported for `merge_lora=true`, we should
@@ -731,6 +770,15 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             )
 
     lora_cfg = cfg.trainer.policy.model.lora
+    if lora_cfg.checkpoint_export not in {"every_save", "final"}:
+        raise ValueError(
+            "trainer.policy.model.lora.checkpoint_export must be 'every_save' or 'final', "
+            f"got {lora_cfg.checkpoint_export!r}"
+        )
+    if lora_cfg.checkpoint_export == "final" and cfg.trainer.strategy != "fsdp":
+        raise ValueError(
+            "trainer.policy.model.lora.checkpoint_export='final' is implemented for trainer.strategy='fsdp' only"
+        )
     if lora_cfg.sync_mode not in {"disk", "memory"}:
         raise ValueError(f"trainer.policy.model.lora.sync_mode must be 'disk' or 'memory', got {lora_cfg.sync_mode!r}")
     if lora_cfg.sync_mode == "memory":
@@ -738,12 +786,12 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         # into the receive engine, which stages it for vLLM's LoRA manager. The
         # other backends have no such stream to carry it: delta publishes
         # checkpoint diffs and sharded_rdt bakes a pull plan into model params.
-        if cfg.trainer.strategy != "megatron":
-            raise ValueError("lora.sync_mode='memory' is only implemented for trainer.strategy='megatron'")
-        if lora_cfg.rank <= 0 or cfg.trainer.policy.megatron_config.lora_config.merge_lora:
-            raise ValueError(
-                "lora.sync_mode='memory' requires lora.rank > 0 and megatron_config.lora_config.merge_lora=false"
-            )
+        if cfg.trainer.strategy not in ("megatron", "fsdp"):
+            raise ValueError("lora.sync_mode='memory' is only implemented for trainer.strategy='megatron' or 'fsdp'")
+        if lora_cfg.rank <= 0:
+            raise ValueError("lora.sync_mode='memory' requires lora.rank > 0")
+        if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.megatron_config.lora_config.merge_lora:
+            raise ValueError("lora.sync_mode='memory' requires megatron_config.lora_config.merge_lora=false")
         if ie_cfg.weight_sync_backend != "nccl":
             raise ValueError(
                 "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
@@ -850,12 +898,18 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 "installed vLLM is not one, so earlier stages' routes would be lost. Use "
                 "pipeline_parallel_size=1 and scale with tensor/expert parallelism instead."
             )
-        assert (
-            cfg.trainer.strategy == "megatron"
-        ), "rollout router replay (r3) is only supported with Megatron training backend"
-        assert (
-            cfg.trainer.policy.megatron_config.moe_enable_routing_replay
-        ), "moe_enable_routing_replay must be True to consume rollout expert indices"
+        if cfg.trainer.strategy == "megatron":
+            assert (
+                cfg.trainer.policy.megatron_config.moe_enable_routing_replay
+            ), "moe_enable_routing_replay must be True to consume rollout expert indices"
+        else:
+            assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "rollout router replay (r3) needs Megatron or FSDP"
+            assert (
+                cfg.trainer.policy.fsdp_config.router_replay
+            ), "trainer.policy.fsdp_config.router_replay must be True to consume rollout expert indices"
+            assert (
+                cfg.trainer.policy.sequence_parallel_size == 1
+            ), "rollout router replay (r3) on FSDP does not support sequence parallelism"
 
     pp_size = ie_cfg.pipeline_parallel_size
     tp_pp_size = tp_size * pp_size
@@ -1003,7 +1057,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # NOTE (erictang000): This should no longer be required since this has been removed in vllm
     # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for
     # that previously ran successfully, so keeping this to maintain backwards compatibility.
-    if cfg.generator.inference_engine.weight_sync_backend == "nccl":
+    # An explicit NCCL_CUMEM_ENABLE on the driver wins: multi-node NVLink (GB200 MNNVL) needs cuMem,
+    # and with 0 NCCL drops cross-node trainer and TP collectives to the NIC.
+    if os.environ.get("NCCL_CUMEM_ENABLE"):
+        env_vars["NCCL_CUMEM_ENABLE"] = os.environ["NCCL_CUMEM_ENABLE"]
+    elif cfg.generator.inference_engine.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     if cfg.trainer.strategy == "megatron":
@@ -1059,6 +1117,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
                 f"Exporting `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` to ray runtime env: {os.environ['VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS']}"
             )
             env_vars["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"]
+
+        # LoRA kernel config folder (ML4: split_k=1 shrink so non-zero LoRA scoring is repeatable).
+        if os.environ.get("VLLM_TUNED_CONFIG_FOLDER"):
+            env_vars["VLLM_TUNED_CONFIG_FOLDER"] = os.environ["VLLM_TUNED_CONFIG_FOLDER"]
 
         if os.environ.get("RAY_CGRAPH_get_timeout"):
             logger.info(

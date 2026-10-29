@@ -1,0 +1,124 @@
+# ML4 GRPO on DAPO-Math-17K, AIME-2024 validation; FSDP2 + PEFT LoRA, 8 nodes x 4 GPUs.
+# Flat SkyRL overrides (dot keys); "(default X)" marks an explicit override of a SkyRL default.
+# Paths (model, data, checkpoints) are set by run_ml4_dapo_lora_fsdp.sh.
+# Micro batch, logprob chunk and grouped experts are sized for GB200 (184 GiB) next to the
+# sleeping colocated vLLM; gpu_memory_utilization, max_num_seqs and offload are at defaults.
+
+# --- data / reward ---
+environment.env_class: aime              # DAPO rule-based math grader
+generator.batched: true
+
+# --- model: ML4 remote code (config.json auto_map from ml4_train.convert) ---
+trainer.strategy: fsdp
+trainer.policy.model.sharded_load_fn: loading.load_sharded   # every rank reads only its shards
+trainer.policy.model_config_kwargs:
+  attn_implementation: eager             # ML4 has its own attention; no sdpa / FA2 dispatch
+  moe_grouped_mm: true                   # NVFP4 QAT experts as grouped GEMMs (false: per-expert loop)
+  logprob_chunk_size: 2048               # token logprobs from hidden states 2048 tokens at a time:
+                                         # no [B, T, 204800] FP32 logits (20 GB at 4 x 6144)
+  fp8_kv_cache: true                     # rollout FP8 latent KV (kv_cache_dtype below);
+                                         # ml4_train simulates the fp8_ds_mla cache content
+  rollout_moe_activation: &moe_act nvfp4_per_token   # NVFP4 QAT needs it = rollout moe.activation (aliased below)
+trainer.flash_attn: false                # (default true)
+trainer.remove_microbatch_padding: false # (default true) recipe: padded batch, no packing
+trainer.gradient_checkpointing: true
+trainer.bf16: true                       # frozen base in bf16, adapters fp32
+
+# --- LoRA (rank/alpha/targets baseline-fixed) ---
+trainer.policy.model.lora.rank: 32       # (default 0)
+trainer.policy.model.lora.alpha: 64      # (default 16)
+trainer.policy.model.lora.dropout: 0.0
+# = ml4_train.lora.LORA_TARGET_REGEX: q_proj, kv_a_proj_with_mqa, o_proj, dense/shared/routed gate/up/down
+trainer.policy.model.lora.target_modules: 'language_model\.model\.layers\.\d+\.(self_attn\.(q_proj|kv_a_proj_with_mqa|o_proj)|mlp\.(shared_experts\.|experts\.\d+\.)?(gate_proj|up_proj|down_proj))'
+# shared-outer expert factors, synced/exported expanded per expert: vLLM keeps its default format
+trainer.policy.model.lora.experts_shared_outer_loras: true   # (default false)
+trainer.policy.model.lora.sync_mode: memory   # (default disk) adapter over the NCCL/IPC transport
+trainer.policy.model.lora.checkpoint_export: final   # (default every_save) 41.5 GB PEFT export only in the last checkpoint; resume reads the rank shards
+
+# --- algorithm ---
+trainer.algorithm.advantage_estimator: grpo
+trainer.algorithm.grpo_norm_by_std: true
+trainer.algorithm.loss_reduction: sequence_mean   # (default token_mean)
+trainer.algorithm.eps_clip_low: 0.2
+trainer.algorithm.eps_clip_high: 0.28             # (default 0.2)
+trainer.algorithm.use_kl_loss: false              # (default true)
+trainer.algorithm.use_kl_in_reward: false
+trainer.algorithm.use_entropy_loss: false
+trainer.algorithm.off_policy_correction.tis_ratio_type: token   # (default null) token TIS from step 0
+trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high: 2.0
+
+# --- optimizer ---
+trainer.policy.optimizer_config.lr: 1.0e-5
+trainer.policy.optimizer_config.adam_betas: [0.9, 0.98]   # (default [0.9, 0.999])
+trainer.policy.optimizer_config.weight_decay: 0.1         # (default 0.01)
+trainer.policy.optimizer_config.max_grad_norm: 1.0
+trainer.policy.optimizer_config.scheduler: constant_with_warmup
+trainer.policy.optimizer_config.num_warmup_steps: 0
+
+# --- batch: P=32 prompts x G=8, one update per rollout ---
+trainer.train_batch_size: 32                 # (default 1024)
+trainer.policy_mini_batch_size: 32           # (default 256)
+trainer.update_epochs_per_batch: 1
+trainer.recompute_old_logprobs_per_minibatch: true
+# One optimizer update per batch (mini = train batch, 1 epoch): the update forward runs on the old
+# policy's parameters, so the old logprobs are taken from it (detached) instead of a separate
+# full-model forward. PPO ratio == 1, gradient and TIS weights equal an exact recompute.
+trainer.old_logprobs_from_update_forward: true   # (default false)
+# 256 samples / 32 GPUs = 8 per GPU -> 4 micro-batches of 2 (padded to the batch max length).
+# mb 4 projects to ~168 GiB trainer peak + ~12 GiB sleeping-vLLM residue of 184 GiB; mb 2 ~109 + 12.
+trainer.micro_train_batch_size_per_gpu: 2        # (default 1)
+trainer.micro_forward_batch_size_per_gpu: 4      # (default 1) eval / forward-only paths
+generator.n_samples_per_prompt: 8            # (default 5)
+
+# --- lengths / sampling ---
+trainer.max_prompt_length: 2048              # (default 512)
+generator.sampling_params.max_generate_length: 4096   # (default 1024)
+generator.sampling_params.temperature: 1.0
+generator.sampling_params.top_p: 1.0
+generator.sampling_params.logprobs: 1        # rollout logprobs for TIS and the train/rollout gap metrics
+
+# --- eval: AIME-2024 (30 problems after dedupe), mean@8 ---
+generator.eval_n_samples_per_prompt: 8       # (default 1)
+generator.eval_sampling_params:              # (default temperature 0.0)
+  temperature: 1.0
+  top_p: 1.0
+  max_generate_length: 4096
+trainer.eval_before_train: true
+trainer.eval_interval: 10                    # (default 5)
+
+# --- schedule / checkpoints ---
+trainer.max_training_steps: 200
+trainer.ckpt_interval: 5                     # (default 10)
+trainer.max_ckpts_to_keep: 2                 # (default -1)
+trainer.seed: 42
+
+# --- placement: 8 nodes x 4 GPUs; trainer FSDP over 32 ranks, colocated rollout ---
+trainer.placement.colocate_all: true
+trainer.placement.policy_num_nodes: 8
+trainer.placement.policy_num_gpus_per_node: 4
+
+# --- rollout: vLLM from the image, 4 engines x TP8, FP8 latent KV, CUDA graphs, no spec decode ---
+generator.inference_engine.backend: vllm
+generator.inference_engine.run_engines_locally: true
+generator.inference_engine.num_engines: 4
+generator.inference_engine.tensor_parallel_size: 8
+generator.inference_engine.enforce_eager: false
+generator.inference_engine.weight_sync_backend: nccl
+# R3: vLLM records each MoE layer's top-k (needs prefix caching); the trainer replays the ids
+generator.inference_engine.enable_return_routed_experts: true
+trainer.policy.fsdp_config.router_replay: true
+generator.inference_engine.engine_init_kwargs:
+  enable_prefix_caching: true
+  moe_backend: flashinfer_trtllm         # NVFP4 experts with LoRA (TrtLlmNvFp4LoRAExperts)
+  quantization_config: {moe: {activation: *moe_act}}
+  tokenizer_mode: mistral                # Mistral-format checkpoint (params.json, consolidated, tekken)
+  config_format: mistral
+  load_format: mistral
+  kv_cache_dtype: fp8_ds_mla             # FP8 latent KV, explicit (not auto); trainer fp8_kv_cache: true simulates it
+  max_model_len: 6144                    # max_prompt_length 2048 + max_generate_length 4096 (the 1M default does not fit the KV cache)
+  limit_mm_per_prompt: {image: 0}        # Pixtral outer arch, text-only RL
+  lora_target_modules: [q_proj, kv_a_proj_with_mqa, o_proj, gate_up_proj, down_proj, experts]
+
+trainer.logger: console
+trainer.project_name: ml4_dapo
+trainer.run_name: ml4_dapo_lora_fsdp

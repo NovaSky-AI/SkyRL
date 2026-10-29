@@ -125,6 +125,8 @@ class RayPPOTrainer:
         self.generator = generator
         self.train_dataloader = None
         self.total_training_steps = None
+        # Last checkpoint written without its PEFT adapter (lora.checkpoint_export=final).
+        self._ckpt_dir_without_lora_export: Optional[str] = None
         self._build_train_dataloader_and_compute_training_steps()
 
         self.eval_dataloader = (
@@ -606,11 +608,7 @@ class RayPPOTrainer:
 
         # Safety net: always save final checkpoint at end of training.
         # Skip if we already saved at the last step
-        if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
-            async with self._step_deadline(), Timer("save_checkpoints", self.all_timings):
-                ckpt_path = self.save_checkpoints()
-                logger.info("Saved final checkpoint.")
-            self._fire("on_save", ckpt_path=ckpt_path)
+        await self._save_final_checkpoint(will_save_ckpts)
         if self.cfg.trainer.hf_save_interval > 0 and not hf_model_save:
             async with self._step_deadline(), Timer("save_hf_model", self.all_timings):
                 self.save_models()
@@ -1356,6 +1354,9 @@ class RayPPOTrainer:
         is anchor-aware here rather than a static membership in LOSSES_WITHOUT_OLD_LOGPROBS, which is
         keyed by policy_loss_type and cannot distinguish the two CISPO anchors.
         """
+        if self.cfg.trainer.old_logprobs_from_update_forward:
+            # One update per batch: the worker takes old logprobs from the update forward.
+            return True
         algorithm = self.cfg.trainer.algorithm
         if algorithm.policy_loss_type == PolicyLossType.CISPO:
             # CISPO reads old logprobs only with the default "old" anchor; "rollout" optimizes against
@@ -1722,10 +1723,11 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self) -> str:
+    def save_checkpoints(self, final: bool = False) -> str:
         """
         Save the model, optimizer, and training states to disk. Returns the
-        checkpoint folder path.
+        checkpoint folder path. ``final``: the end-of-training save (exports the
+        PEFT adapter under ``lora.checkpoint_export=final``).
 
         Dispatch handles offload/backload automatically for all colocation configurations.
         """
@@ -1737,7 +1739,11 @@ class RayPPOTrainer:
         io.makedirs(global_step_folder, exist_ok=True)
 
         # Save policy checkpoint (dispatch handles offload/backload)
-        self.dispatch.save_checkpoint("policy", policy_save_dir, self.tokenizer)
+        export_lora_adapter = self._export_lora_adapter_this_save(final)
+        self.dispatch.save_checkpoint(
+            "policy", policy_save_dir, self.tokenizer, export_lora_adapter=export_lora_adapter
+        )
+        self._ckpt_dir_without_lora_export = policy_save_dir if export_lora_adapter is False else None
 
         # Save critic checkpoint (if it exists)
         if self.has_critic:
@@ -1775,6 +1781,36 @@ class RayPPOTrainer:
             self._cleanup_old_checkpoints()
 
         return global_step_folder
+
+    async def _save_final_checkpoint(self, will_save_ckpts: bool) -> None:
+        """End of training: save unless the last step already did, and make sure the run's last
+        checkpoint carries the PEFT adapter under ``lora.checkpoint_export=final``."""
+        if self.cfg.trainer.ckpt_interval > 0 and not will_save_ckpts:
+            async with self._step_deadline(), Timer("save_checkpoints", self.all_timings):
+                ckpt_path = self.save_checkpoints(final=True)
+                logger.info("Saved final checkpoint.")
+            self._fire("on_save", ckpt_path=ckpt_path)
+        elif self._ckpt_dir_without_lora_export is not None:
+            # The run's last save came before total_training_steps (e.g. dynamic sampling ran out of
+            # batches): export the adapter into that checkpoint.
+            async with self._step_deadline(), Timer("save_checkpoints", self.all_timings):
+                self.dispatch.export_lora_adapter("policy", self._ckpt_dir_without_lora_export)
+                logger.info(f"Exported the final LoRA adapter into {self._ckpt_dir_without_lora_export}")
+            self._ckpt_dir_without_lora_export = None
+
+    def _export_lora_adapter_this_save(self, final: bool = False) -> Optional[bool]:
+        """Whether this checkpoint writes the PEFT-format adapter (``lora.checkpoint_export``).
+
+        ``None`` (LoRA off, or ``every_save``) leaves the strategy's default: export every save.
+        ``final`` exports at the end-of-training save and at a save of the last training step.
+        A run whose last save precedes ``total_training_steps`` (dynamic sampling, early stop) gets
+        the export added to that checkpoint after the loop (``_ckpt_dir_without_lora_export``);
+        for a crashed run, ``lora_shards_export`` converts the rank shards.
+        """
+        lora_cfg = self.cfg.trainer.policy.model.lora
+        if lora_cfg.rank <= 0 or lora_cfg.checkpoint_export == "every_save":
+            return None
+        return final or self.total_training_steps is None or self.global_step >= self.total_training_steps
 
     def _cleanup_old_checkpoints(self):
         if not self._node_ids:

@@ -176,6 +176,23 @@ def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
 
 
+@pytest.mark.parametrize(
+    "driver_value,expected",
+    [(None, "0"), ("1", "1"), ("0", "0")],
+    ids=["unset-defaults-off", "explicit-on-kept", "explicit-off-kept"],
+)
+def test_runtime_env_nccl_cumem(monkeypatch, driver_value, expected):
+    if driver_value is None:
+        monkeypatch.delenv("NCCL_CUMEM_ENABLE", raising=False)
+    else:
+        monkeypatch.setenv("NCCL_CUMEM_ENABLE", driver_value)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+
+    assert prepare_runtime_environment(cfg)["NCCL_CUMEM_ENABLE"] == expected
+
+
 def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("NVTE_FP8_BLOCK_AMAX_EPSILON", raising=False)
@@ -1482,11 +1499,13 @@ def test_lora_sync_mode_rejects_unknown_value():
         validate_inference_engine_cfg(cfg)
 
 
-def test_lora_memory_sync_mode_requires_megatron():
+def test_lora_memory_sync_mode_accepts_fsdp():
     cfg = _memory_lora_megatron_cfg()
     cfg.trainer.strategy = "fsdp"
-    with pytest.raises(ValueError, match="only implemented for trainer.strategy='megatron'"):
-        validate_inference_engine_cfg(cfg)
+    validate_inference_engine_cfg(cfg)
+    # merge_lora is a Megatron knob; FSDP LoRA always syncs adapters only.
+    cfg.trainer.policy.megatron_config.lora_config.merge_lora = True
+    validate_inference_engine_cfg(cfg)
 
 
 def test_lora_memory_sync_mode_requires_adapter_only_lora():

@@ -11,7 +11,7 @@ index) that vLLM has no concept of; they live in
 ``sharded_rdt/sharded_rdt_base.GroupedWeightSource``.
 
 ``LoraAdapterWeightSource`` streams a PEFT adapter instead of the model, for
-adapter-only sync (Megatron ``merge_lora=false``) with
+adapter-only sync (FSDP LoRA, Megatron ``merge_lora=false``) with
 ``lora.sync_mode=memory``. It is the one source that must be prepared before the
 send: see its docstring.
 
@@ -31,6 +31,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 
 __all__ = [
+    "FsdpLoraAdapterSource",
     "FsdpWeightSource",
     "LoraAdapterWeightSource",
     "MegatronLoraAdapterSource",
@@ -410,3 +411,110 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
             )
         )
         return adapter_state, adapter_config
+
+
+class FsdpLoraAdapterSource(LoraAdapterWeightSource):
+    """LoRA adapter source for the FSDP backend.
+
+    Streams the adapter the disk path writes (the PEFT state dict) and applies
+    the lora_B folds of :class:`MegatronLoraAdapterSource`, publishing the config
+    with ``lora_alpha == r``. PEFT keys need no rename: they are the names vLLM's
+    LoRA loader resolves.
+
+    Like :class:`FsdpWeightSource`, and unlike the base class, nothing is
+    retained between the channels: ``prepare`` reads only shapes (a ``DTensor``'s
+    shape is global), and iteration all-gathers the shards bucket by bucket on
+    the device (one collective per ~256 MiB, ``dtensor_gather``; tens of thousands
+    of per-tensor ``full_tensor()`` calls dominated the sync), then folds, casts
+    and yields one tensor at a time and drops it once the transport has taken it.
+    Peak memory is the transport's bucket plus one gather bucket and one full
+    tensor, with no host copy. FSDP adapters are per module, so there is nothing
+    to dedupe.
+
+    Args:
+        dtype: wire dtype (vLLM's LoRA dtype).
+        adapter_state: returns ``{peft_key: this rank's shard}`` (no copy).
+            Iteration all-gathers, so every rank must iterate in the same order.
+        adapter_config: the PEFT ``adapter_config`` the disk path writes.
+    """
+
+    def __init__(
+        self,
+        *,
+        dtype: torch.dtype,
+        adapter_state: Callable[[], Dict[str, torch.Tensor]],
+        adapter_config: Dict[str, Any],
+    ) -> None:
+        super().__init__(dtype=dtype, experts_per_shared_adapter=1)
+        if adapter_config.get("use_rslora"):
+            raise ValueError("lora.sync_mode='memory' folds lora_alpha / r into lora_B; rsLoRA is not supported")
+        self._adapter_state = adapter_state
+        self._adapter_config = dict(adapter_config)
+        self._shards: Optional[Dict[str, torch.Tensor]] = None
+
+    def prepare(self) -> None:
+        """Shapes and config only; the folds run on meta tensors to validate the ranks."""
+        if self._prepared is not None:
+            return
+        self._shards = self._adapter_state()
+        shapes = {k: torch.empty(t.shape, dtype=t.dtype, device="meta") for k, t in self._shards.items()}
+        to_send, adapter_config = self.finalize_adapter(shapes)
+        self._prepared = (to_send, {}, adapter_config)
+
+    def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        from skyrl.backends.skyrl_train.distributed.dtensor_gather import (
+            iter_full_tensors,
+        )
+        from skyrl.backends.skyrl_train.weight_sync import lora_manifest
+
+        to_send, _, adapter_config = self._prepared_state()
+        shards = self._shards
+        # See FsdpWeightSource.__iter__ on the device.
+        device = torch.cuda.current_device() if torch.cuda.is_available() else None
+        manifest = (
+            {}
+            if lora_manifest.enabled() and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
+            else None
+        )
+
+        def device_shards() -> Iterator[Tuple[str, torch.Tensor]]:
+            for name in to_send:
+                shard = shards[name]
+                yield name, (shard.to(device, non_blocking=True) if device is not None else shard)
+
+        try:
+            # One all-gather per bucket of FSDP2 shards instead of one full_tensor() per tensor.
+            for name, full in iter_full_tensors(device_shards()):
+                full = full.detach()
+                # Same folds (fp32, cast back), then the wire dtype, as the base class sends.
+                out = self.finalize_adapter({name: full})[0][name].to(dtype=self._dtype).contiguous()
+                del full
+                if manifest is not None:
+                    manifest[name] = lora_manifest.tensor_entry(out)
+                yield name, out
+                del out
+            if manifest is not None:
+                lora_manifest.write("sender", self._lora_name or "unnamed", manifest, adapter_config)
+        finally:
+            self._prepared = None
+            self._shards = None
+
+    def finalize_adapter(
+        self, adapter_state: Dict[str, torch.Tensor]
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
+        from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
+            fold_lora_alpha_for_vllm,
+            fold_lora_rank_scale_for_vllm,
+            mark_alpha_folded,
+        )
+
+        # Same folds, same order, as MegatronLoraAdapterSource.finalize_adapter:
+        # PEFT scales each module by lora_alpha / its own rank (rank_pattern), vLLM by
+        # one lora_alpha / r, and vLLM's in-place scale would compound on LRU reloads
+        # of the staged tensors. Afterwards lora_B carries the full scale.
+        config_rank = int(self._adapter_config["r"])
+        adapter_state, _ = fold_lora_rank_scale_for_vllm(adapter_state, config_rank=config_rank)
+        adapter_state = fold_lora_alpha_for_vllm(
+            adapter_state, config_rank=config_rank, alpha=self._adapter_config["lora_alpha"]
+        )
+        return adapter_state, mark_alpha_folded(self._adapter_config)

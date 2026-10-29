@@ -577,16 +577,34 @@ class WorkerDispatch:
             "save_memory_snapshot",
         )
 
-    def save_checkpoint(self, model: str, ckpt_dir: str, tokenizer=None, model_id: Optional[str] = None) -> None:
-        """Save checkpoint for model."""
+    def save_checkpoint(
+        self,
+        model: str,
+        ckpt_dir: str,
+        tokenizer=None,
+        model_id: Optional[str] = None,
+        export_lora_adapter: Optional[bool] = None,
+    ) -> None:
+        """Save checkpoint for model. ``export_lora_adapter=False`` skips the FSDP PEFT-format
+        adapter export (``lora.checkpoint_export``); ``None`` keeps the strategy's default."""
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
+        kwargs = {} if export_lora_adapter is None else {"export_lora_adapter": export_lora_adapter}
         deadline.ray_get(
             self._actor_groups[model].async_run_ray_method(
-                "pass_through", "save_checkpoint", ckpt_dir=ckpt_dir, tokenizer=tokenizer
+                "pass_through", "save_checkpoint", ckpt_dir=ckpt_dir, tokenizer=tokenizer, **kwargs
             ),
             "save_checkpoint",
+        )
+
+    def export_lora_adapter(self, model: str, ckpt_dir: str) -> None:
+        """Write the PEFT-format adapter (``<ckpt_dir>/lora_adapter``) of the live model into an existing
+        checkpoint dir (FSDP LoRA)."""
+        self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "export_lora_adapter", ckpt_dir=ckpt_dir),
+            "export_lora_adapter",
         )
 
     def finalize_pending_saves(self, model: str) -> None:
@@ -771,6 +789,18 @@ class WorkerDispatch:
             offload_model=True,
         )
 
+    def _is_fsdp_lora_memory_sync(self) -> bool:
+        """FSDP LoRA with ``lora.sync_mode=memory``: the sync reads only the adapters, which the FSDP
+        offload keeps on the GPU (``FSDPStrategy.offload_frozen_only``). The frozen base then stays
+        offloaded while the engines wake their weights; with it resident the full ML4 model (77 GiB
+        trainer + 97 GiB engine + the adapter on both sides) does not fit a 184 GiB GPU."""
+        policy_cfg = self.cfg.trainer.policy
+        return (
+            self.cfg.trainer.strategy == "fsdp"
+            and policy_cfg.model.lora.rank > 0
+            and policy_cfg.model.lora.sync_mode == "memory"
+        )
+
     def _is_lora_no_merge(self) -> bool:
         """True for the megatron LoRA path that ships standalone adapters to vLLM."""
         policy_cfg = self.cfg.trainer.policy
@@ -796,7 +826,7 @@ class WorkerDispatch:
                 "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
             )
 
-        adapter_only_sync = self.colocate_all and self._is_lora_no_merge()
+        adapter_only_sync = self.colocate_all and (self._is_lora_no_merge() or self._is_fsdp_lora_memory_sync())
 
         def _broadcast_and_finish() -> None:
             """The weight transfer proper, timed on its own.

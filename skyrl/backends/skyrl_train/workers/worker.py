@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -40,6 +41,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
+from skyrl.backends.skyrl_train.utils import remote_code_identity
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
@@ -218,15 +220,19 @@ class DistributedTorchRayActor:
         LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
         LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
         LIBNUMA.numa_run_on_node_mask.restype = c_int
-        LIBNUMA.numa_set_membind.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_set_membind.restype = c_void_p
+        LIBNUMA.numa_set_preferred.argtypes = [c_int]
+        LIBNUMA.numa_set_preferred.restype = c_void_p
         LIBNUMA.numa_num_configured_nodes.argtypes = []
         LIBNUMA.numa_num_configured_nodes.restype = c_int
 
         def numa_bind(nid: int):
+            # CPUs pinned to the GPU's node; memory only *preferred* there. A strict membind
+            # OOM-kills on one node while the other is free: colocated with a sleeping vLLM
+            # (pinned host backup, placed by first touch) the trainer's host offload can fill
+            # its node (GB200: 2 x ~478 GiB nodes).
             bitmask = LIBNUMA.numa_parse_nodestring(bytes(str(nid), "ascii"))
             LIBNUMA.numa_run_on_node_mask(bitmask)
-            LIBNUMA.numa_set_membind(bitmask)
+            LIBNUMA.numa_set_preferred(nid)
 
         # Only bind to NUMA nodes that actually have CPUs. On Grace-Blackwell (GB200),
         # GPU HBM is exposed as additional CPU-less NUMA nodes (e.g. 34 nodes total, only
@@ -677,7 +683,7 @@ class Worker(DistributedTorchRayActor):
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         raise NotImplementedError()
 
-    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None, **kwargs):
         self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
@@ -685,7 +691,32 @@ class Worker(DistributedTorchRayActor):
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
+            **kwargs,
         )
+        if kwargs.get("export_lora_adapter") is False and torch.distributed.get_rank() == 0:
+            # What lora_shards_export needs to rebuild the PEFT adapter from the rank shards.
+            from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+                lora_adapter_config,
+            )
+            from skyrl.backends.skyrl_train.distributed.lora_shards_export import (
+                ADAPTER_CONFIG_FILE,
+                ALIASES_FILE,
+                lora_param_aliases,
+            )
+
+            peft_model = getattr(self.model, "model", self.model)
+            with open(os.path.join(ckpt_dir, ADAPTER_CONFIG_FILE), "w", encoding="utf-8") as f:
+                json.dump(lora_adapter_config(peft_model), f, ensure_ascii=False, indent=4)
+            with open(os.path.join(ckpt_dir, ALIASES_FILE), "w", encoding="utf-8") as f:
+                json.dump(lora_param_aliases(peft_model), f, indent=1)
+
+    def export_lora_adapter(self, ckpt_dir: str) -> None:
+        """PEFT-format adapter into ``<ckpt_dir>/lora_adapter`` (FSDP LoRA). Collective."""
+        from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
+
+        if not isinstance(self.strategy, FSDPStrategy):
+            raise NotImplementedError("export_lora_adapter is implemented for the FSDP strategy only")
+        self.strategy._save_lora_adapters(getattr(self.model, "model", self.model), ckpt_dir)
 
     def finalize_pending_saves(self):
         """Block until any in-flight async checkpoint write completes (no-op otherwise)."""
@@ -977,6 +1008,20 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
+    @property
+    def router_replay(self) -> bool:
+        """R3 on FSDP (Megatron has its own path): replay rollout expert ids in the policy forward."""
+        return self.cfg.strategy in ("fsdp", "fsdp2") and self.cfg.policy.fsdp_config.router_replay
+
+    def _router_replay_kwargs(self, rollout_expert_indices, router_padding_mask) -> dict:
+        if not self.router_replay:
+            return {}
+        return {
+            "rollout_expert_indices": rollout_expert_indices,
+            "router_padding_mask": router_padding_mask,
+            "enable_router_replay": True,
+        }
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
@@ -1061,6 +1106,10 @@ class PolicyWorkerBase(Worker):
             result["num_microbatches"] = float(len(microbatch_iterator))
             result["num_padding_microbatches"] = float(getattr(microbatch_iterator, "num_padding_microbatches", 0))
 
+        proof = remote_code_identity.check_proof()  # first training step only; raises on failure
+        if proof is not None:
+            logger.info(f"[remote code] runtime proof: {proof}")
+
         dp_group = self.device_mesh.get_group("dp")
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
@@ -1141,9 +1190,13 @@ class PolicyWorkerBase(Worker):
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
                 sample_support=experience.rollout_sample_support if sample_support_replay else None,
-                loss_mask=loss_mask if sample_support_replay else None,
+                loss_mask=loss_mask if sample_support_replay or self.router_replay else None,
                 enable_sample_support_replay=sample_support_replay,
+                **self._router_replay_kwargs(experience.rollout_expert_indices, experience.router_padding_mask),
             )
+            if self.cfg.old_logprobs_from_update_forward:
+                # One update per batch: this forward runs on the old policy's parameters.
+                old_action_log_probs = action_log_probs.detach()
             # loss function
             # TODO: recompute advantages
             policy_loss, loss_metrics = current_loss_fn(
@@ -1280,6 +1333,8 @@ class PolicyWorkerBase(Worker):
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
+            if self.router_replay:
+                status.update(self.model.last_router_replay_metrics)
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
             status.update(
@@ -1420,8 +1475,9 @@ class PolicyWorkerBase(Worker):
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
                 sample_support=experience.rollout_sample_support if sample_support_replay else None,
-                loss_mask=loss_mask if sample_support_replay else None,
+                loss_mask=loss_mask if sample_support_replay or self.router_replay else None,
                 enable_sample_support_replay=sample_support_replay,
+                **self._router_replay_kwargs(experience.rollout_expert_indices, experience.router_padding_mask),
             )
             policy_loss, _ = current_loss_fn(
                 action_log_probs,
@@ -1496,8 +1552,11 @@ class PolicyWorkerBase(Worker):
                 image_grid_thw=image_grid_thw,
                 # Replay the rollout support when recomputing the policy ratio.
                 sample_support=micro_batch.get(SAMPLE_SUPPORT_FIELD) if sample_support_replay else None,
-                loss_mask=micro_batch.get("loss_mask") if sample_support_replay else None,
+                loss_mask=micro_batch.get("loss_mask") if sample_support_replay or self.router_replay else None,
                 enable_sample_support_replay=sample_support_replay,
+                **self._router_replay_kwargs(
+                    micro_batch.get("rollout_expert_indices"), micro_batch.get("router_padding_mask")
+                ),
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1527,6 +1586,77 @@ class PolicyWorkerBase(Worker):
         if safe_model_id:
             return safe_model_id, os.path.join(base_sync_path, safe_model_id)
         return SKYRL_LORA_ADAPTER_NAME, base_sync_path
+
+    async def _publish_lora_adapter_in_memory(
+        self,
+        lora_name: str,
+        inference_engine_client,
+    ) -> None:
+        """Adapter-only sync over the base-model transport; no files.
+
+        Four steps, and the order is the point:
+
+        1. ``prepare()`` on every rank -- the adapter export is a collective
+           (Megatron-Bridge export, or FSDP2 all-gathers), and only after it has
+           run are the alias map and the adapter config known.
+        2. rank 0 arms every inference worker with that target. It has to land
+           before ``send_weights()``, whose round trip carries only names,
+           dtypes and shapes.
+        3. every rank runs the send. The receivers stage the tensors instead of
+           loading them into the base model.
+        4. rank 0 asks the servers to register the adapter from the staged
+           tensors under ``lora_name``.
+        """
+        import time
+
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
+
+        if not isinstance(inference_engine_client, RemoteInferenceClient):
+            raise TypeError("lora.sync_mode='memory' requires the RemoteInferenceClient (new inference path)")
+        source = getattr(self, "_lora_weight_source", None)
+        engine = getattr(self, "_weight_sync_engine", None)
+        if source is None or engine is None:
+            raise RuntimeError("init_weight_sync_state must run before publishing a LoRA adapter")
+
+        rank = torch.distributed.get_rank()
+        started = time.perf_counter()
+        source.set_lora_name(lora_name)
+        await self._weight_sync_thread(source.prepare)
+        exported = time.perf_counter()
+
+        unique = aliased = 0
+        if rank == 0:
+            receive_target = source.receive_target
+            # Read while the export is still prepared: the send consumes the
+            # stream and drops it, and re-reading afterwards would be a
+            # collective this rank would run alone.
+            unique = len(source.metadata())
+            aliased = len(receive_target["aliases"])
+            await inference_engine_client.set_lora_receive_target(receive_target)
+        # No rank may enter the transfer before every worker is armed: rank 0
+        # opens the round trip, the others only join its collectives.
+        torch.distributed.barrier()
+
+        with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
+            await self._weight_sync_thread(engine.send_weights)
+        sent = time.perf_counter()
+
+        if rank == 0:
+            await inference_engine_client.load_lora_adapter(lora_name, in_memory=True)
+            logger.info(
+                "LoRA sync (memory): adapter {!r} {} unique tensors (+{} aliased, {:.1f}x dedupe), "
+                "exported in {:.2f}s, sent in {:.2f}s, registered on vLLM in {:.2f}s",
+                lora_name,
+                unique,
+                aliased,
+                (unique + aliased) / max(unique, 1),
+                exported - started,
+                sent - exported,
+                time.perf_counter() - sent,
+            )
+        torch.distributed.barrier()
 
     def swap_to_adapter(self, model_id: str) -> None:
         """Make ``model_id`` the live LoRA adapter on this worker."""

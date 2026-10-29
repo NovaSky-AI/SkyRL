@@ -58,6 +58,7 @@ Remove this module once vLLM ships a tensor-backed LoRA request.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping
 
@@ -189,6 +190,16 @@ def _load_in_memory_adapter(manager, lora_request, staged: StagedLoRAAdapter):
         lora_request.lora_name,
     )
 
+    from skyrl.backends.skyrl_train.weight_sync import lora_manifest
+
+    if lora_manifest.enabled():
+        try:
+            from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+        except ImportError:
+            from contextlib import nullcontext as gpu_sync_allowed
+        with gpu_sync_allowed():
+            lora_manifest.record("receiver", lora_request.lora_name, staged.tensors.items(), staged.peft_config)
+
     tensors = staged.tensors
     moe_ep_spec = getattr(adapter_manager, "moe_ep_load_spec", None)
     if moe_ep_spec is not None:
@@ -258,6 +269,9 @@ def offload_in_memory_adapter(manager, lora_request) -> None:
     lora_model = manager._adapter_manager.get_adapter(lora_request.lora_int_id)
     if lora_model is None:
         return
+    if os.environ.get("SKYRL_LORA_IN_MEMORY_HOST_COPY", "1") == "0":
+        _discard_activated_adapter(lora_model, lora_request)
+        return
     moved: Dict[tuple, torch.Tensor] = {}
     for weights in lora_model.loras.values():
         for attr in ("lora_a", "lora_b"):
@@ -275,6 +289,22 @@ def offload_in_memory_adapter(manager, lora_request) -> None:
         # Waits for the non_blocking copies before returning the GPU blocks to the driver.
         torch.cuda.current_stream().synchronize()
         moved.clear()
+        torch.cuda.empty_cache()
+
+
+def _discard_activated_adapter(lora_model, lora_request) -> None:
+    """``SKYRL_LORA_IN_MEMORY_HOST_COPY=0``: drop the activated adapter's tensors instead of keeping
+    a pinned host copy. Generation reads only vLLM's LoRA slots, so with one adapter that every sync
+    replaces (no LRU eviction) the host copy is never read. It costs about 2-3x the adapter per
+    worker (staged tensors, ``pack_moe``'s stacked experts, pinned-allocator rounding): ~58 GiB per
+    GPU for full ML4 r32. A later re-activation or rebuild then fails loudly (no tensors, nothing
+    staged) instead of reading stale weights."""
+    for weights in lora_model.loras.values():
+        weights.lora_a = None
+        weights.lora_b = None
+    _STAGED.pop(lora_request.lora_name, None)
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        torch.cuda.current_stream().synchronize()
         torch.cuda.empty_cache()
 
 

@@ -19,24 +19,32 @@ from torch import distributed as dist
 from torch import optim
 from transformers.trainer import get_scheduler
 
+from skyrl.backends.skyrl_train.distributed.fsdp_local_optim import (
+    LocalShardAdamW,
+    local_shard_clip_grad_norm_,
+)
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
     PrecisionType,
     apply_fsdp2,
     create_device_mesh,
-    fsdp2_clip_grad_norm_,
     fsdp2_get_full_state_dict,
     fsdp2_load_full_state_dict,
+    fsdp2_load_sharded,
     load_fsdp2_model_to_gpu,
     load_fsdp_optimizer,
     offload_fsdp2_model_to_cpu,
     offload_fsdp_optimizer,
+    resolve_sharded_load_fn,
 )
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
+from skyrl.backends.skyrl_train.workers.model_wrapper import (
+    HFModelWrapper,
+    check_shared_outer_ties,
+)
 from skyrl.train.config import FSDPConfig, ModelConfig, OptimizerConfig
 from skyrl.utils.tok import check_is_vlm, get_processor
 
@@ -85,6 +93,9 @@ class FSDPStrategy(DistributedStrategy):
 
         # When cpu_offload is off, manually offload weights/optimizer to cpu.
         self.manual_offload = not self.fsdp_config.cpu_offload
+        # Set by LoRA workers whose adapter sync reads only the adapters: the model offload then
+        # leaves the trainable params on the GPU (see WorkerDispatch._is_fsdp_lora_memory_sync).
+        self.offload_frozen_only = False
         if self.optimizer_config is not None:
             self.manual_offload_optimizer = self.optimizer_config.offload_after_step and self.manual_offload
         else:
@@ -124,7 +135,7 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.manual_offload:
             if offload_model:
-                offload_fsdp2_model_to_cpu(model, empty_cache=True)
+                offload_fsdp2_model_to_cpu(model, empty_cache=True, frozen_only=self.offload_frozen_only)
 
             if optimizer is not None and self.manual_offload_optimizer and offload_optimizer:
                 offload_fsdp_optimizer(optimizer)
@@ -165,7 +176,8 @@ class FSDPStrategy(DistributedStrategy):
         if self.max_norm > 0:
             # NOTE (sumanthrh): All `grad_norm`s returned here are the original grad norms before clipping.
             if FSDPModule is not None and isinstance(model, FSDPModule):
-                grad_norm = fsdp2_clip_grad_norm_(model.parameters(), max_norm=self.max_norm)
+                # Local shards + all_reduce: DTensor foreach is O(N^2) in the tensor count.
+                grad_norm = local_shard_clip_grad_norm_(model.parameters(), max_norm=self.max_norm)
             else:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.max_norm)
 
@@ -221,6 +233,14 @@ class FSDPStrategy(DistributedStrategy):
             "reshard_after_forward": self.fsdp_config.reshard_after_forward,
         }
         module = model.model if is_wrapped else model
+        sharded_load_fn = self.model_config.sharded_load_fn if self.model_config is not None else None
+        if sharded_load_fn:
+            # Every rank holds the model on meta (no rank-0 full copy); each loads its own shards.
+            load_fn = resolve_sharded_load_fn(sharded_load_fn, self.model_config.path)
+            device = torch.device("cpu") if cpu_offload else torch.device("cuda", torch.cuda.current_device())
+            module = fsdp2_load_sharded(module, fsdp_kwargs, self.fsdp_config, load_fn, self.model_config.path, device)
+            return self._check_ties(model, module, "after FSDP sharded load")
+
         full_state = module.state_dict()
 
         # Move the entire module to meta before apply_fsdp2 so the sharded
@@ -251,6 +271,13 @@ class FSDPStrategy(DistributedStrategy):
 
         apply_fsdp2(module, fsdp_kwargs, self.fsdp_config)
         fsdp2_load_full_state_dict(module, full_state, cpu_offload)
+        return self._check_ties(model, module, "after FSDP full-state init (use sharded_load_fn)")
+
+    @staticmethod
+    def _check_ties(model, module, where):
+        n = getattr(model, "shared_outer_factors", 0)
+        if n:
+            check_shared_outer_ties(module, n, where)
         return module
 
     def _fsdp_init_train_model(self, model, optimizer, scheduler):
@@ -260,7 +287,8 @@ class FSDPStrategy(DistributedStrategy):
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            new_optimizer = optim.AdamW(
+            # AdamW math on the DTensors' local shards (see fsdp_local_optim).
+            new_optimizer = LocalShardAdamW(
                 fsdp_module.parameters(),
                 lr=optim_config.lr,
                 betas=optim_config.adam_betas,
@@ -328,12 +356,11 @@ class FSDPStrategy(DistributedStrategy):
 
     def _save_lora_adapters(self, model, ckpt_dir):
         """Save LoRA adapters in HuggingFace PEFT format"""
-        from dataclasses import asdict
-
         from safetensors.torch import save_file
 
         from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
             layered_summon_lora_params,
+            lora_adapter_config,
         )
 
         lora_save_path = os.path.join(ckpt_dir, "lora_adapter")
@@ -341,15 +368,20 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.is_rank_0():
             io.makedirs(lora_save_path, exist_ok=True)
-            peft_config = asdict(model.peft_config.get("default", {}))
-            if peft_config:
-                peft_config["task_type"] = peft_config["task_type"].value
-                peft_config["peft_type"] = peft_config["peft_type"].value
-                peft_config["target_modules"] = list(peft_config["target_modules"])
+            if "default" in model.peft_config:
+                peft_config = lora_adapter_config(model)
 
-        lora_params = layered_summon_lora_params(model)
+        lora_params = layered_summon_lora_params(model, rank0_only=True)
 
         if self.is_rank_0():
+            # Per name: a shared-outer expert factor is exported once per expert (expanded).
+            n_trainable = sum(
+                1 for n, p in model.named_parameters(remove_duplicate=False) if p.requires_grad and "lora_" in n
+            )
+            if len(lora_params) != n_trainable:
+                raise RuntimeError(
+                    f"PEFT adapter export gathered {len(lora_params)} tensors, the model has {n_trainable} LoRA parameters"
+                )
             save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
             with io.open_file(os.path.join(lora_save_path, "adapter_config.json"), "w") as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
@@ -357,6 +389,28 @@ class FSDPStrategy(DistributedStrategy):
             self.print(f"[rank-0]: Saved LoRA adapter to: {lora_save_path}")
 
         dist.barrier()
+
+    def _model_state_dict_to_save(self, model) -> dict:
+        """Full state dict, or with LoRA only the trainable (adapter) parameters.
+
+        As on Megatron, a LoRA checkpoint leaves the frozen base out: resume rebuilds
+        it from the original model path when the model is constructed.
+        """
+        if not self.is_lora:
+            return model.state_dict()
+        return {name: param.detach() for name, param in model.named_parameters() if param.requires_grad}
+
+    def _load_trainable_state_dict(self, model, state_dict: dict) -> None:
+        """Load a LoRA checkpoint: every trainable parameter, nothing else."""
+        trainable = {name for name, param in model.named_parameters() if param.requires_grad}
+        unexpected = set(state_dict) - trainable
+        missing = trainable - set(state_dict)
+        if unexpected or missing:
+            raise ValueError(
+                f"LoRA checkpoint does not match the trainable parameters: "
+                f"unexpected {sorted(unexpected)[:5]}, missing {sorted(missing)[:5]}"
+            )
+        model.load_state_dict(state_dict, strict=False)
 
     def save_checkpoint(
         self,
@@ -368,8 +422,10 @@ class FSDPStrategy(DistributedStrategy):
         client_state={},
         tag=None,
         tokenizer=None,
+        export_lora_adapter: bool = True,
     ):
-        """Save model checkpoint for FSDP"""
+        """Save model checkpoint for FSDP. ``export_lora_adapter=False`` skips the PEFT-format
+        adapter (``lora_adapter/``); resume reads only the per-rank shards."""
         import warnings
 
         if node_local_rank == 0:
@@ -396,7 +452,7 @@ class FSDPStrategy(DistributedStrategy):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 # FSDP2 state_dict returns DTensors directly; no state_dict_type context needed.
-                model_state_dict = save_model.state_dict()
+                model_state_dict = self._model_state_dict_to_save(save_model)
                 self.print(f"[rank-{rank}]: Saving model to {model_path}")
                 with io.open_file(model_path, "wb") as f:
                     torch.save(model_state_dict, f)
@@ -444,7 +500,7 @@ class FSDPStrategy(DistributedStrategy):
                     json.dump({"fsdp_strategy": self.fsdp_strategy, "world_size": self.world_size}, f, indent=4)
 
         # Save LoRA adapters if using LoRA
-        if self.is_lora and hasattr(save_model, "peft_config"):
+        if export_lora_adapter and self.is_lora and hasattr(save_model, "peft_config"):
             self._save_lora_adapters(save_model, ckpt_dir)
 
         # Final barrier to ensure all operations complete
@@ -519,7 +575,11 @@ class FSDPStrategy(DistributedStrategy):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             # FSDP2: load_state_dict accepts DTensors directly; no state_dict_type context needed.
-            load_model.load_state_dict(model_state_dict, strict=load_module_strict)
+            if self.is_lora:
+                self._load_trainable_state_dict(load_model, model_state_dict)
+            else:
+                load_model.load_state_dict(model_state_dict, strict=load_module_strict)
+            self._check_ties(model, load_model, "after checkpoint load")
             self.print(f"[rank-{rank}]: Successfully loaded model state dict")
 
             # Load optimizer state dict if optimizer object is provided and loading is requested

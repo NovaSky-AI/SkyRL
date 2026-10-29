@@ -166,3 +166,25 @@ def test_patch_wraps_add_adapter_of_both_worker_managers(monkeypatch):
     # LRUCacheWorkerLoRAManager overrides add_adapter without calling super(), so both are wrapped.
     for cls in (WorkerLoRAManager, LRUCacheWorkerLoRAManager):
         assert cls.__dict__["add_adapter"].__name__ == "_patched_add_adapter"
+
+
+@pytest.mark.parametrize("host_copy", ["1", "0"], ids=["host-copy", "discard"])
+def test_activated_adapter_host_copy_switch(monkeypatch, host_copy):
+    """``SKYRL_LORA_IN_MEMORY_HOST_COPY=0`` drops the activated adapter's tensors and its stage
+    (no pinned host copy); the default keeps both (moved to the host on a GPU)."""
+    monkeypatch.setenv("SKYRL_LORA_IN_MEMORY_HOST_COPY", host_copy)
+    tensors = _tensors()
+    patch.stage_in_memory_adapter("t", tensors, _peft_config(RANK))
+    # A registered LoRAModel stand-in on the CPU (the default path moves only CUDA tensors).
+    lora = SimpleNamespace(loras={k: SimpleNamespace(lora_a=v, lora_b=[v]) for k, v in tensors.items()})
+    manager = SimpleNamespace(_adapter_manager=SimpleNamespace(get_adapter=lambda _id: lora))
+
+    patch.offload_in_memory_adapter(manager, _request("t"))
+
+    kept = [w.lora_a is not None and w.lora_b is not None for w in lora.loras.values()]
+    if host_copy == "1":
+        assert all(kept) and patch.staged_adapter_names() == ["t"]
+    else:
+        assert not any(kept) and patch.staged_adapter_names() == []
+        with pytest.raises(RuntimeError, match="no tensors are staged"):
+            patch._patched_load_adapter(_manager(), _request("t"))

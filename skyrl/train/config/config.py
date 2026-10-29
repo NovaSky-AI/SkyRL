@@ -108,14 +108,15 @@ class SkyRLLoraConfig(BaseConfig):
     """Directory where LoRA adapter weights are saved and synchronized between the training and inference processes.
     Must be accessible to all workers in distributed setups. Unused when ``sync_mode="memory"``."""
     sync_mode: str = "disk"
-    """How adapter-only weight sync (Megatron ``merge_lora=false``) reaches the inference engines.
+    """How adapter-only weight sync (FSDP LoRA, Megatron ``merge_lora=false``) reaches the inference engines.
     ``"disk"`` writes PEFT files to ``lora_sync_path`` and vLLM reads them back.
     ``"memory"`` ships the adapter tensors through the configured
     ``generator.inference_engine.weight_sync_backend`` transport (``nccl``: NCCL broadcast when
     non-colocated, CUDA IPC when colocated) and vLLM builds the adapter from the received GPU
     tensors; nothing is written. Once the adapter is copied into vLLM's LoRA slots, the built
     adapter and the received tensors move to pinned host memory, where ``"disk"`` keeps the built
-    adapter. Shared expert adapters are sent once and aliased on the receiver. Megatron only."""
+    adapter. Shared expert adapters are sent once and aliased on the receiver (Megatron). In memory mode
+    ``lora_alpha / r`` is folded into ``lora_B`` and the adapter is published with ``lora_alpha == r``."""
     target_modules: str = "all-linear"
     """Modules to apply LoRA to.
     ``"all-linear"`` targets every linear layer for FSDP/PEFT, and is remapped to a fixed module
@@ -130,6 +131,14 @@ class SkyRLLoraConfig(BaseConfig):
 
     share_expert_adapters: bool = True
     """Share one LoRA adapter across local grouped experts."""
+
+    experts_shared_outer_loras: bool = False
+    """FSDP counterpart of ``megatron_config.lora_config.experts_shared_outer_loras`` for models with one
+    PEFT linear per routed expert (``...experts.<e>.gate_proj|up_proj|down_proj``): within each experts
+    list, ``gate_proj`` / ``up_proj`` lora_A and ``down_proj`` lora_B are one parameter shared by all
+    experts, ``gate_proj`` / ``up_proj`` lora_B and ``down_proj`` lora_A stay per expert. The PEFT state
+    dict keeps one key per expert (aliases of the shared parameter), so sync and the PEFT export are the
+    expanded per-expert adapter vLLM loads by default (no ``--enable-moe-shared-loras``). FSDP only."""
 
     max_loras: int = 1
     """Maximum number of LoRA adapters that can be active concurrently in a
@@ -159,6 +168,12 @@ class SkyRLLoraConfig(BaseConfig):
     the largest per-module rank, which exceeds ``rank`` when ``init_adapter_path`` carries a
     ``rank_pattern`` or when Megatron (``merge_lora=false``) fuses several adapted projections into
     one module. vLLM accepts 8, 16, 32, 64, 128, 256, 320 or 512."""
+
+    checkpoint_export: str = "every_save"
+    """When an FSDP checkpoint also writes the PEFT-format adapter (``<ckpt>/policy/lora_adapter``,
+    float32, gathered and written by rank 0). ``"every_save"``: every checkpoint. ``"final"``: only
+    the checkpoint of the last training step. Resume reads only the per-rank shards, so this changes
+    no resumed state; the export is what HF/PEFT tools and a vLLM disk load read."""
 
 
 @dataclass
@@ -201,6 +216,13 @@ class ModelConfig(BaseConfig):
     """HuggingFace model path (or local directory) for this model."""
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
     fake_int4_qat: FakeInt4QatConfig = field(default_factory=FakeInt4QatConfig)
+    sharded_load_fn: Optional[str] = None
+    """FSDP policy only. ``<module>.<function>`` in the model directory's remote code, resolved like an
+    ``auto_map`` entry (``trust_remote_code``), e.g. ``"loading.load_sharded"``. When set, every rank builds
+    the model on the meta device from ``config.json`` (LoRA adapters are created and initialized as usual),
+    FSDP2 shards it, and ``fn(module, path)`` fills this rank's local shards of every base parameter and
+    persistent buffer. There is no rank-0 ``from_pretrained`` and no broadcast, so the checkpoint may be in
+    a format ``from_pretrained`` cannot read and need not fit on one host."""
 
     def __post_init__(self) -> None:
         if self.fake_int4_qat.enabled:
@@ -271,6 +293,11 @@ class FSDPConfig(BaseConfig):
     mixed_precision: Optional[MixedPrecisionConfig] = None
     # specify wrap policy as a dict with `transformer_layer_cls_to_wrap` key for custom module based wrapping
     wrap_policy: dict = field(default_factory=dict)
+    router_replay: bool = False
+    """Rollout routing replay (R3) in the policy forward: MoE routers use the rollout's expert ids
+    (``generator.inference_engine.enable_return_routed_experts``) with weights from their own
+    router probabilities. The model's MoE module must support it, see
+    ``skyrl/backends/skyrl_train/utils/fsdp_router_replay.py``."""
 
 
 # ---------------------------------------------------------------------------
@@ -1631,6 +1658,13 @@ class TrainerConfig(BaseConfig):
     This makes the microbatch packing — and therefore the resulting logprobs/values — identical to
     what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
     first inner step."""
+    old_logprobs_from_update_forward: bool = False
+    """Skip the separate policy forward that produces the "old" logprobs; the loss uses the
+    update forward's own logprobs, detached, as old logprobs. Only valid with one optimizer
+    update per training batch (``policy_mini_batch_size == train_batch_size``,
+    ``update_epochs_per_batch == 1``): the parameters of that forward are the old policy, so
+    the PPO ratio is exactly 1 and the gradient, off-policy correction (TIS) weights and
+    metrics are those of an exact recompute. FSDP only."""
     update_ref_every_epoch: bool = False
     """Re-sync the reference model from the policy model at every epoch boundary."""
     remove_microbatch_padding: bool = True

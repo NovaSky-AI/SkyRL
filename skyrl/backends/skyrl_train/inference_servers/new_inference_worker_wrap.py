@@ -97,6 +97,14 @@ patch_vllm_dummy_weight_boot_detection()
 patch_vllm_fp8_kv_scale_boot_normalization()
 patch_vllm_fp8_kv_scale_completion()
 
+# Drop each checkpoint file's page cache as soon as it is loaded (Ray's memory monitor counts
+# active page cache; the whole checkpoint would otherwise be cached until the post-init drop).
+from skyrl.backends.skyrl_train.utils.page_cache import (  # noqa: E402
+    patch_vllm_per_file_page_cache_drop,
+)
+
+patch_vllm_per_file_page_cache_drop()
+
 try:
     from skyrl.backends.skyrl_train.weight_sync.register import (
         register_receive_engines,
@@ -305,6 +313,14 @@ class NewInferenceWorkerWrap:
         if fetch is None:
             raise RuntimeError(f"{type(self.weight_transfer_engine).__name__} does not support fetch_weights")
         return fetch(target_version=target_version, sync_dir=sync_dir, uri=uri)
+
+    def skyrl_drop_checkpoint_page_cache(self) -> int:
+        """Drop the page cache of the checkpoint files this worker loaded (called once after engine init)."""
+        from skyrl.backends.skyrl_train.utils.page_cache import (
+            drop_checkpoint_page_cache,
+        )
+
+        return drop_checkpoint_page_cache(self.model_config.model)[0]
 
     def skyrl_set_lora_receive_target(self, receive_target: dict) -> None:
         """Arm the next weight update to build a LoRA adapter, not the base model.

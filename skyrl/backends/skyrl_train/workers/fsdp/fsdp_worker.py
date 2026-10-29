@@ -10,6 +10,7 @@ from transformers import AutoConfig
 from skyrl.backends.skyrl_train.distributed.dispatch import WorkerOutput
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+    lora_adapter_config,
     should_use_meta_init,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -33,6 +34,27 @@ from skyrl.backends.skyrl_train.workers.worker_utils import get_inference_weight
 
 if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
+
+
+def _inference_lora_names(lora_params: dict, is_multimodal_lm_only: bool) -> dict:
+    """PEFT adapter keys -> the names the inference engines load.
+
+    A language-only VLM trains its text backbone without the inference
+    model's ``language_model.`` namespace. Preserve PEFT's outer wrapper
+    and insert that namespace inside it.
+    """
+    weight_prefix = get_inference_weight_prefix(is_multimodal_lm_only)
+    if not weight_prefix:
+        return lora_params
+    peft_wrapper_prefix = "base_model.model."
+    return {
+        (
+            f"{peft_wrapper_prefix}{weight_prefix}{name.removeprefix(peft_wrapper_prefix)}"
+            if name.startswith(peft_wrapper_prefix)
+            else name
+        ): tensor
+        for name, tensor in lora_params.items()
+    }
 
 
 class FSDPPolicyWorkerBase(PolicyWorkerBase):
@@ -59,11 +81,16 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.strategy = strategy
 
         self._is_lora = self.cfg.policy.model.lora.rank > 0
+        # In-memory adapter sync reads only the adapters: keep them on the GPU across offloads so
+        # the colocated sync never needs the frozen base back next to the woken engine weights.
+        strategy.offload_frozen_only = self._lora_sync_mode_is_memory()
 
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         is_multimodal = hasattr(model_config, "vision_config") and model_config.vision_config is not None
         self._is_multimodal_lm_only = self.cfg.policy.language_model_only and is_multimodal
-        use_meta = should_use_meta_init(
+        # With a sharded loader every rank starts on meta and loads only its own shards.
+        sharded_load = bool(self.cfg.policy.model.sharded_load_fn)
+        use_meta = sharded_load or should_use_meta_init(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
 
@@ -78,11 +105,13 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             lora_init_method=self.cfg.policy.model.lora.init_method,
             target_modules=self.cfg.policy.model.lora.target_modules,
             exclude_modules=self.cfg.policy.model.lora.exclude_modules,
+            experts_shared_outer_loras=self.cfg.policy.model.lora.experts_shared_outer_loras,
             sequence_parallel_size=self.cfg.policy.sequence_parallel_size,
             remove_microbatch_padding=self.cfg.remove_microbatch_padding,
             use_torch_compile=self.cfg.policy.use_torch_compile,
             model_config_kwargs=self.cfg.policy.model_config_kwargs,
             meta_init=use_meta,
+            meta_init_adapters=sharded_load,
             language_model_only=self.cfg.policy.language_model_only,
             logprobs_chunk_size=self.cfg.logprobs_chunk_size,
         )
@@ -120,6 +149,22 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         ``weight_prefix`` covers the one case where they still differ: syncing a
         CausalLM backbone into a vLLM multimodal namespace.
         """
+        if self._lora_sync_mode_is_memory():
+            # Every sync is adapter-only, so the engine's source IS the adapter
+            # (as on Megatron with merge_lora=false). Held for the per-sync
+            # set_lora_name / prepare in _publish_lora_adapter_in_memory.
+            from skyrl.backends.skyrl_train.weight_sync.sources import (
+                FsdpLoraAdapterSource,
+            )
+
+            peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
+            self._lora_weight_source = FsdpLoraAdapterSource(
+                dtype=dtype,
+                adapter_state=self._lora_adapter_state,
+                adapter_config=lora_adapter_config(peft_model),
+            )
+            return self._lora_weight_source
+
         weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
         if backend == "sharded_rdt":
             # RDT pulls, so it needs the ownership + group channels its own
@@ -134,6 +179,19 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         return FsdpWeightSource(self.model.model, dtype, weight_prefix)
 
+    def _lora_sync_mode_is_memory(self) -> bool:
+        """Whether adapter sync ships tensors instead of writing PEFT files."""
+        return self._is_lora and self.cfg.policy.model.lora.sync_mode == "memory"
+
+    def _lora_adapter_state(self) -> dict:
+        """The adapter under the inference engines' names: PEFT key -> this rank's shard.
+
+        Not a collective and no copy: the values are the FSDP2 ``DTensor`` parameters.
+        """
+        from peft.utils.save_and_load import get_peft_model_state_dict
+
+        return _inference_lora_names(get_peft_model_state_dict(self.model.model), self._is_multimodal_lm_only)
+
     async def _save_lora_adapters_and_sync(
         self,
         peft_model,
@@ -141,14 +199,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         inference_engine_client,
         lora_name: str = SKYRL_LORA_ADAPTER_NAME,
     ):
-        """Collect, namespace, and hot-load FSDP LoRA adapter weights.
-
-        A language-only VLM trains its text backbone without the inference
-        model's ``language_model.`` namespace. Preserve PEFT's outer wrapper
-        and insert that namespace inside it before vLLM loads the adapter.
-        """
+        """Collect, write, and hot-load the FSDP LoRA adapter (``lora.sync_mode=disk``)."""
         import json
-        from dataclasses import asdict
 
         from safetensors.torch import save_file
 
@@ -156,26 +208,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             collect_lora_params,
         )
 
-        lora_params = collect_lora_params(module=self.model.model)
-        weight_prefix = get_inference_weight_prefix(self._is_multimodal_lm_only)
-        if weight_prefix:
-            peft_wrapper_prefix = "base_model.model."
-            lora_params = {
-                (
-                    f"{peft_wrapper_prefix}{weight_prefix}{name.removeprefix(peft_wrapper_prefix)}"
-                    if name.startswith(peft_wrapper_prefix)
-                    else name
-                ): tensor
-                for name, tensor in lora_params.items()
-            }
+        lora_params = _inference_lora_names(collect_lora_params(module=self.model.model), self._is_multimodal_lm_only)
 
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            peft_config = asdict(peft_model.peft_config.get("default", {}))
-            peft_config["task_type"] = peft_config["task_type"].value
-            peft_config["peft_type"] = peft_config["peft_type"].value
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            peft_config = lora_adapter_config(peft_model)
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
@@ -218,9 +256,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
             torch.cuda.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
-            await self._save_lora_adapters_and_sync(
-                peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
-            )
+            if self._lora_sync_mode_is_memory():
+                await self._publish_lora_adapter_in_memory(lora_name, inference_engine_client)
+            else:
+                await self._save_lora_adapters_and_sync(
+                    peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
+                )
             if cache_reset_task is not None:
                 await cache_reset_task
             if self.cfg.placement.colocate_all:

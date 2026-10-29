@@ -786,6 +786,10 @@ async def _build_and_serve_vllm_server(
         stat_loggers=stat_loggers,
     )
     logger.info(f"Engine initialized on {cli_args.host}:{cli_args.port}, adding custom endpoints...")
+    # Every worker has loaded its weights; drop the checkpoint's page cache on each node (Ray's
+    # memory monitor counts active page cache). Needs SkyRL's worker extension.
+    if str(getattr(cli_args, "worker_extension_cls", "") or "").endswith(".NewInferenceWorkerWrap"):
+        await engine.collective_rpc("skyrl_drop_checkpoint_page_cache")
 
     # Add custom SkyRL endpoints
     metrics_info = None
