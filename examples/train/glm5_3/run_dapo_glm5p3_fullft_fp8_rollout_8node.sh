@@ -32,13 +32,14 @@ INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE="${INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE:-
 MULTINODE_ENGINE_KWARGS=''
 if [ "$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE" -gt "$NUM_GPUS_PER_NODE" ]; then
   INFERENCE_EXECUTOR_BACKEND="${INFERENCE_EXECUTOR_BACKEND:-ray}"
-  # A TP group across nodes without multi-node NVLink (B200 over RoCE), on vLLM 0.30:
+  # A TP group across nodes without multi-node NVLink (B200 over RoCE), as seen on vLLM 0.30:
   # * custom all-reduce rendezvous for an MNNVL buffer that never forms -> engine init deadlocks;
   # * FlashInfer all-reduce and NCCL symmetric memory cannot set up across nodes;
   # * FlashInfer's TRT-LLM sparse-MLA decode has no kernel for 4 heads/rank (64 heads / TP16),
   #   FlashMLA pads heads;
-  # * the per-layer FlashInfer fused all-reduce + RMSNorm retries its MNNVL workspace (30 s
-  #   timeout) on every call -- skipped by SkyRL's patch_multinode_fused_allreduce_norm.
+  # * the per-layer FlashInfer fused all-reduce + RMSNorm tries an MNNVL workspace (30 s timeout).
+  #   vLLM 0.30 retried it on every call; 0.31+ caches the failure and falls back to NCCL, so it
+  #   now costs one timeout at engine startup.
   MULTINODE_ENGINE_KWARGS='"disable_custom_all_reduce": true, "attention_config": {"backend": "FLASHMLA_SPARSE"}, '
   export VLLM_ALLREDUCE_USE_FLASHINFER=0
   export VLLM_ALLREDUCE_USE_SYMM_MEM=0
@@ -157,8 +158,8 @@ else
     QUANT_LABEL=$VLLM_QUANTIZATION
   fi
 fi
-# R3 on vLLM's default FP8 MoE backend on B200 (FlashInfer TRT-LLM, monolithic) needs SkyRL's
-# patch_routed_experts_rebind (backport of vllm#59455, installed in every vLLM worker): without it
+# R3 on vLLM's default FP8 MoE backend on B200 (FlashInfer TRT-LLM, monolithic) needs vllm#59455
+# (in vLLM 0.32.0; this branch carried a backport before that): without it
 # the capture callback is lost when a weight sync rebuilds the kernel, the capture returns the
 # startup profile run's routing for every prefill token, and R3 made the rollout/train logprob gap
 # WORSE (0.063 -> 0.164). R3_MOE_BACKEND=deep_gemm (router-side capture, unaffected by the bug)

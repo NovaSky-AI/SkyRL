@@ -60,4 +60,4 @@ jobs:
       - name: Install with the tokens extra
         run: uv sync --extra tokens
       - name: Test token mode on a real tokenizer
-        run: uv run pytest tests/test_renderers_integration.py tests/test_tokens.py
+        run: uv run pytest tests/test_renderer_parse.py tests/test_renderers_integration.py tests/test_tokens.py

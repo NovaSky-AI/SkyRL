@@ -40,6 +40,14 @@ class _SimDispatch:
         # ``convert_to_training_input`` (pad to a multiple of dp_size) is a no-op.
         return 1
 
+    def get_timing_metrics(self) -> dict:
+        """Simulated weight sync has no model-transfer timing metrics."""
+        return {}
+
+    def finalize_pending_saves(self, role: str) -> None:
+        """The simulation has no model checkpoint writes to finish."""
+        pass
+
     async def save_weights_for_sampler(self):
         await self._client.pause_generation()
         try:

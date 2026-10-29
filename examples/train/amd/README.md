@@ -4,7 +4,7 @@ This example is a starting point for running SkyRL's Tinker-compatible API on AM
 
 The runtime path is intentionally split from the image path:
 
-- `docker/Dockerfile.amd` builds a SkyRL AMD image from `vllm/vllm-openai-rocm:v0.23.0`.
+- `docker/Dockerfile.amd` builds a SkyRL AMD image from `vllm/vllm-openai-rocm:v0.31.0`.
 - This directory contains commands to run inside that image.
 
 The Docker image bakes in Ray and the non-GPU SkyRL dependencies. It relies on the parent vLLM ROCm image for ROCm builds of PyTorch, vLLM, and flash-attn.
@@ -48,6 +48,10 @@ The default server binds to `0.0.0.0:9000` and uses:
 - `BACKEND=fsdp`
 - `POLICY_NUM_GPUS_PER_NODE=1`
 - `INFERENCE_NUM_ENGINES=6`
+- `INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND=mp`
+
+The `mp` executor keeps each vLLM engine on one node and avoids nested Ray
+GPU mask remapping on ROCm.
 
 This default targets an 8-GPU AMD node with one GPU for the FSDP policy worker,
 six vLLM inference engines, and one GPU left for headroom. For smaller nodes or

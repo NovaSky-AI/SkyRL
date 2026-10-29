@@ -59,7 +59,7 @@ All under `generator.inference_engine.*`:
 - `enable_prefix_caching` (bool, default true)
 - `enable_chunked_prefill` (bool, default true)
 - `distributed_executor_backend` ("ray" or "mp")
-- `engine_init_kwargs` (dict, pass-through to vLLM EngineArgs)
+- `engine_init_kwargs` (dict, pass-through to vLLM EngineArgs). `logprobs_mode` is always `processed_logprobs` (logprobs of the sampling distribution, after temperature and top-k/top-p); other values are rejected, here and in `prefill_init_kwargs` / `decode_init_kwargs`.
 
 ## Placement
 - Colocated: vLLM and training workers (FSDP/Megatron) are placed on the same set of GPUs. We offload/backload each component as needed. During weight syncing, model weights from vLLM as well as model weights from the training workers remain on GPU

@@ -25,11 +25,12 @@ and does not fit a B200; FP8 is ~89 GiB/GPU. No `fp8_weight_sync_mode`.
 - `patches/vllm/patch_per_block_fp8_param.py` — `quantization=fp8_per_block` crashed on the
   first sync (`InternalTorchDynamoError: RecursionError`): the torch.compile'd
   `per_block_cast_to_fp8` was handed a vLLM parameter subclass. The patch passes `.data`.
-- `patches/vllm/patch_routed_experts_rebind.py` — backport of vllm-project/vllm#59455 (fixes
-  #59449). R3's routed-experts capture callback is bound once at startup and was lost when a weight
-  sync rebuilt the monolithic FlashInfer TRT-LLM FP8 MoE kernel, so capture returned the startup
-  profile run's routing for every prefill token. The patch carries the callback over.
-- All three are installed from `inference_servers/new_inference_worker_wrap.py`.
+- Both are installed from `inference_servers/new_inference_worker_wrap.py`.
+- R3 on the FlashInfer TRT-LLM FP8 MoE kernel needs vllm-project/vllm#59455 (fixes #59449), which
+  ships in vLLM 0.32.0. This branch carried it as `patch_routed_experts_rebind` while it was on
+  vLLM 0.30: the routed-experts capture callback was bound once at startup and lost when a weight
+  sync rebuilt the kernel, so capture returned the startup profile run's routing for every prefill
+  token.
 - `weight_sync/fp8/models/glm5.py` (+ test) — GLM-5.3 `ModelFp8Spec` for
   `fp8_weight_sync_mode=blockwise` (stage 3). Follows zai-org/GLM-5-FP8's split; the indexer's
   `wk`/`weights_proj` stay bf16 because vLLM fuses them into an unquantized linear.
@@ -53,8 +54,8 @@ and does not fit a B200; FP8 is ~89 GiB/GPU. No `fp8_weight_sync_mode`.
 - Trainer TP8 (not TP4) and LoRA r64 in the GSM8K recipe: at TP4 / r256 the post-step sync OOMed
   by 1–2 GiB (before the eager-reload patch and precision-aware optimizer existed; probably fits
   now, untested).
-- R3 works on vLLM's default FP8 MoE backend (FlashInfer TRT-LLM) only with
-  `patch_routed_experts_rebind`. Without it R3 made the logprob gap **worse** (0.063 → 0.164)
+- R3 works on vLLM's default FP8 MoE backend (FlashInfer TRT-LLM) only with vllm#59455 (vLLM
+  >= 0.32.0, previously `patch_routed_experts_rebind`). Without it R3 made the logprob gap **worse** (0.063 → 0.164)
   because every prompt token was replayed with one stale expert set.
   `R3_MOE_BACKEND=deep_gemm` (router-side capture, not affected) is the fallback; it costs ~1.7×
   generation time.

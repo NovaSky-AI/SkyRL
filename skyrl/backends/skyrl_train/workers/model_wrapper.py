@@ -31,9 +31,14 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
+from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberWeight
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_NO_ROW,
+    SCORE_CENTERING_SCORES_KEY,
+    PackedSampleSupport,
+)
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    SampleSupportScores,
     missing_sample_support_message,
     sample_support_row_ids_in_batch_positions,
     score_aligned_sample_support,
@@ -56,7 +61,7 @@ class _SampleSupportChannels:
         cls,
         sequences: torch.Tensor,
         attention_mask: torch.Tensor,
-        sample_support: PackedTensor,
+        sample_support: PackedSampleSupport,
         loss_mask: torch.Tensor,
     ) -> "_SampleSupportChannels":
         """Place channels in canonical ``[batch, seq_len]`` positions."""
@@ -313,13 +318,20 @@ class HFModelWrapper(nn.Module):
         pixel_values: Optional[TensorList] = None,
         image_grid_thw: Optional[TensorList] = None,
         mm_token_type_ids: Optional[torch.Tensor] = None,
-        sample_support: Optional[PackedTensor] = None,
+        sample_support: Optional[PackedSampleSupport] = None,
         loss_mask: Optional[torch.Tensor] = None,
         enable_sample_support_replay: bool = False,
+        centering_weight: Optional[MemberWeight] = None,
     ) -> torch.Tensor:
-        """Returns action log probs"""
+        """Returns action log probs.
+
+        With ``centering_weight`` (sample-support replay only), ``output`` also holds the
+        canonical-position ``SampleSupportScores`` under ``SCORE_CENTERING_SCORES_KEY``.
+        """
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
         support_channels = None
+        if centering_weight is not None and not enable_sample_support_replay:
+            raise ValueError("score centering requires sample-support replay")
         if enable_sample_support_replay:
             if sample_support is None:
                 raise ValueError(missing_sample_support_message("FSDP"))
@@ -426,6 +438,7 @@ class HFModelWrapper(nn.Module):
                 tp_group=None,
                 compute_entropy=compute_entropy,
                 entropy_requires_grad=compute_entropy and entropy_requires_grad,
+                centering_weight=centering_weight,
             )
             log_probs = support_scores.logprobs
             support_entropy = support_scores.entropy
@@ -451,6 +464,22 @@ class HFModelWrapper(nn.Module):
             return values
 
         log_probs = to_canonical_batch_positions(log_probs)
+        if centering_weight is not None:
+            output[SCORE_CENTERING_SCORES_KEY] = SampleSupportScores(
+                logprobs=log_probs,
+                entropy=None,
+                # Carry the mask through float-only gather and unpadding operations.
+                valid_mask=to_canonical_batch_positions(support_scores.valid_mask.to(log_probs.dtype)) > 0,
+                centering_term=to_canonical_batch_positions(support_scores.centering_term),
+                centering_term_negative=(
+                    None
+                    if support_scores.centering_term_negative is None
+                    else to_canonical_batch_positions(support_scores.centering_term_negative)
+                ),
+                sampler_logprobs=to_canonical_batch_positions(support_scores.sampler_logprobs),
+                support_tv=to_canonical_batch_positions(support_scores.support_tv),
+                sampler_mass=to_canonical_batch_positions(support_scores.sampler_mass),
+            )
 
         if compute_entropy:
             if support_entropy is not None:

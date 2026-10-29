@@ -10,7 +10,7 @@ import orjson
 import pytest
 from aiohttp.test_utils import TestServer
 
-from skycap.openai_chat import StreamAssembler
+from skycap.dialects.openai_chat import StreamAssembler
 from skycap.server import CaptureServer
 from skycap.text import TextBackend
 from tests.conftest import Stack, openai_client

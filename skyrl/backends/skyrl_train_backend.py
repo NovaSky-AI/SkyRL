@@ -890,7 +890,7 @@ class SkyRLTrainBackend(AbstractBackend):
         """Extract training metrics from dispatch return dict.
 
         Workers return metrics like 'loss', 'policy_loss', 'policy_entropy', etc.
-        We convert to Tinker's colon-suffixed format (e.g. 'total_loss:sum').
+        We convert to Tinker's colon-suffixed format (e.g. 'loss:sum').
         """
         metrics: dict[str, float] = {}
 
@@ -899,6 +899,9 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["total_loss:sum"] = float(data["loss"])
         elif "final_loss" in data:
             metrics["total_loss:sum"] = float(data["final_loss"])
+
+        if "total_loss:sum" in metrics:
+            metrics["loss:sum"] = metrics["total_loss:sum"]
 
         if "policy_loss" in data:
             metrics["pg_loss:sum"] = float(data["policy_loss"])

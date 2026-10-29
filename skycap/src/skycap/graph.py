@@ -28,19 +28,26 @@ Identical outputs under the same conditions are one node that records every
 call that produced it. Rarely, several siblings share a match hash but differ
 in delta: the same text sampled under two ``top_p`` values, a harness-written
 message equal to a sample, or (token mode) the same text tokenized two ways.
-History then continues from the latest model-authored one, or the latest
-client-authored one if there is no model sibling. The others are
-``shadowed_by`` it: still valid nodes whose paths train normally, marked so a
-reader can see that later history couldn't be attributed to them.
+A later request's matching message is then matched to the latest of them,
+whatever its author: a trajectory goes on from its newest branch, e.g. the
+client twins a full render stores in token mode. The others are ``shadowed_by`` it: still valid nodes whose paths train
+normally. In text mode, history continues from the chosen sibling. In token
+mode, a turn continues from it only if the turn reuses its tokens, and
+otherwise from a client sibling with exactly the rendered tokens: a shadowed
+one, or a new one. A shadowed model sample never continues (see
+``skycap.tokens.turn``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from skycap import hashing
+
+if TYPE_CHECKING:
+    from skycap.tokens.renderer import Media
 
 Author = Literal["client", "model"]
 
@@ -61,6 +68,9 @@ class CallInfo:
     #: token. ``False`` means it was rendered from the messages instead (a harness edit, compaction,
     #: or a turn the renderer wouldn't extend); ``None`` for a trajectory's first call, or text mode.
     bridged: bool | None = None
+    #: The API the call came in on: a ``skycap.dialects.DialectType`` value, e.g. ``openai_responses``.
+    #: ``None`` in records written before dialects.
+    dialect: str | None = None
 
 
 @dataclass(slots=True)
@@ -70,7 +80,8 @@ class NodeTokens:
     For a model node, ``token_ids[:sampled_start]`` is template scaffold the
     model did not produce, and the rest is what it sampled. ``logprobs``,
     ``routed_experts`` and ``sampling_mask`` are aligned to ``token_ids``;
-    ``sampling_mask`` has one support set per sampled token.
+    ``sampling_mask`` has one support set per sampled token, and
+    ``sampling_mask_logprobs``, when captured, the sampler's logprob of each id in it.
 
     ``text`` is what these tokens decode to, special tokens kept, and
     ``text_offsets[k]`` is the UTF-8 byte offset in ``text`` where token ``k``
@@ -80,6 +91,9 @@ class NodeTokens:
     and the tokens before it have empty spans, so every span decodes on its own.
     Both are filled when the trajectory is recorded, so a reader never needs the
     tokenizer.
+
+    ``media`` are the multimodal items whose placeholders sit in these tokens, with offsets relative to them. Only a
+    client node has any.
     """
 
     token_ids: list[int]
@@ -87,8 +101,10 @@ class NodeTokens:
     logprobs: list[float] | None = None
     routed_experts: Any | None = None
     sampling_mask: list[list[int]] | None = None
+    sampling_mask_logprobs: list[list[float]] | None = None
     text: str | None = None
     text_offsets: list[int] | None = None
+    media: list[Media] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -131,8 +147,8 @@ class MessageGraph:
         self.tools: dict[str, list[dict[str, Any]]] = {}
         #: (parent id, delta hash) -> node id. How ``add`` finds a node it already made.
         self._by_delta: dict[tuple[int | None, str], int] = {}
-        #: (parent id, match hash) -> node id: the latest model-authored such sibling,
-        #: else the latest client-authored one. How ``match`` walks a request's history.
+        #: (parent id, match hash) -> node id: the latest such sibling. How ``match`` walks a
+        #: request's history.
         self._by_match: dict[tuple[int | None, str], int] = {}
         #: parent id (``None`` for roots) -> child node ids, in creation order.
         self._children: dict[int | None, list[int]] = {}
@@ -182,9 +198,7 @@ class MessageGraph:
         )
         self.nodes.append(node)
         self._by_delta[(parent, delta_hash)] = node.id
-        chosen = self._by_match.get((parent, match_hash))
-        if chosen is None or author == "model" or self.nodes[chosen].author == "client":
-            self._by_match[(parent, match_hash)] = node.id
+        self._by_match[(parent, match_hash)] = node.id
         self._children.setdefault(parent, []).append(node.id)
         return node, True
 
@@ -192,10 +206,20 @@ class MessageGraph:
     def child(self, parent: int | None, match_hash: str) -> int | None:
         return self._by_match.get((parent, match_hash))
 
-    def match(self, match_hashes: Sequence[str]) -> list[int]:
-        """The longest prefix of ``match_hashes`` already in the graph, as node ids."""
+    def alias(self, parent: int | None, match_hash: str, node: int) -> None:
+        """Match ``match_hash`` under ``parent`` to ``node``, a child whose message renders the same.
+
+        Token mode records one when a request spells a message differently from
+        the node (``tokens.turn``), so later requests match it without rendering.
+        An existing match is kept.
+        """
+        if self.nodes[node].parent != parent:
+            raise ValueError(f"node {node} is not a child of {parent}")
+        self._by_match.setdefault((parent, match_hash), node)
+
+    def match(self, match_hashes: Sequence[str], parent: int | None = None) -> list[int]:
+        """The longest prefix of ``match_hashes`` already in the graph below ``parent``, as node ids."""
         matched: list[int] = []
-        parent: int | None = None
         for match in match_hashes:
             node = self.child(parent, match)
             if node is None:
@@ -227,7 +251,8 @@ class MessageGraph:
         if tools_key and tools is not None:
             self.tools.setdefault(tools_key, [dict(tool) for tool in tools])
         call.tools = tools_key or None
-        matches = [hashing.match_hash(m, tools=tools_key, model=model) for m in messages]
+        key = hashing.MatchKey.text(tools_key, model)
+        matches = [key(message) for message in messages]
         matched = self.match(matches)
         parent = matched[-1] if matched else None
         created: list[int] = []
@@ -244,7 +269,7 @@ class MessageGraph:
             if new:
                 created.append(node.id)
             parent = node.id
-        output_match = hashing.match_hash(output, tools=tools_key, model=model)
+        output_match = key(output)
         reply, new = self.add(
             parent,
             role=output.get("role"),
@@ -284,7 +309,11 @@ class MessageGraph:
         return [self.path_to(leaf) for leaf in self.leaves()]
 
     def shadowed_by(self, node: int) -> int | None:
-        """The sibling that history matching this node's message continues from, if not this one."""
+        """The sibling that a request's matching message is matched to, if not this one.
+
+        Token-mode history can still continue from this node if it is client-authored: see the
+        module docstring.
+        """
         n = self.nodes[node]
         chosen = self._by_match[(n.parent, n.match_hash)]
         return None if chosen == node else chosen

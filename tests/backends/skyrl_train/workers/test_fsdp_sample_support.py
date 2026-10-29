@@ -1,10 +1,16 @@
 """Sample-support replay through the FSDP forward."""
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import numpy as np
 import pytest
 import torch
 from torch import nn
 
 from skyrl.backends.skyrl_train.distributed.ulysses import utils as ulysses_utils
+from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import RatioBand
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
     cu_seqlens_from_lengths,
@@ -12,13 +18,21 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_NO_ROW,
-    SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
+    SCORE_CENTERING_SCORES_KEY,
+)
+from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    SampleSupportScores,
+    ScoreCenteringMetric,
 )
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
     _SampleSupportChannels,
 )
+from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.dataset.replay_buffer import Experience
+from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 VOCAB = 12
 
@@ -35,7 +49,7 @@ class _TokenIndexedLM(nn.Module):
 
 
 def _support(segments: list[list[list[int]]]) -> PackedTensor:
-    """Pack one ``[response_tokens, top_k]`` block per trajectory."""
+    """Pack one ``[response_tokens, top_k]`` reference grid per trajectory; ``-1`` marks no member."""
     return PackedTensor(
         torch.tensor([row for segment in segments for row in segment], dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
         cu_seqlens_from_lengths([len(segment) for segment in segments]),
@@ -91,11 +105,12 @@ def _wrapper(model: nn.Module, *, packed: bool = False) -> HFModelWrapper:
 
 
 def _forward(wrapper, sequences, attention_mask, support, response_lengths, num_actions):
+    """Run the forward on the CSR form of the ``support`` reference grid."""
     return wrapper(
         sequences,
         num_actions,
         attention_mask=attention_mask,
-        sample_support=support,
+        sample_support=ragged_support(support),
         loss_mask=_loss_mask(response_lengths, num_actions),
         enable_sample_support_replay=True,
     )
@@ -106,7 +121,7 @@ def _forward_entropy(wrapper, sequences, attention_mask, support, response_lengt
         sequences,
         num_actions,
         attention_mask=attention_mask,
-        sample_support=support,
+        sample_support=ragged_support(support),
         loss_mask=_loss_mask(response_lengths, num_actions),
         enable_sample_support_replay=True,
         return_output=True,
@@ -258,7 +273,7 @@ def test_replay_never_scores_every_position_over_the_full_vocabulary(monkeypatch
 def test_an_unsupported_loss_active_token_is_rejected():
     sequences, attention_mask = _ragged_batch()
     support = _ragged_support(sequences)
-    support.values[1] = SAMPLE_SUPPORT_PADDING
+    support.values[1] = -1
 
     with pytest.raises(ValueError, match="requires captured support for every loss-active token"):
         _forward(_wrapper(_TokenIndexedLM()), sequences, attention_mask, support, [2, 1], 2)
@@ -275,7 +290,7 @@ def test_replay_disabled_takes_the_ordinary_full_vocabulary_path():
         sequences,
         2,
         attention_mask=attention_mask,
-        sample_support=_ragged_support(sequences),
+        sample_support=ragged_support(_ragged_support(sequences)),
         loss_mask=_loss_mask([2, 1], 2),
         enable_sample_support_replay=False,
     )
@@ -297,7 +312,7 @@ def test_replay_disabled_takes_the_ordinary_full_vocabulary_path():
 def test_replay_requires_both_the_support_and_the_loss_mask(omitted, message):
     sequences, attention_mask = _ragged_batch()
     kwargs = {
-        "sample_support": _ragged_support(sequences),
+        "sample_support": ragged_support(_ragged_support(sequences)),
         "loss_mask": _loss_mask([2, 1], 2),
         "enable_sample_support_replay": True,
     }
@@ -325,3 +340,124 @@ def test_sequence_parallel_slice_pads_row_ids_with_a_sentinel(monkeypatch):
 
     assert tail.row_ids.tolist() == [[2, SAMPLE_SUPPORT_NO_ROW]]
     assert tail.loss_mask.tolist() == [[True, False]]
+
+
+def _scored_forward(wrapper, sequences, attention_mask, support: PackedTensor, response_lengths, num_actions):
+    """Score-centered forward over ``support`` whose members' sampler logprobs are distinct."""
+    grids = [support.segment(index).numpy() for index in range(len(support))]
+    member_logprobs = [-0.3 - 0.1 * np.arange(grid.size, dtype=np.float32).reshape(grid.shape) for grid in grids]
+    _, output = wrapper(
+        sequences,
+        num_actions,
+        attention_mask=attention_mask,
+        sample_support=ragged_support(grids, logprobs=member_logprobs),
+        loss_mask=_loss_mask(response_lengths, num_actions),
+        enable_sample_support_replay=True,
+        centering_weight=RatioBand(low=0.5, high=2.0),
+        return_output=True,
+    )
+    return output[SCORE_CENTERING_SCORES_KEY]
+
+
+def test_centering_scores_land_in_canonical_positions_packed_or_not():
+    sequences, attention_mask = _ragged_batch()
+    support = _ragged_support(sequences)
+    model = _TokenIndexedLM()
+    packed_model = _TokenIndexedLM()
+    packed_model.table.data.copy_(model.table.data)
+
+    unpacked = _scored_forward(_wrapper(model), sequences, attention_mask, support, [2, 1], 2)
+    packed = _scored_forward(_wrapper(packed_model, packed=True), sequences, attention_mask, support, [2, 1], 2)
+    unpacked.centering_term.sum().backward()
+    packed.centering_term.sum().backward()
+
+    for field in ("centering_term", "sampler_logprobs", "support_tv", "sampler_mass"):
+        torch.testing.assert_close(getattr(packed, field), getattr(unpacked, field))
+    assert torch.equal(packed.valid_mask, unpacked.valid_mask)
+    torch.testing.assert_close(packed_model.table.grad, model.table.grad)
+    # Only the three response positions predict a supported token.
+    assert int(unpacked.valid_mask.sum()) == 3
+
+
+def test_centering_requires_sample_support_replay():
+    sequences, attention_mask = _ragged_batch()
+    with pytest.raises(ValueError, match="score centering requires sample-support replay"):
+        _wrapper(_TokenIndexedLM())(
+            sequences, 2, attention_mask=attention_mask, centering_weight=RatioBand(low=0.5, high=2.0)
+        )
+
+
+def test_the_worker_centers_rollout_is_with_the_post_override_band():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.algorithm.policy_loss_type = "rollout_is"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_entropy_loss = False
+    cfg.trainer.algorithm.enable_sample_support_replay = True
+    cfg.trainer.algorithm.enable_score_centering = True
+
+    worker = PolicyWorkerBase(
+        cfg=cfg.trainer,
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
+    worker.strategy = MagicMock()
+    worker.device_mesh = MagicMock()
+    worker.mesh_rank = SimpleNamespace(dp_size=1)
+    worker.optimizer = None
+    worker.scheduler = MagicMock(get_last_lr=MagicMock(return_value=[0.0]))
+    canonical = torch.zeros((2, 3))
+    scores = SampleSupportScores(
+        logprobs=canonical,
+        entropy=None,
+        valid_mask=torch.tensor([[True, True, False], [True, True, False]]),
+        centering_term=torch.tensor([[0.5, 1.0, 0.0], [-1.0, 2.0, 0.0]]),
+        sampler_logprobs=torch.full((2, 3), -0.5),
+        support_tv=torch.full((2, 3), 0.25),
+        sampler_mass=torch.ones((2, 3)),
+    )
+    worker.model = MagicMock(
+        return_value=(
+            torch.zeros((2, 2), requires_grad=True),
+            {
+                "entropy": canonical,
+                SCORE_CENTERING_SCORES_KEY: scores,
+            },
+        )
+    )
+    experience = Experience(
+        sequences=torch.zeros((2, 3), dtype=torch.long),
+        action_log_probs=None,
+        base_action_log_probs=None,
+        values=None,
+        returns=None,
+        advantages=torch.ones((2, 2)),
+        attention_mask=torch.ones((2, 3), dtype=torch.long),
+        loss_mask=torch.ones((2, 2)),
+        response_mask=torch.ones((2, 2)),
+        rollout_logprobs=torch.full((2, 2), -0.5),
+        rollout_expert_indices=None,
+        num_actions=2,
+        info=None,
+        rollout_sample_support=ragged_support(_support([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])),
+    )
+
+    with (
+        patch("torch.cuda.current_device", return_value=torch.device("cpu")),
+        patch("torch.autocast", side_effect=lambda *args, **kwargs: nullcontext()),
+    ):
+        status = worker._forward_backward_micro(
+            experience,
+            microbatch_weight=1.0,
+            loss_fn_config={"eps_clip_low": 0.1, "eps_clip_high": 0.3},
+        )
+
+    assert worker.model.call_args.kwargs["centering_weight"] == RatioBand(low=0.9, high=1.3)
+    # log π = 0 and log q̃ = -0.5 put every ratio at e^0.5 ≈ 1.65, outside the band, so only A·T remains.
+    assert status["policy_loss"] == pytest.approx(0.5 + 1.0 - 1.0 + 2.0)
+    assert status[ScoreCenteringMetric.TERM_ABS_MEAN.value] == pytest.approx(1.125)

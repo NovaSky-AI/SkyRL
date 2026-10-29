@@ -1,24 +1,31 @@
-"""Training samples: one row per root-to-leaf path.
+"""Training samples: one per row a path rule picks (``skycap.paths``).
 
-Each model-authored node is a training target in exactly one row, the first
-path (in leaf creation order) that contains it. A shared prefix appears in
-every row that shares it and trains once.
+By default (``all``) that is one row per root-to-leaf path, each model-authored
+node a training target in exactly one row, the first path (in leaf creation
+order) that contains it. A shared prefix appears in every row that shares it
+and trains once.
 
 In token mode a row also carries the concatenated tokens of its path, aligned
 arrays for training: a loss mask over the sampled tokens of its targets, the
 rollout logprobs, the routed experts (when every node on the path has them) and
-the sampling mask (when every target has one).
+the sampling mask (when every target has one), with its sampler logprobs (when
+every target captured them). Its multimodal items (images) come with it, in
+order, each with its placeholder offset in ``input_ids`` and the processor's
+arrays for it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from skycap.graph import MessageGraph, Node
+from skycap.paths import PathRule, Row, all_paths, check_rows
 from skycap.tokens.engine import pack, unpack
+from skycap.tokens.renderer import Media
 
 
 @dataclass(slots=True)
@@ -35,6 +42,11 @@ class Sample:
     routed_experts: np.ndarray | None = None
     #: Per position, the ids the sampler could have drawn; empty where ``loss_mask`` is 0.
     sampling_mask: list[list[int]] | None = None
+    #: Row for row with ``sampling_mask``, the sampler's logprob of each id.
+    sampling_mask_logprobs: list[list[float]] | None = None
+    #: The path's multimodal items in order, offsets into ``input_ids``. ``length`` counts placeholder tokens, not
+    #: always embeddings, and ``data``'s keys are the model's processor outputs, which vary by family (``Media``).
+    media: list[Media] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -46,7 +58,10 @@ class Sample:
         if self.input_ids is not None:
             out.update(input_ids=self.input_ids, loss_mask=self.loss_mask, logprobs=self.logprobs)
             out["routed_experts"] = pack(self.routed_experts) if self.routed_experts is not None else None
-            out["sampling_mask"] = _csr(self.sampling_mask) if self.sampling_mask is not None else None
+            out["sampling_mask"] = (
+                _csr(self.sampling_mask, self.sampling_mask_logprobs) if self.sampling_mask is not None else None
+            )
+            out["media"] = [_media_json(item) for item in self.media]
         return out
 
     @classmethod
@@ -54,6 +69,8 @@ class Sample:
         """The inverse of ``to_json``: arrays decoded."""
         routed = data.get("routed_experts")
         mask = data.get("sampling_mask")
+        spans = list(zip(mask["offsets"], mask["offsets"][1:], strict=False)) if mask is not None else []
+        mask_logprobs = unpack(mask["logprobs"]).tolist() if mask is not None and "logprobs" in mask else None
         return cls(
             leaf=data["leaf"],
             path=data["path"],
@@ -63,24 +80,25 @@ class Sample:
             loss_mask=data.get("loss_mask"),
             logprobs=data.get("logprobs"),
             routed_experts=unpack(routed) if routed is not None else None,
-            sampling_mask=(
-                [mask["ids"][a:b] for a, b in zip(mask["offsets"], mask["offsets"][1:], strict=False)]
-                if mask is not None
-                else None
-            ),
+            sampling_mask=[mask["ids"][a:b] for a, b in spans] if mask is not None else None,
+            sampling_mask_logprobs=([mask_logprobs[a:b] for a, b in spans] if mask_logprobs is not None else None),
+            media=[_media_from_json(item) for item in data.get("media") or ()],
         )
 
 
-def build_samples(graph: MessageGraph) -> list[Sample]:
-    trained: set[int] = set()
+def build_samples(graph: MessageGraph, rule: PathRule = all_paths) -> list[Sample]:
+    """A sample per row ``rule`` picks from the graph."""
+    return samples_for(graph, rule(graph))
+
+
+def samples_for(graph: MessageGraph, rows: Iterable[Row]) -> list[Sample]:
+    """A sample per row, once ``check_rows`` has accepted them."""
     samples: list[Sample] = []
-    for path in graph.paths():
-        targets = [node for node in path if graph.nodes[node].author == "model" and node not in trained]
-        trained.update(targets)
-        sample = Sample(
-            leaf=path[-1], path=path, messages=[graph.nodes[node].message for node in path], targets=targets
-        )
+    for path, targets in check_rows(graph, rows):
         nodes = [graph.nodes[node] for node in path]
+        sample = Sample(
+            leaf=path[-1], path=list(path), messages=[node.message for node in nodes], targets=list(targets)
+        )
         if all(node.tokens is not None for node in nodes):
             _fill_tokens(sample, nodes, set(targets))
         samples.append(sample)
@@ -92,12 +110,15 @@ def _fill_tokens(sample: Sample, nodes: list[Node], targets: set[int]) -> None:
     loss_mask: list[int] = []
     logprobs: list[float] = []
     mask_rows: list[list[int]] | None = []
+    mask_logprobs: list[list[float]] | None = []
     saw_mask = False
     routed: list[np.ndarray] | None = []
+    media: list[Media] = []
     for node in nodes:
         tokens = node.tokens
         assert tokens is not None
         length = len(tokens.token_ids)
+        media.extend(item.shifted(len(input_ids)) for item in tokens.media)
         input_ids.extend(tokens.token_ids)
         logprobs.extend(tokens.logprobs if tokens.logprobs is not None else [0.0] * length)
         trains = node.id in targets and tokens.sampled_start is not None
@@ -113,21 +134,51 @@ def _fill_tokens(sample: Sample, nodes: list[Node], targets: set[int]) -> None:
                 saw_mask = True
                 mask_rows.extend([] for _ in range(start))
                 mask_rows.extend(tokens.sampling_mask)
+        if mask_logprobs is not None:
+            if not trains:
+                mask_logprobs.extend([] for _ in range(length))
+            elif tokens.sampling_mask_logprobs is None:
+                mask_logprobs = None
+            else:
+                mask_logprobs.extend([] for _ in range(start))
+                mask_logprobs.extend(tokens.sampling_mask_logprobs)
         if routed is not None:
             if tokens.routed_experts is None or len(tokens.routed_experts) != length:
                 routed = None
             else:
                 routed.append(np.asarray(tokens.routed_experts))
     sample.input_ids, sample.loss_mask, sample.logprobs = input_ids, loss_mask, logprobs
+    sample.media = media
     sample.sampling_mask = mask_rows if saw_mask else None
+    sample.sampling_mask_logprobs = mask_logprobs if saw_mask and mask_rows is not None else None
     if routed:
         sample.routed_experts = np.concatenate(routed)
 
 
-def _csr(rows: list[list[int]]) -> dict[str, list[int]]:
+def _media_json(item: Media) -> dict[str, Any]:
+    data = None if item.data is None else {key: pack(np.asarray(value)) for key, value in item.data.items()}
+    return {"modality": item.modality, "offset": item.offset, "length": item.length, "hash": item.hash, "data": data}
+
+
+def _media_from_json(item: dict[str, Any]) -> Media:
+    data = item.get("data")
+    return Media(
+        modality=item["modality"],
+        offset=item["offset"],
+        length=item["length"],
+        hash=item["hash"],
+        data=None if data is None else {key: unpack(value) for key, value in data.items()},
+    )
+
+
+def _csr(rows: list[list[int]], logprobs: list[list[float]] | None = None) -> dict[str, Any]:
+    """The rows as CSR ids, with their sampler logprobs, when given, as a packed float32 array."""
     offsets = [0]
     ids: list[int] = []
     for row in rows:
         ids.extend(row)
         offsets.append(len(ids))
-    return {"ids": ids, "offsets": offsets}
+    out: dict[str, Any] = {"ids": ids, "offsets": offsets}
+    if logprobs is not None:
+        out["logprobs"] = pack(np.fromiter((v for row in logprobs for v in row), dtype=np.float32, count=len(ids)))
+    return out

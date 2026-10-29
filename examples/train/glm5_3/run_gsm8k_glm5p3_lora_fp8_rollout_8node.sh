@@ -88,7 +88,7 @@ INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION="${INFERENCE_ENGINE_GPU_MEMORY_UTILIZATI
 # fp8: vLLM's online per-tensor FP8 (one scale per weight, per expert for MoE). fp8_per_block
 # (128x128 blocks) fails on the first weight sync with vLLM 0.30 + torch 2.13: the reload hands a
 # vLLM parameter subclass to the torch.compile'd per_block_cast_to_fp8 and dynamo hits
-# RecursionError in its __torch_function__.
+# RecursionError in its __torch_function__ (worked around by patch_per_block_fp8_param).
 # load_format=dummy: SkyRL syncs the trainer's weights before the first generation anyway, and a
 # broken reload then shows up as garbage instead of silently keeping the checkpoint weights.
 VLLM_QUANTIZATION="${VLLM_QUANTIZATION:-fp8}"

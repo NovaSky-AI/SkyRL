@@ -164,7 +164,7 @@ class RayGpuMonitor:
                 resp = client.get(url)
                 resp.raise_for_status()
             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-                logger.debug(f"RayGpuMonitor: failed to scrape {url}: {exc}")
+                logger.warning(f"RayGpuMonitor: failed to scrape {url}: {exc}")
                 continue
             try:
                 parsed = parse_metrics_text(resp.text)

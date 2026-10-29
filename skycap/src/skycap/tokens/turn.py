@@ -2,7 +2,11 @@
 
 Planning, in order:
 
-1. Match the request's messages against the graph in message space.
+1. Match the request's messages against the graph in message space: walk
+   down from the root by match hash, one message at a time. When a message
+   has no node with its hash, it may still be a stored message spelled
+   differently; if the renderer renders both alike, it matches that node and
+   the walk continues (``_match``).
 2. If the matched prefix contains a model node, bridge from the deepest one:
    the renderer extends that call's exact prompt and completion with the new
    messages instead of re-rendering what the model sampled.
@@ -12,10 +16,17 @@ Planning, in order:
 4. Split the new tokens into one chunk per new message using the renderer's
    attribution. Scaffold belongs to the message that follows it; scaffold
    after the last message is the generation prompt, which opens the model node.
+   A multimodal item (an image) belongs to the chunk its placeholder tokens
+   sit in.
 
 Committing adds those nodes and the model node (its scaffold plus the sampled
 completion), each with its slice of the routed experts. The model node also
 gets logprobs and the sampling mask.
+
+The engine needs every item in the prompt, not only the new ones: a bridged
+prompt's earlier items are read from the nodes on its path, and a full render
+returns them all. Matching a node by its tokens also requires its items, since
+two images of one size have the same placeholder tokens.
 """
 
 from __future__ import annotations
@@ -29,7 +40,7 @@ import numpy as np
 from skycap import hashing
 from skycap.graph import CallInfo, MessageGraph, NodeTokens
 from skycap.tokens.engine import EngineOutput
-from skycap.tokens.renderer import TokenRenderer
+from skycap.tokens.renderer import Media, Rendered, TokenRenderer
 
 
 class TokenError(Exception):
@@ -47,6 +58,13 @@ class Plan:
     chunks: list[list[int]]
     scaffold: list[int]
     bridged: bool
+    #: One match hash per request message: a matched message's is its node's, which differs from
+    #: the request's own for a message matched in another spelling, so committing it finds that node.
+    matches: list[str]
+    #: Every multimodal item in ``prompt_ids``, with offsets into it: what the engine is sent.
+    media: list[Media]
+    #: Per chunk, its items, with offsets relative to the chunk.
+    chunk_media: list[list[Media]]
 
 
 def routes_from(graph: MessageGraph, planned: Plan) -> int:
@@ -65,35 +83,139 @@ def routes_from(graph: MessageGraph, planned: Plan) -> int:
     return planned.prefix_len - 1
 
 
-def match_hashes(messages: Sequence[Mapping[str, Any]], tools: str, model: str | None) -> list[str]:
-    return [hashing.token_match_hash(m, tools=tools, model=model) for m in messages]
-
-
 def plan(
     graph: MessageGraph,
     renderer: TokenRenderer,
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
-    matches: Sequence[str],
+    key: hashing.MatchKey,
 ) -> Plan:
+    """Where a request attaches to the graph, the prompt tokens it sends, and its new nodes' tokens.
+
+    ``key`` is the call's ``MatchKey.tokens``. The steps are in the module
+    docstring. Planning changes the graph only by recording aliases for
+    messages matched in another spelling.
+    """
     if not messages:
         raise TokenError("a request needs at least one message")
-    matched = graph.match(matches)
-    bridged = _bridge(graph, renderer, messages, tools, matched)
+    matches = [key(message) for message in messages]
+    matched, rendered = _match(graph, renderer, messages, tools, matches, key)
+    # A matched message takes its node's hash, which differs from the request's for a respelling.
+    resolved = list(matches)
+    for depth, node_id in enumerate(matched):
+        resolved[depth] = graph.nodes[node_id].match_hash
+    bridged = _bridge(graph, renderer, messages, tools, matched, resolved)
     if bridged is not None:
         return bridged
-    rendered = renderer.render(messages, tools)
+    if rendered is None:
+        rendered = renderer.render(messages, tools)
     prompt = rendered.token_ids
     offset, parent, start = 0, None, 0
     for depth, node_id in enumerate(matched):
         tokens = graph.nodes[node_id].tokens
         if tokens is None or prompt[offset : offset + len(tokens.token_ids)] != tokens.token_ids:
             break
+        if _identities(tokens.media, 0) != _identities(_within(rendered.media, offset, len(tokens.token_ids)), offset):
+            break
         offset += len(tokens.token_ids)
         parent, start = node_id, depth + 1
     indices = [i - start if i >= 0 else -1 for i in rendered.tail_indices[offset:]]
     chunks, scaffold = attribute(prompt[offset:], indices, len(messages) - start)
-    return Plan(prompt, parent, offset, start, chunks, scaffold, bridged=False)
+    chunk_media = attribute_media(_within(rendered.media, offset, len(prompt) - offset), offset, chunks)
+    return Plan(
+        prompt,
+        parent,
+        offset,
+        start,
+        chunks,
+        scaffold,
+        bridged=False,
+        matches=resolved,
+        media=list(rendered.media),
+        chunk_media=chunk_media,
+    )
+
+
+def _match(
+    graph: MessageGraph,
+    renderer: TokenRenderer,
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    matches: Sequence[str],
+    key: hashing.MatchKey,
+) -> tuple[list[int], Rendered | None]:
+    """The longest prefix of ``messages`` in the graph, and the full render if one was needed.
+
+    The walk down the graph by match hash stops at the first message with no
+    node under its parent. That message may still be a stored message spelled
+    differently, e.g. ``content: ""`` against no ``content``. Whether two
+    spellings are the same message depends on the chat template, so the renderer
+    decides: a child of the parent whose rendered fields agree once empty
+    strings are dropped is swapped into the request, and if the request renders
+    to the same tokens either way, the message is that node. Its hash is
+    recorded as an alias, so later requests sending this spelling match by hash,
+    and the walk continues from that node.
+
+    Cost, for ``n`` messages: hash lookups are ``O(n)``, since the walk never
+    restarts. Renders happen only for a message whose hash misses and that has
+    a candidate: one render of the request, plus one per distinct candidate
+    spelling (``_candidates``). Each spelling is checked once per parent; after
+    that its alias matches by hash.
+    """
+    rendered: Rendered | None = None
+    matched = graph.match(matches)
+    while len(matched) < len(messages):
+        depth = len(matched)
+        parent = matched[-1] if matched else None
+        same = None
+        for node_id in _candidates(graph, parent, messages[depth], key):
+            if rendered is None:
+                rendered = renderer.render(messages, tools)
+            swapped = [*messages[:depth], graph.nodes[node_id].message, *messages[depth + 1 :]]
+            if renderer.render(swapped, tools).token_ids == rendered.token_ids:
+                same = node_id
+                break
+        if same is None:
+            break
+        graph.alias(parent, matches[depth], same)
+        matched += [same, *graph.match(matches[depth + 1 :], parent=same)]
+    return matched, rendered
+
+
+def _candidates(
+    graph: MessageGraph, parent: int | None, message: Mapping[str, Any], key: hashing.MatchKey
+) -> list[int]:
+    """Children of ``parent`` that may be ``message`` spelled differently, one per spelling.
+
+    A child qualifies if its fields equal the message's once empty strings are
+    dropped too, and it was matched by this call's key: the same tools and
+    model. Siblings with the same match hash render alike, so only one is
+    tried: the latest, the one history continues from, as in
+    ``MessageGraph.add``.
+    """
+    loose = _loose(message, key)
+    found: list[int] = []
+    for node_id in graph.children(parent):
+        node = graph.nodes[node_id]
+        if _loose(node.message, key) != loose:
+            continue
+        if key(node.message) != node.match_hash:
+            continue
+        found.append(node_id)
+
+    by_spelling: dict[str, int] = {}
+    for node_id in sorted(found, reverse=True):
+        by_spelling.setdefault(graph.nodes[node_id].match_hash, node_id)
+    return list(by_spelling.values())
+
+
+def _loose(message: Mapping[str, Any], key: hashing.MatchKey) -> dict[str, Any]:
+    """The fields ``key`` matches ``message`` on, with empty strings dropped as well as empty values."""
+    loose = {}
+    for field, value in key.fields(message).items():
+        if value != "":
+            loose[field] = value
+    return loose
 
 
 def _bridge(
@@ -102,6 +224,7 @@ def _bridge(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]] | None,
     matched: list[int],
+    matches: list[str],
 ) -> Plan | None:
     """Extend the deepest matched model call, if there is one and the renderer agrees."""
     for depth in range(len(matched) - 1, -1, -1):
@@ -114,19 +237,78 @@ def _bridge(
         ss = node.tokens.sampled_start
         previous_prompt = [t for i in matched[:depth] for t in _tokens(graph, i)] + node.tokens.token_ids[:ss]
         previous_completion = node.tokens.token_ids[ss:]
-        rendered = renderer.bridge(previous_prompt, previous_completion, new_messages, tools)
+        previous_media = path_media(graph, matched[: depth + 1])
+        rendered = renderer.bridge(previous_prompt, previous_completion, new_messages, tools, previous_media)
         if rendered is None:
             return None
         chunks, scaffold = attribute(rendered.token_ids[rendered.reused :], rendered.tail_indices, len(new_messages))
-        return Plan(rendered.token_ids, node.id, rendered.reused, depth + 1, chunks, scaffold, bridged=True)
+        return Plan(
+            rendered.token_ids,
+            node.id,
+            rendered.reused,
+            depth + 1,
+            chunks,
+            scaffold,
+            bridged=True,
+            matches=matches,
+            media=[*previous_media, *rendered.media],
+            chunk_media=attribute_media(list(rendered.media), rendered.reused, chunks),
+        )
     return None
 
 
-def _tokens(graph: MessageGraph, node_id: int) -> list[int]:
+def path_media(graph: MessageGraph, path: Sequence[int]) -> list[Media]:
+    """The items of the nodes on ``path``, with offsets into the path's concatenated tokens."""
+    media: list[Media] = []
+    position = 0
+    for node_id in path:
+        tokens = _node_tokens(graph, node_id)
+        media.extend(item.shifted(position) for item in tokens.media)
+        position += len(tokens.token_ids)
+    return media
+
+
+def _within(media: Sequence[Media], start: int, length: int) -> list[Media]:
+    """The items whose placeholders start in ``[start, start + length)``."""
+    return [item for item in media if start <= item.offset < start + length]
+
+
+def _identities(media: Sequence[Media], base: int) -> list[tuple[str, int, int, str]]:
+    return [(item.modality, item.offset - base, item.length, item.hash) for item in media]
+
+
+def attribute_media(media: Sequence[Media], start: int, chunks: Sequence[Sequence[int]]) -> list[list[Media]]:
+    """Each chunk's items, offsets relative to the chunk. ``start`` is where the first chunk begins.
+
+    An item belongs to the chunk its placeholders lie in; one that starts in no
+    chunk (the generation prompt) or crosses a chunk's end can't be attributed.
+    """
+    out: list[list[Media]] = [[] for _ in chunks]
+    bounds = []
+    for chunk in chunks:
+        bounds.append((start, start + len(chunk)))
+        start += len(chunk)
+    for item in media:
+        for index, (begin, end) in enumerate(bounds):
+            if begin <= item.offset < end:
+                if item.offset + item.length > end:
+                    raise TokenError(f"{item.modality} placeholder at {item.offset} crosses a message boundary")
+                out[index].append(item.shifted(-begin))
+                break
+        else:
+            raise TokenError(f"{item.modality} placeholder at {item.offset} is in no message")
+    return out
+
+
+def _node_tokens(graph: MessageGraph, node_id: int) -> NodeTokens:
     tokens = graph.nodes[node_id].tokens
     if tokens is None:
         raise TokenError(f"node {node_id} on a token path has no tokens")
-    return tokens.token_ids
+    return tokens
+
+
+def _tokens(graph: MessageGraph, node_id: int) -> list[int]:
+    return _node_tokens(graph, node_id).token_ids
 
 
 def attribute(token_ids: Sequence[int], indices: Sequence[int], count: int) -> tuple[list[list[int]], list[int]]:
@@ -166,7 +348,6 @@ def commit(
     turn: Plan,
     *,
     messages: Sequence[Mapping[str, Any]],
-    matches: Sequence[str],
     reply: Mapping[str, Any],
     reply_match: str,
     output: EngineOutput,
@@ -187,10 +368,14 @@ def commit(
             role=messages[index].get("role"),
             author="client",
             message=messages[index],
-            match_hash=matches[index],
-            delta_hash=hashing.client_token_delta_hash(matches[index], chunk),
+            match_hash=turn.matches[index],
+            delta_hash=hashing.client_token_delta_hash(turn.matches[index], chunk, turn.chunk_media[offset]),
             created_at=call.t_start,
-            tokens=NodeTokens(token_ids=list(chunk), routed_experts=routed.slice(position, len(chunk))),
+            tokens=NodeTokens(
+                token_ids=list(chunk),
+                routed_experts=routed.slice(position, len(chunk)),
+                media=list(turn.chunk_media[offset]),
+            ),
         )
         parent, position = node.id, position + len(chunk)
 
@@ -210,6 +395,7 @@ def commit(
             logprobs=[0.0] * sampled_start + list(output.logprobs),
             routed_experts=routed.slice(position, len(tokens)),
             sampling_mask=output.sampling_mask,
+            sampling_mask_logprobs=output.sampling_mask_logprobs,
         ),
     )
     reply_node.calls.append(call)

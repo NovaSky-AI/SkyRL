@@ -6,10 +6,62 @@ optimizer-offload policy applied before and after the sync. CPU-only: the
 dispatch is built via ``__new__`` with mocked actor groups and client.
 """
 
+import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import ray
+
+from skyrl.train.utils import Timer, deadline
+from skyrl.train.utils.deadline import StepTimeoutError
+
+
+@ray.remote
+class _BlockingForwardBackwardWorker:
+    def forward_backward(self):
+        time.sleep(30)
+
+
+class _BlockingForwardBackwardGroup:
+    def __init__(self, actor):
+        self.actor = actor
+
+    def async_run_ray_method(self, dispatch_type, method, *args, **kwargs):
+        assert (dispatch_type, method) == ("mesh", "forward_backward")
+        return [self.actor.forward_backward.remote()]
+
+
+class ForwardBackwardTimeoutError(StepTimeoutError):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_forward_backward_times_out_on_cpu():
+    from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+    actor = _BlockingForwardBackwardWorker.remote()
+    dispatch = WorkerDispatch.__new__(WorkerDispatch)
+    dispatch._actor_groups = {"policy": _BlockingForwardBackwardGroup(actor)}
+    dispatch._ensure_on_gpu = MagicMock()
+    dispatch.ensure_active_adapter = MagicMock()
+    dispatch._save_memory_snapshot = MagicMock()
+
+    started_at = time.monotonic()
+    try:
+        async with deadline.step_deadline(7, 0.2, ForwardBackwardTimeoutError):
+            with Timer("train_critic_and_policy"):
+                with pytest.raises(ForwardBackwardTimeoutError) as exc_info:
+                    dispatch.forward_backward("policy", SimpleNamespace())
+    finally:
+        ray.kill(actor)
+
+    assert time.monotonic() - started_at < 5
+    assert (exc_info.value.stage, exc_info.value.operation) == (
+        "train_critic_and_policy",
+        "forward_backward",
+    )
 
 
 # NOTE: this duplicates the config helper in test_megatron_correctness.py, but that is
@@ -129,21 +181,25 @@ class TestSaveWeights:
 
     @pytest.mark.asyncio
     async def test_non_colocated_resumes_on_broadcast_failure(self):
-        """resume_generation must be called even if broadcast raises."""
+        """A failed resume must not hide the broadcast failure."""
         from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
         dispatch.cfg = _fft_dispatch_cfg()
         dispatch._inference_engine_client = AsyncMock()
-        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=RuntimeError("broadcast failed"))
+        dispatch._inference_engine_client.resume_generation.side_effect = ConnectionError("resume failed")
+        primary = RuntimeError("broadcast failed")
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=primary)
         dispatch._prepare_for_weight_sync = AsyncMock()
         dispatch._finish_weight_sync = MagicMock()
         dispatch.ensure_active_adapter = MagicMock()
 
-        with pytest.raises(RuntimeError, match="broadcast failed"):
+        with pytest.raises(RuntimeError) as exc_info:
             await dispatch.save_weights_for_sampler()
 
+        assert exc_info.value is primary
+        assert "resume_generation also failed during cleanup: ConnectionError('resume failed')" in primary.__notes__
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
 
@@ -203,6 +259,102 @@ class TestSaveWeights:
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
+
+    @staticmethod
+    def _nccl_dispatch(broadcast):
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = False
+        dispatch.cfg = _fft_dispatch_cfg()
+        dispatch._inference_engine_client = AsyncMock()
+        dispatch._inference_engine_client.increment_weight_version = MagicMock()
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=broadcast)
+        dispatch._prepare_for_weight_sync = AsyncMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+        return dispatch
+
+    @pytest.mark.asyncio
+    async def test_broadcast_does_not_block_event_loop(self):
+        """The broadcast blocks on ``ray.get``. A timeout armed by a coroutine sharing the
+        loop (a fully-async generator's HTTP request) must not expire because of it."""
+        dispatch = self._nccl_dispatch(lambda *args, **kwargs: time.sleep(0.5))
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        async with asyncio.timeout(0.2):
+            await asyncio.sleep(0.05)
+        assert not sync.done()
+        await sync
+
+        dispatch._broadcast_to_inference_engines.assert_called_once()
+        assert dispatch.last_weight_sync_seconds >= 0.5
+
+    @pytest.mark.asyncio
+    async def test_cancellation_waits_for_the_transfer_before_resuming(self):
+        """A cancellation mid-broadcast must not resume generation onto partially transferred weights."""
+        events = []
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.3)
+            events.append("broadcast_done")
+
+        dispatch = self._nccl_dispatch(broadcast)
+        dispatch._inference_engine_client.resume_generation.side_effect = lambda: events.append("resumed")
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        sync.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sync
+
+        assert events == ["broadcast_done", "resumed"]
+
+    @pytest.mark.asyncio
+    async def test_cancellation_survives_a_failed_transfer(self):
+        """A transfer that fails after the cancellation arrived must not replace the cancellation."""
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.3)
+            raise RuntimeError("broadcast failed")
+
+        dispatch = self._nccl_dispatch(broadcast)
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        sync.cancel()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await sync
+
+        assert isinstance(raised.value.__cause__, RuntimeError)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel, expected", [(False, RuntimeError), (True, asyncio.CancelledError)])
+    async def test_offload_kv_wakes_kv_cache_before_resuming(self, cancel, expected):
+        """However the sync is interrupted, generation must not resume onto a sleeping KV cache."""
+        events = []
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.2)
+            events.append("broadcast_done")
+            if not cancel:
+                raise RuntimeError("broadcast failed")
+
+        dispatch = self._nccl_dispatch(broadcast)
+        dispatch.cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+        dispatch.cfg.trainer.fully_async = SimpleNamespace(enabled=True, clear_kv_cache_on_weight_sync=False)
+        client = dispatch._inference_engine_client
+        client.wake_for_weight_sync.side_effect = lambda tags: events.append(f"wake_{tags[0]}")
+        client.resume_generation.side_effect = lambda: events.append("resumed")
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        if cancel:
+            sync.cancel()
+        with pytest.raises(expected):
+            await sync
+
+        assert events == ["wake_weights", "broadcast_done", "wake_kv_cache", "resumed"]
 
 
 def _adapter_sync_dispatch(*, model_on_gpu: bool, optimizer_on_gpu: bool = False):
@@ -282,7 +434,7 @@ class TestAdapterOnlyColocatedSync:
         from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
 
         dispatch = _adapter_sync_dispatch(model_on_gpu=False)
-        monkeypatch.setattr(wd.ray, "get", lambda _: None)
+        monkeypatch.setattr(wd.deadline.ray, "get", lambda _: None)
 
         await dispatch.save_weights_for_sampler(model_id="m1")
 
@@ -302,7 +454,7 @@ class TestAdapterOnlyColocatedSync:
         from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
 
         dispatch = _adapter_sync_dispatch(model_on_gpu=False)
-        monkeypatch.setattr(wd.ray, "get", lambda _: None)
+        monkeypatch.setattr(wd.deadline.ray, "get", lambda _: None)
 
         await dispatch.save_weights_for_sampler(model_id="m1")
 
@@ -317,7 +469,7 @@ class TestAdapterOnlyColocatedSync:
         from skyrl.backends.skyrl_train.workers import worker_dispatch as wd
 
         dispatch = _adapter_sync_dispatch(model_on_gpu=True, optimizer_on_gpu=True)
-        monkeypatch.setattr(wd.ray, "get", lambda _: None)
+        monkeypatch.setattr(wd.deadline.ray, "get", lambda _: None)
 
         await dispatch.save_weights_for_sampler(model_id="m1")
 

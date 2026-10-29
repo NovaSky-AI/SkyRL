@@ -210,6 +210,8 @@ async def test_sustained_model_path_rollouts_training_futures_and_heartbeats(fut
                         sample_request,
                         session,
                     )
+                assert response.sample_sequence_ids is not None
+                assert len(response.sample_sequence_ids) == 1
                 return int(response.request_id)
 
             async def create_training_future(index: int) -> None:

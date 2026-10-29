@@ -19,13 +19,20 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | test | covers |
 |---|---|
 | `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
-| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection |
+| `patches/megatron/mcore_ext/test_hyper_connection_proj_rms.py` (CPU) | `mcore_ext/hyper_connection.py` projection: bitwise vs plain autograd, no saved FP32 copy |
+| `patches/megatron/mcore_ext/test_mhc_moe_chunking.py` (CPU) | `mcore_ext/mhc_transformer_layer.py` `chunked_mlp`: chunked MLP/MoE matches one call |
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection, query chunking |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
+| `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
+| `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
+| `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
+| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py` | `patch_checkpoint_without_output_frozen_inputs.py`; the unpatched case doubles as the landed check |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -76,7 +83,9 @@ model, `glm5_next/` is deleted too.
 Two pieces, which may land separately.
 
 **a) Standard-RMSNorm input norm**
-- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`).
+- **Carried as:** `mcore_ext/hyper_connection.py` (`RMSNormInputHyperConnectionModule`; its FP32
+  projection is checkpointed so backward keeps the activation-dtype input, not the FP32 upcast:
+  2 GiB per mHC site at 32k tokens per rank. #7521 still saves the upcast; worth proposing there).
 - **Landed?** `TransformerConfig` has `mhc_norm_eps` / `mhc_norm_eps_inside_sqrt`, and
   `HyperConnectionModule` reads them.
 - **Remove:**
@@ -88,8 +97,15 @@ Two pieces, which may land separately.
 
 **b) MoE sub-layers in the mHC layer**
 - **Carried as:** `mcore_ext/mhc_transformer_layer.py` (`HyperConnectionTransformerLayer`).
+  - The layer replaces megatron-core's `_forward_mlp`, where `mlp_chunks_for_training` is applied,
+    so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
+    data, routing sends some expert ranks several times their share of tokens; chunking bounds their
+    dispatch/expert/combine buffers.
+  - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
+    `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
+    `TransformerLayer._forward_mlp`.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
-  no `NotImplementedError` for MoE.
+  no `NotImplementedError` for MoE. Check that it honors `mlp_chunks_for_training` before switching.
 - **Remove:**
   - `glm5_next/layer_specs.py`: build the specs on megatron-core's layer.
   - `workers/megatron/megatron_worker.py`: the `enable_mhc_connections` block in `init_configs`
@@ -101,7 +117,8 @@ Two pieces, which may land separately.
     full recompute with mHC. SkyRL's default config is full recompute, and the GLM roundtrip
     tests run on defaults.
   - Delete `mcore_ext/mhc_transformer_layer.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_hyper_connection_matches_hf`,
+  `patches/megatron/mcore_ext/test_mhc_moe_chunking.py`; the GLM roundtrip rows.
   These run with the default full recompute, so they exercise the worker block above.
 
 ### NVIDIA/Megatron-LM#7522: k-pool DSA indexer
@@ -110,7 +127,24 @@ This is the riskiest entry. A wrong k-pool selection doesn't raise. It silently 
 different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (2048).
 
 - **Carried as:**
-  - `mcore_ext/dsa_kpool.py`: the six k-pool kernels, copied verbatim from #7522.
+  - `mcore_ext/dsa_kpool.py`: the six k-pool kernels, copied from #7522. One deliberate
+    deviation: `fused_qk_topk_kpool` scores and selects in query chunks. Verbatim, it
+    materializes FP32 `[sq, b, heads, sq / kpool]` per-head scores (32 GiB/GPU at 32k), so
+    GLM-5.3-Flash can't train past ~16k. Top-k is per query row, so chunking is exact
+    (`test_kpool_query_chunking_is_exact`); `SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS` sets the chunk
+    cap (default 2 GiB of FP32 scores). Past one chunk the loop follows #7522 @ `b27efd8`, which
+    now chunks too: no-grad, in-place ReLU and head weighting, one FP32 cast of the pooled keys, a
+    preallocated selection. Upstream's cap is a fixed 256 MiB; at 512k (65,536 query rows per TP8
+    rank x 131,072 pools, one B200) one selection takes 3.31 s there vs 2.64 s at 2 GiB and
+    2.60 s at 8 GiB, with peak extra memory 0.6 / 2.4 / 8.6 GiB. When removing, carry the
+    configurable cap over unless upstream's default has grown.
+    Second deviation, opt-in with `SKYRL_DSA_INDEXER_TP_SHARD=1` (wired in `glm5_next/dsa.py`):
+    `query_shard_group` splits the query rows across the tensor-parallel group, whose ranks all
+    score the same gathered sequence with the same frozen indexer weights, and all-gathers the
+    pool selections. The scoring is O(sq^2) (every query scores every pool) and was redundant on
+    every TP rank: at 512k tokens, TP8, 64 B200 (TCP NCCL) sharding cut warm fwd+bwd 1545 -> 1094 s,
+    i.e. ~1/3 of the step was replicated indexer scoring. Bitwise-identical selections
+    (`test_dsa_kpool_tp_shard.py`).
   - `glm5_next/dsa.py`:
     - `Glm5NextDSAIndexer`: k-pool gate/ape parameters and the gate score, hand-merged onto the
       pinned `DSAIndexer`;
@@ -191,6 +225,20 @@ softmax, which OOMs at 32k. Only active with `dsa_kernel_backend="tilelang"`.
   module, and its CPU and GPU tests (`test_sparse_mla_nope.py`, and its line in
   `ci/gpu_ci_run_h100.sh`).
 
+### `patch_moe_release_dispatcher_probs.py`: no upstream PR yet
+
+`MoEAlltoAllTokenDispatcher.dispatch_preprocess` stores `self.probs` (the router output, with its
+`grad_fn`) and only the same forward's `combine_preprocess` reads it. Kept until the next forward,
+it pins that forward's autograd graph; under full recompute that is every MoE layer's recomputed
+graph for the rest of backward (~21 GiB/GPU at 64k tokens on GLM-5.3-Flash). Generic MoE + full
+recompute, not GLM- or mHC-specific (NVIDIA/Megatron-LM#7521 makes it reachable for megatron-core's
+own mHC layers). The release wraps `MoELayer.postprocess`, where every MoE forward ends, so
+patches that replace dispatcher methods can't drop it. Applied unconditionally in
+`make_megatron_module`.
+- **Landed?** megatron-core's dispatcher clears `self.probs` after the combine (or stops storing it).
+- **Remove:** the module, its call in `make_megatron_module`, and
+  `patches/megatron/test_moe_release_dispatcher_probs.py`.
+
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 
 Shared-expert LoRA forward scaling under shared-expert overlap. It only activates when
@@ -199,6 +247,29 @@ Shared-expert LoRA forward scaling under shared-expert overlap. It only activate
   contains `_external_tp_reduce_scale`.
 - **Remove:** the module-level `apply_shared_expert_lora_tp_patch()` call and import in
   `megatron_worker.py`, the module, and its two-rank GPU test.
+
+### `patch_distopt_mixed_dtype_group_index.py`: NVIDIA/Megatron-LM#2872 (and #5835 on `dev`)
+
+`DistributedOptimizer` records each model param's main-param position in grad-buffer order (bf16 buffer, then
+fp32), then installs each optimizer group as `[*fp32 shards, *fp32-from-float16 shards]`. In a group that mixes
+dtypes (DeepSeek-V4/V4.1 mHC `mapping_proj` and compressor `ape`, GLM-5.3 mHC) every lookup lands one param off,
+and full-finetune checkpoint save fails with a shape mismatch in `sharded_param_state_*`. The patch rebuilds
+`model_param_group_index_map` from `model_fp32_groups` / `model_float16_groups` after `__init__`.
+- **Landed?** `DistributedOptimizer.__init__` rebuilds the map itself (#2872 on `main`; #5835 merged 2026-07-18
+  into `dev` only, so not in a `main` pin).
+- **Remove:** the `apply_distopt_mixed_dtype_group_index_patch()` call and import in `megatron_worker.py`, the
+  module, and `patches/megatron/test_distopt_mixed_dtype_group_index.py`.
+
+### `patch_clip_grads_mixed_dtype.py`: NVIDIA/Megatron-LM#7279 (issue #7338)
+
+With the precision-aware optimizer the grads passed to `get_grad_norm_fp32` / `clip_grad_by_total_norm_fp32` keep
+each param's dtype, so models with fp32-kept params hand one fused multi-tensor launch a mixed bf16/fp32 list and
+the first step dies with "CUDA error: an illegal memory access". The patch wraps `clip_grads.multi_tensor_applier`
+to launch once per dtype and recombine the L2 norm as sqrt(sum of squared group norms); #7279 does the same inside
+the two functions (`_group_grads_by_dtype`).
+- **Landed?** `clip_grads.py` has `_group_grads_by_dtype` (or otherwise splits by dtype before each launch).
+- **Remove:** the `apply_clip_grads_mixed_dtype_patch()` call and import in `megatron_worker.py`, the module, and
+  `patches/megatron/test_clip_grads_mixed_dtype.py`.
 
 ### `patch_dsa_hybrid_indexer.py`: SkyRL-only, no upstream counterpart
 
@@ -214,6 +285,21 @@ k-pool indexer (`index_kpool > 1`) selects through `fused_qk_topk_kpool` and byp
 - **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
+
+### `patch_checkpoint_without_output_frozen_inputs.py`: no upstream PR yet
+
+`CheckpointWithoutOutput` (the `mhc` / `layernorm` / `moe_act` selective-recompute modules) saves its
+inputs with `save_for_backward`, which keeps nothing when none of them requires grad, but its recompute
+hook still fires once a later consumer is trainable. Under LoRA (frozen embeddings and early base weights,
+trainable adapters after the first mHC / layernorm block) backward then runs off the end of
+`ctx.saved_tensors`: `RuntimeError: coroutine raised StopIteration` (DeepSeek-V4 LoRA with
+`recompute_modules=[..., mhc, layernorm]`). The patch keeps references to such inputs on the ctx and
+recomputes from them. Applied unconditionally at `megatron_worker.py` import.
+- **Landed?** megatron-core recomputes (or keeps) inputs that do not require grad: the GPU test
+  `test_unpatched_recompute_fails_on_frozen_inputs` then fails because backward no longer raises.
+- **Remove:** the module-level `apply_checkpoint_without_output_frozen_inputs_patch()` call and import in
+  `megatron_worker.py`, the module, and
+  `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py`.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 

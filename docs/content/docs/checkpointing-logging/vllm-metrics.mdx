@@ -2,88 +2,205 @@
 title: "vLLM Engine Metrics"
 ---
 
-SkyRL can route vLLM's engine-level metrics (queue depth, KV cache usage,
-throughput, latency, prefix-cache hit rate) through Ray's per-node Prometheus
-metrics agents. A small fixed subset is also scraped once per training step
-and merged into the trainer's wandb payload.
-
-## Enabling
-
-This is **on by default**. To disable it:
+SkyRL logs vLLM throughput, latency, cache usage, and preemptions alongside
+training metrics. Collection is enabled by default:
 
 ```yaml
 generator:
   inference_engine:
-    enable_ray_prometheus_stats: false
+    enable_ray_prometheus_stats: true
 ```
 
-When enabled, vLLM's `RayPrometheusStatLogger` is installed on every engine. Each
-engine reports its stats through `ray.util.metrics`, and Ray's per-node
-metrics agent exposes them at `http://<node-ip>:<MetricsExportPort>/metrics`
-in Prometheus text format. 
+vLLM's `RayPrometheusStatLogger` sends metrics to Ray. Each node exposes them at
+`http://<node-ip>:<MetricsExportPort>/metrics`, where Prometheus can scrape them
+for Grafana dashboards. Ray replaces `:` in vLLM metric names with `_` and adds
+the `ray_` prefix. Use counters ending in `_total`; summing them with their
+legacy aliases counts the same events twice.
 
-## Metrics logged to wandb
+## Read step metrics
 
-When the flag is on, the trainer constructs a `VLLMMetricsScraper`
-([trainer.py:122-124](skyrl/train/trainer.py#L122-L124)) that scrapes every
-alive Ray node's metrics endpoint once per training step and merges its
-output into the wandb log payload — the same payload used for training
-metrics, so the keys appear under whatever logger backend is configured
-(`wandb`, `mlflow`, `swanlab`, `tensorboard`, or `console`).
+Sync training logs generation metrics under `vllm/train/` and `vllm/eval/`.
+Fully async training uses `vllm/` because training and evaluation requests can
+overlap. These keys are sent to your configured logger.
 
-Both `Trainer` and `FullyAsyncTrainer` log these:
+Throughput divides token deltas by the time measured for each window. Sync
+training measures time spent in generation calls. Fully async training uses
+elapsed time between samples, including idle time and weight synchronization.
+For example, 12,000 output tokens over a 30-second async window gives
+400 output tokens/s.
 
-| Key                                | Source                       | Aggregation                |
-| ---------------------------------- | ---------------------------- | -------------------------- |
-| `vllm/num_requests_running`        | gauge                        | sum across replicas        |
-| `vllm/num_requests_waiting`        | gauge                        | sum across replicas        |
-| `vllm/kv_cache_usage_perc`         | gauge                        | mean across replicas       |
-| `vllm/generation_throughput_tok_s` | counter delta / Δt           | summed before differencing |
-| `vllm/prompt_throughput_tok_s`     | counter delta / Δt           | summed before differencing |
-| `vllm/prefix_cache_hit_rate`       | hits Δ / queries Δ           | summed before ratio        |
-| `vllm/ttft_seconds_avg`            | histogram sum Δ / count Δ    | summed before ratio        |
-| `vllm/tpot_seconds_avg`            | histogram sum Δ / count Δ    | summed before ratio        |
+| Metric suffix | Calculation across engines |
+| --- | --- |
+| `num_requests_running`, `num_requests_waiting` | Sum of gauges |
+| `kv_cache_usage_perc` | Mean of gauges |
+| `generation_throughput_tok_s`, `prompt_throughput_tok_s` | Token delta / measured seconds |
+| `prefix_cache_hit_rate`, `external_prefix_cache_hit_rate` | Hit-token delta / queried-token delta |
+| `num_preemptions` | Scheduler preemption-event delta |
+| `preemptions_per_million_tokens` | Preemptions × 1e6 / output-token delta |
+| `kv_offload_load_throughput_bytes_s` | Reloaded byte delta / measured seconds |
+| `ttft_seconds_avg`, `tpot_seconds_avg` | Histogram sum delta / count delta |
+| `ttft_seconds_p90`, `tpot_seconds_p90` | P90 from merged histogram bucket deltas |
+| `generation_throughput_cv`, `prompt_throughput_cv` | Standard deviation / mean of per-engine token deltas |
 
-Rate- and ratio-style metrics need two consecutive samples to take a delta,
-so they appear starting from the **second** training step. Counter resets
-(e.g. engine restart) are skipped rather than reported as negative rates.
+TPOT uses vLLM's `request_time_per_output_token_seconds` histogram, which
+matches the Serve LLM dashboard. Older SkyRL runs used ITL for
+`tpot_seconds_avg`, so those values are not comparable. ITL, P50 latency, and
+offload store throughput remain available as raw metrics for Grafana but are
+not sent to the training logger.
 
-The full set of vLLM metrics is still available via the Prometheus endpoints
-themselves — only this curated subset is forwarded to wandb. The selection
-lives in [vllm_metrics_scraper.py:27-51](skyrl/train/utils/vllm_metrics_scraper.py#L27-L51).
+The CV metrics describe how evenly engines share work. They include idle
+engines and report the engine count in a companion `_num_engines` field.
+CV is omitted when fewer than two engines are observed or their mean is zero.
+Compare engines with similar capacity.
 
-## Querying additional metrics
+SkyRL filters metrics to the Ray WorkerIds of the inference server actors it
+launches. Those IDs belong to the API server processes, where vLLM records
+the metrics. The filter does not follow replacement actors. If SkyRL cannot
+obtain these IDs, it disables collection. External deployments require their
+SkyRL servers to expose worker metadata, as described below.
 
-The curated subset above is only what SkyRL forwards to wandb. Every metric the
-vLLM engine exports is still available on the same Ray metrics endpoints, so you
-can query anything vLLM emits — not just the keys in the table.
+Missing counters and ratios with zero denominators are omitted. A failed
+scrape clears the step baseline, and a decreasing counter invalidates that
+window. Ray exports metrics periodically, so a step can observe events from
+an earlier step. Ray's OpenTelemetry histogram conversion also estimates
+observations from bucket midpoints. Latency means and P90 are therefore
+estimates; SkyRL does not merge engines with different bucket boundaries.
 
-To actually query these over time, point a Prometheus server at Ray's metrics
-endpoints (Ray exposes them for exactly this) and use PromQL.
+## Compare run summaries in W&B
 
-Names are sanitized on the way out: vLLM's `:` becomes `_`, and Ray's metrics
-agent prepends `ray_`. So vLLM's `vllm:kv_cache_usage_perc` is exported as
-`ray_vllm_kv_cache_usage_perc`, and histograms expose `_sum` / `_count` /
-`_bucket` samples.
+At the end of a fresh run, SkyRL writes aggregate fields to W&B Summary under
+`vllm_correct_aggregate/train/`, `vllm_correct_aggregate/eval/`, or
+`vllm_correct_aggregate/combined/`. Other loggers continue to receive step metrics.
 
-### Example: KV cache block lifetime
+Run throughput divides total tokens by total measured seconds. For example,
+windows with 1,000 tokens in 10 seconds and 9,000 tokens in 30 seconds give
+250 tokens/s overall. Averaging their step rates would give 200 tokens/s.
+Cache hit rates use total hits / total queries; latency means and P90 use
+merged histogram statistics. Summaries also include token, preemption, and
+offload byte totals, plus `measurement_seconds`, the throughput denominator.
 
-vLLM can emit KV-cache **residency** histograms — block lifetime (allocation →
-eviction), idle time before eviction, and reuse gaps. These are **off by
-default**; start the engine with `--kv-cache-metrics` (they also require log
-stats to be enabled, and are sampled at 1% of blocks via
-`--kv-cache-metrics-sample`). Once on, the series are
-`ray_vllm_kv_block_lifetime_seconds_{sum,count,bucket}`.
+Use these aggregate fields as W&B run-table columns, together with
+`run_status`. Handled exits set status to `success` or `failed`.
+Step values under `vllm/*` remain in history. SkyRL asks W&B to suppress their
+automatic summaries, but the backend can still show inferred last values.
+Use `vllm_correct_aggregate/*` for run comparisons.
 
-Because it's a histogram, query it with `histogram_quantile` over the bucket
-rate — e.g. p95 block lifetime over a 5m window:
+Finalization makes one collection attempt with a 10-second limit. It does not
+wait for the next Ray export. Ray 2.58 defaults to a 10-second reporting
+interval, so a final scrape may miss recent events. Very short runs can finish
+before the first usable export.
+
+A missing or reset window omits that scope's aggregate. Counters missing from
+part of a scope are also omitted. A reused external server needs an observed
+baseline before generation; SkyRL subtracts it from later observations.
+Loading a checkpoint disables run aggregates while preserving step metrics.
+`LATEST` with no checkpoint still counts as a fresh run. A hard kill cannot
+publish final summaries or status.
+
+### Prefill/decode metrics
+
+For SkyRL-managed prefill/decode deployments, metrics are collected separately
+from each role's server actors. Summary keys add a role after the scope:
+`vllm_correct_aggregate/eval/prefill/prompt_tokens_total` and
+`vllm_correct_aggregate/eval/decode/output_tokens_total`, for example. Step keys
+use the same role segment, such as `vllm/eval/prefill/ttft_seconds_avg`.
+
+Each role uses the same metrics and reductions as a regular deployment,
+including running/waiting requests, KV usage, throughput and latency. Engine
+imbalance is computed within each role. Separate queue charts can show whether
+requests are waiting at prefill or decode. Fully async step keys use
+`vllm/prefill/...` and `vllm/decode/...`; sync keys also include `train` or `eval`.
+Scheduler gauges remain step snapshots and are not added to run summaries.
+
+These are engine observations: both roles can count the same prompt, and
+prefill can report a placeholder output token. SkyRL keeps those observations
+in their role scopes without adding the two roles' totals or merging their
+latency histograms. Missing series and undefined ratios remain omitted.
+
+Role TTFT measures time within that engine's request. Prefill and decode TTFT
+describe different parts of serving and cannot be added to obtain client TTFT.
+End-to-end latency includes the proxy and transfer path and needs separate
+client instrumentation.
+
+Both roles retain the fresh-run, baseline and finalization rules above. A
+missing worker or reset omits the affected role's summary. External PD
+deployments without known prefill/decode worker membership disable collection.
+
+### External servers in the same Ray cluster
+
+Launch the servers with `skyrl.train.entrypoints.serve` and enable
+`generator.inference_engine.enable_ray_prometheus_stats=true` on the serving
+config. Enable the same setting in the client config. The client setting
+controls collection; it does not change an already running server's logger.
+
+Set `generator.inference_engine.external_server_urls` to the individual backend
+URLs and `run_engines_locally=false`. You can also set `external_proxy_url` for
+generation through the existing router. SkyRL queries each backend's
+`/get_metrics_worker_info` endpoint for its Ray frontend WorkerId and PD role.
+Collection then uses the same worker filters, role scopes and fresh-run
+summaries as internally launched servers. The servers and client must use the
+same Ray cluster so its metrics agents expose those WorkerIds. If an expected
+WorkerId is absent from the local exports, the affected collector skips the
+snapshot and omits its run summary; it never substitutes unrelated engines.
+Known roles come from the servers, so an external client does not need to
+repeat the serving configuration's `enable_pd` setting for role collection.
+
+Each client run takes its own baseline before generation, excluding earlier
+work served by those engines. Other clients must not send requests to the same
+engines during the measured run; their counters are shared. Engine replacement
+and checkpoint-resume rules remain the same.
+
+Older or non-SkyRL servers, disabled server stats, and proxy-only configurations
+may not expose worker metadata. SkyRL disables collection in that case, and
+also when backend metadata requests fail or PD roles are invalid or incomplete.
+It does not fall back to cluster-wide collection. Generation continues without
+engine step metrics or run summaries.
+
+## Mark runs in Grafana
+
+Enable run annotations in your training config:
+
+```yaml
+trainer:
+  grafana_annotations:
+    enabled: true
+    tags: [training]
+```
+
+SkyRL creates an annotation with the run name and updates it with an end time
+when the run finishes. The `run-id:<uuid>` tag distinguishes runs that share a
+name. Grafana stores annotations in its database.
+
+Requests run on the Ray head and use its `RAY_GRAFANA_HOST` setting, defaulting
+to `http://localhost:3000`. You do not need to set a URL in the training config.
+The cluster must already have Grafana running. If writes require authentication,
+set `GRAFANA_API_TOKEN` on the driver, or use `token_env_var` to name your token
+variable. SkyRL forwards the token to Ray without logging its value.
+
+In the dashboard's annotation settings, add a Grafana organization query
+filtered by the `skyrl-run` tag and show it on all panels. The region covers
+startup through finalization. `organization_id` can override the head's
+`RAY_GRAFANA_ORG_ID` setting, which defaults to 1.
+Annotation failures do not stop training. A failed start request or hard kill
+can leave an annotation without an end time.
+
+## Check against Prometheus
+
+For a rolling TTFT P90, sum engine buckets before calculating the quantile:
 
 ```text
-# p95 KV block lifetime
 histogram_quantile(
-  0.95,
-  sum by (le) (
-    rate(ray_vllm_kv_block_lifetime_seconds_bucket[5m])
-  )
+  0.90,
+  sum by (le) (rate(ray_vllm_time_to_first_token_seconds_bucket[2m]))
 )
 ```
+
+Add cluster and worker filters to select the run's engines. For a run audit,
+record workload start/end times and allow for export and scrape delays when
+checking terminal counters. Prometheus rates use wall time; sync W&B throughput
+uses time in generation calls. Compare the same denominator.
+
+`increase()` cannot recover work that happened before the first scrape. If
+you have verified that fresh engines served only this run, their final
+cumulative counters give its totals. Reused engines require baseline/end
+subtraction and a check for counter resets.

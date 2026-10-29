@@ -9,8 +9,11 @@ it):
   exactly as before this feature existed.
 * the **copy**. Chunks arrive as views into a transport buffer the sender reuses
   immediately, so staging has to clone.
+* the **release**. An armed round skips vLLM's ``finish_weight_update``, so it
+  must still release the receive buffers that call would have released.
 """
 
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -71,6 +74,17 @@ class _Engine(SkyrlReceiveLifecycleMixin, _FakeVllmEngine):
         self.loaded = []
         self.model = _FakeModel(self.loaded)
         self.vllm_config = SimpleNamespace(lora_config=object() if lora_enabled else None)
+
+
+class _BufferHoldingEngine(_Engine):
+    """An engine whose transport keeps a receive buffer until the round ends."""
+
+    def __init__(self, weights):
+        super().__init__(weights)
+        self.releases = 0
+
+    def skyrl_release_receive_buffers(self):
+        self.releases += 1
 
 
 @pytest.fixture(autouse=True)
@@ -161,6 +175,19 @@ class TestArmedRound:
         assert not engine.skyrl_lora_armed()
         assert patch.staged_adapter_names() == []
 
+    def test_releases_receive_buffers(self):
+        engine = _BufferHoldingEngine([("a", torch.ones(1))])
+        engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {}, {}))
+        _run_round(engine)
+        assert engine.releases == 1
+
+    def test_releases_receive_buffers_when_finish_fails(self):
+        engine = _BufferHoldingEngine([])
+        engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {}, {}))
+        with pytest.raises(RuntimeError, match="without receiving any tensors"):
+            _run_round(engine)
+        assert engine.releases == 1
+
     def test_staging_restores_the_model_handle(self):
         """The proxy must compose with set_weight_update_target / the drafter swap."""
         engine = _Engine([("a", torch.ones(1))])
@@ -178,6 +205,48 @@ class TestUnarmedRound:
         ((name, tensor),) = engine.loaded[0]
         assert name == "w" and torch.equal(tensor, torch.ones(2))
         assert patch.staged_adapter_names() == []
+
+    def test_leaves_the_release_to_vllm_finish(self):
+        engine = _BufferHoldingEngine([("w", torch.ones(2))])
+        _run_round(engine)
+        assert engine.calls == ["start", "receive", "finish"]
+        assert engine.releases == 0
+
+
+@pytest.mark.vllm
+def test_ipc_engine_lora_round_releases_packed_buffer_mapping(monkeypatch):
+    """The real CUDA IPC receive engine drops its packed-buffer mapping at the
+    end of an adapter round, as vLLM's own ``finish_weight_update`` does.
+
+    The trainer frees its packed IPC staging buffer only once this mapping is
+    released. ``rebuild_cuda_tensor`` is replaced with a CPU tensor so the
+    importer's mapping can be tracked without a GPU.
+    """
+    pytest.importorskip("vllm", reason="the receive engine subclasses vLLM's IPC engine")
+    import torch.multiprocessing.reductions as reductions
+
+    from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
+        get_skyrl_ipc_engine,
+    )
+
+    # ``PackedBufferImporter.rebuild`` imports ``rebuild_cuda_tensor`` from this
+    # module at call time, so patching the module attribute reaches it.
+    rebuilt = [torch.zeros(8, dtype=torch.uint8)]
+    mapping_ref = weakref.ref(rebuilt[0])
+    monkeypatch.setattr(reductions, "rebuild_cuda_tensor", lambda *args: rebuilt.pop())
+
+    vllm_config = SimpleNamespace(parallel_config=None, model_config=None, lora_config=object())
+    engine = get_skyrl_ipc_engine()(None, vllm_config, torch.device("cpu"), _FakeModel([]))
+    engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {}, {}))
+    engine.start_weight_update()
+    # What ``packed_ipc_consumer`` does with each chunk of a packed transfer.
+    engine._packed_importer.rebuild(["handle"])
+    engine._skyrl_lora_staged["a"] = torch.ones(1)
+    assert mapping_ref() is not None
+
+    engine.finish_weight_update()
+
+    assert mapping_ref() is None
 
 
 class TestStagingRegistry:

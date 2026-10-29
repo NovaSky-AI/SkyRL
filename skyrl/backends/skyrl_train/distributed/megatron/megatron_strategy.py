@@ -42,6 +42,9 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
+from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
+    sync_params_for_export,
+)
 
 # Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
 _PP_SEED_OFFSET = 100
@@ -143,7 +146,21 @@ def _patched_load_parameter_state_from_dp_reshardable(self, state_dict):
     ``_set_main_param_and_optimizer_states`` overwrites it with the stale one.
     ``load_parameter_state_from_fs_model_space`` already filters ``step``;
     here we save/restore it around the original method instead.
+
+    With a HybridDeviceOptimizer, ``load_state_dict`` also gives *every* param a
+    per-param ``step``, including those of the GPU sub-optimizer (TE FusedAdam),
+    which keeps its step in the param group and saves none per param. The original
+    then looks that ``step`` up in the checkpoint and raises ``KeyError``, so drop
+    it from those params first.
     """
+    if isinstance(self.optimizer, HybridDeviceOptimizer):
+        for sub_opt in self.optimizer.sub_optimizers:
+            if isinstance(sub_opt, (torch.optim.Adam, torch.optim.AdamW)):
+                continue
+            for p in sub_opt.state:
+                self.optimizer.state[self.optimizer.inner_param_to_orig_param[p]].pop("step", None)
+                sub_opt.state[p].pop("step", None)
+
     correct_step = None
     for v in self.optimizer.state.values():
         if "step" in v and isinstance(v["step"], torch.Tensor):
@@ -317,6 +334,46 @@ class MegatronStrategy(DistributedStrategy):
             cfg = getattr(opt, "config", None)
             if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
+            elif (
+                init_fn is None
+                and hasattr(inner_opt, "sub_optimizers")
+                and hasattr(inner_opt, "_sync_sub_optimizers_state_to_hdo")
+                and len(inner_opt.state) == 0
+            ):
+                # HybridDeviceOptimizer (optimizer_cpu_offload): megatron-core builds it with init_state_fn=None
+                # and fills its state from the sub-optimizers only after a step. Create the state each
+                # sub-optimizer's first step would, then mirror it into the HDO.
+                for sub_opt in inner_opt.sub_optimizers:
+                    # The GPU sub-optimizer (optimizer_offload_fraction < 1) is TransformerEngine's FusedAdam: its
+                    # moment dtypes, scales and master params are its own, and its step count lives in the group.
+                    # Let it initialize itself exactly as its step() would.
+                    te_initialize_state = getattr(sub_opt, "initialize_state", None)
+                    for group in sub_opt.param_groups:
+                        if te_initialize_state is not None and "step" not in group and group["params"]:
+                            # FusedAdam keeps one step count per group and creates it on its first step(); the
+                            # checkpoint loader matches param groups including it. Start it at 0 so the next
+                            # step() makes it 1, as on a fresh run.
+                            group["step"] = (
+                                torch.tensor([0], dtype=torch.int, device=group["params"][0].device)
+                                if getattr(sub_opt, "capturable", False)
+                                else 0
+                            )
+                        # torch's Adam/AdamW (the CPU sub-optimizer): fused / capturable kernels need `step` on the
+                        # param's device, otherwise it is a CPU scalar.
+                        on_param_device = group.get("fused") or group.get("capturable")
+                        for p in group["params"]:
+                            if len(sub_opt.state[p]) != 0:
+                                continue
+                            if te_initialize_state is not None:
+                                remainders = getattr(sub_opt, "store_param_remainders", False)
+                                te_initialize_state(p, bool(remainders) and p.dtype == torch.bfloat16)
+                                continue
+                            sub_opt.state[p]["step"] = torch.tensor(
+                                0.0, dtype=torch.float32, device=p.device if on_param_device else "cpu"
+                            )
+                            sub_opt.state[p]["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                            sub_opt.state[p]["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                inner_opt._sync_sub_optimizers_state_to_hdo()
 
     def save_checkpoint(
         self,
@@ -331,6 +388,7 @@ class MegatronStrategy(DistributedStrategy):
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
+        sync_params_for_export(model, optimizer)
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
         unwrapped_model = model[0]
         while hasattr(unwrapped_model, "module"):

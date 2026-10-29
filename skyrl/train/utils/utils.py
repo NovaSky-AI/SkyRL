@@ -9,6 +9,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import ray
 import torch
@@ -38,35 +39,45 @@ from skyrl.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
 from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
     SkyRLTrainConfig,
     get_config_as_dict,
 )
+from skyrl.train.utils import deadline
 
 
 class Timer:
+    """Times a block and names it as the current step-deadline stage (see ``deadline.stage``)."""
+
     def __init__(self, message, update_dict=None):
         self.message = message
         self.update_dict = update_dict
 
     def __enter__(self):
         self.start_time = time.time()
+        self._stage = deadline.stage(self.message)
+        self._stage.__enter__()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stage.__exit__(exc_type, exc_val, exc_tb)
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
     async def __aenter__(self):
         self.start_time = time.time()
+        self._stage = deadline.stage(self.message)
+        self._stage.__enter__()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._stage.__exit__(exc_type, exc_val, exc_tb)
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
@@ -268,6 +279,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
+    # The decoupled MTP draft loss rolls logits and labels without context parallelism (see the CP=1
+    # assert in MegatronModelWrapper), for every model.
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is not None and mtp.enabled and cfg.trainer.policy.megatron_config.context_parallel_size > 1:
+        raise ValueError("trainer.mtp.enabled=true is not supported with context_parallel_size > 1")
+
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
         # Megatron's fused top-k returns before compute_topk consults router_replay
@@ -369,6 +386,24 @@ def _validate_draft_weight_sync_cfg(cfg: SkyRLTrainConfig):
         )
 
 
+def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_s: Optional[float]) -> None:
+    for name, value in (("step_timeout_s", step_timeout_s), ("weight_sync_timeout_s", weight_sync_timeout_s)):
+        if value is None:
+            continue
+        if value <= 0:
+            raise ValueError(f"trainer.{name} must be > 0, got {value}")
+        if value < SKYRL_WORKER_NCCL_TIMEOUT_IN_S:
+            logger.warning(
+                f"trainer.{name}={value} is below SKYRL_WORKER_NCCL_TIMEOUT_IN_S={SKYRL_WORKER_NCCL_TIMEOUT_IN_S}: "
+                "the driver will give up on a stuck collective before the NCCL watchdog reports it."
+            )
+    if step_timeout_s is not None and weight_sync_timeout_s is not None and weight_sync_timeout_s > step_timeout_s:
+        raise ValueError(
+            f"trainer.weight_sync_timeout_s ({weight_sync_timeout_s}) must be <= trainer.step_timeout_s "
+            f"({step_timeout_s})"
+        )
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -383,6 +418,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.max_training_steps is not None:
         if cfg.trainer.max_training_steps <= 0:
             raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
+
+    validate_step_timeouts(cfg.trainer.step_timeout_s, cfg.trainer.weight_sync_timeout_s)
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
@@ -712,6 +749,44 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
+    if lora_cfg.max_lora_rank is not None and lora_cfg.max_lora_rank < lora_cfg.rank:
+        raise ValueError(
+            f"trainer.policy.model.lora.max_lora_rank={lora_cfg.max_lora_rank} must be >= lora.rank={lora_cfg.rank}"
+        )
+    if lora_cfg.init_adapter_path:
+        if lora_cfg.rank <= 0:
+            raise ValueError("trainer.policy.model.lora.init_adapter_path requires lora.rank > 0 (the adapter's r)")
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError(
+                f"trainer.policy.model.lora.init_adapter_path is only supported with trainer.strategy=megatron, "
+                f"got {cfg.trainer.strategy!r}"
+            )
+        if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.megatron_config.lora_config.lora_type != "lora":
+            raise ValueError(
+                "trainer.policy.model.lora.init_adapter_path requires megatron_config.lora_config.lora_type='lora'"
+            )
+    if cfg.trainer.critic.model.lora.init_adapter_path:
+        raise ValueError("lora.init_adapter_path is only supported for the policy, not trainer.critic")
+
+    if ie_cfg.scale_moe_lora_rank:
+        megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
+        if cfg.trainer.strategy != "megatron" or lora_cfg.rank <= 0 or megatron_lora_cfg.merge_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires trainer.strategy='megatron', "
+                "lora.rank > 0 and megatron_config.lora_config.merge_lora=false"
+            )
+        if not megatron_lora_cfg.normalize_moe_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires "
+                "megatron_config.lora_config.normalize_moe_lora=true: otherwise the experts train at lora.rank"
+            )
+    for kwargs_name in ("engine_init_kwargs", "prefill_init_kwargs", "decode_init_kwargs"):
+        additional_config = (getattr(ie_cfg, kwargs_name) or {}).get("additional_config") or {}
+        if "max_expert_lora_rank" in additional_config:
+            raise ValueError(
+                f"generator.inference_engine.{kwargs_name}.additional_config.max_expert_lora_rank is set by "
+                "SkyRL; use generator.inference_engine.scale_moe_lora_rank=true instead"
+            )
 
     if ie_cfg.enable_pd:
         assert ie_cfg.num_prefill > 0, "num_prefill must be > 0 when enable_pd=True"
@@ -760,16 +835,21 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     if ie_cfg.enable_return_routed_experts:
-        # vLLM captures routes per worker, into a buffer covering only that worker's layers, and
-        # only the last pipeline stage returns model output. With inference PP > 1 the routes of
-        # every earlier stage's MoE layers are silently dropped (left as expert 0). This holds for
-        # both executor backends. The ray backend itself is fine: vLLM copies the routed-expert
-        # arrays out of Ray's shared-memory channel before the next read (v1/executor/ray_utils.py).
-        assert ie_cfg.pipeline_parallel_size == 1, (
-            "rollout router replay (r3) requires generator.inference_engine.pipeline_parallel_size=1: "
-            "vLLM returns routed experts only from the last pipeline stage, so earlier stages' routes "
-            "would be lost. Scale the inference engine with tensor/expert parallelism instead."
-        )
+        # Each vLLM PP stage captures only its own MoE layers, and only the last stage returns
+        # output, so stock vLLM rejects R3 with PP > 1. The PP relay (natively in a patched vLLM,
+        # or through patches/vllm/patch_routed_experts_pp_relay.py on AuxOutput-based builds)
+        # forwards each stage's routes to the next. Both executor backends use the same PP channel.
+        if ie_cfg.pipeline_parallel_size > 1:
+            from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+                vllm_supports_routed_experts_with_pp,
+            )
+
+            assert vllm_supports_routed_experts_with_pp(), (
+                "rollout router replay (r3) with generator.inference_engine.pipeline_parallel_size > 1 "
+                "needs a vLLM build with the AuxOutput connector (the PP relay patch targets it); the "
+                "installed vLLM is not one, so earlier stages' routes would be lost. Use "
+                "pipeline_parallel_size=1 and scale with tensor/expert parallelism instead."
+            )
         assert (
             cfg.trainer.strategy == "megatron"
         ), "rollout router replay (r3) is only supported with Megatron training backend"
@@ -906,6 +986,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
+    annotation_cfg = cfg.trainer.grafana_annotations
+    if annotation_cfg.enabled and (token := os.environ.get(annotation_cfg.token_env_var)):
+        env_vars[annotation_cfg.token_env_var] = token
 
     # TileLang JITs kernels by shelling out to nvcc, and picks its toolkit from CUDA_HOME,
     # defaulting to the pip wheel tree (site-packages/nvidia/cu13). That tree can be internally
@@ -1075,7 +1158,8 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "NCCL_DEBUG",
     ):
         if value := os.environ.get(var_name):
-            logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+            logged_value = "[REDACTED]" if var_name == "HF_TOKEN" else value
+            logger.info(f"Exporting `{var_name}` to ray runtime env: {logged_value}")
             env_vars[var_name] = value
 
     # Forward any SKYRL_* overrides set in the launching shell (e.g.
@@ -1204,8 +1288,11 @@ def configure_ray_worker_logging() -> None:
     # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
     class _InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
+            level_name = record.levelname
+            if record.levelno == logging.INFO and (record.name == "httpx" or record.name.startswith("httpx.")):
+                level_name = "DEBUG"
             try:
-                level = logger.level(record.levelname).name
+                level = logger.level(level_name).name
             except ValueError:
                 level = record.levelno
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())

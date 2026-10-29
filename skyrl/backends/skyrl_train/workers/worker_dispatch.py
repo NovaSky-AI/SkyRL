@@ -8,11 +8,11 @@ Automatically handles GPU placement:
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-import ray
 from loguru import logger
 from ray import ObjectRef
 
@@ -25,6 +25,8 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils import deadline
+from skyrl.train.utils.async_utils import cleanup_preserving_primary
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -107,7 +109,10 @@ class WorkerDispatch:
             return
         if require_model_resident:
             self._ensure_on_gpu(role, need_optimizer=False, need_model=True)
-        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id))
+        deadline.ray_get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "swap_to_adapter", model_id),
+            "swap_to_adapter",
+        )
 
     def register_adapter(self, role: str, model_id: str) -> None:
         """Register a new adapter slot on every worker (subsequent
@@ -115,12 +120,17 @@ class WorkerDispatch:
         """
         if role not in self._actor_groups:
             return
-        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "register_adapter", model_id))
+        deadline.ray_get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "register_adapter", model_id),
+            "register_adapter",
+        )
 
     def delete_adapter(self, role: str, model_id: str) -> None:
         if role not in self._actor_groups:
             return
-        ray.get(self._actor_groups[role].async_run_ray_method("pass_through", "delete_adapter", model_id))
+        deadline.ray_get(
+            self._actor_groups[role].async_run_ray_method("pass_through", "delete_adapter", model_id), "delete_adapter"
+        )
 
     def get_lcm_dp_size(self) -> int:
         """Get LCM of all models' dp_size."""
@@ -276,7 +286,7 @@ class WorkerDispatch:
             kwargs["loss_fn_config"] = loss_fn_config
 
         refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data, **kwargs)
-        results = ray.get(refs)
+        results = deadline.ray_get(refs, "forward")
 
         return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
 
@@ -325,7 +335,7 @@ class WorkerDispatch:
             chunk_refs=chunk_refs,
             **kwargs,
         )
-        results = ray.get(refs)
+        results = deadline.ray_get(refs, "forward")
         return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
 
     def stage_data(
@@ -391,7 +401,7 @@ class WorkerDispatch:
             kwargs["loss_fn_config"] = loss_fn_config
 
         refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data, **kwargs)
-        statuses = ray.get(refs)
+        statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
 
@@ -438,7 +448,7 @@ class WorkerDispatch:
             chunk_refs=chunk_refs,
             **kwargs,
         )
-        statuses = ray.get(refs)
+        statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
         return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
@@ -455,7 +465,7 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
-        grad_norms = ray.get(refs)
+        grad_norms = deadline.ray_get(refs, "optim_step")
 
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
@@ -468,12 +478,18 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         self.ensure_active_adapter(model, model_id)
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate),
+            "set_lr",
+        )
 
     def set_algorithm_config(self, model: str, **kwargs) -> None:
         """Update algorithm config fields on all workers for a model."""
         self._ensure_on_gpu(model, need_optimizer=False, need_model=False)
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "set_algorithm_config", **kwargs),
+            "set_algorithm_config",
+        )
 
     # ------------------------------------------------------------------
     # torch.profiler control. Avoid _ensure_on_gpu so profiling does not perturb
@@ -496,7 +512,12 @@ class WorkerDispatch:
                 raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "start_profile", config))
+            deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "start_profile", config),
+                "start_profile",
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             if raise_on_error:
                 raise
@@ -507,7 +528,11 @@ class WorkerDispatch:
         if model not in self._actor_groups:
             return None
         try:
-            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"))
+            return deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "profile_step"), "profile_step"
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             logger.warning(f"[profiler] profile_step dispatch for {model} failed: {e}")
             return None
@@ -519,7 +544,11 @@ class WorkerDispatch:
                 raise ValueError(f"no actor group registered for model {model!r}")
             return
         try:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"))
+            deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "stop_profile"), "stop_profile"
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             if raise_on_error:
                 raise
@@ -530,15 +559,23 @@ class WorkerDispatch:
         if model not in self._actor_groups:
             return None
         try:
-            return ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "dump_profiler_summary"))
+            return deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "dump_profiler_summary"),
+                "dump_profiler_summary",
+            )
+        except deadline.StepTimeoutError:
+            raise
         except Exception as e:
             logger.warning(f"[profiler] dump_profiler_summary dispatch for {model} failed: {e}")
             return None
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""
-        ray.get(
-            self._actor_groups[model].async_run_ray_method("pass_through", "save_memory_snapshot", tag=f"{model}_{tag}")
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method(
+                "pass_through", "save_memory_snapshot", tag=f"{model}_{tag}"
+            ),
+            "save_memory_snapshot",
         )
 
     def save_checkpoint(self, model: str, ckpt_dir: str, tokenizer=None, model_id: Optional[str] = None) -> None:
@@ -546,15 +583,19 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
-        ray.get(
+        deadline.ray_get(
             self._actor_groups[model].async_run_ray_method(
                 "pass_through", "save_checkpoint", ckpt_dir=ckpt_dir, tokenizer=tokenizer
-            )
+            ),
+            "save_checkpoint",
         )
 
     def finalize_pending_saves(self, model: str) -> None:
         """Block until any in-flight async checkpoint write for ``model`` completes."""
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "finalize_pending_saves"))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "finalize_pending_saves"),
+            "finalize_pending_saves",
+        )
 
     def load_checkpoint(
         self,
@@ -568,21 +609,25 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=load_optimizer_states, need_model=True)
         self.ensure_active_adapter(model, model_id)
 
-        ray.get(
+        deadline.ray_get(
             self._actor_groups[model].async_run_ray_method(
                 "pass_through",
                 "load_checkpoint",
                 ckpt_dir=ckpt_dir,
                 load_optimizer_states=load_optimizer_states,
                 load_lr_scheduler_states=load_lr_scheduler_states,
-            )
+            ),
+            "load_checkpoint",
         )
 
     def save_hf_model(self, model: str, export_dir: str, tokenizer) -> None:
         """Save model in HuggingFace format."""
         self._ensure_on_gpu(model, need_optimizer=False, need_model=True)
 
-        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "save_hf_model", export_dir, tokenizer))
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "save_hf_model", export_dir, tokenizer),
+            "save_hf_model",
+        )
 
     def init_model(self, model: str, model_path: str, num_training_steps: Optional[int] = None) -> None:
         """Initialize model from path. Offloads others in colocation group first."""
@@ -599,7 +644,7 @@ class WorkerDispatch:
         if num_training_steps is not None:
             kwargs["num_training_steps"] = num_training_steps
 
-        ray.get(self._actor_groups[model].async_init_model(**kwargs))
+        deadline.ray_get(self._actor_groups[model].async_init_model(**kwargs), "init_model")
 
         # After init, model is on GPU
         self._gpu_state[model].model_on_gpu = True
@@ -615,18 +660,22 @@ class WorkerDispatch:
     def empty_cache(self, model: Optional[str] = None) -> None:
         """Empty GPU cache for model(s)."""
         if model is not None:
-            ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "empty_cache"))
+            deadline.ray_get(
+                self._actor_groups[model].async_run_ray_method("pass_through", "empty_cache"), "empty_cache"
+            )
         else:
             refs = []
             for group in self._actor_groups.values():
                 refs.extend(group.async_run_ray_method("pass_through", "empty_cache"))
-            ray.get(refs)
+            deadline.ray_get(refs, "empty_cache")
 
     def get_node_ids(self) -> List[str]:
         """Get unique node IDs from all actor groups."""
         all_node_ids = []
         for group in self._actor_groups.values():
-            node_ids = ray.get(group.async_run_ray_method("pass_through", "get_ray_node_id"))
+            node_ids = deadline.ray_get(
+                group.async_run_ray_method("pass_through", "get_ray_node_id"), "get_ray_node_id"
+            )
             all_node_ids.extend(node_ids)
         return list(set(all_node_ids))
 
@@ -636,13 +685,14 @@ class WorkerDispatch:
 
     def init_weight_sync_state(self, inference_engine_client) -> None:
         """Initialize weight sync state for policy model."""
-        ray.get(
+        deadline.ray_get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "init_weight_sync_state",
                 inference_engine_client,
                 self.cfg.generator.inference_engine,
-            )
+            ),
+            "init_weight_sync_state",
         )
 
     def _broadcast_to_inference_engines(self, inference_engine_client, model_id: Optional[str] = None) -> None:
@@ -657,14 +707,15 @@ class WorkerDispatch:
         # It carries the HF tokenizer (~10MB — 0.13s pickle driver-side, 0.34s
         # unpickle on EVERY worker), so shipping it per sync costs ~0.5s of the
         # sync wall even via ray.put (deref still deserializes per worker).
-        ray.get(
+        deadline.ray_get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "broadcast_to_inference_engines",
                 None,
                 self.cfg.generator.inference_engine,
                 model_id=model_id,
-            )
+            ),
+            "broadcast_to_inference_engines",
         )
 
     def get_timing_metrics(self) -> Dict[str, float]:
@@ -748,8 +799,19 @@ class WorkerDispatch:
 
         adapter_only_sync = self.colocate_all and self._is_lora_no_merge()
 
-        def _broadcast_and_finish() -> None:
+        def _transfer() -> None:
+            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
+            self._finish_weight_sync(adapter_only_sync=adapter_only_sync)
+
+        async def _broadcast_and_finish() -> None:
             """The weight transfer proper, timed on its own.
+
+            The transfer blocks on ``ray.get`` for the whole broadcast, so it runs in a
+            worker thread: on the event loop it would stall every coroutine sharing the
+            loop (the fully-async generators) and expire their timeouts. A cancellation
+            waits for the transfer to finish before propagating (chained to the transfer's
+            error, if any), so the enclosing resume bracket never resumes generation onto
+            partially transferred weights.
 
             ``last_weight_sync_seconds`` is surfaced as
             ``timing/sync_weights_only_transfer`` via :meth:`get_timing_metrics`,
@@ -757,8 +819,17 @@ class WorkerDispatch:
             enclosing pause/resume bracket too.
             """
             start = time.perf_counter()
-            self._broadcast_to_inference_engines(self._inference_engine_client, model_id=model_id)
-            self._finish_weight_sync(adapter_only_sync=adapter_only_sync)
+            with deadline.operation("broadcast_to_inference_engines"):
+                transfer = asyncio.ensure_future(asyncio.to_thread(_transfer))
+                cancelled = False
+                while not transfer.done():
+                    try:
+                        await asyncio.wait({transfer})
+                    except asyncio.CancelledError:
+                        cancelled = True
+                if cancelled:
+                    raise asyncio.CancelledError() from transfer.exception()
+                transfer.result()
             self.last_weight_sync_seconds = time.perf_counter() - start
 
         # Sync weights to inference engine
@@ -768,7 +839,7 @@ class WorkerDispatch:
         self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            _broadcast_and_finish()
+            await _broadcast_and_finish()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
             strategy = self.cfg.trainer.strategy
@@ -777,7 +848,7 @@ class WorkerDispatch:
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
                 # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                _broadcast_and_finish()
+                await _broadcast_and_finish()
             elif self.cfg.generator.inference_engine.offload_kv_for_weight_sync:
                 # Sleep the engine to free GPU memory during the sync (wake weights,
                 # broadcast, wake KV cache) so gpu_memory_utilization can run higher.
@@ -789,36 +860,41 @@ class WorkerDispatch:
                     # reset the prefix cache anyway (clear_kv_cache_on_weight_sync).
                     offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
                     await self._inference_engine_client.pause_generation()
-                    try:
+                    async with cleanup_preserving_primary(
+                        self._inference_engine_client.resume_generation, "resume_generation"
+                    ):
                         await self._inference_engine_client.sleep_for_weight_sync(offload_kv=offload_kv)
-                        await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
-                        _broadcast_and_finish()
-                        await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
-                    finally:
-                        await self._inference_engine_client.resume_generation()
+                        # Wake the KV cache even if the sync fails, so the resume above never
+                        # schedules the frozen requests onto a sleeping KV cache.
+                        async with cleanup_preserving_primary(
+                            lambda: self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"]),
+                            "wake_for_weight_sync(kv_cache)",
+                        ):
+                            await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
+                            await _broadcast_and_finish()
                 else:
                     # Synchronous trainer: generation is complete at sync time, so there
                     # are no in-flight requests to preserve. A plain sleep (discards KV,
                     # aborts nothing) is enough -- same three-phase pattern as colocated.
                     await self._inference_engine_client.sleep()
-                    try:
+                    async with cleanup_preserving_primary(
+                        lambda: self._inference_engine_client.wake_up(tags=["kv_cache"]), "wake_up(kv_cache)"
+                    ):
                         await self._inference_engine_client.wake_up(tags=["weights"])
-                        _broadcast_and_finish()
-                    finally:
-                        await self._inference_engine_client.wake_up(tags=["kv_cache"])
+                        await _broadcast_and_finish()
             else:
                 # Non-colocated single tenant: pause generation to prevent in-flight requests from
                 # reading partially-updated weights during the NCCL broadcast.
                 if self.cfg.generator.inference_engine.weight_sync_backend == "delta":
                     # Delta disk sync performs publish/fetch before pausing and
                     # pauses internally only around the final reload.
-                    _broadcast_and_finish()
+                    await _broadcast_and_finish()
                 else:
                     await self._inference_engine_client.pause_generation()
-                    try:
-                        _broadcast_and_finish()
-                    finally:
-                        await self._inference_engine_client.resume_generation()
+                    async with cleanup_preserving_primary(
+                        self._inference_engine_client.resume_generation, "resume_generation"
+                    ):
+                        await _broadcast_and_finish()
 
         # Advance the policy version so prefix-cache salting isolates blocks from the previous weights
         # (see `GeneratorConfig.use_cache_salt`).

@@ -41,6 +41,25 @@ The error message is referring to worker process not starting up within timeout.
 2. Slow startup : Your run can hang even if you simply exceed Ray's timeout limit for worker startup. This can happen with a cold-start run - the first SkyRL run in your cluster when `uv` has to download all the dependencies and populate its cache.
    - Fix: Increase the registration timeout for Ray workers with `RAY_worker_register_timeout_seconds` (say 600). This should be set before the ray cluster is launched with ray start. The ideal fix is to bake this large value in the container. 
 
+## Step timeouts
+
+A training step that hangs (for example on a stuck collective or a wedged inference engine) blocks the driver forever by default. Two optional keys turn such a hang into an error:
+
+- `trainer.step_timeout_s`: budget for one training step, from generation through weight sync. Checkpoint and HF saves made outside a step each get their own budget of this size. Eval is not covered.
+- `trainer.weight_sync_timeout_s`: budget for one weight sync, including the initial sync before training. Must be `<=` `trainer.step_timeout_s`.
+
+When a budget runs out, the driver raises `StepTimeoutError` (or its subclass `WeightSyncTimeoutError`) from `skyrl.train.utils.deadline`, for example:
+
+`StepTimeoutError: step 12 exceeded its 1800s budget after 1800.0s (stage='train_critic_and_policy', operation='forward_backward')`
+
+The error carries `global_step`, `stage` (the innermost enclosing `Timer`), `operation` (the worker method or inference-server endpoint being waited on, or `"await"`), `budget_s` and `elapsed_s`. It is not a `TimeoutError`, so retry handlers that catch `TimeoutError` don't swallow it. The budget bounds every wait on the driver within the step: the `WorkerDispatch` training-worker calls a step makes, generation, inference-engine pause/resume and sleep/wake-up, and the fully-async generation buffer.
+
+Independently of these keys, each control-plane request from `RemoteInferenceClient` to an inference server (pause, resume, sleep, wake-up, weight updates, LoRA load/unload) times out after `SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S` (default 600s; `<= 0` disables it) with `InferenceServerTimeoutError`. Data-plane requests such as generate are not bounded by it.
+
+**Only the driver's wait is interrupted**: a hung worker keeps running until the job is torn down.
+
+**Interaction with NCCL timeouts**: a stuck collective is also reported by the NCCL watchdog after `SKYRL_WORKER_NCCL_TIMEOUT_IN_S` (default 600s). A budget below that value makes the driver give up before the watchdog reports which collective is stuck, so SkyRL logs a warning for it.
+
 ## Hard `Aborted`/SIGABRT crash with GPU memory still free
 
 If a run dies with a hard `Aborted`/SIGABRT rather than a catchable CUDA OOM, and the worker had
