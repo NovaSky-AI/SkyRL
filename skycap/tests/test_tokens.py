@@ -801,6 +801,16 @@ def test_a_node_with_no_tokens_keeps_the_paths_routed_experts() -> None:
     assert empty is not None and empty.shape == (0, 2, 2)
 
 
+def test_a_client_node_without_images_keeps_its_delta_hash() -> None:
+    from skycap.hashing import client_token_delta_hash
+    from skycap.tokens.renderer import Media
+
+    assert client_token_delta_hash("m", [1, 2]) == client_token_delta_hash("m", [1, 2], [])
+    assert client_token_delta_hash("m", [1, 2], [Media("image", 0, 2, "a")]) != client_token_delta_hash(
+        "m", [1, 2], [Media("image", 0, 2, "b")]
+    )
+
+
 async def test_one_full_render_costs_one_unbridged_call_not_the_rest_of_the_trajectory() -> None:
     # A reasoning model's history doesn't re-render as sampled (the template drops earlier reasoning), so a
     # full render twins the history as client nodes and the conversation continues below them. Later calls

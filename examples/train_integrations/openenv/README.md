@@ -2,9 +2,9 @@
 
 ## Guide: OpenEnv + SkyRL
 
-This directory holds the workflow to train on PyTorch OpenEnv environments with SkyRL.
+This directory holds the workflow to train on OpenEnv environments with SkyRL.
 
-In this guide, we walk through how to train a reinforcement learning agent using SkyRL with [PyTorch OpenEnv](https://github.com/meta-pytorch/OpenEnv) environments. OpenEnv provides isolated execution environments for agentic RL training with Gymnasium-style APIs.
+In this guide, we walk through how to train a reinforcement learning agent using SkyRL with [OpenEnv](https://github.com/openenv/OpenEnv) environments. OpenEnv provides isolated execution environments for agentic RL training with Gymnasium-style APIs.
 
 
 Start by following the SkyRL [installation instructions](https://docs.skyrl.ai/docs/getting-started/installation):

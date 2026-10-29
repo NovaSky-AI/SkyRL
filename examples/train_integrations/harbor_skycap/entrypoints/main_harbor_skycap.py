@@ -147,6 +147,9 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
         "record_mirror": cfg.skycap.record_mirror,
         "record_mirror_config": dict(cfg.skycap.record_mirror_config or {}) or None,
+        # skycap processes images itself and sends vLLM the result, so it needs the engine's image processor
+        # settings (it checks them against the engine at start).
+        "processor_kwargs": engine_init.get("mm_processor_kwargs") or None,
     }
     return start_servers(
         settings,

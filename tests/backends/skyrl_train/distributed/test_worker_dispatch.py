@@ -6,6 +6,7 @@ optimizer-offload policy applied before and after the sync. CPU-only: the
 dispatch is built via ``__new__`` with mocked actor groups and client.
 """
 
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -258,6 +259,102 @@ class TestSaveWeights:
 
         dispatch._inference_engine_client.pause_generation.assert_awaited_once()
         dispatch._inference_engine_client.resume_generation.assert_awaited_once()
+
+    @staticmethod
+    def _nccl_dispatch(broadcast):
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = False
+        dispatch.cfg = _fft_dispatch_cfg()
+        dispatch._inference_engine_client = AsyncMock()
+        dispatch._inference_engine_client.increment_weight_version = MagicMock()
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=broadcast)
+        dispatch._prepare_for_weight_sync = AsyncMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+        return dispatch
+
+    @pytest.mark.asyncio
+    async def test_broadcast_does_not_block_event_loop(self):
+        """The broadcast blocks on ``ray.get``. A timeout armed by a coroutine sharing the
+        loop (a fully-async generator's HTTP request) must not expire because of it."""
+        dispatch = self._nccl_dispatch(lambda *args, **kwargs: time.sleep(0.5))
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        async with asyncio.timeout(0.2):
+            await asyncio.sleep(0.05)
+        assert not sync.done()
+        await sync
+
+        dispatch._broadcast_to_inference_engines.assert_called_once()
+        assert dispatch.last_weight_sync_seconds >= 0.5
+
+    @pytest.mark.asyncio
+    async def test_cancellation_waits_for_the_transfer_before_resuming(self):
+        """A cancellation mid-broadcast must not resume generation onto partially transferred weights."""
+        events = []
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.3)
+            events.append("broadcast_done")
+
+        dispatch = self._nccl_dispatch(broadcast)
+        dispatch._inference_engine_client.resume_generation.side_effect = lambda: events.append("resumed")
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        sync.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sync
+
+        assert events == ["broadcast_done", "resumed"]
+
+    @pytest.mark.asyncio
+    async def test_cancellation_survives_a_failed_transfer(self):
+        """A transfer that fails after the cancellation arrived must not replace the cancellation."""
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.3)
+            raise RuntimeError("broadcast failed")
+
+        dispatch = self._nccl_dispatch(broadcast)
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        sync.cancel()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await sync
+
+        assert isinstance(raised.value.__cause__, RuntimeError)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel, expected", [(False, RuntimeError), (True, asyncio.CancelledError)])
+    async def test_offload_kv_wakes_kv_cache_before_resuming(self, cancel, expected):
+        """However the sync is interrupted, generation must not resume onto a sleeping KV cache."""
+        events = []
+
+        def broadcast(*args, **kwargs):
+            time.sleep(0.2)
+            events.append("broadcast_done")
+            if not cancel:
+                raise RuntimeError("broadcast failed")
+
+        dispatch = self._nccl_dispatch(broadcast)
+        dispatch.cfg.generator.inference_engine.offload_kv_for_weight_sync = True
+        dispatch.cfg.trainer.fully_async = SimpleNamespace(enabled=True, clear_kv_cache_on_weight_sync=False)
+        client = dispatch._inference_engine_client
+        client.wake_for_weight_sync.side_effect = lambda tags: events.append(f"wake_{tags[0]}")
+        client.resume_generation.side_effect = lambda: events.append("resumed")
+
+        sync = asyncio.create_task(dispatch.save_weights_for_sampler())
+        await asyncio.sleep(0.05)
+        if cancel:
+            sync.cancel()
+        with pytest.raises(expected):
+            await sync
+
+        assert events == ["wake_weights", "broadcast_done", "wake_kv_cache", "resumed"]
 
 
 def _adapter_sync_dispatch(*, model_on_gpu: bool, optimizer_on_gpu: bool = False):
