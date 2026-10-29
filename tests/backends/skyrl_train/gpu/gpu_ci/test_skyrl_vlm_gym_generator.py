@@ -146,6 +146,7 @@ def get_vlm_test_config(model: str) -> SkyRLTrainConfig:
     cfg.generator.use_conversation_multi_turn = True
     cfg.generator.step_wise_trajectories = False
     cfg.generator.apply_overlong_filtering = False
+    cfg.generator.vision_language_generator = True
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
@@ -236,6 +237,7 @@ async def test_vlm_generator_color_classification(ray_init_fixture):
         assert pixel_values is not None, "Expected pixel_values in output"
         assert image_grid_thw is not None, "Expected image_grid_thw in output"
 
+        image_pad_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
         for i in range(num_prompts):
             pv = pixel_values[i]
             thw = image_grid_thw[i]
@@ -244,6 +246,15 @@ async def test_vlm_generator_color_classification(ray_init_fixture):
             assert isinstance(thw, torch.Tensor), f"image_grid_thw[{i}] should be a tensor"
             assert thw.shape[-1] == 3, f"image_grid_thw[{i}] last dim should be 3"
             assert thw.dtype == torch.long, f"image_grid_thw[{i}] should be long dtype"
+            # The red prompt image and the blue observation image.
+            assert thw.shape[0] == 2, f"image_grid_thw[{i}] should describe 2 images, got {thw.shape}"
+            # Qwen-VL merges 2x2 patches into one placeholder token.
+            num_image_tokens = sum(
+                t == image_pad_id for t in generator_output["prompt_token_ids"][i] + generator_output["response_ids"][i]
+            )
+            assert (
+                num_image_tokens == int(thw.prod(dim=-1).sum()) // 4
+            ), f"Trajectory {i}: {num_image_tokens} image placeholder tokens for image_grid_thw {thw.tolist()}"
 
         # ── Per-trajectory assertions ──────────────────────────────────
         for i in range(num_prompts):
