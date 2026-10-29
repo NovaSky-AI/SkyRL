@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import shutil
 from collections import defaultdict
@@ -42,7 +43,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     print_model_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
-    OffloadToDiskSettings,
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
@@ -1089,11 +1089,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if offload_cfg.dir is not None:
                 if self._is_lora:
                     raise ValueError("optimizer_offload_to_disk does not support LoRA.")
-                offload_to_disk = OffloadToDiskSettings(
-                    dir=os.path.join(offload_cfg.dir, self.cfg.run_name),
-                    moment_storage_dtype=offload_cfg.moment_storage_dtype,
-                    staging_buffer_mb=offload_cfg.staging_buffer_mb,
-                )
+                offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
             self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
 
             # create scheduler

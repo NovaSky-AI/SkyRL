@@ -90,9 +90,7 @@ def build_optimizer(model, state_dir, moment_dtype):
     from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
         get_megatron_optimizer,
     )
-    from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
-        OffloadToDiskSettings,
-    )
+    from skyrl.train.config.config import MegatronOptimizerOffloadToDiskConfig
 
     config = OptimizerConfig(
         optimizer="adam",
@@ -103,7 +101,11 @@ def build_optimizer(model, state_dir, moment_dtype):
         params_dtype=torch.bfloat16,
         use_distributed_optimizer=True,
     )
-    settings = None if state_dir is None else OffloadToDiskSettings(dir=state_dir, moment_storage_dtype=moment_dtype)
+    settings = (
+        None
+        if state_dir is None
+        else MegatronOptimizerOffloadToDiskConfig(dir=state_dir, moment_storage_dtype=moment_dtype)
+    )
     return get_megatron_optimizer([model], config, offload_to_disk=settings)
 
 

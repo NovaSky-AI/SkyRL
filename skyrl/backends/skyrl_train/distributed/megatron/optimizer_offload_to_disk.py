@@ -58,6 +58,7 @@ from megatron.core.optimizer import distrib_optimizer as _distrib_optimizer_modu
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 
 from skyrl.env_vars import SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL
+from skyrl.train.config.config import MegatronOptimizerOffloadToDiskConfig
 
 MOMENT_STORAGE_DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16}
 CHECKPOINT_SUBDIR = "optimizer_offload_to_disk"
@@ -65,14 +66,6 @@ _MEMORY_FILESYSTEMS = ("tmpfs", "ramfs")
 
 # (start, end, optimizer param group index), in coordinates of a DDP buffer's flat param/grad data.
 Run = Tuple[int, int, int]
-
-
-@dataclass
-class OffloadToDiskSettings:
-    dir: str
-    """This run's state directory; each rank uses ``<dir>/rank<global rank>/``."""
-    moment_storage_dtype: str = "fp32"
-    staging_buffer_mb: int = 256
 
 
 def filesystem_type(path: str, mounts: str = "/proc/mounts") -> str:
@@ -199,7 +192,7 @@ class _StateFile:
 class DiskOptimizerStateStore:
     """The on-disk state of one ``OffloadedDistributedOptimizer`` and the streamed step over it."""
 
-    def __init__(self, dist_opt: DistributedOptimizer, settings: OffloadToDiskSettings, index: int):
+    def __init__(self, dist_opt: DistributedOptimizer, settings: MegatronOptimizerOffloadToDiskConfig, index: int):
         from megatron.core.fp4_utils import is_nvfp4tensor
         from megatron.core.fp8_utils import is_float8tensor
 
@@ -230,11 +223,6 @@ class DiskOptimizerStateStore:
             raise ValueError("optimizer_offload_to_disk does not support fp8 or fp4 params.")
         if not isinstance(dist_opt.optimizer, Adam):
             raise ValueError(f"optimizer_offload_to_disk supports Adam only, got {type(dist_opt.optimizer).__name__}.")
-        if settings.moment_storage_dtype not in MOMENT_STORAGE_DTYPES:
-            raise ValueError(
-                f"optimizer_offload_to_disk.moment_storage_dtype={settings.moment_storage_dtype!r}, "
-                f"expected one of {sorted(MOMENT_STORAGE_DTYPES)}"
-            )
         self.moment_dtype = MOMENT_STORAGE_DTYPES[settings.moment_storage_dtype]
         self.steps = 0
 
@@ -467,7 +455,7 @@ def _deferred_build_model_and_main_param_groups() -> classmethod:
 
 @dataclass
 class _BuildContext:
-    settings: OffloadToDiskSettings
+    settings: MegatronOptimizerOffloadToDiskConfig
     next_index: int = 0
 
 
@@ -573,8 +561,10 @@ def _unlock_rank_dir(rank_dir: str) -> None:
         os.close(fd)
 
 
-def build_optimizer_offloaded_to_disk(model_chunks, config, settings: OffloadToDiskSettings):
-    """``get_megatron_optimizer`` with every ``DistributedOptimizer`` built as an ``OffloadedDistributedOptimizer``."""
+def build_optimizer_offloaded_to_disk(model_chunks, config, settings: MegatronOptimizerOffloadToDiskConfig):
+    """``get_megatron_optimizer`` with every ``DistributedOptimizer`` built as an ``OffloadedDistributedOptimizer``.
+
+    ``settings.dir`` is this run's state directory; each rank uses ``<dir>/rank<global rank>/``."""
     global _build_context
 
     if not config.use_distributed_optimizer:

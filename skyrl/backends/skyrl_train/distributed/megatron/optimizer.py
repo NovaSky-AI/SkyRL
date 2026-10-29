@@ -30,10 +30,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer_dtype import (
     coerce_optimizer_dtype_kwargs,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
-    OffloadToDiskSettings,
     build_optimizer_offloaded_to_disk,
 )
 from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
+from skyrl.train.config.config import MegatronOptimizerOffloadToDiskConfig
 
 
 def init_megatron_optim_config(
@@ -62,7 +62,7 @@ def init_megatron_optim_config(
 def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
-    offload_to_disk: Optional[OffloadToDiskSettings] = None,
+    offload_to_disk: Optional[MegatronOptimizerOffloadToDiskConfig] = None,
 ):
     """Build Megatron's optimizer; with ``offload_to_disk`` its state lives on node-local disk."""
     if offload_to_disk is not None:
