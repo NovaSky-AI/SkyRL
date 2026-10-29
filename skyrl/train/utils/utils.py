@@ -481,6 +481,13 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         cfg.trainer.algorithm.policy_loss_type in available_policy_losses
     ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
 
+    adapo_losses = ["regular", "dual_clip", "gspo", "rollout_is", "clip_cov"]
+    if cfg.trainer.algorithm.adapo.enabled and cfg.trainer.algorithm.policy_loss_type not in adapo_losses:
+        raise ValueError(
+            f"`trainer.algorithm.adapo` adapts `eps_clip_high`, which `policy_loss_type="
+            f"{cfg.trainer.algorithm.policy_loss_type}` does not use. Supported policy losses: {adapo_losses}"
+        )
+
     available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
     assert cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators, (
         f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. "

@@ -159,6 +159,13 @@ class RayPPOTrainer:
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
 
+        # ADAPO: adapts `eps_clip_high` once per iteration (see `train_critic_and_policy`); the current
+        # value is pushed to the policy workers via the loss-config override channel
+        # (see `_execute_training_step`).
+        self.adapo_controller: Optional[ppo_utils.ADAPOController] = None
+        if cfg.trainer.algorithm.adapo.enabled:
+            self.adapo_controller = ppo_utils.ADAPOController(cfg.trainer.algorithm.adapo)
+
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
 
@@ -1603,6 +1610,10 @@ class RayPPOTrainer:
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
+        loss_fn_config = None
+        if model == "policy" and self.adapo_controller is not None:
+            loss_fn_config = {"eps_clip_high": self.adapo_controller.eps_clip_high}
+
         # Pre-stage all per-DP mini-batch chunks in the object store so that
         # serialization is fully off the critical path during training.
         all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
@@ -1610,7 +1621,7 @@ class RayPPOTrainer:
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs, loss_fn_config=loss_fn_config)
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
@@ -1647,6 +1658,12 @@ class RayPPOTrainer:
 
         for k, v in policy_status.items():
             self.all_metrics.update({f"policy/{k}": v})
+
+        # ADAPO: log the clip bound used for this step, then adapt it for the next iteration.
+        if self.adapo_controller is not None:
+            self.all_metrics["policy/adapo_eps_clip_high"] = self.adapo_controller.eps_clip_high
+            self.adapo_controller.update(policy_status["policy_entropy"])
+            self.all_metrics["policy/adapo_target_entropy"] = self.adapo_controller.target_entropy
 
         self.dispatch.empty_cache()
 
@@ -1759,6 +1776,8 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": asdict(self.cfg),
         }
+        if self.adapo_controller is not None:
+            trainer_state["adapo"] = self.adapo_controller.state_dict()
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
@@ -1865,6 +1884,12 @@ class RayPPOTrainer:
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
+        if self.adapo_controller is not None:
+            if "adapo" in trainer_state:
+                self.adapo_controller.load_state_dict(trainer_state["adapo"])
+                logger.info(f"Restored ADAPO controller state: {trainer_state['adapo']}")
+            else:
+                logger.warning("ADAPO is enabled but the checkpoint has no ADAPO state. Starting from the initial config.")
 
         # 2. Load dataloader state if available
         if io.exists(dataloader_state_path):

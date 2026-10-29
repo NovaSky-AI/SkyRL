@@ -920,6 +920,41 @@ class DPPOConfig(BaseConfig):
             raise ValueError("Invalid DPPO type")
 
 
+# ADAPO parameters (only used when adapo.enabled=true).
+# Adaptive asymmetric clipping: once per iteration, ``eps_clip_high`` is multiplied by
+# ``increase_factor`` when ``policy_entropy`` is below the target and by ``decrease_factor`` when it
+# is above, then clamped to ``[eps_clip_high_min, eps_clip_high_max]``. ``eps_clip_low`` is unchanged.
+# See the REPO/ADAPO paper: https://arxiv.org/pdf/2603.11682
+@dataclass
+class ADAPOConfig(BaseConfig):
+    enabled: bool = False
+    """Enable adaptive control of ``eps_clip_high``. Overrides ``algorithm.eps_clip_high`` while enabled."""
+    eps_clip_high_init: float = 0.28
+    """Starting value of ``eps_clip_high``. The paper starts from the DAPO clip-higher value of 0.28."""
+    eps_clip_high_min: float = 0.2
+    """Lower bound for the adapted ``eps_clip_high``."""
+    eps_clip_high_max: float = 0.32
+    """Upper bound for the adapted ``eps_clip_high``."""
+    increase_factor: float = 1.05
+    """Multiplier applied to ``eps_clip_high`` when entropy is below the target."""
+    decrease_factor: float = 0.95
+    """Multiplier applied to ``eps_clip_high`` when entropy is above the target."""
+    target_entropy: Optional[float] = None
+    """Entropy the controller drives toward. ``None`` uses the ``policy_entropy`` measured on the
+    first training step, as in the paper."""
+
+    def __post_init__(self):
+        if not self.eps_clip_high_min <= self.eps_clip_high_init <= self.eps_clip_high_max:
+            raise ValueError(
+                "adapo requires eps_clip_high_min <= eps_clip_high_init <= eps_clip_high_max, got "
+                f"{self.eps_clip_high_min}, {self.eps_clip_high_init}, {self.eps_clip_high_max}"
+            )
+        if self.increase_factor <= 1.0:
+            raise ValueError(f"adapo.increase_factor must be > 1, got {self.increase_factor}")
+        if not 0.0 < self.decrease_factor < 1.0:
+            raise ValueError(f"adapo.decrease_factor must be in (0, 1), got {self.decrease_factor}")
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -1081,6 +1116,9 @@ class AlgorithmConfig(BaseConfig):
     """Only used when ``policy_loss_type="cispo"``."""
     dppo: DPPOConfig = field(default_factory=DPPOConfig)
     """Only used when ``policy_loss_type="dppo"``."""
+    adapo: ADAPOConfig = field(default_factory=ADAPOConfig)
+    """Adaptive ``eps_clip_high`` control; only used when ``adapo.enabled=true``.
+    Requires a policy loss that reads ``eps_clip_high``."""
     max_seq_len: Optional[int] = None
     """Sequence-length normalization constant used for ``seq_mean_token_sum_norm`` loss reduction.
     Must be set explicitly for that reduction mode; otherwise can remain ``None``. This often

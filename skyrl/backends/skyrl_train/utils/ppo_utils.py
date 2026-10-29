@@ -38,7 +38,7 @@ from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
     sampler_ratio,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
-from skyrl.train.config import AlgorithmConfig
+from skyrl.train.config import ADAPOConfig, AlgorithmConfig
 
 # Import cloudpickle for function serialization
 try:
@@ -75,6 +75,38 @@ class FixedKLController:
 
     def update(self, current, n_steps):
         pass
+
+
+class ADAPOController:
+    """
+    Adaptive asymmetric clipping (ADAPO) controller described in the paper:
+    https://arxiv.org/pdf/2603.11682
+
+    Once per iteration, scales ``eps_clip_high`` up when policy entropy is below the target and down
+    when it is above, clamped to ``[eps_clip_high_min, eps_clip_high_max]``. When no target is
+    configured, the entropy from the first update becomes the target.
+    """
+
+    def __init__(self, cfg: ADAPOConfig):
+        self.cfg = cfg
+        self.eps_clip_high = cfg.eps_clip_high_init
+        self.target_entropy = cfg.target_entropy
+
+    def update(self, current_entropy: float) -> None:
+        if self.target_entropy is None:
+            self.target_entropy = current_entropy
+            return
+        if current_entropy < self.target_entropy:
+            self.eps_clip_high = min(self.eps_clip_high * self.cfg.increase_factor, self.cfg.eps_clip_high_max)
+        elif current_entropy > self.target_entropy:
+            self.eps_clip_high = max(self.eps_clip_high * self.cfg.decrease_factor, self.cfg.eps_clip_high_min)
+
+    def state_dict(self) -> dict:
+        return {"eps_clip_high": self.eps_clip_high, "target_entropy": self.target_entropy}
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.eps_clip_high = state_dict["eps_clip_high"]
+        self.target_entropy = state_dict["target_entropy"]
 
 
 def get_kl_controller(algorithm_cfg: AlgorithmConfig):
