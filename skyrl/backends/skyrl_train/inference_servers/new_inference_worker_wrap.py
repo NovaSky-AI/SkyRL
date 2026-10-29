@@ -177,6 +177,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 
 apply_pp_relay_worker_patch()
 
+# DeepSeek-V4 under layerwise reload (weight sync): load attention sinks through a weight loader and run the
+# model-level finalize once per reload, as vllm-project/vllm#57797 (merged) and #64357 (open) do upstream.
+# TODO: remove once the pinned vLLM includes both (see the module docstring).
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (  # noqa: E402
+    apply_deepseek_v4_reload_patch,
+)
+
+apply_deepseek_v4_reload_patch()
+
 # A PP stage with no layers of some KV cache group gets cache tensors for layers it does not own (DeepSeek-V4.1 at PP=2).
 # TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.32.0).
 from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import (  # noqa: E402
