@@ -385,7 +385,14 @@ class RemoteGenerateClient:
                 raise ValueError("routed_experts_prompt_start must be an integer within the prompt")
 
         packed_side_channels = return_routed_experts or return_sample_support
-        path = "/skyrl/v1/generate" if packed_side_channels else "/inference/v1/generate"
+        # vLLM occasionally reports a NaN logprob for a token it just sampled; the native endpoint then fails
+        # the whole request at JSON encoding, while /skyrl/v1/generate floors it (build_logprobs_content).
+        # TODO: route logprob requests back to /inference/v1/generate once vLLM's native generate endpoint
+        # serializes non-finite logprobs (no upstream PR yet; vllm-project/vllm#48585 does it for /v1/completions
+        # only). The source we hit, DeepSeek-V4.1's NaN first tokens, is fixed by #2551 (vllm-project/vllm#60613
+        # upstream), so with it this is a safety net for other models.
+        wants_logprobs = sampling_params.get("logprobs") is not None
+        path = "/skyrl/v1/generate" if packed_side_channels or wants_logprobs else "/inference/v1/generate"
         request_sampling_params = dict(sampling_params)
         if routed_experts_prompt_start is not None:
             request_sampling_params["routed_experts_prompt_start"] = routed_experts_prompt_start

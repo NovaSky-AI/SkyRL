@@ -90,6 +90,7 @@ from skyrl.train.utils.trainer_utils import (
     DynamicSamplingState,
     ResumeMode,
     build_dataloader,
+    clamped_rollout_logprob_stats,
     cleanup_old_checkpoints,
     extract_step_from_path,
     finalize_minibatch_rollout_logprob_diff_std,
@@ -1184,6 +1185,21 @@ class RayPPOTrainer:
             "reward/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
         self.all_metrics.update(reward_metrics)
+        clamped = clamped_rollout_logprob_stats(generator_output.get("rollout_logprobs"))
+        if clamped["tokens"]:
+            self.all_metrics.update(
+                {
+                    "generate/clamped_logprob_tokens": clamped["count"],
+                    "generate/clamped_logprob_first_token": clamped["first_token"],
+                    "generate/clamped_logprob_sequences": clamped["sequences"],
+                }
+            )
+            if clamped["count"]:
+                logger.warning(
+                    f"{clamped['count']} rollout logprobs at the non-finite floor in {clamped['sequences']} sequences "
+                    f"({clamped['first_token']} at the first response token); (seq, positions, length): "
+                    f"{clamped['examples']}"
+                )
         logger.info(
             f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}"
         )
