@@ -27,6 +27,7 @@ from loguru import logger
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packing_align_size_sequence,
     get_packing_align_size_total,
+    packed_segment_layout,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
@@ -143,9 +144,10 @@ class PackedDataCollator:
         #   - When FP8 is enabled, Transformer Engine GEMMs require each CP
         #     rank's aggregate token slab to be 16-aligned; globally this means
         #     the final packed length is divisible by ``16*cp_size``.
-        # This MUST stay in lockstep with the worker's preprocess_packed_seqs
-        # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
-        # gather/scatter offsets silently corrupt loss/grads (no crash).
+        # The padded layout itself comes from ``packed_segment_layout`` below, which the
+        # worker's preprocess_packed_seqs and the host metadata builders also call, so the
+        # divisors cannot drift apart. These two sizes are used here only for bin capacity
+        # and the PP>1 global max, which are not part of that layout.
         packing_align_size_sequence = get_packing_align_size_sequence(tp_size, cp_size)
         packing_align_size_total = get_packing_align_size_total(
             tp_size, cp_size, fp8_enabled=self.fp8_enabled, fp8_recipe=self.fp8_recipe
@@ -222,8 +224,13 @@ class PackedDataCollator:
         bin_subseq_lengths: List[List[int]] = []  # one list per bin row
         for bin_indices in flat_bins:
             subseq_lens = [seq_lengths[idx] for idx in bin_indices]
-            sequence_aligned_len = sum(_round_up(s, packing_align_size_sequence) for s in subseq_lens)
-            packed_len = _round_up(sequence_aligned_len, packing_align_size_total)
+            packed_len = packed_segment_layout(
+                subseq_lens,
+                tp_size=tp_size,
+                cp_size=cp_size,
+                fp8_enabled=self.fp8_enabled,
+                fp8_recipe=self.fp8_recipe,
+            ).total
             bin_packed_lengths.append(packed_len)
             bin_subseq_lengths.append(subseq_lens)
 
