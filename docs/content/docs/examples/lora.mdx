@@ -29,6 +29,8 @@ trainer:
         target_modules: "all-linear"  # Apply to all linear layers OR
         # specify specific modules as a list
         exclude_modules: null  # Modules to exclude from LoRA
+        train_attn: true      # Apply LoRA to the attention projections
+        train_mlp: true       # Apply LoRA to the MLP projections
   critic:
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
@@ -49,6 +51,11 @@ trainer:
 - **`lora_sync_path`**: Directory path where LoRA adapters are saved and synchronized between training and inference engines.
 - **`target_modules`**: Specifies which modules to apply LoRA to. By default, LoRA is applied to all linear layers in the model - you can customize which modules to target by providing a list of specific module names.
 - **`exclude_modules`**: Specifies which modules to exclude from LoRA application. By default, no modules are excluded.
+- **`train_attn`** / **`train_mlp`**: Whether to apply LoRA to the attention and MLP projections. Both default to `true`. Setting one to `false` narrows `target_modules: "all-linear"` to the other group; at least one must stay `true`. Narrowing:
+  - is FSDP-only — Megatron raises;
+  - requires `target_modules: "all-linear"` — with an explicit list, select the modules there;
+  - needs Llama/Qwen-style module names (`self_attn`, `mlp`) and is not supported for vision-language models;
+  - does not reach routed MoE experts, which `transformers` stores as fused `nn.Parameter` tensors; shared experts and dense MLP layers are covered.
 
 ## Running LoRA Training
 

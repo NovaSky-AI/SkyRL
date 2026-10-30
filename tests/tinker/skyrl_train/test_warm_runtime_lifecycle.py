@@ -52,7 +52,7 @@ def _backend(
     backend._inference_adapter_ids = set()
     backend._renderer = None
     backend._render_server = None
-    backend._base_lora_signature = (LORA_CONFIG.rank, int(LORA_CONFIG.alpha)) if lora else None
+    backend._base_lora_signature = SkyRLTrainBackend._lora_signature_from(backend, LORA_CONFIG) if lora else None
     backend._server_groups = []
     backend._inference_router = None
     backend._inference_state_publisher = Mock()
@@ -70,7 +70,7 @@ def test_last_lora_unload_keeps_runtime_warm_when_enabled():
     dispatch.delete_adapter.assert_called_once_with("policy", "model-a")
     assert backend._dispatch is dispatch
     assert backend._model_ids_to_role == {}
-    assert backend._base_lora_signature == (8, 16)
+    assert backend._base_lora_signature == (8, 16, True, True)
     assert backend._inference_engines_initialized
     # Item 3: the proxy URL published at engine bring-up stays valid — the
     # warm path never clears (None) or re-publishes it.
@@ -164,3 +164,22 @@ def test_create_model_signature_mismatch_rejected_against_warm_runtime():
 
     with pytest.raises(ValueError, match="LoRA signature mismatch"):
         backend.create_model("model-b", types.LoraConfig(rank=16, alpha=32, seed=0))
+
+
+def test_second_tenant_narrowing_on_megatron_reports_the_capability():
+    """Not a signature mismatch: Megatron cannot narrow, whatever the first adapter used."""
+    backend = _backend(keep_runtime_warm=True)
+    with pytest.raises(NotImplementedError, match="only supported on the FSDP backend"):
+        backend.create_model("model-b", types.LoraConfig(rank=8, alpha=16, seed=0, train_mlp=False))
+    backend._dispatch.register_adapter.assert_not_called()
+
+
+def test_second_adapter_on_fsdp_reports_single_tenancy():
+    """FSDP serves one adapter, so a differing signature is beside the point."""
+    backend = _backend(keep_runtime_warm=True, strategy="fsdp")
+    backend._base_lora_signature = SkyRLTrainBackend._lora_signature_from(
+        backend, types.LoraConfig(rank=8, alpha=16, seed=0, train_mlp=False)
+    )
+    with pytest.raises(NotImplementedError, match="not implemented on the fsdp backend"):
+        backend.create_model("model-b", LORA_CONFIG)
+    backend._dispatch.register_adapter.assert_not_called()

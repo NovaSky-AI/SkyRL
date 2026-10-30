@@ -97,6 +97,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     append_tensor_list_padding,
     packed_dummy_row_segments,
 )
+from skyrl.backends.skyrl_train.utils.lora_targets import check_lora_group_flags
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -495,6 +496,11 @@ class MegatronWorker:
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
+        # Megatron builds its target list from fixed module names (see the
+        # "all-linear" expansion below), so the FSDP group narrowing does not apply.
+        check_lora_group_flags(
+            lora_config.target_modules, lora_config.train_attn, lora_config.train_mlp, strategy="megatron"
+        )
         if experts_shared_outer_loras:
             apply_packed_per_expert_sharded_state_dict_patch()
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
