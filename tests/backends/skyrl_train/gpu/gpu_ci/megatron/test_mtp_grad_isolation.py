@@ -167,6 +167,8 @@ def _cfg(tp: int, num_gpus: int):
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.mtp.enabled = True
     cfg.trainer.mtp.num_speculative_tokens = 1
+    # MTP with prefix caching is rejected on Qwen3.5 (recurrent linear-attention layers).
+    cfg.generator.inference_engine.enable_prefix_caching = False
     validate_cfg(cfg)
     return cfg
 
