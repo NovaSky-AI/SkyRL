@@ -1610,10 +1610,14 @@ class RayPPOTrainer:
         # serialization is fully off the critical path during training.
         all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
 
+        # Only `status.metrics` is read below, so the policy worker skips the per-token `loss_fn_outputs`.
+        # The critic worker does not take this argument.
+        worker_kwargs = {"return_per_token_outputs": False} if model == "policy" else {}
+
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs, **worker_kwargs)
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
