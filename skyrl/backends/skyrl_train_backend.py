@@ -153,8 +153,11 @@ def _build_skyrl_train_config(
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
     lora = cfg.trainer.policy.model.lora
     if lora.rank > 0:
-        # Fail before Ray starts or any GPU is reserved; the worker only re-checks.
-        check_lora_group_flags(lora.target_modules, lora.train_attn, lora.train_mlp, cfg.trainer.strategy)
+        # Fail before Ray starts or any GPU is reserved. The worker repeats this and adds the
+        # checks that need the model (e.g. Megatron's for vision towers and MLA).
+        check_lora_group_flags(
+            lora.target_modules, lora.train_attn, lora.train_mlp, init_adapter_path=lora.init_adapter_path
+        )
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
@@ -379,7 +382,10 @@ class SkyRLTrainBackend(AbstractBackend):
         if critic_lora.rank > 0:
             # Before the critic workers start, as for the policy in _build_skyrl_train_config.
             check_lora_group_flags(
-                critic_lora.target_modules, critic_lora.train_attn, critic_lora.train_mlp, cfg.trainer.strategy
+                critic_lora.target_modules,
+                critic_lora.train_attn,
+                critic_lora.train_mlp,
+                init_adapter_path=critic_lora.init_adapter_path,
             )
         critic_model = PPORayActorGroup(
             cfg.trainer,
@@ -599,7 +605,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 self._cfg.trainer.policy.model.lora.target_modules,
                 lora_config.train_attn,
                 lora_config.train_mlp,
-                strategy,
+                init_adapter_path=self._cfg.trainer.policy.model.lora.init_adapter_path,
             )
             new_signature = self._lora_signature_from(lora_config)
             if new_signature != self._base_lora_signature:

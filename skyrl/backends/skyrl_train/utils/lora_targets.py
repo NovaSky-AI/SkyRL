@@ -22,6 +22,33 @@ LORA_ATTN_PARENT_MODULES = frozenset({"self_attn", "linear_attn"})
 LORA_MLP_PARENT_MODULES = frozenset({"mlp", "experts"})
 LORA_UNEMBED_MODULES = frozenset({"lm_head", "embed_tokens"})
 
+# What `target_modules="all-linear"` expands to on the Megatron backend: Megatron-Core
+# module names, in order, each with its LoRA group. Megatron-Bridge adapts every module
+# whose own name is listed and only warns about a name that matches nothing, so one list
+# serves every architecture. Gated DeltaNet (under `self_attention`) and Mamba (under
+# `mixer`) both name their projections `in_proj`/`out_proj`; both count as attention.
+MEGATRON_ALL_LINEAR_TARGETS = {
+    "lora": (
+        ("linear_qkv", "attn"),
+        ("linear_proj", "attn"),
+        ("linear_fc1", "mlp"),
+        ("linear_fc2", "mlp"),
+        ("in_proj", "attn"),
+        ("out_proj", "attn"),
+    ),
+    "canonical_lora": (
+        ("linear_q", "attn"),
+        ("linear_k", "attn"),
+        ("linear_v", "attn"),
+        ("linear_proj", "attn"),
+        ("linear_fc1_up", "mlp"),
+        ("linear_fc1_gate", "mlp"),
+        ("linear_fc2", "mlp"),
+        ("in_proj", "attn"),
+        ("out_proj", "attn"),
+    ),
+}
+
 
 def lora_module_group(module_name: str) -> Optional[str]:
     """Classify a dotted module path into the LoRA group it belongs to.
@@ -46,16 +73,21 @@ def check_lora_group_flags(
     target_modules: Union[str, list[str], None],
     train_attn: bool,
     train_mlp: bool,
-    strategy: Optional[str] = None,
+    init_adapter_path: Optional[str] = None,
 ) -> None:
     """Reject ``train_attn``/``train_mlp`` combinations that cannot be applied.
 
     Needs no model, so callers can run it before reserving GPUs.
 
+    Args:
+        target_modules: The configured ``trainer.policy.model.lora.target_modules``.
+        train_attn: Whether to adapt the attention group.
+        train_mlp: Whether to adapt the MLP group.
+        init_adapter_path: The configured ``trainer.policy.model.lora.init_adapter_path``, if any.
+
     Raises:
         ValueError: If both flags are ``False``, or if narrowing is requested alongside an explicit
-            module list.
-        NotImplementedError: If narrowing is requested on Megatron.
+            module list or an adapter to initialize from.
     """
     if train_attn and train_mlp:
         return
@@ -64,19 +96,93 @@ def check_lora_group_flags(
             "LoRA requires at least one of `train_attn` or `train_mlp` to be True; with both False "
             "no module would be adapted and there would be nothing to train."
         )
-    if strategy == "megatron":
-        # TODO: honour train_attn/train_mlp on Megatron (https://github.com/NovaSky-AI/SkyRL/issues/2511).
-        raise NotImplementedError(
-            "`train_attn`/`train_mlp` are only supported on the FSDP backend; the Megatron "
-            "backend always adapts both attention and MLP. Use `trainer.strategy=fsdp`, or "
-            "name the modules explicitly in `trainer.policy.model.lora.target_modules`."
+    if init_adapter_path:
+        raise ValueError(
+            "`train_attn`/`train_mlp` narrowing cannot be combined with "
+            "`trainer.policy.model.lora.init_adapter_path`: the adapter decides which modules are adapted. "
+            "Set both to True."
         )
     if not (isinstance(target_modules, str) and target_modules.lower() == "all-linear"):
         raise ValueError(
-            f"`train_attn`/`train_mlp` narrow `target_modules='all-linear'`, but it is set to "
-            f"{target_modules!r}. Name the modules in `target_modules` directly, or leave it at "
-            f'"all-linear" and use the flags.'
+            '`train_attn`/`train_mlp` narrow `trainer.policy.model.lora.target_modules="all-linear"`, but '
+            f"it is set to {target_modules!r}. Name the modules in "
+            '`trainer.policy.model.lora.target_modules` directly, or leave it at "all-linear" and use the '
+            "flags."
         )
+
+
+def check_megatron_lora_group_support(
+    train_attn: bool,
+    train_mlp: bool,
+    *,
+    has_vision_tower: bool,
+    multi_latent_attention: bool,
+) -> None:
+    """Reject narrowing on Megatron models where the ``"all-linear"`` halves do not match the groups.
+
+    Args:
+        train_attn: Whether to adapt the attention group.
+        train_mlp: Whether to adapt the MLP group.
+        has_vision_tower: Whether the model being built includes a vision encoder.
+        multi_latent_attention: Whether the model uses multi-latent attention (MLA).
+
+    Raises:
+        ValueError: If narrowing is requested on a model with a vision tower, or attention-only
+            LoRA on an MLA model.
+    """
+    if train_attn and train_mlp:
+        return
+    # The vision tower and its patch merger reuse the language model's module names
+    # (`linear_qkv`, `linear_fc1`, ...), so either half would adapt parts of it too.
+    if has_vision_tower:
+        raise ValueError(
+            "`train_attn`/`train_mlp` narrowing is not supported for vision-language models on the "
+            "Megatron backend. Set both to True and name the modules to adapt in "
+            "`trainer.policy.model.lora.target_modules` instead."
+        )
+    if multi_latent_attention and not train_mlp:
+        raise ValueError(
+            "Attention-only LoRA (`train_mlp=False`) is not supported for multi-latent attention models "
+            'on the Megatron backend: `trainer.policy.model.lora.target_modules="all-linear"` adapts only '
+            "`linear_proj` of their attention. Set both to True and name the modules to adapt in "
+            "`trainer.policy.model.lora.target_modules` instead, e.g. `linear_q_down_proj`, "
+            "`linear_q_up_proj`, `linear_kv_down_proj`, `linear_kv_up_proj`, `linear_proj`."
+        )
+
+
+def megatron_all_linear_target_modules(
+    lora_type: str,
+    train_attn: bool,
+    train_mlp: bool,
+    include_gdn_in_proj: bool,
+) -> list[str]:
+    """Expand ``target_modules="all-linear"`` to Megatron-Core module names.
+
+    Args:
+        lora_type: ``"lora"`` (fused ``linear_qkv``/``linear_fc1``) or ``"canonical_lora"``
+            (separate q/k/v and up/gate adapters).
+        train_attn: Whether to keep the attention names.
+        train_mlp: Whether to keep the MLP names.
+        include_gdn_in_proj: Whether ``in_proj`` may be adapted; ``False`` for models whose Gated
+            DeltaNet ``in_proj`` cannot round-trip through weight sync (see
+            ``gdn_in_proj_lora_is_safe``).
+
+    Returns:
+        The module names, in a fixed order. With both flags set, this is the full list.
+
+    Raises:
+        ValueError: If ``lora_type`` is not one of the two supported types.
+    """
+    if lora_type not in MEGATRON_ALL_LINEAR_TARGETS:
+        raise ValueError(
+            f"Unknown Megatron lora_type {lora_type!r}; expected one of {sorted(MEGATRON_ALL_LINEAR_TARGETS)}."
+        )
+    groups = {group for group, wanted in (("attn", train_attn), ("mlp", train_mlp)) if wanted}
+    return [
+        name
+        for name, group in MEGATRON_ALL_LINEAR_TARGETS[lora_type]
+        if group in groups and (include_gdn_in_proj or name != "in_proj")
+    ]
 
 
 def resolve_lora_target_modules(

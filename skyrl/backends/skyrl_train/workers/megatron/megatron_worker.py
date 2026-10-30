@@ -98,7 +98,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     append_tensor_list_padding,
     packed_dummy_row_segments,
 )
-from skyrl.backends.skyrl_train.utils.lora_targets import check_lora_group_flags
+from skyrl.backends.skyrl_train.utils.lora_targets import (
+    check_lora_group_flags,
+    check_megatron_lora_group_support,
+    megatron_all_linear_target_modules,
+)
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -504,10 +508,19 @@ class MegatronWorker:
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
-        # Megatron builds its target list from fixed module names (see the
-        # "all-linear" expansion below), so the FSDP group narrowing does not apply.
         check_lora_group_flags(
-            lora_config.target_modules, lora_config.train_attn, lora_config.train_mlp, strategy="megatron"
+            lora_config.target_modules,
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            init_adapter_path=lora_config.init_adapter_path,
+        )
+        # `language_model_only` swaps in a text-only bridge only for some architectures
+        # (Qwen3.5, Kimi K2.5), so also ask the provider whether it builds a vision tower.
+        check_megatron_lora_group_support(
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            has_vision_tower=self.is_vlm or getattr(self.provider, "vision_config", None) is not None,
+            multi_latent_attention=bool(getattr(self.provider, "multi_latent_attention", False)),
         )
         if experts_shared_outer_loras:
             apply_packed_per_expert_sharded_state_dict_patch()
@@ -533,30 +546,22 @@ class MegatronWorker:
             )
 
         self._lora_import_plan = None
+        target_modules = lora_config.target_modules
         if lora_config.init_adapter_path:
             # The adapter decides which modules are adapted and at what rank; the LoRA
             # module built below must match it exactly for the import to be lossless.
             self._lora_import_plan = self._plan_lora_import(lora_config, lora_type)
             target_modules = self._lora_import_plan.target_modules
-        elif lora_config.target_modules == "all-linear":
-            if lora_type == "lora":
-                target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-            else:
-                target_modules = [
-                    "linear_q",
-                    "linear_k",
-                    "linear_v",
-                    "linear_proj",
-                    "linear_fc1_up",
-                    "linear_fc1_gate",
-                    "linear_fc2",
-                    "in_proj",
-                    "out_proj",
-                ]
-            if not gdn_in_proj_lora_is_safe(self.bridge):
-                target_modules.remove("in_proj")
-        else:
-            target_modules = lora_config.target_modules
+        elif isinstance(target_modules, str) and target_modules.lower() == "all-linear":
+            target_modules = megatron_all_linear_target_modules(
+                lora_type,
+                lora_config.train_attn,
+                lora_config.train_mlp,
+                include_gdn_in_proj=gdn_in_proj_lora_is_safe(self.bridge),
+            )
+            if not (lora_config.train_attn and lora_config.train_mlp) and self._rank == 0:
+                group = "attn" if lora_config.train_attn else "mlp"
+                logger.info(f"LoRA restricted to {group} modules: {target_modules}")
 
         if lora_type == "lora":
             from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (

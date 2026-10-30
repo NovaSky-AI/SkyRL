@@ -101,17 +101,26 @@ class TestLoraSignature:
 
 
 @pytest.mark.parametrize(
-    ("overrides", "error"),
-    [
-        (FSDPBackendOverrides(**{"trainer.policy.model.lora.target_modules": ["q_proj"]}), ValueError),
-        (MegatronBackendOverrides(), NotImplementedError),
-    ],
-    ids=["explicit_target_modules", "megatron"],
+    "overrides_cls",
+    [FSDPBackendOverrides, MegatronBackendOverrides],
+    ids=["fsdp", "megatron"],
 )
-def test_unappliable_flags_fail_while_building_the_config(overrides, error):
+def test_unappliable_flags_fail_while_building_the_config(overrides_cls):
     """Raised here, before create_model starts Ray or reserves GPUs."""
-    with pytest.raises(error):
+    overrides = overrides_cls(**{"trainer.policy.model.lora.target_modules": ["q_proj"]})
+    with pytest.raises(ValueError, match="narrow"):
         _build_skyrl_train_config(BASE_MODEL, overrides, _lora(train_mlp=False))
+
+
+@pytest.mark.parametrize(("train_attn", "train_mlp"), [(True, False), (False, True)])
+def test_megatron_narrowing_builds_a_config(train_attn, train_mlp):
+    """Megatron takes either narrowing; the model-dependent checks run in the worker."""
+    cfg = _build_skyrl_train_config(
+        BASE_MODEL, MegatronBackendOverrides(), _lora(train_attn=train_attn, train_mlp=train_mlp)
+    )
+    assert cfg.trainer.strategy == "megatron"
+    lora = cfg.trainer.policy.model.lora
+    assert (lora.train_attn, lora.train_mlp, lora.target_modules) == (train_attn, train_mlp, "all-linear")
 
 
 class _StopBeforeWorkers(Exception):
