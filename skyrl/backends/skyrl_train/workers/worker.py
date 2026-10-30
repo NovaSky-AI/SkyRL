@@ -98,7 +98,15 @@ if TYPE_CHECKING:
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
 class DistributedTorchRayActor:
     def __init__(
-        self, world_size, rank, local_rank, master_addr, master_port, sequence_parallel_size, record_memory=False
+        self,
+        world_size,
+        rank,
+        local_rank,
+        master_addr,
+        master_port,
+        sequence_parallel_size,
+        record_memory=False,
+        num_nodes=1,
     ):
         logging.basicConfig(
             format="%(asctime)s %(levelname)-8s %(message)s",
@@ -108,6 +116,7 @@ class DistributedTorchRayActor:
         self._world_size = world_size
         self._rank = rank
         self._local_rank = local_rank
+        self._num_nodes = num_nodes
         self._master_addr = master_addr if master_addr else self._get_current_node_ip()
         self._master_port = master_port if master_port else self._get_free_port()
         os.environ["MASTER_ADDR"] = self._master_addr
@@ -119,12 +128,13 @@ class DistributedTorchRayActor:
         # os.environ["LOCAL_RANK"] = str(self._local_rank)
         if device.is_neuron():
             os.environ["LOCAL_RANK"] = "0"
-            # The driver runs the in-process inference engine on one NeuronCore; this
-            # FSDP worker actor is a separate Ray process and a NeuronCore is not
-            # shareable across processes, so it must claim a disjoint single core before
-            # the first neuron allocation (the runtime reads NEURON_RT_VISIBLE_CORES
-            # lazily, at first use). See device.neuron_worker_core.
-            os.environ["NEURON_RT_VISIBLE_CORES"] = str(device.neuron_worker_core(self._rank, self._world_size))
+            # This FSDP worker actor is a separate Ray process and a NeuronCore is not
+            # shareable across processes, so it claims its own single core before the
+            # first neuron allocation (the runtime reads NEURON_RT_VISIBLE_CORES lazily,
+            # at first use). The core must equal the local rank: the neuron collective
+            # backend's NCCL topology aborts when the visible core is offset from it.
+            # See device.neuron_worker_core.
+            os.environ["NEURON_RT_VISIBLE_CORES"] = str(device.neuron_worker_core(self._rank, self._num_nodes))
         else:
             os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
         self.sequence_parallel_size: int = sequence_parallel_size
@@ -145,7 +155,15 @@ class DistributedTorchRayActor:
     def init_worker_process_group(self):
         if not torch.distributed.is_initialized():
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
-            backend = "cpu:gloo,cuda:nccl" if device.is_cuda() else "gloo"
+            if device.is_cuda():
+                backend = "cpu:gloo,cuda:nccl"
+            elif device.is_neuron():
+                # Neuron has a native NKI collective backend for sharded DTensors, but
+                # SkyRL's scalar/metric reductions still run on CPU, so request both and
+                # let c10d dispatch on tensor device.
+                backend = "cpu:gloo,neuron:neuron"
+            else:
+                backend = "gloo"
             torch.distributed.init_process_group(
                 backend=backend, timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
@@ -156,15 +174,15 @@ class DistributedTorchRayActor:
         # it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
-        # TorchNeuron has no NCCL: collectives run on CPU via gloo. Pin the backend
-        # explicitly on neuron (consistent with create_device_mesh in fsdp_utils.py).
-        # Single-core is the only supported shape.
-        backend_override = {0: "gloo"} if device.is_neuron() else None
+        # ``init_device_mesh`` auto-resolves the mesh collective backend from
+        # ``dist.Backend.default_device_backend_map``, which torch-neuronx populates with
+        # ``"neuron" -> "neuron"``. Forcing gloo here is wrong: gloo is CPU-only and cannot
+        # run the sharded-DTensor all-gather/reduce-scatter that FSDP2 needs. CUDA resolves
+        # to NCCL, so neither path needs an explicit override.
         device_mesh = torch.distributed.device_mesh.init_device_mesh(
             device.backend(),
             mesh_shape=(dp_size, self.sequence_parallel_size),
             mesh_dim_names=("dp", "sp"),
-            backend_override=backend_override,
         )
         self.device_mesh = device_mesh
         self.mesh_rank = MeshRank(
@@ -854,7 +872,8 @@ class PPORayActorGroup:
 
         # If no PG provided, create one internally
         if raw_pg is None and self._num_gpus_per_node > 1:
-            bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
+            accel = device.accelerator_resource_name()
+            bundles = [{accel: self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
                 for i in range(len(bundles)):
@@ -892,6 +911,7 @@ class PPORayActorGroup:
             master_port=None,
             sequence_parallel_size=self.sequence_parallel_size,
             record_memory=self.record_memory,
+            num_nodes=self._num_nodes,
         )
         self._actor_handlers = [master_actor]
 
@@ -914,6 +934,7 @@ class PPORayActorGroup:
                     master_port=master_port,
                     sequence_parallel_size=self.sequence_parallel_size,
                     record_memory=self.record_memory,
+                    num_nodes=self._num_nodes,
                 )
                 self._actor_handlers.append(worker_actor)
 

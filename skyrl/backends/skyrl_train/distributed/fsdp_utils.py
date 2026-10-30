@@ -253,23 +253,22 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
 
 
 def create_device_mesh(world_size, fsdp_size):
-    # TorchNeuron has no NCCL: collectives run on CPU via gloo. ``init_device_mesh``
-    # resolves the backend lazily and raises for unknown accelerator types, so pin
-    # the backend explicitly on neuron. Single-core is the only supported shape.
-    backend_override = {0: "gloo"} if device.is_neuron() else None
+    # ``init_device_mesh`` auto-resolves the mesh collective backend from
+    # ``dist.Backend.default_device_backend_map``: torch-neuronx registers ``"neuron"``
+    # there (NKI kernels), and CUDA resolves to NCCL. Forcing gloo on neuron is wrong --
+    # gloo is CPU-only and cannot run the sharded-DTensor all-gather/reduce-scatter that
+    # FSDP2 needs -- so no override is passed.
     if fsdp_size < 0 or fsdp_size >= world_size:
         device_mesh = init_device_mesh(
             device.backend(),
             mesh_shape=(world_size,),
             mesh_dim_names=["fsdp"],
-            backend_override=backend_override,
         )
     else:
         device_mesh = init_device_mesh(
             device.backend(),
             mesh_shape=(world_size // fsdp_size, fsdp_size),
             mesh_dim_names=["ddp", "fsdp"],
-            backend_override=backend_override,
         )
     return device_mesh
 

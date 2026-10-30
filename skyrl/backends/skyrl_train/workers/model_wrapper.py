@@ -199,16 +199,24 @@ class HFModelWrapper(nn.Module):
                     )
                     # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
                     model_class = AutoModelForImageTextToText
-                    # Qwen3.5-VL's vision tower has device-unsafe RoPE / repeat_interleave
-                    # paths that crash on TorchNeuron. Apply the shared device-safety patch
-                    # before the model is built (idempotent, no-op off neuron, and gated on
-                    # the model type so unrelated VLMs are never monkeypatched).
-                    if device.is_neuron() and getattr(model_config, "model_type", None) == "qwen3_5":
+                    # Qwen3.5-VL / Qwen3-VL vision towers have device-unsafe RoPE /
+                    # repeat_interleave paths that crash on TorchNeuron. Apply the
+                    # family-specific device-safety patch before the model is built
+                    # (idempotent, no-op off neuron, and gated on the model type so
+                    # unrelated VLMs are never monkeypatched).
+                    model_type = getattr(model_config, "model_type", None)
+                    if device.is_neuron() and model_type == "qwen3_5":
                         from skyrl.backends.skyrl_train.patches.neuron.qwen3_5_vl import (
                             apply_qwen3_5_vl_device_patch,
                         )
 
                         apply_qwen3_5_vl_device_patch()
+                    elif device.is_neuron() and model_type == "qwen3_vl":
+                        from skyrl.backends.skyrl_train.patches.neuron.qwen3_vl import (
+                            apply_qwen3_vl_device_patch,
+                        )
+
+                        apply_qwen3_vl_device_patch()
 
             model_config._attn_implementation = self.attn_implementation
 

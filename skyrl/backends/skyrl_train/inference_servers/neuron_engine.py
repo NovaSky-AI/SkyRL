@@ -28,6 +28,7 @@ for ``kwargs_data`` instead of vLLM's ``mm_serde``, so it does not require vLLM.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -42,6 +43,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_neuron_sampling_params,
 )
+from skyrl.backends.skyrl_train.utils.device import neuron_driver_core
 from skyrl.backends.skyrl_train.weight_sync.base import LoraLoadRequest
 from skyrl.utils.tok import check_is_vlm, get_processor, get_tokenizer
 
@@ -62,6 +64,18 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         self._model_path = model_path
         self._device = device
         self._torch_dtype = torch_dtype if torch_dtype is not None else torch.bfloat16
+
+        # Pin the driver's engine to its NeuronCore (the last logical core) before the
+        # first neuron allocation. This engine runs inside the driver's Ray actor, which
+        # is spawned by the raylet and does not inherit the launch script's shell export.
+        # The variable must be set here, in-process, rather than forwarded through the
+        # Ray runtime env: Ray's accelerator manager reads it back as the worker's
+        # "original visible cores" and indexes worker core assignments into it, so a
+        # runtime-env copy collapses every FSDP worker (which requests ``neuron_cores``)
+        # onto the driver's single-core list. Without this pin the model's ``.to("neuron")``
+        # spreads across the default visible-core set and collides with the workers'
+        # ``0 .. world_size-1`` cores.
+        os.environ["NEURON_RT_VISIBLE_CORES"] = str(neuron_driver_core())
 
         self._tokenizer = tokenizer if tokenizer is not None else get_tokenizer(model_path)
         self._processor = processor
@@ -112,6 +126,18 @@ class NeuronInferenceEngine(InferenceEngineInterface):
                 except ImportError:
                     logger.warning(
                         "Qwen3.5-VL detected but the neuron device-safety patch is unavailable "
+                        "on this transformers release; running unpatched."
+                    )
+            elif config.model_type == "qwen3_vl":
+                try:
+                    from skyrl.backends.skyrl_train.patches.neuron.qwen3_vl import (
+                        apply_qwen3_vl_device_patch,
+                    )
+
+                    apply_qwen3_vl_device_patch()
+                except ImportError:
+                    logger.warning(
+                        "Qwen3-VL detected but the neuron device-safety patch is unavailable "
                         "on this transformers release; running unpatched."
                     )
             load_kwargs["config"] = config
@@ -197,7 +223,10 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         concatenates items along dim 0, so a single item holding the full concatenation
         round-trips unchanged).
         """
-        messages = [{**message, "content": self._normalize_content(message.get("content"))} for message in messages]
+        messages = [
+            {**message, "content": self._normalize_content(message.get("content"))}
+            for message in messages
+        ]
         images = self._extract_images(messages)
         text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         if images:
@@ -360,7 +389,9 @@ class NeuronInferenceEngine(InferenceEngineInterface):
 
         from peft import PeftModel
 
-        adapter = PeftModel.from_pretrained(self._base_model, lora_path, adapter_name=lora_name, is_trainable=False)
+        adapter = PeftModel.from_pretrained(
+            self._base_model, lora_path, adapter_name=lora_name, is_trainable=False
+        )
         adapter.to(self._device)
         adapter.eval()
         self._adapters[lora_name] = adapter

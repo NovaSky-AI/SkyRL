@@ -1082,6 +1082,22 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             )
             env_vars["RAY_CGRAPH_get_timeout"] = os.environ["RAY_CGRAPH_get_timeout"]
 
+    if cfg.generator.inference_engine.backend == "neuron":
+        # The NKI / hub-kernel pins must reach both the driver's in-process engine and
+        # the FSDP workers. They are read at import/forward time in every process, and
+        # Ray workers are spawned by the raylet, so a driver-only shell export never
+        # reaches them when the cluster is started externally (``ray start --head``).
+        # ``NEURON_RT_VISIBLE_CORES`` is deliberately NOT forwarded here: Ray's neuron
+        # accelerator manager reads it back as the worker's "original visible cores" and
+        # indexes worker core assignments into it, so a runtime-env copy would collapse
+        # every FSDP worker onto the driver's single-core list (IndexError). The driver
+        # pins its own core inside ``NeuronInferenceEngine`` and each worker pins
+        # ``rank`` in its ``__init__``.
+        for var_name in ("NKI_ENABLE_TRACE_CACHE", "USE_HUB_KERNELS"):
+            if value := os.environ.get(var_name):
+                logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+                env_vars[var_name] = value
+
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
     if hasattr(cfg.generator, "inference_engine") and hasattr(cfg.generator.inference_engine, "tensor_parallel_size"):
@@ -1096,7 +1112,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
-    if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
+    # NCCL P2P/SHM transport flags are a CUDA-only tuning path. Trainium's `neuron`
+    # collective backend (libnccom/libnrt) needs its intra-device transport enabled:
+    # disabling it yields "No transport found between devices" and a SIGSEGV in the
+    # worker communicator. Skip the peer-access probe for the neuron backend.
+    if not device.is_neuron() and not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
