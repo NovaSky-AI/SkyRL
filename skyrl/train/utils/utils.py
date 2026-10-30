@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
     BLOCKWISE_FP8,
@@ -404,6 +405,20 @@ def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_
         )
 
 
+def validate_optimizer_offload_to_disk_cfg(cfg: SkyRLTrainConfig):
+    """Reject ``optimizer_offload_to_disk`` settings that would be ignored, or fail only once training runs."""
+    if cfg.trainer.ref.megatron_config.optimizer_offload_to_disk.dir is not None:
+        raise ValueError("optimizer_offload_to_disk applies to the policy only; unset it for trainer.ref.")
+    if cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is None:
+        return
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError("optimizer_offload_to_disk requires trainer.strategy=megatron.")
+    if cfg.trainer.policy.model.lora.rank > 0:
+        raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+    if is_cloud_path(cfg.trainer.ckpt_path):
+        raise ValueError("optimizer_offload_to_disk requires a local trainer.ckpt_path.")
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -662,6 +677,7 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
+    validate_optimizer_offload_to_disk_cfg(cfg)
     if cfg.generator.use_conversation_multi_turn:
         if (
             cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
@@ -1028,6 +1044,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
             if os.environ.get(nvte_var):
                 env_vars[nvte_var] = os.environ[nvte_var]
+        # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
+        # Engram table placement, faulthandler).
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
@@ -1144,6 +1163,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Selects the DSA indexer top-k backend under dsa_kernel_backend=cudnn
         # (patches/megatron/patch_dsa_hybrid_indexer.py); read in the Megatron workers.
         "SKYRL_DSA_INDEXER_BACKEND",
+        # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
+        "VLLM_ALLREDUCE_USE_FLASHINFER",
+        "VLLM_ALLREDUCE_USE_SYMM_MEM",
+        # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
+        # which leaves the CPU-offloaded optimizer step single-threaded.
+        "OMP_NUM_THREADS",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",
         "PYTHONFAULTHANDLER",

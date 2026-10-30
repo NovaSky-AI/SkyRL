@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import shutil
 from collections import defaultdict
@@ -60,6 +61,12 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_checkpoint_without_output_frozen_inputs import (
     apply_checkpoint_without_output_frozen_inputs_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype import (
+    apply_clip_grads_mixed_dtype_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
+    apply_distopt_mixed_dtype_group_index_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
@@ -150,6 +157,38 @@ apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
 # Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
 apply_checkpoint_without_output_frozen_inputs_patch()
+# Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
+# TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
+apply_distopt_mixed_dtype_group_index_patch()
+# Grad norm / clip over mixed fp32/bf16 decoupled grads (precision-aware optimizer on mHC models).
+# TODO: remove once NVIDIA/Megatron-LM#7279 is in the pinned megatron-core (see patches/megatron/README.md).
+apply_clip_grads_mixed_dtype_patch()
+
+
+# Selective-recompute modules an attention variant cannot take.
+_UNSUPPORTED_RECOMPUTE_MODULES = {
+    # megatron-core's DSv4HybridAttention (DeepSeek-V4 / V4.1) asserts checkpoint_core_attention is off.
+    "dsv4_hybrid": {"core_attn"},
+}
+
+
+def drop_unsupported_recompute_modules(provider) -> None:
+    """Drop the selective-recompute modules the provider's attention variant cannot take (selective "core_attn"
+    is SkyRL's default), and turn recompute off if nothing is left. A no-op for variants with no entry in
+    ``_UNSUPPORTED_RECOMPUTE_MODULES`` and for any granularity but "selective"."""
+    variant = getattr(provider, "experimental_attention_variant", None)
+    unsupported = _UNSUPPORTED_RECOMPUTE_MODULES.get(variant, set())
+    if provider.recompute_granularity != "selective" or not unsupported & set(provider.recompute_modules or []):
+        return
+    dropped = sorted(unsupported & set(provider.recompute_modules))
+    provider.recompute_modules = [m for m in provider.recompute_modules if m not in unsupported]
+    if not provider.recompute_modules:
+        provider.recompute_granularity = None
+    logger.info(
+        f"{variant} attention does not support {dropped} recompute; "
+        f"recompute_granularity={provider.recompute_granularity}, "
+        f"recompute_modules={provider.recompute_modules}"
+    )
 
 
 class MegatronWorker:
@@ -379,6 +418,8 @@ class MegatronWorker:
                 f"(recompute_modules={provider.recompute_modules}); mHC is not compatible with "
                 "full recompute."
             )
+
+        drop_unsupported_recompute_modules(provider)
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
@@ -1051,10 +1092,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.optimizer = None
             self.scheduler = None
         else:
+            if self.cfg.policy.megatron_config.optimizer_config_kwargs.get("optimizer_cpu_offload"):
+                # Ray starts this actor with num_cpus=1, which sets OMP_NUM_THREADS=1, so the CPU share of the
+                # optimizer (torch AdamW) would step on one thread. Use this rank's share of the node's CPUs.
+                cpu_threads = len(os.sched_getaffinity(0)) // max(1, self.cfg.placement.policy_num_gpus_per_node)
+                if torch.get_num_threads() < cpu_threads:
+                    torch.set_num_threads(cpu_threads)
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
-            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+            offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
+            offload_to_disk = None
+            if offload_cfg.dir is not None:
+                if self._is_lora:
+                    raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+                offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
+            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(

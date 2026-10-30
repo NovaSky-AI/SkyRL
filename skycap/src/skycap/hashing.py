@@ -162,13 +162,19 @@ def _token_digest(token_ids: Sequence[int]) -> str:
     return hashlib.blake2b(np.asarray(token_ids, dtype=np.int64).tobytes(), digest_size=16).hexdigest()
 
 
-def client_token_delta_hash(match: str, token_ids: Sequence[int]) -> str:
-    """A client node's identity in token mode: its match hash and its exact tokens.
+def client_token_delta_hash(match: str, token_ids: Sequence[int], media: Sequence[Any] = ()) -> str:
+    """A client node's identity in token mode: its match hash, its exact tokens and its images.
 
     Two identical messages that tokenized differently are two nodes, so a path's
-    tokens are always the tokens its nodes were committed with.
+    tokens are always the tokens its nodes were committed with. Images count too
+    (``media``, the node's ``Media`` items): two images of one size have the same
+    placeholder tokens, and a node must keep the images its tokens were sent with.
+    A node without images hashes as it did before images were captured.
     """
-    return digest(["client", match, _token_digest(token_ids)])
+    if not media:
+        return digest(["client", match, _token_digest(token_ids)])
+    images = [[item.modality, item.offset, item.length, item.hash] for item in media]
+    return digest(["client", match, _token_digest(token_ids), images])
 
 
 def model_token_delta_hash(

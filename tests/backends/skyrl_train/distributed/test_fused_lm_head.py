@@ -29,8 +29,8 @@ def hybrid_model_type(monkeypatch):
 
     class OffloadInterface:
         @staticmethod
-        def mark_not_offloadable(parameter):
-            parameter.offloading_activation = False
+        def mark_not_offload(tensor):
+            tensor._do_not_offload = True
 
     hybrid_model.HybridModel = HybridModel
     activation_offload.FineGrainedActivationOffloadingInterface = OffloadInterface
@@ -77,7 +77,7 @@ def _make_hybrid(
     )
     model.mtp_process = mtp_num_layers is not None
     model.share_embeddings_and_output_weights = False
-    output_parameter = SimpleNamespace(offloading_activation=True)
+    output_parameter = SimpleNamespace(_do_not_offload=False)
     model.output_layer = SimpleNamespace(weight="lm-head-weight", parameters=lambda: iter((output_parameter,)))
     return model
 
@@ -99,7 +99,7 @@ def test_hybrid_processes_hidden_states_and_restores_post_process(hybrid_model_t
 
     assert output == "processed"
     assert hybrid.post_process is True
-    assert next(hybrid.output_layer.parameters()).offloading_activation is False
+    assert next(hybrid.output_layer.parameters())._do_not_offload is True
     wrapped_model.assert_called_once_with("input", packed_seq_params="packed")
     processor.assert_called_once_with(
         hidden_states="hidden-states",
@@ -107,6 +107,14 @@ def test_hybrid_processes_hidden_states_and_restores_post_process(hybrid_model_t
         output_weight="shared-weight",
         context={},
     )
+
+
+@pytest.mark.megatron
+def test_megatron_offload_interface_exposes_mark_not_offload():
+    # The stub above must track the real interface; guard against the method name drifting.
+    offload = pytest.importorskip("megatron.core.pipeline_parallel.fine_grained_activation_offload")
+
+    assert callable(getattr(offload.FineGrainedActivationOffloadingInterface, "mark_not_offload", None))
 
 
 def test_hybrid_pipeline_stage_skips_output_processor(hybrid_model_type):

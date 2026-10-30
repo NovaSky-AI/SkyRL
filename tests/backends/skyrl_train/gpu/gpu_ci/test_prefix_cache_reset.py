@@ -72,6 +72,7 @@ def _make_worker(worker_cls, engine):
     )
     worker._weight_sync_engine = engine
     worker._weight_sync_inference_client = None
+    worker.actor_module = []
     # FSDP dereferences self.model.model before the LoRA branch, so it must exist even
     # though _is_lora is False and the resulting peft_model goes unused.
     worker.model = SimpleNamespace(model=SimpleNamespace())

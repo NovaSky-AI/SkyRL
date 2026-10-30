@@ -502,3 +502,17 @@ class TestMultiDatasetValidation:
         cfg = _sft_cfg_from_overrides(["eval_interval=5"])
         with pytest.raises(ValueError, match="requires eval_datasets"):
             validate_sft_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        (["strategy=fsdp"], "requires strategy='megatron'"),
+        (["ckpt_path=s3://bucket/ckpts"], "local ckpt_path"),
+    ],
+)
+def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, match):
+    cfg = _sft_cfg_from_overrides(["megatron_config.optimizer_offload_to_disk.dir=/tmp/state", *overrides])
+
+    with pytest.raises(ValueError, match=match):
+        validate_sft_cfg(cfg)

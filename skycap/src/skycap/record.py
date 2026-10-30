@@ -35,6 +35,7 @@ import orjson
 import zstandard
 
 from skycap.graph import CallInfo, NodeTokens
+from skycap.tokens.renderer import Media
 from skycap.trajectory import Failure, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,11 @@ class _Columns:
             "experts_rows": 0,
             "mask_offset": None,
             "mask_rows": 0,
+            # The items themselves are in the node's message; their processed arrays are not recorded.
+            "media": [
+                {"modality": item.modality, "offset": item.offset, "length": item.length, "hash": item.hash}
+                for item in tokens.media
+            ],
             "has_mask_logprobs": False,
         }
         self.token_ids.append(np.asarray(tokens.token_ids, dtype=np.int32))
@@ -332,4 +338,5 @@ def _node_tokens(meta: dict[str, Any] | None, arrays: dict[str, dict[str, np.nda
         sampling_mask_logprobs=row_logprobs,
         text=text,
         text_offsets=offsets,
+        media=[Media(**item) for item in meta.get("media") or ()],
     )

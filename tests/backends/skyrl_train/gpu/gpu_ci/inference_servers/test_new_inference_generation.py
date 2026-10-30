@@ -350,22 +350,19 @@ def test_context_length_error_returns_400(vllm_server):
     error_message = error_data.get("error", {}).get("message", str(error_data)).lower()
     assert "context length" in error_message
 
-    # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len -> HTTP 400
-    # vllm serve returns: "'max_tokens' or 'max_completion_tokens' is too large: {max_tokens}.
-    # This model's maximum context length is {max_model_len} tokens and your request has {n}
-    # input tokens ({max_tokens} > {max_model_len} - {n})."
+    # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len. Since vLLM 0.32.0 the
+    # server clamps max_tokens to the remaining context (max_model_len - prompt_len) instead of
+    # returning 400, so the request succeeds and never generates past max_model_len.
     messages_medium = [{"role": "user", "content": "hello " * 500}]
     response = requests.post(
         f"{base_url}/chat/completions",
         json={"model": SERVED_MODEL_NAME, "messages": messages_medium, "max_tokens": 1000},
     )
     assert (
-        response.status_code == HTTPStatus.BAD_REQUEST
-    ), f"Expected HTTP 400 for prompt+max_tokens overflow, got {response.status_code}: {response.json()}"
-    error_data = response.json()
-    assert "error" in error_data
-    error_message = error_data["error"]["message"]
-    assert "context length" in error_message.lower(), f"Error message should mention 'context length': {error_message}"
+        response.status_code == HTTPStatus.OK
+    ), f"Expected max_tokens to be clamped to the remaining context, got {response.status_code}: {response.json()}"
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] + usage["completion_tokens"] <= 1024
 
 
 # NOTE : We use LiteLLM because it supports sampling params such as min_tokens, skip_special_tokens, etc.,
@@ -432,18 +429,19 @@ async def test_completions_via_litellm(vllm_server: InferenceEngineState):
 async def test_client_context_length_error_returns_400_via_litellm(vllm_server: InferenceEngineState):
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
-    # LiteLLM wraps prompt+max_tokens error as BadRequestError (not InternalServerError).
-    # This is critical for Harbor's ContextLengthExceededError detection.
+    # LiteLLM wraps the context length error as BadRequestError (not InternalServerError).
+    # This is critical for Harbor's ContextLengthExceededError detection. Since vLLM 0.32.0 only an
+    # oversized prompt is rejected; prompt+max_tokens overflow is clamped (see test above).
     base_url = _get_base_url(vllm_server)
-    messages_medium = [{"role": "user", "content": "hello " * 500}]
+    messages_oversized = [{"role": "user", "content": "hello " * 1500}]
 
     with pytest.raises(LiteLLMBadRequestError) as excinfo:
         await litellm_async_completion(
             model=f"openai/{SERVED_MODEL_NAME}",
-            messages=messages_medium,
+            messages=messages_oversized,
             api_base=base_url,
             api_key="DUMMY_KEY",
-            max_tokens=1000,
+            max_tokens=10,
             num_retries=0,
         )
     exception_raised = excinfo.value
