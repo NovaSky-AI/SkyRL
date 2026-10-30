@@ -381,7 +381,12 @@ class SkyRLTrainBackend(AbstractBackend):
         critic_lora.train_mlp = lora_config.train_mlp
         if critic_lora.rank > 0:
             # Before the critic workers start, as for the policy in _build_skyrl_train_config.
-            check_lora_group_flags(critic_lora.target_modules, critic_lora.train_attn, critic_lora.train_mlp)
+            check_lora_group_flags(
+                critic_lora.target_modules,
+                critic_lora.train_attn,
+                critic_lora.train_mlp,
+                init_adapter_path=critic_lora.init_adapter_path,
+            )
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,
