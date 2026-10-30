@@ -51,6 +51,7 @@ class SeqPacker(ABC):
         bin_count_multiple: Optional[int] = None,
         sequence_length_multiple: int = 1,
         packed_length_multiple: int = 1,
+        allow_empty_bins: bool = False,
     ):
         if min_bin_count is not None and min_bin_count < 0:
             raise ValueError("min_bin_count must be nonnegative")
@@ -66,6 +67,7 @@ class SeqPacker(ABC):
         self.bin_count_multiple = bin_count_multiple
         self.sequence_length_multiple = sequence_length_multiple
         self.packed_length_multiple = packed_length_multiple
+        self.allow_empty_bins = allow_empty_bins
 
     @abstractmethod
     def _pack_implementation(self, sequence_lengths: List[int]) -> List[List[int]]:
@@ -104,7 +106,7 @@ class SeqPacker(ABC):
             return bins
 
         total_sequences = sum(len(bin_contents) for bin_contents in bins)
-        if total_sequences < target_bin_count:
+        if total_sequences < target_bin_count and not self.allow_empty_bins:
             raise ValueError(
                 f"Cannot create {target_bin_count} bins with only {total_sequences} sequences. "
                 f"Each bin must contain at least one sequence. "
@@ -133,7 +135,9 @@ class SeqPacker(ABC):
                 else:
                     source_bin_idx += 1
             else:
-                raise ValueError("Cannot create additional bins: insufficient sequences to redistribute.")
+                if not self.allow_empty_bins:
+                    raise ValueError("Cannot create additional bins: insufficient sequences to redistribute.")
+                break
 
         return adjusted_bins
 
@@ -353,6 +357,7 @@ def make_seq_packer(
     bin_count_multiple: Optional[int] = None,
     sequence_length_multiple: int = 1,
     packed_length_multiple: int = 1,
+    allow_empty_bins: bool = False,
 ) -> SeqPacker:
     """Factory returning a configured :class:`SeqPacker` instance.
 
@@ -369,6 +374,8 @@ def make_seq_packer(
             to this multiple before placement.
         packed_length_multiple: Round each bin's aggregate footprint up to
             this multiple when checking capacity.
+        allow_empty_bins: Keep unfilled DP padding bins when there are fewer
+            real sequences than the requested bin count.
     """
     if isinstance(algorithm, str):
         try:
@@ -387,4 +394,5 @@ def make_seq_packer(
         bin_count_multiple=bin_count_multiple,
         sequence_length_multiple=sequence_length_multiple,
         packed_length_multiple=packed_length_multiple,
+        allow_empty_bins=allow_empty_bins,
     )
