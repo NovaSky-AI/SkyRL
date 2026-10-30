@@ -5,6 +5,7 @@ installed.
 """
 
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -137,6 +138,76 @@ def test_per_token_loss_requires_no_overlap_grad_reduce(overlap_grad_reduce):
         else:
             wrapper = MegatronModelWrapper(config=mock_skyrl_config, actor_module=[mock_module], actor_optimizer=None)
             assert wrapper._per_token_loss
+
+
+@pytest.mark.skipif(not _has_megatron, reason="megatron-core not installed")
+@pytest.mark.parametrize("per_token_loss", [False, True])
+@pytest.mark.parametrize("forward_only", [False, True])
+def test_schedule_defers_sync_and_preserves_per_token_scaling(monkeypatch, per_token_loss, forward_only):
+    from skyrl.backends.skyrl_train.workers.megatron import (
+        megatron_model_wrapper as wrapper_module,
+    )
+
+    class Chunk:
+        def __init__(self):
+            self.config = SimpleNamespace(no_sync_func=object(), grad_sync_func=object())
+            self.hooks_enabled = True
+            self.gradient = 0.0
+
+        @contextmanager
+        def no_sync(self):
+            self.hooks_enabled = False
+            try:
+                yield
+            finally:
+                self.hooks_enabled = True
+
+        def scale_gradients(self, scale):
+            self.gradient *= scale
+
+    chunk = Chunk()
+    callbacks = (chunk.config.no_sync_func, chunk.config.grad_sync_func)
+    wrapper = wrapper_module.MegatronModelWrapper.__new__(wrapper_module.MegatronModelWrapper)
+    wrapper.actor_module = [chunk]
+    wrapper.is_vlm = False
+    wrapper._per_token_loss = per_token_loss
+    wrapper.policy_loss_fn = None
+    wrapper.cfg = SimpleNamespace(
+        policy=SimpleNamespace(
+            megatron_config=SimpleNamespace(mtp_loss_weight=1.0, mtp_loss_chunk_size=None, mtp_loss_topk=None)
+        ),
+        algorithm=SimpleNamespace(policy_loss_type="cross_entropy"),
+    )
+
+    def schedule(*, data_iterator, forward_only, **kwargs):
+        batch = next(data_iterator)
+        assert chunk.hooks_enabled == forward_only
+        assert chunk.config.no_sync_func is (callbacks[0] if forward_only else None)
+        assert chunk.config.grad_sync_func is (callbacks[1] if forward_only else None)
+        if not forward_only:
+            chunk.gradient += batch["gradient"] * (batch["num_tokens_global"] if per_token_loss else 1)
+        return [{}]
+
+    monkeypatch.setattr(wrapper_module, "get_forward_backward_func", lambda: schedule)
+    monkeypatch.setattr(wrapper_module, "get_model_config", lambda _: SimpleNamespace(mtp_num_layers=None))
+    monkeypatch.setattr(wrapper_module, "make_batch_generator", lambda batches, vpp_size: iter(batches))
+    monkeypatch.setattr(
+        wrapper_module,
+        "mpu",
+        SimpleNamespace(
+            is_pipeline_last_stage=lambda **kwargs: True,
+            get_pipeline_model_parallel_last_rank=lambda: 0,
+            get_pipeline_model_parallel_group=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(wrapper_module.torch.distributed, "broadcast_object_list", lambda *args, **kwargs: None)
+
+    for tokens, gradient, expected in ((2, 2.0, 2.0), (3, 3.0, 5.0)):
+        batch = {"num_tokens_global": tokens, "gradient": gradient, "rollout_expert_indices": None}
+        wrapper.forward_backward_mini_batch([batch], seq_len=1, micro_batch_size=1, forward_only=forward_only)
+        assert chunk.gradient == pytest.approx(0.0 if forward_only else expected)
+        assert chunk.hooks_enabled
+        assert (chunk.config.no_sync_func, chunk.config.grad_sync_func) == callbacks
 
 
 # ---------------------------------------------------------------------------
