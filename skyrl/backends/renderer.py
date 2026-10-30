@@ -51,6 +51,9 @@ def decode_mm_kwargs(mm_kwargs: dict[str, list[str]] | None) -> MultiModalKwargs
     if not mm_kwargs or "image" not in mm_kwargs:
         return MultiModalKwargs(pixel_values=None, image_grid_thw=None)
 
+    if all(isinstance(s, str) and s.startswith(SAFETENSORS_MM_PREFIX) for s in mm_kwargs["image"]):
+        return _decode_safetensors_mm_kwargs(mm_kwargs["image"])
+
     from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
         decode_mm_kwargs_item as _vllm_decode,
     )
@@ -69,6 +72,30 @@ def decode_mm_kwargs(mm_kwargs: dict[str, list[str]] | None) -> MultiModalKwargs
     thw_parts = [t.reshape(1, -1) if t.dim() == 1 else t for t in thw_parts]
     image_grid_thw = torch.cat(thw_parts, dim=0) if thw_parts else None
     return MultiModalKwargs(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
+
+
+#: kwargs_data items written by a render server that is not vLLM:
+#: ``"st:" + base64(safetensors{pixel_values, image_grid_thw})``.
+#: Decoding them needs no vLLM, so a trainer host without the vLLM wheel can read them.
+SAFETENSORS_MM_PREFIX = "st:"
+
+
+def _decode_safetensors_mm_kwargs(items: list[str]) -> MultiModalKwargs:
+    from safetensors.torch import load as st_load
+
+    pv_parts: list[torch.Tensor] = []
+    thw_parts: list[torch.Tensor] = []
+    for item in items:
+        tensors = st_load(base64.b64decode(item[len(SAFETENSORS_MM_PREFIX) :]))
+        if "pixel_values" in tensors:
+            pv_parts.append(tensors["pixel_values"])
+        if "image_grid_thw" in tensors:
+            thw = tensors["image_grid_thw"]
+            thw_parts.append(thw.reshape(1, -1) if thw.dim() == 1 else thw)
+    return MultiModalKwargs(
+        pixel_values=torch.cat(pv_parts, dim=0) if pv_parts else None,
+        image_grid_thw=torch.cat(thw_parts, dim=0) if thw_parts else None,
+    )
 
 
 class RenderedImage(NamedTuple):

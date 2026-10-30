@@ -1330,7 +1330,9 @@ class InferenceEngineConfig(BaseConfig):
     weight_sync_backend: str = "nccl"
     """Backend used for weight synchronization.
     Use ``"nccl"`` (colocated ``nccl`` uses CUDA IPC internally), or ``"delta"`` for checkpoint-delta sync through
-    shared storage in non-colocated vLLM runs. See https://docs.skyrl.ai/docs/examples/delta_weight_sync"""
+    shared storage in non-colocated vLLM runs. See https://docs.skyrl.ai/docs/examples/delta_weight_sync
+    ``"reload"`` exports the full checkpoint each sync and has a reload agent restart each external server on it;
+    it needs no vLLM weight-transfer API (FSDP strategy, ``run_engines_locally=false``, full-model training only)."""
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """Size (GB) of the reusable packed buffer the trainer streams weights through.
 
