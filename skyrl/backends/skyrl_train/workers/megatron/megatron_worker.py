@@ -16,6 +16,7 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.quantization.quant_config import RecipeConfig
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
@@ -51,6 +52,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
     is_fp8_enabled,
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
@@ -392,6 +394,15 @@ class MegatronWorker:
         if megatron_config.moe_router_enable_expert_bias is not None:
             provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
         provider.moe_enable_routing_replay = megatron_config.moe_enable_routing_replay
+
+        # Supply a quant recipe via either user-provided config file or derived config file
+        # from user-provided exclude list.
+        if megatron_config.te_precision_config_file:
+            provider.quant_recipe = RecipeConfig.from_yaml_file(megatron_config.te_precision_config_file)
+        elif megatron_config.fp8_exclude_modules:
+            provider.quant_recipe = RecipeConfig.from_config_dict(
+                fp8_exclude_recipe(list(megatron_config.fp8_exclude_modules))
+            )
 
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
@@ -1596,7 +1607,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
                     f"got {resolved_backend!r}."
                 )
-            self._serialized_fp8_config = resolve_serialized_fp8_config(mode, self.strategy.hf_config)
+            self._serialized_fp8_config = resolve_serialized_fp8_config(
+                mode,
+                self.strategy.hf_config,
+                inference_engine_cfg.fp8_weight_sync_exclude_modules,
+            )
 
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 

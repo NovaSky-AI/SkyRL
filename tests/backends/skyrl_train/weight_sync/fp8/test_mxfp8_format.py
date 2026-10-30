@@ -21,7 +21,7 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     scale_name_for_weight,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8.models.qwen35 import (
-    get_qwen35_fp8_ignored_layers,
+    get_qwen35_base_exclude_list,
     is_quantizable_weight_shape,
 )
 
@@ -89,7 +89,7 @@ def test_batched_mx_cast_matches_per_expert():
 def test_quantization_config_matches_vllm_is_mxfp8_predicate():
     """vLLM selects both its dense and fused-MoE MXFP8 schemes from this exact predicate."""
 
-    config = get_serialized_fp8_quantization_config(ignored_layers=["lm_head"], wire_format=MXFP8)
+    config = get_serialized_fp8_quantization_config(exclude_list=["lm_head"], wire_format=MXFP8)
     assert config["quant_method"] == "compressed-tensors"
     assert config["ignore"] == ["lm_head"]
     weights = config["config_groups"]["group_0"]["weights"]
@@ -105,7 +105,7 @@ def test_quantization_config_matches_vllm_is_mxfp8_predicate():
 def test_blockwise_quantization_config_is_unchanged():
     """The shipped blockwise path must not shift; its runs are already validated."""
 
-    assert get_serialized_fp8_quantization_config(ignored_layers=["a"]) == {
+    assert get_serialized_fp8_quantization_config(exclude_list=["a"]) == {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
         "weight_block_size": [128, 128],
@@ -144,8 +144,8 @@ def test_mxfp8_ignores_extend_blockwise_without_changing_it():
         },
     )()
 
-    blockwise = get_qwen35_fp8_ignored_layers(hf_config, BLOCKWISE_FP8)
-    mxfp8 = get_qwen35_fp8_ignored_layers(hf_config, MXFP8)
+    blockwise = get_qwen35_base_exclude_list(hf_config, BLOCKWISE_FP8)
+    mxfp8 = get_qwen35_base_exclude_list(hf_config, MXFP8)
 
     assert set(blockwise).issubset(set(mxfp8))
     extra = set(mxfp8) - set(blockwise)

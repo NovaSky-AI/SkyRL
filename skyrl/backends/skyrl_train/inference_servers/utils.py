@@ -30,9 +30,11 @@ from skyrl.backends.skyrl_train.weight_sync import (
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
+    engine_exclude_list,
     get_serialized_fp8_quantization_config,
     registered_fp8_spec_names,
     resolve_fp8_spec,
+    resolve_user_provided_exclude_list,
 )
 from skyrl.backends.skyrl_train.weight_sync.register import register_receive_engines
 from skyrl.train.config import (
@@ -47,7 +49,12 @@ logger = logging.getLogger(__name__)
 VLLM_LOGPROBS_MODE = "processed_logprobs"
 
 
-def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str = BLOCKWISE_FP8) -> list[str]:
+def _serialized_fp8_engine_exclude_list(
+    model_path: Optional[str],
+    wire_format: str = BLOCKWISE_FP8,
+    exclude_modules: Optional[List[str]] = None,
+) -> list[str]:
+    """Return the modules vLLM builds unquantized: the model spec's base list plus ``exclude_modules``."""
     if not model_path:
         raise ValueError("A model path is required when FP8 weight sync is enabled")
     try:
@@ -56,7 +63,7 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str =
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     except Exception as exc:
         raise RuntimeError(
-            "Could not inspect the model config required to derive FP8 ignored layers: " f"model_path={model_path!r}"
+            "Could not inspect the model config required to derive the FP8 exclude list: " f"model_path={model_path!r}"
         ) from exc
     spec = resolve_fp8_spec(hf_config)
     if spec is None:
@@ -64,7 +71,8 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str =
             "FP8 weight sync has no registered model spec for this checkpoint layout "
             f"(registered specs: {', '.join(registered_fp8_spec_names())}); model_path={model_path!r}"
         )
-    return spec.ignored_layers(hf_config, wire_format)
+    user_provided_exclude_list = resolve_user_provided_exclude_list(spec, hf_config, wire_format, exclude_modules or ())
+    return engine_exclude_list(spec, hf_config, wire_format, user_provided_exclude_list)
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
@@ -82,6 +90,7 @@ def _apply_serialized_fp8_weight_sync_defaults(
 
     Wire-format-agnostic apart from ``wire_to_engine_quantization`` and the
     injected quantization config, both of which key off the concrete wire.
+    User-supplied ``quantization_config`` via HF overrides is ignored.
     """
 
     mode = ie_cfg.fp8_weight_sync_mode
@@ -99,33 +108,23 @@ def _apply_serialized_fp8_weight_sync_defaults(
     if not isinstance(hf_overrides, dict):
         raise ValueError("engine_init_kwargs.hf_overrides must be a dict when FP8 weight sync is enabled")
 
-    qcfg_value = hf_overrides.get("quantization_config")
-    qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
-    if not isinstance(qcfg, dict):
-        raise ValueError(
-            "engine_init_kwargs.hf_overrides.quantization_config must be a dict when FP8 weight sync is enabled"
+    if hf_overrides.get("quantization_config") is not None:
+        logger.warning(
+            "Ignoring engine_init_kwargs.hf_overrides.quantization_config: FP8 weight sync builds the "
+            "vLLM quantization config itself. Configure it with fp8_weight_sync_mode and "
+            "fp8_weight_sync_exclude_modules instead."
         )
 
-    ignored_layers = _serialized_fp8_ignored_layers(model_path, mode)
-    if ignored_layers:
-        logger.info(
-            "FP8 weight sync (%s) will leave %d vLLM modules unquantized "
-            "to match the model's FP8 quantization spec.",
-            mode,
-            len(ignored_layers),
-        )
-
-    for key, value in get_serialized_fp8_quantization_config(
-        ignored_layers=ignored_layers,
+    exclude_list = _serialized_fp8_engine_exclude_list(model_path, mode, ie_cfg.fp8_weight_sync_exclude_modules)
+    logger.info(
+        "vLLM engine init (%s FP8 weights): %d names are built unquantized.",
+        mode,
+        len(exclude_list),
+    )
+    hf_overrides["quantization_config"] = get_serialized_fp8_quantization_config(
+        exclude_list=exclude_list,
         wire_format=mode,
-    ).items():
-        _set_or_validate(
-            qcfg,
-            key,
-            value,
-            context="engine_init_kwargs.hf_overrides.quantization_config",
-        )
-    hf_overrides["quantization_config"] = qcfg
+    )
     engine_kwargs["hf_overrides"] = hf_overrides
 
 
