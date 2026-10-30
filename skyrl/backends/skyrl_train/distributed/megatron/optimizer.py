@@ -39,6 +39,8 @@ from skyrl.train.config.config import MegatronOptimizerOffloadToDiskConfig
 def init_megatron_optim_config(
     optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
 ) -> OptimizerConfig:
+    # The Tinker server's AdamParams warning mirrors which values win here
+    # (_MEGATRON_ADAM_KWARGS in skyrl/backends/skyrl_train_backend.py); keep the two in sync.
     adam_betas = getattr(optim_config, "adam_betas", (0.9, 0.999))
     optim_args = {
         "optimizer": getattr(optim_config, "optimizer", "adam"),

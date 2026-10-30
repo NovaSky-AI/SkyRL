@@ -121,6 +121,7 @@ class _StopBeforeWorkers(Exception):
 def _build_critic_until_workers(monkeypatch, lora: types.LoraConfig):
     """Run _build_critic up to the point where it would start Ray workers."""
     backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
+    backend.config = FSDPBackendOverrides()  # _build_critic checks it against the request's rank
     backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
     backend._colocate_pg = None
 
@@ -142,6 +143,7 @@ def test_critic_receives_the_flags(monkeypatch):
 def test_critic_rejects_unappliable_flags_before_workers_start(monkeypatch):
     """An invalid critic request raises before any critic worker is created."""
     backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
+    backend.config = FSDPBackendOverrides()
     backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
     backend._cfg.trainer.critic.model.lora.target_modules = ["q_proj"]
     monkeypatch.setattr(skyrl_train_backend, "PPORayActorGroup", lambda *a, **k: pytest.fail("workers started"))

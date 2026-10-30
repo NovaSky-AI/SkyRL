@@ -50,6 +50,7 @@ def _backend(
     backend._inference_engine_client.unload_lora_adapter = AsyncMock()
     backend._inference_engines_initialized = True
     backend._inference_adapter_ids = set()
+    backend._adam_params_checked = set()
     backend._renderer = None
     backend._render_server = None
     backend._base_lora_signature = SkyRLTrainBackend._lora_signature_from(backend, LORA_CONFIG) if lora else None

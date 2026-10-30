@@ -19,7 +19,13 @@ from sqlmodel import Session, create_engine, func, select, update
 from skyrl.backends.utils import log_timing
 from skyrl.env_vars import SKYRL_TINKER_CONTINUOUS_SAMPLING
 from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, TinkerTorchProfilerConfig, add_model
+from skyrl.tinker.config import (
+    EngineConfig,
+    TinkerTorchProfilerConfig,
+    add_model,
+    check_backend_config,
+    flatten_backend_config,
+)
 from skyrl.tinker.db_models import (
     CheckpointDB,
     CheckpointStatus,
@@ -367,6 +373,19 @@ class TinkerEngine:
         backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
         backend_overrides = dict(config.backend_config)
         if config.backend in ("fsdp", "megatron"):
+            # Values decided by the engine's own flags. runtime_role and served_model_name are written
+            # into the overrides below; strategy comes from the overrides class picked by --backend,
+            # and a backend_config "strategy" would replace it. A differing value is rejected.
+            engine_values = {
+                "strategy": (config.backend, "set by --backend"),
+                "runtime_role": (config.runtime_role, "set by --runtime-role"),
+            }
+            if config.base_model_checkpoint_path is not None:
+                engine_values["generator.inference_engine.served_model_name"] = (
+                    config.base_model,
+                    "set to --base-model when --base-model-checkpoint-path is given",
+                )
+            check_backend_config(flatten_backend_config(backend_overrides), engine_values)
             backend_overrides["runtime_role"] = config.runtime_role
             if config.base_model_checkpoint_path is not None:
                 backend_overrides["generator.inference_engine.served_model_name"] = config.base_model

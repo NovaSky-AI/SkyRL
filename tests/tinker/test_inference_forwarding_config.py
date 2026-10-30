@@ -52,22 +52,24 @@ def test_runtime_role_flag_parses() -> None:
 
 
 @pytest.mark.parametrize(
-    ("runtime_role", "colocate_all", "expected"),
+    ("runtime_role", "backend_config", "expected"),
     [
-        ("trainer", False, False),
-        ("inference", False, False),
-        ("combined", False, True),
-        ("combined", True, False),
+        ("trainer", {"trainer.placement.colocate_all": False}, False),
+        ("inference", {"trainer.placement.colocate_all": False}, False),
+        ("combined", {"trainer.placement.colocate_all": False}, True),
+        ("combined", {"trainer.placement.colocate_all": True}, False),
+        # The engine reads the nested spelling as colocate_all=False, so the API must too.
+        ("combined", {"trainer.placement": {"colocate_all": False}}, True),
     ],
 )
 def test_skyrl_train_forwarding_requires_non_colocated_combined_runtime(
-    runtime_role: str, colocate_all: bool, expected: bool
+    runtime_role: str, backend_config: dict, expected: bool
 ) -> None:
     config = EngineConfig(
         base_model="test-model",
         backend="fsdp",
         runtime_role=runtime_role,
-        backend_config={"trainer.placement.colocate_all": colocate_all},
+        backend_config=backend_config,
     )
 
     assert _should_forward_sample_requests(config) is expected

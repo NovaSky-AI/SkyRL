@@ -12,7 +12,7 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
     --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.inference_engine.num_engines": 4}'
 ```
 
-Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/api-ref/skyrl/config) can be overridden this way (see [`SkyRLTrainConfig` in `skyrl/train/config/config.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py) for all available keys and defaults). The most commonly used options are listed below.
+Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/api-ref/skyrl/config) can be overridden this way (see [`SkyRLTrainConfig` in `skyrl/train/config/config.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/config.py) for all available keys and defaults), except the keys the server sets itself (see [Keys the server sets](#keys-the-server-sets)). The most commonly used options are listed below.
 
 JSON types are preserved exactly, so use JSON literals rather than strings: `null` for an unset field, `true`/`false` for booleans, and `4` rather than `"4"` for numbers.
 
@@ -39,6 +39,35 @@ For large models that don't fit on a single GPU for inference, increase `generat
 ```bash
 --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.inference_engine.num_engines": 2, "generator.inference_engine.tensor_parallel_size": 2}'
 ```
+
+### Keys the server sets
+
+The server sets some SkyRL-Train config values itself, from its flags or from each client request. Setting one of these keys in `--backend-config` to a value the server would not use is an error that lists each offending key. Nested spellings such as `{"trainer.policy.optimizer_config": {"lr": 1e-5}}` are checked the same way.
+
+- `strategy`, `runtime_role` and `served_model_name` stop the server at startup.
+- The other keys are checked when the first `create_model` request sets up training (on an inference-only runtime, at the first sample request). That request fails with the error, which also appears in the server log.
+- The critic's LoRA rank is checked when the critic's `create_model` request arrives, which fails the same way.
+- A `backend_config` LoRA alpha, for the policy or the critic, is used as given: the Tinker SDK cannot send alpha, so the request only carries a placeholder (32).
+- Values that SkyRL-Train itself adjusts while building the config are kept, and SkyRL-Train logs a warning for each (for example `enforce_eager: true` with LoRA on vLLM).
+
+| Key | Set by | Rejected when |
+|-----|--------|---------------|
+| `strategy`, `trainer.strategy` | `--backend` | the value differs from `--backend` |
+| `runtime_role` | `--runtime-role` | the value differs from `--runtime-role` |
+| `trainer.policy.model.path`, `trainer.critic.model.path` | `--base-model` (or `--base-model-checkpoint-path`) | the value differs |
+| `trainer.{policy,critic}.model.lora.rank` | the LoRA rank the client passes to `create_model` | the value differs from the client's rank. With `--runtime-role inference` the policy rank is used as given: it enables LoRA on the inference engines |
+| `trainer.{policy,critic}.optimizer_config.lr` | `AdamParams.learning_rate` on every `optim_step` | always |
+| `trainer.{policy,critic}.optimizer_config.scheduler`, `…num_warmup_steps` | the server, since the client schedules the learning rate | the value is not `constant_with_warmup` / `0` |
+| `trainer.algorithm.use_kl_loss` | not supported by the Tinker server | the value is `true` |
+| `trainer.algorithm.policy_loss_type` | the request's `loss_fn` | the value is not `regular` or `dual_clip` (`dual_clip` enables dual-clip PPO for `loss_fn="ppo"`) |
+| `trainer.policy.torch_profiler_config.*` | `--torch-profiler` and `/start_profiling` | always |
+| `trainer.placement.colocate_all` | `--runtime-role trainer` or `inference` | the value is `true` with those roles |
+| `generator.inference_engine.served_model_name` | `--base-model` when `--base-model-checkpoint-path` is given | the value differs |
+| `use_ray` | only read by the jax backend | always |
+
+### Optimizer settings
+
+The SkyRL-Train backends apply only `learning_rate` from each `optim_step`'s `AdamParams`. Betas, weight decay and gradient clipping come from `trainer.policy.optimizer_config` (`adam_betas`, `weight_decay`, `max_grad_norm`), and eps is `1e-8`. On Megatron, `trainer.policy.megatron_config.optimizer_config_kwargs` takes precedence for the keys it sets (`adam_beta1`, `adam_beta2`, `adam_eps`, `weight_decay`, `clip_grad`), so eps can be changed there; on FSDP it is fixed. The server logs a warning on a model's first `optim_step` when the request's `beta1`, `beta2`, `eps`, `weight_decay` or `grad_clip_norm` differ from the values in use, naming the key that sets each one. Set those keys in `--backend-config` to match what the client sends.
 
 ## LoRA
 
@@ -109,7 +138,7 @@ Only one profiling session runs at a time server-wide — a second `/start_profi
 On the FSDP backend with `colocate_all: true`, profiling requires `trainer.policy.fsdp_config.cpu_offload: true`. The policy is offloaded to CPU between requests, and the default manual offload path moves parameters with `torch.utils.swap_tensors`, which fails while the profiler holds references to them.
 </Callout>
 
-Only policy workers are profiled; inference engines are not. Setting `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at startup — static config would compete with these endpoints for the same profiler.
+Only policy workers are profiled; inference engines are not. Setting `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected (see [Keys the server sets](#keys-the-server-sets)) — static config would compete with these endpoints for the same profiler.
 
 See [`examples/tinker/torch_profiling/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/tinker/torch_profiling) for a runnable client.
 

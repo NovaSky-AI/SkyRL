@@ -61,6 +61,8 @@ class AdamParams(BaseModel):
     beta2: float
     eps: float
     weight_decay: float
+    grad_clip_norm: float = 0.0
+    """0.0 disables clipping, as in the Tinker SDK."""
 
 
 class LoraConfig(BaseModel):
