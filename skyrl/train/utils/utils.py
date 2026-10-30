@@ -1116,6 +1116,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
                 ("SKYRL_TPU_", "SKYRL_RELOAD_", "SKYRL_DIST_", "TORCH_TPU_", "TPU_", "PJRT_")
             ):
                 env_vars[key] = value
+        # With autoload on, every `import torch` in a worker (DataLoader workers included) loads
+        # TorchTPU and opens a chip. The workers load it explicitly once their chip is selected
+        # (`device.configure_process_env`), so turn autoload off for all of them, whatever the
+        # driver's own environment.
+        env_vars["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
     elif not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"

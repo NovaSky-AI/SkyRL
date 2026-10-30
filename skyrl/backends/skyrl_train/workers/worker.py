@@ -734,6 +734,11 @@ class Worker(DistributedTorchRayActor):
             load_optimizer_states=load_optimizer_states,
             load_lr_scheduler_states=load_lr_scheduler_states,
         )
+        reload_sync = getattr(self, "_reload_sync", None)
+        if reload_sync is not None:
+            # The rollout servers still run the initial checkpoint, not these restored weights:
+            # the first sync must not be skipped.
+            reload_sync.skip_initial = False
         return states
 
     def save_hf_model(self, export_dir: str, tokenizer):

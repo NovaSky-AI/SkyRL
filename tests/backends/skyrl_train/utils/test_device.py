@@ -100,3 +100,20 @@ def test_tpu_env_spec_is_applied_per_rank(device_env, monkeypatch):
     assert os.environ["TORCH_TPU_TOPOLOGY"] == "2,2,1"
     assert os.environ["TPU_VISIBLE_DEVICES"] == "1"
     assert os.environ["RANK"] == "1" and os.environ["WORLD_SIZE"] == "2"
+
+
+def test_tpu_env_spec_is_applied_before_the_backend_loads(device_env, monkeypatch):
+    """Loading TorchTPU opens a chip, so this rank's chip selection must already be in the env."""
+    import os
+
+    device_env("tpu")
+    seen = {}
+    monkeypatch.setattr(
+        device, "_ensure_backend_loaded", lambda: seen.update(chip=os.environ.get("TPU_VISIBLE_DEVICES"))
+    )
+    for name in ("patch_fsdp_move_states_for_tpu", "patch_qwen35_mrope_for_tpu", "patch_qwen35_vision_rope_for_tpu"):
+        monkeypatch.setattr(device, name, lambda: None)
+    monkeypatch.setenv("SKYRL_TPU_GROUP_ENV_REF", '{"env": {}, "per_rank": [{"TPU_VISIBLE_DEVICES": "4"}]}')
+    monkeypatch.delenv("TPU_VISIBLE_DEVICES", raising=False)
+    device.configure_process_env(rank=0, local_rank=0, world_size=1, group="ref")
+    assert seen == {"chip": "4"}

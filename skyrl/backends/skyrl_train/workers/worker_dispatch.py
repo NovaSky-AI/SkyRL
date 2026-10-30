@@ -896,6 +896,11 @@ class WorkerDispatch:
                     # Delta disk sync performs publish/fetch before pausing and
                     # pauses internally only around the final reload.
                     await _broadcast_and_finish()
+                elif self.cfg.generator.inference_engine.weight_sync_backend == "reload":
+                    # Each server's reload agent restarts it on the new weights, so no request
+                    # can read partially updated weights, and the servers need not implement
+                    # /pause and /resume.
+                    await _broadcast_and_finish()
                 else:
                     await self._inference_engine_client.pause_generation()
                     async with cleanup_preserving_primary(

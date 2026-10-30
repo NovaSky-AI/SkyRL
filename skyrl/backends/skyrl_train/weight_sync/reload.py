@@ -11,7 +11,10 @@ One sync:
 
 1. Every policy rank joins the full-state-dict gather (FSDP2 collective).
 2. Rank 0 casts floating tensors to the inference dtype and writes HF safetensors
-   to ``SKYRL_RELOAD_EXPORT_DIR/v<version>``.
+   to ``SKYRL_RELOAD_EXPORT_DIR/<job>/v<version>``, plus the tokenizer and processor
+   files of the policy model, so a server can start from the export alone.
+   ``<job>`` is unique per trainer process, and a job removes only its own exports,
+   so jobs that share a host or an export dir do not touch each other's files.
 3. Rank 0 publishes to every reload agent (one per rollout server), concurrently:
    * ``http`` (default): ``PUT /v1/files/<version>/<name>`` for each file, then
      ``POST /v1/reload {"version": v}``;
@@ -30,7 +33,8 @@ Configuration (environment, read on the policy workers):
   (``http`` | ``path``), ``SKYRL_RELOAD_TIMEOUT_S`` (default 3600).
 * ``SKYRL_RELOAD_SKIP_INITIAL`` (default ``1``): skip the sync the trainer runs before
   step 1. The servers were started on the same checkpoint the policy loads, so that
-  sync would only restart them on identical weights.
+  sync would only restart them on identical weights. Not skipped after the policy is
+  restored from a checkpoint (the servers then run older weights).
 
 This module imports no vLLM.
 """
@@ -44,8 +48,9 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import torch
@@ -59,8 +64,8 @@ def _default_agent_url(server_url: str) -> str:
     parts = urlsplit(server_url)
     if parts.port is None:
         raise ValueError(f"cannot derive a reload agent URL from {server_url!r}; set SKYRL_RELOAD_AGENT_URLS")
-    netloc = f"{parts.hostname}:{parts.port + 1}"
-    return urlunsplit((parts.scheme, netloc, "", "", ""))
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname  # IPv6 literal
+    return urlunsplit((parts.scheme, f"{host}:{parts.port + 1}", "", "", ""))
 
 
 def _request(method: str, url: str, *, body=None, headers=None, timeout: float) -> dict:
@@ -71,7 +76,36 @@ def _request(method: str, url: str, *, body=None, headers=None, timeout: float) 
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:2000]
         raise RuntimeError(f"{method} {url} -> HTTP {e.code}: {detail}") from e
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise RuntimeError(f"{method} {url} failed: {e}; is the reload agent running?") from e
     return json.loads(raw) if raw else {}
+
+
+# Not tokenizer or processor files: written by ``save_pretrained`` or not needed by a server.
+_NOT_PROCESSING_FILES = ("config.json", "generation_config.json")
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".msgpack", ".h5")
+
+
+def _processing_files(model_path: str) -> List[str]:
+    """Paths of the tokenizer / processor files of ``model_path`` (a local dir or a Hub id)."""
+
+    def wanted(name: str) -> bool:
+        return (
+            name not in _NOT_PROCESSING_FILES
+            and not name.endswith(_WEIGHT_SUFFIXES)
+            and not name.endswith(".index.json")
+        )
+
+    if not os.path.isdir(model_path):
+        from huggingface_hub import snapshot_download
+
+        # The policy already loaded this model, so the files are in the local cache.
+        model_path = snapshot_download(model_path, ignore_patterns=[f"*{s}" for s in _WEIGHT_SUFFIXES])
+    return [
+        os.path.join(model_path, n)
+        for n in sorted(os.listdir(model_path))
+        if os.path.isfile(os.path.join(model_path, n)) and wanted(n)
+    ]
 
 
 @dataclass
@@ -82,12 +116,16 @@ class ReloadWeightSync:
     model_dtype: str = "bfloat16"
     timeout_s: float = 3600.0
     skip_initial: bool = True
+    source_model_path: Optional[str] = None
     version: int = 0
     calls: int = 0
     last_timings: dict = field(default_factory=dict)
+    _exports: List[str] = field(default_factory=list)
 
     @classmethod
-    def from_env(cls, *, server_urls: List[str], model_dtype: str) -> "ReloadWeightSync":
+    def from_env(
+        cls, *, server_urls: List[str], model_dtype: str, source_model_path: Optional[str] = None
+    ) -> "ReloadWeightSync":
         raw = os.environ.get("SKYRL_RELOAD_AGENT_URLS", "").strip()
         agents = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()] if raw else []
         if not agents:
@@ -102,11 +140,15 @@ class ReloadWeightSync:
             raise ValueError(f"SKYRL_RELOAD_TRANSPORT must be 'http' or 'path', got {transport!r}")
         return cls(
             agent_urls=agents,
-            export_dir=os.environ.get("SKYRL_RELOAD_EXPORT_DIR", "/tmp/skyrl_reload"),
+            # A subdirectory per trainer process: concurrent jobs on one host never share exports.
+            export_dir=os.path.join(
+                os.environ.get("SKYRL_RELOAD_EXPORT_DIR", "/tmp/skyrl_reload"), f"job-{uuid.uuid4().hex[:12]}"
+            ),
             transport=transport,
             model_dtype=model_dtype,
             timeout_s=float(os.environ.get("SKYRL_RELOAD_TIMEOUT_S", "3600")),
             skip_initial=os.environ.get("SKYRL_RELOAD_SKIP_INITIAL", "1") == "1",
+            source_model_path=source_model_path,
         )
 
     # ------------------------------------------------------------------ export
@@ -134,6 +176,13 @@ class ReloadWeightSync:
         model_to_save.save_pretrained(out_dir, state_dict=state_dict, safe_serialization=True, max_shard_size="4GB")
         strategy._fix_fsdp_config(model_to_save.config).save_pretrained(out_dir)
         del state_dict
+        # Tokenizer / processor files (e.g. Qwen3.5's preprocessor_config.json), as the
+        # trainer's own HF export has, so a server can start from this directory alone.
+        if self.source_model_path:
+            for path in _processing_files(self.source_model_path):
+                dst = os.path.join(out_dir, os.path.basename(path))
+                if not os.path.exists(dst):
+                    shutil.copy2(path, dst)
 
     # ----------------------------------------------------------------- publish
     def _publish_one(self, agent: str, out_dir: str) -> dict:
@@ -194,8 +243,8 @@ class ReloadWeightSync:
                 f"[reload] weight version {self.version}: export {t_export:.1f}s, "
                 f"publish+restart {t_publish:.1f}s on {len(self.agent_urls)} server(s): {results}"
             )
-            # Keep only the latest export; the agents hold their own copies.
-            for entry in os.listdir(self.export_dir):
-                path = os.path.join(self.export_dir, entry)
-                if entry != os.path.basename(out_dir) and os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=True)
+            # Keep only this job's latest export (the agents hold their own copies); never
+            # touch anything this job did not write.
+            for path in self._exports:
+                shutil.rmtree(path, ignore_errors=True)
+            self._exports = [out_dir]

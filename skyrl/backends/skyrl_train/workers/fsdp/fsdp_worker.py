@@ -1,5 +1,6 @@
 import io
 import os
+from datetime import timedelta
 from typing import TYPE_CHECKING, Optional
 
 import ray
@@ -52,6 +53,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self._reload_sync = ReloadWeightSync.from_env(
                 server_urls=list(inference_engine_client.server_urls),
                 model_dtype=inference_engine_cfg.model_dtype,
+                source_model_path=self.cfg.policy.model.path,
+            )
+            # Ranks other than 0 wait at a barrier while rank 0 exports, publishes and waits for
+            # the servers to restart. The default group times out after
+            # SKYRL_WORKER_NCCL_TIMEOUT_IN_S (600 s), well inside a reload of a large model, so
+            # they wait on a CPU group whose timeout covers the whole reload.
+            self._reload_wait_group = torch.distributed.new_group(
+                backend="gloo", timeout=timedelta(seconds=self._reload_sync.timeout_s + 600)
             )
             torch.distributed.barrier()
         else:
@@ -248,8 +257,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
         if getattr(self, "_reload_sync", None) is not None:
             # Collective (every rank gathers), then rank 0 publishes and waits for the reload.
-            self._reload_sync.send(self.strategy, self.model)
-            torch.distributed.barrier()
+            # Blocking (collectives, rank 0's HTTP), so off the event loop like the other backends.
+            def _reload_and_wait():
+                self._reload_sync.send(self.strategy, self.model)
+                torch.distributed.barrier(group=self._reload_wait_group)
+
+            await self._weight_sync_thread(_reload_and_wait)
             return
 
         await self._sync_weights_to_inference_engines(inference_engine_client, inference_engine_cfg)

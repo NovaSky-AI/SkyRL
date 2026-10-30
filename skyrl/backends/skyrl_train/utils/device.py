@@ -80,7 +80,8 @@ def _ensure_backend_loaded() -> None:
         raise RuntimeError("SKYRL_DEVICE=tpu but torch_tpu is not installed (pip install torch_tpu)") from e
     # `import torch_tpu` adds `torch.tpu` but leaves the backend unnamed ("privateuseone");
     # only the loader registers "tpu".
-    if torch._C._get_privateuse1_backend_name() != "tpu":
+    get_backend_name = getattr(torch._C, "_get_privateuse1_backend_name", None)
+    if get_backend_name is None or get_backend_name() != "tpu":
         from torch_tpu._loader import load
 
         load()
@@ -168,7 +169,7 @@ def set_rng_state(state: torch.Tensor) -> None:
 def mem_get_info() -> tuple[int, int]:
     """(free, total) bytes. TorchTPU exposes ``torch.accelerator.get_memory_info``."""
     if is_tpu():
-        acc = torch.accelerator
+        acc = getattr(torch, "accelerator", None)  # absent on torch builds without the accelerator API
         fn = getattr(acc, "get_memory_info", None) or getattr(acc, "mem_get_info", None)
         if fn is not None:
             try:
@@ -187,14 +188,14 @@ def mem_get_info() -> tuple[int, int]:
 
 def memory_allocated() -> int:
     if is_tpu():
-        fn = getattr(torch.accelerator, "memory_allocated", None)
+        fn = getattr(getattr(torch, "accelerator", None), "memory_allocated", None)
         return int(fn()) if fn is not None else 0
     return torch.cuda.memory_allocated()
 
 
 def memory_reserved() -> int:
     if is_tpu():
-        fn = getattr(torch.accelerator, "memory_reserved", None)
+        fn = getattr(getattr(torch, "accelerator", None), "memory_reserved", None)
         return int(fn()) if fn is not None else 0
     return torch.cuda.memory_reserved()
 
@@ -372,23 +373,22 @@ def configure_process_env(*, rank: int, local_rank: int, world_size: int, group:
     """
     if not is_tpu():
         return
-    _ensure_backend_loaded()
-    patch_fsdp_move_states_for_tpu()
-    patch_qwen35_mrope_for_tpu()
-    patch_qwen35_vision_rope_for_tpu()
     os.environ.setdefault("LOCAL_RANK", str(local_rank))
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ.setdefault("NODE_RANK", "0")
-    if group is None:
-        return
-    raw = os.environ.get(f"SKYRL_TPU_GROUP_ENV_{group.upper()}")
-    if not raw:
-        return
-    spec = json.loads(raw)
-    for key, value in (spec.get("env") or {}).items():
-        os.environ[key] = str(value)
-    per_rank = spec.get("per_rank") or []
-    if rank < len(per_rank):
-        for key, value in per_rank[rank].items():
+    raw = os.environ.get(f"SKYRL_TPU_GROUP_ENV_{group.upper()}") if group is not None else None
+    if raw:
+        spec = json.loads(raw)
+        for key, value in (spec.get("env") or {}).items():
             os.environ[key] = str(value)
+        per_rank = spec.get("per_rank") or []
+        if rank < len(per_rank):
+            for key, value in per_rank[rank].items():
+                os.environ[key] = str(value)
+    # Load TorchTPU only now: loading opens a chip, so the topology and the chip selection
+    # above must already be in the environment.
+    _ensure_backend_loaded()
+    patch_fsdp_move_states_for_tpu()
+    patch_qwen35_mrope_for_tpu()
+    patch_qwen35_vision_rope_for_tpu()
