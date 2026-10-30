@@ -58,7 +58,8 @@ class Qwen4ExpCoreAttention(TEDotProductAttention):
 
     The layer sets ``qsa_selection`` from the indexer right before the attention call: None
     (every packed sequence within the exactly-dense bound) keeps the fused TE kernel, otherwise
-    attention runs over the selected keys (``qsa_sparse_attention``, torch SDPA with a mask).
+    attention runs over the selected keys (``qsa_sparse_attention``: cuDNN QSA, FlexAttention or
+    masked torch SDPA, whichever is available first).
     """
 
     qsa_selection = None

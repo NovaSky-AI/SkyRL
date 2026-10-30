@@ -221,7 +221,8 @@ switch to it and delete `qwen4_exp/` as a whole; don't port pieces between imple
 
 - **Carried as:** `qwen4_exp/`: `modules.py` (gated low-rank hyper-connection, final mixer, PLE
   n-gram embedding, sigmoid-gated GDN, the frozen QSA indexer and its sparse attention:
-  chunked SDPA, or FlexAttention on CUDA), `layer_specs.py`,
+  cuDNN frontend's QSA kernels on Blackwell, else FlexAttention on CUDA, else chunked SDPA),
+  `layer_specs.py`,
   `provider.py`, and `bridge.py` (`Qwen4ExpBridge`, registered for
   `Qwen4ExpForConditionalGeneration` on import).
 - **Landed?** The pinned Megatron-Bridge registers its own bridge for
