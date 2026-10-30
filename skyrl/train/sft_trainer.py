@@ -63,6 +63,7 @@ from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
+    ReleaseOptimizerStateFilesCallback,
     TrainingCallback,
     TrainingControl,
 )
@@ -839,6 +840,8 @@ class SFTTrainer:
 
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
+        if self.cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is not None:
+            self.add_callback(ReleaseOptimizerStateFilesCallback())
         # Loop metadata used to build CallbackInput. Populated in train().
         self._total_steps: int = 0
         self._steps_per_epoch: int = 0

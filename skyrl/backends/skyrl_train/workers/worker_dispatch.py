@@ -597,6 +597,13 @@ class WorkerDispatch:
             "finalize_pending_saves",
         )
 
+    def release_optimizer_state_files(self, model: str) -> None:
+        """Delete ``model``'s optimizer state files at the end of training (no-op unless it keeps any)."""
+        deadline.ray_get(
+            self._actor_groups[model].async_run_ray_method("pass_through", "release_optimizer_state_files"),
+            "release_optimizer_state_files",
+        )
+
     def load_checkpoint(
         self,
         model: str,

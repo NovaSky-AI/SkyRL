@@ -185,3 +185,12 @@ SKYRL_MEGATRON_RANDOM_INIT = str(os.environ.get("SKYRL_MEGATRON_RANDOM_INIT", "0
 
 For throughput/memory benchmarking (e.g. dummy SFT with random tokens), where only the architecture
 matters: ``model.path`` then needs just ``config.json`` and tokenizer files, no safetensors."""
+
+SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL = int(
+    os.environ.get("SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL", 200_000_000)
+)
+"""Elements per chunk for ``megatron_config.optimizer_offload_to_disk``, default 200M.
+
+The optimizer step streams each rank's shard of every DDP bucket in chunks of at most this many elements. A chunk's
+fp32 main params and Adam moments are on the GPU together during the step, so the peak extra GPU memory is about
+12 B x this (2.4 GB by default). Resuming a checkpoint needs the same value it was saved with."""

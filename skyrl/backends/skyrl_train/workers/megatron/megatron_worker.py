@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import shutil
 from collections import defaultdict
@@ -1095,7 +1096,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
-            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+            offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
+            offload_to_disk = None
+            if offload_cfg.dir is not None:
+                if self._is_lora:
+                    raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+                offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
+            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(

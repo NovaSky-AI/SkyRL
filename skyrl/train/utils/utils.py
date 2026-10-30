@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
     BLOCKWISE_FP8,
@@ -404,6 +405,20 @@ def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_
         )
 
 
+def validate_optimizer_offload_to_disk_cfg(cfg: SkyRLTrainConfig):
+    """Reject ``optimizer_offload_to_disk`` settings that would be ignored, or fail only once training runs."""
+    if cfg.trainer.ref.megatron_config.optimizer_offload_to_disk.dir is not None:
+        raise ValueError("optimizer_offload_to_disk applies to the policy only; unset it for trainer.ref.")
+    if cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is None:
+        return
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError("optimizer_offload_to_disk requires trainer.strategy=megatron.")
+    if cfg.trainer.policy.model.lora.rank > 0:
+        raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+    if is_cloud_path(cfg.trainer.ckpt_path):
+        raise ValueError("optimizer_offload_to_disk requires a local trainer.ckpt_path.")
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -662,6 +677,7 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
+    validate_optimizer_offload_to_disk_cfg(cfg)
     if cfg.generator.use_conversation_multi_turn:
         if (
             cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
