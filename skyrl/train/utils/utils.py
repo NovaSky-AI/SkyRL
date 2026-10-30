@@ -710,6 +710,16 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     """
     ie_cfg = cfg.generator.inference_engine
 
+    if ie_cfg.weight_sync_backend == "reload":
+        # ``reload`` restarts external servers on an exported checkpoint; locally launched vLLM engines
+        # take weights through the push backends instead.
+        if ie_cfg.run_engines_locally:
+            raise ValueError("weight_sync_backend='reload' requires run_engines_locally=false (external servers)")
+        if cfg.trainer.strategy != "fsdp":
+            raise ValueError(
+                f"weight_sync_backend='reload' supports trainer.strategy='fsdp', got {cfg.trainer.strategy!r}"
+            )
+
     # "auto" resolves from the trainer recipe in validate_megatron_cfg; a
     # config path that never runs it (the serve entrypoint, non-megatron
     # strategies) has no recipe to resolve from, so reject it with the way out
@@ -1099,7 +1109,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
-    if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
+    if os.environ.get("SKYRL_DEVICE", "cuda").lower() == "tpu":
+        # Ray "GPU" slots stand for TPU chips; there is no NCCL and no CUDA peer access to probe.
+        for key, value in os.environ.items():
+            if key == "SKYRL_DEVICE" or key.startswith(
+                ("SKYRL_TPU_", "SKYRL_RELOAD_", "SKYRL_DIST_", "TORCH_TPU_", "TPU_", "PJRT_")
+            ):
+                env_vars[key] = value
+    elif not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"

@@ -18,6 +18,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
+from skyrl.backends.skyrl_train.utils import device as accel
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
@@ -39,7 +40,22 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         if inference_engine_cfg.fp8_weight_sync_mode is not None:
             raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")
-        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+        self._reload_sync = None
+        if inference_engine_cfg.weight_sync_backend == "reload":
+            # Checkpoint-and-reload: no vLLM weight-transfer engine on either side, so it
+            # also works with rollout servers that do not implement vLLM's transfer API.
+            from skyrl.backends.skyrl_train.weight_sync.reload import ReloadWeightSync
+
+            if self._is_lora:
+                raise ValueError("weight_sync_backend='reload' supports full-model training only")
+            self._weight_sync_inference_client = inference_engine_client
+            self._reload_sync = ReloadWeightSync.from_env(
+                server_urls=list(inference_engine_client.server_urls),
+                model_dtype=inference_engine_cfg.model_dtype,
+            )
+            torch.distributed.barrier()
+        else:
+            await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
     def init_model(self, model_path, num_training_steps: int = None):
         assert self.cfg.strategy == "fsdp"
@@ -218,7 +234,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # PolicyWorkerBase) basename-guards against a malformed model_id
             # escaping lora_sync_path even though api.py already validates IDs.
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
-            torch.cuda.empty_cache()
+            accel.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
@@ -226,7 +242,13 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if cache_reset_task is not None:
                 await cache_reset_task
             if self.cfg.placement.colocate_all:
-                torch.cuda.empty_cache()
+                accel.empty_cache()
+            torch.distributed.barrier()
+            return
+
+        if getattr(self, "_reload_sync", None) is not None:
+            # Collective (every rank gathers), then rank 0 publishes and waits for the reload.
+            self._reload_sync.send(self.strategy, self.model)
             torch.distributed.barrier()
             return
 

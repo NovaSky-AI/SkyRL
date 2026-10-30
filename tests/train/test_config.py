@@ -339,6 +339,21 @@ def test_serialized_fp8_weight_sync_rejects_backends_without_a_chunk_channel(bac
         validate_inference_engine_cfg(cfg)
 
 
+def test_reload_weight_sync_requires_external_servers_and_fsdp():
+    cfg = example_dummy_config()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.weight_sync_backend = "reload"
+
+    ie_cfg.run_engines_locally = True
+    with pytest.raises(ValueError, match="run_engines_locally=false"):
+        validate_inference_engine_cfg(cfg)
+
+    ie_cfg.run_engines_locally = False
+    cfg.trainer.strategy = "megatron"
+    with pytest.raises(ValueError, match="trainer.strategy='fsdp'"):
+        validate_inference_engine_cfg(cfg)
+
+
 def test_serialized_fp8_weight_sync_requires_megatron():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "fsdp"
