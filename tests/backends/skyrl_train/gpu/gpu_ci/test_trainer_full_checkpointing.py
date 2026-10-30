@@ -34,6 +34,9 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # 4-layer GLM-5.3-Flash slice (2 KDA + 2 NoPE-MLA/DSA, 3 MoE layers x 288 experts, mHC
 # residuals) -- the same checkpoint the megatron parity rows use.
 GLM5_3_FLASH_MODEL_NAME = "eatang/GLM-5.3-Flash-4layer"
+# 4-layer Qwen3.8-Flash-Next slice (3 GDN + 1 QSA attention, PLE, 512-expert MoE, gated
+# hyper-connections), the same checkpoint as the qwen3.8 megatron parity rows.
+QWEN3_8_FLASH_NEXT_MODEL_NAME = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-Flash-Next-4layer")
 NUM_GPUS = 2
 
 
@@ -121,6 +124,20 @@ def get_test_trainer_config(
         cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
         cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
         cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "none"
+
+    if "qwen3.8-flash-next" in model_name.lower():
+        # qwen4_exp: VL checkpoint bridged text-only; PLE needs packed sequences; the bridge
+        # supports TP=PP=CP=1, so the 4 GPUs come from EP (which also shards the PLE table).
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        cfg.trainer.policy.megatron_config.mtp_num_layers = 0
+        cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
 
     if lora:
         lora_cfg = cfg.trainer.policy.model.lora
@@ -222,6 +239,14 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         # optimizer sharding format. With LoRA only the adapter tensors are in the grad
         # buffer, which is why this row passes.
         pytest.param("megatron", False, True, GLM5_3_FLASH_MODEL_NAME, None, marks=pytest.mark.megatron),
+        # Qwen3.8-Flash-Next (qwen4_exp) slice with LoRA. Checkpoints the adapters on the
+        # attention/GDN/MoE linears and 512-expert MoE layers sharded over EP=4 (the frozen PLE
+        # n-gram table is a plain tensor and is not saved).
+        #
+        # As for GLM-5.3-Flash, the full-finetune counterpart is NOT parametrized: with the
+        # optimizer on the GPU (as in the 4-node recipes) and expert-DP 1 on 4 GPUs, it peaks at
+        # ~85 GB/GPU, more than this suite's GPUs have.
+        pytest.param("megatron", False, True, QWEN3_8_FLASH_NEXT_MODEL_NAME, None, marks=pytest.mark.megatron),
     ],
     ids=[
         "fsdp_no_lora",
@@ -230,6 +255,7 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         "megatron_optimizer_cpu_offload",
         "megatron_optimizer_partial_cpu_offload",
         "megatron_glm5_3_flash_lora",
+        "megatron_qwen3_8_flash_next_lora",
     ],
 )
 def test_trainer_full_checkpointing(
