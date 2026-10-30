@@ -224,15 +224,99 @@ def chunked_mlp(
     dispatch / expert / combine buffers on ranks whose experts receive far more than their share
     under real routing.
     """
-    num_chunks = min(num_chunks, hidden_states.shape[0])
     if num_chunks <= 1:
         kwargs = {"input_ids": input_ids} if input_ids is not None else {}
         return mlp(hidden_states, padding_mask=padding_mask, **kwargs)
-    masks = padding_mask.chunk(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
-    # input_ids is [b, s] while hidden_states is [s, b, h], so it is chunked along dim 1.
-    id_chunks = input_ids.chunk(num_chunks, dim=1) if input_ids is not None else [None] * num_chunks
-    outputs = [
-        mlp(chunk, padding_mask=mask, **({"input_ids": ids} if ids is not None else {}))
-        for chunk, mask, ids in zip(hidden_states.chunk(num_chunks, dim=0), masks, id_chunks)
-    ]
-    return torch.cat([out for out, _ in outputs], dim=0), outputs[0][1]
+    # Every rank must make the same number of MoE calls: each one runs expert-parallel
+    # collectives, and a rank that made fewer (a short micro-batch, e.g. the one-token padding
+    # micro-batches that even out micro-batch counts across DP ranks) deadlocks the group. So
+    # always split into exactly num_chunks non-empty chunks, padding the sequence with masked
+    # dummy tokens when it is shorter than that; their outputs are dropped.
+    seq, batch = hidden_states.shape[:2]
+    pad = max(0, num_chunks - seq)
+    if pad:
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, 0, 0, pad))
+        # Mask the dummy tokens even when the caller passed no mask: the router counts unmasked
+        # tokens in its aux / z-loss and expert-bias token counts.
+        if padding_mask is None:
+            padding_mask = hidden_states.new_zeros(batch, seq, dtype=torch.bool)
+        padding_mask = torch.nn.functional.pad(padding_mask, (0, pad), value=True)
+        if input_ids is not None:
+            input_ids = torch.nn.functional.pad(input_ids, (0, pad))
+    chunks = hidden_states.tensor_split(num_chunks, dim=0)
+    masks = padding_mask.tensor_split(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
+    # input_ids is [b, s] while hidden_states is [s, b, h], so it is split along dim 1.
+    id_chunks = input_ids.tensor_split(num_chunks, dim=1) if input_ids is not None else [None] * num_chunks
+    replay = _ChunkedRouterReplay(mlp, [c.shape[0] * batch for c in chunks], pad * batch)
+    outputs = []
+    for i, (chunk, mask, ids) in enumerate(zip(chunks, masks, id_chunks)):
+        replay.before_chunk(i)
+        outputs.append(mlp(chunk, padding_mask=mask, **({"input_ids": ids} if ids is not None else {})))
+        replay.after_chunk()
+    replay.finish()
+    return torch.cat([out for out, _ in outputs], dim=0)[:seq], outputs[0][1]
+
+
+class _ChunkedRouterReplay:
+    """Router replay (R3) for ``chunked_mlp``.
+
+    ``RouterReplay`` assumes one router call per micro-batch:
+
+    - Expected: on replay, ``get_replay_topk`` returns ``target_topk_idx`` as the routing and
+      gathers the router's scores with it (``scores.gather(1, target_topk_idx)``), so the indices
+      must cover exactly the tokens of this call: ``[call_tokens, topk]``.
+    - Actual: ``target_topk_idx`` holds the whole micro-batch, ``[s * b, topk]``, while
+      ``chunked_mlp`` calls the router once per chunk, with scores of ``[chunk_tokens, experts]``.
+    - So the gather fails on the first chunk ("Size does not match at dimension 0").
+      Recompute (``REPLAY_BACKWARD``) pops one ``replay_backward_list`` entry per call, so the
+      second chunk would take the next micro-batch's entry. ``RECORD`` keeps only the last call's
+      indices, so the earlier chunks' routing would be lost.
+
+    So each chunk gets its slice in ``target_topk_idx`` before its call, and the full tensor is
+    put back after the last one. The micro-batch's ``replay_backward_list`` entry is split into
+    one per chunk. Recorded top-k is concatenated back into one tensor.
+    """
+
+    def __init__(self, mlp, chunk_tokens, pad_tokens=0):
+        from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+        router = getattr(mlp, "router", None)
+        self.replay = getattr(router, "router_replay", None)
+        self.action = self.replay.router_replay_action if self.replay is not None else None
+        self.bounds = [0]
+        for n in chunk_tokens:
+            self.bounds.append(self.bounds[-1] + n)
+        self.recorded = []
+        self.real_tokens = self.bounds[-1] - pad_tokens
+        self.target = None
+        if self.action == RouterReplayAction.REPLAY_FORWARD:
+            self.saved_target = self.replay.target_topk_idx
+            self.target = self._pad(self.saved_target, pad_tokens)
+        elif self.action == RouterReplayAction.REPLAY_BACKWARD and self.replay.replay_backward_list:
+            full = self._pad(self.replay.replay_backward_list.pop(0), pad_tokens)
+            self.replay.replay_backward_list[0:0] = [full[lo:hi] for lo, hi in zip(self.bounds[:-1], self.bounds[1:])]
+        self._record = self.action == RouterReplayAction.RECORD
+
+    @staticmethod
+    def _pad(indices, pad_tokens):
+        """Dummy tokens replay the first real token's experts (any valid, distinct top-k works)."""
+        if not pad_tokens or indices is None:
+            return indices
+        if indices.shape[0] == 0:  # no real token to copy: experts 0..topk-1
+            dummy = torch.arange(indices.shape[1], dtype=indices.dtype, device=indices.device)
+            return dummy.expand(pad_tokens, -1)
+        return torch.cat([indices, indices[:1].expand(pad_tokens, -1)], dim=0)
+
+    def before_chunk(self, i):
+        if self.target is not None:
+            self.replay.target_topk_idx = self.target[self.bounds[i] : self.bounds[i + 1]]
+
+    def after_chunk(self):
+        if self._record and self.replay.recorded_topk_idx is not None:
+            self.recorded.append(self.replay.recorded_topk_idx.clone())
+
+    def finish(self):
+        if self.target is not None:
+            self.replay.target_topk_idx = self.saved_target
+        if self._record and self.recorded:
+            self.replay.recorded_topk_idx = torch.cat(self.recorded, dim=0)[: self.real_tokens]

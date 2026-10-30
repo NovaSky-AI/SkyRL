@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    PolicyConfig,
     SkyRLTrainConfig,
     TrainerConfig,
     _resolve_class_type,
@@ -27,6 +28,7 @@ from skyrl.train.utils.utils import (
     validate_cfg,
     validate_inference_engine_cfg,
     validate_megatron_cfg,
+    validate_optimizer_offload_to_disk_cfg,
 )
 from tests.train.util import example_dummy_config
 
@@ -1610,3 +1612,110 @@ def test_validate_step_timeouts_warns_below_nccl_timeout():
         logger.remove(handler_id)
     (message,) = messages
     assert "trainer.weight_sync_timeout_s" in message and "NCCL watchdog" in message
+
+
+def _cp2_megatron_config():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.remove_microbatch_padding = True
+    cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    return cfg
+
+
+def test_megatron_validation_refuses_mtp_with_cp():
+    cfg = _cp2_megatron_config()
+    cfg.trainer.mtp.enabled = True
+
+    with pytest.raises(ValueError, match="mtp.enabled=true is not supported with context_parallel_size > 1"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "target_modules, raises",
+    [
+        (["linear_qkv", "linear_proj", "output_layer"], True),
+        (["linear_qkv", "linear_proj"], False),
+        ("all-linear", False),
+    ],
+)
+def test_fused_lm_head_logprob_rejects_output_layer_lora(target_modules, raises):
+    """The fused LM head reads output_layer.weight directly, so it would skip an output_layer adapter."""
+    from skyrl.train.config.config import ModelConfig, SkyRLLoraConfig
+
+    policy = PolicyConfig(model=ModelConfig(lora=SkyRLLoraConfig(rank=8, target_modules=target_modules)))
+    if raises:
+        with pytest.raises(ValueError, match="fused_lm_head_logprob=True reads output_layer.weight"):
+            TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
+    else:
+        TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
+
+
+_SCORE_CENTERING_BASE = [
+    "trainer.algorithm.enable_score_centering=true",
+    "trainer.algorithm.enable_sample_support_replay=true",
+    "trainer.algorithm.policy_loss_type=rollout_is",
+    "generator.inference_engine.enable_return_sample_support_set=true",
+    "generator.sampling_params.top_k=8",
+    "trainer.strategy=megatron",
+]
+
+
+def test_score_centering_accepts_replay_rollout_is_and_a_sequence_mask():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [*_SCORE_CENTERING_BASE, "trainer.algorithm.off_policy_correction.sequence_mask_metric=geometric"]
+    )
+
+    assert cfg.trainer.algorithm.enable_score_centering
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["trainer.algorithm.policy_loss_type=reinforce"],
+        ["trainer.algorithm.policy_loss_type=cispo", "trainer.algorithm.cispo.cispo_anchor=rollout"],
+        ["trainer.algorithm.policy_loss_type=dppo"],
+    ],
+)
+def test_score_centering_accepts_every_sampler_anchored_loss(overrides):
+    cfg = SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, *overrides])
+
+    assert cfg.trainer.algorithm.enable_score_centering
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("trainer.algorithm.enable_sample_support_replay=false", "requires enable_sample_support_replay"),
+        ("trainer.algorithm.policy_loss_type=regular", "weighted relative to the sampler"),
+        ("trainer.algorithm.policy_loss_type=gspo", "weighted relative to the sampler"),
+        ("trainer.algorithm.policy_loss_type=cispo", "weighted relative to the sampler"),
+        ("trainer.algorithm.off_policy_correction.tis_ratio_type=token", "tis_ratio_type"),
+        ("trainer.algorithm.off_policy_correction.tis_ratio_type=sequence", "tis_ratio_type"),
+        ("trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5", "token_mask_is_threshold"),
+        ("trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0", "token_mask_is_threshold"),
+    ],
+)
+def test_score_centering_rejects_what_breaks_its_drift_cancellation(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, override])
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"trainer.strategy": "fsdp"}, "requires trainer.strategy=megatron"),
+        ({"trainer.policy.model.lora.rank": 8}, "does not support LoRA"),
+        ({"trainer.ckpt_path": "s3://bucket/ckpts"}, "local trainer.ckpt_path"),
+        ({"trainer.ref.megatron_config.optimizer_offload_to_disk.dir": "/tmp/state"}, "policy only"),
+    ],
+)
+def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, match):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = "/tmp/state"
+    for path, value in overrides.items():
+        *parents, name = path.split(".")
+        setattr(_get_nested_attr(cfg, ".".join(parents)), name, value)
+
+    with pytest.raises(ValueError, match=match):
+        validate_optimizer_offload_to_disk_cfg(cfg)

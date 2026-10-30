@@ -31,9 +31,18 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
+from skyrl.backends.skyrl_train.utils.lora_targets import (
+    resolve_critic_lora_target_modules,
+    resolve_lora_target_modules,
+)
+from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberWeight
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_NO_ROW,
+    SCORE_CENTERING_SCORES_KEY,
+    PackedSampleSupport,
+)
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    SampleSupportScores,
     missing_sample_support_message,
     sample_support_row_ids_in_batch_positions,
     score_aligned_sample_support,
@@ -56,7 +65,7 @@ class _SampleSupportChannels:
         cls,
         sequences: torch.Tensor,
         attention_mask: torch.Tensor,
-        sample_support: PackedTensor,
+        sample_support: PackedSampleSupport,
         loss_mask: torch.Tensor,
     ) -> "_SampleSupportChannels":
         """Place channels in canonical ``[batch, seq_len]`` positions."""
@@ -132,6 +141,8 @@ class HFModelWrapper(nn.Module):
         lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
+        train_attn=True,
+        train_mlp=True,
         device_map=None,
         temperature=1.0,
         use_liger_kernel=False,
@@ -249,11 +260,12 @@ class HFModelWrapper(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
+                resolved_target_modules = resolve_lora_target_modules(self.model, target_modules, train_attn, train_mlp)
                 lora_config = LoraConfig(
                     task_type=TaskType.CAUSAL_LM,
                     r=lora_rank,
                     lora_alpha=lora_alpha,
-                    target_modules=target_modules,
+                    target_modules=resolved_target_modules,
                     exclude_modules=exclude_modules,
                     lora_dropout=lora_dropout,
                     bias="none",
@@ -313,13 +325,20 @@ class HFModelWrapper(nn.Module):
         pixel_values: Optional[TensorList] = None,
         image_grid_thw: Optional[TensorList] = None,
         mm_token_type_ids: Optional[torch.Tensor] = None,
-        sample_support: Optional[PackedTensor] = None,
+        sample_support: Optional[PackedSampleSupport] = None,
         loss_mask: Optional[torch.Tensor] = None,
         enable_sample_support_replay: bool = False,
+        centering_weight: Optional[MemberWeight] = None,
     ) -> torch.Tensor:
-        """Returns action log probs"""
+        """Returns action log probs.
+
+        With ``centering_weight`` (sample-support replay only), ``output`` also holds the
+        canonical-position ``SampleSupportScores`` under ``SCORE_CENTERING_SCORES_KEY``.
+        """
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
         support_channels = None
+        if centering_weight is not None and not enable_sample_support_replay:
+            raise ValueError("score centering requires sample-support replay")
         if enable_sample_support_replay:
             if sample_support is None:
                 raise ValueError(missing_sample_support_message("FSDP"))
@@ -426,6 +445,7 @@ class HFModelWrapper(nn.Module):
                 tp_group=None,
                 compute_entropy=compute_entropy,
                 entropy_requires_grad=compute_entropy and entropy_requires_grad,
+                centering_weight=centering_weight,
             )
             log_probs = support_scores.logprobs
             support_entropy = support_scores.entropy
@@ -451,6 +471,22 @@ class HFModelWrapper(nn.Module):
             return values
 
         log_probs = to_canonical_batch_positions(log_probs)
+        if centering_weight is not None:
+            output[SCORE_CENTERING_SCORES_KEY] = SampleSupportScores(
+                logprobs=log_probs,
+                entropy=None,
+                # Carry the mask through float-only gather and unpadding operations.
+                valid_mask=to_canonical_batch_positions(support_scores.valid_mask.to(log_probs.dtype)) > 0,
+                centering_term=to_canonical_batch_positions(support_scores.centering_term),
+                centering_term_negative=(
+                    None
+                    if support_scores.centering_term_negative is None
+                    else to_canonical_batch_positions(support_scores.centering_term_negative)
+                ),
+                sampler_logprobs=to_canonical_batch_positions(support_scores.sampler_logprobs),
+                support_tv=to_canonical_batch_positions(support_scores.support_tv),
+                sampler_mass=to_canonical_batch_positions(support_scores.sampler_mass),
+            )
 
         if compute_entropy:
             if support_entropy is not None:
@@ -606,6 +642,8 @@ def get_llm_for_sequence_regression(
     target_modules=None,
     exclude_modules=None,
     lora_dropout=0,
+    train_attn: bool = True,
+    train_mlp: bool = True,
     use_flash_attention_2=False,
     init_value_head: bool = False,
     value_head_prefix="value_head",
@@ -673,10 +711,11 @@ def get_llm_for_sequence_regression(
     # LoRA
     if lora_rank > 0:
         model.enable_input_require_grads()
+        targets = resolve_critic_lora_target_modules(model, target_modules, train_attn, train_mlp, value_head_prefix)
         lora_config = LoraConfig(
             r=lora_rank,
             lora_alpha=lora_alpha,
-            target_modules=target_modules,
+            target_modules=targets,
             exclude_modules=exclude_modules,
             lora_dropout=lora_dropout,
             bias="none",

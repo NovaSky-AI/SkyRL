@@ -551,3 +551,139 @@ async def test_megatron_vlm_packed_vs_unpacked(model_name, tp, pp):
     first_d, later_d = packed_vs_alone[first][ref_scored[first]], packed_vs_alone[later][ref_scored[later]]
     assert later_d.mean().item() <= 3 * first_d.mean().item() + 1e-2, (later_d.mean(), first_d.mean())
     assert later_d.max().item() <= 3 * first_d.max().item() + 0.25, (later_d.max(), first_d.max())
+
+
+def _vlm_cp_training_batch(model_name: str) -> TrainingInputBatch:
+    """The packing-parity batch (first 8 samples) with non-trivial PPO inputs.
+
+    The old and rollout logprobs are placeholders: ``_run_vlm_cp_layout`` replaces them with
+    the layout's own forward logprobs before training.
+    """
+    batch = get_packing_parity_batch(model_name)[:8]
+    shape = batch["advantages"].shape
+    batch["advantages"] = torch.full(shape, 0.5)
+    for key in ("action_log_probs", "base_action_log_probs", "rollout_logprobs"):
+        batch[key] = torch.full(shape, -1.0)
+    batch.metadata["global_step"] = 0
+    return batch
+
+
+def _on_policy(batch: TrainingInputBatch, logprobs: torch.Tensor) -> TrainingInputBatch:
+    """Copy of ``batch`` with old and rollout logprobs set to ``logprobs`` (importance ratio 1).
+
+    Fixed old logprobs put some tokens near the PPO clip boundary, where bf16-level logprob
+    differences between parallel layouts clip different tokens and move the grad norm by
+    several percent. With ratio 1 no token is near the boundary.
+    """
+    on_policy = TrainingInputBatch({k: v for k, v in batch.items()})
+    on_policy.metadata = batch.metadata
+    on_policy["action_log_probs"] = logprobs.clone()
+    on_policy["rollout_logprobs"] = logprobs.clone()
+    return on_policy
+
+
+def _forward_logprobs(actor_group, batch: TrainingInputBatch) -> torch.Tensor:
+    refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
+    output = WorkerOutput.cat(actor_group.actor_infos, ray.get(refs))
+    return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs").float()
+
+
+def _run_vlm_cp_layout(model_name, batch, cp, tp=1):
+    """Packed forward logprobs, one forward_backward + optim_step, then two half-batch
+    forward_backward calls + optim_step; returns (logprobs, results, grad_norms, split_grad_norms).
+
+    lr is 0, so optim_step only reduces, reports and clears the gradients: both phases see the
+    same weights and their grad norms are directly comparable.
+    """
+    cfg = get_test_actor_config(model_name=model_name)
+    cfg.trainer.strategy = "megatron"
+    num_gpus = tp * cp
+    cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.remove_microbatch_padding = True
+    # KL off: the KL term is a mean over each call's microbatches, so two calls weight it twice and
+    # the two-call check below would not be comparing like for like. Both checks cover the policy loss.
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.train_batch_size = len(batch)
+    cfg.trainer.policy_mini_batch_size = len(batch)
+    cfg.generator.n_samples_per_prompt = 1
+    cfg.trainer.micro_forward_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.micro_train_batch_size_per_gpu = PACKING_MICRO_BATCH
+    cfg.trainer.policy.optimizer_config.lr = 0
+    with ray_init():
+        actor_group = init_worker_with_type(
+            "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=num_gpus, cfg=cfg
+        )
+        logprobs = _forward_logprobs(actor_group, batch)
+        train_batch = _on_policy(batch, logprobs)
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", train_batch))
+        grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        # Gradient accumulation over two forward_backward calls in one optimizer step (as a
+        # Tinker client may do). Under calculate_per_token_loss each call's gradients are
+        # divided by that call's own token count. The halves are the two microbatches of the
+        # full-batch call, so both modes should give the full-batch gradient.
+        half = len(batch) // 2
+        for part in (train_batch.slice(0, half), train_batch.slice(half, len(batch))):
+            ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", part))
+        split_grad_norms = ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        return logprobs, results, grad_norms, split_grad_norms
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_name", "tp"),
+    [
+        # CP=1 puts all of Qwen3-VL-2B and its Adam state on one GPU (~41 GB peak), past a 22 GB L4.
+        pytest.param("Qwen/Qwen3-VL-2B-Instruct", 1, marks=pytest.mark.h100),
+        ("Qwen/Qwen3.5-0.8B", 1),
+        # TP=2 turns on sequence parallelism: the deepstack/SP split runs on top of the CP split.
+        ("Qwen/Qwen3-VL-2B-Instruct", 2),
+        ("Qwen/Qwen3.5-0.8B", 2),
+    ],
+    ids=["qwen3_vl", "qwen3_5_vl", "qwen3_vl_tp2_sp", "qwen3_5_vl_tp2_sp"],
+)
+@pytest.mark.megatron
+async def test_megatron_vlm_cp_vs_no_cp(model_name, tp):
+    """VLM context parallelism must match CP=1: per-token logprobs and the gradient.
+
+    The full packed stream goes to every CP rank and Megatron-Bridge's Qwen3VLModel
+    computes mRoPE, places image features and applies the CP split itself. Images span
+    the 2*CP chunk boundaries of most samples, so a mismatched split shows up as large
+    logprob differences. The grad-norm check covers loss scaling: the bridge forces
+    calculate_per_token_loss under CP, so CP=2 runs Megatron's per-token mode (DDP sums,
+    each call's gradients divided by its token count) while CP=1 runs the default mode.
+    The batch is on-policy (old logprobs from the layout's own forward), so PPO clipping
+    can't differ between layouts.
+    Both layouts use DP=1 (TP*1 vs TP*2 GPUs) so their microbatches are
+    identical and only the CP split differs; the bf16 floor still applies (changing
+    only microbatch composition moves these logprobs by ~0.034 mean), so the logprob
+    bar is the bf16 floor while a wrong split shows up as O(1) differences.
+    """
+    batch = _vlm_cp_training_batch(model_name)
+    logprobs_nocp, results_nocp, grad_norms_nocp, split_nocp = _run_vlm_cp_layout(model_name, batch, cp=1, tp=tp)
+    logprobs_cp, results_cp, grad_norms_cp, split_cp = _run_vlm_cp_layout(model_name, batch, cp=2, tp=tp)
+
+    scored = batch["loss_mask"].bool()
+    diff = (logprobs_cp - logprobs_nocp).abs()[scored]
+    print(f"\n[cp parity] {model_name} tp={tp}: logprob max={diff.max().item():.4f} mean={diff.mean().item():.5f}")
+    print(f"[cp parity] grad norms CP1={grad_norms_nocp} CP2={grad_norms_cp}")
+    print(f"[cp parity] two-call grad norms CP1={split_nocp} CP2={split_cp}")
+    print(
+        f"[cp parity] policy_loss: CP1={results_nocp[0].metrics['policy_loss']} CP2={results_cp[0].metrics['policy_loss']}"
+    )
+
+    assert torch.isfinite(logprobs_cp[scored]).all()
+    # bf16 floor: HF bf16 vs fp32 differs by ~5e-2 mean on these answer tokens.
+    assert diff.mean().item() < 5e-2
+    assert diff.max().item() < 1.0
+    gn_nocp, gn_cp = grad_norms_nocp[0], grad_norms_cp[0]
+    assert gn_nocp is not None and gn_nocp > 0 and gn_cp is not None
+    # Same 10% band as test_megatron_worker's text CP check: a scaling bug is ~2x off.
+    assert abs(gn_cp - gn_nocp) / gn_nocp < 0.1, (gn_cp, gn_nocp)
+    # Two calls per optimizer step must add up to the one-call gradient in each layout (same
+    # weights, lr=0). Dividing the window once by the summed token count would average the two
+    # calls instead, about half the norm.
+    for gn, split_gn in ((gn_nocp, split_nocp[0]), (gn_cp, split_cp[0])):
+        assert split_gn is not None and abs(split_gn - gn) / gn < 0.02, (split_gn, gn)

@@ -45,9 +45,17 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
     ppo_critic_loss,
+    score_centering_weight,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SCORE_CENTERING_SCORES_KEY,
+)
+from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    score_centering_loss_inputs,
+    score_centering_metrics,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -693,6 +701,12 @@ class Worker(DistributedTorchRayActor):
         if finalize is not None:
             finalize()
 
+    def release_optimizer_state_files(self):
+        """Delete optimizer state kept in files (Megatron ``optimizer_offload_to_disk``) at the end of training."""
+        release = getattr(self.strategy, "release_optimizer_state_files", None)
+        if release is not None and getattr(self, "optimizer", None) is not None:
+            release(self.optimizer)
+
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
@@ -1126,6 +1140,13 @@ class PolicyWorkerBase(Worker):
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
+        centering_weight = (
+            score_centering_weight(resolved_loss_name, loss_config)
+            if self.cfg.algorithm.enable_score_centering
+            else None
+        )
+        # The FSDP forward returns logit positions, so action t is scored one column earlier.
+        action_positions = slice(-num_actions - 1, -1)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -1143,16 +1164,26 @@ class PolicyWorkerBase(Worker):
                 sample_support=experience.rollout_sample_support if sample_support_replay else None,
                 loss_mask=loss_mask if sample_support_replay else None,
                 enable_sample_support_replay=sample_support_replay,
+                centering_weight=centering_weight,
             )
             # loss function
             # TODO: recompute advantages
+            centering_inputs = None
+            loss_rollout_logprobs, score_centering_kwargs = rollout_action_logprobs, {}
+            if centering_weight is not None:
+                centering_inputs = score_centering_loss_inputs(
+                    output[SCORE_CENTERING_SCORES_KEY], action_positions, rollout_action_logprobs, advantages
+                )
+                loss_rollout_logprobs = centering_inputs.sampler_logprobs
+                score_centering_kwargs = centering_inputs.loss_kwargs()
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
                 config=loss_config,
                 loss_mask=loss_mask,
-                rollout_logprobs=rollout_action_logprobs,
+                rollout_logprobs=loss_rollout_logprobs,
+                **score_centering_kwargs,
             )
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
@@ -1280,6 +1311,12 @@ class PolicyWorkerBase(Worker):
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
+            if centering_inputs is not None:
+                status.update(
+                    score_centering_metrics(
+                        output[SCORE_CENTERING_SCORES_KEY], centering_inputs, action_positions, loss_mask
+                    )
+                )
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
             status.update(

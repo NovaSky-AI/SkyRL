@@ -157,13 +157,17 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import ( 
 
 apply_per_block_fp8_param_patch()
 
-# R3 on monolithic MoE kernels (FlashInfer TRT-LLM FP8): the routed-experts capture callback is
-# bound once at startup and lost when a weight sync rebuilds the kernel (vllm#59449 / #59455).
-from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_rebind import (  # noqa: E402
-    apply_routed_experts_rebind_patch,
-)
+# Full-weight syncs go through vLLM's layerwise reload, which buffers each incoming tensor at
+# its unsharded size until the whole layer has arrived (~19 GiB per GLM-5.3 MoE layer on every
+# TP rank). Opt in to loading them into the local shard as they arrive instead.
+from skyrl.env_vars import SKYRL_VLLM_EAGER_LAYERWISE_RELOAD  # noqa: E402
 
-apply_routed_experts_rebind_patch()
+if SKYRL_VLLM_EAGER_LAYERWISE_RELOAD:
+    from skyrl.backends.skyrl_train.patches.vllm.patch_layerwise_reload_eager import (  # noqa: E402
+        apply_layerwise_reload_eager_patch,
+    )
+
+    apply_layerwise_reload_eager_patch()
 
 # R3 with inference PP > 1: relay each stage's routes to the next so the last stage returns every
 # layer (pass-through at PP=1; a no-op when vLLM relays natively).
@@ -172,6 +176,31 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 )
 
 apply_pp_relay_worker_patch()
+
+# DeepSeek-V4 under layerwise reload (weight sync): load attention sinks through a weight loader and run the
+# model-level finalize once per reload, as vllm-project/vllm#57797 (merged) and #64357 (open) do upstream.
+# TODO: remove once the pinned vLLM includes both (see the module docstring).
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (  # noqa: E402
+    apply_deepseek_v4_reload_patch,
+)
+
+apply_deepseek_v4_reload_patch()
+
+# A PP stage with no layers of some KV cache group gets cache tensors for layers it does not own (DeepSeek-V4.1 at PP=2).
+# TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.32.0).
+from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import (  # noqa: E402
+    apply_pp_kv_cache_projection_patch,
+)
+
+apply_pp_kv_cache_projection_patch()
+
+# DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
+# NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#60613 is in the pinned vLLM.
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
+    apply_deepseek_v41_prefill_workspace_patch,
+)
+
+apply_deepseek_v41_prefill_workspace_patch()
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
@@ -360,6 +389,11 @@ class NewInferenceWorkerWrap:
 
         The drafter's buffers are saved too: the weight sync reloads its
         parameters, but nothing else restores its buffers.
+
+        Since vLLM 0.32.0, KV-init runtime state and CUDA graph memory live in their
+        own ``runtime`` / ``cudagraph`` pools. They are always offloaded (as in
+        CuMemBackend.suspend), since any wake remaps them and discarding them leaves
+        the next forward reading garbage (illegal memory access).
         """
         from vllm.device_allocator import get_mem_allocator_instance
 
@@ -368,7 +402,8 @@ class NewInferenceWorkerWrap:
         self._skyrl_saved_draft_buffers = (
             {name: buf.cpu().clone() for name, buf in draft.named_buffers()} if draft is not None else {}
         )
-        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",) if offload_kv else ())
+        offload_tags = ("runtime", "cudagraph", "kv_cache") if offload_kv else ("runtime", "cudagraph")
+        get_mem_allocator_instance().sleep(offload_tags=offload_tags)
 
     def skyrl_wake_for_weight_sync(self, tags: list) -> None:
         """Wake the given allocator tags, restoring CPU-backed contents.

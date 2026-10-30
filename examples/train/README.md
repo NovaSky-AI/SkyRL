@@ -30,7 +30,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 - `mini_swe_agent/`: Integration with [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent) to train coding agents on SWE-Bench via SkyRL.
 - `thunder_agent/`: ThunderAgent-accelerated Harbor/R2EGym training recipe with program-aware inference scheduling.
 - `../integrations/verifiers/`: Integration with PrimeIntellect's [Verifiers Library](https://github.com/PrimeIntellect-ai/verifiers) + [Environments Hub](https://app.primeintellect.ai/dashboard/environments?_gl=1*1vogwn8*_gcl_au*NjA1ODI2MTMxLjE3NjczOTkwMTM)
-- `../integrations/openenv/`: Integration with HuggingFace/Meta [OpenEnv](https://github.com/meta-pytorch/OpenEnv)
+- `../integrations/openenv/`: Integration with [OpenEnv](https://github.com/openenv/OpenEnv)
 
 ## Large Scale Model Training
 - `megatron/`: Examples for running SkyRL with the Megatron Backend for 5D parallelism.

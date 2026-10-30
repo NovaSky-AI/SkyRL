@@ -31,7 +31,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.engine import prepare_sample_batch  # noqa: E402
-from tests.tinker.test_api import start_api_server  # noqa: E402
+from tests.tinker.conftest import start_api_server  # noqa: E402
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 TINKER_API_KEY = "tml-dummy"
@@ -39,11 +39,9 @@ TINKER_API_KEY = "tml-dummy"
 
 def _start_jax_api_server(port: int, db_path: str, extra_overrides: dict[str, str] | None = None):
     """CPU Tinker API server (jax backend) on the given port and DB."""
-    overrides = {"port": str(port), "backend": "jax"}
-    if extra_overrides:
-        overrides.update(extra_overrides)
     return start_api_server(
-        overrides=overrides,
+        port=port,
+        overrides=extra_overrides,
         extras=("tinker", "jax"),
         db_path=db_path,
         wait_for_up=True,

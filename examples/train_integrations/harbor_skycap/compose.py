@@ -38,7 +38,8 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
+    SAMPLE_SUPPORT_LOGPROBS_DTYPE,
+    CompactSampleSupport,
 )
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics
@@ -70,6 +71,8 @@ class _Row:
     loss_mask: List[int]
     logprobs: List[float]
     support: Optional[List[List[int]]] = None
+    # Row for row with ``support``, the sampler's logprob of each id (score centering).
+    support_logprobs: Optional[List[List[float]]] = None
     routes: Optional[RoutedExpertIndices] = None
     placeholder: bool = False
 
@@ -90,6 +93,7 @@ def split(sample: Sample) -> Optional[_Row]:
             list(sample.logprobs[first:]) if sample.logprobs is not None else [0.0] * (len(sample.input_ids) - first)
         ),
         support=sample.sampling_mask[first:] if sample.sampling_mask is not None else None,
+        support_logprobs=sample.sampling_mask_logprobs[first:] if sample.sampling_mask_logprobs is not None else None,
         routes=_routes(sample),
     )
 
@@ -115,10 +119,10 @@ def compose(
     sample_support: bool = False,
     routed_experts: bool = False,
 ) -> GeneratorOutput:
-    """``top_k`` sets the width of sampler-support rows, as SkyRL's own capture pads them.
+    """``top_k`` bounds sampler-support rows, as SkyRL's own capture does.
 
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
-    still carries padded support rows, as every other batch will. ``routed_experts`` says the same
+    still carries (empty) support rows, as every other batch will. ``routed_experts`` says the same
     of routes (R3); every trained row must then have them.
     """
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
@@ -179,23 +183,32 @@ def compose(
 
 def _sample_support(
     groups: List[List[_Row]], real: List[_Row], top_k: int, expected: bool
-) -> Optional[List[np.ndarray]]:
+) -> Optional[List[CompactSampleSupport]]:
     if (not real and not expected) or (real and all(row.support is None for row in real)):
         return None
     if any(row.support is None for row in real):
         raise ValueError("some captured paths have sampler support and some don't")
+    scored = any(row.support_logprobs is not None for row in real)
+    if scored and any(row.support_logprobs is None for row in real):
+        raise ValueError("some captured paths have sampler support logprobs and some don't")
     widest = max((len(ids) for row in real for ids in row.support), default=1)
     if top_k > 0 and widest > top_k:
         raise ValueError(f"a sampler support row has {widest} ids, more than top_k={top_k}")
     top_k = top_k if top_k > 0 else max(widest, 1)
-    arrays = []
+    supports = []
     for rows in groups:
         for row in rows:
-            array = np.full((len(row.response), top_k), SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_DTYPE)
-            for index, ids in enumerate(row.support or ()):
-                array[index, : len(ids)] = ids
-            arrays.append(array)
-    return arrays
+            ids = list(row.support or ())
+            lengths = [len(token_ids) for token_ids in ids] + [0] * (len(row.response) - len(ids))
+            members = np.array([token_id for token_ids in ids for token_id in token_ids], dtype=SAMPLE_SUPPORT_DTYPE)
+            logprobs = None
+            if scored:
+                logprobs = np.array(
+                    [value for values in row.support_logprobs or () for value in values],
+                    dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE,
+                )
+            supports.append(CompactSampleSupport.from_token_ids(members, lengths, top_k=top_k, logprobs=logprobs))
+    return supports
 
 
 def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List[RoutedExpertIndices]]:

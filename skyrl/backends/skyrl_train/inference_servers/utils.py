@@ -298,7 +298,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     if _uses_lora_weight_sync(cfg):
         lora_cfg = cfg.trainer.policy.model.lora
         args.enable_lora = True
-        args.max_lora_rank = lora_cfg.rank
+        args.max_lora_rank = lora_cfg.max_lora_rank or lora_cfg.rank
         args.max_loras = lora_cfg.max_loras
         if lora_cfg.max_cpu_loras is not None:
             args.max_cpu_loras = lora_cfg.max_cpu_loras

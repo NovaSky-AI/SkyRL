@@ -13,7 +13,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
-import numpy as np
 import torch
 from loguru import logger
 from tqdm.asyncio import tqdm
@@ -29,9 +28,7 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertTrace,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
-    SampleSupport,
+    CompactSampleSupport,
     SampleSupportTrace,
 )
 from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
@@ -66,7 +63,7 @@ class TrajectoryOutput:
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
     rollout_expert_indices: Optional[RoutedExpertIndices] = None
-    rollout_sample_support: Optional[SampleSupport] = None
+    rollout_sample_support: Optional[CompactSampleSupport] = None
     pixel_values: Optional[torch.Tensor] = None
     image_grid_thw: Optional[torch.Tensor] = None
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: agent loops may
@@ -101,7 +98,7 @@ class AgentLoopState:
     routed_expert_trace: Optional[RoutedExpertTrace] = None
     sample_support_trace: Optional[SampleSupportTrace] = None
     # Support for an EOS sliced from a single-turn response.
-    dropped_eos_sample_support: Optional[SampleSupport] = None
+    dropped_eos_sample_support: Optional[CompactSampleSupport] = None
 
 
 @dataclass
@@ -112,22 +109,18 @@ class TurnOutput:
     new_obs: ConversationType
     obs_ids: List[int]
     reward: Optional[float]
-    rollout_sample_support: Optional[SampleSupport] = None
+    rollout_sample_support: Optional[CompactSampleSupport] = None
     added_eos: bool = False
 
-    def get_turn_rollout_sample_support(self) -> Optional[SampleSupport]:
+    def get_turn_rollout_sample_support(self) -> Optional[CompactSampleSupport]:
         """Return sample support padded over synthetic EOS and observation tokens."""
         if self.rollout_sample_support is None:
             return None
         padding_count = int(self.added_eos) + len(self.obs_ids)
         if not padding_count:
             return self.rollout_sample_support
-        padding = np.full(
-            (padding_count, self.rollout_sample_support.shape[1]),
-            SAMPLE_SUPPORT_PADDING,
-            dtype=self.rollout_sample_support.dtype,
-        )
-        return np.concatenate((self.rollout_sample_support, padding), axis=0)
+        padding = self.rollout_sample_support.empty_like(padding_count)
+        return CompactSampleSupport.concat([self.rollout_sample_support, padding])
 
     def get_turn_loss_mask(self) -> List[int]:
         """
@@ -428,7 +421,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 self.generator_cfg.inference_engine.enable_return_sample_support_set
                 and training_phase != TRAINING_PHASE_EVAL
             )
-            sample_support_width = current_sampling_params["top_k"] if capture_sample_support else 0
             # Eval trajectories do not consume routed-expert indices.
             capture_routed_experts = (
                 self.generator_cfg.inference_engine.enable_return_routed_experts
@@ -519,14 +511,10 @@ class SkyRLGymGenerator(GeneratorInterface):
                     raw_sample_support = engine_output.get("rollout_sample_support", None)
                     if raw_sample_support is None:
                         raise ValueError("Sample-support generation did not return a support set")
-                    sample_support_rows = np.asarray(
-                        raw_sample_support[0],
-                        dtype=SAMPLE_SUPPORT_DTYPE,
-                        order="C",
-                    ).reshape(-1, sample_support_width)
-                    if sample_support_rows.shape[0] != len(output_ids):
+                    sample_support_rows = raw_sample_support[0]
+                    if len(sample_support_rows) != len(output_ids):
                         raise ValueError(
-                            f"Sample support has {sample_support_rows.shape[0]} rows for {len(output_ids)} tokens"
+                            f"Sample support has {len(sample_support_rows)} rows for {len(output_ids)} tokens"
                         )
                 # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
                 # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
@@ -917,7 +905,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
         truncated_indices: Optional[List[RoutedExpertIndices]] = [] if raw_rollout_expert_indices is not None else None
-        truncated_sample_support: Optional[List[SampleSupport]] = [] if raw_rollout_sample_support is not None else None
+        truncated_sample_support: Optional[List[CompactSampleSupport]] = (
+            [] if raw_rollout_sample_support is not None else None
+        )
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             # step on environment and compute reward

@@ -70,6 +70,21 @@ once; the rest queue locally and proceed as slots free up.
 Set to 0 to disable throttling (all tasks fire immediately).
 """
 
+SKYRL_VLLM_EAGER_LAYERWISE_RELOAD = str(os.environ.get("SKYRL_VLLM_EAGER_LAYERWISE_RELOAD", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+Install ``patches/vllm/patch_layerwise_reload_eager.py`` in the vLLM workers. During a
+full-weight sync, vLLM's layerwise reload holds every incoming tensor at its unsharded size
+until the whole layer has arrived; the patch loads each one into the local shard as it arrives.
+This lowers the sync-time memory peak, which matters for large MoE layers in colocated runs
+(~19 GiB per GLM-5.3 MoE layer per TP rank).
+
+Default: False. Set ``SKYRL_VLLM_EAGER_LAYERWISE_RELOAD=1`` to enable it.
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tinker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,3 +185,12 @@ SKYRL_MEGATRON_RANDOM_INIT = str(os.environ.get("SKYRL_MEGATRON_RANDOM_INIT", "0
 
 For throughput/memory benchmarking (e.g. dummy SFT with random tokens), where only the architecture
 matters: ``model.path`` then needs just ``config.json`` and tokenizer files, no safetensors."""
+
+SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL = int(
+    os.environ.get("SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL", 200_000_000)
+)
+"""Elements per chunk for ``megatron_config.optimizer_offload_to_disk``, default 200M.
+
+The optimizer step streams each rank's shard of every DDP bucket in chunks of at most this many elements. A chunk's
+fp32 main params and Adam moments are on the GPU together during the step, so the peak extra GPU memory is about
+12 B x this (2.4 GB by default). Resuming a checkpoint needs the same value it was saved with."""

@@ -84,7 +84,7 @@ def call_model_with_fused_lm_head(
     # Manually mark output layer as not offloadable; this is normally done by Megatron post-processing, but we disable that
     if unwrapped_model.config.fine_grained_activation_offloading:
         for parameter in unwrapped_model.output_layer.parameters():
-            off_interface.mark_not_offloadable(parameter)
+            off_interface.mark_not_offload(parameter)
 
     # Disable post-processing since we manually handle the LM head output downstream
     unwrapped_model.post_process = False

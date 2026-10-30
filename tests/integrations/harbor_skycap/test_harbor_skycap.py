@@ -34,14 +34,18 @@ from skycap.paths import Row, final_path  # noqa: E402
 from skycap.tokens.engine import EngineError  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
+    pack_sample_support_logprobs,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     AGENT,
     EXPERTS_PER_TOKEN,
     LAYERS,
+    NEIGHBOUR_LOGPROB,
+    SAMPLED_LOGPROB,
     SETUP,
     START_TIMEOUT,
     TOP_K,
@@ -119,12 +123,12 @@ def skycap(router, tmp_path):
     service.stop()
 
 
-def service_for(router, record_dir, **options) -> CaptureService:
+def service_for(router, record_dir, engine: SkyRLEngine | None = None, **options) -> CaptureService:
     return CaptureService(
         router.url,
         mode="tokens",
         renderer=FakeRenderer(),
-        engine=SkyRLEngine(),
+        engine=engine or SkyRLEngine(),
         model="policy",
         record_dir=str(record_dir),
         host="127.0.0.1",
@@ -203,7 +207,7 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
         routed = node.tokens.routed_experts
         assert routed.shape == (len(node.tokens.token_ids), LAYERS, EXPERTS_PER_TOKEN)
     # Support rows line up with the response: the sampled token first, none where untrained.
-    support = out["rollout_sample_support"][0]
+    support = dense(out["rollout_sample_support"][0])
     assert support.shape == (len(response), TOP_K)
     for token, trained, row in zip(response, mask, support):
         assert (row[0] == token) if trained else (row == -1).all()
@@ -435,7 +439,7 @@ def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
     outcome = TrialOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
 
     support = compose([outcome], overlong_filtering=False, top_k=TOP_K, sample_support=True)["rollout_sample_support"]
-    assert [array.shape for array in support] == [(1, TOP_K)]
+    assert [(len(rows), rows.top_k) for rows in support] == [(1, TOP_K)]
     assert compose([outcome], overlong_filtering=False, top_k=TOP_K)["rollout_sample_support"] is None
 
 
@@ -520,7 +524,7 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
 
 
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
-    support = pack_sample_support(np.zeros((1, TOP_K), dtype=np.int32))
+    support = pack_sample_support(csr(np.zeros((1, TOP_K), dtype=np.int32)))
     body = {
         "choices": [
             {
@@ -533,6 +537,55 @@ def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None
     }
     with pytest.raises(EngineError, match="sample-support rows"):
         SkyRLEngine().parse(body)
+
+
+@pytest.mark.asyncio
+async def test_with_score_centering_support_carries_the_sampler_logprob_of_each_member(
+    router, trials, tmp_path
+) -> None:
+    service = service_for(
+        router,
+        tmp_path / "record",
+        engine=SkyRLEngine(sample_support_logprobs=True),
+        sampling_overrides={"top_k": TOP_K},
+        sampling_mask=True,
+    )
+    service.start()
+    generator = HarborSkycapGenerator(
+        generator_cfg(), harbor_cfg(), [service.url], SimpleNamespace(weight_version=7), train_paths="all"
+    )
+    try:
+        out = await generator.generate(batch("linear"), disable_tqdm=True)
+    finally:
+        await generator.close()
+        service.stop()
+    validate_generator_output(1, out, step_wise=True, support_expected=True, support_scores_expected=True)
+
+    assert all(r["return_sample_support_logprobs"] is True for r in router.requests)
+    (support,) = out["rollout_sample_support"]
+    mask = out["loss_masks"][0]
+    # Each trained token's row is the sampled token and its neighbour, scored as the engine scored them.
+    assert support.row_lengths.tolist() == [2 if trained else 0 for trained in mask]
+    expected = np.tile(np.array([SAMPLED_LOGPROB, NEIGHBOUR_LOGPROB], dtype=np.float32), sum(mask))
+    np.testing.assert_array_equal(support.logprobs, expected)
+
+
+def test_without_score_centering_support_carries_no_logprobs() -> None:
+    support = csr(np.array([[4, 5, -1]], dtype=np.int32), np.array([[-0.25, -1.5, 0.0]], dtype=np.float32))
+    body = {
+        "choices": [
+            {
+                "token_ids": [4],
+                "logprobs": {"content": [{"logprob": -0.25}]},
+                "rollout_sample_support": pack_sample_support(support),
+            }
+        ]
+    }
+    assert SkyRLEngine().parse(body).sampling_mask_logprobs is None
+    with pytest.raises(EngineError, match="without the sampler's member logprobs"):
+        SkyRLEngine(sample_support_logprobs=True).parse(body)
+    body["choices"][0]["rollout_sample_support_logprobs"] = pack_sample_support_logprobs(support)
+    assert SkyRLEngine(sample_support_logprobs=True).parse(body).sampling_mask_logprobs == [[-0.25, -1.5]]
 
 
 def test_the_engine_asks_for_support_only_with_a_sampling_mask() -> None:

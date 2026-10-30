@@ -129,7 +129,8 @@ async def test_each_server_exposes_its_harness_routes_to_agents_in_sandboxes(loc
 
 
 def test_a_failed_exposure_fails_the_start_and_releases_the_pool(local_ray, tmp_path) -> None:
-    before = ray.available_resources().get("CPU")
+    # The cluster total, not a snapshot: an earlier test's removed placement group may still be releasing its CPUs.
+    total = ray.cluster_resources()["CPU"]
     with pytest.raises(ray.exceptions.RayTaskError, match="no way in"):
         start_servers(
             {"upstream_url": "http://127.0.0.1:9", "renderer": FakeRenderer(), "model": "policy"},
@@ -144,6 +145,6 @@ def test_a_failed_exposure_fails_the_start_and_releases_the_pool(local_ray, tmp_
     import time
 
     deadline = time.monotonic() + 30
-    while ray.available_resources().get("CPU") != before and time.monotonic() < deadline:
+    while ray.available_resources().get("CPU") != total and time.monotonic() < deadline:
         time.sleep(0.5)
-    assert ray.available_resources().get("CPU") == before
+    assert ray.available_resources().get("CPU") == total

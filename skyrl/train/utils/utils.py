@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
     BLOCKWISE_FP8,
@@ -279,6 +280,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
+    # The decoupled MTP draft loss rolls logits and labels without context parallelism (see the CP=1
+    # assert in MegatronModelWrapper), for every model.
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is not None and mtp.enabled and cfg.trainer.policy.megatron_config.context_parallel_size > 1:
+        raise ValueError("trainer.mtp.enabled=true is not supported with context_parallel_size > 1")
+
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
         # Megatron's fused top-k returns before compute_topk consults router_replay
@@ -396,6 +403,20 @@ def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_
             f"trainer.weight_sync_timeout_s ({weight_sync_timeout_s}) must be <= trainer.step_timeout_s "
             f"({step_timeout_s})"
         )
+
+
+def validate_optimizer_offload_to_disk_cfg(cfg: SkyRLTrainConfig):
+    """Reject ``optimizer_offload_to_disk`` settings that would be ignored, or fail only once training runs."""
+    if cfg.trainer.ref.megatron_config.optimizer_offload_to_disk.dir is not None:
+        raise ValueError("optimizer_offload_to_disk applies to the policy only; unset it for trainer.ref.")
+    if cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is None:
+        return
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError("optimizer_offload_to_disk requires trainer.strategy=megatron.")
+    if cfg.trainer.policy.model.lora.rank > 0:
+        raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+    if is_cloud_path(cfg.trainer.ckpt_path):
+        raise ValueError("optimizer_offload_to_disk requires a local trainer.ckpt_path.")
 
 
 def validate_cfg(cfg: SkyRLTrainConfig):
@@ -656,6 +677,7 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
+    validate_optimizer_offload_to_disk_cfg(cfg)
     if cfg.generator.use_conversation_multi_turn:
         if (
             cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
@@ -743,6 +765,24 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
                 "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
             )
+    if lora_cfg.max_lora_rank is not None and lora_cfg.max_lora_rank < lora_cfg.rank:
+        raise ValueError(
+            f"trainer.policy.model.lora.max_lora_rank={lora_cfg.max_lora_rank} must be >= lora.rank={lora_cfg.rank}"
+        )
+    if lora_cfg.init_adapter_path:
+        if lora_cfg.rank <= 0:
+            raise ValueError("trainer.policy.model.lora.init_adapter_path requires lora.rank > 0 (the adapter's r)")
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError(
+                f"trainer.policy.model.lora.init_adapter_path is only supported with trainer.strategy=megatron, "
+                f"got {cfg.trainer.strategy!r}"
+            )
+        if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.megatron_config.lora_config.lora_type != "lora":
+            raise ValueError(
+                "trainer.policy.model.lora.init_adapter_path requires megatron_config.lora_config.lora_type='lora'"
+            )
+    if cfg.trainer.critic.model.lora.init_adapter_path:
+        raise ValueError("lora.init_adapter_path is only supported for the policy, not trainer.critic")
 
     if ie_cfg.scale_moe_lora_rank:
         megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
@@ -1004,6 +1044,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
             if os.environ.get(nvte_var):
                 env_vars[nvte_var] = os.environ[nvte_var]
+        # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
+        # Engram table placement, faulthandler).
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
@@ -1120,6 +1163,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Selects the DSA indexer top-k backend under dsa_kernel_backend=cudnn
         # (patches/megatron/patch_dsa_hybrid_indexer.py); read in the Megatron workers.
         "SKYRL_DSA_INDEXER_BACKEND",
+        # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
+        "VLLM_ALLREDUCE_USE_FLASHINFER",
+        "VLLM_ALLREDUCE_USE_SYMM_MEM",
+        # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
+        # which leaves the CPU-offloaded optimizer step single-threaded.
+        "OMP_NUM_THREADS",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",
         "PYTHONFAULTHANDLER",

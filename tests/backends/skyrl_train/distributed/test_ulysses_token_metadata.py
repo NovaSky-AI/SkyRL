@@ -4,17 +4,13 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.ulysses import utils
-from skyrl.backends.skyrl_train.utils.packed_tensor import (
-    PackedTensor,
-    cu_seqlens_from_lengths,
-)
-from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_NO_ROW,
-    SAMPLE_SUPPORT_TORCH_DTYPE,
-)
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
+from skyrl.backends.skyrl_train.utils.packed_tensor import cu_seqlens_from_lengths
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_NO_ROW
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     score_aligned_sample_support,
 )
+from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 SP_SIZE = 2
 VOCAB = 9
@@ -33,11 +29,9 @@ def sharded(monkeypatch):
     return state
 
 
-def _support(rows: list[list[int]], segment_lengths: list[int]) -> PackedTensor:
-    return PackedTensor(
-        torch.tensor(rows, dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
-        cu_seqlens_from_lengths(segment_lengths),
-    )
+def _support(rows: list[list[int]], segment_lengths: list[int]) -> PackedRaggedTensor:
+    bounds = cu_seqlens_from_lengths(segment_lengths).tolist()
+    return ragged_support([rows[start:stop] for start, stop in zip(bounds, bounds[1:])])
 
 
 def _score(logits, sampled_ids, row_ids, loss_mask, support, **kwargs):

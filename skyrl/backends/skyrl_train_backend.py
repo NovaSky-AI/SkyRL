@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.lora_targets import check_lora_group_flags
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -121,7 +122,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     the per-tenant adapter machinery, which FSDP does not implement);
     full-parameter fine-tuning and FSDP always tear down on unload. Set to
     ``False`` to release all GPUs on the last unload (scale-to-zero) — also
-    the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
+    the escape hatch for changing the LoRA ``(rank, alpha, train_attn, train_mlp)`` signature, which
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
     runtime_role: Literal["trainer", "inference", "combined"] = "combined"
@@ -164,14 +165,27 @@ def _server_values(
     # An inference-only runtime trains nothing: its create_model only registers a base-model alias
     # with rank 0, and the backend_config rank is what enables LoRA on the inference engines.
     if lora_config is not None and overrides.runtime_role != "inference":
-        values["trainer.policy.model.lora.rank"] = (
-            lora_config.rank,
-            "set by the LoRA rank the client passes to create_model",
-        )
-        # The Tinker SDK cannot express alpha (the API server fills in 32), so a backend_config
-        # alpha takes precedence over that placeholder.
-        if lora_config.rank > 0 and "trainer.policy.model.lora.alpha" not in backend_config_values:
-            values["trainer.policy.model.lora.alpha"] = (int(lora_config.alpha), "filled in by the API server")
+        if lora_config.rank > 0:
+            values["trainer.policy.model.lora.rank"] = (
+                lora_config.rank,
+                "set by the LoRA rank the client passes to create_model",
+            )
+            # train_attn/train_mlp narrow which modules get an adapter; the worker
+            # resolves them against the loaded model. train_unembed is resolved in
+            # the API (see api._supported_lora_config) and never arrives as True.
+            # With rank 0 there is no adapter at all, so the flags must not leak in.
+            values["trainer.policy.model.lora.train_attn"] = (
+                lora_config.train_attn,
+                "set by the LoRA flags the client passes to create_model",
+            )
+            values["trainer.policy.model.lora.train_mlp"] = (
+                lora_config.train_mlp,
+                "set by the LoRA flags the client passes to create_model",
+            )
+            # The Tinker SDK cannot express alpha (the API server fills in 32), so a backend_config
+            # alpha takes precedence over that placeholder.
+            if "trainer.policy.model.lora.alpha" not in backend_config_values:
+                values["trainer.policy.model.lora.alpha"] = (int(lora_config.alpha), "filled in by the API server")
     return values
 
 
@@ -201,6 +215,24 @@ def _build_skyrl_train_config(
     unused_keys[SkyRLTrainBackend.PROFILER_CONFIG_KEY] = (
         "start the server with --torch-profiler and call /start_profiling and /stop_profiling"
     )
+    # A Tinker request carries these and would overwrite any backend_config value for
+    # them, so reject it there outright — including a value that happens to equal the
+    # request's. Stricter than the _server_values() check below, which only rejects a
+    # differing value. Without a request (an inference-only server) backend_config is
+    # the only way to configure LoRA serving: the alias that runtime's create_model
+    # registers still arrives here with a rank-0 LoraConfig, so guard on the runtime
+    # role the same way _server_values() does.
+    client_lora_keys = [
+        f"trainer.{role}.model.lora.{field}"
+        for role in ("policy", "critic")
+        for field in ("rank", "train_attn", "train_mlp")
+    ]
+    operator_set = sorted(k for k in client_lora_keys if k in backend_config_values)
+    if lora_config is not None and overrides.runtime_role != "inference" and operator_set:
+        raise ValueError(
+            f"`backend_config` may not set {operator_set}. These come from each Tinker request "
+            f"(`create_lora_training_client(rank=..., train_attn=..., train_mlp=...)`); set them there."
+        )
     check_backend_config(backend_config_values, server_values, unused_keys)
     loss_type = backend_config_values.get("trainer.algorithm.policy_loss_type")
     if loss_type is not None and loss_type not in SkyRLTrainBackend.TINKER_POLICY_LOSS_TYPES:
@@ -212,6 +244,10 @@ def _build_skyrl_train_config(
     cfg = SkyRLTrainConfig.from_cli_overrides(
         {**backend_config, **{key: value for key, (value, _) in server_values.items()}}
     )
+    lora = cfg.trainer.policy.model.lora
+    if lora.rank > 0:
+        # Fail before Ray starts or any GPU is reserved; the worker only re-checks.
+        check_lora_group_flags(lora.target_modules, lora.train_attn, lora.train_mlp, cfg.trainer.strategy)
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
@@ -425,10 +461,21 @@ class SkyRLTrainBackend(AbstractBackend):
         critic_lora = {"trainer.critic.model.lora.rank": (lora_config.rank, "set by the critic's create_model")}
         backend_config_values = flatten_backend_config(self.config.model_extra or {})
         check_backend_config(backend_config_values, critic_lora)
-        cfg.trainer.critic.model.lora.rank = lora_config.rank
+        critic_lora_cfg = cfg.trainer.critic.model.lora
+        critic_lora_cfg.rank = lora_config.rank
         # The Tinker SDK cannot send alpha (the API fills in 32), so a backend_config alpha wins, as for the policy.
         if "trainer.critic.model.lora.alpha" not in backend_config_values:
-            cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+            critic_lora_cfg.alpha = int(lora_config.alpha)
+        critic_lora_cfg.train_attn = lora_config.train_attn
+        critic_lora_cfg.train_mlp = lora_config.train_mlp
+        if critic_lora_cfg.rank > 0:
+            # Before the critic workers start, as for the policy in _build_skyrl_train_config.
+            check_lora_group_flags(
+                critic_lora_cfg.target_modules,
+                critic_lora_cfg.train_attn,
+                critic_lora_cfg.train_mlp,
+                cfg.trainer.strategy,
+            )
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,
@@ -600,12 +647,15 @@ class SkyRLTrainBackend(AbstractBackend):
             self._render_server = None
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
-        # Tinker's public LoraConfig only exposes rank + alpha (plus
-        # seed/train_attn/train_mlp/train_unembed) - pending support https://github.com/NovaSky-AI/SkyRL/issues/1632.
-        # Equality across adapters therefore reduces to (rank, alpha); the worker-side
-        # AdapterStore additionally verifies parallel-state equality via
-        # its own LoraSignature.
-        return (int(lora_config.rank), int(lora_config.alpha))
+        # Shape-affecting fields only: adapters sharing a runtime are byte-copies of
+        # one template. `seed` stays out -- it changes initial values, not structure.
+        # The worker-side AdapterStore additionally verifies parallel-state equality.
+        return (
+            int(lora_config.rank),
+            int(lora_config.alpha),
+            bool(lora_config.train_attn),
+            bool(lora_config.train_mlp),
+        )
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
         if model_id in self._model_ids_to_role:
@@ -632,14 +682,29 @@ class SkyRLTrainBackend(AbstractBackend):
                     "model was created without LoRA. Recreate the server with a "
                     "LoRA-enabled first model."
                 )
+            # Capability before compatibility: otherwise a request this backend can never
+            # serve is reported as a signature mismatch with the first adapter.
+            strategy = self._cfg.trainer.strategy
+            if strategy != "megatron":
+                raise NotImplementedError(
+                    f"A second LoRA adapter on one server is not implemented on the {strategy} backend, "
+                    "which serves a single adapter per server; multi-tenant LoRA requires Megatron."
+                )
+            check_lora_group_flags(
+                self._cfg.trainer.policy.model.lora.target_modules,
+                lora_config.train_attn,
+                lora_config.train_mlp,
+                strategy,
+            )
             new_signature = self._lora_signature_from(lora_config)
             if new_signature != self._base_lora_signature:
                 raise ValueError(
                     f"LoRA signature mismatch for model '{model_id}': "
-                    f"got (rank, alpha)={new_signature}, "
+                    f"got (rank, alpha, train_attn, train_mlp)={new_signature}, "
                     f"first adapter registered with {self._base_lora_signature}. "
-                    "Multi-LoRA with the SkyRLTrainBackend requires identical (rank, alpha) across all "
-                    "adapters; target_modules is fixed server-side."
+                    "Multi-LoRA with the SkyRLTrainBackend requires identical "
+                    "(rank, alpha, train_attn, train_mlp) across all adapters; target_modules is "
+                    "fixed server-side."
                 )
             self._dispatch.register_adapter("policy", model_id)
             self._model_ids_to_role[model_id] = model_role

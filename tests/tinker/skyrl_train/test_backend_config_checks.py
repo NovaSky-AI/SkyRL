@@ -40,7 +40,13 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
         ({"trainer.policy.optimizer_config.scheduler": "cosine"}, {}, "optimizer_config.scheduler='cosine'"),
         ({"trainer.algorithm.use_kl_loss": True}, {}, "use_kl_loss=True"),
         ({"trainer.placement.colocate_all": True}, {"runtime_role": "trainer"}, "colocate_all=True"),
-        ({"trainer.policy.model.lora.rank": 32}, FULL_FT, "lora.rank=32"),
+        # Client-carried LoRA keys are rejected outright once a request carries them (#2529),
+        # even when the value equals the request's — so the _server_values() rank row that
+        # would have rejected only a differing value never gets the chance.
+        ({"trainer.policy.model.lora.rank": 32}, FULL_FT, "may not set ['trainer.policy.model.lora.rank']"),
+        ({"trainer.policy.model.lora.rank": 8}, LORA, "may not set ['trainer.policy.model.lora.rank']"),
+        ({"trainer.policy.model.lora.train_mlp": False}, LORA, "may not set ['trainer.policy.model.lora.train_mlp']"),
+        ({"trainer.critic.model.lora.train_attn": False}, LORA, "may not set ['trainer.critic.model.lora.train_attn']"),
         ({"trainer.critic": {"optimizer_config": {"lr": 1e-5}}}, {}, "replaced by AdamParams.learning_rate"),
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, {}, "--torch-profiler"),
         ({"trainer.algorithm.policy_loss_type": "gspo"}, {}, "must be 'regular' or 'dual_clip'"),
@@ -60,7 +66,13 @@ def test_rejected(backend_config, kwargs, expected):
     [
         ({"trainer.strategy": "fsdp", "trainer.algorithm.use_kl_loss": False}, {}, "trainer.strategy", "fsdp"),
         ({"trainer.algorithm.policy_loss_type": "dual_clip"}, {}, "trainer.algorithm.policy_loss_type", "dual_clip"),
-        ({"trainer.policy.model.lora.rank": 8}, LORA, "trainer.policy.model.lora.rank", 8),
+        # The request's train_attn/train_mlp reach the config (via _server_values(), #2529).
+        (
+            {},
+            {"lora_config": types.LoraConfig(rank=8, alpha=32, seed=0, train_attn=False, train_mlp=True)},
+            "trainer.policy.model.lora.train_attn",
+            False,
+        ),
         # On an inference-only runtime, create_model's rank-0 alias keeps the rank that enables vLLM LoRA.
         (
             {"trainer.policy.model.lora.rank": 32},

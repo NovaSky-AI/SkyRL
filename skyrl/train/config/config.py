@@ -124,6 +124,13 @@ class SkyRLLoraConfig(BaseConfig):
     LoRA adapter through Megatron-Bridge. A list of specific module names can be given instead."""
     exclude_modules: Optional[str] = None
     """Modules to exclude from LoRA."""
+    train_attn: bool = True
+    """Whether to apply LoRA to the attention projections.
+    Setting this or ``train_mlp`` to ``False`` narrows ``target_modules="all-linear"`` to the other
+    group. See the LoRA example for the supported backends and models."""
+    train_mlp: bool = True
+    """Whether to apply LoRA to the MLP projections.
+    The counterpart to ``train_attn``; at least one of the two must be ``True``."""
     init_method: str = "kaiming"
     """For FSDP, corresponds to ``init_lora_weights`` in PEFT.
     For Megatron, used for ``lora_A_init_method``; supports "xavier", "normal", "kaiming", "zero"."""
@@ -140,6 +147,25 @@ class SkyRLLoraConfig(BaseConfig):
     """Total LoRA adapter capacity in vLLM's CPU LRU cache. Maps to vLLM's
     ``max_cpu_loras``; when None, vLLM defaults it to ``max_loras``. Must be
     >= ``max_loras`` if explicitly set."""
+
+    init_adapter_path: Optional[str] = None
+    """HuggingFace PEFT LoRA adapter directory that initializes the policy's adapter weights.
+    The directory (local or cloud) holds ``adapter_config.json`` and ``adapter_model.safetensors``,
+    e.g. a SkyRL ``lora_adapter`` checkpoint export or a Tinker sampler checkpoint converted with
+    ``tinker_cookbook.weights.build_lora_adapter``. ``rank`` and ``alpha`` must match the adapter's
+    ``r`` and ``lora_alpha``; with ``target_modules="all-linear"`` the targets are taken from the
+    adapter, otherwise the given list must cover every module the adapter trains. The optimizer and
+    LR schedule start fresh. PEFT ``rank_pattern`` / ``alpha_pattern`` are honored; on Megatron a
+    module that fuses several adapted HF projections (``linear_qkv``, GatedDeltaNet ``in_proj``,
+    ``linear_fc1``) is built at the sum of their ranks with a block-diagonal ``lora_B``, so it
+    computes the same function as the separate adapters. Tinker's ``linear_attn.in_proj_q/k/v``
+    keys are folded into ``in_proj_qkv`` the same way. Megatron only."""
+
+    max_lora_rank: Optional[int] = None
+    """vLLM ``max_lora_rank`` for adapter-only weight sync; defaults to ``rank``. Must be at least
+    the largest per-module rank, which exceeds ``rank`` when ``init_adapter_path`` carries a
+    ``rank_pattern`` or when Megatron (``merge_lora=false``) fuses several adapted projections into
+    one module. vLLM accepts 8, 16, 32, 64, 128, 256, 320 or 512."""
 
 
 @dataclass
@@ -429,6 +455,39 @@ class MegatronHFExportConfig(BaseConfig):
 
 
 @dataclass
+class MegatronOptimizerOffloadToDiskConfig(BaseConfig):
+    """Keep the distributed optimizer's fp32 main params and Adam moments on node-local disk.
+
+    Instead of 12 B/param of optimizer state per DP shard on the GPU (or in host RAM with
+    ``optimizer_cpu_offload``), the state lives in files and the optimizer step streams it through the GPU one
+    chunk at a time; the update itself still runs on the GPU. Requires the distributed optimizer, bf16 training,
+    ``grad_reduce_in_fp32=True``, ``optimizer_cpu_offload=False``, ``use_precision_aware_optimizer=False``, and no
+    fp8/fp4 params or LoRA. Checkpoints resume with the same parallelism only, from a local ``ckpt_path``.
+    Implementation: ``skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py``."""
+
+    dir: Optional[str] = None
+    """Node-local directory for the state files; ``None`` (default) disables offloading.
+
+    Use fast NVMe; tmpfs is refused. Each run uses ``<dir>/<run_name>/rank<global rank>/``, cleared at startup and
+    removed at the end of training. Needs about 12 B x (local params / DP size) per GPU, or 8 B with bf16 moments."""
+    moment_storage_dtype: str = "fp32"
+    """On-disk dtype of the Adam moments: ``"fp32"`` or ``"bf16"``.
+
+    ``"fp32"`` gives the same numerics as the regular optimizer; ``"bf16"`` reads and writes 8 instead of 12 B/param
+    per step and is not bit-identical. The main params are always stored in fp32, and the step computes in fp32."""
+    staging_buffer_mb: int = 256
+    """Size in MB of the pinned host staging buffer for disk <-> GPU transfers, per rank and optimizer.
+
+    MoE models have a dense and an expert optimizer, so two buffers per rank."""
+
+    def __post_init__(self) -> None:
+        if self.moment_storage_dtype not in ("fp32", "bf16"):
+            raise ValueError(f"moment_storage_dtype must be 'fp32' or 'bf16', got {self.moment_storage_dtype!r}")
+        if self.staging_buffer_mb < 1:
+            raise ValueError(f"staging_buffer_mb must be >= 1, got {self.staging_buffer_mb}")
+
+
+@dataclass
 class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
     """``"lora"`` or ``"canonical_lora"``.
@@ -553,6 +612,10 @@ class MegatronConfig(BaseConfig):
     https://docs.skyrl.ai/docs/examples/megatron for the accepted names and per-field checks.
     ``use_precision_aware_optimizer=True`` can cause checkpointing to fail
     (https://github.com/nvidia/megatron-lm/issues/1820); leaving it ``False`` is recommended."""
+    optimizer_offload_to_disk: MegatronOptimizerOffloadToDiskConfig = field(
+        default_factory=MegatronOptimizerOffloadToDiskConfig
+    )
+    """Hold the optimizer state on node-local disk; off unless ``optimizer_offload_to_disk.dir`` is set."""
     fp8: Optional[str] = None
     """TransformerEngine FP8 compute format for linear-layer GEMMs, e.g. ``"e4m3"`` or
     ``"hybrid"``. ``None`` (default) trains without FP8. Folded into
@@ -985,6 +1048,8 @@ class AlgorithmConfig(BaseConfig):
     - ``"dppo"``: DPPO, from Rethinking the Trust Region in LLM Reinforcement Learning
       (https://arxiv.org/pdf/2602.04879). Uses rollout logprobs and absolute probability
       divergences rather than probability ratios, improving on PPO clipping behavior.
+    - ``"reinforce"``: plain policy gradient ``-A log π`` with no importance ratio, the objective
+      score centering builds on (https://arxiv.org/abs/2609.20807).
     """
     loss_reduction: str = "token_mean"
     """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
@@ -1032,6 +1097,20 @@ class AlgorithmConfig(BaseConfig):
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
+    enable_score_centering: bool = False
+    """Score centering (https://arxiv.org/abs/2609.20807): subtract each token's expected weighted
+    score under the sampler, cancelling the drift a training-inference mismatch adds to the policy
+    gradient.
+
+    The expectation runs over the recorded support with the sampler's processed logprobs, which is
+    exact under top-k/top-p sampling, and weights every member with the loss's own weight on the
+    sampled token. That weight must be relative to the sampler, so this requires
+    ``enable_sample_support_replay`` and a loss with no ratio or a rollout-anchored one:
+    ``"reinforce"`` (``f = 1``), ``"rollout_is"`` (its band), ``"cispo"`` with
+    ``cispo_anchor="rollout"`` (its clamp) or ``"dppo"`` (its trust region). Incompatible with
+    ``off_policy_correction.tis_ratio_type`` and the token-mask IS thresholds, which weight only the
+    sampled token by ``π_old / π_rollout``; sequence and outlier masks apply to both terms but are
+    approximate, because each depends on the sampled token's own ratio."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1725,6 +1804,18 @@ class TrainerConfig(BaseConfig):
                 "fused_lm_head_logprob=True is only supported with the Megatron backend, "
                 f"got strategy={self.strategy!r}."
             )
+        lora = self.policy.model.lora
+        if (
+            self.fused_lm_head_logprob
+            and lora.rank > 0
+            and isinstance(lora.target_modules, (list, tuple))
+            and "output_layer" in lora.target_modules
+        ):
+            raise ValueError(
+                "fused_lm_head_logprob=True reads output_layer.weight directly and would skip the LoRA "
+                "adapter on output_layer; remove output_layer from trainer.policy.model.lora.target_modules "
+                "or disable fused_lm_head_logprob."
+            )
         if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
             raise ValueError(
                 "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
@@ -1940,6 +2031,33 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError(
                     "sample-support replay requires generator.use_conversation_multi_turn=True because "
                     "use_conversation_multi_turn=False appends a synthetic loss-active EOS without captured support"
+                )
+
+        algorithm = self.trainer.algorithm
+        if algorithm.enable_score_centering:
+            from skyrl.backends.skyrl_train.utils.ppo_utils import (
+                score_centering_weight,
+            )
+
+            if not algorithm.enable_sample_support_replay:
+                raise ValueError("trainer.algorithm.enable_score_centering requires enable_sample_support_replay")
+            # Raises for a loss whose weight is not relative to the sampler.
+            score_centering_weight(algorithm.policy_loss_type, algorithm)
+            off_policy = algorithm.off_policy_correction
+            if off_policy.tis_ratio_type is not None:
+                raise ValueError(
+                    "score centering does not compose with off_policy_correction.tis_ratio_type, which weights "
+                    "only the sampled token by pi_old / pi_rollout; the loss's own weight is the importance "
+                    "correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
+                )
+            if (
+                off_policy.token_mask_is_threshold_low is not None
+                or off_policy.token_mask_is_threshold_high is not None
+            ):
+                raise ValueError(
+                    "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
+                    "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
+                    "importance weight that score centering applies to every support member"
                 )
 
         # Eval requests opt out of capture and do not use these constraints.
