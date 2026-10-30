@@ -1,0 +1,31 @@
+name: inspect-cudnn
+entrypoint: |
+  echo "===== /opt/cudnn (symlink) ====="
+  ls -la /opt/cudnn 2>&1
+  echo "===== /opt/cudnn target contents ====="
+  ls -la /opt/cudnn/ 2>&1
+  echo "===== /opt/cudnn/include ====="
+  ls -la /opt/cudnn/include/ 2>&1 | head -20
+  echo "===== find cudnn.h ====="
+  find / -name "cudnn.h" 2>/dev/null | head -20
+  echo "===== find libcudnn ====="
+  find / -name "libcudnn*" 2>/dev/null | head -20
+  echo "===== env CPATH / CUDNN_PATH ====="
+  echo "CPATH=$CPATH"
+  echo "CUDNN_PATH=$CUDNN_PATH"
+  echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8
+cloud: rkn-gpu-cloud
+ray_version: "2.51.1"
+working_dir: .
+max_retries: 0
+
+compute_config:
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: default-queue
+  head_node:
+    required_resources:
+      CPU: 2
+      memory: 4Gi
