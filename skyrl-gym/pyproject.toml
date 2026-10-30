@@ -16,7 +16,7 @@ requires-python = ">=3.10"
 
 dependencies = [
     "func_timeout",
-    "pandas", 
+    "pandas",
     "requests",
     "omegaconf",
 ]
@@ -26,6 +26,11 @@ Repository = "https://github.com/NovaSky-AI/SkyRL"
 
 [tool.setuptools.packages.find]
 include = ["skyrl_gym*"]
+
+[tool.setuptools.package-data]
+# Vendored tau-bench retail domain data (DB json + policy wiki) must ship in wheels.
+"skyrl_gym.envs.tau_bench.tau_core.retail" = ["*.md"]
+"skyrl_gym.envs.tau_bench.tau_core.retail.data" = ["*.json", "*.md"]
 
 [project.optional-dependencies]
 dev = [
