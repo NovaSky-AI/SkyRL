@@ -4,6 +4,7 @@ server in token mode, which calls a mock SkyRL router."""
 import asyncio
 import re
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -756,8 +757,27 @@ def test_with_images_each_row_carries_its_paths_vision_features_and_a_masked_row
     assert out["pixel_values"][0][:8].eq(1).all() and out["pixel_values"][0][8:].eq(4).all()
     assert out["image_grid_thw"][0].tolist() == [[1, 2, 4], [1, 2, 2]]
     assert tuple(out["image_grid_thw"][1].shape) == (0, 3)
-    without = compose([trained], overlong_filtering=False)
-    assert without.get("pixel_values") is None
+    assert compose([masked], overlong_filtering=False, include_images=True)["pixel_values"] is None
+
+
+def test_images_fail_the_step_unless_the_trainer_can_take_them() -> None:
+    def outcome(image: Media) -> TrialOutcome:
+        sample = Sample(
+            leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=list(range(8)),
+            loss_mask=[0] * 6 + [1, 1], logprobs=[0.0] * 8, media=[image],
+        )  # fmt: skip
+        return TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
+
+    image = _image(1, 8, [1, 2, 4])
+    # The servers send the images whatever the flag says: off, the rows would train on bare placeholders.
+    with pytest.raises(ValueError, match="include_images is off"):
+        compose([outcome(image)], overlong_filtering=False)
+    # Gemma 4's processor output, and an image read back from a record.
+    gemma = replace(image, data={"pixel_values": image.data["pixel_values"], "image_position_ids": np.zeros(2)})
+    with pytest.raises(ValueError, match="image_position_ids"):
+        compose([outcome(gemma)], overlong_filtering=False, include_images=True)
+    with pytest.raises(ValueError, match="no processor output"):
+        compose([outcome(replace(image, data=None))], overlong_filtering=False, include_images=True)
 
 
 def test_the_labelled_environment_tags_every_sandbox_and_bounds_its_life(monkeypatch) -> None:

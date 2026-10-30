@@ -22,7 +22,9 @@ with its reward unless overlong filtering is on.
 
 With ``include_images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
 placeholder order. A row without images (a masked rollout's placeholder) carries zero-row tensors, as the
-trainer pads a batch.
+trainer pads a batch. Those are the only vision features the trainer takes, so an image whose processor output
+has other keys (Gemma 4's ``image_position_ids``) or none (one read back from a record) is an error, as is
+a path with images when ``include_images`` is off: its rows would train on placeholders without the images.
 
 With R3, each row carries its own routes: one per token of the path, prompt and
 history included, each from the forward pass that ran it. The path's last token
@@ -50,6 +52,8 @@ from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics
 
 MASKED_STOP_REASONS = frozenset({"agent_timeout", "error"})
+#: The processor output the trainer takes for an image: Qwen-VL's and Qwen3.5's.
+VISION_KEYS = frozenset({"pixel_values", "image_grid_thw"})
 
 
 @dataclass
@@ -147,6 +151,11 @@ def compose(
                 for row in rows:
                     row.loss_mask = [0] * len(row.loss_mask)
         groups.append(rows or [_placeholder()])
+    if not include_images and any(row.media for rows in groups for row in rows):
+        raise ValueError(
+            "a captured path has images, but skycap.include_images is off: its rows would train on the image"
+            " placeholders without the images"
+        )
 
     real = [row for rows in groups for row in rows if not row.placeholder]
     support = _sample_support(groups, real, top_k, expected=sample_support)
@@ -227,6 +236,14 @@ def _vision_features(media: List[Any]) -> tuple:
         raise ValueError(f"only images are supported, got {sorted({item.modality for item in media})}")
     if not media:
         return None, None
+    for item in media:
+        if item.data is None:
+            raise ValueError("an image has no processor output (one read back from a record keeps placeholders only)")
+        if set(item.data) != VISION_KEYS:
+            raise ValueError(
+                f"include_images takes images processed as {sorted(VISION_KEYS)} (Qwen-VL, Qwen3.5),"
+                f" got {sorted(item.data)}"
+            )
     pixel_values = torch.from_numpy(np.concatenate([np.asarray(item.data["pixel_values"]) for item in media]))
     image_grid_thw = torch.from_numpy(np.concatenate([np.asarray(item.data["image_grid_thw"]) for item in media]))
     return pixel_values, image_grid_thw
