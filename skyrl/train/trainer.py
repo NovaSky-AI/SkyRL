@@ -1620,7 +1620,9 @@ class RayPPOTrainer:
 
         # Pre-stage all per-DP mini-batch chunks in the object store so that
         # serialization is fully off the critical path during training.
-        all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
+        all_chunk_refs = self.dispatch.stage_data(
+            model, data, boundaries, balance_lengths=self.cfg.trainer.balance_dp_sequence_lengths
+        )
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):

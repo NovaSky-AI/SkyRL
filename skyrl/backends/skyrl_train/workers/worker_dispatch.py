@@ -342,6 +342,7 @@ class WorkerDispatch:
         model: str,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
+        balance_lengths: bool = False,
     ) -> List[List[ObjectRef]]:
         """Pre-stage mini-batch chunks in the Ray object store.
 
@@ -358,7 +359,7 @@ class WorkerDispatch:
             ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
         """
         dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
-        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_boundaries)
+        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_boundaries, balance_lengths=balance_lengths)
 
     def forward_backward(
         self,

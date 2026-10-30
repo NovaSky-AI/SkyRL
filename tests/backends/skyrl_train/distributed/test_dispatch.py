@@ -16,6 +16,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
     MeshRank,
     PassThroughDispatch,
+    balance_rows_by_length,
     concatenate_outputs_after_mesh_dispatch,
     loss_fn_outputs_to_tensor,
 )
@@ -188,3 +189,26 @@ def test_dispatch_registry():
         }
     finally:
         DispatchRegistry._registry.pop("custom")
+
+
+def test_balance_rows_by_length():
+    # 4 ranks x 3 rows: rank r's k-th row should come from the k-th length band.
+    dp_size, rows_per_rank, width = 4, 3, 16
+    lengths = torch.tensor([3, 16, 7, 1, 12, 9, 5, 14, 2, 11, 8, 6])
+    attention_mask = (torch.arange(width)[None, :] < lengths[:, None]).long()
+    batch = TrainingInputBatch({"attention_mask": attention_mask, "row_id": torch.arange(len(lengths))})
+    balanced = balance_rows_by_length(batch, dp_size)
+
+    assert sorted(balanced["row_id"].tolist()) == list(range(len(lengths)))  # same rows
+    out_lengths = balanced["attention_mask"].sum(-1).view(dp_size, rows_per_rank)
+    assert torch.equal(out_lengths[:, 0], torch.tensor([16, 14, 12, 11]))  # each rank's first micro-batch: top 4
+    assert torch.equal(out_lengths[:, 2], torch.tensor([5, 3, 2, 1]))
+    assert torch.equal(balanced["row_id"], lengths.argsort(descending=True).view(rows_per_rank, dp_size).T.flatten())
+    # Every micro-batch waits for its longest row: 16 + 9 + 5 = 30 instead of the unbalanced 16 + 14 + 11 = 41.
+    unbalanced = lengths.view(dp_size, rows_per_rank)
+    assert out_lengths.max(dim=0).values.sum() == 30 < unbalanced.max(dim=0).values.sum()
+
+
+def test_balance_rows_by_length_without_attention_mask_is_a_no_op():
+    batch = TrainingInputBatch({"a": torch.arange(8)})
+    assert balance_rows_by_length(batch, 4) is batch

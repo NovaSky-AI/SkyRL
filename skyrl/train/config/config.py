@@ -1641,6 +1641,12 @@ class TrainerConfig(BaseConfig):
     remove_microbatch_padding: bool = True
     """Pack samples into the THD layout and strip intra-microbatch padding (requires flash attention).
     Common to all models."""
+    balance_dp_sequence_lengths: bool = False
+    """Reorder each training mini-batch so every data-parallel rank's k-th micro-batch gets sequences of similar
+    length (sort by length, deal across ranks). Collectives inside the model (e.g. each MoE layer's all-to-all)
+    wait for the slowest rank, so mixed lengths leave the other ranks idle. Only the policy/critic training pass
+    is reordered, after advantage normalization, so the gradient is unchanged up to summation order; per-micro-batch
+    metrics change grouping."""
     eval_batch_size: int = 1024
     """Batch size for evaluation."""
     eval_before_train: bool = True

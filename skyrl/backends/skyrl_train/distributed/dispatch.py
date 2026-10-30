@@ -16,6 +16,26 @@ from skyrl.backends.skyrl_train.training_batch import (
 )
 
 
+def balance_rows_by_length(batch: TrainingInputBatch, dp_size: int) -> TrainingInputBatch:
+    """Reorder rows so each data-parallel rank's k-th row has a similar sequence length.
+
+    Ranks get contiguous chunks of ``len(batch) // dp_size`` rows and split them into micro-batches in order, so
+    the rows are sorted by length (``attention_mask`` sum, longest first) and dealt out: the i-th longest row goes
+    to rank ``i % dp_size`` at position ``i // dp_size``. Every rank's k-th micro-batch then holds rows of about
+    the same length, and the per-layer collectives stop waiting on one rank's long sequence. A batch without
+    ``attention_mask`` is returned unchanged.
+    """
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is None or len(batch) % dp_size:
+        return batch
+    rows_per_rank = len(batch) // dp_size
+    by_length = torch.argsort(attention_mask.sum(dim=-1), descending=True, stable=True).tolist()
+    order = [0] * len(batch)
+    for i, row in enumerate(by_length):
+        order[(i % dp_size) * rows_per_rank + i // dp_size] = row
+    return type(batch).cat([batch[row : row + 1] for row in order])
+
+
 @dataclass
 class MeshRank:
     """Represents a rank in the device mesh.
@@ -128,6 +148,7 @@ class MeshDispatch(Dispatch):
         dp_size: int,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
+        balance_lengths: bool = False,
     ) -> List[List[ObjectRef]]:
         """Pre-stage mini-batch chunks into the object store.
 
@@ -140,6 +161,9 @@ class MeshDispatch(Dispatch):
             data: Full TrainingInputBatch to slice from.
             mini_batch_boundaries: List of ``(start, end)`` index pairs.  The i-th mini-batch is
                 data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
+            balance_lengths: Reorder each mini-batch with :func:`balance_rows_by_length` so the ranks' k-th
+                micro-batches have similar sequence lengths. Only for passes whose per-sample outputs are not
+                mapped back to ``data`` (training).
 
         Returns:
             ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
@@ -158,6 +182,8 @@ class MeshDispatch(Dispatch):
             assert (
                 mini_batch_size % dp_size == 0
             ), f"mini_batch_size % dp_size != 0, got {mini_batch_size} and {dp_size}"
+            if balance_lengths:
+                mini_batch = balance_rows_by_length(mini_batch, dp_size)
             chunk_size = mini_batch_size // dp_size
             chunks = mini_batch.chunk(chunk_size)
             all_chunk_refs.append([ray.put(chunk) for chunk in chunks])
