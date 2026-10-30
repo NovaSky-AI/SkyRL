@@ -36,7 +36,7 @@ def sft_entrypoint(cfg: SFTConfig, skyrl_cfg: SkyRLTrainConfig):
     need to rebuild the bridge config.
 
     ``SFTTrainer`` selects its batch collator from ``use_sequence_packing``
-    (controller-level FFD bin-packing, Megatron-only, when enabled).
+    (controller-level MFFD bin-packing, Megatron-only, when enabled).
     """
     trainer = SFTTrainer(cfg, skyrl_cfg=skyrl_cfg)
     try:
