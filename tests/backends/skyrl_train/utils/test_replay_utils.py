@@ -295,3 +295,31 @@ def test_router_replay_schedule_clears_after_exception(router_replay_module):
 
     assert router_replay_module.replay_backward_list == []
     assert router_replay_module.action is None
+
+
+# DeepSeek-V4 as the pinned Megatron-Bridge builds it: 43 blocks of (W/C/H attention, MoE) -> 86 hybrid layers.
+_DSV4_PATTERN = "WEWE" + "CEHE" * 20 + "CE"
+
+
+@pytest.mark.parametrize(
+    "pattern, num_layers, hybrid, expected",
+    [
+        # DeepSeek-V4: MoE routers on every odd hybrid layer.
+        (_DSV4_PATTERN, 43, list(range(1, 86, 2)), list(range(43))),
+        # Under pipeline parallelism each stage maps only its own routers: stage 0's (1, ..., 41) all fit below the
+        # 43 decoder layers and must still be mapped; stage 1's overflow them.
+        (_DSV4_PATTERN, 43, list(range(1, 43, 2)), list(range(21))),
+        (_DSV4_PATTERN, 43, list(range(43, 86, 2)), list(range(21, 43))),
+        # Beam: decoder layer = attention + MLP/MoE pair; MoE routers at hybrid 7, 9, 11.
+        ("*-*-*-*E*E*E", 6, [7, 9, 11], [3, 4, 5]),
+        # Pipeline separators and MTP suffixes are ignored.
+        ("*-*-*-|*E*E*E/*E", 6, [7, 9, 11], [3, 4, 5]),
+        # Nemotron-H style: one decoder layer per hybrid layer, no remapping.
+        ("MEM*E", 5, [1, 4], [1, 4]),
+    ],
+)
+def test_hybrid_router_layers_map_to_decoder_layers(pattern, num_layers, hybrid, expected):
+    config = SimpleNamespace(hybrid_layer_pattern=pattern)
+    assert replay_utils._hybrid_to_decoder_layer_indices(config, num_layers, hybrid) == expected
+    # GPTModel configs have no hybrid pattern.
+    assert replay_utils._hybrid_to_decoder_layer_indices(SimpleNamespace(), num_layers, hybrid) == hybrid
