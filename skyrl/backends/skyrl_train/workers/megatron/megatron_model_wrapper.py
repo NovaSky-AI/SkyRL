@@ -82,6 +82,7 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     score_centering_metrics,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.workers.megatron.grad_sync import configure_no_sync
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
@@ -272,6 +273,7 @@ class MegatronModelWrapper:
             # _per_token_grad_scaling rescales the grad buffers between calls, which would race
             # with reductions still in flight.
             raise ValueError("calculate_per_token_loss (VLM context parallelism) requires overlap_grad_reduce=false")
+        self._overlap_grad_reduce = configure_no_sync(self.actor_module, config)
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the built-in finalize_model_grads function to all reduce gradients across
         # parallelism dimensions -- but deferred to optim_step rather than run per
@@ -319,6 +321,21 @@ class MegatronModelWrapper:
         """
         del model, num_tokens, kwargs  # replayed against self.actor_module with default process groups
         self._pending_grad_sync = {"num_tokens": None}
+
+    def _reject_overlapped_accumulation(self) -> None:
+        """Fail a second training ``forward_backward`` before ``optim_step`` under overlap.
+
+        Overlapped reductions dispatch from the final microbatch's backward hook, so the
+        previous call's gradients are already in flight. Checked before the schedule runs:
+        any backward would write into those buffers, and its last microbatch would
+        dispatch reductions into buckets whose collectives are still outstanding.
+        """
+        if self._overlap_grad_reduce and self._pending_grad_sync is not None:
+            raise RuntimeError(
+                "ddp_config.overlap_grad_reduce=True requires one forward_backward call "
+                "per optimizer step, but a second call was made before optim_step. "
+                "Set overlap_grad_reduce=False to accumulate across calls."
+            )
 
     @contextmanager
     def _per_token_grad_scaling(self, num_tokens_global: int):
@@ -717,6 +734,8 @@ class MegatronModelWrapper:
         """
         if self.is_vlm:
             self._assert_vlm_supported()
+        if not forward_only:
+            self._reject_overlapped_accumulation()
         forward_backward_func = get_forward_backward_func()
 
         # Multi-Token Prediction (MTP): if the model was built with native MTP heads, train them with
