@@ -1044,6 +1044,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
             if os.environ.get(nvte_var):
                 env_vars[nvte_var] = os.environ[nvte_var]
+        # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
+        # Engram table placement, faulthandler).
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
