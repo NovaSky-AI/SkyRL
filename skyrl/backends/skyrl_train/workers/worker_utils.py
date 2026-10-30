@@ -77,7 +77,7 @@ def compute_minibatch_rollout_logprob_diff_metrics(
 def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = False) -> Dict[str, float]:
     """Reduce scalar metrics from a list of entries per key with the appropriate reduction.
 
-    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
+    Default reduction is mean. Metrics ending in `_min`, `_max` or `_sum` use that reduction.
 
     If sum_loss_metrics is True, metrics named 'loss' or ending in `_loss` are summed instead of
     averaged (except those in `MEAN_LOSS_METRICS`, which are always averaged).
@@ -100,6 +100,8 @@ def reduce_metrics(metrics: Dict[str, List[float]], sum_loss_metrics: bool = Fal
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
+        elif k.endswith("_sum"):
+            reduced_metrics[k] = sum(v)
         elif sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS:
             reduced_metrics[k] = sum(v)
         else:
@@ -115,7 +117,7 @@ def all_reduce_metrics(
 ) -> Dict[str, float]:
     """All reduce metrics across all processes.
 
-    Default reduction is mean. Metrics ending in `_min` or `_max` use min/max respectively.
+    Default reduction is mean. Metrics ending in `_min`, `_max` or `_sum` use that reduction.
     If sum_loss_metrics is True, metrics named ``loss`` or ending in ``_loss`` are summed
     instead of averaged.
 
@@ -131,7 +133,8 @@ def all_reduce_metrics(
     sum_metrics = {
         k: v
         for k, v in metrics.items()
-        if sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS
+        if k.endswith("_sum")
+        or (sum_loss_metrics and (k == "loss" or k.endswith("_loss")) and k not in MEAN_LOSS_METRICS)
     }
     mean_metrics = {
         k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics
