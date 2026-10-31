@@ -17,6 +17,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     get_node_ip,
     get_open_port,
     is_ipv6_address,
+    resolve_server_hosts,
 )
 
 
@@ -74,6 +75,17 @@ class TestIPv6SafeAddressing:
         assert default_bind_host("worker-1") == "0.0.0.0"
         assert default_bind_host("2602:fb33::5") == "::"
         assert default_bind_host("::1") == "::"
+
+    @pytest.mark.parametrize("configured", ["127.0.0.1", "::1", "worker-1.internal"])
+    def test_resolve_server_hosts_advertises_explicit_configuration(self, configured):
+        assert resolve_server_hosts(configured, "10.0.0.1") == (configured, configured)
+
+    @pytest.mark.parametrize(
+        "configured, node_ip, expected_bind",
+        [(None, "10.0.0.1", "0.0.0.0"), ("", "2602:fb33::5", "::"), ("0.0.0.0", "10.0.0.1", "0.0.0.0")],
+    )
+    def test_resolve_server_hosts_advertises_node_for_wildcard_bind(self, configured, node_ip, expected_bind):
+        assert resolve_server_hosts(configured, node_ip) == (expected_bind, node_ip)
 
 
 class TestGetOpenPort:

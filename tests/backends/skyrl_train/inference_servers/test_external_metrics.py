@@ -13,6 +13,15 @@ from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
 pytestmark = pytest.mark.vllm
 
 
+def test_server_info_uses_the_http_advertise_host():
+    actor = object.__new__(VLLMServerActor)
+    actor._http_advertise_host = "127.0.0.1"
+    actor._port = 8123
+    actor._mooncake_bootstrap_server_port = None
+
+    assert actor.get_server_info().url == "http://127.0.0.1:8123"
+
+
 @pytest.mark.asyncio
 async def test_external_worker_metadata_is_not_captured_by_prometheus_mount():
     from vllm.entrypoints.openai.api_server import build_app

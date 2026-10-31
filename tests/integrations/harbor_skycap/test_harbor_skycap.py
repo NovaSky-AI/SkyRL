@@ -446,6 +446,18 @@ async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(sky
 
 
 @pytest.mark.asyncio
+async def test_an_invalid_verifier_reward_is_retried_then_masked(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("invalid_reward"), disable_tqdm=True)
+
+    assert out["rewards"] == [0.0]
+    assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
+    assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
+    assert out["rollout_metrics"]["generate/harbor/num_retried_attempts"] == (
+        harbor_generator.MAX_NUM_RETRIES_PER_TRIAL - 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_sandbox_start_timeout_rescued_by_a_retry_still_shows_in_the_metrics(skycap, trials, generator) -> None:
     """The run this is for: sandboxes timing out at start, retried into a clean batch whose
     error and mask counts stay at zero."""
@@ -549,17 +561,19 @@ def test_the_generator_refuses_configs_it_cannot_serve() -> None:
         HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], train_paths="nowhere_skycap_test:rule")
 
 
-def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(monkeypatch) -> None:
+def test_the_servers_use_the_configured_host_and_custom_rule(monkeypatch) -> None:
     from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
 
     started = []
     monkeypatch.setattr(main_harbor_skycap, "start_servers", lambda settings, **_: started.append(settings))
     cfg = main_harbor_skycap.HarborSkycapConfig()
     cfg.trainer.algorithm.max_seq_len = 1024
+    cfg.skycap.host = "127.0.0.1"
     for train_paths in ("final", SHORT_DISCARDS):
         cfg.skycap.train_paths = train_paths
         main_harbor_skycap.start_skycap(cfg, "http://router")
     assert [settings["path_rules"] for settings in started] == [{}, {SHORT_DISCARDS: SHORT_DISCARDS}]
+    assert [settings["host"] for settings in started] == ["127.0.0.1", "127.0.0.1"]
     # A rule that won't load fails before any server starts.
     for train_paths, error in (("longest", ValueError), ("nowhere_skycap_test:rule", ModuleNotFoundError)):
         cfg.skycap.train_paths = train_paths

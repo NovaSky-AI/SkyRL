@@ -148,11 +148,18 @@ def timing(start: float, seconds: float) -> SimpleNamespace:
     )
 
 
-def verified(reward: float, exception: str | None = None, timed: bool = True, message: str = "") -> SimpleNamespace:
+def verified(
+    reward: float,
+    exception: str | None = None,
+    timed: bool = True,
+    message: str = "",
+    reward_valid: bool = True,
+) -> SimpleNamespace:
     """A trial's result. Timed: every phase ran, except the verifier after an exception."""
     return SimpleNamespace(
         exception_info=SimpleNamespace(exception_type=exception, exception_message=message) if exception else None,
         verifier_result=None if exception else SimpleNamespace(rewards={"reward": reward}),
+        reward_valid=reward_valid,
         environment_setup=timing(0, SETUP) if timed else None,
         agent_execution=timing(SETUP, AGENT) if timed else None,
         verifier=timing(SETUP + AGENT, VERIFY) if timed and not exception else None,
@@ -218,6 +225,8 @@ class FakeTrial:
                 return start_timed_out()
             history = [{"role": "user", "content": script}]
             history.append(await chat(session, history))
+            if script == "invalid_reward":
+                return verified(1.0, reward_valid=False)
             if script == "timeout":
                 return verified(0.0, "AgentTimeoutError")
             if script == "overflow":

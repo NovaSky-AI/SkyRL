@@ -39,6 +39,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     find_and_reserve_port,
     format_http_url,
     get_node_ip,
+    resolve_server_hosts,
 )
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
@@ -263,7 +264,7 @@ class VLLMServerActor(ServerActorProtocol):
         self._cli_args.distributed_executor_backend = distributed_executor_backend
 
         # Update args with our assigned host/port
-        self._cli_args.host = default_bind_host(self._ip)
+        self._cli_args.host, self._http_advertise_host = resolve_server_hosts(self._cli_args.host, self._ip)
         self._cli_args.port = self._port
 
         # PD disaggregation: setup the KV-transfer side channel for the P2P
@@ -420,7 +421,7 @@ class VLLMServerActor(ServerActorProtocol):
     def get_server_info(self) -> ServerInfo:
         """Get the server's IP and port info."""
         return ServerInfo(
-            ip=self._ip,
+            ip=self._http_advertise_host,
             port=self._port,
             mooncake_bootstrap_server_port=self._mooncake_bootstrap_server_port,
         )
@@ -434,7 +435,7 @@ class VLLMServerActor(ServerActorProtocol):
         """Start the vLLM server. Blocks until server is healthy."""
 
         set_ulimit()
-        logger.info(f"Starting server on {self._ip}:{self._port}...")
+        logger.info(f"Starting server on {self._cli_args.host}:{self._port}...")
 
         # Start HTTP server as background asyncio task
         self._server_task = asyncio.create_task(self._run_server())
@@ -446,7 +447,7 @@ class VLLMServerActor(ServerActorProtocol):
 
     async def _wait_until_healthy(self, timeout: float = SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S) -> None:
         """Poll the /health endpoint until it responds OK."""
-        url = format_http_url(self._ip, self._port, "/health")
+        url = format_http_url(self._http_advertise_host, self._port, "/health")
         start_time = time.time()
 
         async with httpx.AsyncClient() as client:
@@ -461,7 +462,7 @@ class VLLMServerActor(ServerActorProtocol):
                 try:
                     resp = await client.get(url, timeout=5.0)
                     if resp.status_code == 200:
-                        logger.info(f"Server {self._ip}:{self._port} is healthy")
+                        logger.info(f"Server {self._http_advertise_host}:{self._port} is healthy")
                         return
                 except httpx.RequestError:
                     pass

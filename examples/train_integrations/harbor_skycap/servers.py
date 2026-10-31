@@ -1,7 +1,7 @@
 """A pool of skycap servers, one Ray actor each.
 
 Each actor runs one server (``skycap.CaptureService``) on a port it picks itself, so
-servers never collide, and advertises its node's address. The actors sit in one
+servers never collide, and advertises its configured host or node address. The actors sit in one
 placement group whose strategy is configurable: ``SPREAD`` by default, so one
 node going away takes one server rather than all of them. The generator spreads
 trajectories over the pool's URLs round-robin.
@@ -20,8 +20,8 @@ from ray.util.placement_group import placement_group, remove_placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
-    default_bind_host,
     get_node_ip,
+    resolve_server_hosts,
 )
 
 
@@ -41,14 +41,16 @@ class SkycapServerActor:
         from .engine import SkyRLEngine
 
         node_ip = get_node_ip()
+        settings = dict(settings)
+        host, advertise_host = resolve_server_hosts(settings.pop("host", None), node_ip)
         self.service = CaptureService(
             mode="tokens",
             engine=SkyRLEngine(sample_support_logprobs=sample_support_logprobs),
             record_dir=record_dir,
             ttl=ttl,
-            host=default_bind_host(node_ip),
+            host=host,
             port=0,
-            advertise_host=node_ip,
+            advertise_host=advertise_host,
             exposure=load_exposure(exposure[0], **exposure[1]) if exposure is not None else None,
             **settings,
         )
