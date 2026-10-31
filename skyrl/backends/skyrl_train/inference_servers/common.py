@@ -78,6 +78,18 @@ def default_bind_host(node_ip: str) -> str:
     return "::" if is_ipv6_address(node_ip) else "0.0.0.0"
 
 
+def resolve_server_hosts(configured_host: Optional[str], node_ip: str) -> Tuple[str, str]:
+    """Return the HTTP bind host and the host clients should use.
+
+    A wildcard listener is normalized to the node's address family and reached
+    through the node address. An explicit interface, hostname, or loopback
+    address is both the listener and the advertised address.
+    """
+    if not configured_host or configured_host in {"0.0.0.0", "::"}:
+        return default_bind_host(node_ip), node_ip
+    return configured_host, configured_host
+
+
 def get_node_ip() -> str:
     """
     Get the IP address of the current node.
