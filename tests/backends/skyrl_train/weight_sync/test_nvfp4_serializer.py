@@ -107,7 +107,8 @@ def test_runtime_env_derives_matching_flashinfer_settings():
 
 def test_runtime_env_pure_recipe_leaves_te_defaults():
     env = nvfp4.nvfp4_runtime_env({"SKYRL_NVFP4_RECIPE": "pure"})
-    assert "NVTE_BACKWARD_OVERRIDE" not in env and "NVTE_NVFP4_DISABLE_RHT" not in env
+    assert "NVTE_BACKWARD_OVERRIDE" not in env and "NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING" not in env
+    assert env["NVTE_NVFP4_DISABLE_RHT"] == "1"  # TE rejects RHT with row-scaled activations
     assert env["NVTE_NVFP4_4OVER6"] == "none" and env["FLASHINFER_NVFP4_4OVER6"] == "0"
 
 

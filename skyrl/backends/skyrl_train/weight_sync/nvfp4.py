@@ -189,10 +189,16 @@ def nvfp4_runtime_env(environ: Dict[str, str]) -> Dict[str, str]:
     """
     recipe = environ.get("SKYRL_NVFP4_RECIPE", "humans")
     if recipe == "pure":
-        # TE's stock NVFP4 recipe (2D weight blocks, RHT + stochastic rounding on gradients, quantized backward,
-        # no 4/6). Only per-token activations are forced: the sampler has no other activation scheme that can
-        # match the trainer without calibrated static scales.
-        defaults = {"NVTE_NVFP4_ROW_SCALED_ACTIVATION": "1", "NVTE_NVFP4_4OVER6": "none", "NVTE_USE_FAST_MATH": "0"}
+        # TE's stock NVFP4 recipe (2D weight blocks, stochastic rounding on gradients, quantized backward, no 4/6)
+        # with two forced changes: per-token activations (the sampler has no other activation scheme that can
+        # match the trainer without calibrated static scales), and hence no RHT (TE rejects RHT with row-scaled
+        # activations).
+        defaults = {
+            "NVTE_NVFP4_ROW_SCALED_ACTIVATION": "1",
+            "NVTE_NVFP4_DISABLE_RHT": "1",
+            "NVTE_NVFP4_4OVER6": "none",
+            "NVTE_USE_FAST_MATH": "0",
+        }
     elif recipe == "humans":
         defaults = _NVTE_RECIPE_DEFAULTS
     else:
