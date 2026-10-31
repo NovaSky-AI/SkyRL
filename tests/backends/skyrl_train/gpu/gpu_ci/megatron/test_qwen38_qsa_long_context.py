@@ -13,6 +13,8 @@ Qwen4ExpQSAIndexer + qsa_sparse_attention. Forward only, no weight sync (the rou
 covers that).
 """
 
+import os
+
 import pytest
 import ray
 from transformers import AutoTokenizer
@@ -38,10 +40,12 @@ from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
 )
 
-PROMPT_TOKENS = 7680
+# SKYRL_QWEN38_QSA_PROMPT_TOKENS / _NUM_PROMPTS run the same comparison at long context (the
+# context-parallel rows, e.g. 65536 or 260096 tokens with 2 prompts).
+PROMPT_TOKENS = int(os.environ.get("SKYRL_QWEN38_QSA_PROMPT_TOKENS", "7680"))
 GENERATE_LENGTH = 256
-MAX_MODEL_LEN = 8448 + 512  # prompt + response + chat-template headroom
-NUM_PROMPTS = 8  # two per DP rank at EP=4 (DP=4)
+MAX_MODEL_LEN = PROMPT_TOKENS + 768 + 512  # prompt + response + chat-template headroom
+NUM_PROMPTS = int(os.environ.get("SKYRL_QWEN38_QSA_NUM_PROMPTS", "8"))  # default: two per DP rank at EP=4
 
 
 def _long_context_input(model_name, tokenizer):
@@ -69,16 +73,18 @@ def _long_context_input(model_name, tokenizer):
 @pytest.mark.megatron_models
 @pytest.mark.h100
 @pytest.mark.parametrize(
-    "tp,threshold",
+    "tp,cp,num_gpus,threshold",
     [
-        pytest.param(1, 1e-1, id="qwen3.8-flash-next-4layer_h100_ep4_qsa8k"),
+        pytest.param(1, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_ep4_qsa8k"),
         # Sequence parallelism: the indexer selects on the TP-gathered sequence.
-        pytest.param(2, 1e-1, id="qwen3.8-flash-next-4layer_h100_tp2_ep4_qsa8k"),
+        pytest.param(2, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_tp2_ep4_qsa8k"),
+        # Context parallelism (split-K cuDNN QSA: Blackwell only), for the long-context prompt sizes.
+        pytest.param(1, 8, 8, 1e-1, id="qwen3.8-flash-next-4layer_cp8_ep8"),
     ],
 )
-async def test_qwen38_qsa_long_context_logprobs(tp, threshold, monkeypatch):
+async def test_qwen38_qsa_long_context_logprobs(tp, cp, num_gpus, threshold, monkeypatch):
     model_name = QWEN38_4LAYER
-    ep, inference_tp, num_gpus = 4, 4, 4
+    ep, inference_tp = num_gpus, num_gpus
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
         cfg = get_test_actor_config(model_name=model_name)
         cfg.trainer.strategy = "megatron"
@@ -93,7 +99,7 @@ async def test_qwen38_qsa_long_context_logprobs(tp, threshold, monkeypatch):
         mcfg = cfg.trainer.policy.megatron_config
         mcfg.tensor_model_parallel_size = tp
         mcfg.pipeline_model_parallel_size = 1
-        mcfg.context_parallel_size = 1
+        mcfg.context_parallel_size = cp
         mcfg.expert_model_parallel_size = ep
         mcfg.expert_tensor_parallel_size = 1
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
