@@ -6,10 +6,11 @@ import os
 import socket
 import sys
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import ray
 import torch
@@ -18,6 +19,7 @@ from ray.util.placement_group import (
     PlacementGroup,
     placement_group,
     placement_group_table,
+    remove_placement_group,
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -1360,21 +1362,39 @@ def initialize_ray(cfg: SkyRLTrainConfig):
     sync_registries()
 
 
-def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
-    try:
-        ray.get(pg.ready(), timeout=timeout)
-    except Exception as e:
-        # Extract resource demands from the placement group
-        bundles = pg.bundle_specs
-        total_gpus = sum(bundle.get("GPU", 0) for bundle in bundles)
-        total_cpus = sum(bundle.get("CPU", 0) for bundle in bundles)
+@contextmanager
+def cleanup_on_error(cleanup: Callable[[], Any], description: str):
+    """Run ``cleanup`` if the body raises, then re-raise the body's exception.
 
-        raise RuntimeError(
-            f"Failed to create placement group with {len(bundles)} bundles "
-            f"(requiring {total_gpus} GPUs, {total_cpus} CPUs total) in {timeout} seconds. "
-            f"This might indicate insufficient GPU resources.\n"
-            f"Error: {e}"
-        )
+    A failure in ``cleanup`` is attached to that exception as a note instead of replacing it.
+    """
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            cleanup()
+        except Exception as cleanup_exc:
+            primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
+        raise
+
+
+def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
+    """Wait until ``pg`` is ready, removing it if that does not happen within ``timeout`` seconds."""
+    with cleanup_on_error(lambda: remove_placement_group(pg), "Removing the placement group"):
+        try:
+            ray.get(pg.ready(), timeout=timeout)
+        except Exception as e:
+            # Extract resource demands from the placement group
+            bundles = pg.bundle_specs
+            total_gpus = sum(bundle.get("GPU", 0) for bundle in bundles)
+            total_cpus = sum(bundle.get("CPU", 0) for bundle in bundles)
+
+            raise RuntimeError(
+                f"Failed to create placement group with {len(bundles)} bundles "
+                f"(requiring {total_gpus} GPUs, {total_cpus} CPUs total) in {timeout} seconds. "
+                f"This might indicate insufficient GPU resources.\n"
+                f"Error: {e}"
+            )
 
 
 @ray.remote(num_gpus=1)
