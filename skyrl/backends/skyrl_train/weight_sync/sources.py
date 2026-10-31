@@ -218,6 +218,38 @@ class SerializedFp8WeightSource(WeightSource):
         yield from self._serialized()
 
 
+class SerializedNvfp4WeightSource(WeightSource):
+    """Serialize routed-expert weights into ModelOpt NVFP4 checkpoint tensors (see ``weight_sync/nvfp4.py``).
+
+    Like ``SerializedFp8WeightSource``: metadata comes from one dry conversion of the same stream. Each pass
+    uses a fresh serializer, so gate/up pairing state never leaks between passes.
+    """
+
+    def __init__(self, source: WeightSource, settings: Any, num_layers: int, high_precision_last_layers: int) -> None:
+        self._source = source
+        self._settings = settings
+        self._num_layers = num_layers
+        self._high_precision_last_layers = high_precision_last_layers
+        self._meta: Optional[List[ParamMeta]] = None
+
+    def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        from skyrl.backends.skyrl_train.weight_sync.nvfp4 import Nvfp4ExpertSerializer
+
+        serializer = Nvfp4ExpertSerializer(self._settings, self._num_layers, self._high_precision_last_layers)
+        for name, tensor in self._source:
+            for serialized_name, serialized_tensor in serializer(name, tensor):
+                yield serialized_name, serialized_tensor.detach().contiguous()
+        serializer.finish()
+
+    def metadata(self) -> List[ParamMeta]:
+        if self._meta is None:
+            self._meta = [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self._serialized()]
+        return self._meta
+
+    def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        yield from self._serialized()
+
+
 class LoraAdapterWeightSource(WeightSource):
     """``WeightSource`` whose stream is a PEFT adapter rather than the model.
 

@@ -408,6 +408,13 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
+        if megatron_config.expert_nvfp4:
+            from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+                configure_expert_nvfp4,
+            )
+
+            configure_expert_nvfp4(provider, megatron_config.expert_nvfp4_high_precision_last_layers)
+
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
         # the residual it would re-materialize is the n-stream tensor consumed by the mHC
         # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
@@ -1634,6 +1641,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
 
         source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
+        megatron_config = self.cfg.policy.megatron_config
+        if megatron_config.expert_nvfp4:
+            from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
+                Nvfp4WeightQuantSettings,
+            )
+            from skyrl.backends.skyrl_train.weight_sync.sources import (
+                SerializedNvfp4WeightSource,
+            )
+
+            if backend not in {"nccl", "ipc"}:
+                raise ValueError(
+                    f"expert_nvfp4 weight sync requires the NCCL or CUDA-IPC push backend, got {backend!r}"
+                )
+            return SerializedNvfp4WeightSource(
+                source,
+                Nvfp4WeightQuantSettings.from_te_recipe(),
+                num_layers=self.strategy.hf_config.num_hidden_layers,
+                high_precision_last_layers=megatron_config.expert_nvfp4_high_precision_last_layers,
+            )
         if self._serialized_fp8_config is not None:
             from skyrl.backends.skyrl_train.weight_sync.sources import (
                 SerializedFp8WeightSource,

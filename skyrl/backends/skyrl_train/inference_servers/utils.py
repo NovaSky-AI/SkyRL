@@ -129,6 +129,39 @@ def _apply_serialized_fp8_weight_sync_defaults(
     engine_kwargs["hf_overrides"] = hf_overrides
 
 
+def _apply_expert_nvfp4_weight_sync_defaults(cfg: SkyRLTrainConfig, engine_kwargs: Dict[str, Any]) -> None:
+    """Boot vLLM as a ModelOpt NVFP4 expert-only engine that loads the trainer's NVFP4 expert weights as-is."""
+    if cfg.trainer.strategy != "megatron" or not cfg.trainer.policy.megatron_config.expert_nvfp4:
+        return
+    if cfg.generator.inference_engine.fp8_weight_sync_mode is not None:
+        raise ValueError("expert_nvfp4 and fp8_weight_sync_mode are mutually exclusive")
+    from transformers import AutoConfig
+
+    from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
+        get_nvfp4_vllm_engine_overrides,
+    )
+
+    hf_config = AutoConfig.from_pretrained(cfg.trainer.policy.model.path, trust_remote_code=True)
+    hf_config = getattr(hf_config, "text_config", hf_config)
+    overrides = get_nvfp4_vllm_engine_overrides(
+        hf_config.num_hidden_layers, cfg.trainer.policy.megatron_config.expert_nvfp4_high_precision_last_layers
+    )
+    for key in ("quantization", "load_format", "quantization_config"):
+        _set_or_validate(engine_kwargs, key, overrides[key], context="engine_init_kwargs")
+    hf_overrides = copy.deepcopy(engine_kwargs.get("hf_overrides") or {})
+    _set_or_validate(
+        hf_overrides,
+        "quantization_config",
+        overrides["hf_overrides"]["quantization_config"],
+        context="engine_init_kwargs.hf_overrides",
+    )
+    engine_kwargs["hf_overrides"] = hf_overrides
+    # Per-token NVFP4 activations exist only on the FlashInfer TRT-LLM MoE backend.
+    kernel_config = copy.deepcopy(engine_kwargs.get("kernel_config") or {})
+    _set_or_validate(kernel_config, "moe_backend", "flashinfer_trtllm", context="engine_init_kwargs.kernel_config")
+    engine_kwargs["kernel_config"] = kernel_config
+
+
 def _validate_logprobs_mode(engine_kwargs: Dict[str, Any], *, context: str) -> None:
     """Raises if *engine_kwargs* sets ``logprobs_mode`` to anything but ``VLLM_LOGPROBS_MODE``."""
     logprobs_mode = engine_kwargs.get("logprobs_mode", VLLM_LOGPROBS_MODE)
@@ -338,6 +371,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         engine_kwargs,
         cfg.trainer.policy.model.path,
     )
+    _apply_expert_nvfp4_weight_sync_defaults(cfg, engine_kwargs)
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 

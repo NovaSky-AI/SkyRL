@@ -142,6 +142,22 @@ checkpoint-format vision-block exclusions remain BF16. The path does not silentl
 change that policy for a topology or add a VLM-specific merger fallback; a configuration
 that vLLM cannot instantiate fails at startup.
 
+### Serialized NVFP4 expert sync (`expert_nvfp4`)
+
+`trainer.policy.megatron_config.expert_nvfp4=true` runs the routed-expert GEMMs through Transformer Engine's
+NVFP4 recipe (`workers/megatron/quantization/expert_nvfp4.py`: a per-module quant recipe matches only
+`*.experts.linear_fc1/fc2`; `expert_nvfp4_high_precision_last_layers` keeps the tail BF16) and syncs the same
+expert weights to vLLM. `SerializedNvfp4WeightSource` (`weight_sync/nvfp4.py`) quantizes each exported BF16
+expert with a TE `NVFP4Quantizer` built from the forward recipe -- gate and up together, so they share one
+global scale -- and ships ModelOpt NVFP4 checkpoint tensors (`weight` uint8, `weight_scale` e4m3,
+`weight_scale_2`, `input_scale`). vLLM boots as `modelopt_fp4` with dummy weights and a per-token MoE activation
+override on the FlashInfer TRT-LLM backend; its layerwise reload only re-lays the tensors out, so the sampler's
+expert weights equal the trainer's bitwise. The TE recipe knobs come from the `NVTE_NVFP4_*` environment and the
+matching FlashInfer settings are derived from them (`nvfp4_runtime_env`), so the activation quantizers agree on
+both sides. Run vLLM's experts expert-parallel: under expert TP the down_proj input's per-token scale covers
+only a rank's slice. Serialized NVFP4 is incompatible with `fp8_weight_sync_mode` and the delta / sharded-RDT
+backends, and works with vLLM sleep level 2.
+
 ### Control plane
 
 `control_plane.SkyrlWeightSyncClient` is a **blocking** HTTP client over vLLM's native

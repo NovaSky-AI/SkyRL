@@ -656,6 +656,16 @@ class MegatronConfig(BaseConfig):
     allocates little GPU memory, and under ``expandable_segments`` the empty releases every cached page
     to the driver, which the next forward pass maps again (seconds per step at high memory use).
     ``True`` / ``False`` force it on / off. Forward-only passes empty the cache unless this is ``False``."""
+    expert_nvfp4: bool = False
+    """Run routed-expert GEMMs (``*.experts.linear_fc1/fc2``) through Transformer Engine's NVFP4 recipe and
+    sync the same NVFP4 expert weights to vLLM (ModelOpt NVFP4, per-token activations, no re-quantization on
+    the sampler). Everything else stays BF16. The recipe itself (per-token activations, 4/6 block scaling,
+    dequantized backward, no RHT / stochastic rounding / 2D blocks) is read by TE from the ``NVTE_NVFP4_*``
+    and ``NVTE_BACKWARD_OVERRIDE`` environment, forwarded to all Ray actors together with the matching
+    ``FLASHINFER_*`` sampler settings. Requires ``moe_grouped_gemm`` and SM100."""
+    expert_nvfp4_high_precision_last_layers: int = 0
+    """With ``expert_nvfp4``: keep the routed experts of the last N transformer layers in BF16, in the
+    trainer and on the sampler."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use
