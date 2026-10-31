@@ -1244,8 +1244,6 @@ class PolicyWorkerBase(Worker):
                 "lr": self.scheduler.get_last_lr()[0],
                 "loss_fn_outputs": loss_fn_outputs,
             }
-            for key, value in loss_metrics.items():
-                status["loss_metrics/" + key] = value
         else:
             # RL path: add optional KL/entropy terms
             # entropy loss
