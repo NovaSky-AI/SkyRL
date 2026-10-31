@@ -6,8 +6,20 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_mxfp8_recipe,
 )
 
-# Every CP chunk (a sequence's 1 / (2 * cp)) holds a multiple of this many tokens.
-CP_CHUNK_TOKEN_ALIGN = 4
+# Tokens every CP chunk (a sequence's 1 / (2 * cp)) must be a multiple of, for models whose
+# layers work on fixed-size token blocks within a chunk (Qwen4Exp's QSA pools 4-token key blocks).
+# Set once per worker process by such a model's provider (``set_cp_chunk_token_align``); 1 keeps
+# the plain CP layout.
+_cp_chunk_token_align = 1
+
+
+def set_cp_chunk_token_align(tokens: int) -> None:
+    global _cp_chunk_token_align
+    _cp_chunk_token_align = int(tokens)
+
+
+def get_cp_chunk_token_align() -> int:
+    return _cp_chunk_token_align
 
 
 def _fp8_token_align(tp_size: int, cp_size: int, fp8_recipe: Any) -> int:
@@ -51,9 +63,9 @@ def get_packed_seq_align_size(
     if tp_size < 1 or cp_size < 1:
         raise ValueError(f"tp_size and cp_size must be positive, got tp_size={tp_size}, cp_size={cp_size}")
     if cp_size > 1:
-        # 2 * cp zigzag chunks per sequence, each split over TP and made of whole
-        # CP_CHUNK_TOKEN_ALIGN-token blocks (Qwen4Exp's QSA pools 4-token key blocks per chunk).
-        layout_align = 2 * cp_size * math.lcm(tp_size, CP_CHUNK_TOKEN_ALIGN)
+        # 2 * cp zigzag chunks per sequence, each split over TP (and made of whole
+        # model-registered token blocks, see ``set_cp_chunk_token_align``).
+        layout_align = 2 * cp_size * math.lcm(tp_size, _cp_chunk_token_align)
     else:
         layout_align = tp_size
     if not fp8_enabled:

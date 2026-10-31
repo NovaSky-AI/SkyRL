@@ -8,6 +8,9 @@ from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.core import parallel_state
 from megatron.core.transformer.spec_utils import ModuleSpec
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    set_cp_chunk_token_align,
+)
 from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import (
     CPLayout,
 )
@@ -54,6 +57,9 @@ class Qwen4ExpModelProvider(GPTModelProvider):
             raise NotImplementedError("Qwen4Exp on Megatron needs sequence_parallel=True with TP > 1.")
         if self.pipeline_model_parallel_size != 1:
             raise NotImplementedError("Qwen4Exp on Megatron does not support pipeline parallelism yet.")
+        if self.context_parallel_size > 1:
+            # QSA pools 4-token key blocks per CP chunk: pad sequences so chunks hold whole blocks.
+            set_cp_chunk_token_align(self.qwen4_indexer_compress_ratio)
         model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
 
         ples = [m.ple for m in model.modules() if isinstance(m, Qwen4ExpTransformerLayer) and m.ple is not None]
