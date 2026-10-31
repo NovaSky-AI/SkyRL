@@ -969,15 +969,6 @@ class MegatronModelWrapper:
                 rollout_logprobs=loss_rollout_logprobs,
                 **score_centering_kwargs,
             )
-            if self._fused_lm_head_block_sparse and "dft_weight_mean" in loss_metrics:
-                # Sparse rows carry neutral log-prob 0, so exp(logprob)=1 there.
-                # Correct this diagnostic only on the opt-in path; the disabled
-                # path retains the existing objective work with no extra scan.
-                metric_mask = (loss_mask > 0).to(action_log_probs.dtype)
-                dft_weights = torch.exp(action_log_probs).detach()
-                loss_metrics["dft_weight_mean"] = (
-                    (dft_weights * metric_mask).sum() / metric_mask.sum().clamp(min=1)
-                ).item()
 
             # Decoupled MTP / draft loss: soft-CE distillation of the detached-input MTP head against
             # the policy's own next-token distribution (full-vocab, or top-k when mtp_loss_topk is
