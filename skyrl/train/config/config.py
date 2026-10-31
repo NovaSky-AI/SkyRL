@@ -1501,6 +1501,11 @@ class GeneratorConfig(BaseConfig):
     with the same policy weight version. The salt is keyed on the engine's weight version, captured at the start of each
     ``generate`` call. Matters for fully-async RL; a no-op for synchronous training (which resets the
     cache each sync) and when prefix caching is off, so it is safe to leave on by default."""
+    cache_salt_per_trajectory: bool = False
+    """Give every trajectory its own prefix-cache salt, so the samples of a prompt never reuse each other's cached
+    prompt KV (each re-prefills its prompt). For models whose decode drifts from prefill after a prefix-cache hit
+    while prefix caching cannot be turned off (vLLM requires it for routed-expert capture, i.e. R3), e.g.
+    DeepSeek-V4.1-Flash. Costs one extra prompt prefill per sample."""
     apply_overlong_filtering: bool = False
     """Apply DAPO Overlong Filtering: mask out all tokens in the loss mask for trajectories that
     exceed max length (truncated, no EOS token)."""
