@@ -1048,6 +1048,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Engram table placement, faulthandler).
         env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
 
+        # Expert NVFP4: the TE recipe and the matching sampler-side FlashInfer settings, on every actor.
+        if cfg.trainer.policy.megatron_config.expert_nvfp4:
+            from skyrl.backends.skyrl_train.weight_sync.nvfp4 import nvfp4_runtime_env
+
+            env_vars.update(nvfp4_runtime_env(dict(os.environ)))
+
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
