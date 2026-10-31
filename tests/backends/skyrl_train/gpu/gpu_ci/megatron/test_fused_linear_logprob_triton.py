@@ -23,7 +23,6 @@ import triton
 
 from skyrl.backends.skyrl_train.distributed.megatron import fused_linear_logprob_triton
 from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
-    TRITON_AVAILABLE,
     FusedLinearLogprobTriton,
 )
 
@@ -31,7 +30,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton
 pytestmark = [
     pytest.mark.megatron,
     pytest.mark.skipif(
-        not (torch.cuda.is_available() and TRITON_AVAILABLE),
+        not torch.cuda.is_available(),
         reason="Triton fused LM-head log-prob requires a CUDA device and triton",
     ),
 ]

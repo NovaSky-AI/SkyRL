@@ -1766,8 +1766,9 @@ class TrainerConfig(BaseConfig):
     ``"triton_block_sparse"``. The block-sparse backend preserves token order
     and skips wholly inactive loss-mask row tiles for SFT or RL. It can regress
     near a fully active mask; select it only after benchmarking representative
-    masks and sharding. Sample-support replay is not supported. Triton backends
-    require CUDA + triton and fall back to ``"torch"`` when unavailable.
+    masks and sharding. Under sample-support replay the recorded candidates
+    already supply the sparsity, so the row mask and spans are not built.
+    Triton backends require CUDA + Triton; import and execution errors propagate.
     Ignored unless ``fused_lm_head_logprob`` is true."""
 
     grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
