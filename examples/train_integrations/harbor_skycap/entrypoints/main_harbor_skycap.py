@@ -76,8 +76,8 @@ class SkycapConfig:
     placement_strategy: str = "SPREAD"
     """Ray placement-group strategy for the servers: SPREAD (default, for availability), STRICT_SPREAD, PACK."""
     host: Optional[str] = None
-    """Address each skycap server binds to and advertises to clients. Defaults to a wildcard listener that
-    advertises its node's address."""
+    """Address each skycap server binds to and advertises to clients.
+    Defaults to a wildcard listener that advertises its node's address."""
     record_dir: Optional[str] = None
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""

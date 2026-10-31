@@ -82,7 +82,14 @@ class TestIPv6SafeAddressing:
 
     @pytest.mark.parametrize(
         "configured, node_ip, expected_bind",
-        [(None, "10.0.0.1", "0.0.0.0"), ("", "2602:fb33::5", "::"), ("0.0.0.0", "10.0.0.1", "0.0.0.0")],
+        [
+            (None, "10.0.0.1", "0.0.0.0"),
+            ("", "2602:fb33::5", "::"),
+            ("0.0.0.0", "10.0.0.1", "0.0.0.0"),
+            ("0.0.0.0", "2602:fb33::5", "::"),
+            ("::", "10.0.0.1", "0.0.0.0"),
+            ("::", "2602:fb33::5", "::"),
+        ],
     )
     def test_resolve_server_hosts_advertises_node_for_wildcard_bind(self, configured, node_ip, expected_bind):
         assert resolve_server_hosts(configured, node_ip) == (expected_bind, node_ip)

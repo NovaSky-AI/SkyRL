@@ -225,6 +225,10 @@ class FakeTrial:
                 return start_timed_out()
             history = [{"role": "user", "content": script}]
             history.append(await chat(session, history))
+            if script == "legacy_reward":
+                result = verified(1.0)
+                del result.reward_valid
+                return result
             if script == "invalid_reward":
                 return verified(1.0, reward_valid=False)
             if script == "timeout":

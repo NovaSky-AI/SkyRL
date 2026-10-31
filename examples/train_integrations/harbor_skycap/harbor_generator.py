@@ -295,7 +295,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 elif await asyncio.to_thread(_ran_out_of_context, results):
                     # Trains with reward 0, as the sibling does.
                     reward, stop_reason = 0.0, "context_length"
-                elif not results.verifier_result or not results.reward_valid:
+                elif not results.verifier_result or not getattr(results, "reward_valid", True):
                     reward, stop_reason = 0.0, "error"
                     if not results.verifier_result:
                         logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")

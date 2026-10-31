@@ -458,6 +458,15 @@ async def test_an_invalid_verifier_reward_is_retried_then_masked(skycap, trials,
 
 
 @pytest.mark.asyncio
+async def test_a_result_without_reward_valid_remains_trainable(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("legacy_reward"), disable_tqdm=True)
+
+    assert out["rewards"] == [1.0]
+    assert out["stop_reasons"] == ["complete"]
+    assert len(trials.configs) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_sandbox_start_timeout_rescued_by_a_retry_still_shows_in_the_metrics(skycap, trials, generator) -> None:
     """The run this is for: sandboxes timing out at start, retried into a clean batch whose
     error and mask counts stay at zero."""
