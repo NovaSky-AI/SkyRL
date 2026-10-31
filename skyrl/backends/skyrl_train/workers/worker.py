@@ -701,6 +701,12 @@ class Worker(DistributedTorchRayActor):
         if finalize is not None:
             finalize()
 
+    def release_optimizer_state_files(self):
+        """Delete optimizer state kept in files (Megatron ``optimizer_offload_to_disk``) at the end of training."""
+        release = getattr(self.strategy, "release_optimizer_state_files", None)
+        if release is not None and getattr(self, "optimizer", None) is not None:
+            release(self.optimizer)
+
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(
             model=self.model,

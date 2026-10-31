@@ -28,6 +28,7 @@ from skyrl.train.utils.utils import (
     validate_cfg,
     validate_inference_engine_cfg,
     validate_megatron_cfg,
+    validate_optimizer_offload_to_disk_cfg,
 )
 from tests.train.util import example_dummy_config
 
@@ -1697,3 +1698,24 @@ def test_score_centering_accepts_every_sampler_anchored_loss(overrides):
 def test_score_centering_rejects_what_breaks_its_drift_cancellation(override, message):
     with pytest.raises(ValueError, match=message):
         SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, override])
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"trainer.strategy": "fsdp"}, "requires trainer.strategy=megatron"),
+        ({"trainer.policy.model.lora.rank": 8}, "does not support LoRA"),
+        ({"trainer.ckpt_path": "s3://bucket/ckpts"}, "local trainer.ckpt_path"),
+        ({"trainer.ref.megatron_config.optimizer_offload_to_disk.dir": "/tmp/state"}, "policy only"),
+    ],
+)
+def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, match):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = "/tmp/state"
+    for path, value in overrides.items():
+        *parents, name = path.split(".")
+        setattr(_get_nested_attr(cfg, ".".join(parents)), name, value)
+
+    with pytest.raises(ValueError, match=match):
+        validate_optimizer_offload_to_disk_cfg(cfg)

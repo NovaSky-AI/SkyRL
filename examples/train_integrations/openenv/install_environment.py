@@ -15,7 +15,7 @@ import argparse
 import sys
 import subprocess
 
-# Image mapping: from https://github.com/meta-pytorch/OpenEnv/pkgs/container/
+# Image mapping: from https://github.com/openenv/OpenEnv/pkgs/container/
 ENV_IMAGES = {
     "base": "ghcr.io/meta-pytorch/openenv-base:sha-64d4b10",
     "atari-env": "ghcr.io/meta-pytorch/openenv-atari-env:sha-64d4b10",
@@ -65,7 +65,7 @@ def main() -> None:
                 # NOTE(shu): finrl-env is not available remotely; need to build from source
                 print("Building finrl-env from source (no remote package available)...")
 
-                repo_url = "https://github.com/meta-pytorch/OpenEnv.git"
+                repo_url = "https://github.com/openenv/OpenEnv.git"
                 repo_dir = "OpenEnv"
 
                 try:

@@ -79,6 +79,7 @@ from skyrl.train.utils import (
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
+    ReleaseOptimizerStateFilesCallback,
     TrainingCallback,
     TrainingControl,
 )
@@ -164,6 +165,8 @@ class RayPPOTrainer:
 
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
+        if cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is not None:
+            self.add_callback(ReleaseOptimizerStateFilesCallback())
         self._current_epoch: int = 0
 
         configure_ray_worker_logging()

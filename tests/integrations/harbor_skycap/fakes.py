@@ -8,7 +8,7 @@
 - ``FakeTrial``: what Harbor's ``Trial`` is to the generator. Its task path picks
   a script: a linear chat, a summarization (the history is rewritten), a
   discarded reply asked again for (mini-swe-agent's format-error retry), a
-  timeout, a crash, or a sandbox that times out starting on the first attempt
+  timeout, an agent that exits on skycap's context-length error (``overflow``), a crash, or a sandbox that times out starting on the first attempt
   (``slow_start``; "first" counts every trial of that task path since
   ``FakeTrial.configs`` was reset, so a test runs one such trial). Results carry Harbor's phase timings: the sandbox takes
   ``SETUP`` seconds to start, the agent ``AGENT`` and the verifier ``VERIFY``.
@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -63,7 +64,7 @@ class FakeRenderer:
         prompt = [START, *encode("assistant"), NL]
         return Rendered(token_ids=tokens + prompt, tail_indices=indices + [-1] * len(prompt))
 
-    def bridge(self, previous_prompt, previous_completion, new_messages, tools) -> Rendered | None:
+    def bridge(self, previous_prompt, previous_completion, new_messages, tools, previous_media=()) -> Rendered | None:
         if not previous_completion or previous_completion[-1] != END:
             return None
         if any(m.get("role") == "assistant" for m in new_messages):
@@ -147,10 +148,10 @@ def timing(start: float, seconds: float) -> SimpleNamespace:
     )
 
 
-def verified(reward: float, exception: str | None = None, timed: bool = True) -> SimpleNamespace:
+def verified(reward: float, exception: str | None = None, timed: bool = True, message: str = "") -> SimpleNamespace:
     """A trial's result. Timed: every phase ran, except the verifier after an exception."""
     return SimpleNamespace(
-        exception_info=SimpleNamespace(exception_type=exception) if exception else None,
+        exception_info=SimpleNamespace(exception_type=exception, exception_message=message) if exception else None,
         verifier_result=None if exception else SimpleNamespace(rewards={"reward": reward}),
         environment_setup=timing(0, SETUP) if timed else None,
         agent_execution=timing(SETUP, AGENT) if timed else None,
@@ -170,9 +171,11 @@ def start_timed_out() -> SimpleNamespace:
 
 
 class FakeTrial:
-    """Replaces ``harbor.trial.trial.Trial``. Every created trial's config is kept in ``configs``."""
+    """Replaces ``harbor.trial.trial.Trial``. Every created trial's config is kept in ``configs``; a trial that
+    writes an agent log does so under ``trials_root``."""
 
     configs: list[dict[str, Any]] = []
+    trials_root: Path
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
@@ -217,6 +220,24 @@ class FakeTrial:
             history.append(await chat(session, history))
             if script == "timeout":
                 return verified(0.0, "AgentTimeoutError")
+            if script == "overflow":
+                # mini-swe-agent exiting on skycap's context-length 400: Harbor sees only a non-zero exit, and
+                # still runs the verifier.
+                # Harbor's message keeps only the start of the agent's output; the error is at the end of its
+                # log, which Rich wraps.
+                result = verified(1.0)
+                result.exception_info = SimpleNamespace(
+                    exception_type="NonZeroAgentExitCodeError",
+                    exception_message="Command failed (exit 1): mini-swe-agent ...\nstdout: You are a helpful"
+                    " ... [truncated]",
+                )
+                trial_dir = self.trials_root / f"overflow-{len(self.configs)}"
+                (trial_dir / "agent").mkdir(parents=True)
+                (trial_dir / "agent" / "mini-swe-agent.txt").write_text(
+                    "step 1 ...\n" * 10_000 + "litellm.BadRequestError: ... 'code': 'context\n_length_exceeded'\n"
+                )
+                result.trial_uri = trial_dir.as_uri()
+                return result
             history += [{"role": "user", "content": "ok"}]
             if script == "discard":
                 # As mini-swe-agent on a format error: the reply is dropped from the history and the
