@@ -82,7 +82,8 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
 
     Under sequence parallelism ``x`` holds this rank's tokens. PLE and the QSA indexer need whole
     sequences, so their inputs are all-gathered over TP; the attention / GDN and MoE handle SP
-    themselves.
+    themselves. Under context parallelism PLE and QSA exchange what they need over the CP group
+    (``context_parallel.py``).
     """
 
     def __init__(
@@ -107,6 +108,7 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
                 module.to(config.params_dtype)
         self.expand_input = global_idx == 0
         self.sp_group = self.tp_group if config.sequence_parallel and self.tp_group.size() > 1 else None
+        self.cp_layout = None  # this micro-batch's CP split (set by the provider's pre-hook)
 
     @property
     def _qwen4_is_gdn(self) -> bool:
@@ -142,7 +144,7 @@ class Qwen4ExpTransformerLayer(TransformerLayer):
             with torch.no_grad():
                 index_in = sp_gather(attn_in, self.sp_group)
             core_attention.qsa_selection = self.self_attention.indexer.select(
-                index_in, rotary_pos_emb, packed_seq_params
+                index_in, rotary_pos_emb, packed_seq_params, self.cp_layout
             )
         attn_out, attn_bias = self.self_attention(
             attn_in,

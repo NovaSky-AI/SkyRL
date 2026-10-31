@@ -6,6 +6,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_mxfp8_recipe,
 )
 
+# Every CP chunk (a sequence's 1 / (2 * cp)) holds a multiple of this many tokens.
+CP_CHUNK_TOKEN_ALIGN = 4
+
 
 def _fp8_token_align(tp_size: int, cp_size: int, fp8_recipe: Any) -> int:
     # MXFP8 quantizes sequence-parallel all-gather inputs in 1x32 tiles, so
@@ -48,7 +51,9 @@ def get_packed_seq_align_size(
     if tp_size < 1 or cp_size < 1:
         raise ValueError(f"tp_size and cp_size must be positive, got tp_size={tp_size}, cp_size={cp_size}")
     if cp_size > 1:
-        layout_align = tp_size * cp_size * 2
+        # 2 * cp zigzag chunks per sequence, each split over TP and made of whole
+        # CP_CHUNK_TOKEN_ALIGN-token blocks (Qwen4Exp's QSA pools 4-token key blocks per chunk).
+        layout_align = 2 * cp_size * math.lcm(tp_size, CP_CHUNK_TOKEN_ALIGN)
     else:
         layout_align = tp_size
     if not fp8_enabled:

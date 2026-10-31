@@ -8,7 +8,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
 
 def test_packed_alignment_uses_layout_only_without_fp8():
     assert get_packed_seq_align_size(tp_size=4, cp_size=1) == 4
-    assert get_packed_seq_align_size(tp_size=1, cp_size=2) == 4
+    assert get_packed_seq_align_size(tp_size=1, cp_size=2) == 16
+    assert get_packed_seq_align_size(tp_size=2, cp_size=2) == 16
+    assert get_packed_seq_align_size(tp_size=8, cp_size=2) == 32
 
 
 def test_packed_alignment_adds_fp8_local_rank_multiple():
