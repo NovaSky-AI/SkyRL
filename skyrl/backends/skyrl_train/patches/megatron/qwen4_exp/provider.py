@@ -8,7 +8,9 @@ from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.core import parallel_state
 from megatron.core.transformer.spec_utils import ModuleSpec
 
-from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import CPLayout
+from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import (
+    CPLayout,
+)
 from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.layer_specs import (
     Qwen4ExpTransformerLayer,
     build_qwen4_exp_layer_spec,

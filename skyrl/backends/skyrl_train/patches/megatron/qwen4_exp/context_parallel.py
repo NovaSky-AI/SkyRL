@@ -59,7 +59,9 @@ class CPLayout:
         inverse = torch.empty_like(all_positions)
         inverse[all_positions] = torch.arange(all_positions.numel(), device=all_positions.device)
         n = all_positions.numel() // size
-        return cls(group, size, rank, cu_seqlens_padded, all_positions[rank * n : (rank + 1) * n], all_positions, inverse)
+        return cls(
+            group, size, rank, cu_seqlens_padded, all_positions[rank * n : (rank + 1) * n], all_positions, inverse
+        )
 
     def gather(self, x: Tensor) -> Tensor:
         """All of ``x`` ([T_local, ...]) in global stream order ([T, ...]).

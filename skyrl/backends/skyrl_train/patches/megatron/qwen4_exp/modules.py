@@ -26,7 +26,9 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from safetensors import safe_open
 from torch import Tensor, nn
 
-from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import CPLayout
+from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import (
+    CPLayout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -589,7 +591,9 @@ class Qwen4ExpQSAIndexer(nn.Module):
             lo, n = start // size, length // size
             block_mask = None
             if length > self.max_dense_length:
-                block_mask = self._select_rows(q[lo : lo + n], pos[lo : lo + n], keys[start // r : (start + length) // r])
+                block_mask = self._select_rows(
+                    q[lo : lo + n], pos[lo : lo + n], keys[start // r : (start + length) // r]
+                )
             sequences.append(QSASequenceSelection(lo, n, block_mask))
         return QSASelection(sequences, self.compress_ratio, cp_layout=layout)
 
@@ -766,8 +770,12 @@ class _CPPairs:
         i64 = dict(dtype=torch.long, device=device)
         # Local rows of each half, and the global rows of each key chunk.
         self.half_rows = [
-            torch.cat([torch.arange(a // layout.size + k * h, a // layout.size + (k + 1) * h, **i64)
-                       for a, h in zip(cu[:-1], self.h)])
+            torch.cat(
+                [
+                    torch.arange(a // layout.size + k * h, a // layout.size + (k + 1) * h, **i64)
+                    for a, h in zip(cu[:-1], self.h)
+                ]
+            )
             for k in range(2)
         ]
         self.device = device
@@ -777,7 +785,10 @@ class _CPPairs:
 
     def key_rows(self, j: int) -> Tensor:
         return torch.cat(
-            [torch.arange(a + j * h, a + (j + 1) * h, dtype=torch.long, device=self.device) for a, h in zip(self.cu[:-1], self.h)]
+            [
+                torch.arange(a + j * h, a + (j + 1) * h, dtype=torch.long, device=self.device)
+                for a, h in zip(self.cu[:-1], self.h)
+            ]
         )
 
     def metadata(self, half: int, j: int):
@@ -803,7 +814,9 @@ class _CPPairs:
             tok_base[off : off + h] = off
             if seq.block_mask is None:  # dense: every block up to the query's own
                 own = (c * h + u) // r - j * nb  # own block index within chunk j
-                sel[off : off + h, off // r : off // r + nb] = (torch.arange(nb, device=dev) <= own[:, None]).to(torch.uint8)
+                sel[off : off + h, off // r : off // r + nb] = (torch.arange(nb, device=dev) <= own[:, None]).to(
+                    torch.uint8
+                )
             else:
                 rows = seq.block_mask[half * h : (half + 1) * h]
                 sel[off : off + h, off // r : off // r + nb] = rows[:, j * nb : (j + 1) * nb].to(torch.uint8)
