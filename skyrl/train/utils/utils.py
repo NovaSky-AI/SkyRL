@@ -1079,6 +1079,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             )
             env_vars["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"]
 
+        # With a warm FlashInfer autotune cache, vLLM boot can hang with rank 0 done and the other ranks
+        # stuck in the collective MoE tuning; a fresh per-run dir avoids it. Engines on other nodes only
+        # see it through the runtime env.
+        if os.environ.get("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"):
+            env_vars["VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"] = os.environ["VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR"]
+
         if os.environ.get("RAY_CGRAPH_get_timeout"):
             logger.info(
                 f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
