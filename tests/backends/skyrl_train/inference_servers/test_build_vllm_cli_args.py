@@ -7,6 +7,7 @@ import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     _apply_serialized_fp8_weight_sync_defaults,
+    build_frozen_vllm_cli_args,
     build_vllm_cli_args,
     get_pd_cli_args,
     get_pd_p2p_connector_name,
@@ -155,6 +156,37 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
 
 
 @pytest.mark.vllm
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            ["generator.inference_engine.engine_init_kwargs.logprobs_mode=raw_logprobs"],
+            "generator.inference_engine.engine_init_kwargs.logprobs_mode must be 'processed_logprobs'",
+        ),
+        (
+            ["generator.inference_engine.weight_sync_backend=sharded_rdt", "trainer.placement.colocate_all=true"],
+            "weight_sync_backend='sharded_rdt' requires non-colocated",
+        ),
+        (
+            [
+                "trainer.strategy=megatron",
+                "generator.inference_engine.fp8_weight_sync_mode=blockwise",
+                "generator.inference_engine.engine_init_kwargs.quantization=awq",
+            ],
+            "quantization must be 'fp8' when FP8 weight sync is enabled",
+        ),
+    ],
+)
+def test_build_vllm_cli_args_rejects_invalid_settings(overrides, message, monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
+
+    with pytest.raises(ValueError, match=message):
+        build_vllm_cli_args(SkyRLTrainConfig.from_cli_overrides(overrides))
+
+
+@pytest.mark.vllm
 def test_default_logprobs_mode_is_processed_logprobs():
     args = build_vllm_cli_args(SkyRLTrainConfig())
 
@@ -174,6 +206,50 @@ def test_sample_support_uses_processed_top_k_logprobs():
 
     assert args.max_logprobs == 8
     assert args.logprobs_mode == "processed_logprobs"
+
+
+@pytest.mark.vllm
+def test_build_frozen_vllm_cli_args_serves_a_model_that_is_only_read():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.sampling_params.top_k = 8
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.served_model_name = "teacher"
+    ie_cfg.tensor_parallel_size = 4
+    ie_cfg.enable_return_routed_experts = True  # policy-only settings the frozen role must not apply
+    ie_cfg.enable_return_sample_support_set = True
+    ie_cfg.engine_init_kwargs = {"max_model_len": 4096, "enforce_eager": True}
+
+    args = build_frozen_vllm_cli_args("Qwen/Qwen3-32B", ie_cfg, seed=7)
+    policy_args = build_vllm_cli_args(cfg)
+
+    assert args.model == "Qwen/Qwen3-32B"
+    assert args.served_model_name == ["teacher"]
+    assert args.tensor_parallel_size == 4
+    assert args.seed == 7
+    assert args.enable_sleep_mode is False
+    assert args.enable_lora is False
+    assert args.weight_transfer_config is None
+    assert args.enable_return_routed_experts is False
+    assert args.logprobs_mode == "processed_logprobs"  # every SkyRL-launched engine, frozen ones included
+    assert args.max_logprobs != 8  # sample-support capture is the policy's
+    assert args.max_model_len == 4096
+    assert args.enforce_eager is True  # engine_init_kwargs applies last, over the config field
+    # the role-independent fields are the same ones the policy gets
+    for name in ("worker_extension_cls", "generation_config", "gpu_memory_utilization", "max_num_seqs", "dtype"):
+        assert getattr(args, name) == getattr(policy_args, name)
+    assert policy_args.weight_transfer_config is not None
+    assert policy_args.max_logprobs == 8
+
+
+def test_build_frozen_vllm_cli_args_rejects_other_logprobs_modes(monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_base_vllm_cli_args", lambda *_: Namespace())
+    ie_cfg = SkyRLTrainConfig().generator.inference_engine
+    ie_cfg.engine_init_kwargs = {"logprobs_mode": "raw_logits"}
+
+    with pytest.raises(ValueError, match="logprobs_mode must be 'processed_logprobs'"):
+        build_frozen_vllm_cli_args("Qwen/Qwen3-32B", ie_cfg, seed=7)
 
 
 def _megatron_lora_cfg(*overrides):

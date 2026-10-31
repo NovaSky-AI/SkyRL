@@ -6,6 +6,7 @@ Uses Ray's public network utilities for consistency with Ray's cluster managemen
 
 import ipaddress
 import logging
+import os
 import socket
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -13,6 +14,13 @@ from typing import Optional, Tuple
 import ray
 
 logger = logging.getLogger(__name__)
+
+# The base port for the vLLM server group. This is the lowest port number SkyRL
+# assigns vLLM servers that are launched. Each server actor owns a 100-port window
+# (`SERVER_PORT_STRIDE`). Overridable because another service on the host
+# (e.g. a k8s LoadBalancer) can claim port 8000 and silently hijack /wake_up,
+# which then 404s from the other app.
+VLLM_START_PORT = int(os.environ.get("SKYRL_VLLM_START_PORT", 8000))
 
 # Stride between successive server actors' (or groups') start_port values.
 # Each actor's `find_and_reserve_port` increments by 1 on conflict, so this

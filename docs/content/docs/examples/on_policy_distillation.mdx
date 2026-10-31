@@ -1,0 +1,90 @@
+---
+title: "On-Policy Distillation"
+---
+
+On-policy distillation (OPD) trains a student on its own rollouts while a frozen teacher grades every
+token using the negative per-token reverse KL to the teacher, `log π_teacher − log π_student`.
+It keeps the on-policy character of RL and adds a dense, per-token signal
+([Thinking Machines](https://thinkingmachines.ai/blog/on-policy-distillation/)).
+
+SkyRL's entrypoint, `skyrl.train.entrypoints.main_opd` (library code under `skyrl/train/opd/`, run scripts under `examples/train/on_policy_distillation/`),
+serves the teacher from an inference engine. During a rollout, the teacher model scores each prompt's group of rollouts as soon as it finishes. Importantly,
+the teacher works with the `GeneratorInterface` to do this scoring. Therefore, any pre-existing `GeneratorInterface` implementation can be left untouched.
+
+## Quickstart
+
+```bash
+# The math recipe: Qwen3-4B-Base student, DAPO-17k prompts, AIME24 eval. The job launches the teacher
+# (Qwen3-32B, TP=4) on 4 GPUs of an 8-GPU node, next to the student's 4.
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh
+```
+
+The only OPD-specific flags are the teacher and, optionally, the mixing knobs. By default the job launches
+the teacher's vLLM deployment on its own cluster GPUs:
+
+```bash
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_opd \
+  trainer.policy.model.path=Qwen/Qwen3-4B-Base \
+  trainer.teacher.model=Qwen/Qwen3-32B \
+  trainer.teacher.inference_engine.num_engines=1 \
+  trainer.teacher.inference_engine.tensor_parallel_size=4 \
+  trainer.algorithm.opd.kl_coef=1.0 \
+  trainer.algorithm.opd.use_task_reward=false \
+  ...
+```
+
+<Callout type="warn">
+The student and the teacher must share a tokenizer: the teacher scores the student's token ids verbatim.
+SkyRL's OPD implementation currently does not support cross-tokenizer training.
+</Callout>
+
+## Teacher backends
+
+Currently SkyRL allows for the teacher model to be setup in two different ways. Each method requires
+setting different teacher configurations.
+
+- `trainer.teacher.backend=skyrl` (default): the job launches a vLLM deployment of `trainer.teacher.model`
+  (an HF id or local path) from `trainer.teacher.inference_engine` (same schema as `generator.inference_engine`)
+  similar to how SkyRL creates vLLM deployments for the rollout engine. The teacher requires
+  `num_engines · tensor_parallel_size · pipeline_parallel_size · data_parallel_size` GPUs to be available
+  in addition to the GPUs required for the trainer and rollout inference engine.
+- `trainer.teacher.backend=vllm`: sometimes there may be teacher models already running on external
+  vLLM deployments, or it might be more convenient to run the teacher models from a different cluster.
+  In this situation, it is possible to provide vLLM endpoints as the teacher model via `trainer.teacher.server_url`.
+  The teacher scores student trajectories through the OpenAI-compatible `/v1/completions`
+  with vLLM's `prompt_logprobs` parameter; `trainer.teacher.model` is the served model name.
+
+<Callout type="info">\
+The SkyRL-managed teacher backend shares the same configuration schema with the rollout engine. However, there
+are some defualts to the inference engine config that are different between the teacher and rollout engine:
+
+- Prefix caching is off
+- `gpu_memory_utilization` 0.9
+- Ray Prometheus stats off
+
+As for the student, vLLM uses the model's native context unless `trainer.teacher.inference_engine.engine_init_kwargs.max_model_len`
+is set; set it to cover prompt + response + 1, as the example script does.
+
+Furthermore, the teacher model is never weight-synced or slept.
+</Callout>
+
+## Pure and mixed distillation
+
+`trainer.algorithm.opd.use_task_reward=false` (default) is pure distillation: the environment reward is
+logged but zeroed before the advantage estimator, so the advantage is the teacher term alone.
+`use_task_reward=true` keeps the reward: the configured estimator (GRPO by default) produces its
+advantages and the teacher term, `kl_coef · (log π_student − log π_teacher)`, is subtracted per token after
+it. Applying the term after the estimator is what lets it compose with any estimator in mixed mode, and
+with any reward-only estimator in pure mode (`gae` is rejected there: a critic's whitened residuals would
+replace the teacher signal). GRPO would otherwise sum the per-token signal into one scalar per sequence.
+
+## Metrics
+
+`opd/reverse_kl` is the headline curve and approaches 0 as the student matches the teacher.
+`opd/adv_rl_abs_mean` and `opd/adv_opd_abs_mean` compare the scale of the reward term and the teacher term
+when tuning `kl_coef` in mixed mode. `opd/teacher_time_exposed` is the seconds the step waited on the
+teacher after the last rollout of the batch came back, the only scoring cost the overlap cannot hide.
+`reward/avg_pass_at_n` still reports the verifier's pass rate on training rollouts in pure mode.
+
+See `skyrl/train/opd/config.py` for every OPD field, and `examples/train/on_policy_distillation/README.md` for the caveats.
