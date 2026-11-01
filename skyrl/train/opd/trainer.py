@@ -12,7 +12,7 @@
 import asyncio
 import inspect
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import torch
 from tqdm.asyncio import tqdm
@@ -33,9 +33,10 @@ from skyrl.train.trainer import RayPPOTrainer
 class OPDTrainer(RayPPOTrainer):
     """``RayPPOTrainer`` for on-policy distillation. Works with any ``GeneratorInterface``."""
 
-    def __init__(self, *args, teacher_client: TeacherLogprobClient, **kwargs):
+    def __init__(self, *args, teacher_client: Optional[TeacherLogprobClient], **kwargs):
         super().__init__(*args, **kwargs)
-        self.teacher_client = teacher_client
+        assert teacher_client is not None
+        self.teacher_client: TeacherLogprobClient = teacher_client
         # One progress bar per group would flood the console. SkyRLGymGenerator.generate takes
         # `disable_tqdm` for exactly this; other generators may not (same check as the fully-async trainer).
         self._generate_kwargs = (

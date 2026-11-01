@@ -15,6 +15,7 @@ For more usecases and example scripts, look at
 """
 
 import sys
+from typing import Optional
 
 import ray
 
@@ -34,7 +35,7 @@ from skyrl.train.utils import initialize_ray, validate_cfg
 class OPDExp(BasePPOExp):
     def __init__(self, cfg):
         super().__init__(cfg)
-        self._teacher_client: TeacherLogprobClient = None
+        self._teacher_client: Optional[TeacherLogprobClient] = None
 
     def get_teacher_client(self) -> TeacherLogprobClient:
         """Build the teacher client from ``trainer.teacher``."""
