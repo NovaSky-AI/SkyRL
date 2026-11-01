@@ -196,7 +196,7 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
 def test_build_vllm_cli_args_rejects_invalid_settings(overrides, message, monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
 
     with pytest.raises(ValueError, match=message):
         build_vllm_cli_args(SkyRLTrainConfig.from_cli_overrides(overrides))
