@@ -12,7 +12,7 @@
 import asyncio
 import inspect
 import time
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from tqdm.asyncio import tqdm
