@@ -1,5 +1,6 @@
 """Recipe/architecture helpers shared by FP8 packing, weight sync, and workers."""
 
+import fnmatch
 from typing import Any, MutableMapping, Optional, Sequence
 
 from loguru import logger
@@ -25,6 +26,31 @@ def fp8_exclude_recipe(exclude_modules: Sequence[str]) -> dict:
             for idx, pattern in enumerate(exclude_modules)
         },
     }
+
+
+def validate_fp8_exclude_modules_matched(model_chunks: Sequence[Any], exclude_modules: Sequence[str]) -> None:
+    """Validates that every pattern in `exclude_modules` matches at least one module, and
+    raises otherwise. It only considers module names that the exclude list can apply to,
+    which excludes intermediate module names that don't have weights (like `decoder.layers`)
+    and those that are not TE layers (embedding, MoE router).
+
+    Collective: every rank calls it.
+    """
+    import torch
+
+    names = []
+    for chunk in model_chunks:
+        while hasattr(chunk, "module"):
+            chunk = chunk.module
+        # include only modules that the exclude list can apply to
+        # filtered using `finish_init` which only applies to end modules with names that are TE layers
+        # excluding intermediate layers (like `decoder.layers`) and those that are not TE layers (embedding, MoE router)
+        names.extend(name for name, module in chunk.named_modules() if hasattr(module, "finish_init"))
+    counts = torch.tensor([sum(fnmatch.fnmatch(name, pattern) for name in names) for pattern in exclude_modules])
+    torch.distributed.all_reduce(counts)
+    unmatched = [pattern for pattern, count in zip(exclude_modules, counts.tolist()) if count == 0]
+    if unmatched:
+        raise ValueError(f"fp8_exclude_modules patterns {unmatched} match none of the layers Megatron can run in FP8. ")
 
 
 def is_fp8_enabled(fp8: Any) -> bool:

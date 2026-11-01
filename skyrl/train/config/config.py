@@ -641,7 +641,9 @@ class MegatronConfig(BaseConfig):
     Patterns use ``fnmatch`` syntax and match Megatron module paths such as
     ``decoder.layers.3.self_attention.linear_qkv``, ``decoder.layers.3.self_attention.in_proj``
     (GDN), ``decoder.layers.3.mlp.experts.linear_fc1``, ``decoder.layers.3.mlp.shared_experts.linear_fc2``
-    and ``output_layer``. Examples: ``["*.shared_experts.*"]``, ``["*.self_attention.*"]``. Megatron
+    and ``output_layer`` (an FP8 layer only with ``fp8_output_proj`` and ``fp8_recipe=mxfp8``).
+    Examples: ``["*.shared_experts.*"]``, ``["*.self_attention.*"]``. A pattern that matches none of
+    the layers Megatron can run in FP8 raises when the model is built. Megatron
     numbers ``layers.N`` within each pipeline stage, so layer-indexed patterns are rejected when
     ``pipeline_model_parallel_size > 1``; use ``num_layers_at_start_in_bf16`` /
     ``num_layers_at_end_in_bf16`` for layer ranges.

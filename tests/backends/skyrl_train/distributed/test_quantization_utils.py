@@ -1,6 +1,8 @@
+import re
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
@@ -11,6 +13,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     resolve_text_config,
     validate_concrete_fp8_recipe,
+    validate_fp8_exclude_modules_matched,
     validate_mxfp8_gdn_tp_alignment,
     wire_to_engine_quantization,
 )
@@ -248,3 +251,46 @@ def test_fp8_exclude_recipe_matches_megatron_module_paths():
     assert config_key("decoder.layers.0.self_attention.in_proj") == "bf16"
     assert config_key("decoder.layers.10.self_attention.linear_qkv") is None
     assert config_key("decoder.layers.3.mlp.experts.linear_fc1") is None
+
+
+class _TELayer(torch.nn.Module):
+    """Stands in for a Transformer Engine layer, which Megatron marks with ``finish_init``."""
+
+    def finish_init(self, quantization_config):
+        pass
+
+
+def _ddp_wrapped_model():
+    layer = torch.nn.Module()
+    layer.self_attention = torch.nn.Module()
+    layer.self_attention.linear_qkv = _TELayer()
+    layer.mlp = torch.nn.Module()
+    layer.mlp.linear_fc1 = _TELayer()
+    model = torch.nn.Module()
+    model.decoder = torch.nn.Module()
+    model.decoder.layers = torch.nn.ModuleList([layer])
+    wrapper = torch.nn.Module()
+    wrapper.module = model
+    return [wrapper]
+
+
+def test_validate_fp8_exclude_modules_matched_accepts_patterns_that_match(monkeypatch):
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda counts: None)
+    validate_fp8_exclude_modules_matched(
+        _ddp_wrapped_model(), ["*.self_attention.*", "decoder.layers.0.mlp.linear_fc1"]
+    )
+
+
+@pytest.mark.parametrize("pattern", ["*.self_atention.*", "decoder.layers.0.mlp"])
+def test_validate_fp8_exclude_modules_matched_refuses_patterns_that_match_no_fp8_layer(monkeypatch, pattern):
+    """A misspelled pattern and one that names only a container module both leave every layer in FP8."""
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda counts: None)
+    expected = f"{[pattern]} match none of the layers Megatron can run in FP8 (e.g. 'decoder.layers.0.self_attention.linear_qkv')"
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        validate_fp8_exclude_modules_matched(_ddp_wrapped_model(), ["*.self_attention.*", pattern])
+
+
+def test_validate_fp8_exclude_modules_matched_counts_matches_on_other_pipeline_stages(monkeypatch):
+    # Another pipeline stage holds the only layer the second pattern matches.
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda counts: counts.add_(torch.tensor([0, 1])))
+    validate_fp8_exclude_modules_matched(_ddp_wrapped_model(), ["*.self_attention.*", "decoder.layers.5.*"])

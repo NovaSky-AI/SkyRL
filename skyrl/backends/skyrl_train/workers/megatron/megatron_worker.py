@@ -56,6 +56,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     is_fp8_enabled,
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
+    validate_fp8_exclude_modules_matched,
     validate_mxfp8_gdn_tp_alignment,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -750,6 +751,8 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        if self.megatron_config.fp8_exclude_modules:
+            validate_fp8_exclude_modules_matched(model, list(self.megatron_config.fp8_exclude_modules))
         if lora_config is not None and getattr(self, "_lora_import_plan", None) is not None:
             self._load_lora_init_adapter(model)
         return model

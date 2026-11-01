@@ -64,9 +64,10 @@ export VLLM_USE_DEEP_GEMM_E8M0=0
 #
 # Training (Megatron). Layer ranges use the layer-count fields, which also work under pipeline
 # parallelism. Module globs match Megatron names such as decoder.layers.3.self_attention.linear_qkv
-# (GDN layers use self_attention.in_proj / out_proj instead). For finer control, such as a
-# different recipe per module, use megatron_config.te_precision_config_file in place of
-# fp8_exclude_modules (the two cannot be combined).
+# (GDN layers use self_attention.in_proj / out_proj instead), and raise when the model is built
+# if a pattern matches no FP8 layer. For finer control, such as a different recipe per module,
+# use megatron_config.te_precision_config_file in place of fp8_exclude_modules (the two cannot
+# be combined).
 NUM_LAYERS_AT_START_IN_BF16=2
 NUM_LAYERS_AT_END_IN_BF16=1
 MEGATRON_FP8_EXCLUDE_MODULES="['*.self_attention.linear_qkv','*.self_attention.linear_proj']"
