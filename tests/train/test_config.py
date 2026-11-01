@@ -537,6 +537,8 @@ def test_megatron_validation_rejects_mxfp8_before_blackwell(monkeypatch):
 
 
 def test_megatron_validation_rejects_mxfp8_with_fp8_param(monkeypatch):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
+    monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: True)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
