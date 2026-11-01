@@ -14,11 +14,13 @@ and a serialized MXFP8 wire (fp8_weight_sync_mode=mxfp8) into vLLM's
 compressed-tensors MXFP8 path. Select with: -m b200.
 """
 
+import dataclasses
 import os
 
 import pytest
 import ray
 import torch
+import yaml
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
@@ -26,6 +28,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
     is_blackwell_or_newer,
 )
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
@@ -766,6 +769,24 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-0.8b-dense_mxfp8_exclude",
             marks=pytest.mark.b200,
         ),
+        # The same exclusions given to training as a te_precision_config_file
+        # instead of fp8_exclude_modules.
+        pytest.param(
+            1,
+            1,
+            1,
+            1,
+            None,
+            1,
+            2,
+            "Qwen/Qwen3.5-0.8B",
+            1e-1,
+            5e-2,
+            "mxfp8_precision_file",
+            None,
+            id="qwen3.5-0.8b-dense_mxfp8_precision_file",
+            marks=pytest.mark.b200,
+        ),
         pytest.param(
             1,
             1,
@@ -797,6 +818,7 @@ async def test_logprobs_matching_roundtrip(
     megatron_threshold,
     fp8_mode,
     max_generate_length,
+    tmp_path,
 ):
     """
     Check that logprob diff matches acrosss vllm and megatron.
@@ -837,20 +859,28 @@ async def test_logprobs_matching_roundtrip(
                     "fp8_param": fp8_mode == "fp8_param",
                 }
             )
-            if fp8_mode.endswith("_exclude"):
+            mcfg.transformer_config_kwargs = transformer_config_kwargs
+            if fp8_mode.endswith(("_exclude", "_precision_file")):
                 # The same modules stay BF16 on both sides: the first layer, layer 3
                 # (full attention, plus the routed and shared experts on MoE models)
                 # and every GDN out_proj, named in Megatron and in HF terms.
-                mcfg.fp8_exclude_modules = ["decoder.layers.3.*", "*.self_attention.out_proj"]
-                transformer_config_kwargs.update(
-                    {"first_last_layers_bf16": True, "num_layers_at_start_in_bf16": 1, "num_layers_at_end_in_bf16": 0}
+                exclude_modules = ["decoder.layers.3.*", "*.self_attention.out_proj"]
+                if fp8_mode.endswith("_exclude"):
+                    precision = {"fp8_exclude_modules": exclude_modules}
+                else:
+                    recipe_path = tmp_path / "precision.yaml"
+                    recipe_path.write_text(yaml.safe_dump(fp8_exclude_recipe(exclude_modules), sort_keys=False))
+                    precision = {"te_precision_config_file": str(recipe_path)}
+                # Rebuilt so MegatronConfig.__post_init__ folds these fields into
+                # transformer_config_kwargs, as it does for a user's config.
+                mcfg = cfg.trainer.policy.megatron_config = dataclasses.replace(
+                    mcfg, num_layers_at_start_in_bf16=1, **precision
                 )
                 cfg.generator.inference_engine.fp8_weight_sync_exclude_modules = [
                     "*.layers.0.*",
                     "*.layers.3.*",
                     "*.linear_attn.out_proj",
                 ]
-            mcfg.transformer_config_kwargs = transformer_config_kwargs
             if fp8_mode == "fp8_param":
                 mcfg.ddp_config.fp8_param_gather = True
             # vLLM: FP8 rollout fed by the serialized weight sync
