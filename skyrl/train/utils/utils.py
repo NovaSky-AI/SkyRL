@@ -1170,6 +1170,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "SKYRL_DSA_INDEXER_TP_SHARD",
         "SKYRL_DSA_HEAD_FULL",
         "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
+        "SKYRL_DSA_HEAD_FULL_ZIGZAG",
         # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
         "VLLM_ALLREDUCE_USE_FLASHINFER",
         "VLLM_ALLREDUCE_USE_SYMM_MEM",
