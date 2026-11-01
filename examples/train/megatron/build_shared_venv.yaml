@@ -1,0 +1,55 @@
+name: build-skyrl-shared-venv
+entrypoint: |
+  set -e
+  VENV=/mnt/cluster_storage/.skyrl-venv
+  STAMP=$VENV/.built-ok
+  if [ -f "$STAMP" ]; then
+    echo "[setup] venv already built at $VENV — verifying imports"
+    "$VENV/bin/python" -c "import torch, megatron.core, transformer_engine.pytorch, vllm, skyrl_gym, skyrl.train; print('OK')"
+    echo "[setup] no rebuild needed."
+    exit 0
+  fi
+  echo "[setup] building venv at $VENV  ($(date -u))"
+  rm -rf "$VENV"
+  # We need pyproject.toml + skyrl + skyrl-gym sources to run uv sync. The Anyscale
+  # working_dir is uploaded into the runtime_resources dir; copy it to a stable path.
+  WD="$(pwd)"
+  echo "[setup] working_dir = $WD"
+  cd "$WD"
+  uv venv --python 3.12 "$VENV"
+  # --no-editable so the workspace packages (skyrl, skyrl-gym) are installed as
+  # regular packages inside the venv; otherwise their source path lives in this
+  # ephemeral pod and the venv breaks when training runs elsewhere.
+  UV_PROJECT_ENVIRONMENT="$VENV" uv sync --extra megatron --no-editable
+  "$VENV/bin/python" -c "import torch, megatron.core, transformer_engine.pytorch, vllm, skyrl_gym, skyrl.train; print('IMPORTS OK')"
+  touch "$STAMP"
+  echo "[setup] DONE at $(date -u). venv at $VENV"
+image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8
+cloud: rkn-gpu-cloud
+ray_version: "2.51.1"
+working_dir: .
+max_retries: 0
+
+env_vars:
+  UV_CACHE_DIR: "/mnt/cluster_storage/.uv_cache"
+  UV_LINK_MODE: "copy"
+  MAX_JOBS: "8"
+  NINJA_JOBS: "8"
+  CMAKE_BUILD_PARALLEL_LEVEL: "8"
+  CPATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include:/mnt/cluster_storage/nv_pkg/nvidia/cublas/include"
+  C_INCLUDE_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include"
+  CPLUS_INCLUDE_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include"
+  LIBRARY_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/lib:/mnt/cluster_storage/nv_pkg/nvidia/nccl/lib:/mnt/cluster_storage/nv_pkg/nvidia/cublas/lib"
+  LD_LIBRARY_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/lib:/mnt/cluster_storage/nv_pkg/nvidia/nccl/lib"
+  CUDNN_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn"
+  CUDA_HOME: "/usr/local/cuda"
+
+compute_config:
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: default-queue
+  head_node:
+    required_resources:
+      CPU: 8
+      memory: 32Gi

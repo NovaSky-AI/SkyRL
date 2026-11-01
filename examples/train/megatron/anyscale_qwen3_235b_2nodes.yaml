@@ -1,0 +1,135 @@
+name: qwen3-235b-a22b-rl-training
+entrypoint: |
+  set -e
+
+  # === DIAGNOSTICS: persistent log file survives head pod restarts ===
+  DIAG_LOG=/mnt/cluster_storage/head_diag.log
+  RUN_TAG="run-$(date -u +%Y%m%dT%H%M%SZ)-pid$$"
+  echo "===== [$RUN_TAG] HEAD ENTRYPOINT START $(date -u) =====" | tee -a "$DIAG_LOG"
+  uname -a 2>&1 | tee -a "$DIAG_LOG"
+  cat /etc/os-release 2>/dev/null | tee -a "$DIAG_LOG" || true
+  echo "--- env (filtered) ---" | tee -a "$DIAG_LOG"
+  env | grep -E "^(POD|NODE|HOSTNAME|KUEUE|RAY|ANYSCALE|HEAD)" 2>&1 | tee -a "$DIAG_LOG" || true
+  echo "--- container resource limits (cgroup v2) ---" | tee -a "$DIAG_LOG"
+  cat /sys/fs/cgroup/memory.max 2>/dev/null | tee -a "$DIAG_LOG" || echo "(memory.max not readable)" | tee -a "$DIAG_LOG"
+  cat /sys/fs/cgroup/memory.current 2>/dev/null | tee -a "$DIAG_LOG" || true
+  cat /sys/fs/cgroup/cpu.max 2>/dev/null | tee -a "$DIAG_LOG" || true
+  echo "--- previous boot dmesg (oom_killer if present) ---" | tee -a "$DIAG_LOG"
+  dmesg 2>/dev/null | tail -200 | tee -a "$DIAG_LOG" || echo "(dmesg not accessible)" | tee -a "$DIAG_LOG"
+  echo "--- initial free / df ---" | tee -a "$DIAG_LOG"
+  free -h 2>&1 | tee -a "$DIAG_LOG"
+  df -h 2>&1 | tee -a "$DIAG_LOG"
+
+  # Trap signals so we know WHY we're exiting (k8s preemption sends SIGTERM)
+  trap 'rc=$?; echo "[$RUN_TAG] TRAP EXIT code=$rc at $(date -u)" | tee -a "$DIAG_LOG"; free -h 2>&1 | tee -a "$DIAG_LOG"; ps -eo pid,ppid,rss,vsz,pcpu,pmem,etime,comm --sort=-rss 2>&1 | head -20 | tee -a "$DIAG_LOG"; exit $rc' EXIT
+  trap 'echo "[$RUN_TAG] SIGTERM received at $(date -u)" | tee -a "$DIAG_LOG"; free -h 2>&1 | tee -a "$DIAG_LOG"; ps -eo pid,ppid,rss,vsz,pcpu,pmem,etime,comm --sort=-rss 2>&1 | head -20 | tee -a "$DIAG_LOG"' TERM
+  trap 'echo "[$RUN_TAG] SIGINT received at $(date -u)" | tee -a "$DIAG_LOG"' INT
+  trap 'echo "[$RUN_TAG] SIGHUP received at $(date -u)" | tee -a "$DIAG_LOG"' HUP
+
+  # Background monitor: every 30s dump mem/cpu/disk to DIAG_LOG
+  (
+    while true; do
+      ts=$(date -u +%H:%M:%S)
+      mem=$(free -m 2>/dev/null | awk '/^Mem:/{printf "used=%dMi total=%dMi avail=%dMi", $3, $2, $7}')
+      cgmem=$(cat /sys/fs/cgroup/memory.current 2>/dev/null)
+      cgmax=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+      load=$(cat /proc/loadavg 2>/dev/null | awk '{print $1,$2,$3}')
+      diskcs=$(df -h /mnt/cluster_storage 2>/dev/null | tail -1 | awk '{print "cs="$5"("$3"/"$2")"}')
+      diskroot=$(df -h / 2>/dev/null | tail -1 | awk '{print "/="$5"("$3"/"$2")"}')
+      echo "[$RUN_TAG] $ts $mem cg_used=$cgmem cg_max=$cgmax load=$load $diskcs $diskroot" >> "$DIAG_LOG"
+      sleep 30
+    done
+  ) &
+  MONITOR_PID=$!
+  echo "[$RUN_TAG] background monitor pid=$MONITOR_PID" | tee -a "$DIAG_LOG"
+
+  # === ACTUAL JOB ===
+  # Install nvidia headers to shared cluster storage so all worker nodes can find them
+  # via CPATH/LD_LIBRARY_PATH below. Only the head runs this; workers mount the same FS.
+  NV=/mnt/cluster_storage/nv_pkg
+  if [ ! -f "$NV/nvidia/cudnn/include/cudnn.h" ]; then
+    echo "[bootstrap] installing nvidia headers to $NV" | tee -a "$DIAG_LOG"
+    /home/ray/anaconda3/bin/python3 -m pip install -q --target "$NV" \
+      nvidia-cudnn-cu12 nvidia-nccl-cu12 nvidia-cublas-cu12 nvidia-cusparse-cu12 \
+      nvidia-cusolver-cu12 nvidia-curand-cu12 nvidia-cufft-cu12 nvidia-cuda-runtime-cu12 \
+      nvidia-cuda-nvrtc-cu12 nvidia-cuda-cupti-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12 \
+      nvidia-cudnn-frontend
+  fi
+  ls -la "$NV/nvidia/cudnn/include/cudnn.h"
+  bash examples/train/megatron/run_megatron_qwen3_235b_2nodes.sh
+image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8
+cloud: rkn-gpu-cloud
+ray_version: "2.51.1"
+working_dir: .
+max_retries: 0
+
+# Use the shared pre-built venv on NFS for all Ray worker actors.
+py_executable: "/mnt/cluster_storage/.skyrl-venv/bin/python"
+
+# cuDNN/NCCL/cublas paths point to our pre-installed nvidia packages on shared NFS
+# (set up by the head entrypoint preamble). /opt/cudnn doesn't exist in this image.
+env_vars:
+  # Disable Ray's auto "uv run" propagation. Don't set RAY_RUNTIME_ENV_HOOK
+  # to empty here — unset it in the entrypoint shell instead (Ray's load_class
+  # crashes on empty string).
+  RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+  CUDA_HOME: "/usr/local/cuda"
+  CPATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include:/mnt/cluster_storage/nv_pkg/nvidia/cublas/include"
+  C_INCLUDE_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include"
+  CPLUS_INCLUDE_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/include:/mnt/cluster_storage/nv_pkg/nvidia/nccl/include"
+  LIBRARY_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/lib:/mnt/cluster_storage/nv_pkg/nvidia/nccl/lib:/mnt/cluster_storage/nv_pkg/nvidia/cublas/lib"
+  LD_LIBRARY_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn/lib:/mnt/cluster_storage/nv_pkg/nvidia/nccl/lib"
+  CUDNN_PATH: "/mnt/cluster_storage/nv_pkg/nvidia/cudnn"
+  # Workers compile transformer-engine-torch from source on first start; that takes
+  # 5-10 minutes which exceeds Ray's default PG timeout. Give it 30 minutes.
+  SKYRL_RAY_PG_TIMEOUT_IN_S: "1800"
+  # 235B model on TP=16 needs much longer than the default 600s to become healthy.
+  SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S: "3600"
+  # Share uv's build/wheel cache across all nodes and runs via NFS. After TE
+  # builds once globally, every future cluster start pulls the cached wheel
+  # instead of rebuilding (cuts launch time from ~25 min cold to ~5 min warm).
+  UV_CACHE_DIR: "/mnt/cluster_storage/.uv_cache"
+  UV_LINK_MODE: "copy"
+  # ninja parallelism — 4 jobs ≈ 12 GiB peak (fits 32 GiB head; trivial for workers).
+  MAX_JOBS: "4"
+  NINJA_JOBS: "4"
+  CMAKE_BUILD_PARALLEL_LEVEL: "4"
+  # Ray's 60s worker-register timeout otherwise fires repeatedly during the
+  # first-time TE build, producing log noise + spurious worker process spawns.
+  RAY_worker_register_timeout_seconds: "1800"
+  # Critical: RAY_OVERRIDE_JOB_RUNTIME_ENV=1 replaces SkyRL's prepare_runtime_environment
+  # env vars with ours. Re-add all the ones SkyRL would have set (utils.py:615-647)
+  # so vLLM/megatron behave correctly.
+  RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  NVTE_FUSED_ATTN: "0"
+  VLLM_ALLOW_RUNTIME_LORA_UPDATING: "true"
+  VLLM_ALLOW_INSECURE_SERIALIZATION: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"
+  VLLM_USE_V1: "1"
+  VLLM_ENABLE_V1_MULTIPROCESSING: "0"
+  _SKYRL_USE_NEW_INFERENCE: "1"
+  # Cache HF downloads in shared FS so model doesn't redownload on restarts / per-worker.
+  HF_HOME: "/mnt/cluster_storage/hf_cache"
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+  # Allow YAML env_vars to be merged with SkyRL's runtime env instead of conflicting.
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+
+compute_config:
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: default-queue
+  head_node:
+    required_resources:
+      CPU: 8
+      memory: 32Gi
+  worker_nodes:
+    - required_resources:
+        CPU: 184
+        memory: 1920Gi
+        GPU: 8
+      required_labels:
+        ray.io/accelerator-type: H100
+      min_nodes: 2
+      max_nodes: 2
