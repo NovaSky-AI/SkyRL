@@ -63,6 +63,8 @@ class SkyrlWeightSyncClient:
             sends the same dict to every server.
     """
 
+    fail_closed_transfers: bool = False
+
     def __init__(
         self,
         server_urls: Sequence[str],
@@ -103,7 +105,7 @@ class SkyrlWeightSyncClient:
         self._fanout_uniform(self._start_endpoint, None)
 
     def update_weights(self, update_info: Dict[str, Any]) -> None:
-        self._fanout_uniform(UPDATE_WEIGHTS_ENDPOINT, {"update_info": _json_safe(update_info)})
+        self._fanout_uniform(UPDATE_WEIGHTS_ENDPOINT, {"update_info": json_safe(update_info)})
 
     def finish_weight_update(self, weight_version: Optional[str] = None) -> None:
         # Omit the key entirely when unset so the route's default applies.
@@ -189,7 +191,7 @@ class SkyrlWeightSyncClient:
             raise RuntimeError(_error_message(url, endpoint, resp))
 
 
-def _json_safe(update_info: Dict[str, Any]) -> Dict[str, Any]:
+def json_safe(update_info: Dict[str, Any]) -> Dict[str, Any]:
     """Make an update_info dict JSON-serializable for HTTP transport.
 
     ``IPCTrainerWeightTransferEngine`` emits raw CUDA IPC handles -- tuples

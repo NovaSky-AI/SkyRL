@@ -30,9 +30,15 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 )
 
 from skyrl.backends.skyrl_train.weight_sync.control_plane import (
-    SkyrlWeightSyncClient,
     nccl_init_payloads,
     rdt_init_payloads,
+)
+from skyrl.backends.skyrl_train.weight_sync.control_spec import (
+    DirectWeightSyncControlSpec,
+    WeightSyncControlSpec,
+)
+from skyrl.backends.skyrl_train.weight_sync.ipc_lifetime import (
+    FailClosedIPCLifetimeMixin,
 )
 
 if TYPE_CHECKING:
@@ -60,7 +66,7 @@ class SkyrlTrainerCapabilities:
       must not fire a second concurrent reset. Checkpoint-delta sets this.
     * ``skyrl_force_disable_expandable_segments`` -- the engine shares CUDA
       memory over IPC on every run, not only under colocation, so expandable
-      (VMM) segments must be off around the send. Sharded RDT sets this.
+      (VMM) segments must be off around the send. Sharded RDT and the IPC engine set this.
     * ``skyrl_empty_cache_after_send`` -- False when the send buffers are reused
       by the next step, where scrubbing them back to CUDA is pure cost.
     """
@@ -133,9 +139,10 @@ def _build_skyrl_ipc_trainer() -> "tuple[type, type]":
         backend: ClassVar[str] = SKYRL_IPC_TRAINER_BACKEND
 
     class SkyrlIPCTrainerWeightTransferEngine(
-        SkyrlDraftSessionMixin, SkyrlTrainerCapabilities, IPCTrainerWeightTransferEngine
+        FailClosedIPCLifetimeMixin, SkyrlDraftSessionMixin, SkyrlTrainerCapabilities, IPCTrainerWeightTransferEngine
     ):
         init_info_cls = SkyrlIPCTrainerInitInfo
+        skyrl_force_disable_expandable_segments = True
 
     return SkyrlIPCTrainerInitInfo, SkyrlIPCTrainerWeightTransferEngine
 
@@ -165,6 +172,7 @@ def build_trainer_engine(
     server_urls: list,
     data_parallel_size: int,
     base_model_path: Optional[str] = None,
+    control_spec: Optional[WeightSyncControlSpec] = None,
 ) -> Any:
     """Resolve the backend, build this rank's source, rendezvous, and return the engine.
 
@@ -192,6 +200,8 @@ def build_trainer_engine(
         data_parallel_size: DP replicas per deployment.
         base_model_path: policy model path. Required by ``delta``, which
             publishes against that checkpoint.
+        control_spec: Provider-owned serving identities and control-client factory.
+            When unset, the existing direct-vLLM blocking client is unchanged.
     """
     from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
@@ -199,6 +209,8 @@ def build_trainer_engine(
     from skyrl.train.utils.utils import str_to_torch_dtype
 
     backend = get_transfer_strategy(ie_cfg.weight_sync_backend, colocate_all)
+    if control_spec is None:
+        control_spec = DirectWeightSyncControlSpec(tuple(server_urls), data_parallel_size)
     if getattr(ie_cfg, "fp8_weight_sync_mode", None) is not None and backend not in {"nccl", "ipc"}:
         raise ValueError("Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}.")
     dtype = str_to_torch_dtype(ie_cfg.model_dtype)
@@ -220,23 +232,21 @@ def build_trainer_engine(
         data_parallel_size=data_parallel_size,
         base_model_path=base_model_path,
     )
-    client = SkyrlWeightSyncClient(
-        server_urls,
-        data_parallel_size,
-        init_payload_fn=init_payload_fn,
-    )
-    if backend == "sharded_rdt":
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
+    client = control_spec.build_client(init_payload_fn)
+    try:
+        if backend == "sharded_rdt":
+            from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
-        rdt_send.log_source_choice(source)
+            rdt_send.log_source_choice(source)
+        engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
+        engine.skyrl_draft_source = draft_source
+        if backend == "sharded_rdt":
+            from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
 
-    engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
-    engine.skyrl_draft_source = draft_source
-
-    if backend == "sharded_rdt":
-        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
-
-        rdt_send.freeze_trainer_heap()
+            rdt_send.freeze_trainer_heap()
+    except BaseException:
+        client.close()
+        raise
     return engine
 
 
