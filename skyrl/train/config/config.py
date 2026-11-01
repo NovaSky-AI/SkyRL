@@ -654,7 +654,9 @@ class MegatronConfig(BaseConfig):
     num_layers_at_start_in_bf16: int = 0
     """Number of leading transformer layers trained in BF16 instead of FP8. Layer numbers are global, so this
     works under pipeline parallelism. If this conflicts with a custom ``te_precision_config_file`` which indicates
-    a layer to be FP8, this config wins and the layer is kept in BF16."""
+    a layer to be FP8, this config wins and the layer is kept in BF16, unless that file's config for the layer sets
+    ``override_nonquantized_autocast: true`` (Megatron defaults it to false), in which case the file wins and the
+    layer runs in FP8."""
     num_layers_at_end_in_bf16: int = 0
     """Number of trailing transformer layers trained in BF16 instead of FP8; see
     ``num_layers_at_start_in_bf16``."""
