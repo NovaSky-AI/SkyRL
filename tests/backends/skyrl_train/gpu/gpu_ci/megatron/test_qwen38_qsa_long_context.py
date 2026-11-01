@@ -17,6 +17,7 @@ import os
 
 import pytest
 import ray
+import torch
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
@@ -80,6 +81,8 @@ def _long_context_input(model_name, tokenizer):
         pytest.param(2, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_tp2_ep4_qsa8k"),
         # Context parallelism (split-K cuDNN QSA: Blackwell only), for the long-context prompt sizes.
         pytest.param(1, 8, 8, 1e-1, id="qwen3.8-flash-next-4layer_cp8_ep8"),
+        # The CP=1 reference on the same 8 GPUs (prompts that fit one GPU, e.g. 32K).
+        pytest.param(1, 1, 8, 1e-1, id="qwen3.8-flash-next-4layer_cp1_ep8"),
     ],
 )
 async def test_qwen38_qsa_long_context_logprobs(tp, cp, num_gpus, threshold, monkeypatch):
@@ -159,6 +162,12 @@ async def test_qwen38_qsa_long_context_logprobs(tp, cp, num_gpus, threshold, mon
             logprobs_megatron = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
 
             mask = response_mask.bool()
+            if os.environ.get("SKYRL_QWEN38_QSA_DUMP"):
+                # For comparing Megatron configurations (e.g. CP8 vs CP1) on the same greedy rollouts.
+                torch.save(
+                    {"vllm": logprobs_t, "megatron": logprobs_megatron, "mask": response_mask},
+                    os.environ["SKYRL_QWEN38_QSA_DUMP"],
+                )
             diff = (logprobs_t[mask] - logprobs_megatron[mask]).abs()
             print(
                 f"QSA sparse (~{PROMPT_TOKENS} prompt tokens): vLLM vs Megatron logprob diff mean "
