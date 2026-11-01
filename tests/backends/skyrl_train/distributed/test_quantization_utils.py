@@ -285,7 +285,7 @@ def test_validate_fp8_exclude_modules_matched_accepts_patterns_that_match(monkey
 def test_validate_fp8_exclude_modules_matched_refuses_patterns_that_match_no_fp8_layer(monkeypatch, pattern):
     """A misspelled pattern and one that names only a container module both leave every layer in FP8."""
     monkeypatch.setattr(torch.distributed, "all_reduce", lambda counts: None)
-    expected = f"{[pattern]} match none of the layers Megatron can run in FP8 (e.g. 'decoder.layers.0.self_attention.linear_qkv')"
+    expected = f"fp8_exclude_modules patterns {[pattern]} match none of the layers Megatron can run in FP8."
     with pytest.raises(ValueError, match=re.escape(expected)):
         validate_fp8_exclude_modules_matched(_ddp_wrapped_model(), ["*.self_attention.*", pattern])
 

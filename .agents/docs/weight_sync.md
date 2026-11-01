@@ -129,8 +129,7 @@ layout remains identical to the tensors sent on the wire.
 
 The inference launch path supplies vLLM's FP8 dummy-load configuration, including the
 model-specific base exclude list. That quantization config is built entirely by SkyRL; a
-user-supplied `engine_init_kwargs.hf_overrides.quantization_config` is replaced with a
-warning.
+user-supplied `engine_init_kwargs.hf_overrides.quantization_config` raises an error.
 
 `generator.inference_engine.fp8_weight_sync_exclude_modules` (HF module-name globs) keeps
 more modules in the model dtype. `resolve_user_provided_exclude_list` expands it against

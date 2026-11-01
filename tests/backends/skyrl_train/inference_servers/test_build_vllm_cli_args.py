@@ -1,6 +1,5 @@
 """Tests for build_vllm_cli_args on GPU-less hosts."""
 
-import logging
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -73,26 +72,16 @@ def test_serialized_fp8_weight_sync_rejects_non_mapping_overrides():
 
 
 @pytest.mark.parametrize("user_quantization_config", [{"weight_block_size": [64, 128]}, {"store_dtype": "mxfp4"}, []])
-def test_serialized_fp8_replaces_a_user_quantization_config(user_quantization_config, monkeypatch, caplog):
+def test_serialized_fp8_rejects_a_user_quantization_config(user_quantization_config):
     """FP8 weight sync owns the engine's quantization config: it must describe exactly what the trainer sends."""
-    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
-
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
     engine_kwargs = {"hf_overrides": {"quantization_config": user_quantization_config}}
 
-    with caplog.at_level(logging.WARNING, logger=inference_utils.__name__):
+    with pytest.raises(ValueError, match="hf_overrides.quantization_config cannot be set"):
         _apply_serialized_fp8_weight_sync_defaults(
             cfg.generator.inference_engine, engine_kwargs, model_path="qwen35-test"
         )
-
-    assert engine_kwargs["hf_overrides"]["quantization_config"] == {
-        "quant_method": "fp8",
-        "activation_scheme": "dynamic",
-        "weight_block_size": [128, 128],
-    }
-    assert "Ignoring engine_init_kwargs.hf_overrides.quantization_config" in caplog.text
 
 
 def test_serialized_fp8_requires_model_path():

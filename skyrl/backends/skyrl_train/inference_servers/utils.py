@@ -90,7 +90,7 @@ def _apply_serialized_fp8_weight_sync_defaults(
 
     Wire-format-agnostic apart from ``wire_to_engine_quantization`` and the
     injected quantization config, both of which key off the concrete wire.
-    User-supplied ``quantization_config`` via HF overrides is ignored.
+    A user-supplied ``quantization_config`` in HF overrides is rejected.
     """
 
     mode = ie_cfg.fp8_weight_sync_mode
@@ -109,10 +109,10 @@ def _apply_serialized_fp8_weight_sync_defaults(
         raise ValueError("engine_init_kwargs.hf_overrides must be a dict when FP8 weight sync is enabled")
 
     if hf_overrides.get("quantization_config") is not None:
-        logger.warning(
-            "Ignoring engine_init_kwargs.hf_overrides.quantization_config: FP8 weight sync builds the "
-            "vLLM quantization config itself. Configure it with fp8_weight_sync_mode and "
-            "fp8_weight_sync_exclude_modules instead."
+        raise ValueError(
+            "engine_init_kwargs.hf_overrides.quantization_config cannot be set when FP8 weight sync is "
+            "enabled: SkyRL builds the vLLM quantization config itself. Configure it with "
+            "fp8_weight_sync_mode and fp8_weight_sync_exclude_modules instead."
         )
 
     exclude_list = _serialized_fp8_engine_exclude_list(model_path, mode, ie_cfg.fp8_weight_sync_exclude_modules)

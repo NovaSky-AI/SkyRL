@@ -1380,7 +1380,7 @@ class InferenceEngineConfig(BaseConfig):
     ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
     this needs (``quantization``, ``load_format="dummy"``, and the matching
     ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
-    automatically, replacing any user-supplied ``quantization_config``; the first weight sync
+    automatically, and a user-supplied ``quantization_config`` is rejected; the first weight sync
     supplies real weights before any generation.
 
     Which modules are FP8 is the model spec's policy, minus ``fp8_weight_sync_exclude_modules``.
