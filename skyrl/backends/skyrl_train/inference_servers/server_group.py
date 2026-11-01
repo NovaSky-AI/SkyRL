@@ -97,6 +97,8 @@ class ServerGroup:
         self._nixl_side_channel_base = nixl_side_channel_base
         self._mooncake_bootstrap_base_port = mooncake_bootstrap_base_port
         self._pool: Optional[ServerActorPool] = None
+        # Constructor-time server infos captured by start(blocking=False).
+        self._nowait_infos: Optional[List[ServerInfo]] = None
         self._internal_pg: Optional[PlacementGroup] = None
         self._server_actor_kwargs = server_actor_kwargs
         self._use_expandable_segments = use_expandable_segments
@@ -241,6 +243,14 @@ class ServerGroup:
                 logger.info(f"Server {i}: {info.url}")
             return server_infos
 
+        # Resolve the constructor-time infos *before* submitting ``start``. The engine
+        # build runs synchronously inside the async ``start`` and holds the actor's event
+        # loop until the engine is healthy, so an info RPC that is merely *submitted*
+        # first is not guaranteed to run first: when it lands behind ``start`` it waits
+        # for the whole engine startup and the caller's overlap silently degrades to the
+        # sequential order (observed on 8xH100: 171s instead of 29s). This blocks only on
+        # actor construction, which the caller pays for either way.
+        self._nowait_infos = ray.get([actor.get_server_info.remote() for actor in actors])
         return self._pool.start(blocking=False)
 
     @property
@@ -249,6 +259,17 @@ class ServerGroup:
         if self._pool is None:
             return []
         return self._pool.server_infos
+
+    def get_server_infos_nowait(self) -> List[ServerInfo]:
+        """Server infos without waiting for the servers to become healthy.
+
+        IP, port and bootstrap ports are fixed in the actor constructor and
+        collected by ``start(blocking=False)`` before the engines launch.
+        Falls back to the resolved infos after a blocking start.
+        """
+        if self._nowait_infos is not None:
+            return self._nowait_infos
+        return self.server_infos
 
     def get_pool(self) -> Optional[ServerActorPool]:
         """Get the underlying actor pool."""
