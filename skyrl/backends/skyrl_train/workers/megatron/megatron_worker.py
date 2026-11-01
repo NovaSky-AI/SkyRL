@@ -54,6 +54,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     fp8_exclude_recipe,
     is_fp8_enabled,
+    reject_stage_local_layer_patterns,
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
     validate_fp8_exclude_modules_matched,
@@ -411,6 +412,10 @@ class MegatronWorker:
         # from user-provided exclude list.
         if megatron_config.te_precision_config_file:
             provider.quant_recipe = RecipeConfig.from_yaml_file(megatron_config.te_precision_config_file)
+            if megatron_config.pipeline_model_parallel_size > 1:
+                reject_stage_local_layer_patterns(
+                    [m.pattern for m in provider.quant_recipe.matchers], "te_precision_config_file"
+                )
         elif megatron_config.fp8_exclude_modules:
             provider.quant_recipe = RecipeConfig.from_config_dict(
                 fp8_exclude_recipe(list(megatron_config.fp8_exclude_modules))

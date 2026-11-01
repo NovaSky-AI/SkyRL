@@ -9,6 +9,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     fp8_exclude_recipe,
     is_fp8_enabled,
     is_mxfp8_recipe,
+    reject_stage_local_layer_patterns,
     resolve_auto_fp8_recipe,
     resolve_auto_wire_format,
     resolve_text_config,
@@ -251,6 +252,26 @@ def test_fp8_exclude_recipe_matches_megatron_module_paths():
     assert config_key("decoder.layers.0.self_attention.in_proj") == "bf16"
     assert config_key("decoder.layers.10.self_attention.linear_qkv") is None
     assert config_key("decoder.layers.3.mlp.experts.linear_fc1") is None
+
+
+def test_reject_stage_local_layer_patterns_checks_precision_file_matchers(tmp_path):
+    quant_config = pytest.importorskip("megatron.core.quantization.quant_config")
+    recipe_file = tmp_path / "recipe.yaml"
+    recipe_file.write_text(
+        "configs:\n"
+        "  bf16: {transformer_engine_config_type: TEQuantizationParams, training_recipe: {}}\n"
+        "matchers:\n"
+        "  shared: {config: bf16, type: glob, pattern: '*.shared_experts.*', enabled: true}\n"
+        "  mtp: {config: bf16, type: glob, pattern: 'mtp.layers.0.*', enabled: true}\n"
+        "  first: {config: bf16, type: glob, pattern: 'decoder.layers.0.*', enabled: true}\n"
+    )
+    patterns = [m.pattern for m in quant_config.RecipeConfig.from_yaml_file(str(recipe_file)).matchers]
+
+    # MTP layers all sit on one stage, so only the decoder layer index is rejected.
+    expected = "te_precision_config_file patterns ['decoder.layers.0.*'] select layers by index"
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        reject_stage_local_layer_patterns(patterns, "te_precision_config_file")
+    reject_stage_local_layer_patterns(patterns[:2], "te_precision_config_file")
 
 
 class _TELayer(torch.nn.Module):

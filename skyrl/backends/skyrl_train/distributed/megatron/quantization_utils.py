@@ -1,6 +1,7 @@
 """Recipe/architecture helpers shared by FP8 packing, weight sync, and workers."""
 
 import fnmatch
+import re
 from typing import Any, MutableMapping, Optional, Sequence
 
 from loguru import logger
@@ -26,6 +27,23 @@ def fp8_exclude_recipe(exclude_modules: Sequence[str]) -> dict:
             for idx, pattern in enumerate(exclude_modules)
         },
     }
+
+
+def reject_stage_local_layer_patterns(patterns: Sequence[str], source: str) -> None:
+    """Raise if a module-path glob selects layers by index; This is used to ensure that the user does
+    not try to select specific layers when PP > 1, since each pipeline stage numbers its decoder layers
+    from 0, so ``decoder.layers.0.*`` would match the first layer of every stage.
+
+    This does not include MTP layers since they all sit on one stage in their own ``mtp.layers`` list, so
+    ``mtp.layers.N`` names the same layer under any pipeline split and is allowed.
+    """
+    layer_indexed = [p for p in patterns if re.search(r"layers\.[0-9\[?]", p) and not p.startswith("mtp.")]
+    if layer_indexed:
+        raise ValueError(
+            f"{source} patterns {layer_indexed} select layers by index, but Megatron numbers "
+            "layers within each pipeline stage when pipeline_model_parallel_size > 1. Use "
+            "num_layers_at_start_in_bf16 / num_layers_at_end_in_bf16 for layer ranges."
+        )
 
 
 def validate_fp8_exclude_modules_matched(model_chunks: Sequence[Any], exclude_modules: Sequence[str]) -> None:

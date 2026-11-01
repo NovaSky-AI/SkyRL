@@ -440,6 +440,7 @@ def test_megatron_rejects_layer_indexed_fp8_exclusions_under_pipeline_parallelis
     with pytest.raises(ValueError, match="within each pipeline stage"):
         MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=[pattern])
     MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=["*.shared_experts.*"])
+    MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=["mtp.layers.0.*"])
     MegatronConfig(fp8="e4m3", fp8_exclude_modules=[pattern])
 
 

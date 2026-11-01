@@ -9,7 +9,6 @@ import copy
 import dataclasses
 import json
 import os
-import re
 import typing
 from abc import ABC
 from dataclasses import asdict, dataclass, field
@@ -645,8 +644,8 @@ class MegatronConfig(BaseConfig):
     Examples: ``["*.shared_experts.*"]``, ``["*.self_attention.*"]``. A pattern that matches none of
     the layers Megatron can run in FP8 raises when the model is built. Megatron
     numbers ``layers.N`` within each pipeline stage, so layer-indexed patterns are rejected when
-    ``pipeline_model_parallel_size > 1``; use ``num_layers_at_start_in_bf16`` /
-    ``num_layers_at_end_in_bf16`` for layer ranges.
+    ``pipeline_model_parallel_size > 1`` (except ``mtp.layers.N``, whose numbering does not depend on
+    the pipeline split); use ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` for layer ranges.
 
     Built into Megatron's per-module ``quant_recipe``. These are training-side names only; the
     rollout's FP8 modules are set separately by ``generator.inference_engine.fp8_weight_sync_exclude_modules``.
@@ -667,6 +666,7 @@ class MegatronConfig(BaseConfig):
     The file holds named ``configs`` (TE quantization recipes, e.g. BF16, ``blockwise``, ``mxfp8``)
     and ordered glob ``matchers`` over Megatron module paths; the first matching matcher picks a
     module's config, and unmatched modules use the global ``fp8`` / ``fp8_recipe``.
+    Layer-indexed patterns are rejected under pipeline parallelism, as for ``fp8_exclude_modules``.
     Mutually exclusive with ``fp8_exclude_modules``."""
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
@@ -751,6 +751,7 @@ class MegatronConfig(BaseConfig):
 
         from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
             is_fp8_enabled,
+            reject_stage_local_layer_patterns,
         )
 
         # Backfill defaults for any keys the user didn't override so an override dict
@@ -785,13 +786,7 @@ class MegatronConfig(BaseConfig):
                 "Please only use one of the two."
             )
         if self.pipeline_model_parallel_size > 1:
-            layer_indexed = [p for p in self.fp8_exclude_modules or [] if re.search(r"layers\.[0-9\[?]", p)]
-            if layer_indexed:
-                raise ValueError(
-                    f"fp8_exclude_modules {layer_indexed} select layers by index, but Megatron numbers "
-                    "layers within each pipeline stage when pipeline_model_parallel_size > 1. Use "
-                    "num_layers_at_start_in_bf16 / num_layers_at_end_in_bf16 for layer ranges."
-                )
+            reject_stage_local_layer_patterns(self.fp8_exclude_modules or [], "fp8_exclude_modules")
         for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
             self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
         if self.optimizer_config_kwargs is None:
