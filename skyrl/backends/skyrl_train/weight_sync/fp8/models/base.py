@@ -187,7 +187,7 @@ def resolve_user_provided_exclude_list(
                 f"routed-expert tensors in {experts!r}, but not {kept[0]!r}. vLLM runs all of a layer's "
                 f"routed experts at one precision: exclude all of them (e.g. '{experts}.*') or none."
             )
-    return tuple(excluded)
+    return tuple(sorted(excluded))  # sorted just for cleaner observality across processes
 
 
 def engine_exclude_list(
