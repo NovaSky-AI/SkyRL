@@ -612,6 +612,14 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             f"parallel is not supported for megatron"
         )
 
+    if cfg.megatron_config.optimizer_offload_to_disk.dir is not None:
+        from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
+
+        if cfg.strategy != "megatron":
+            raise ValueError("optimizer_offload_to_disk requires strategy='megatron'.")
+        if is_cloud_path(cfg.ckpt_path):
+            raise ValueError("optimizer_offload_to_disk requires a local ckpt_path.")
+
     # ---- sequence packing checks ----
     if cfg.use_sequence_packing:
         if cfg.strategy != "megatron":

@@ -118,6 +118,17 @@ class TrainingCallback:
         """Fires before metrics are committed to the tracker. Mutate ``callback_input.logs`` to add fields."""
 
 
+class ReleaseOptimizerStateFilesCallback(TrainingCallback):
+    """Deletes the policy's optimizer state files (Megatron ``optimizer_offload_to_disk``) when training ends.
+
+    The trainers register it themselves when ``trainer.policy.megatron_config.optimizer_offload_to_disk.dir`` is
+    set, after the callbacks passed to the constructor, so their ``on_train_end`` still sees a usable optimizer.
+    """
+
+    def on_train_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        trainer.dispatch.release_optimizer_state_files("policy")
+
+
 class CallbackHandler(TrainingCallback):
     """Fan-out dispatcher. Itself a ``TrainingCallback`` (composite pattern).
 

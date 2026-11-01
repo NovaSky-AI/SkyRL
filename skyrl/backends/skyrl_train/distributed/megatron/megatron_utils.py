@@ -627,6 +627,10 @@ def load_megatron_copy_params(optimizers):
 
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
+    from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+        OffloadedDistributedOptimizer,
+    )
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -636,6 +640,9 @@ def offload_megatron_optimizer(optimizers):
         if _opt.optimizer is None:
             # Stub sub-optimizer with no params on this rank, e.g. the dense group when
             # LoRA only targets expert linears.
+            continue
+        if isinstance(_opt, OffloadedDistributedOptimizer):
+            # Its main params and moments are on disk between steps.
             continue
         offload_megatron_copy_params(_opt)
         opt_state_dict_values = _opt.optimizer.state.values()
@@ -648,13 +655,17 @@ def offload_megatron_optimizer(optimizers):
 
 @torch.no_grad()
 def load_megatron_optimizer(optimizers):
+    from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+        OffloadedDistributedOptimizer,
+    )
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
         return [opt]
 
     for _opt in _iter_opts(optimizers):
-        if _opt.optimizer is None:
+        if _opt.optimizer is None or isinstance(_opt, OffloadedDistributedOptimizer):
             continue
         load_megatron_copy_params(_opt)
         # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu

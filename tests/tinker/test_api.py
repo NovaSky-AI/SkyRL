@@ -3,10 +3,8 @@
 import asyncio
 import dataclasses
 import os
-import subprocess
 import tempfile
 import urllib.request
-from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import pytest
@@ -16,7 +14,7 @@ from transformers import AutoTokenizer
 
 from skyrl.tinker.api import _build_uv_run_cmd_engine
 from skyrl.tinker.config import EngineConfig
-from tests.tinker.conftest import api_server_is_up, wait_for_condition
+from tests.tinker.conftest import start_api_server, wait_for_condition
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
@@ -48,66 +46,6 @@ def create_service_and_training_client(base_url: str, skip_verify: bool = False)
     return service_client, training_client
 
 
-@contextmanager
-def start_api_server(
-    overrides: dict[str, str] | None = None,
-    extras: tuple[str, ...] = ("tinker",),
-    db_path: str | None = None,
-    wait_for_up: bool = False,
-    teardown_timeout: float = 5.0,
-):
-    """Start the FastAPI server with optional config overrides. Prints log on failure.
-
-    Pass ``db_path`` to keep the SQLite file alive past the context (e.g. for tests
-    that inspect persisted state after server shutdown).
-    """
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        log_path = os.path.join(tmp_dir, "server.log")
-        resolved_db_path = db_path if db_path is not None else os.path.join(tmp_dir, "server.db")
-
-        with open(log_path, "w") as log_file:
-            defaults = {
-                "host": "0.0.0.0",
-                "port": str(TEST_SERVER_PORT),
-                "base-model": BASE_MODEL,
-                # Pinned rather than inherited from EngineConfig's default: these
-                # run on a CPU runner, and jax is the only backend that works
-                # without a GPU. `_build_uv_run_cmd_engine` turns this into
-                # `--extra <backend>` for the engine child process.
-                "backend": "jax",
-                "backend-config": '{"max_lora_adapters": 4}',
-                "database-url": f"sqlite:///{resolved_db_path}",
-            }
-            if overrides:
-                defaults.update(overrides)
-            cmd = ["uv", "run"]
-            for extra in extras:
-                cmd.extend(["--extra", extra])
-            cmd.extend(["-m", "skyrl.tinker.api"])
-            for key, value in defaults.items():
-                cmd.extend([f"--{key}", value])
-            process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
-            print(f"Starting API server: {' '.join(cmd)}")
-            try:
-                if wait_for_up:
-                    port = int(defaults["port"])
-                    if not wait_for_condition(lambda: api_server_is_up(port), timeout_sec=180, poll_interval_sec=2):
-                        with open(log_path) as f:
-                            print(f"=== Server failed to start ===\n{f.read()}")
-                        pytest.fail("Tinker API server did not come up in time")
-                yield process, log_path
-            except Exception:
-                with open(log_path) as f:
-                    print(f"=== Test failed. Server log ({log_path}) ===\n{f.read()}")
-                raise
-            finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=teardown_timeout)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-
-
 @pytest.fixture(scope="function")
 def api_server():
     """Start a fresh FastAPI server for each test.
@@ -122,7 +60,7 @@ def api_server():
     the longer teardown timeout lets the lifespan shutdown reap the engine
     subprocess so it isn't orphaned across restarts.
     """
-    with start_api_server(wait_for_up=True, teardown_timeout=20.0) as server:
+    with start_api_server(port=TEST_SERVER_PORT, wait_for_up=True, teardown_timeout=20.0) as server:
         yield server
 
 
@@ -292,6 +230,7 @@ def test_delete_checkpoint(tmp_path):
     """
     checkpoints_base = tmp_path / "checkpoints"
     with start_api_server(
+        port=TEST_SERVER_PORT,
         overrides={"checkpoints-base": str(checkpoints_base)},
         wait_for_up=True,
         teardown_timeout=20.0,
@@ -556,8 +495,8 @@ def test_sample_num_samples_diversity(service_client):
 def api_server_fast_cleanup():
     """Start the FastAPI server with fast cleanup settings for testing."""
     with start_api_server(
+        port=TEST_SERVER_PORT_FAST_CLEANUP,
         overrides={
-            "port": str(TEST_SERVER_PORT_FAST_CLEANUP),
             "session-cleanup-interval-sec": str(FAST_CLEANUP_INTERVAL_SEC),
             "session-timeout-sec": str(FAST_CLEANUP_TIMEOUT_SEC),
         },

@@ -20,6 +20,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 import torch
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
@@ -544,3 +545,33 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
     for name, snap in recorder.events:
         assert snap["total_steps"] == 2, f"{name}: total_steps={snap['total_steps']}"
         assert snap["steps_per_epoch"] == 2, f"{name}: steps_per_epoch={snap['steps_per_epoch']}"
+
+
+@pytest.mark.parametrize("offload_dir", [None, "/fake/optimizer-offload"])
+def test_optimizer_offload_to_disk_registers_release_callback(offload_dir):
+    """With ``optimizer_offload_to_disk.dir`` set, ``on_train_end`` deletes the policy's optimizer state files,
+    after the user's callbacks; without it, nothing is released."""
+    cfg = _build_test_cfg()
+    cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = offload_dir
+
+    calls = []
+
+    class UserOnTrainEnd(TrainingCallback):
+        def on_train_end(self, trainer, callback_input, control):
+            calls.append("user")
+
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=MagicMock(),
+        tokenizer=MagicMock(),
+        train_dataset=DummyDataset(size=4),
+        inference_engine_client=None,
+        generator=MagicMock(),
+        callbacks=[UserOnTrainEnd()],
+    )
+    trainer.dispatch = MagicMock()
+    trainer.dispatch.release_optimizer_state_files.side_effect = lambda model: calls.append(("release", model))
+
+    trainer._fire("on_train_end")
+
+    assert calls == (["user"] if offload_dir is None else ["user", ("release", "policy")])

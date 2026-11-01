@@ -31,6 +31,10 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils.lora_targets import (
+    resolve_critic_lora_target_modules,
+    resolve_lora_target_modules,
+)
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberWeight
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
@@ -137,6 +141,8 @@ class HFModelWrapper(nn.Module):
         lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
+        train_attn=True,
+        train_mlp=True,
         device_map=None,
         temperature=1.0,
         use_liger_kernel=False,
@@ -254,11 +260,12 @@ class HFModelWrapper(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
+                resolved_target_modules = resolve_lora_target_modules(self.model, target_modules, train_attn, train_mlp)
                 lora_config = LoraConfig(
                     task_type=TaskType.CAUSAL_LM,
                     r=lora_rank,
                     lora_alpha=lora_alpha,
-                    target_modules=target_modules,
+                    target_modules=resolved_target_modules,
                     exclude_modules=exclude_modules,
                     lora_dropout=lora_dropout,
                     bias="none",
@@ -635,6 +642,8 @@ def get_llm_for_sequence_regression(
     target_modules=None,
     exclude_modules=None,
     lora_dropout=0,
+    train_attn: bool = True,
+    train_mlp: bool = True,
     use_flash_attention_2=False,
     init_value_head: bool = False,
     value_head_prefix="value_head",
@@ -702,10 +711,11 @@ def get_llm_for_sequence_regression(
     # LoRA
     if lora_rank > 0:
         model.enable_input_require_grads()
+        targets = resolve_critic_lora_target_modules(model, target_modules, train_attn, train_mlp, value_head_prefix)
         lora_config = LoraConfig(
             r=lora_rank,
             lora_alpha=lora_alpha,
-            target_modules=target_modules,
+            target_modules=targets,
             exclude_modules=exclude_modules,
             lora_dropout=lora_dropout,
             bias="none",

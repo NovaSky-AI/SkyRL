@@ -33,6 +33,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
 | `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py` | `patch_checkpoint_without_output_frozen_inputs.py`; the unpatched case doubles as the landed check |
+| `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
+| `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -202,6 +204,55 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
   - Delete `glm5_next/`.
 - **Verify:** the full [Verification](#verification) set.
 
+## Qwen3.8-Flash-Next (`qwen4_exp`)
+
+### Upstream trials: NVIDIA/Megatron-LM#7393, NVIDIA-NeMo/Megatron-Bridge#6123, NVIDIA/Megatron-LM#7553, NVIDIA-NeMo/Megatron-Bridge#6354
+
+These are independent attempts at `qwen4_exp`, not one stack: they use different model classes,
+config fields and PLE designs, and only Megatron-Bridge#6123 builds on another of them
+(Megatron-LM#7393). `qwen4_exp/` here is SkyRL's own implementation. Whichever trial lands first,
+switch to it and delete `qwen4_exp/` as a whole; don't port pieces between implementations.
+
+| Trial | What has to land | Shape (as of 2026-10) |
+|---|---|---|
+| Megatron-LM#7393 + Megatron-Bridge#6123 | both | `GPTModel`; TP + SP; PLE table vocab-parallel on GPU over TP |
+| Megatron-Bridge#6354 | Bridge alone (it carries its own modules) | `HybridModel`; built through Builder + Config only (no provider); TP + SP, PP=CP=1; rejects activation recompute |
+| Megatron-LM#7553 | core, plus a Bridge bridge on top | `HybridModel`; PP/VPP, CP, MTP, Triton QSA kernel, PLE table row-sharded over EP. Core alone does not retire `qwen4_exp/` |
+
+- **Carried as:** `qwen4_exp/`: `modules.py` (gated low-rank hyper-connection, final mixer, PLE
+  n-gram embedding, sigmoid-gated GDN, the frozen QSA indexer and its sparse attention:
+  cuDNN frontend's QSA kernels on Blackwell, else FlexAttention on CUDA, else chunked SDPA),
+  `layer_specs.py`,
+  `provider.py`, and `bridge.py` (`Qwen4ExpBridge`, registered for
+  `Qwen4ExpForConditionalGeneration` on import).
+- **Landed?** The pinned Megatron-Bridge registers its own bridge for
+  `Qwen4ExpForConditionalGeneration` / `model_type="qwen4_exp"` (under
+  `megatron/bridge/models/qwen*`), from any of the trials above. megatron-core modules alone
+  (Megatron-LM#7393 or #7553) are not enough.
+- **Before switching**, check that the landed version runs the `examples/train/qwen3_8_flash_next/`
+  recipes. Close a gap with a small patch on top of upstream or a recipe change, not by keeping
+  `qwen4_exp/`:
+  - Construction: SkyRL builds models through `bridge.to_megatron_provider()`. A Builder +
+    Config-only bridge (Megatron-Bridge#6354) needs a builder path in `megatron_worker.py`.
+  - Activation recompute: the DAPO full-FT recipe uses `recompute_granularity=full`.
+  - PLE placement next to colocated vLLM at the recipes' TP (here: frozen, in pinned host memory,
+    row-sharded over the EP group, loaded outside the bridge, never exported).
+  - Packed (THD) sequences with the PLE n-gram context reset at every sequence boundary.
+  - LoRA target module names and the vLLM adapter mapping.
+  - Router replay (R3) through its MoE layer, including `chunked_mlp` if its layer bypasses
+    `TransformerLayer._forward_mlp` as the mHC layers here do.
+  - QSA top-k block selection past `indexer_budget + compress_ratio - 1` tokens (ties, dtype of
+    the indexer scores), and the unexported MTP head.
+- **Remove:**
+  - `workers/megatron/model_bridges.py`: drop the `qwen4_exp` import.
+  - `workers/megatron/megatron_worker.py`: re-check the `qwen4_exp` `language_model_only` guard
+    against what upstream builds.
+  - Delete `qwen4_exp/` and `tests/.../patches/megatron/qwen4_exp/`.
+- **Verify:** the `qwen3.8-flash-next-4layer_*` rows of
+  `gpu_ci/megatron/test_megatron_{,lora_}models.py`, `gpu_ci/megatron/test_qwen38_qsa_long_context.py`
+  (~8K tokens, sparse regime) and the `megatron_qwen3_8_flash_next_lora` row of
+  `gpu_ci/test_trainer_full_checkpointing.py`; then a few steps of the DAPO recipe.
+
 ## Standalone patches
 
 ### `patch_dsa_index_share.py` (+ `dsa_index_share_recompute.patch`): NVIDIA/Megatron-LM#6793
@@ -313,6 +364,22 @@ Qwen3-VL ViT attention-backend propagation.
 Skips megatron-core's MLA THD value pad on Blackwell. **Nothing calls it:** the call was removed
 from `megatron_worker.py` together with `disable_fa4_if_requested()`. Don't delete it silently: decide whether Blackwell MLA + CP training
 still needs it. If yes, re-wire the call. If no, delete the module and this entry.
+
+### `optimizer_offload_to_disk.py`: generated `_build_model_and_main_param_groups`, SkyRL-only
+
+Not a module in this directory: `skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py`
+generates `OffloadedDistributedOptimizer._build_model_and_main_param_groups` from the installed megatron-core source,
+replacing the line `shard_main_param = shard_model_param.clone().float()` so the per-param fp32 main shards are
+created with empty storage. Only the subclass gets the generated method; `DistributedOptimizer` is unchanged. It
+raises if the line does not appear exactly once.
+- **Landed?** Obsolete once `OptimizerConfig` has a field to defer main-param allocation (e.g.
+  `defer_main_param_initialization`).
+- **Remove:** `_deferred_build_model_and_main_param_groups` and its installation in
+  `build_optimizer_offloaded_to_disk`, `test_deferred_build_method_is_generated_from_installed_megatron` in
+  `tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py`, and the sentence on the generated
+  method in `.agents/docs/backends/megatron.md`; set the config field instead.
+- **Verify:** `tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py` and
+  `tests/backends/skyrl_train/gpu/gpu_ci/test_optimizer_offload_to_disk.py` (2 GPUs).
 
 ## Verification
 

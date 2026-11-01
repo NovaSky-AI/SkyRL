@@ -43,6 +43,9 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
+    # GitHub-hosted runners cap a job at 6h; the Anyscale run timeout below (21000s)
+    # leaves ~10 min of that for checkout, setup and submission.
+    timeout-minutes: 360
     defaults:
       run:
         shell: bash
@@ -90,7 +93,7 @@ jobs:
           envsubst < ci/anyscale_gpu_ci_skyrl_megatron.yaml > ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           JOB_NAME="skyrl-gpu-ci-megatron-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
-          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml "$JOB_NAME" 20400
+          bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml "$JOB_NAME" 21000
           rm -f ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
       # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
