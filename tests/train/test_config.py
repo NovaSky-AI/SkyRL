@@ -427,7 +427,9 @@ def test_megatron_rejects_two_per_module_precision_sources():
     from skyrl.train.config.config import MegatronConfig
 
     with pytest.raises(ValueError, match="only use one"):
-        MegatronConfig(fp8_exclude_modules=["*.shared_experts.*"], te_precision_config_file="/tmp/recipe.yaml")
+        MegatronConfig(
+            fp8="e4m3", fp8_exclude_modules=["*.shared_experts.*"], te_precision_config_file="/tmp/recipe.yaml"
+        )
 
 
 @pytest.mark.parametrize("pattern", ["decoder.layers.0.*", "*.layers.[0-3].*"])
@@ -435,9 +437,26 @@ def test_megatron_rejects_layer_indexed_fp8_exclusions_under_pipeline_parallelis
     from skyrl.train.config.config import MegatronConfig
 
     with pytest.raises(ValueError, match="within each pipeline stage"):
-        MegatronConfig(pipeline_model_parallel_size=2, fp8_exclude_modules=[pattern])
-    MegatronConfig(pipeline_model_parallel_size=2, fp8_exclude_modules=["*.shared_experts.*"])
-    MegatronConfig(fp8_exclude_modules=[pattern])
+        MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=[pattern])
+    MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=["*.shared_experts.*"])
+    MegatronConfig(fp8="e4m3", fp8_exclude_modules=[pattern])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"fp8_exclude_modules": ["*.shared_experts.*"]},
+        {"num_layers_at_start_in_bf16": 1},
+        {"num_layers_at_end_in_bf16": 1},
+    ],
+)
+def test_megatron_rejects_fp8_only_settings_without_fp8(kwargs):
+    from skyrl.train.config.config import MegatronConfig
+
+    with pytest.raises(ValueError, match="FP8 disabled"):
+        MegatronConfig(**kwargs)
+    MegatronConfig(fp8="e4m3", **kwargs)
+    MegatronConfig(transformer_config_kwargs={"fp8": "e4m3"}, **kwargs)
 
 
 def test_fp8_weight_sync_exclusions_require_fp8_weight_sync():
@@ -453,6 +472,7 @@ def test_cli_overrides_accept_fp8_exclusion_lists():
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
             "trainer.strategy=megatron",
+            "trainer.policy.megatron_config.fp8=e4m3",
             "trainer.policy.megatron_config.fp8_exclude_modules=['*.shared_experts.*']",
             "trainer.policy.megatron_config.num_layers_at_start_in_bf16=1",
             "generator.inference_engine.fp8_weight_sync_mode=mxfp8",

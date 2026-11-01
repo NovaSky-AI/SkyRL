@@ -700,6 +700,11 @@ class MegatronConfig(BaseConfig):
     See ``_stage_async_request_to_host``."""
 
     def __post_init__(self):
+
+        from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+            is_fp8_enabled,
+        )
+
         # Backfill defaults for any keys the user didn't override so an override dict
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
@@ -714,6 +719,12 @@ class MegatronConfig(BaseConfig):
         ):
             if value is not None:
                 self.transformer_config_kwargs.setdefault(key, value)
+        if not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False)) and (
+            self.fp8_exclude_modules or self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0
+        ):
+            raise ValueError(
+                "FP8 disabled but one or more of these quantization config is requested: exclude modules, num start/end layers to keep at BF16. "
+            )
         if self.num_layers_at_start_in_bf16 < 0 or self.num_layers_at_end_in_bf16 < 0:
             raise ValueError("num_layers_at_start_in_bf16 and num_layers_at_end_in_bf16 must be >= 0")
         if self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0:
