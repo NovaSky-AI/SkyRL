@@ -12,7 +12,9 @@ ranks (GLM-5.3-Flash: 288 experts, EP8). ``SKYRL_MOE_DEDUP_A2A=1`` instead:
 
 Dispatch and combine move ~1/3 fewer rows, forward and backward. The expert inputs are
 identical; the combine sums a token's expert outputs in two stages (per rank, rounded to the
-activation dtype, then across ranks) instead of one. Applies to the plain dropless alltoall
+activation dtype, then across ranks) instead of one. Under FP8/FP4 the receiver's permute also
+pads each expert segment to the quantization alignment (TE's fused permute-and-pad), so the experts
+skip their separate ``Fp8Padding`` / ``Fp8Unpadding`` copies. Applies to the plain dropless alltoall
 path (ETP1, fused permute, no shared-expert overlap); anything else runs the stock methods.
 """
 
@@ -37,7 +39,8 @@ def apply_moe_dedup_alltoall_patch() -> None:
     if _APPLIED or os.environ.get("SKYRL_MOE_DEDUP_A2A", "0").lower() not in ("1", "true"):
         return
     from megatron.core.tensor_parallel import all_to_all
-    from megatron.core.transformer.moe.moe_utils import permute, unpermute
+    from megatron.core.transformer.moe import experts
+    from megatron.core.transformer.moe.moe_utils import get_align_size_for_quantization, permute, unpermute
     from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
 
     stock = {name: getattr(MoEAlltoAllTokenDispatcher, name) for name in _METHODS}
@@ -56,6 +59,7 @@ def apply_moe_dedup_alltoall_patch() -> None:
 
     def dispatch_preprocess(self, hidden_states, routing_map, probs):
         self._skyrl_dedup = eligible(self)
+        self.config._skyrl_dispatch_padded = False
         if not self._skyrl_dedup:
             return stock["dispatch_preprocess"](self, hidden_states, routing_map, probs)
         self.hidden_shape = hidden_states.shape
@@ -97,8 +101,23 @@ def apply_moe_dedup_alltoall_patch() -> None:
         if not self._skyrl_dedup:
             return stock["dispatch_postprocess"](self, tokens, probs)
         mask = self._skyrl_recv_mask
-        tokens_per_expert = mask.sum(dim=0).cpu()
         self._skyrl_recv_shape = tokens.shape
+        if self.config.fp8 or self.config.fp4:
+            # Permute straight into quantization-aligned expert segments (see module docstring).
+            counts = mask.sum(dim=0)
+            expert_tokens, expert_probs, self._skyrl_recv_map, self._skyrl_pad_offsets, padded = permute(
+                tokens,
+                mask,
+                probs=probs,
+                num_out_tokens=int(counts.sum()),
+                fused=True,
+                tokens_per_expert=counts,
+                align_size=get_align_size_for_quantization(self.config),
+            )
+            self.config._skyrl_dispatch_padded = self._skyrl_pad_offsets is not None
+            return expert_tokens, (padded if self._skyrl_pad_offsets is not None else counts).cpu(), expert_probs
+        self._skyrl_pad_offsets = None
+        tokens_per_expert = mask.sum(dim=0).cpu()
         expert_tokens, expert_probs, self._skyrl_recv_map, _, _ = permute(
             tokens, mask, probs=probs, num_out_tokens=int(tokens_per_expert.sum()), fused=True
         )
@@ -113,8 +132,9 @@ def apply_moe_dedup_alltoall_patch() -> None:
             restore_shape=self._skyrl_recv_shape,
             routing_map=self._skyrl_recv_mask,
             fused=True,
+            pad_offsets=self._skyrl_pad_offsets,
         )
-        self._skyrl_recv_map = self._skyrl_recv_mask = None
+        self._skyrl_recv_map = self._skyrl_recv_mask = self._skyrl_pad_offsets = None
         return output
 
     def token_combine(self, hidden_states, async_finish=True, allocate_on_comm_stream=True):
@@ -135,6 +155,12 @@ def apply_moe_dedup_alltoall_patch() -> None:
         self._skyrl_send_map = self._skyrl_rank_map = None
         return output.view(self.hidden_shape)
 
+    skip_padding = experts.skip_routed_expert_padding
+
+    def skip_routed_expert_padding(config):
+        return skip_padding(config) or getattr(config, "_skyrl_dispatch_padded", False)
+
+    experts.skip_routed_expert_padding = skip_routed_expert_padding
     for name in _METHODS:
         setattr(MoEAlltoAllTokenDispatcher, name, locals()[name])
     _APPLIED = True
