@@ -973,7 +973,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
                 "weight sync (allocate gather buffers in classic segments)."
             )
 
-        engine._meta = list(source.metadata())
+        engine._meta = list(source.metadata)
         names = [m.name for m in engine._meta]
         engine._groups = layerwise_groups(names)
         flat = [n for g in engine._groups for n in g]
@@ -1027,7 +1027,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
             unknown = sorted(held_set - set(names))
             if unknown:
                 raise ValueError(
-                    f"WeightSource.held_names() lists {len(unknown)} name(s) not " f"in metadata(), e.g. {unknown[:3]}."
+                    f"WeightSource.held_names() lists {len(unknown)} name(s) not " f"in metadata, e.g. {unknown[:3]}."
                 )
             if not held_set:
                 raise ValueError(
@@ -1048,7 +1048,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
         mismatched = [r for r, (d, *_rest) in enumerate(per_rank) if d != digest]
         if mismatched:
             raise ValueError(
-                f"WeightSource.metadata() disagrees across trainer ranks "
+                f"WeightSource.metadata disagrees across trainer ranks "
                 f"(rank {rank} digest {digest}, differing ranks {mismatched[:4]}). "
                 "Every rank must describe the WHOLE model, even when it holds "
                 "only some of it."
@@ -1065,7 +1065,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
             owners = tuple(r for r, m in enumerate(masks) if m[i >> 3] & (1 << (i & 7)))
             if not owners:
                 raise ValueError(
-                    f"no trainer rank holds {n!r}; every name in metadata() must "
+                    f"no trainer rank holds {n!r}; every name in metadata must "
                     "be held by at least one rank or it can never be served."
                 )
             ci = class_of_owners.get(owners)

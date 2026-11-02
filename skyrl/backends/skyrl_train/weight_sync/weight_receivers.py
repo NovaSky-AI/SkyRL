@@ -61,6 +61,14 @@ class _LoadWeightsProxy:
         # Only reached for attributes not set on the proxy itself.
         return getattr(self._model, name)
 
+    # vLLM's NCCL receiver caches each round's update info keyed by `self.model`. A fresh proxy per
+    # round would add one entry per sync; keying as the wrapped model keeps it at one.
+    def __hash__(self) -> int:
+        return hash(self._model)
+
+    def __eq__(self, other: object) -> bool:
+        return self._model is getattr(other, "_model", other)
+
 
 class SkyrlCheckpointLoadMixin:
     """Split the compact batched-MoE FP8 wire tensors from ordinary checkpoint weights."""

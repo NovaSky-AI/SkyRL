@@ -2,7 +2,7 @@
 
 Two properties matter:
 
-* **channel agreement.** ``metadata()`` declares what iteration will yield, and
+* **channel agreement.** ``metadata`` declares what iteration will yield, and
   the trainer engine sizes the worker's receive buffers -- and in packed mode
   cuts its chunk boundaries -- from it. A source that disagrees splits the stream
   differently on each side, which hangs in NCCL rather than erroring.
@@ -35,8 +35,8 @@ def _model():
 
 def _assert_channels_agree(source):
     """The contract vLLM validates at runtime in ``_checked_iter``."""
-    meta = source.metadata()
-    pairs = list(source)
+    meta = source.metadata
+    pairs = list(source.iter_full())
     assert len(meta) == len(pairs)
     for m, (name, tensor) in zip(meta, pairs):
         assert m.name == name
@@ -53,9 +53,9 @@ class TestFsdpWeightSource:
 
     def test_casts_to_the_inference_dtype(self):
         source = FsdpWeightSource(_model(), torch.bfloat16)
-        # Declared as well as yielded: the worker allocates from metadata().
-        assert {m.dtype for m in source.metadata()} == {torch.bfloat16}
-        assert {t.dtype for _, t in source} == {torch.bfloat16}
+        # Declared as well as yielded: the worker allocates from metadata.
+        assert {m.dtype for m in source.metadata} == {torch.bfloat16}
+        assert {t.dtype for _, t in source.iter_full()} == {torch.bfloat16}
 
     def test_yields_contiguous_tensors(self):
         # NCCL sends `numel` elements straight from data_ptr(), so a
@@ -71,7 +71,7 @@ class TestFsdpWeightSource:
 
     def test_is_re_iterable(self):
         source = FsdpWeightSource(_model(), torch.bfloat16)
-        assert [n for n, _ in source] == [n for n, _ in source]
+        assert [n for n, _ in source.iter_full()] == [n for n, _ in source.iter_full()]
 
     def test_metadata_does_not_gather(self, monkeypatch):
         """FSDP2 ``DTensor.shape`` is already the global shape, so declaring the
@@ -83,9 +83,9 @@ class TestFsdpWeightSource:
         monkeypatch.setattr(
             sources_mod,
             "materialize_full_tensor",
-            lambda t: pytest.fail("metadata() must not materialize"),
+            lambda t: pytest.fail("metadata must not materialize"),
         )
-        meta = FsdpWeightSource(_model(), torch.bfloat16).metadata()
+        meta = FsdpWeightSource(_model(), torch.bfloat16).metadata
         assert [m.shape for m in meta] == [(2, 3), (3,)]
 
     def test_iteration_gathers_every_parameter(self, monkeypatch):
@@ -99,7 +99,7 @@ class TestFsdpWeightSource:
             return tensor
 
         monkeypatch.setattr(sources_mod, "materialize_full_tensor", _spy)
-        list(FsdpWeightSource(_model(), torch.bfloat16))
+        list(FsdpWeightSource(_model(), torch.bfloat16).iter_full())
         assert gathered == [(2, 3), (3,)]
 
 
@@ -142,16 +142,16 @@ class TestMegatronWeightSource:
         """`_accumulate_grouped_export` needs every task of a `group_key` in one
         call, or expert weights are silently never yielded."""
         bridge = _FakeBridge(self._tensors())
-        list(MegatronWeightSource(bridge, object(), torch.bfloat16))
+        list(MegatronWeightSource(bridge, object(), torch.bfloat16).iter_full())
         assert bridge.tasks_args == [None]
 
     def test_metadata_caches_its_dry_export(self):
         bridge = _FakeBridge(self._tensors())
         source = MegatronWeightSource(bridge, object(), torch.bfloat16)
-        first = source.metadata()
+        first = source.metadata
         assert bridge.export_calls == 1
-        # Engines call metadata() every round; it must not re-run the export.
-        assert source.metadata() is first
+        # Engines read metadata every round; it must not re-run the export.
+        assert source.metadata is first
         assert bridge.export_calls == 1
 
     def test_iteration_is_lazy(self):
@@ -160,7 +160,7 @@ class TestMegatronWeightSource:
         bounds peak memory."""
         bridge = _FakeBridge(self._tensors())
         source = MegatronWeightSource(bridge, object(), torch.bfloat16)
-        it = iter(source)
+        it = source.iter_full()
         assert bridge.yielded == 0
         next(it)
         assert bridge.yielded == 1
@@ -170,13 +170,13 @@ class TestMegatronWeightSource:
     def test_is_re_iterable_and_re_exports(self):
         bridge = _FakeBridge(self._tensors())
         source = MegatronWeightSource(bridge, object(), torch.bfloat16)
-        assert [n for n, _ in source] == [n for n, _ in source]
+        assert [n for n, _ in source.iter_full()] == [n for n, _ in source.iter_full()]
         assert bridge.export_calls == 2
 
     def test_reads_the_module_it_was_given(self):
         module = object()
         bridge = _FakeBridge(self._tensors(), expect_module=module)
-        list(MegatronWeightSource(bridge, module, torch.bfloat16))
+        list(MegatronWeightSource(bridge, module, torch.bfloat16).iter_full())
         assert bridge.export_calls == 1
 
 
@@ -233,8 +233,8 @@ class TestLoraAdapterWeightSource:
         source = self._source()
         source.prepare()
         assert source.receive_target["lora_name"] == "tenant"
-        names = [m.name for m in source.metadata()]
-        sent = [n for n, _ in source]
+        names = [m.name for m in source.metadata]
+        sent = [n for n, _ in source.iter_full()]
         assert source.exports == 1
         assert names == sent
         # finalize only ever sees the canonical keys.
@@ -245,7 +245,7 @@ class TestLoraAdapterWeightSource:
         source = self._source(state=state)
         source.prepare()
         target = source.receive_target
-        sent = {m.name for m in source.metadata()}
+        sent = {m.name for m in source.metadata}
         # 2 groups of 2 experts -> 2 expert tensors sent, 2 aliased, plus 1 dense.
         assert len(sent) == 3
         assert set(target["aliases"]) | sent == set(state)
@@ -254,13 +254,13 @@ class TestLoraAdapterWeightSource:
     def test_casts_to_the_wire_dtype_on_both_channels(self):
         source = self._source()
         source.prepare()
-        assert {m.dtype for m in source.metadata()} == {torch.bfloat16}
-        assert {t.dtype for _, t in source} == {torch.bfloat16}
+        assert {m.dtype for m in source.metadata} == {torch.bfloat16}
+        assert {t.dtype for _, t in source.iter_full()} == {torch.bfloat16}
 
     def test_yields_contiguous_tensors(self):
         source = self._source()
         source.prepare()
-        assert all(t.is_contiguous() for _, t in source)
+        assert all(t.is_contiguous() for _, t in source.iter_full())
 
     def test_the_target_carries_the_name_and_adapter_config(self):
         source = self._source(adapter_config={"r": 4, "lora_alpha": 8})
@@ -273,32 +273,42 @@ class TestLoraAdapterWeightSource:
     def test_consuming_the_stream_re_exports_next_round(self):
         source = self._source()
         source.prepare()
-        list(source)
+        list(source.iter_full())
         assert source.exports == 1
         source.set_lora_name("next")
         source.prepare()
         assert source.exports == 2
         assert source.receive_target["lora_name"] == "next"
 
-    def test_reading_an_unprepared_source_raises_instead_of_exporting(self):
+    def test_reading_an_unprepared_source_never_exports(self):
         """The export is a collective. A source that ran it implicitly would have
         whichever rank asked run it alone, hanging the job in an EP all-gather
-        for the full NCCL watchdog timeout instead of failing."""
+        for the full NCCL watchdog timeout instead of failing. ``metadata`` is
+        empty (the engine's init-time ownership probe reads it before any round);
+        iteration raises."""
         source = self._source()
+        assert source.metadata == []
         with pytest.raises(RuntimeError, match="no prepared adapter"):
-            source.metadata()
-        with pytest.raises(RuntimeError, match="no prepared adapter"):
-            list(source)
+            list(source.iter_full())
         assert source.exports == 0
 
-    def test_reading_after_the_stream_is_consumed_raises(self):
+    def test_metadata_read_before_prepare_does_not_go_stale(self):
+        """``metadata`` is a cached property; prepare() must drop the value cached
+        by an earlier read, or the round would declare an empty stream."""
+        source = self._source()
+        assert source.metadata == []
+        source.prepare()
+        assert [m.name for m in source.metadata] == [n for n, _ in source.iter_full()]
+
+    def test_reading_after_the_stream_is_consumed_never_re_exports(self):
         """The trap the trainer fell into: the round is over, the cache is gone,
-        and a stray metadata() would re-export on one rank only."""
+        and a stray metadata read would re-export on one rank only."""
         source = self._source()
         source.prepare()
-        list(source)
+        list(source.iter_full())
+        assert source.metadata == []
         with pytest.raises(RuntimeError, match="no prepared adapter"):
-            source.metadata()
+            list(source.iter_full())
         assert source.exports == 1
 
     def test_prepare_is_idempotent_within_a_round(self):

@@ -1793,7 +1793,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # Read while the export is still prepared: the send consumes the
             # stream and drops it, and re-reading afterwards would be a
             # collective this rank would run alone.
-            unique = len(source.metadata())
+            unique = len(source.metadata)
             aliased = len(receive_target["aliases"])
             await inference_engine_client.set_lora_receive_target(receive_target)
         # No rank may enter the transfer before every worker is armed: rank 0

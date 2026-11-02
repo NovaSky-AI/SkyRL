@@ -283,6 +283,8 @@ version = {attr = "skyrl.__version__"}
 skyrl_r3_pp_relay = "skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay:vllm_general_plugin"
 # Serves DeepSeek-V4.1 with vLLM's text-only (LoRA-capable) class; SKYRL_DEEPSEEK_V41_TEXT_ONLY=0 opts out.
 skyrl_deepseek_v41 = "skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41:vllm_general_plugin"
+# Declares Kimi K2.5-family checkpoints LoRA-capable before vLLM 0.33's config-time LoRA support check.
+skyrl_kimi_k25_lora = "skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora:vllm_general_plugin"
 
 [tool.uv]
 # Resolve only the Linux architectures covered by the CUDA wheels, plus the

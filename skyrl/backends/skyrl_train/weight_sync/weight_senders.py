@@ -118,6 +118,14 @@ def _build_skyrl_nccl_trainer() -> "tuple[type, type]":
     ):
         init_info_cls = SkyrlNCCLTrainerInitInfo
 
+        def send_weights(self) -> None:
+            # Since vLLM 0.33 a round whose metadata equals the previous one ships an empty update info,
+            # and the worker reuses the info it cached under its `self.model`. SkyRL's receivers swap in
+            # a per-round proxy as `self.model` (FP8 load proxy, LoRA staging), so that lookup misses, the
+            # worker receives nothing and the trainer's broadcast hangs. Always ship the names.
+            self._sent_meta = None
+            super().send_weights()
+
     return SkyrlNCCLTrainerInitInfo, SkyrlNCCLTrainerWeightTransferEngine
 
 

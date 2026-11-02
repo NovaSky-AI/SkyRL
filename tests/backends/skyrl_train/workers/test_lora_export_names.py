@@ -104,7 +104,7 @@ def test_full_weight_sync_uses_inference_namespace(monkeypatch, is_multimodal_lm
     monkeypatch.setattr(sources_mod, "materialize_full_tensor", lambda tensor: tensor)
 
     source = worker._build_weight_source(torch.float32, backend="nccl")
-    assert [meta.name for meta in source.metadata()] == [expected_prefix + source_name]
+    assert [meta.name for meta in source.metadata] == [expected_prefix + source_name]
     exported = list(source)
     assert [name for name, _ in exported] == [expected_prefix + source_name]
     assert torch.equal(exported[0][1], source_tensor)

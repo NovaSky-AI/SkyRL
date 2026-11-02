@@ -37,17 +37,18 @@ _1GiB = 1024**3
 
 
 class _Source:
-    """Only ``metadata()`` is read here; the engines are not constructed."""
+    """Only ``metadata`` is read here; the engines are not constructed."""
 
     def __init__(self, shapes=((4, 4),), dtype=None):
         self.metadata_calls = 0
         self._meta = [ParamMeta(f"w{i}", dtype or torch.bfloat16, s) for i, s in enumerate(shapes)]
 
+    @property
     def metadata(self):
         self.metadata_calls += 1
         return self._meta
 
-    def __iter__(self):
+    def iter_full(self):
         return iter(())
 
 

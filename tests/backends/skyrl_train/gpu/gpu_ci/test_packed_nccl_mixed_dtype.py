@@ -25,7 +25,7 @@ def _serialized_pairs(device):
     from skyrl.backends.skyrl_train.weight_sync.sources import SerializedFp8WeightSource
 
     class DenseSource:
-        def __iter__(self):
+        def iter_full(self):
             # 128 x 128 gives one 128 x 128 FP8 block. Its 16,384-byte payload
             # leaves the following FP32 scale at a 4-byte-aligned offset.
             projection = torch.arange(128 * 128, device=device, dtype=torch.float32).reshape(128, 128)

@@ -82,7 +82,7 @@ class TestPpLocalOwnership:
             "model.norm.weight",
         ]
         for my_pp in (0, 1):
-            meta = self._source(2, my_pp, [stage0, stage1]).metadata()
+            meta = self._source(2, my_pp, [stage0, stage1]).metadata
             assert [m.name for m in meta] == expected
             assert [tuple(m.shape) for m in meta] == [(8, 4), (4, 4), (4, 4), (4,)]
         # ... and each stage claims exactly the names it produced.
@@ -115,7 +115,7 @@ class TestPpLocalOwnership:
         per_stage = []
         for my_pp in (0, 1):
             src = self._source(2, my_pp, [stage0, stage1])
-            names = [m.name for m in src.metadata()]
+            names = [m.name for m in src.metadata]
             assert [n for g in layerwise_groups(names) for n in g] == names
             per_stage.append(names)
         assert per_stage[0] == per_stage[1]
@@ -142,7 +142,7 @@ class TestPpLocalOwnership:
         # Re-asking is still None: a demoted source holds everything.
         assert src.held_names() is None
         # Metadata is still the whole model, so the digest check still passes.
-        assert [m.name for m in src.metadata()] == [
+        assert [m.name for m in src.metadata] == [
             "model.embed_tokens.weight",
             "model.layers.0.w",
             "model.layers.1.w",
@@ -156,7 +156,7 @@ class TestPpLocalOwnership:
         the consumers two plan entries for one tensor — and mark its group shared."""
         tied = ("model.embed_tokens.weight", [8, 4])
         src = self._source(2, 0, [[tied, ("model.layers.0.w", [4, 4])], [tied]])
-        assert [m.name for m in src.metadata()] == ["model.embed_tokens.weight", "model.layers.0.w"]
+        assert [m.name for m in src.metadata] == ["model.embed_tokens.weight", "model.layers.0.w"]
         assert src._group_stages[0] == {0, 1}
         assert src.held_names() is None
 

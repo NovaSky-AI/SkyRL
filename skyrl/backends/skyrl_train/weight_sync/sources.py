@@ -1,8 +1,9 @@
 """``WeightSource`` implementations over SkyRL's training backends.
 
 A ``WeightSource`` is vLLM's trainer-side weight contract
-(``vllm.distributed.weight_transfer.base``): ``metadata()`` and ``__iter__``,
-which must agree element for element. Chunking is vLLM's: the packed producers
+(``vllm.distributed.weight_transfer.base``): ``metadata`` (a
+``functools.cached_property``; vLLM rejects any other kind at class definition)
+and ``iter_full()``, which must agree element for element. Chunking is vLLM's: the packed producers
 cut bounded-memory chunks out of a fixed buffer and consume the source lazily,
 so a source's only obligation is to be a lazy generator that does not retain.
 
@@ -20,6 +21,7 @@ without the wheel.
 """
 
 import re
+from functools import cached_property
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import torch
@@ -64,7 +66,7 @@ def is_megatron_draft_param(name: str) -> bool:
 class FsdpWeightSource(WeightSource):
     """``WeightSource`` over an FSDP2-sharded HF model.
 
-    ``metadata()`` reads ``state_dict()`` shapes only: an FSDP2 ``DTensor``'s
+    ``metadata`` reads ``state_dict()`` shapes only: an FSDP2 ``DTensor``'s
     ``.shape`` is already the global shape, so declaring the stream costs no
     collective. Iteration all-gathers each parameter (``full_tensor()``), which
     IS a collective, so every trainer rank must iterate the same source in the
@@ -91,11 +93,12 @@ class FsdpWeightSource(WeightSource):
     def weight_prefix(self) -> str:
         return self._prefix
 
+    @cached_property
     def metadata(self) -> List[ParamMeta]:
         sd = self._model.state_dict()
         return [ParamMeta(f"{self._prefix}{key}", self._dtype, tuple(param.shape)) for key, param in sd.items()]
 
-    def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
+    def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
         # The caller selects this rank's CUDA device before iterating; a worker
         # thread does not inherit it (see Worker._weight_sync_thread).
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
@@ -119,8 +122,8 @@ class MegatronWeightSource(WeightSource):
     needs every task sharing a ``group_key`` present in the same call, or the
     expert weights are silently never yielded.
 
-    There is no shape-only export, so ``metadata()`` runs a dry export and
-    caches. Engines call it every round; the cost is one-time.
+    There is no shape-only export, so ``metadata`` runs a dry export once
+    (it is a cached property). Engines read it every round.
 
     ``param_filter`` keeps the conversion tasks whose global Megatron name it
     accepts. Every rank filters the same global list, so they enter the same
@@ -138,7 +141,6 @@ class MegatronWeightSource(WeightSource):
         self._module = module
         self._dtype = dtype
         self._param_filter = param_filter
-        self._meta: Optional[List[ParamMeta]] = None
 
     def _export(self) -> Iterator[Tuple[str, torch.Tensor]]:
         tasks = None
@@ -160,17 +162,16 @@ class MegatronWeightSource(WeightSource):
             return tensor.dtype
         return self._dtype
 
+    @cached_property
     def metadata(self) -> List[ParamMeta]:
-        if self._meta is None:
-            meta: List[ParamMeta] = []
-            for name, tensor in self._export():
-                meta.append(ParamMeta(name, self._wire_dtype(tensor), tuple(tensor.shape)))
-                del tensor
-            self._meta = meta
-        return self._meta
+        meta: List[ParamMeta] = []
+        for name, tensor in self._export():
+            meta.append(ParamMeta(name, self._wire_dtype(tensor), tuple(tensor.shape)))
+            del tensor
+        return meta
 
-    def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        # See FsdpWeightSource.__iter__ on the device.
+    def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        # See FsdpWeightSource.iter_full on the device.
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
         for name, tensor in self._export():
             dtype = self._wire_dtype(tensor)
@@ -185,7 +186,7 @@ class SerializedFp8WeightSource(WeightSource):
     agnostic to it.
 
     The vLLM trainer engines require metadata and iteration to expose the same
-    expanded stream. The first metadata call therefore runs one dry conversion
+    expanded stream. The first metadata read therefore runs one dry conversion
     and caches the result; subsequent weight syncs stream the wrapped source
     lazily through vLLM's packed buffer.
     """
@@ -193,14 +194,13 @@ class SerializedFp8WeightSource(WeightSource):
     def __init__(self, source: WeightSource, config: Any) -> None:
         self._source = source
         self._config = config
-        self._meta: Optional[List[ParamMeta]] = None
 
     def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
         from skyrl.backends.skyrl_train.weight_sync.fp8 import (
             iter_serialized_fp8_tensors,
         )
 
-        for name, tensor in self._source:
+        for name, tensor in self._source.iter_full():
             for serialized_name, serialized_tensor in iter_serialized_fp8_tensors(
                 name,
                 tensor,
@@ -209,12 +209,11 @@ class SerializedFp8WeightSource(WeightSource):
             ):
                 yield serialized_name, serialized_tensor.detach().contiguous()
 
+    @cached_property
     def metadata(self) -> List[ParamMeta]:
-        if self._meta is None:
-            self._meta = [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self._serialized()]
-        return self._meta
+        return [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self._serialized()]
 
-    def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
+    def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
         yield from self._serialized()
 
 
@@ -236,11 +235,17 @@ class LoraAdapterWeightSource(WeightSource):
     per-key transform that pairs A with B still has both.
 
     Unlike the model sources, the export cannot be re-run per channel: the
-    dedupe is what decides which keys exist, so ``metadata()`` and iteration
+    dedupe is what decides which keys exist, so ``metadata`` and iteration
     must see one export. :meth:`prepare` runs it once, on every rank, and the
     caller must invoke it before ``send_weights()`` -- the ``receive_target``
     is only known afterwards and has to reach the workers first. Iteration
     drops the cache, so the next round re-exports.
+
+    ``metadata`` is a cached property (vLLM requires it), but this source's
+    metadata changes every round, so :meth:`prepare` and the end of iteration
+    both drop the cached value. Read before any :meth:`prepare` -- the engine's
+    init-time ownership probe does -- it is empty rather than an error: it
+    reads no export, so it cannot run a collective.
 
     Retaining the unique adapter between the two channels is what the model
     sources avoid, and is affordable for exactly the same reason the dedupe
@@ -290,6 +295,10 @@ class LoraAdapterWeightSource(WeightSource):
         if missing:
             raise RuntimeError(f"finalize_adapter dropped aliased keys: {sorted(missing)[:5]}")
         self._prepared = (to_send, aliases, adapter_config)
+        self._drop_cached_metadata()
+
+    def _drop_cached_metadata(self) -> None:
+        self.__dict__.pop("metadata", None)
 
     def _prepared_state(self) -> Tuple[Dict[str, torch.Tensor], Dict[str, str], Dict[str, Any]]:
         """The current round's export. Raises rather than exporting implicitly.
@@ -320,13 +329,16 @@ class LoraAdapterWeightSource(WeightSource):
         _, aliases, adapter_config = self._prepared_state()
         return build_lora_receive_target(self._lora_name, adapter_config, aliases)
 
+    @cached_property
     def metadata(self) -> List[ParamMeta]:
-        to_send, _, _ = self._prepared_state()
+        if self._prepared is None:
+            return []
+        to_send, _, _ = self._prepared
         return [ParamMeta(name, self._dtype, tuple(t.shape)) for name, t in to_send.items()]
 
-    def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
+    def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
         to_send, _, _ = self._prepared_state()
-        # See FsdpWeightSource.__iter__ on the device.
+        # See FsdpWeightSource.iter_full on the device.
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
         try:
             for name, tensor in to_send.items():
@@ -337,6 +349,7 @@ class LoraAdapterWeightSource(WeightSource):
         finally:
             # The next sync re-exports; nothing from this one is worth keeping.
             self._prepared = None
+            self._drop_cached_metadata()
 
 
 class MegatronLoraAdapterSource(LoraAdapterWeightSource):
