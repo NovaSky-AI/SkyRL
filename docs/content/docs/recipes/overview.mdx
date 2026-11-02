@@ -72,7 +72,9 @@ The scripts for training on GSM8K are available at `examples/train/gsm8k/`.
 
 The code for the DAPO recipe is available at `examples/train/algorithms/dapo/`. 
 
-For evals we report Pass@32 and Mean@32. In the WandB metrics we log "avg_score" - since reward is either -1 or 1 for the AIME task, mean@32 can be computed as mean@32 = (avg_score + 1) / 2. 
+`examples/train/algorithms/dapo/prepare_dapo_data.sh` prepares the DAPO-Math-17k training set and the AIME-2024 (`data_source=math_dapo`) eval set, and also writes an optional AIME-2025 eval set (`data_source=aime-2025`, `aime-2025-cleaned.parquet`, produced by `data_preprocess_aime2025.py`). Both AIME sets use the same prompt template and are graded by the `aime` environment, which reads the last `Answer: X` line of the response. AIME-2025 is used only if you add it to the eval data; to evaluate on both, pass `data.val_data="['$DATA_DIR/aime-2024-cleaned.parquet', '$DATA_DIR/aime-2025-cleaned.parquet']"`; metrics are reported per data source, under `eval/math_dapo/...` and `eval/aime-2025/...`. `examples/train/algorithms/dapo/run_generation_aime.sh` runs an eval-only pass (`skyrl.train.entrypoints.main_generate`) of DeepSeek-R1-Distill-Qwen-1.5B on AIME-2025. See the [DAPO example README](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/algorithms/dapo) for details.
+
+For evals we report Pass@32 and Mean@32. In the WandB metrics we log "avg_score" - since reward is either -1 or 1 for the AIME task, mean@32 can be computed as mean@32 = (avg_score + 1) / 2, which is also logged directly as "mean_positive_reward". 
 In the table below we report the peak mean@32 and pass@32 over the course of the run. All runs are DAPO but without Dynamic Sampling enabled (just clip-higher, overlong buffer, overlong filtering, and token level loss aggregation).
 
 All results can be reproduced with commit [8263149145f2455b75c082f3280d344b8a554f5d](https://github.com/novasky-ai/SkyRL/commit/8263149145f2455b75c082f3280d344b8a554f5d), and the WandB report for all runs is available [here](https://api.wandb.ai/links/sky-posttraining-uc-berkeley/ijmo1v6q).

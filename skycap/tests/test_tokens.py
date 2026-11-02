@@ -15,7 +15,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from skycap import record
-from skycap.hashing import match_hash, token_match_hash
+from skycap.hashing import MatchKey
 from skycap.samples import build_samples
 from skycap.server import CaptureServer
 from skycap.tokens.backend import STATUS_HEADER, TokensBackend
@@ -47,14 +47,19 @@ class TokenStack:
 
 @asynccontextmanager
 async def token_stack(
-    *, engine: VLLMEngine | None = None, completion: Any = None, record_dir: Path | None = None, **options: Any
+    *,
+    engine: VLLMEngine | None = None,
+    completion: Any = None,
+    record_dir: Path | None = None,
+    path_rules: dict[str, Any] | None = None,
+    **options: Any,
 ) -> AsyncIterator[TokenStack]:
     mock = MockEngine(completion)
     engine_server = TestServer(mock.app())
     await engine_server.start_server()
     renderer = FakeRenderer()
     backend = TokensBackend(str(engine_server.make_url("")).rstrip("/"), renderer, engine=engine, **options)
-    server = CaptureServer(backend, record_dir=record_dir)
+    server = CaptureServer(backend, record_dir=record_dir, path_rules=path_rules)
     capture = TestServer(server.app())
     await capture.start_server()
     try:
@@ -84,26 +89,79 @@ async def converse(llm: openai.AsyncOpenAI, *texts: str, **kwargs: Any) -> list[
 
 
 # -- attribution ---------------------------------------------------------------
+TEXT_KEY = MatchKey.text("", "policy")
+TOKEN_KEY = MatchKey.tokens("", "policy")
+
+
+def test_match_keys_keep_the_hash_values_recorded_before_them() -> None:
+    """Records store match hashes, so the values a ``MatchKey`` gives must not drift."""
+    message = {
+        "role": "assistant",
+        "content": "hi",
+        "refusal": None,
+        "provider_specific_fields": {"x": 1},
+        "tool_calls": [{"id": "c0", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+    }
+
+    assert MatchKey.text("t", "policy")(message) == "f378894da4b0e48303e35fdf42be5375"
+    assert MatchKey.tokens("t", "policy")(message) == "2bc94eedd73c39da36f6e5cee703ab40"
+
+
 @pytest.mark.parametrize("fields", [{"refusal": None}, {"response_id": "resp_1", "refusal": None}])
 def test_token_match_ignores_provider_specific_fields(fields: dict) -> None:
     reply = {"role": "assistant", "content": "answer"}
     replay = {**reply, "provider_specific_fields": fields}
 
-    assert token_match_hash(reply, tools="", model="policy") == token_match_hash(replay, tools="", model="policy")
-    assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
+    assert TOKEN_KEY(reply) == TOKEN_KEY(replay)
+    assert TEXT_KEY(reply) != TEXT_KEY(replay)
 
 
-def test_token_match_equates_empty_tool_content_with_absent_content() -> None:
+def test_token_match_leaves_empty_tool_content_to_the_renderer() -> None:
+    """``content: ""`` against no ``content`` is template-dependent, so the hash keeps them apart.
+
+    Whether they are the same message is decided by rendering, when a request
+    is planned: see ``test_empty_tool_call_content_replay_bridges_but_rewrite_forks``
+    and ``test_a_replayed_message_the_template_renders_differently_forks``.
+    """
     tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
-    reply = {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [tool_call]}
-    replay = {key: value for key, value in reply.items() if key != "content"}
-    replay["provider_specific_fields"] = {"refusal": None}
+    # What skycap answered with, and what the client replays in its next request's history.
+    returned = {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [tool_call]}
+    replayed = _without_content(returned)
+    with_metadata = {**replayed, "provider_specific_fields": {"refusal": None}}
 
-    assert token_match_hash(reply, tools="", model="policy") == token_match_hash(replay, tools="", model="policy")
-    assert match_hash(reply, tools="", model="policy") != match_hash(replay, tools="", model="policy")
-    assert token_match_hash(reply, tools="", model="policy") != token_match_hash(
-        {**replay, "content": "Summary so far"}, tools="", model="policy"
-    )
+    assert TOKEN_KEY(with_metadata) == TOKEN_KEY(replayed)
+    assert TOKEN_KEY(returned) != TOKEN_KEY(replayed)
+    assert TEXT_KEY(returned) != TEXT_KEY(with_metadata)
+    assert TOKEN_KEY(returned) != TOKEN_KEY({**replayed, "content": "Summary so far"})
+
+
+def _without_content(message: dict) -> dict:
+    replayed = dict(message)
+    del replayed["content"]
+    return replayed
+
+
+def test_token_match_ignores_unrendered_fields_inside_tool_calls() -> None:
+    tool_call = {"id": "call_0", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+    returned = {"role": "assistant", "content": "x", "tool_calls": [tool_call]}
+    replayed = {
+        **returned,
+        "refusal": None,
+        "annotations": [],
+        "audio": {"id": "audio_0"},
+        "provider_specific_fields": {"refusal": None},
+        "tool_calls": [
+            {
+                **tool_call,
+                "provider_specific_fields": {"thought_signature": "sig"},
+                "function": {**tool_call["function"], "provider_specific_fields": {"index": 0}},
+            }
+        ],
+    }
+    edited = {**returned, "tool_calls": [{**tool_call, "function": {"name": "search", "arguments": '{"q":1}'}}]}
+
+    assert TOKEN_KEY(returned) == TOKEN_KEY(replayed)
+    assert TOKEN_KEY(returned) != TOKEN_KEY(edited)
 
 
 def test_scaffold_belongs_to_the_following_message_and_the_tail_to_the_reply() -> None:
@@ -132,6 +190,25 @@ async def test_a_continued_conversation_extends_the_previous_tokens() -> None:
         graph = stack.server.trajectories[created["id"]].graph
         (path,) = graph.paths()
         assert [graph.nodes[i].author for i in path] == ["client", "model", "client", "model"]
+
+
+class PromptRecordingRenderer(FakeRenderer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list[list[int] | None] = []
+
+    def parse(self, completion_ids: Any, tools: Any, prompt_ids: Any = None) -> dict[str, Any]:
+        self.prompts.append(None if prompt_ids is None else list(prompt_ids))
+        return super().parse(completion_ids, tools, prompt_ids)
+
+
+async def test_the_parser_gets_the_prompt_the_completion_was_sampled_from() -> None:
+    async with token_stack() as stack:
+        renderer = stack.server.backend.renderer = PromptRecordingRenderer()  # type: ignore[attr-defined]
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("hi")])
+
+        assert renderer.prompts == [stack.engine.requests[0]["token_ids"]]
 
 
 async def test_the_sample_is_exactly_what_inference_saw() -> None:
@@ -289,6 +366,111 @@ async def test_empty_tool_call_content_replay_bridges_but_rewrite_forks() -> Non
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
 
 
+TOOLS = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+
+
+async def _post(stack: TokenStack, created: dict, body: dict) -> None:
+    async with stack.http.post(f"{created['base_url']}/chat/completions", json=body) as response:
+        assert response.status == 200
+
+
+async def _tool_call_then_replay_without_content(stack: TokenStack, created: dict) -> dict:
+    """Answer ``q`` with a tool call, then replay it without its empty ``content``, plus the tool result."""
+    first = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")], tools=TOOLS)
+    returned = first.choices[0].message.model_dump(exclude_none=True)
+    assert returned["content"] == "" and returned["tool_calls"]
+    replayed = _without_content(returned)
+    tool_result = {"role": "tool", "tool_call_id": returned["tool_calls"][0]["id"], "content": "found"}
+    body = {"model": "policy", "messages": [user("q"), replayed, tool_result], "tools": TOOLS}
+    await _post(stack, created, body)
+    return body
+
+
+async def test_a_replayed_message_the_template_renders_differently_forks() -> None:
+    """With a template that renders ``content: ""``, dropping it is an edit, not a respelling."""
+    completion = [*encode("THINK:hmm|CALL:search:{}"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.renderer.empty_content = "<empty>"
+        created = await stack.create()
+        await _tool_call_then_replay_without_content(stack, created)
+
+        graph = stack.server.trajectories[created["id"]].graph
+        model_nodes = [node for node in graph if node.author == "model"]
+        assert model_nodes[0].id not in graph.path_to(model_nodes[1].id)
+        assert [call.bridged for node in model_nodes for call in node.calls] == [None, False]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
+
+
+async def test_a_respelled_message_is_rendered_once_then_matched_by_alias() -> None:
+    completion = [*encode("THINK:hmm|CALL:search:{}"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        created = await stack.create()
+        body = await _tool_call_then_replay_without_content(stack, created)
+        # The first call renders once; the second renders the request with each spelling.
+        assert stack.renderer.renders == 3
+
+        await _post(stack, created, body)
+
+        assert stack.renderer.renders == 3
+        graph = stack.server.trajectories[created["id"]].graph
+        assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True, True]
+
+
+async def test_a_respelled_message_after_the_last_model_node_commits_as_that_node() -> None:
+    """A bridged call commits every message after the model node; a respelled one must find its node, not fork."""
+    async with token_stack() as stack:
+        created = await stack.create()
+        first = await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")])
+        answer = first.choices[0].message.model_dump(exclude_none=True)
+        await _post(stack, created, {"model": "policy", "messages": [user("q"), answer, {**user("next"), "name": ""}]})
+        graph = stack.server.trajectories[created["id"]].graph
+        nodes = len(graph)
+
+        await _post(stack, created, {"model": "policy", "messages": [user("q"), answer, user("next")]})
+
+        assert len(graph) == nodes
+        assert graph.branch_points() == []
+        assert [call.bridged for node in graph if node.author == "model" for call in node.calls] == [None, True, True]
+
+
+async def test_siblings_with_one_spelling_are_render_checked_once() -> None:
+    """Two samples of the same reply (here under two temperatures) are one candidate spelling, not two."""
+    completion = [*encode("THINK:hmm|CALL:search:{}"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        stack.renderer.empty_content = "<empty>"
+        created = await stack.create()
+        llm = client(created["base_url"])
+        for temperature in (0.5, 1.0):
+            first = await llm.chat.completions.create(
+                model="policy", messages=[user("q")], tools=TOOLS, temperature=temperature
+            )
+        returned = first.choices[0].message.model_dump(exclude_none=True)
+        graph = stack.server.trajectories[created["id"]].graph
+        assert len([node for node in graph if node.author == "model"]) == 2
+        renders = stack.renderer.renders
+
+        replayed = _without_content(returned)
+        tool_result = {"role": "tool", "tool_call_id": returned["tool_calls"][0]["id"], "content": "found"}
+        await _post(stack, created, {"model": "policy", "messages": [user("q"), replayed, tool_result], "tools": TOOLS})
+
+        # The request once, and one swapped-in spelling, which renders differently.
+        assert stack.renderer.renders == renders + 2
+
+
+async def test_a_rewrite_is_not_rendered_twice() -> None:
+    """A message that differs from every sibling in more than empty strings is new without a render check."""
+    async with token_stack() as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        await llm.chat.completions.create(model="policy", messages=[user("q")])
+        renders = stack.renderer.renders
+        await llm.chat.completions.create(
+            model="policy", messages=[user("q"), {"role": "assistant", "content": "Summary so far"}, user("next")]
+        )
+
+        assert stack.renderer.renders == renders + 1
+
+
 async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
     thinking = [*encode("THINK:hmm|answer"), END]
     async with token_stack(completion=lambda prompt, sampling: thinking) as stack:
@@ -314,6 +496,59 @@ async def test_stripped_reasoning_forks_and_trains_each_sample_once() -> None:
         second = next(n for n in graph if n.author == "model" and n.id != 1)
         assert [call.bridged for call in second.calls] == [False]
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 1
+
+
+async def test_token_history_continues_from_the_shadowed_sibling_whose_tokens_the_render_reproduces() -> None:
+    # The fake parser drops every END, so this reply re-renders as "ab" END: not the tokens sampled.
+    completion = [*encode("a"), END, *encode("b"), END]
+    async with token_stack(completion=lambda prompt, sampling: completion) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        first = await llm.chat.completions.create(model="policy", messages=[user("q")])
+        reply = first.choices[0].message.model_dump(exclude_none=True)
+        # An assistant message among the new ones makes the fake bridge decline, so each prompt is rendered.
+        history = [user("q"), reply, user("more"), {"role": "assistant", "content": "edited"}, user("go")]
+        await llm.chat.completions.create(model="policy", messages=history)
+        await llm.chat.completions.create(model="policy", messages=[*history, user("again")])
+        graph = stack.server.trajectories[created["id"]].graph
+
+        sample, replay = graph.children(0)
+        assert (graph.nodes[sample].author, graph.nodes[replay].author) == ("model", "client")
+        assert graph.shadowed_by(sample) == replay
+        # The replay is the latest sibling and holds the render's tokens, so both later calls continue from it.
+        later = [node.id for node in graph if node.author == "model" and node.id != sample]
+        assert len(later) == 2 and all(replay in graph.path_to(node) for node in later)
+
+
+async def test_token_history_never_continues_from_a_shadowed_model_sample() -> None:
+    # Both samples parse as "ab". The top_p=0.9 one re-renders exactly; the other doesn't (the fake parser drops END).
+    def completion(prompt: list[int], sampling: dict) -> list[int]:
+        if sampling.get("top_p") == 0.9:
+            return [*encode("ab"), END]
+        return [*encode("a"), END, *encode("b"), END]
+
+    async with token_stack(completion=completion) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        await llm.chat.completions.create(model="policy", messages=[user("q")], top_p=0.9)
+        await llm.chat.completions.create(model="policy", messages=[user("q")], top_p=0.5)
+        graph = stack.server.trajectories[created["id"]].graph
+        older, latest = graph.children(0)
+        assert graph.shadowed_by(older) == latest
+
+        # An assistant message among the new ones makes the fake bridge decline, so the prompt is rendered.
+        history = [user("q"), {"role": "assistant", "content": "ab"}, user("more")]
+        history += [{"role": "assistant", "content": "edited"}, user("go")]
+        await llm.chat.completions.create(model="policy", messages=history)
+
+        # The render reproduces the older sample's tokens, but the turn forks to a new client node instead.
+        fork = graph.children(0)[-1]
+        assert graph.nodes[fork].author == "client"
+        older_tokens = graph.nodes[older].tokens.token_ids
+        assert graph.nodes[fork].tokens.token_ids[: len(older_tokens)] == older_tokens
+        assert graph.shadowed_by(fork) is None and graph.shadowed_by(latest) == fork
+        later = next(node.id for node in graph if node.author == "model" and node.id not in (older, latest))
+        assert fork in graph.path_to(later) and older not in graph.path_to(later)
 
 
 async def test_use_raw_content_keeps_reasoning_inline_so_a_verbatim_replay_stays_one_path() -> None:
@@ -564,3 +799,44 @@ def test_a_node_with_no_tokens_keeps_the_paths_routed_experts() -> None:
     empty = routing.slice(3, 0)
 
     assert empty is not None and empty.shape == (0, 2, 2)
+
+
+def test_a_client_node_without_images_keeps_its_delta_hash() -> None:
+    from skycap.hashing import client_token_delta_hash
+    from skycap.tokens.renderer import Media
+
+    assert client_token_delta_hash("m", [1, 2]) == client_token_delta_hash("m", [1, 2], [])
+    assert client_token_delta_hash("m", [1, 2], [Media("image", 0, 2, "a")]) != client_token_delta_hash(
+        "m", [1, 2], [Media("image", 0, 2, "b")]
+    )
+
+
+async def test_one_full_render_costs_one_unbridged_call_not_the_rest_of_the_trajectory() -> None:
+    # A reasoning model's history doesn't re-render as sampled (the template drops earlier reasoning), so a
+    # full render twins the history as client nodes and the conversation continues below them. Later calls
+    # must follow those twins to the newest reply and extend it, not stop on the stale model branch.
+    replies = iter(f"THINK:r{n}|a{n}" for n in range(1, 6))
+    async with token_stack(
+        completion=lambda prompt, sampling: [*encode(next(replies)), END], use_raw_content=True
+    ) as stack:
+        stack.renderer.drop_history_thinking = True
+        created = await stack.create()
+        llm = client(created["base_url"])
+        messages = [user("q1")]
+
+        async def call(next_user: str) -> None:
+            reply = (await llm.chat.completions.create(model="policy", messages=messages)).choices[0].message
+            messages.extend([{"role": "assistant", "content": reply.content}, user(next_user)])
+
+        await call("q2")
+        await call("q3")
+        stack.renderer.no_bridge = True  # e.g. a harness edit the renderer can't extend: one full render
+        await call("q4")
+        stack.renderer.no_bridge = False
+        await call("q5")
+        await call("q6")
+        graph = stack.server.trajectories[created["id"]].graph
+
+        bridged = [call.bridged for node in graph if node.author == "model" for call in node.calls]
+        assert bridged == [None, True, False, True, True]
+        assert (await stack.finish(created["id"]))["unbridged_calls"] == 1

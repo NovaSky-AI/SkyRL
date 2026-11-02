@@ -1,5 +1,6 @@
 """Token-aligned metadata layout transforms shared by training features."""
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Optional
@@ -11,6 +12,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
     get_unpacked_seq_align_size,
 )
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import RaggedRows
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
 # Megatron is imported lazily inside functions so that non-Megatron backends can
@@ -48,8 +50,13 @@ def build_token_metadata_layout(
     packed: bool,
     fp8_enabled: bool,
     fp8_recipe: Optional[str] = None,
+    seq_align: int = 1,
 ) -> TokenMetadataLayout:
-    """Compute the shared layout once for all replayed token metadata."""
+    """Compute the shared layout once for all replayed token metadata.
+
+    ``seq_align`` must match the extra unpacked-length alignment ``remove_left_padding`` applied to the model
+    input, so replayed metadata covers every token.
+    """
     import megatron.core.parallel_state as mpu
 
     aligned_attention_mask = attention_mask.to(device=device, dtype=torch.bool)
@@ -58,7 +65,9 @@ def build_token_metadata_layout(
     tp_size = mpu.get_tensor_model_parallel_world_size()
 
     if not packed:
-        align_size = get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
+        align_size = math.lcm(
+            get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe), seq_align
+        )
         max_sequence_length = max(sequence_lengths)
         aligned_sequence_length = max_sequence_length + (-max_sequence_length % align_size)
         return TokenMetadataLayout(
@@ -319,15 +328,16 @@ def _widen_dtype(current: np.dtype, incoming: np.dtype) -> np.dtype:
 
 
 class TokenMetadataTrace:
-    """Accumulate arrays whose first dimension is aligned to tokens.
+    """Accumulate token-aligned rows: arrays whose first dimension is tokens, or ``RaggedRows``.
 
-    Rows must share one trailing shape. Their dtype may widen across chunks; the
-    finalized array uses the widest dtype seen.
+    Every chunk shares one schema -- a trailing row shape, or one ``RaggedRows`` type. An
+    array's dtype may widen across chunks, and the finalized rows use the widest dtype seen;
+    ragged chunks join under ``RaggedRows.concat``'s column rule.
     """
 
     def __init__(self) -> None:
-        self._chunks: list[np.ndarray] = []
-        self._row_shape: tuple[int, ...] | None = None
+        self._chunks: list[np.ndarray | RaggedRows] = []
+        self._schema: tuple[int, ...] | type[RaggedRows] | None = None
         self._dtype: np.dtype | None = None
         self._num_rows = 0
         self._finalized = False
@@ -337,53 +347,55 @@ class TokenMetadataTrace:
         return self._num_rows
 
     @property
-    def row_shape(self) -> tuple[int, ...] | None:
-        """Trailing shape shared by every appended row, or None before the first append."""
-        return self._row_shape
-
-    @property
     def dtype(self) -> np.dtype | None:
-        """Widest dtype appended so far, or None before the first append."""
+        """Widest array dtype appended so far; None before the first append or for ragged rows."""
         return self._dtype
 
-    def append(self, rows: np.ndarray, *, expected_rows: int) -> None:
+    def append(self, rows: np.ndarray | RaggedRows, *, expected_rows: int) -> None:
         if self._finalized:
             raise RuntimeError("token metadata trace is already finalized")
         if isinstance(expected_rows, bool) or not isinstance(expected_rows, int) or expected_rows < 0:
             raise ValueError(f"expected_rows must be a non-negative integer, got {expected_rows!r}")
-        if not isinstance(rows, np.ndarray):
-            raise TypeError("token metadata rows must be a NumPy array")
-        if rows.ndim < 1:
-            raise ValueError("token metadata must have a token-row dimension")
-        if rows.shape[0] != expected_rows:
-            raise ValueError(f"token metadata has {rows.shape[0]} rows, expected {expected_rows}")
-        if not rows.flags.c_contiguous:
-            raise ValueError("token metadata rows must be contiguous")
-
-        if self._row_shape is None:
-            self._row_shape = rows.shape[1:]
-            self._dtype = rows.dtype
-        elif rows.shape[1:] != self._row_shape:
-            raise ValueError(f"token metadata schema changed from {self._row_shape} to {rows.shape[1:]}")
+        if isinstance(rows, np.ndarray):
+            if rows.ndim < 1:
+                raise ValueError("token metadata must have a token-row dimension")
+            if not rows.flags.c_contiguous:
+                raise ValueError("token metadata rows must be contiguous")
+            schema = rows.shape[1:]
+        elif isinstance(rows, RaggedRows):
+            schema = type(rows)
         else:
-            self._dtype = _widen_dtype(self._dtype, rows.dtype)
+            raise TypeError("token metadata rows must be a NumPy array or RaggedRows")
+        if len(rows) != expected_rows:
+            raise ValueError(f"token metadata has {len(rows)} rows, expected {expected_rows}")
+
+        if self._schema is None:
+            self._schema = schema
+        elif schema != self._schema:
+            raise ValueError(f"token metadata schema changed from {self._schema} to {schema}")
+        if isinstance(rows, np.ndarray):
+            self._dtype = rows.dtype if self._dtype is None else _widen_dtype(self._dtype, rows.dtype)
 
         self._chunks.append(rows)
         self._num_rows += expected_rows
 
     def append_padding(self, count: int, *, fill: int = -1) -> None:
-        """Append ``count`` rows of ``fill`` in the schema already established by ``append``."""
+        """Append ``count`` padding rows in the established schema: ``fill`` rows, or empty ragged rows."""
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise ValueError(f"padding count must be a non-negative integer, got {count!r}")
         if count == 0:
             return
-        if self._row_shape is None or self._dtype is None:
+        if not self._chunks:
             raise ValueError("cannot pad token metadata before any rows are captured")
 
-        row_shape, dtype = self._row_shape, self._dtype
-        self.append(np.full((count, *row_shape), fill, dtype=dtype, order="C"), expected_rows=count)
+        template = self._chunks[0]
+        if isinstance(template, RaggedRows):
+            padding = template.empty_like(count)
+        else:
+            padding = np.full((count, *template.shape[1:]), fill, dtype=self._dtype, order="C")
+        self.append(padding, expected_rows=count)
 
-    def finalize(self, *, expected_rows: int) -> np.ndarray:
+    def finalize(self, *, expected_rows: int) -> np.ndarray | RaggedRows:
         if self._finalized:
             raise RuntimeError("token metadata trace is already finalized")
         if self._num_rows != expected_rows:
@@ -394,4 +406,6 @@ class TokenMetadataTrace:
         self._finalized = True
         if len(self._chunks) == 1:
             return self._chunks[0]
+        if isinstance(self._chunks[0], RaggedRows):
+            return type(self._chunks[0]).concat(self._chunks)
         return np.concatenate(self._chunks, axis=0, dtype=self._dtype)

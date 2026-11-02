@@ -58,6 +58,12 @@ def _ray_init(extra_env_vars: dict[str, str] | None = None):
     if extra_env_vars:
         env_vars.update(extra_env_vars)
 
+    # Every worker boots through `uv run --isolated`, which builds a fresh env per
+    # process. With 8 starting at once (e.g. the 35B rows probing 8 GPU bundles) they
+    # queue on the uv cache past Ray's 60 s registration default, and the retries
+    # compete with the still-booting stragglers until the actor is unschedulable.
+    # Read by a raylet that ray.init starts here; no-op when attaching to a cluster.
+    os.environ.setdefault("RAY_worker_register_timeout_seconds", "600")
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})
 

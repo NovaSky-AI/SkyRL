@@ -47,12 +47,16 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     Any,
+    AsyncIterator,
     Dict,
+    Iterable,
     List,
     Literal,
     Optional,
@@ -64,6 +68,8 @@ from typing import (
 
 import aiohttp
 import orjson
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
@@ -79,12 +85,14 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     load_packed_body,
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
-from skyrl.backends.skyrl_train.utils.sample_support import SampleSupport
+from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
     SKYRL_HTTP_CONNECTION_LIMIT,
+    SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S,
 )
+from skyrl.train.utils import deadline
 
 _DATA_PLANE_RETRIES = 30
 
@@ -102,6 +110,85 @@ _TINKER_SAMPLE_TO_VLLM_PARAM_MAP = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+class InferenceServerHTTPError(aiohttp.ClientResponseError):
+    """A picklable ``ClientResponseError`` for an HTTP error from an inference server.
+
+    aiohttp's own error holds ``CIMultiDictProxy`` request info and headers, which can't be pickled, so Ray
+    replaces it with a bare ``RayError``. This keeps only plain fields and rebuilds the rest on unpickle.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        url: str,
+        status: int,
+        message: str,
+        headers: Optional[Iterable[Tuple[str, str]]] = None,
+    ) -> None:
+        request_info = aiohttp.RequestInfo(URL(url), method, CIMultiDictProxy(CIMultiDict()), URL(url))
+        super().__init__(request_info, (), status=status, message=message, headers=CIMultiDict(headers or ()))
+
+    @classmethod
+    def from_response(cls, resp: aiohttp.ClientResponse, message: str) -> "InferenceServerHTTPError":
+        return cls(resp.method, str(resp.url), resp.status, message, resp.headers.items())
+
+    def __reduce__(self):
+        # ClientResponseError forces args=(request_info, history), so the default reduce can't rebuild it.
+        args = (
+            self.request_info.method,
+            str(self.request_info.url),
+            self.status,
+            self.message,
+            list(self.headers.items()),
+        )
+        notes = getattr(self, "__notes__", None)
+        return type(self), args, {"__notes__": notes} if notes else None
+
+
+class InferenceServerTimeoutError(RuntimeError):
+    """A control-plane request exceeded ``SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S``.
+
+    Not a ``TimeoutError``, so ``except TimeoutError`` retry handlers don't swallow it.
+    """
+
+    def __init__(self, method: str, url: str, timeout_s: float) -> None:
+        # All fields go to args so the default BaseException pickling round-trips them.
+        super().__init__(method, url, timeout_s)
+        self.method = method
+        self.url = url
+        self.timeout_s = timeout_s
+
+    def __str__(self) -> str:
+        return (
+            f"{self.method} {self.url} did not complete within {self.timeout_s:g}s "
+            "(SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S)"
+        )
+
+
+@contextlib.asynccontextmanager
+async def _control_plane_request(
+    session: aiohttp.ClientSession, method: str, url: str, **kwargs: Any
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """``session.request`` bounded by ``SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S``."""
+    timeout_s = SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S
+    timeout = aiohttp.ClientTimeout(total=timeout_s if timeout_s > 0 else None)
+    try:
+        async with session.request(method, url, timeout=timeout, **kwargs) as resp:
+            yield resp
+    except asyncio.TimeoutError:
+        raise InferenceServerTimeoutError(method, url, timeout_s) from None
+
+
+async def _read_json_body(resp: aiohttp.ClientResponse) -> Any:
+    """Read JSON, preserving the HTTP error when an error response is not valid JSON."""
+    try:
+        return await resp.json()
+    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+        if resp.status >= 400:
+            raise InferenceServerHTTPError.from_response(resp, await resp.text() or resp.reason) from None
+        raise
 
 
 def _extract_session_id_and_body(
@@ -174,7 +261,7 @@ class RemoteGenerateResult:
     response_logprobs: Optional[List[float]]
     stop_reason: str
     routed_experts: Optional[RoutedExpertIndices]
-    sample_support: Optional[SampleSupport]
+    sample_support: Optional[CompactSampleSupport]
 
 
 @dataclass
@@ -239,13 +326,7 @@ class RemoteGenerateClient:
                     except orjson.JSONDecodeError as exc:
                         if 400 <= resp.status < 500:
                             text = await resp.text()
-                            raise aiohttp.ClientResponseError(
-                                resp.request_info,
-                                resp.history,
-                                status=resp.status,
-                                message=text or resp.reason,
-                                headers=resp.headers,
-                            ) from exc
+                            raise InferenceServerHTTPError.from_response(resp, text or resp.reason) from exc
                         last_exc = exc
                         # The bare JSONDecodeError says only "line 1 column 1 (char 0)", which
                         # gives no hint whether the body was empty, an HTML error page, or a
@@ -283,10 +364,16 @@ class RemoteGenerateClient:
         return_routed_experts: bool = False,
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
+        return_sample_support_logprobs: bool = False,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
     ) -> RemoteGenerateResult:
-        """Generate one raw-token completion with optional per-token replay metadata."""
+        """Generate one raw-token completion with optional per-token replay metadata.
+
+        ``return_sample_support_logprobs`` also returns each support member's sampler logprob.
+        """
+        if return_sample_support_logprobs and not return_sample_support:
+            raise ValueError("return_sample_support_logprobs requires return_sample_support=True")
         if routed_experts_prompt_start is not None:
             if not return_routed_experts:
                 raise ValueError("routed_experts_prompt_start requires return_routed_experts=True")
@@ -309,6 +396,8 @@ class RemoteGenerateClient:
         }
         if return_sample_support:
             payload["return_sample_support"] = True
+        if return_sample_support_logprobs:
+            payload["return_sample_support_logprobs"] = True
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
@@ -347,7 +436,12 @@ class RemoteGenerateClient:
             packed_sample_support = choice.get(PackedField.ROLLOUT_SAMPLE_SUPPORT)
             if not isinstance(packed_sample_support, dict):
                 raise ValueError("/skyrl/v1/generate must return packed rollout_sample_support")
-            sample_support = decode_packed_sample_support(packed_sample_support)
+            packed_logprobs = None
+            if return_sample_support_logprobs:
+                packed_logprobs = choice.get(PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS)
+                if not isinstance(packed_logprobs, dict):
+                    raise ValueError("/skyrl/v1/generate must return packed rollout_sample_support_logprobs")
+            sample_support = decode_packed_sample_support(packed_sample_support, packed_logprobs)
 
         return RemoteGenerateResult(
             raw_response=response,
@@ -433,6 +527,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
     enable_return_sample_support_set: bool = False
     """Whether the engine may return the sampler's bounded top-k support per generated token.
     Capture is per-request: callers opt a batch in with ``InferenceEngineInput.return_sample_support``."""
+
+    enable_return_sample_support_logprobs: bool = False
+    """Whether captured support also carries each member's sampler logprob (score centering).
+    Requires ``enable_return_sample_support_set``."""
 
     uses_lora_weight_sync: bool = False
     """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
@@ -584,6 +682,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return_sample_support = self.enable_return_sample_support_set and input_batch.get(
             "return_sample_support", False
         )
+        return_sample_support_logprobs = return_sample_support and self.enable_return_sample_support_logprobs
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -611,6 +710,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                         routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
                     ),
                     return_sample_support=return_sample_support,
+                    return_sample_support_logprobs=return_sample_support_logprobs,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -624,6 +724,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                         routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
                     ),
                     return_sample_support=return_sample_support,
+                    return_sample_support_logprobs=return_sample_support_logprobs,
                     model=model,
                     cache_salt=cache_salt,
                 )
@@ -663,6 +764,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         cache_salt: Optional[str] = None,
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
+        return_sample_support_logprobs: bool = False,
     ) -> Dict[str, Any]:
         result = await self._get_generate_client().generate(
             prompt_token_ids=prompt_token_ids,
@@ -672,6 +774,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             return_routed_experts=self.enable_return_routed_experts,
             routed_experts_prompt_start=routed_experts_prompt_start,
             return_sample_support=return_sample_support,
+            return_sample_support_logprobs=return_sample_support_logprobs,
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
@@ -1105,8 +1208,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
-        async with session.request(method, url, json=json, params=params) as resp:
-            body = await resp.json() if resp.content_length else None
+        async with _control_plane_request(session, method, url, json=json, params=params) as resp:
+            body = await _read_json_body(resp) if resp.content_length else None
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
 
@@ -1129,9 +1232,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
         Returns:
             Dict mapping server_url to response.
         """
-        results = await asyncio.gather(
-            *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
-        )
+        with deadline.operation(endpoint):
+            results = await asyncio.gather(
+                *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
+            )
         return {url: resp for url, resp in results}
 
     async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP, clear_cache: bool = False) -> Dict[str, Any]:
@@ -1193,7 +1297,13 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 level,
             )
             level = 1
-        params: Dict[str, Any] = {"level": str(level)}
+        # vLLM's /sleep pauses the scheduler (default mode "abort") and, at level >= 1, resets
+        # the prefix cache including running requests. vLLM 0.31 rejected that reset with
+        # routed-experts capture (`enable_return_routed_experts`) unless paused in "keep" mode;
+        # vllm#59060 (in 0.32) lifted that. Abort in-flight requests explicitly first, then sleep
+        # in "keep" mode: the same end state for every engine config.
+        await self.pause(mode=PauseMode.ABORT, clear_cache=False)
+        params: Dict[str, Any] = {"level": str(level), "mode": PauseMode.KEEP.value}
         if tags:
             params["tags"] = tags
         return await self._call_all_servers("/sleep", params=params)
@@ -1360,9 +1470,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 if in_memory
                 else {"lora_name": lora_name, "lora_path": lora_path}
             )
-            async with session.post(url, json=payload) as resp:
+            async with _control_plane_request(session, "POST", url, json=payload) as resp:
                 if resp.status >= 400:
-                    body = await resp.json()
+                    body = await _read_json_body(resp)
                     raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
@@ -1394,9 +1504,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         async def _unload_on_server(server_url: str):
             url = f"{server_url}/v1/unload_lora_adapter"
-            async with session.post(url, json=payload) as resp:
+            async with _control_plane_request(session, "POST", url, json=payload) as resp:
                 if resp.status >= 400:
-                    body = await resp.json()
+                    body = await _read_json_body(resp)
                     raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
@@ -1513,18 +1623,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:
     """Modified version of resp.raise_for_status() that reads the body for the error message.
 
-    Raises aiohttp.ClientResponseError with the error message from the body if there is an error
+    Raises InferenceServerHTTPError (a picklable aiohttp.ClientResponseError) with the error message from the body if there is an error
 
     The standard `raise_for_status()` only uses the HTTP reason phrase (e.g. "Bad Request"), which is often unhelpful. APIs typically put more descriptive error details in the response body. This function bridges that gap by surfacing the body's error message in the exception.
     """
-    if resp.status >= 400 and body is not None:
-        error_detail = body.get("error", {})
+    if resp.status >= 400:
+        error_detail = body.get("error", {}) if isinstance(body, dict) else {}
         detail_msg = error_detail.get("message", resp.reason) if isinstance(error_detail, dict) else resp.reason
-        raise aiohttp.ClientResponseError(
-            resp.request_info,
-            resp.history,
-            status=resp.status,
-            message=detail_msg,
-            headers=resp.headers,
-        )
-    resp.raise_for_status()
+        raise InferenceServerHTTPError.from_response(resp, detail_msg)

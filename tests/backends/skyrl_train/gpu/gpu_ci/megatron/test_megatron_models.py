@@ -14,11 +14,13 @@ and a serialized MXFP8 wire (fp8_weight_sync_mode=mxfp8) into vLLM's
 compressed-tensors MXFP8 path. Select with: -m b200.
 """
 
+import dataclasses
 import os
 
 import pytest
 import ray
 import torch
+import yaml
 from transformers import AutoTokenizer
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
@@ -26,6 +28,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     loss_fn_outputs_to_tensor,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
     is_blackwell_or_newer,
 )
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
@@ -51,6 +54,12 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
+# 4-layer slice of Qwen/Qwen3.8-Flash-Next (layers 0-3: GDN x3 + gated attention with the QSA
+# indexer, PLE on layer 1, no MTP) built by examples/train/qwen3_8_flash_next/make_slice.py. The
+# released ~51B-parameter PLE n-gram table is replaced by a small random one (ngram_vocab_size_base
+# 2048), which HF, vLLM and the Megatron bridge all hash into the same way. A local override must
+# keep "Qwen3.8-Flash-Next" in its path: the qwen3.8 settings below are keyed on the model name.
+QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-Flash-Next-4layer")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -87,10 +96,9 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
             cfg.trainer.remove_microbatch_padding = False
     if "qwen3.5" in model_name.lower():
         # Qwen3.5 hybrid GDN checkpoints report a ...ForConditionalGeneration arch
-        # and auto-dispatch to the VL bridge -> Qwen3VLModel, which self-packs and
-        # double-packs against SkyRL's sample packing (corrupting the GDN
-        # cu_seqlens). language_model_only routes them to the native GPTModel + GDN
-        # thd path instead, which supports packed sequences directly.
+        # and auto-dispatch to the VL bridge -> Qwen3VLModel. language_model_only
+        # routes them to the native GPTModel + GDN thd path, which is what this
+        # text-only test exercises.
         cfg.trainer.remove_microbatch_padding = True
         cfg.trainer.policy.language_model_only = True
         cfg.trainer.ref.language_model_only = True
@@ -110,6 +118,13 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # max_num_seqs=1024 and 64 heads that is 65536 > 65535 and the CUDA-graph capture / profile
         # run fails with "Triton Error [CUDA]: invalid argument". Stay below the limit.
         cfg.generator.inference_engine.max_num_seqs = 512
+    if "qwen3.8-flash-next" in model_name.lower():
+        # VL checkpoint; patches/megatron/qwen4_exp bridges the language model only, and PLE
+        # needs packed (thd) sequences.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
     if "kimi-k2.5" in model_name.lower():
         # Unified VL checkpoint with a DeepSeek-V3 language model under a
         # `language_model.` prefix; MegatronWorker refuses it without
@@ -148,6 +163,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
+        or ("qwen3.8-flash-next" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -183,13 +199,31 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         # 600 s health-wait default; production stages the same ceiling. This
         # is a ceiling, not a duration — warm caches boot in minutes.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = "7200"
+    if "qwen3.8-flash-next" in model_name.lower():
+        # A cold node JIT-builds flashinfer's trtllm_mnnvl_comm (~8 min) at vLLM startup, past
+        # the 600 s health-wait default. A ceiling, not a duration.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = "1800"
     # fla's TileLang GDN backend aborts on Blackwell; fall back to Triton.
-    if "qwen3.5" in model_name.lower():
+    if "qwen3.5" in model_name.lower() or "qwen3.8-flash-next" in model_name.lower():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0" if is_blackwell_or_newer() else "1")
     # Same story for GLM-5.3-Flash's KDA layers, which run fla kernels too. Only forced on
     # Blackwell so the H100 rows keep whatever fla picks by default.
     if "glm-5.3-flash" in model_name.lower() and is_blackwell_or_newer():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0")
+    if "kimi-k2.5" in model_name.lower():
+        # Cold vLLM graph capture can exceed the default 600 s health deadline.
+        env.setdefault(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S",
+            os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"),
+        )
+    if "glm-5.3-flash" in model_name.lower():
+        # On cold kernel caches the vLLM server JIT-compiles the TileLang mHC / fla KDA / DSA
+        # kernels during CUDA-graph capture, then runs the JIT kernel warmup and the FlashInfer
+        # MoE autotune: ~490 s to healthy on B200, and a cold H100 CI runner exceeded the 600 s
+        # default. Warm caches boot in ~2 min.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
     return env or None
 
 
@@ -221,7 +255,9 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
             # GDN hybrid: one Mamba cache block per decode seq; the slim KV
             # pool fits ~163 blocks, and the vLLM default max_num_seqs=1024
             # fails CUDA-graph capture. The test runs <= 80 concurrent seqs.
-            overrides["max_num_seqs"] = 128
+            # The *_exclude row keeps two layers' routed experts BF16 (~1.6 GiB
+            # more weights per engine), which leaves only ~96 blocks.
+            overrides["max_num_seqs"] = 80 if fp8_mode.endswith("_exclude") else 128
     if "qwen3.5-0.8b" in model_name.lower() and not fp8_mode:
         # vLLM 0.30 captures extra graph/memory state during startup on the
         # 24 GB L4 CI shape. The test prompts are <=512 and generation is
@@ -240,6 +276,14 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # colocated with the Megatron shard. The DSA indexer in vLLM needs DeepGEMM.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if "qwen3.8-flash-next" in model_name.lower():
+        # 262k default context; the slice is ~11B params (4 x 512-expert MoE layers, the embedding
+        # and LM head), colocated with the Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
+        # Custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's
+        # cumem allocator at TP>1 (custom_all_reduce.cuh:164 'invalid argument' at engine start).
+        overrides["engine_init_kwargs"]["disable_custom_all_reduce"] = True
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.
@@ -540,6 +584,44 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-35b-a3b_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
+        # Qwen3.8-Flash-Next 4-layer slice (QWEN38_4LAYER) on 4xH100-80G: GDN with a sigmoid output
+        # gate, gated attention with the QSA indexer (dense regime: sequences stay under
+        # indexer_budget), 512-expert shared-expert MoE, gated low-rank hyper-connections, the PLE
+        # n-gram embedding row-sharded over EP=4, and the final hyper-connection mixer. vLLM runs
+        # TP=4. The tp2 row runs the same slice with sequence parallelism: PLE and the QSA indexer
+        # on the TP-gathered sequence, 12Q/1KV attention heads per rank.
+        pytest.param(
+            1,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            QWEN38_4LAYER,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="qwen3.8-flash-next-4layer_h100_ep4",
+            marks=pytest.mark.h100,
+        ),
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            QWEN38_4LAYER,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="qwen3.8-flash-next-4layer_h100_tp2_ep4",
+            marks=pytest.mark.h100,
+        ),
         # Full-FP8 rows: blockwise FP8 Megatron compute + FP8 vLLM rollout fed
         # by serialized blockwise weight sync; the fp8_param row additionally
         # keeps persistent FP8 Megatron params with exact optimizer-master
@@ -599,6 +681,27 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-35b-a3b_h100_tp4_ep4_full_fp8",
             marks=pytest.mark.h100,
         ),
+        # Same shape with the *_exclude modules kept BF16 on both sides, which on this
+        # MoE model includes the routed experts of layers 0 and 3. Their batched BF16
+        # tensors bypass the FP8 MoE wire and load through vLLM's own load_weights, and
+        # blockwise vLLM leaves those layers unquantized from the expert-0 ignore names;
+        # the dense exclusion row reaches neither path.
+        pytest.param(
+            4,
+            1,
+            1,
+            4,
+            1,
+            1,
+            4,
+            "Qwen/Qwen3.5-35B-A3B",
+            3e-1,
+            5e-2,
+            "full_fp8_exclude",
+            None,
+            id="qwen3.5-35b-a3b_h100_tp4_ep4_full_fp8_exclude",
+            marks=pytest.mark.h100,
+        ),
         # MXFP8 rows (Blackwell-only): mxfp8 Megatron compute + vLLM rollout
         # fed by the serialized MXFP8 wire — the recipe/wire pair that
         # fp8_recipe="auto" + fp8_weight_sync_mode="auto" resolve to on B200.
@@ -645,6 +748,45 @@ async def construct_training_input_from_generator_output(generator_output, token
             id="qwen3.5-0.8b-dense_mxfp8_fp8kv",
             marks=pytest.mark.b200,
         ),
+        # Same dense shape with per-module exclusions on both sides
+        # (fp8_exclude_modules + num_layers_at_start_in_bf16 for training,
+        # fp8_weight_sync_exclude_modules for the rollout). If the engine's
+        # ignore list and the sync disagreed on a module, the synced weights
+        # would be corrupt and the logprob checks would fail.
+        pytest.param(
+            1,
+            1,
+            1,
+            1,
+            None,
+            1,
+            2,
+            "Qwen/Qwen3.5-0.8B",
+            1e-1,
+            5e-2,
+            "mxfp8_exclude",
+            None,
+            id="qwen3.5-0.8b-dense_mxfp8_exclude",
+            marks=pytest.mark.b200,
+        ),
+        # The same exclusions given to training as a te_precision_config_file
+        # instead of fp8_exclude_modules.
+        pytest.param(
+            1,
+            1,
+            1,
+            1,
+            None,
+            1,
+            2,
+            "Qwen/Qwen3.5-0.8B",
+            1e-1,
+            5e-2,
+            "mxfp8_precision_file",
+            None,
+            id="qwen3.5-0.8b-dense_mxfp8_precision_file",
+            marks=pytest.mark.b200,
+        ),
         pytest.param(
             1,
             1,
@@ -676,12 +818,15 @@ async def test_logprobs_matching_roundtrip(
     megatron_threshold,
     fp8_mode,
     max_generate_length,
+    tmp_path,
 ):
     """
     Check that logprob diff matches acrosss vllm and megatron.
     """
     # See the comparison branch at the end of the test.
-    compare_common_prefix = bool(fp8_mode) or "kimi-k2.5" in model_name.lower()
+    compare_common_prefix = (
+        bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or "qwen3.8-flash-next" in model_name.lower()
+    )
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which
@@ -715,6 +860,27 @@ async def test_logprobs_matching_roundtrip(
                 }
             )
             mcfg.transformer_config_kwargs = transformer_config_kwargs
+            if fp8_mode.endswith(("_exclude", "_precision_file")):
+                # The same modules stay BF16 on both sides: the first layer, layer 3
+                # (full attention, plus the routed and shared experts on MoE models)
+                # and every GDN out_proj, named in Megatron and in HF terms.
+                exclude_modules = ["decoder.layers.3.*", "*.self_attention.out_proj"]
+                if fp8_mode.endswith("_exclude"):
+                    precision = {"fp8_exclude_modules": exclude_modules}
+                else:
+                    recipe_path = tmp_path / "precision.yaml"
+                    recipe_path.write_text(yaml.safe_dump(fp8_exclude_recipe(exclude_modules), sort_keys=False))
+                    precision = {"te_precision_config_file": str(recipe_path)}
+                # Rebuilt so MegatronConfig.__post_init__ folds these fields into
+                # transformer_config_kwargs, as it does for a user's config.
+                mcfg = cfg.trainer.policy.megatron_config = dataclasses.replace(
+                    mcfg, num_layers_at_start_in_bf16=1, **precision
+                )
+                cfg.generator.inference_engine.fp8_weight_sync_exclude_modules = [
+                    "*.layers.0.*",
+                    "*.layers.3.*",
+                    "*.linear_attn.out_proj",
+                ]
             if fp8_mode == "fp8_param":
                 mcfg.ddp_config.fp8_param_gather = True
             # vLLM: FP8 rollout fed by the serialized weight sync
@@ -874,7 +1040,9 @@ async def test_logprobs_matching_roundtrip(
             # score different tokens and the diff is noise. FP8 rows ran on identical
             # synced weights (~0.14 positional vs ~1e-3 on prefixes); the Kimi slice
             # has a flat enough distribution that 53 of 80 sequences diverged
-            # (~0.93 positional vs ~0.008 on prefixes).
+            # (~0.93 positional vs ~0.008 on prefixes). So does the 4-of-48-layer
+            # Qwen3.8-Flash-Next slice, whose greedy output differs between two
+            # unsynced runs of the same engine.
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]

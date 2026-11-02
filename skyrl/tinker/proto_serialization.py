@@ -1,7 +1,10 @@
 """Proto wire-format conversion for the Tinker SDK's binary paths.
 
 Two directions, both required by tinker SDK >= 0.25.0 (older SDKs negotiate
-these via server-side client_config flags and fall back to JSON):
+these via server-side client_config flags and fall back to JSON). Written
+against the SDK's ``tinker_public.proto`` as of 0.27.x; 0.28.0 renamed
+``TopkPromptLogprobs`` to ``TopkLogprobs`` (``prompt_length`` -> ``length``),
+which the top-k serializer below does not yet handle:
 
 - **Responses**: the SDK retrieves ``sample``, ``forward``, and
   ``forward_backward`` results as protobuf (``Accept: application/x-protobuf``
@@ -19,6 +22,7 @@ these via server-side client_config flags and fall back to JSON):
 """
 
 import base64
+import math
 from collections.abc import Iterable, Sequence
 
 import numpy as np
@@ -56,6 +60,10 @@ _TENSOR_DTYPE_TO_NUMPY = {"float32": np.float32, "int64": np.int64}
 # Request tensors only arrive as the public dtypes (the SDK collapses to
 # {float32, int64} on the write path).
 _PROTO_DTYPE_TO_NUMPY = {pb.DTYPE_FLOAT32: np.float32, pb.DTYPE_INT64: np.int64}
+
+# SDK >= 0.27 schemas carry the tagged loss_fn_config_v2 map; the server runs
+# against whichever SDK is installed, so feature-detect it.
+_HAS_LOSS_FN_CONFIG_V2 = "loss_fn_config_v2" in pb.ForwardBackwardRequest.DESCRIPTOR.fields_by_name
 
 
 def parse_forward_backward_request(body: bytes) -> tuple[dict, bool]:
@@ -99,10 +107,32 @@ def parse_forward_backward_request(body: bytes) -> tuple[dict, bool]:
         "forward_backward_input": {
             "data": data,
             "loss_fn": msg.loss_fn,
-            "loss_fn_config": dict(msg.loss_fn_config) or None,
+            "loss_fn_config": _loss_fn_config_from_proto(msg),
         },
     }
     return request_dict, msg.forward_only
+
+
+def _loss_fn_config_from_proto(msg: pb.ForwardBackwardRequest) -> dict[str, float | str] | None:
+    """Read ``loss_fn_config`` from whichever map the SDK populated.
+
+    SDK >= 0.27 writes every entry to ``loss_fn_config_v2`` (a tagged
+    number/text union) and mirrors only the numeric ones into the legacy
+    float-only ``loss_fn_config`` map, so the legacy map silently drops string
+    values. Prefer v2 whenever it is set; text values pass through unchanged
+    and the API's ``ForwardBackwardInput`` model rejects them, since no SkyRL
+    loss takes a string parameter.
+    """
+    if _HAS_LOSS_FN_CONFIG_V2 and msg.loss_fn_config_v2:
+        config: dict[str, float | str] = {}
+        for key, value in msg.loss_fn_config_v2.items():
+            arm = value.WhichOneof("value")
+            if arm == "text":
+                config[key] = value.text
+            else:
+                config[key] = value.number
+        return config
+    return dict(msg.loss_fn_config) or None
 
 
 def _tensor_from_proto(tensor: pb.Tensor) -> dict:
@@ -190,7 +220,8 @@ def _serialize_forward_backward_output(result_data: dict) -> bytes:
     proto = pb.ForwardBackwardOutput()
     proto.loss_fn_output_type = output.loss_fn_output_type
     for name, value in output.metrics.items():
-        proto.metrics[name] = float(value)
+        # Older futures stored non-finite metrics as null, losing the exact value.
+        proto.metrics[name] = math.nan if value is None else float(value)
 
     if not output.loss_fn_outputs:
         return proto.SerializeToString()

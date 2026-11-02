@@ -150,11 +150,21 @@ class MegatronWeightSource(WeightSource):
             ]
         return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
 
+    def _wire_dtype(self, tensor: torch.Tensor) -> torch.dtype:
+        # Parameters a model keeps in fp32 under bf16 training (DeepSeek-V4's mHC mixing weights,
+        # attention sinks and router expert bias) go out in fp32: vLLM keeps them in fp32 too, and a
+        # bf16 round trip changes them by ~1/256, enough to move router top-k choices.
+        # Integer tables (DeepSeek-V4's hash-routing tid2eid) keep their dtype: bf16 holds
+        # integers exactly only up to 256.
+        if tensor.dtype == torch.float32 or not tensor.is_floating_point():
+            return tensor.dtype
+        return self._dtype
+
     def metadata(self) -> List[ParamMeta]:
         if self._meta is None:
             meta: List[ParamMeta] = []
             for name, tensor in self._export():
-                meta.append(ParamMeta(name, self._dtype, tuple(tensor.shape)))
+                meta.append(ParamMeta(name, self._wire_dtype(tensor), tuple(tensor.shape)))
                 del tensor
             self._meta = meta
         return self._meta
@@ -163,7 +173,8 @@ class MegatronWeightSource(WeightSource):
         # See FsdpWeightSource.__iter__ on the device.
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
         for name, tensor in self._export():
-            full = tensor.to(device=device, dtype=self._dtype, non_blocking=True).detach().contiguous()
+            dtype = self._wire_dtype(tensor)
+            full = tensor.to(device=device, dtype=dtype, non_blocking=True).detach().contiguous()
             yield name, full
 
 

@@ -1,9 +1,10 @@
-"""Text mode: forward the call to an OpenAI-compatible server and record what came back.
+"""Text mode: forward the call to an upstream that speaks its API, and record what came back.
 
-The request bytes are forwarded unchanged apart from the credential. The reply
-is committed to the graph before the response (or, when streamed, its end)
-reaches the harness, so a harness that calls ``finish`` right after its last
-reply always finds that reply recorded.
+The request bytes are forwarded unchanged apart from the credential, to the
+call's dialect's path on the upstream. The reply is committed to the graph
+before the response (or, when streamed, its end) reaches the harness, so a
+harness that calls ``finish`` right after its last reply always finds that
+reply recorded.
 """
 
 from __future__ import annotations
@@ -16,14 +17,8 @@ import orjson
 from aiohttp import web
 
 from skycap import retry
+from skycap.dialects.base import CallRequest, Dialect, Reply, error_body
 from skycap.graph import CallInfo
-from skycap.openai_chat import (
-    ChatReply,
-    ChatRequest,
-    StreamAssembler,
-    error_body,
-    parse_response,
-)
 from skycap.trajectory import Failure, Trajectory
 
 _HOP_HEADERS = {"authorization", "host", "content-length", "transfer-encoding", "connection"}
@@ -70,22 +65,23 @@ class TextBackend:
             return web.Response(body=await up.read(), status=up.status, content_type=up.content_type)
 
     async def chat(
-        self, trajectory: Trajectory, request: web.Request, chat: ChatRequest, raw: bytes
+        self, trajectory: Trajectory, request: web.Request, chat: CallRequest, raw: bytes
     ) -> web.StreamResponse:
         started = time.time()
+        dialect = chat.dialect.get_dialect()
         try:
             async with self.session.post(
-                f"{self.upstream_url}/chat/completions", data=raw, headers=self._headers(request)
+                f"{self.upstream_url}{dialect.path}", data=raw, headers=self._headers(request)
             ) as up:
                 if chat.stream and up.status == 200 and up.content_type == "text/event-stream":
-                    return await self._relay(trajectory, request, chat, up, started)
+                    return await self._relay(trajectory, request, chat, dialect, up, started)
                 body = await up.read()
                 response = web.Response(body=body, status=up.status, content_type=up.content_type)
                 if up.status != 200:
                     _fail(trajectory, up.status, body.decode(errors="replace")[:2000])
                     return response
                 try:
-                    reply = parse_response(orjson.loads(body))
+                    reply = dialect.parse_reply(orjson.loads(body))
                 except ValueError as error:
                     _fail(trajectory, up.status, f"unreadable reply: {error}")
                     return response
@@ -102,7 +98,8 @@ class TextBackend:
         self,
         trajectory: Trajectory,
         request: web.Request,
-        chat: ChatRequest,
+        chat: CallRequest,
+        dialect: Dialect,
         up: aiohttp.ClientResponse,
         started: float,
     ) -> web.StreamResponse:
@@ -110,37 +107,40 @@ class TextBackend:
             status=up.status, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
         )
         await response.prepare(request)
-        assembler = StreamAssembler()
-        # From the event carrying the finish_reason on, chunks are held back until the reply
-        # is committed: a client that stops at the end of the stream and finishes at once
-        # must find its last reply recorded.
+        assembler = dialect.assembler()
+        # From the event that ends the turn on, events are held back until the reply is
+        # committed: a client that stops at the end of the stream and finishes at once must
+        # find its last reply recorded.
         held: list[bytes] = []
         try:
             async for chunk in up.content.iter_any():
-                assembler.feed(chunk)
-                if held or assembler.finish_reason is not None:
-                    held.append(chunk)
-                    if assembler.saw_done:
-                        break
-                    continue
-                await response.write(chunk)
+                for event, ending in assembler.feed(chunk):
+                    if held or ending:
+                        held.append(event)
+                    else:
+                        await response.write(event)
+                if assembler.done:
+                    break
         except aiohttp.ClientError as error:
             _fail(trajectory, up.status, f"upstream stream interrupted: {error}")
             # The response has started, so it can't become an error response. Dropping the
             # connection makes the client see a failed stream rather than a short one.
             raise ConnectionResetError("upstream stream interrupted") from error
-        assembler.feed(b"\n\n")
+        rest = assembler.flush()
+        if rest:
+            held.append(rest)
         try:
-            commit(trajectory, chat, assembler.reply(), started)
+            reply = assembler.reply()
+            commit(trajectory, chat, reply, started)
         except ValueError as error:
             _fail(trajectory, up.status, f"unreadable stream: {error}")
-        for chunk in held:
-            await response.write(chunk)
+        for event in held:
+            await response.write(event)
         await response.write_eof()
         return response
 
 
-def commit(trajectory: Trajectory, chat: ChatRequest, reply: ChatReply, started: float) -> bool:
+def commit(trajectory: Trajectory, chat: CallRequest, reply: Reply, started: float) -> bool:
     """Record one successful call, unless the trajectory was sealed meanwhile. Returns whether it did."""
     if not trajectory.is_open:
         return False
@@ -151,6 +151,7 @@ def commit(trajectory: Trajectory, chat: ChatRequest, reply: ChatReply, started:
         sampling=chat.sampling,
         usage=reply.usage,
         finish_reason=reply.finish_reason,
+        dialect=chat.dialect.value,
     )
     trajectory.graph.commit_text(chat.messages, reply.message, tools=chat.tools, model=chat.model, call=call)
     return True

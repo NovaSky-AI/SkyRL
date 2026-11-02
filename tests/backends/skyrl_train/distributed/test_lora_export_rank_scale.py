@@ -19,6 +19,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
     fold_lora_rank_scale_for_vllm,
     lora_rank_from_tensors,
     mark_alpha_folded,
+    normalized_moe_expert_lora_rank,
 )
 
 ALPHA = 32
@@ -131,6 +132,20 @@ def test_lora_rank_from_tensors_reads_both_layouts_and_rejects_mismatch():
         lora_rank_from_tensors(torch.zeros(8, 16), torch.zeros(8, 4))
     with pytest.raises(ValueError, match="lora_B must be"):
         lora_rank_from_tensors(None, torch.zeros(4))
+
+
+@pytest.mark.parametrize(
+    "lora_rank,topk,etp,expected",
+    [
+        (64, 8, 1, 8),
+        # Rounded up to a multiple of the expert tensor parallel size.
+        (64, 8, 16, 16),
+        (64, 8, 64, 64),
+        (32, 8, 1, 4),
+    ],
+)
+def test_normalized_moe_expert_lora_rank(lora_rank, topk, etp, expected):
+    assert normalized_moe_expert_lora_rank(lora_rank, topk, etp) == expected
 
 
 def test_invalid_config_rank_rejected():

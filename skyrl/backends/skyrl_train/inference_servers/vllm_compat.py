@@ -130,40 +130,57 @@ def patch_vllm_dummy_weight_boot_detection(loader_cls: type[Any] | None = None) 
     return True
 
 
-def patch_vllm_fp8_kv_scale_completion(runner_cls: type[Any] | None = None) -> bool:
-    """Complete vLLM's post-wake FP8 KV scale reset for serialized-FP8 engines.
+def normalize_fp8_kv_scales_after_wake(model_runner: Any) -> int:
+    """Post-wake half of the serialized-FP8 KV scale contract, for any wake path.
 
-    Wraps ``GPUModelRunner.post_kv_cache_wake_up`` to run
-    :func:`normalize_serialized_fp8_kv_scales` after the upstream reset, but
-    only on a dummy-weight boot — see :func:`booted_without_checkpoint_weights`
-    for why an engine serving a calibrated FP8 checkpoint must be left alone.
+    Shared by the ``Worker.wake_up`` patch below and SkyRL's own
+    ``skyrl_wake_for_weight_sync``, which wakes the allocator directly and so
+    bypasses ``Worker.wake_up``. No-op unless this engine booted from dummy
+    weights (see :func:`booted_without_checkpoint_weights`).
     """
-    if runner_cls is None:
+    if not booted_without_checkpoint_weights():
+        return 0
+    count = normalize_serialized_fp8_kv_scales(model_runner)
+    if count:
+        logger.info("Normalized FP8 KV/attention scales to 1.0 on %d layers after wake", count)
+    return count
+
+
+def patch_vllm_fp8_kv_scale_completion(worker_cls: type[Any] | None = None) -> bool:
+    """Re-normalize FP8 KV/attention scales after every wake for serialized-FP8 engines.
+
+    Wraps ``Worker.wake_up`` to run :func:`normalize_serialized_fp8_kv_scales`
+    on the worker's model runner after the upstream wake, but only on a
+    dummy-weight boot — see :func:`booted_without_checkpoint_weights` for why an
+    engine serving a calibrated FP8 checkpoint must be left alone. This used to
+    wrap ``GPUModelRunner.post_kv_cache_wake_up``, which vLLM 0.30 removed (and
+    Model Runner V2, the 0.30 default, never had); the worker owns the wake path
+    and its ``model_runner`` is whichever runner the engine picked, so this hook
+    covers both. Normalizing is idempotent, so it runs on every wake regardless
+    of tags.
+    """
+    if worker_cls is None:
         try:
-            from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+            from vllm.v1.worker.gpu_worker import Worker
         except ImportError:
             return False
-        runner_cls = GPUModelRunner
+        worker_cls = Worker
 
-    original: Callable[..., Any] | None = getattr(runner_cls, "post_kv_cache_wake_up", None)
+    original: Callable[..., Any] | None = getattr(worker_cls, "wake_up", None)
     if not callable(original):
         return False
     if getattr(original, "_skyrl_completes_fp8_kv_scales", False):
         return False
 
     @wraps(original)
-    def _patched_post_kv_cache_wake_up(self: Any, *args: Any, **kwargs: Any) -> Any:
+    def _patched_wake_up(self: Any, *args: Any, **kwargs: Any) -> Any:
         result = original(self, *args, **kwargs)
-        if not booted_without_checkpoint_weights():
-            return result
-        count = normalize_serialized_fp8_kv_scales(self)
-        if count:
-            logger.info("Normalized FP8 KV/attention scales to 1.0 on %d layers after wake", count)
+        normalize_fp8_kv_scales_after_wake(getattr(self, "model_runner", None))
         return result
 
-    setattr(_patched_post_kv_cache_wake_up, "_skyrl_completes_fp8_kv_scales", True)
-    runner_cls.post_kv_cache_wake_up = _patched_post_kv_cache_wake_up
-    logger.info("Patched vLLM post-wake FP8 KV scale reset (q/prob scales + float mirrors)")
+    setattr(_patched_wake_up, "_skyrl_completes_fp8_kv_scales", True)
+    worker_cls.wake_up = _patched_wake_up
+    logger.info("Patched vLLM worker wake-up FP8 KV scale reset (q/prob scales + float mirrors)")
     return True
 
 
@@ -224,3 +241,74 @@ def patch_vllm_fp8_kv_scale_boot_normalization() -> bool:
     if patched_any:
         logger.info("Patched vLLM KV-cache methods to normalize FP8 scales at boot (pre-capture)")
     return patched_any
+
+
+# ``model_runner.model_state`` tensors that vLLM's wake path does not restore and that are not
+# rewritten before use, by attribute name. Model Runner V2 allocates ``model_state`` in the weights
+# pool, but waking restores only the model's parameters and buffers. Add a model's lost tensor here.
+# Drop this once vLLM builds the model state in the runtime pool (vllm-project/vllm#63548).
+MODEL_STATE_TENSORS_LOST_ON_SLEEP = (
+    # Qwen4Exp's constant n-gram offsets (arange(-2, 0)) come back as zeros, which corrupts every
+    # later PLE n-gram context.
+    "ngram_context_offsets",
+)
+
+
+def save_model_state_tensors(model_runner: Any) -> dict[str, torch.Tensor]:
+    """CPU copies of the ``MODEL_STATE_TENSORS_LOST_ON_SLEEP`` tensors the runner's ``model_state`` has."""
+    state = getattr(model_runner, "model_state", None)
+    saved = {}
+    for name in MODEL_STATE_TENSORS_LOST_ON_SLEEP:
+        value = getattr(state, name, None)
+        if isinstance(value, torch.Tensor):
+            saved[name] = value.cpu().clone()
+    return saved
+
+
+def restore_model_state_tensors(model_runner: Any, saved: dict[str, torch.Tensor]) -> int:
+    """Copy :func:`save_model_state_tensors` contents back after the weights pool wakes."""
+    state = getattr(model_runner, "model_state", None)
+    if state is None or not saved:
+        return 0
+    for name, value in saved.items():
+        getattr(state, name).copy_(value)
+    return len(saved)
+
+
+def patch_vllm_sleep_model_state(worker_cls: type[Any] | None = None) -> bool:
+    """Carry the ``MODEL_STATE_TENSORS_LOST_ON_SLEEP`` tensors across ``Worker.sleep`` / ``wake_up``.
+
+    Saved on every sleep (any level) and restored when the weights wake.
+    """
+    if worker_cls is None:
+        try:
+            from vllm.v1.worker.gpu_worker import Worker
+        except ImportError:
+            return False
+        worker_cls = Worker
+
+    original_sleep: Callable[..., Any] | None = getattr(worker_cls, "sleep", None)
+    original_wake: Callable[..., Any] | None = getattr(worker_cls, "wake_up", None)
+    if not callable(original_sleep) or not callable(original_wake):
+        return False
+    if getattr(original_sleep, "_skyrl_saves_model_state", False):
+        return False
+
+    @wraps(original_sleep)
+    def _patched_sleep(worker: Any, level: int = 1) -> Any:
+        worker._skyrl_saved_model_state = save_model_state_tensors(worker.model_runner)
+        return original_sleep(worker, level)
+
+    @wraps(original_wake)
+    def _patched_wake_up(worker: Any, tags: list[str] | None = None) -> Any:
+        result = original_wake(worker, tags)
+        if tags is None or "weights" in tags:
+            restore_model_state_tensors(worker.model_runner, getattr(worker, "_skyrl_saved_model_state", {}))
+            worker._skyrl_saved_model_state = {}
+        return result
+
+    setattr(_patched_sleep, "_skyrl_saves_model_state", True)
+    worker_cls.sleep = _patched_sleep
+    worker_cls.wake_up = _patched_wake_up
+    logger.info("Patched vLLM worker sleep/wake to preserve model_runner.model_state tensors lost on sleep")
+    return True
