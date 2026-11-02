@@ -622,7 +622,11 @@ class MegatronWorker:
             adapter,
             tp_size=mpu.get_tensor_model_parallel_world_size(),
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
-            target_modules=None if lora_config.target_modules == "all-linear" else list(lora_config.target_modules),
+            target_modules=(
+                None
+                if isinstance(lora_config.target_modules, str) and lora_config.target_modules.lower() == "all-linear"
+                else list(lora_config.target_modules)
+            ),
         )
         if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob:
             raise ValueError(
