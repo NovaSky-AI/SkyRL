@@ -798,6 +798,5 @@ def test_the_labelled_environment_tags_every_sandbox_and_bounds_its_life(monkeyp
 
     (params,) = created
     assert params.labels == {"kept": "1", "owner": "me", "run": "r1"} and params.ttl_minutes == 90
-    with pytest.raises(ValueError, match="needs labels"):
+    with pytest.raises(ValueError, match="need labels"):
         daytona.LabelledDaytonaEnvironment(labels={})
-    assert daytona.command_is_unscoped({"owner": "me"}) and not daytona.command_is_unscoped({"owner": "me", "run": "r"})

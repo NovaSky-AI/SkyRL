@@ -233,6 +233,10 @@ miniswe = [
 harbor = [
     "harbor[daytona,modal]",
 ]
+# Daytona's SDK, for labelled sandboxes and their cleanup (skyrl/integration/sandboxes) without a harness.
+daytona = [
+    "daytona",
+]
 # skycap, capturing each rollout's exact tokens in token mode (examples/train_integrations/harbor_skycap).
 skycap = [
     "skycap[tokens]",
