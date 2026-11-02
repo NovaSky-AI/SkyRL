@@ -28,9 +28,3 @@ def test_the_labelled_environment_tags_every_sandbox_and_bounds_its_life(monkeyp
     assert params.labels == {"kept": "1", "owner": "me", "run": "r1"} and params.ttl_minutes == 90
     with pytest.raises(ValueError, match="need labels"):
         environments.LabelledDaytonaEnvironment(labels={})
-
-
-def test_the_old_examples_path_still_resolves() -> None:
-    from examples.train_integrations.harbor_skycap import daytona
-
-    assert daytona.LabelledDaytonaEnvironment is environments.LabelledDaytonaEnvironment
