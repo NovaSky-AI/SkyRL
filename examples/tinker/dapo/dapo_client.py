@@ -114,8 +114,8 @@ FULL_FT_LEARNING_RATE = 1.0e-6  # run_dapo_qwen3_30b_a3b_megatron_aime.sh
 NUM_WARMUP_STEPS = _env_int("NUM_WARMUP_STEPS", 160)  # counted in optimizer (mini-batch) steps
 # Sent with every optim_step's AdamParams and applied there; the server's optimizer_config only
 # holds the build-time defaults a request replaces on each step.
-WEIGHT_DECAY = 0.1
-MAX_GRAD_NORM = 1.0
+WEIGHT_DECAY = _env_float("WEIGHT_DECAY", 0.1)
+MAX_GRAD_NORM = _env_float("MAX_GRAD_NORM", 1.0)
 
 # Soft overlong punishment / overlong filtering (DAPO)
 OVERLONG_BUFFER_LEN = _env_int("OVERLONG_BUFFER_LEN", 1024 * 4)

@@ -55,8 +55,6 @@ fi
 # DAPO loss settings (client sends eps_clip_low/high per request)
 CLIP_RATIO_C="${CLIP_RATIO_C:-10.0}"
 LOSS_REDUCTION="${LOSS_REDUCTION:-token_mean_legacy}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-0.1}"
-MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 
 # Off-policy correction: geometric sequence masking (see docs/content/docs/algorithms/off_policy_correction.mdx)
 GEO_MASK_LOW="${GEO_MASK_LOW:-0.99}"
