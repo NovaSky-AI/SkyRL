@@ -80,12 +80,7 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
         (
             {"trainer.algorithm.policy_loss_type": "gspo"},
             {},
-            "replaced by each request's loss_fn before every forward_backward",
-        ),
-        (
-            {"trainer.algorithm.policy_loss_type": "dual_clip"},
-            {},
-            "replaced by each request's loss_fn before every forward_backward",
+            "comes from each request's loss_fn, so this value would be ignored",
         ),
         ({"use_ray": False}, {}, "use_ray"),
         # Compared as given: a string is not the server's bool, and SkyRL-Train keeps strings as strings.
@@ -102,6 +97,9 @@ def test_rejected(backend_config, kwargs, expected):
     ("backend_config", "kwargs", "key", "value"),
     [
         ({"trainer.strategy": "fsdp", "trainer.algorithm.use_kl_loss": False}, {}, "trainer.strategy", "fsdp"),
+        # "dual_clip" is the one policy_loss_type the server honours: no loss_fn normalizes to
+        # it, and ppo_policy_loss reads it from the config to dual-clip loss_fn="ppo".
+        ({"trainer.algorithm.policy_loss_type": "dual_clip"}, {}, "trainer.algorithm.policy_loss_type", "dual_clip"),
         # The request's train_attn/train_mlp reach the config (via _server_values(), #2464).
         (
             {},

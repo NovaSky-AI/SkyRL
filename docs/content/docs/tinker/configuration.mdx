@@ -63,7 +63,7 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 | `trainer.{policy,critic}.megatron_config.optimizer_config_kwargs.{lr,adam_beta1,adam_beta2,adam_eps,weight_decay,clip_grad}` | the matching `AdamParams` field on every `optim_step` | always |
 | `trainer.{policy,critic}.optimizer_config.scheduler`, `…num_warmup_steps` | the server, since the client schedules the learning rate | the value is not `constant_with_warmup` / `0` |
 | `trainer.algorithm.use_kl_loss` | not supported by the Tinker server | the value is `true` |
-| `trainer.algorithm.policy_loss_type` | the request's `loss_fn` on every `forward_backward` | always |
+| `trainer.algorithm.policy_loss_type` | the request's `loss_fn`; `dual_clip` is honoured as a `ppo_policy_loss` parameter | any value other than `dual_clip`: the loss function comes from each request's `loss_fn` (`dual_clip` dual-clips `loss_fn='ppo'`) |
 | `trainer.policy.torch_profiler_config.*` | `--torch-profiler` and `/start_profiling` | always |
 | `trainer.placement.colocate_all` | `--runtime-role trainer` or `inference` | the value is `true` with those roles |
 | `generator.inference_engine.served_model_name` | `--base-model` when `--base-model-checkpoint-path` is given | the value differs |

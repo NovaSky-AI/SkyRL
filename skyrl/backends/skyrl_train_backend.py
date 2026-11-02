@@ -182,6 +182,18 @@ def _build_skyrl_train_config(
             f"(`create_lora_training_client(rank=..., train_attn=..., train_mlp=...)`); set them there."
         )
     check_backend_config(backend_config_values, server_values, unused_keys)
+    # Every forward_backward request carries loss_fn and picks the loss function, so a
+    # policy_loss_type the request could pick would be inert. "dual_clip" is the exception: no
+    # loss_fn normalizes to it, and ppo_policy_loss (loss_fn="ppo") reads it from the config to
+    # dual-clip, so it is the one value the server honours.
+    loss_type = backend_config_values.get("trainer.algorithm.policy_loss_type")
+    if loss_type is not None and loss_type != "dual_clip":
+        raise ValueError(
+            f"--backend-config sets trainer.algorithm.policy_loss_type={loss_type!r}: the loss function "
+            "comes from each request's loss_fn, so this value would be ignored. 'dual_clip' is the "
+            "one value the server honours (dual-clip PPO for loss_fn='ppo'); pick other losses "
+            "with the request's loss_fn."
+        )
 
     cfg = SkyRLTrainConfig.from_cli_overrides(
         {**backend_config, **{key: value for key, (value, _) in server_values.items()}}
@@ -1348,7 +1360,6 @@ class SkyRLTrainBackend(AbstractBackend):
         "trainer.critic.megatron_config.optimizer_config_kwargs.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
         "trainer.policy.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
         "trainer.critic.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
-        "trainer.algorithm.policy_loss_type": "replaced by each request's loss_fn before every forward_backward",
     }
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
