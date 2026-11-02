@@ -20,6 +20,12 @@ The masking policy is the sibling's: an instance with any rollout that timed
 out or failed is masked whole, and a trial that hit the context limit trains
 with its reward unless overlong filtering is on.
 
+With ``include_images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
+placeholder order. A row without images (a masked rollout's placeholder) carries zero-row tensors, as the
+trainer pads a batch. Those are the only vision features the trainer takes, so an image whose processor output
+has other keys (Gemma 4's ``image_position_ids``) or none (one read back from a record) is an error, as is
+a path with images when ``include_images`` is off: its rows would train on placeholders without the images.
+
 With R3, each row carries its own routes: one per token of the path, prompt and
 history included, each from the forward pass that ran it. The path's last token
 was never forwarded, so its row is left out; the trainer pads it, as it does for
@@ -30,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import torch
 from skycap import Sample
 
 from skyrl.backends.skyrl_train.utils.routed_experts import (
@@ -45,6 +52,8 @@ from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics
 
 MASKED_STOP_REASONS = frozenset({"agent_timeout", "error"})
+#: The processor output the trainer takes for an image: Qwen-VL's and Qwen3.5's.
+VISION_KEYS = frozenset({"pixel_values", "image_grid_thw"})
 
 
 @dataclass
@@ -74,6 +83,7 @@ class _Row:
     # Row for row with ``support``, the sampler's logprob of each id (score centering).
     support_logprobs: Optional[List[List[float]]] = None
     routes: Optional[RoutedExpertIndices] = None
+    media: List[Any] = field(default_factory=list)
     placeholder: bool = False
 
 
@@ -95,6 +105,7 @@ def split(sample: Sample) -> Optional[_Row]:
         support=sample.sampling_mask[first:] if sample.sampling_mask is not None else None,
         support_logprobs=sample.sampling_mask_logprobs[first:] if sample.sampling_mask_logprobs is not None else None,
         routes=_routes(sample),
+        media=list(sample.media or ()),
     )
 
 
@@ -118,12 +129,13 @@ def compose(
     top_k: int = -1,
     sample_support: bool = False,
     routed_experts: bool = False,
+    include_images: bool = False,
 ) -> GeneratorOutput:
     """``top_k`` bounds sampler-support rows, as SkyRL's own capture does.
 
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries (empty) support rows, as every other batch will. ``routed_experts`` says the same
-    of routes (R3); every trained row must then have them.
+    of routes (R3); every trained row must then have them. ``include_images`` adds each row's vision features.
     """
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
 
@@ -139,6 +151,11 @@ def compose(
                 for row in rows:
                     row.loss_mask = [0] * len(row.loss_mask)
         groups.append(rows or [_placeholder()])
+    if not include_images and any(row.media for rows in groups for row in rows):
+        raise ValueError(
+            "a captured path has images, but skycap.include_images is off: its rows would train on the image"
+            " placeholders without the images"
+        )
 
     real = [row for rows in groups for row in rows if not row.placeholder]
     support = _sample_support(groups, real, top_k, expected=sample_support)
@@ -172,8 +189,10 @@ def compose(
             out["is_last_step"].append(last)
             times.append(outcome.e2e_time)
 
+    vision = _vision_rows(groups) if include_images else {}
     return GeneratorOutput(
         **out,
+        **vision,
         trajectory_generation_times=None if any(t is None for t in times) else times,
         rollout_expert_indices=routes,
         rollout_sample_support=support,
@@ -209,6 +228,36 @@ def _sample_support(
                 )
             supports.append(CompactSampleSupport.from_token_ids(members, lengths, top_k=top_k, logprobs=logprobs))
     return supports
+
+
+def _vision_features(media: List[Any]) -> tuple:
+    """A path's images as ``(pixel_values, image_grid_thw)`` in placeholder order, or ``(None, None)``."""
+    if any(item.modality != "image" for item in media):
+        raise ValueError(f"only images are supported, got {sorted({item.modality for item in media})}")
+    if not media:
+        return None, None
+    for item in media:
+        if item.data is None:
+            raise ValueError("an image has no processor output (one read back from a record keeps placeholders only)")
+        if set(item.data) != VISION_KEYS:
+            raise ValueError(
+                f"include_images takes images processed as {sorted(VISION_KEYS)} (Qwen-VL, Qwen3.5),"
+                f" got {sorted(item.data)}"
+            )
+    pixel_values = torch.from_numpy(np.concatenate([np.asarray(item.data["pixel_values"]) for item in media]))
+    image_grid_thw = torch.from_numpy(np.concatenate([np.asarray(item.data["image_grid_thw"]) for item in media]))
+    return pixel_values, image_grid_thw
+
+
+def _vision_rows(groups: List[List[_Row]]) -> Dict[str, Optional[List[torch.Tensor]]]:
+    """Each row's ``pixel_values`` and ``image_grid_thw``; None for both when no row has an image."""
+    features = [_vision_features(row.media) for rows in groups for row in rows]
+    shaped = next((pair for pair in features if pair[0] is not None), None)
+    if shaped is None:
+        return {"pixel_values": None, "image_grid_thw": None}
+    empty = tuple(torch.empty(0, *t.shape[1:], dtype=t.dtype) for t in shaped)
+    pixel_values, image_grid_thw = zip(*(empty if pair[0] is None else pair for pair in features))
+    return {"pixel_values": list(pixel_values), "image_grid_thw": list(image_grid_thw)}
 
 
 def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List[RoutedExpertIndices]]:
