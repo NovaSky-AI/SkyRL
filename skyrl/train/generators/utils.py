@@ -302,6 +302,7 @@ def concatenate_generator_outputs(
     step_wise: bool = False,
     routes_expected: bool = False,
     support_expected: bool = False,
+    support_scores_expected: bool = False,
 ) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
@@ -315,6 +316,7 @@ def concatenate_generator_outputs(
             (e.g. `is_last_step`, `trajectory_ids`, contiguous trajectory ordering).
         routes_expected: If True, a result with trainable tokens must carry routed experts (R3).
         support_expected: If True, a result with trainable tokens must carry sampler support.
+        support_scores_expected: If True, that support must carry the sampler's member logprobs.
     """
     assert len(generator_outputs) > 0
     # Per-token side channels must be populated consistently across batches.
@@ -394,6 +396,7 @@ def concatenate_generator_outputs(
         step_wise=step_wise,
         routes_expected=routes_expected,
         support_expected=support_expected,
+        support_scores_expected=support_scores_expected,
     )
 
     return result

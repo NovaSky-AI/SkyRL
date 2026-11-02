@@ -79,6 +79,7 @@ from skyrl.train.utils import (
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
+    ReleaseOptimizerStateFilesCallback,
     TrainingCallback,
     TrainingControl,
 )
@@ -164,6 +165,8 @@ class RayPPOTrainer:
 
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
+        if cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is not None:
+            self.add_callback(ReleaseOptimizerStateFilesCallback())
         self._current_epoch: int = 0
 
         configure_ray_worker_logging()
@@ -1045,6 +1048,12 @@ class RayPPOTrainer:
 
         return training_input
 
+    async def generate_on_input_batch(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        """Run the generator on the input batch.
+
+        Note: put any generator output post processing in `generate` instead of this function."""
+        return await self.generator.generate(input_batch)
+
     @torch.no_grad()
     async def generate(
         self,
@@ -1059,7 +1068,7 @@ class RayPPOTrainer:
         - after calling this method, the same model placement still holds.
         """
         # NOTE: we assume that .generate returns samples in the same order as passed in
-        generator_output: GeneratorOutput = await self.generator.generate(input_batch)
+        generator_output: GeneratorOutput = await self.generate_on_input_batch(input_batch)
 
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:
@@ -1072,6 +1081,7 @@ class RayPPOTrainer:
             step_wise=self.cfg.generator.step_wise_trajectories,
             routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
             support_expected=self.cfg.trainer.algorithm.enable_sample_support_replay,
+            support_scores_expected=self.cfg.trainer.algorithm.enable_score_centering,
         )
 
         return generator_output

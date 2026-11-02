@@ -7,6 +7,13 @@ name: SkyRL-JAX-GPU
 #
 # Keep the two `paths:` lists below in sync -- GitHub Actions does not support
 # YAML anchors.
+#
+# Three ways this job starts:
+# - `push` to `main`, and PRs whose head branch lives on NovaSky-AI/SkyRL,
+#   auto-run (paths-gated above).
+# - Fork PRs run only when a maintainer applies the `run_jax_gpu_ci` label,
+#   through `pull_request_target`.
+# - `workflow_dispatch` for anything else.
 on:
   push:
     branches: [ main ]
@@ -37,20 +44,38 @@ on:
       - 'ci/gpu_ci_run_jax.sh'
       - 'ci/submit_anyscale_job.sh'
       - '.github/workflows/gpu_jax.yaml'
+  pull_request_target:
+    types: [labeled]
   workflow_dispatch:
 
 permissions:
   checks: write
   contents: read
 
+# Workflow-level concurrency applies when a run is created, before the job `if:`
+# below is evaluated. On `pull_request_target`, `github.ref` is the base branch,
+# so a group keyed on it alone would put every label event on every PR in the
+# same group as the push-to-main run, and `cancel-in-progress` would cancel the
+# real run even when the new one's job is skipped. Key on the event, the PR and
+# the label that fired instead.
 concurrency:
-  group: skyrl-gpu-${{ github.workflow }}-${{ github.ref }}
+  group: skyrl-gpu-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.label.name }}
   cancel-in-progress: true
 
 jobs:
   skyrl_jax_gpu_tests:
-    # Forks inherit these workflows but not the secrets they need -- only run upstream.
-    if: github.repository == 'NovaSky-AI/SkyRL'
+    # `types: [labeled]` fires one event per label added; testing
+    # `github.event.label.name` means bulk labelling starts one run, not one per label.
+    if: >
+      github.repository == 'NovaSky-AI/SkyRL' &&
+      (
+        (github.event_name == 'push' || github.event_name == 'workflow_dispatch') ||
+        (github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'pull_request_target' &&
+          !github.event.pull_request.draft &&
+          github.event.label.name == 'run_jax_gpu_ci')
+      )
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -59,6 +84,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Plain `pull_request` runs keep their default merge-ref checkout
+          # (what would actually land); in the fallback below, `github.ref` is
+          # `refs/pull/<n>/merge` for that event. `pull_request_target` would
+          # instead check out the base ref, so it takes the PR head explicitly
+          # here -- the Anyscale job uploads this working dir. Fork code only
+          # gets this far after a maintainer applies the gating label; don't
+          # leave the base repo token on disk for it.
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.ref }}
+          allow-unsafe-pr-checkout: true
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -82,3 +118,11 @@ jobs:
           JOB_NAME="skyrl-jax-gpu-ci-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
           bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_jax_envsubst.yaml "$JOB_NAME" 10000
           rm -f ci/anyscale_gpu_ci_jax_envsubst.yaml
+      # Cancelling the run stops the runner, not the cluster. GitHub still runs
+      # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
+      - name: Terminate Anyscale jobs on cancellation
+        if: cancelled()
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+        run: bash ci/terminate_anyscale_jobs.sh

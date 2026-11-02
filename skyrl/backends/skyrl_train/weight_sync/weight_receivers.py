@@ -289,8 +289,14 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
             finally:
                 self.skyrl_release_receive_buffers()
             return
+        from skyrl.backends.skyrl_train.patches.vllm.patch_moe_kernel_constants import (
+            restore_moe_kernel_constants,
+        )
+
         with torch.device(self.device):
             super().finish_weight_update()
+            # A level-2 sleep zeroes MoE kernel constants that no reload rebuilds.
+            restore_moe_kernel_constants(self.model)
         skyrl_after_weight_update()
         empty_cuda_cache_rocm()
 

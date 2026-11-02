@@ -384,12 +384,26 @@ class CaptureServer:
                 return _json({"error": f"trajectory already finished with paths={trajectory.samples['paths']!r}"}, 409)
         elif paths not in self.path_rules:
             return _json({"error": f"`paths` must be one of {sorted(self.path_rules)}"}, 400)
+        # Already written and dropped from memory: a repeat, a retry after a path rule failed, or the first finish
+        # of one the TTL or a shutdown wrote.
+        popped = trajectory.id not in self.trajectories
         try:
             samples = await self.end(trajectory, "finished", annotations, paths=paths)
         except Exception as error:  # noqa: BLE001 - a custom rule's failure, reported to the caller
             logger.exception("path rule %r failed on %s", paths, trajectory.id)
             message = f"path rule {paths!r} failed: {type(error).__name__}: {error}"
             return _json({"error": message, "code": PATH_RULE_FAILED}, 500)
+        if popped and any(sample.media for sample in samples):
+            # The samples were rebuilt from the record, which keeps an image's placeholders and hash but not its
+            # processed arrays (pixel_values, image_grid_thw; see record._Columns.add): they are large, and they
+            # duplicate the image in the node's message, from which the processor can recompute them. So a sample
+            # with images is incomplete: answer with none, and the caller drops the trajectory. This is rare: a
+            # repeat, a retry after a failed rule, or a finish after the TTL or a shutdown wrote it. If these drops
+            # matter, recompute the arrays from the messages here instead.
+            logger.warning(
+                "%s: a finish answered from the record of a trajectory with images has no samples", trajectory.id
+            )
+            samples = []
         return _json(
             {
                 "id": trajectory.id,

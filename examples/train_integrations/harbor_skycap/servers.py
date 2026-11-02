@@ -33,6 +33,7 @@ class SkycapServerActor:
         record_dir: Optional[str],
         ttl: float,
         exposure: Optional[Tuple[str, Dict[str, Any]]] = None,
+        sample_support_logprobs: bool = False,
     ) -> None:
         from skycap import CaptureService
         from skycap.exposure import load_exposure
@@ -42,7 +43,7 @@ class SkycapServerActor:
         node_ip = get_node_ip()
         self.service = CaptureService(
             mode="tokens",
-            engine=SkyRLEngine(),
+            engine=SkyRLEngine(sample_support_logprobs=sample_support_logprobs),
             record_dir=record_dir,
             ttl=ttl,
             host=default_bind_host(node_ip),
@@ -93,12 +94,14 @@ def start_servers(
     ttl: float,
     exposure: Optional[str] = None,
     exposure_kwargs: Optional[Dict[str, Any]] = None,
+    sample_support_logprobs: bool = False,
 ) -> SkycapServers:
     """``num_servers`` skycap servers in token mode, in front of SkyRL's router.
 
     ``settings`` are ``skycap.CaptureService``'s options (``upstream_url``, ``tokenizer``, sampling, ...).
     ``exposure`` names a ``skycap.exposure`` way in for agents in remote sandboxes, built in each actor
     with ``exposure_kwargs``; for ``external_host``, server ``i`` gets ``port + i``.
+    ``sample_support_logprobs`` asks the engine for the sampler's logprob of each support member.
     """
     if num_servers < 1:
         raise ValueError("skycap.num_servers must be at least 1")
@@ -108,7 +111,7 @@ def start_servers(
         SkycapServerActor.options(
             num_cpus=num_cpus_per_server,
             scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=i),
-        ).remote(settings, record_dir, ttl, exposure_for(exposure, exposure_kwargs, i))
+        ).remote(settings, record_dir, ttl, exposure_for(exposure, exposure_kwargs, i), sample_support_logprobs)
         for i in range(num_servers)
     ]
     try:

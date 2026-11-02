@@ -109,3 +109,68 @@ def test_contains_checks_each_row_for_its_own_token():
 def test_compact_support_rejects_malformed_rows(token_ids, offsets, top_k, message):
     with pytest.raises(ValueError, match=message):
         CompactSampleSupport((token_ids,), offsets.astype(np.int32), top_k)
+
+
+def _rows_with_logprobs(rows) -> CompactSampleSupport:
+    """Support whose logprob column holds each member's own ID, so a misplaced logprob is visible."""
+    rows = np.asarray(rows)
+    return csr(rows, logprobs=rows.astype(np.float32))
+
+
+def test_logprobs_follow_slices_padding_and_concatenation():
+    support = _rows_with_logprobs([[1, 2, -1], [-1, -1, -1], [3, -1, -1]])
+
+    for block in (support[1:3], support[:1], support.empty_like(2)):
+        np.testing.assert_array_equal(block.logprobs, block.token_ids.astype(np.float32))
+    joined = CompactSampleSupport.concat([support[2:], support[:2]])
+    np.testing.assert_array_equal(joined.logprobs, joined.token_ids.astype(np.float32))
+
+
+def test_the_trace_carries_logprobs_through_padding_and_finalize():
+    trace = SampleSupportTrace()
+    trace.append(_rows_with_logprobs([[4, 5], [6, -1]]), expected_rows=2)
+    trace.append_padding(1)
+    trace.append(_rows_with_logprobs([[7, 8]]), expected_rows=1)
+
+    finalized = trace.finalize(token_count=3, extra_rows=1)
+
+    assert finalized.row_lengths.tolist() == [2, 1, 0]
+    np.testing.assert_array_equal(finalized.logprobs, [4.0, 5.0, 6.0])
+
+
+def test_concat_joins_memberless_blocks_without_logprobs():
+    with_logprobs = _rows_with_logprobs([[1, 2]])
+
+    joined = CompactSampleSupport.concat([CompactSampleSupport.empty(2, 2), with_logprobs])
+
+    assert joined.row_lengths.tolist() == [0, 0, 2]
+    np.testing.assert_array_equal(joined.logprobs, [1.0, 2.0])
+    with pytest.raises(ValueError, match="must share member columns"):
+        CompactSampleSupport.concat([with_logprobs, csr([[3, -1]])])
+
+
+def test_from_masked_rows_keeps_the_logprobs_of_kept_cells():
+    ids = np.array([[5, 6, 7], [8, 9, 10]], dtype=SAMPLE_SUPPORT_DTYPE)
+    present = np.array([[False, True, True], [True, False, True]])
+    logprobs = np.array([[-np.inf, -0.5, -1.5], [-0.25, -np.inf, -2.0]])
+
+    support = CompactSampleSupport.from_masked_rows(ids, present, logprobs)
+
+    assert support.logprobs.dtype == np.float32
+    np.testing.assert_array_equal(support.logprobs, [-0.5, -1.5, -0.25, -2.0])
+    assert CompactSampleSupport.from_masked_rows(ids, present).logprobs is None
+
+
+@pytest.mark.parametrize(
+    "logprobs, message",
+    [
+        (np.zeros(3, dtype=np.float64), "optional float32 logprobs"),
+        (np.zeros(2, dtype=np.float32), "columns must align"),
+        (np.array([0.0, np.nan, 1.0], dtype=np.float32), "logprobs must be finite"),
+    ],
+)
+def test_compact_support_rejects_malformed_logprobs(logprobs, message):
+    with pytest.raises(ValueError, match=message):
+        CompactSampleSupport.from_token_ids(
+            np.array([1, 2, 3], dtype=SAMPLE_SUPPORT_DTYPE), [2, 1], top_k=2, logprobs=logprobs
+        )

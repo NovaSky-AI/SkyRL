@@ -683,6 +683,7 @@ def validate_generator_output(
     step_wise: bool = False,
     routes_expected: bool = False,
     support_expected: bool = False,
+    support_scores_expected: bool = False,
 ):
     """Validate the generator output.
 
@@ -697,6 +698,8 @@ def validate_generator_output(
         support_expected: sample-support replay is on, so a batch that trains anything must carry
             sampler support. Checked here so a generator that never captures it fails right
             after generation rather than in the trainer's worker.
+        support_scores_expected: score centering is on, so every support present must carry the
+            sampler's member logprobs.
     """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
@@ -781,6 +784,17 @@ def validate_generator_output(
             "trainer.algorithm.enable_sample_support_replay=True, but the generator returned no "
             f"{SAMPLE_SUPPORT_FIELD} for a batch with trainable tokens. Use a generator that captures "
             "sampler support (it must call generate with return_sample_support), or disable replay."
+        )
+    if support_scores_expected and generator_output.get(SAMPLE_SUPPORT_FIELD) is not None:
+        # A support with no members (a placeholder row) has nothing to score.
+        unscored = [
+            i
+            for i, support in enumerate(generator_output[SAMPLE_SUPPORT_FIELD])
+            if support.logprobs is None and support.num_members
+        ]
+        assert not unscored, (
+            f"trainer.algorithm.enable_score_centering=True, but {len(unscored)} {SAMPLE_SUPPORT_FIELD} entries "
+            f"(first: {unscored[0]}) carry no sampler member logprobs"
         )
 
     if step_wise:
