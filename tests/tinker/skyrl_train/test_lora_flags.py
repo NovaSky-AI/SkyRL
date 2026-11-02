@@ -161,6 +161,22 @@ def test_critic_rejects_unappliable_flags_before_workers_start(monkeypatch):
         backend._build_critic(CriticWorker=None, lora_config=_lora(train_mlp=False))
 
 
+def test_critic_rejects_an_init_adapter_path_before_workers_start(monkeypatch):
+    """A narrowed critic with an adapter to initialize from raises before the workers start.
+
+    Bugbot's case: the critic's pre-worker check did not pass the critic's ``init_adapter_path``,
+    so a narrowed critic with ``trainer.critic.model.lora.init_adapter_path`` set was rejected
+    only after the critic's workers had started. The regression test pins the kwarg.
+    """
+    backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
+    backend.config = FSDPBackendOverrides()
+    backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
+    backend._cfg.trainer.critic.model.lora.init_adapter_path = "/some/adapter"
+    monkeypatch.setattr(skyrl_train_backend, "PPORayActorGroup", lambda *a, **k: pytest.fail("workers started"))
+    with pytest.raises(ValueError, match="narrow"):
+        backend._build_critic(CriticWorker=None, lora_config=_lora(train_mlp=False))
+
+
 @pytest.mark.parametrize(
     "key",
     ["trainer.policy.model.lora.rank", "trainer.policy.model.lora.train_mlp", "trainer.critic.model.lora.train_attn"],
