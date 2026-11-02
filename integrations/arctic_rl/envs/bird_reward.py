@@ -141,7 +141,15 @@ def validate_response_format(response: str) -> bool:
 # detection below deliberately diverges from V6b's substring check)
 # ---------------------------------------------------------------------------
 
-_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")
+
+
+def _is_word_char(ch: str) -> bool:
+    # SQLite identifier characters: ASCII letters and digits, "_", "$",
+    # and any non-ASCII character. A word token only ends at some other
+    # character, so identifiers such as "limité" or "limit$value" stay
+    # single tokens and are never mistaken for the LIMIT keyword.
+    return ch in _WORD_CHARS or ord(ch) >= 0x80
 
 
 def _find_top_level_limit(query: str) -> tuple[bool, int]:
@@ -228,10 +236,10 @@ def _find_top_level_limit(query: str) -> tuple[bool, int]:
             depth = max(0, depth - 1)
             i += 1
             continue
-        if ch in _WORD_CHARS:
+        if _is_word_char(ch):
             tail_start = None
             end = i + 1
-            while end < n and query[end] in _WORD_CHARS:
+            while end < n and _is_word_char(query[end]):
                 end += 1
             if depth == 0 and query[i:end].upper() == "LIMIT":
                 return True, n

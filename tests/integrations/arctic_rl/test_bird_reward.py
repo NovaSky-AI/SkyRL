@@ -102,6 +102,13 @@ def test_limit_inside_identifier_gets_capped():
     assert bird_reward._add_limit_to_query(query) == capped(query)
 
 
+def test_non_ascii_and_dollar_identifiers_get_capped():
+    # limité and limit$value are single SQLite identifiers, not the LIMIT
+    # keyword followed by a suffix, so they must not suppress the cap.
+    for query in ("select limité from t", "select limit$value from t"):
+        assert bird_reward._add_limit_to_query(query) == capped(query)
+
+
 def test_limit_in_quoted_identifier_gets_capped():
     query = 'select "limit" from t'
     assert bird_reward._add_limit_to_query(query) == capped(query)
