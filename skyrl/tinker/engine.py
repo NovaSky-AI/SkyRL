@@ -378,6 +378,9 @@ class TinkerEngine:
             # and a backend_config "strategy" would replace it. A differing value is rejected.
             engine_values = {
                 "strategy": (config.backend, "set by --backend"),
+                # The nested spelling must stop the server at startup too, like the
+                # create_model-time check that covers trainer.strategy.
+                "trainer.strategy": (config.backend, "set by --backend"),
                 "runtime_role": (config.runtime_role, "set by --runtime-role"),
             }
             if config.base_model_checkpoint_path is not None:

@@ -119,6 +119,8 @@ def _start_engine(monkeypatch, backend_config: dict, backend: str = "fsdp", **kw
     ("backend_config", "kwargs", "expected"),
     [
         ({"strategy": "megatron"}, {}, "strategy='megatron': set by --backend ('fsdp')"),
+        # The nested spelling stops the server at startup like the flattened one.
+        ({"trainer": {"strategy": "megatron"}}, {}, "trainer.strategy='megatron': set by --backend ('fsdp')"),
         ({"generator.inference_engine": {"served_model_name": "x"}}, CHECKPOINT, "served_model_name='x'"),
     ],
 )
