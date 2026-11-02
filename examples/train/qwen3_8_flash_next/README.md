@@ -49,7 +49,7 @@ export FLA_CONFIG_DIR=examples/train/qwen3_8_flash_next/fla_config   # absolute 
 
 `fla_config/chunk_fwd_kernel_o.json` holds the pinned config. Other kernels keep autotuning. SkyRL forwards
 `FLA_CACHE_MODE` / `FLA_CONFIG_DIR` to the Ray workers. Export the same two variables to apply the workaround to the
-other recipes. vLLM's vendored fla copy has no config-dir hook, so this pin covers only the trainer.
+other recipes. vLLM's vendored fla copy has no config-dir hook, so the pin applies only to the trainer; vLLM is unaffected, because its copy autotunes chunk_fwd_kernel_o to 2 warps.
 
 The permanent fix is fla >= 0.6.0 (it drops 8-warp configs on Blackwell with Triton < 3.8) or Triton >= 3.8. That
 dependency bump will be a separate PR.
