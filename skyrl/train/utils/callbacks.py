@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+    from skyrl.train.generators.base import TrajectoryID
 
 
 @dataclass
@@ -48,6 +49,9 @@ class CallbackInput:
 
     # Step events
     batch: Optional["TrainingInputBatch"] = None
+
+    # on_step_end of the synchronous RL trainer only - the trajectory of each of ``batch``'s rows, before padding
+    trajectory_ids: Optional[List["TrajectoryID"]] = None
 
     # Step end / eval end
     metrics: Optional[Dict[str, Any]] = None
@@ -112,6 +116,17 @@ class TrainingCallback:
 
     def on_log(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
         """Fires before metrics are committed to the tracker. Mutate ``callback_input.logs`` to add fields."""
+
+
+class ReleaseOptimizerStateFilesCallback(TrainingCallback):
+    """Deletes the policy's optimizer state files (Megatron ``optimizer_offload_to_disk``) when training ends.
+
+    The trainers register it themselves when ``trainer.policy.megatron_config.optimizer_offload_to_disk.dir`` is
+    set, after the callbacks passed to the constructor, so their ``on_train_end`` still sees a usable optimizer.
+    """
+
+    def on_train_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
+        trainer.dispatch.release_optimizer_state_files("policy")
 
 
 class CallbackHandler(TrainingCallback):

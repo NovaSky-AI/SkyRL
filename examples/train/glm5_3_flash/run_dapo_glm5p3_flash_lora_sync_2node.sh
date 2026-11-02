@@ -44,8 +44,8 @@ MAX_TOKENS_PER_MICROBATCH=8192  # must hold one full sequence; 16384 OOM'd at st
 # Rollout router replay (R3): vLLM returns the experts it routed each token to and Megatron
 # replays that routing, so the trainer scores rollouts with the router the sampler used. On a
 # 288-expert sigmoid MoE this removes most of the rollout/train logprob gap (~4x smaller
-# policy/rollout_train_logprobs_abs_diff_mean). Needs distributed_executor_backend=mp (set
-# below). SkyRLGymGenerator refuses R3 together with step_wise_trajectories,
+# policy/rollout_train_logprobs_abs_diff_mean). Needs inference pipeline_parallel_size=1
+# (vLLM returns routes only from the last pipeline stage). SkyRLGymGenerator refuses R3 together with step_wise_trajectories,
 # use_conversation_multi_turn=false, a custom chat_template, or vision_language_generator; this
 # recipe leaves all four at R3-compatible defaults. Routing is fixed across the
 # train_batch_size / policy_mini_batch_size mini-batches of a step, a small known bias.
@@ -74,6 +74,8 @@ LORA_ALPHA=64
 MERGE_LORA=false
 SHARE_EXPERT_ADAPTERS=false
 NORMALIZE_MOE_LORA=true
+# Size vLLM's MoE expert LoRA slots at the expert rank (64 // top-8 = 8) instead of 64.
+SCALE_MOE_LORA_RANK=true
 LORA_TARGET_MODULES='[linear_q_down_proj,linear_q_up_proj,linear_kv_down_proj,linear_kv_up_proj,linear_proj,linear_fc1,linear_fc2,q_proj,k_proj,v_proj,b_proj,f_a_proj,g_a_proj,o_proj]'
 
 MEGATRON_TP=4
@@ -175,6 +177,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.lora_config.merge_lora=$MERGE_LORA \
   trainer.policy.model.lora.share_expert_adapters=$SHARE_EXPERT_ADAPTERS \
   trainer.policy.megatron_config.lora_config.normalize_moe_lora=$NORMALIZE_MOE_LORA \
+  generator.inference_engine.scale_moe_lora_rank=$SCALE_MOE_LORA_RANK \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \

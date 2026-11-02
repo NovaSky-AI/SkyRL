@@ -41,6 +41,15 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 import torch
 
+from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+    normalize_fp8_kv_scales_after_wake,
+    patch_vllm_dummy_weight_boot_detection,
+    patch_vllm_fp8_kv_scale_boot_normalization,
+    patch_vllm_fp8_kv_scale_completion,
+    patch_vllm_sleep_model_state,
+    restore_model_state_tensors,
+    save_model_state_tensors,
+)
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     batched_moe_wire_targets,
@@ -54,6 +63,19 @@ ensure_ray_rdt_libfabric()
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+# Must run inside EVERY vLLM worker process: post-sync hooks in the receive
+# engines need the process-local model runner, but vLLM only gives engines the
+# model object.
+try:
+    from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
+        apply_model_runner_registry_patch,
+    )
+
+    apply_model_runner_registry_patch()
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm":
+        raise
 
 # Must run inside EVERY vLLM worker process: Worker.load_model builds the
 # weight-transfer engine through the factory. vLLM loads this module before model
@@ -69,6 +91,15 @@ try:
     apply_lora_in_memory_patch()
 except ModuleNotFoundError:
     pass
+
+# Apply the compatibility patches before vLLM constructs each worker.
+# Must be installed before the two KV-scale patches run: it is what tells them
+# whether this engine booted from dummy weights (serialized FP8 weight sync) or
+# from a real checkpoint whose calibrated scales they must not touch.
+patch_vllm_dummy_weight_boot_detection()
+patch_vllm_fp8_kv_scale_boot_normalization()
+patch_vllm_fp8_kv_scale_completion()
+patch_vllm_sleep_model_state()
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.register import (
@@ -105,6 +136,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_glm5next_lora_packing import 
 )
 
 apply_glm5next_lora_packing_patch()
+
+# MoE expert LoRA slots sized at the expert adapter rank (additional_config.max_expert_lora_rank).
+# Installed here for the same reason as the patches above: the slots are allocated at model init.
+from skyrl.backends.skyrl_train.patches.vllm.patch_moe_expert_lora_rank import (  # noqa: E402
+    apply_moe_expert_lora_rank_patch,
+)
+
+apply_moe_expert_lora_rank_patch()
+
 # Runs in every vLLM worker process before the model is loaded, so the
 # LoRA-capability declaration is in place for the supports_lora() gate.
 from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E402
@@ -113,11 +153,64 @@ from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E40
 
 apply_kimi_k25_lora_patch()
 
+# Online fp8_per_block quantization hands the torch.compile'd per_block_cast_to_fp8 a vLLM
+# parameter subclass, which dynamo cannot trace (RecursionError on the first weight sync).
+from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import (  # noqa: E402
+    apply_per_block_fp8_param_patch,
+)
+
+apply_per_block_fp8_param_patch()
+
+# Full-weight syncs go through vLLM's layerwise reload, which buffers each incoming tensor at
+# its unsharded size until the whole layer has arrived (~19 GiB per GLM-5.3 MoE layer on every
+# TP rank). Opt in to loading them into the local shard as they arrive instead.
+from skyrl.env_vars import SKYRL_VLLM_EAGER_LAYERWISE_RELOAD  # noqa: E402
+
+if SKYRL_VLLM_EAGER_LAYERWISE_RELOAD:
+    from skyrl.backends.skyrl_train.patches.vllm.patch_layerwise_reload_eager import (  # noqa: E402
+        apply_layerwise_reload_eager_patch,
+    )
+
+    apply_layerwise_reload_eager_patch()
+
+# R3 with inference PP > 1: relay each stage's routes to the next so the last stage returns every
+# layer (pass-through at PP=1; a no-op when vLLM relays natively).
+from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (  # noqa: E402
+    apply_pp_relay_worker_patch,
+)
+
+apply_pp_relay_worker_patch()
+
+# DeepSeek-V4 under layerwise reload (weight sync): load attention sinks through a weight loader and run the
+# model-level finalize once per reload, as vllm-project/vllm#57797 (merged) and #64357 (open) do upstream.
+# TODO: remove once the pinned vLLM includes both (see the module docstring).
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (  # noqa: E402
+    apply_deepseek_v4_reload_patch,
+)
+
+apply_deepseek_v4_reload_patch()
+
+# A PP stage with no layers of some KV cache group gets cache tensors for layers it does not own (DeepSeek-V4.1 at PP=2).
+# TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.32.0).
+from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import (  # noqa: E402
+    apply_pp_kv_cache_projection_patch,
+)
+
+apply_pp_kv_cache_projection_patch()
+
+# DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
+# NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#60613 is in the pinned vLLM.
+from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
+    apply_deepseek_v41_prefill_workspace_patch,
+)
+
+apply_deepseek_v41_prefill_workspace_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 # Checkpoint-name suffix -> (fused vLLM parameter suffix, FusedMoE shard id).
-# The model specs own this mapping so sender and receiver cannot drift.
+# Fixed by vLLM's FusedMoE, so it is the same for every model.
 _BATCHED_MOE_TARGETS = batched_moe_wire_targets()
 
 
@@ -300,6 +393,11 @@ class NewInferenceWorkerWrap:
 
         The drafter's buffers are saved too: the weight sync reloads its
         parameters, but nothing else restores its buffers.
+
+        Since vLLM 0.32.0, KV-init runtime state and CUDA graph memory live in their
+        own ``runtime`` / ``cudagraph`` pools. They are always offloaded (as in
+        CuMemBackend.suspend), since any wake remaps them and discarding them leaves
+        the next forward reading garbage (illegal memory access).
         """
         from vllm.device_allocator import get_mem_allocator_instance
 
@@ -308,7 +406,9 @@ class NewInferenceWorkerWrap:
         self._skyrl_saved_draft_buffers = (
             {name: buf.cpu().clone() for name, buf in draft.named_buffers()} if draft is not None else {}
         )
-        get_mem_allocator_instance().sleep(offload_tags=("kv_cache",) if offload_kv else ())
+        self._skyrl_saved_model_state = save_model_state_tensors(self.model_runner)
+        offload_tags = ("runtime", "cudagraph", "kv_cache") if offload_kv else ("runtime", "cudagraph")
+        get_mem_allocator_instance().sleep(offload_tags=offload_tags)
 
     def skyrl_wake_for_weight_sync(self, tags: list) -> None:
         """Wake the given allocator tags, restoring CPU-backed contents.
@@ -329,11 +429,13 @@ class NewInferenceWorkerWrap:
             draft = self._skyrl_draft_model()
             if draft is not None:
                 self._skyrl_restore_buffers(draft, "_skyrl_saved_draft_buffers")
-        # Re-init fp8 KV scales after the KV pool remaps (no-op without fp8 KV cache).
+            restore_model_state_tensors(self.model_runner, getattr(self, "_skyrl_saved_model_state", {}))
+            self._skyrl_saved_model_state = {}
+        # Re-assert the serialized-FP8 KV scales after the KV pool remaps (no-op
+        # without fp8 KV cache or on a real-checkpoint boot). This path skips
+        # Worker.wake_up, so the vllm_compat wake patch never sees it.
         if tags is None or "kv_cache" in tags:
-            post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
-            if post_wake is not None:
-                post_wake()
+            normalize_fp8_kv_scales_after_wake(self.model_runner)
 
     def _skyrl_draft_model(self):
         """The spec-decode drafter module, or None when there is no drafter."""

@@ -16,6 +16,7 @@ import torch
 from megatron.core.transformer.hyper_connection import HyperConnectionModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 
 class RMSNormInputHyperConnectionModule(HyperConnectionModule):
@@ -41,9 +42,24 @@ class RMSNormInputHyperConnectionModule(HyperConnectionModule):
         """
         s, b, nC = x.shape
         # The mHC mapping runs in FP32 (the parameters are kept in FP32 and the activations are
-        # upcast here); compute_mappings casts the bounded mixing weights back down.
-        x_2d = x.reshape(s * b, nC).to(torch.float32)
-        weight = self.mapping_proj.weight.to(torch.float32)
-        proj = torch.matmul(x_2d, weight.t())
-        r = torch.rsqrt(x_2d.square().mean(dim=-1, keepdim=True) + self.norm_eps)
+        # upcast in _proj_rms); compute_mappings casts the bounded mixing weights back down.
+        # Checkpointed so backward keeps only the activation-dtype input, not its FP32 upcast
+        # (2 GiB per mHC site at 32k tokens per rank); the upcast and the math rerun in backward.
+        proj, r = checkpoint(
+            _proj_rms,
+            x.reshape(s * b, nC),
+            self.mapping_proj.weight,
+            self.norm_eps,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
         return proj.view(s, b, -1), r.view(s, b, 1)
+
+
+def _proj_rms(x: Tensor, weight: Tensor, eps: float) -> Tuple[Tensor, Tensor]:
+    """FP32 projection and standard RMS factor ``rsqrt(mean(x^2) + eps)`` of the activation-dtype ``x``."""
+    x = x.to(torch.float32)
+    weight = weight.to(torch.float32)
+    proj = torch.matmul(x, weight.t())
+    r = torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
+    return proj, r

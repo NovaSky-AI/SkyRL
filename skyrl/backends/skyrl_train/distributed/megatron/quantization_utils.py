@@ -1,10 +1,74 @@
 """Recipe/architecture helpers shared by FP8 packing, weight sync, and workers."""
 
-from typing import Any, MutableMapping, Optional
+import fnmatch
+import re
+from typing import Any, MutableMapping, Optional, Sequence
 
 from loguru import logger
 
 AUTO_FP8_RECIPE = "auto"
+
+
+def fp8_exclude_recipe(exclude_modules: Sequence[str]) -> dict:
+    """Build a Megatron per-module precision recipe that keeps the given modules in BF16.
+
+    Input is list of globs over Megatron module names, such as
+    ``["decoder.layers.0.*", "*.mlp.linear_fc2"]``
+    """
+    return {
+        "configs": {
+            "bf16": {
+                "transformer_engine_config_type": "TEQuantizationParams",
+                "training_recipe": {},
+            }
+        },
+        "matchers": {
+            f"fp8_exclude_{idx}": {"config": "bf16", "type": "glob", "pattern": pattern, "enabled": True}
+            for idx, pattern in enumerate(exclude_modules)
+        },
+    }
+
+
+def reject_stage_local_layer_patterns(patterns: Sequence[str], source: str) -> None:
+    """Raise if a module-path glob selects layers by index; This is used to ensure that the user does
+    not try to select specific layers when PP > 1, since each pipeline stage numbers its decoder layers
+    from 0, so ``decoder.layers.0.*`` would match the first layer of every stage.
+
+    This does not include MTP layers since they all sit on one stage in their own ``mtp.layers`` list, so
+    ``mtp.layers.N`` names the same layer under any pipeline split and is allowed.
+    """
+    layer_indexed = [p for p in patterns if re.search(r"layers\.[0-9\[?]", p) and not p.startswith("mtp.")]
+    if layer_indexed:
+        raise ValueError(
+            f"{source} patterns {layer_indexed} select layers by index, but Megatron numbers "
+            "layers within each pipeline stage when pipeline_model_parallel_size > 1. Use "
+            "num_layers_at_start_in_bf16 / num_layers_at_end_in_bf16 for layer ranges."
+        )
+
+
+def validate_fp8_exclude_modules_matched(model_chunks: Sequence[Any], exclude_modules: Sequence[str]) -> None:
+    """Validates that every pattern in `exclude_modules` matches at least one module, and
+    raises otherwise. It only considers module names that the exclude list can apply to,
+    which excludes intermediate module names that don't have weights (like `decoder.layers`)
+    and those that are not TE layers (embedding, MoE router).
+
+    Collective: every rank calls it.
+    """
+    import torch
+
+    names = []
+    for chunk in model_chunks:
+        while hasattr(chunk, "module"):
+            chunk = chunk.module
+        # include only modules that the exclude list can apply to
+        # filtered using `finish_init` which only applies to end modules with names that are TE layers
+        # excluding intermediate layers (like `decoder.layers`) and those that are not TE layers (embedding, MoE router)
+        names.extend(name for name, module in chunk.named_modules() if hasattr(module, "finish_init"))
+    counts = torch.tensor([sum(fnmatch.fnmatch(name, pattern) for name in names) for pattern in exclude_modules])
+    torch.distributed.all_reduce(counts)
+    unmatched = [pattern for pattern, count in zip(exclude_modules, counts.tolist()) if count == 0]
+    if unmatched:
+        raise ValueError(f"fp8_exclude_modules patterns {unmatched} match none of the layers Megatron can run in FP8. ")
 
 
 def is_fp8_enabled(fp8: Any) -> bool:
@@ -17,6 +81,20 @@ def is_fp8_enabled(fp8: Any) -> bool:
 def is_mxfp8_recipe(fp8_recipe: Any) -> bool:
     """Return whether a Megatron/TE fp8 recipe value selects MXFP8."""
     return isinstance(fp8_recipe, str) and fp8_recipe.strip().lower() == "mxfp8"
+
+
+def resolve_text_config(hf_config: Any) -> Any:
+    """Return the text sub-config of a (possibly multimodal) HF config.
+
+    Multimodal checkpoints nest the language model's dims one level down, under
+    either ``text_config`` or ``language_config`` depending on the architecture
+    — Qwen3.5's conditional-generation configs use both spellings. Every reader
+    of text dims must unwrap the same way; a reader that knows only one spelling
+    silently sees a config with none of the fields it looks for, which turns a
+    validation guard into a no-op. Falls back to ``hf_config`` for text-only
+    checkpoints, which hold the dims at the top level.
+    """
+    return getattr(hf_config, "text_config", None) or getattr(hf_config, "language_config", None) or hf_config
 
 
 def has_visible_cuda_device() -> bool:
@@ -95,3 +173,101 @@ def validate_concrete_fp8_recipe(transformer_config_kwargs: Optional[MutableMapp
             "fallback zeroes freshly loaded persistent params on the first param "
             "all-gather. Use fp8_param=false with mxfp8."
         )
+
+
+def validate_mxfp8_gdn_tp_alignment(
+    transformer_config_kwargs: Optional[MutableMapping[str, Any]],
+    hf_config: Any,
+    tensor_model_parallel_size: int,
+) -> None:
+    """Refuse mxfp8 + GDN + TP combinations whose weight shard TE cannot quantize.
+
+    Megatron fuses the GDN q/k/v/z/b/a projections into ONE column-parallel
+    ``in_proj`` GEMM (megatron/core/ssm/gated_delta_net.py)::
+
+        in_proj_dim = 2*qk_dim + 2*v_dim + 2*num_value_heads
+
+    TP shards that output dim, so each rank quantizes an
+    ``[in_proj_dim // TP, hidden]`` weight, and MXFP8 scales cover 1x32 groups,
+    so TE requires every dim of the *shard* to be a multiple of 32
+    (``MXFP8Quantizer::create_tensor``, transformer_engine/pytorch/csrc/quantizer.cpp).
+    Megatron's own guard checks only the GLOBAL dim, which can pass while the
+    shard is misaligned — Qwen3.5's 12352 = 32*386 shards to 6176 at TP=2 (fine)
+    but 3088 at TP=4 (rejected) — and the failure then surfaces as a TE C++
+    assert deep inside model build. Catch it here, with the arithmetic.
+    """
+    kwargs = transformer_config_kwargs or {}
+    if not is_fp8_enabled(kwargs.get("fp8")) or not is_mxfp8_recipe(kwargs.get("fp8_recipe")):
+        return
+    config = resolve_text_config(hf_config)
+    dims = [
+        getattr(config, name, None)
+        for name in (
+            "linear_num_key_heads",
+            "linear_num_value_heads",
+            "linear_key_head_dim",
+            "linear_value_head_dim",
+        )
+    ]
+    if any(dim is None for dim in dims):
+        return  # no GDN linear-attention layers in this model
+    num_key_heads, num_value_heads, key_head_dim, value_head_dim = dims
+    in_proj_dim = 2 * key_head_dim * num_key_heads + 2 * value_head_dim * num_value_heads + 2 * num_value_heads
+    tp = tensor_model_parallel_size
+    if in_proj_dim % (32 * tp) == 0:
+        return
+    raise ValueError(
+        f"fp8_recipe='mxfp8' cannot run this GDN model at tensor_model_parallel_size={tp}: "
+        f"Megatron fuses the GDN q/k/v/z/b/a projections into one column-parallel in_proj GEMM "
+        f"(megatron/core/ssm/gated_delta_net.py) with output dim {in_proj_dim} = "
+        f"2*{key_head_dim}*{num_key_heads} + 2*{value_head_dim}*{num_value_heads} + 2*{num_value_heads}, "
+        f"each TP rank quantizes an [{in_proj_dim}/{tp}, hidden] shard, and TE's MXFP8 quantizer "
+        f"(MXFP8Quantizer::create_tensor) rejects any dim not divisible by 32. Pick a "
+        f"tensor_model_parallel_size that divides in_proj_dim/32 = {in_proj_dim / 32:g}, "
+        f"or use fp8_recipe='blockwise'."
+    )
+
+
+def resolve_auto_wire_format(fp8_recipe: Any) -> str:
+    """Resolve ``fp8_weight_sync_mode="auto"`` from the policy's concrete recipe.
+
+    Keys off the *recipe*, never the architecture: the rollout must serve the
+    representation the trainer computes with, so an explicit blockwise recipe
+    on Blackwell keeps a blockwise wire. Call after ``resolve_auto_fp8_recipe``;
+    a recipe left ``"auto"`` by a GPU-less driver is refused rather than
+    guessed, because the wire chosen here reaches every engine's boot config —
+    unlike the recipe, it gets no second resolution on the workers.
+    """
+    if isinstance(fp8_recipe, str) and fp8_recipe.strip().lower() == AUTO_FP8_RECIPE:
+        raise ValueError(
+            'fp8_weight_sync_mode="auto" cannot be resolved while fp8_recipe is still "auto" '
+            "(a driver without a visible CUDA device defers recipe resolution to its workers). "
+            "Set transformer_config_kwargs.fp8_recipe to 'blockwise' or 'mxfp8', or set "
+            "fp8_weight_sync_mode explicitly."
+        )
+    # Lazy import: the wire-format constants live in weight_sync, whose package
+    # init pulls torch; this module stays importable without it.
+    from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import (
+        BLOCKWISE_FP8,
+        MXFP8,
+    )
+
+    return MXFP8 if is_mxfp8_recipe(fp8_recipe) else BLOCKWISE_FP8
+
+
+def wire_to_engine_quantization(wire_format: str) -> str:
+    """Map a serialized wire format to the vLLM ``quantization`` method that serves it.
+
+    MXFP8 rides vLLM's compressed-tensors path; blockwise rides its fp8 path.
+    Engines need this value at boot (``engine_init_kwargs.quantization``),
+    before trainer-side config resolution runs, so launchers deriving it for
+    ``fp8_weight_sync_mode=auto`` call this instead of re-encoding the mapping.
+    """
+    from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import (
+        MXFP8,
+        WIRE_FORMATS,
+    )
+
+    if wire_format not in WIRE_FORMATS:
+        raise ValueError(f"Unsupported wire format {wire_format!r}; expected one of {WIRE_FORMATS!r}")
+    return "compressed-tensors" if wire_format == MXFP8 else "fp8"

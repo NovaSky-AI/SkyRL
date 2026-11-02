@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -11,7 +12,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from skycap import CaptureError, CapturePool, Sample
+from skycap import CaptureError, CapturePool, CaptureService, Sample
 from skycap.server import CaptureServer
 from skycap.text import TextBackend
 from tests.conftest import openai_client
@@ -176,3 +177,25 @@ async def test_the_openai_client_is_all_a_caller_needs(servers) -> None:
         llm = openai_client(trajectory.base_url, api_key="anything")
         reply = await llm.chat.completions.create(model="policy", messages=[{"role": "user", "content": "x"}])
         assert reply.choices[0].message.content == "re: x"
+
+
+def test_a_pool_closes_cleanly_after_its_event_loop_has_ended(caplog) -> None:
+    """A trainer's loop ends before its shutdown code closes the pool; closing it then leaks nothing."""
+    service = CaptureService("http://127.0.0.1:9/v1", host="127.0.0.1")
+    url = service.start()
+    try:
+        pool = CapturePool([url])
+
+        async def rollouts() -> list[str]:
+            statuses = []
+            for _ in range(2):
+                async with pool.trajectory() as trajectory:
+                    pass
+                statuses.append(trajectory.result.status)
+            return statuses
+
+        assert asyncio.run(rollouts()) == ["finished", "finished"]
+        asyncio.run(pool.close())
+    finally:
+        service.stop()
+    assert not [r for r in caplog.records if "Unclosed" in r.getMessage()]

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, call
 import aiohttp
 import pytest
 
+from skyrl.tinker.api import _should_forward_sample_requests
 from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.external_future_store import ExternalFutureStore
 from skyrl.tinker.extra.skyrl_train_inference_forwarding import (
@@ -22,6 +23,54 @@ def test_forwarding_timeout_reads_environment(monkeypatch) -> None:
     config = EngineConfig.model_validate(vars(args))
 
     assert config.forwarding_inference_timeout_sec == 1800.0
+
+
+def test_base_checkpoint_path_parses() -> None:
+    parser = argparse.ArgumentParser()
+    add_model(parser, EngineConfig)
+
+    args = parser.parse_args(["--base-model", "test-model", "--base-model-checkpoint-path", "/models/custom"])
+
+    assert EngineConfig.model_validate(vars(args)).base_model_checkpoint_path == "/models/custom"
+
+
+def test_runtime_role_flag_parses() -> None:
+    parser = argparse.ArgumentParser()
+    add_model(parser, EngineConfig)
+
+    args = parser.parse_args(
+        [
+            "--base-model",
+            "test-model",
+            "--runtime-role",
+            "trainer",
+        ]
+    )
+    config = EngineConfig.model_validate(vars(args))
+
+    assert config.runtime_role == "trainer"
+
+
+@pytest.mark.parametrize(
+    ("runtime_role", "colocate_all", "expected"),
+    [
+        ("trainer", False, False),
+        ("inference", False, False),
+        ("combined", False, True),
+        ("combined", True, False),
+    ],
+)
+def test_skyrl_train_forwarding_requires_non_colocated_combined_runtime(
+    runtime_role: str, colocate_all: bool, expected: bool
+) -> None:
+    config = EngineConfig(
+        base_model="test-model",
+        backend="fsdp",
+        runtime_role=runtime_role,
+        backend_config={"trainer.placement.colocate_all": colocate_all},
+    )
+
+    assert _should_forward_sample_requests(config) is expected
 
 
 @pytest.mark.asyncio

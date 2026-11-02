@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
     VLLMServerActor,
 )
 from skyrl.backends.skyrl_train.weight_sync.control_plane import SkyrlWeightSyncClient
+from skyrl.train.utils import Timer, deadline
 
 pytestmark = pytest.mark.vllm
 
@@ -148,6 +149,18 @@ async def test_reset_accepts_chunked_acknowledgment(backends, transport):
     await reset(backends, transport, reset_running_requests=True)
 
     assert all(backend.app.state.engine_client.calls == [(True, False)] for backend in backends)
+
+
+@pytest.mark.asyncio
+async def test_reset_deadline_names_native_endpoint(backends):
+    backends[0].app.state.engine_client.delay = 0.2
+
+    with pytest.raises(deadline.StepTimeoutError) as error:
+        async with deadline.step_deadline(3, 0.05), Timer("sync_weights"):
+            await reset(backends, "async", reset_running_requests=True)
+
+    assert error.value.global_step == 3
+    assert (error.value.stage, error.value.operation) == ("sync_weights", "/reset_prefix_cache")
 
 
 def test_only_native_reset_route(backends):

@@ -300,3 +300,20 @@ def test_append_padding_needs_a_schema_and_a_valid_count():
     for count in (-1, True, 1.0):
         with pytest.raises(ValueError, match="padding count"):
             trace.append_padding(count)
+
+
+def test_unpacked_layout_honors_extra_seq_align(monkeypatch, parallel_state):
+    # remove_left_padding(seq_align=...) pads unpacked microbatches to an extra alignment; the replay layout must
+    # pad to the same length or replayed routes cover fewer tokens than the model sees.
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 8)
+    attention_mask = torch.ones((2, 211), dtype=torch.bool)
+
+    default = token_metadata.build_token_metadata_layout(
+        attention_mask, attention_mask.device, packed=False, fp8_enabled=False
+    )
+    aligned = token_metadata.build_token_metadata_layout(
+        attention_mask, attention_mask.device, packed=False, fp8_enabled=False, seq_align=128
+    )
+
+    assert default.aligned_sequence_length == 216
+    assert aligned.aligned_sequence_length == 256

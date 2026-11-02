@@ -88,6 +88,58 @@ class SkyrlCheckpointLoadMixin:
             self.model = model
 
 
+def skyrl_before_weight_update() -> None:
+    """Serialized-FP8 hooks that must be in place before the reload runs.
+
+    MXFP8 TRT-LLM MoE prepare re-derives a fixed per-layer weight/scale
+    relocation on every sync. Replace it with a learned, bitwise-validated
+    permutation cache; it falls back to the original on any mismatch, and is a
+    no-op for non-MXFP8 wires. Installed here rather than at worker-extension
+    import so the wrap lands in the process that owns the engine, and only once
+    a sync actually happens.
+    """
+    from skyrl.backends.skyrl_train.inference_servers.trtllm_moe_prepare_cache import (
+        install as install_trtllm_moe_prepare_cache,
+    )
+
+    install_trtllm_moe_prepare_cache()
+
+
+def skyrl_after_weight_update() -> None:
+    """Re-assert the serialized-FP8 wire's KV/attention scale contract.
+
+    The wire ships no KV/attention scale calibration, so those scales are 1.0 by
+    contract. vLLM corrupts them at boot (compressed-tensors copies the
+    dummy-load placeholders verbatim) and after a level-2 wake
+    (``init_fp8_kv_scales`` resets only the k/v tensors — q wakes as 0.0 and the
+    float mirrors keep garbage), which serves NaN on the quantized-Q path or
+    silently wrong logprobs on the bf16-Q path under ``kv_cache_dtype=fp8_*``.
+    Both of those are patched in ``vllm_compat``; a reload re-runs
+    ``process_weights_after_loading``, so re-assert it here too.
+
+    Gated on a dummy-weight boot: these engines also serve models started from a
+    real FP8 checkpoint, whose calibrated k/v scales must survive a sync that
+    carries no replacement for them.
+    """
+    from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
+        booted_without_checkpoint_weights,
+        normalize_serialized_fp8_kv_scales,
+    )
+
+    if not booted_without_checkpoint_weights():
+        return
+    from skyrl.backends.skyrl_train.patches.vllm.patch_model_runner_registry import (
+        current_model_runner,
+    )
+
+    model_runner = current_model_runner()
+    if model_runner is None:
+        return
+    count = normalize_serialized_fp8_kv_scales(model_runner)
+    if count:
+        logger.info("Normalized FP8 KV/attention scales to 1.0 on %d layers after weight sync", count)
+
+
 class SkyrlLoraStagingMixin:
     """Apply one update round to a LoRA adapter instead of the base model.
 
@@ -207,6 +259,7 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
             # model's parameters, so there is nothing to reload.
             self.skyrl_begin_lora_update()
             return
+        skyrl_before_weight_update()
         with torch.device(self.device):
             super().start_weight_update()
 
@@ -218,14 +271,33 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
         with torch.device(self.device), self.skyrl_checkpoint_load():
             super().receive_weights(update_info)
 
+    def skyrl_release_receive_buffers(self) -> None:
+        """Release receive buffers the vLLM engine holds until the end of a round.
+
+        vLLM's ``finish_weight_update`` releases them after its layerwise
+        finalize. For an adapter round, ``finish_weight_update`` calls this hook
+        in place of vLLM's. No-op for transports whose receive buffers do not
+        outlive ``receive_weights``.
+        """
+
     def finish_weight_update(self) -> None:
         if self.skyrl_lora_armed():
             # No layerwise finalize: an adapter update never writes to the base
             # model's parameters.
-            self.skyrl_finish_lora_update()
+            try:
+                self.skyrl_finish_lora_update()
+            finally:
+                self.skyrl_release_receive_buffers()
             return
+        from skyrl.backends.skyrl_train.patches.vllm.patch_moe_kernel_constants import (
+            restore_moe_kernel_constants,
+        )
+
         with torch.device(self.device):
             super().finish_weight_update()
+            # A level-2 sleep zeroes MoE kernel constants that no reload rebuilds.
+            restore_moe_kernel_constants(self.model)
+        skyrl_after_weight_update()
         empty_cuda_cache_rocm()
 
 
@@ -243,6 +315,12 @@ def _build_skyrl_ipc_engine() -> type:
 
     class SkyrlIPCWeightTransferEngine(SkyrlReceiveLifecycleMixin, IPCWeightTransferEngine):
         """vLLM's CUDA IPC receive engine plus SkyRL receive targets."""
+
+        def skyrl_release_receive_buffers(self) -> None:
+            # The importer holds this worker's mapping of the trainer's packed
+            # IPC buffer. Closing it once per export releases the producer-side
+            # refcount, so the trainer's ``ipc_collect`` can free the buffer.
+            self._packed_importer.close()
 
     return SkyrlIPCWeightTransferEngine
 

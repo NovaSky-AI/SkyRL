@@ -1,9 +1,146 @@
-from typing import Optional, Tuple
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import ClassVar, Optional, Tuple
 
 import torch
 from omegaconf import DictConfig
 
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
+
+#: ``sampler_ratio`` clamps ``log π - log q`` to ``±`` this, so the ratio has no gradient past it.
+SAMPLER_LOG_RATIO_CLIP = 20.0
+
+
+def sampler_ratio(log_ratio: torch.Tensor, out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    """``π / q`` from ``log π - log q``, as every sampler-anchored loss computes it."""
+    return safe_exp_delta(log_ratio, clip=SAMPLER_LOG_RATIO_CLIP, out_dtype=out_dtype)
+
+
+class MemberWeight(ABC):
+    """A sampler-anchored loss's detached weight ``f`` on the score ``∇ log π`` of a token.
+
+    Score centering (https://arxiv.org/abs/2609.20807, App. A.2) subtracts ``Σ_v q_v f_v ∇ log π_v``
+    over the support, which cancels drift exactly only when ``f`` is the weight the loss gives the
+    sampled token. Each loss therefore builds its own weight from one of these, and the scorer
+    evaluates the same object on every support member.
+    """
+
+    #: Whether ``f`` differs between positive and negative advantages (e.g. DPPO's trust region).
+    depends_on_advantage_sign: ClassVar[bool] = False
+
+    @abstractmethod
+    def weights(
+        self, trainer_logprobs: torch.Tensor, sampler_logprobs: torch.Tensor, *, negative_advantage: bool = False
+    ) -> torch.Tensor:
+        """``f`` per token, from ``log π`` and ``log q``; ``negative_advantage`` picks the side."""
+
+
+@dataclass(frozen=True)
+class UnitWeight(MemberWeight):
+    """Plain policy gradient: ``f = 1``."""
+
+    def weights(
+        self, trainer_logprobs: torch.Tensor, sampler_logprobs: torch.Tensor, *, negative_advantage: bool = False
+    ) -> torch.Tensor:
+        return torch.ones_like(trainer_logprobs)
+
+
+@dataclass(frozen=True)
+class RatioBand(MemberWeight):
+    """The ``rollout_is`` calibration ``f(r) = r`` inside the open band ``(low, high)``, else 0."""
+
+    low: float
+    high: float
+
+    @classmethod
+    def from_clip(cls, eps_clip_low: float, eps_clip_high: float) -> "RatioBand":
+        return cls(low=1 - eps_clip_low, high=1 + eps_clip_high)
+
+    def contains(self, ratio: torch.Tensor) -> torch.Tensor:
+        return (ratio > self.low) & (ratio < self.high)
+
+    def calibrate(self, ratio: torch.Tensor) -> torch.Tensor:
+        return torch.where(self.contains(ratio), ratio, torch.zeros_like(ratio))
+
+    def weights(
+        self, trainer_logprobs: torch.Tensor, sampler_logprobs: torch.Tensor, *, negative_advantage: bool = False
+    ) -> torch.Tensor:
+        return self.calibrate(sampler_ratio(trainer_logprobs - sampler_logprobs, trainer_logprobs.dtype))
+
+
+@dataclass(frozen=True)
+class RatioClamp(MemberWeight):
+    """The rollout-anchored ``cispo`` weight ``f(r) = clamp(r, low, high)``."""
+
+    low: float
+    high: float
+
+    @classmethod
+    def from_clip(cls, eps_clip_low: float, eps_clip_high: float) -> "RatioClamp":
+        return cls(low=1 - eps_clip_low, high=1 + eps_clip_high)
+
+    def clipped(self, ratio: torch.Tensor) -> torch.Tensor:
+        return (ratio < self.low) | (ratio > self.high)
+
+    def calibrate(self, ratio: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(ratio, self.low, self.high)
+
+    def weights(
+        self, trainer_logprobs: torch.Tensor, sampler_logprobs: torch.Tensor, *, negative_advantage: bool = False
+    ) -> torch.Tensor:
+        return self.calibrate(sampler_ratio(trainer_logprobs - sampler_logprobs, trainer_logprobs.dtype))
+
+
+class DPPOType(StrEnum):
+    BINARY_TV = "binary_tv"
+    BINARY_KL = "binary_kl"
+
+
+@dataclass(frozen=True)
+class DPPOTrustRegion(MemberWeight):
+    """DPPO's divergence mask (https://arxiv.org/abs/2602.04879) times the ratio: ``f(r) = r · keep``,
+    and 0 where ``|log r|`` exceeds ``SAMPLER_LOG_RATIO_CLIP``.
+
+    A positive advantage drops tokens the trainer already pushed ``delta_high`` above the sampler,
+    a negative one tokens pushed ``delta_low`` below it, by total variation or Bernoulli KL.
+    """
+
+    depends_on_advantage_sign: ClassVar[bool] = True
+
+    dppo_type: DPPOType
+    delta_low: float
+    delta_high: float
+
+    def keep(
+        self, trainer_logprobs: torch.Tensor, sampler_logprobs: torch.Tensor, *, negative_advantage: bool
+    ) -> torch.Tensor:
+        """Whether the token stays in the trust region, for the given advantage sign."""
+        trainer_probs, sampler_probs = trainer_logprobs.exp(), sampler_logprobs.exp()
+        prob_diff = trainer_probs - sampler_probs
+        if self.dppo_type == DPPOType.BINARY_TV:
+            if negative_advantage:
+                return -prob_diff <= self.delta_low
+            return prob_diff <= self.delta_high
+        if self.dppo_type == DPPOType.BINARY_KL:
+            eps = 1e-8
+            binary_kl = sampler_probs * (sampler_logprobs - trainer_logprobs) + (1 - sampler_probs) * torch.log(
+                (1 - sampler_probs + eps) / (1 - trainer_probs + eps)
+            )
+            if negative_advantage:
+                return ~((prob_diff < 0) & (binary_kl > self.delta_low))
+            return ~((prob_diff > 0) & (binary_kl > self.delta_high))
+        raise ValueError(f"Unknown DPPO type: {self.dppo_type}. Must be 'binary_tv' or 'binary_kl'.")
+
+    def weights(
+        self, trainer_logprobs: torch.Tensor, sampler_logprobs: torch.Tensor, *, negative_advantage: bool = False
+    ) -> torch.Tensor:
+        keep = self.keep(trainer_logprobs, sampler_logprobs, negative_advantage=negative_advantage)
+        log_ratio = trainer_logprobs - sampler_logprobs
+        # DPPO differentiates the clamped ratio itself, so a token past the clip gets no gradient.
+        keep = keep & (log_ratio.float().abs() <= SAMPLER_LOG_RATIO_CLIP)
+        ratio = sampler_ratio(log_ratio, trainer_logprobs.dtype)
+        return torch.where(keep, ratio, torch.zeros_like(ratio))
 
 
 def off_policy_correction_enabled(off_policy_correction: DictConfig) -> bool:
