@@ -55,8 +55,36 @@ def test_limit_in_line_comment_gets_capped():
 
 
 def test_limit_in_block_comment_gets_capped():
+    # The cap is inserted before the trailing comment, like the line
+    # comment case, not appended after it.
     query = "select a from t /* LIMIT 1 */"
-    assert bird_reward._add_limit_to_query(query) == capped(query)
+    assert bird_reward._add_limit_to_query(query) == "select a from t LIMIT 5000; /* LIMIT 1 */"
+
+
+def test_multiple_trailing_line_comments_get_capped():
+    # The cap goes before the whole trailing comment run; inserting it
+    # after the first comment would leave it inside that comment.
+    query = "select a from t\n-- comment 1\n-- comment 2"
+    assert bird_reward._add_limit_to_query(query) == "select a from t LIMIT 5000; -- comment 1\n-- comment 2"
+
+
+def test_line_comment_ending_in_newline_gets_capped():
+    # A terminated line comment at the end is still trailing material: the
+    # newline after it must not push the cap back onto the comment line.
+    query = "select a from t -- LIMIT 1\n"
+    assert bird_reward._add_limit_to_query(query) == "select a from t LIMIT 5000; -- LIMIT 1"
+
+
+def test_semicolon_after_trailing_line_comment_gets_capped():
+    query = "select a from t -- c\n;"
+    assert bird_reward._add_limit_to_query(query) == "select a from t LIMIT 5000; -- c"
+
+
+def test_semicolon_before_trailing_block_comment_gets_capped():
+    # Appending after the comment would put the cap after the statement's
+    # terminating semicolon, producing two statements that fail to execute.
+    query = "select a from t; /* LIMIT 1 */"
+    assert bird_reward._add_limit_to_query(query) == "select a from t LIMIT 5000; /* LIMIT 1 */"
 
 
 def test_limit_in_string_literal_gets_capped():
@@ -91,15 +119,36 @@ def test_trailing_limit_of_union_is_unchanged():
     assert bird_reward._add_limit_to_query(query) == query
 
 
-def test_execute_sql_row_count_is_bounded_for_subquery_limit(tmp_path):
+def _make_db(tmp_path) -> str:
     db_path = str(tmp_path / "t.db")
     conn = sqlite3.connect(db_path)
     conn.execute("create table t(a)")
     conn.executemany("insert into t values(?)", [(i,) for i in range(CAP + 1000)])
     conn.commit()
     conn.close()
+    return db_path
+
+
+def test_execute_sql_row_count_is_bounded_for_subquery_limit(tmp_path):
+    db_path = _make_db(tmp_path)
 
     query = "select a from t where a = (select a from t order by a desc limit 1) or 1"
     result = bird_reward._execute_sql(db_path, bird_reward._add_limit_to_query(query))
     assert not isinstance(result, Exception)
     assert len(result) == CAP
+
+
+def test_execute_sql_row_count_is_bounded_with_trailing_tails(tmp_path):
+    # The rewritten queries must stay single statements and execute with
+    # the cap in force, not error out or silently fetch the whole table.
+    db_path = _make_db(tmp_path)
+
+    for query in (
+        "select a from t -- LIMIT 1\n",
+        "select a from t\n-- comment 1\n-- comment 2",
+        "select a from t -- c\n;",
+        "select a from t; /* LIMIT 1 */",
+    ):
+        result = bird_reward._execute_sql(db_path, bird_reward._add_limit_to_query(query))
+        assert not isinstance(result, Exception)
+        assert len(result) == CAP
