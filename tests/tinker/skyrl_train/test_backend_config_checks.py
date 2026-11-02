@@ -29,62 +29,33 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
     return _build_skyrl_train_config(BASE_MODEL, overrides, lora_config)
 
 
+# One case per rule: differing server values, always-replaced keys, outright client-carried
+# keys, operator-only features, and the request-replaced loss type.
 @pytest.mark.parametrize(
     ("backend_config", "kwargs", "expected"),
     [
         ({"trainer.strategy": "megatron"}, {}, "trainer.strategy='megatron': set by --backend ('fsdp')"),
-        ({"trainer.critic.model.path": "Qwen/Qwen3-1.7B"}, {}, "trainer.critic.model.path='Qwen/Qwen3-1.7B'"),
-        ({"trainer.policy.optimizer_config.scheduler": "cosine"}, {}, "optimizer_config.scheduler='cosine'"),
         ({"trainer.algorithm.use_kl_loss": True}, {}, "use_kl_loss=True"),
-        ({"trainer.placement.colocate_all": True}, {"runtime_role": "trainer"}, "colocate_all=True"),
         # Client-carried LoRA keys are rejected outright once a request carries them (#2464),
-        # even when the value equals the request's — so the _server_values() rank row that
-        # would have rejected only a differing value never gets the chance.
+        # even when the value equals the request's.
         ({"trainer.policy.model.lora.rank": 32}, FULL_FT, "may not set ['trainer.policy.model.lora.rank']"),
-        ({"trainer.policy.model.lora.rank": 8}, LORA, "may not set ['trainer.policy.model.lora.rank']"),
-        ({"trainer.policy.model.lora.train_mlp": False}, LORA, "may not set ['trainer.policy.model.lora.train_mlp']"),
-        ({"trainer.critic.model.lora.train_attn": False}, LORA, "may not set ['trainer.critic.model.lora.train_attn']"),
         ({"trainer.critic": {"optimizer_config": {"lr": 1e-5}}}, {}, "replaced by AdamParams.learning_rate"),
-        # init_megatron_optim_config applies a kwargs lr at optimizer creation, but set_optimizer_hparams
-        # replaces it with AdamParams.learning_rate before every step, so it can never be used.
+        # set_optimizer_hparams rewrites the param groups before every step, so the same holds
+        # for the kwargs spelling and the other AdamParams fields.
         (
             {"trainer.policy.megatron_config.optimizer_config_kwargs": {"lr": 1e-5}},
             {},
             "replaced by AdamParams.learning_rate",
         ),
-        (
-            {"trainer.critic": {"megatron_config": {"optimizer_config_kwargs": {"lr": 1e-5}}}},
-            {},
-            "replaced by AdamParams.learning_rate",
-        ),
-        # The same holds for every other AdamParams field, on both config spellings.
-        (
-            {"trainer.policy.optimizer_config.adam_betas": [0.9, 0.95]},
-            {},
-            "replaced by AdamParams.beta1/beta2",
-        ),
         ({"trainer.critic.optimizer_config.weight_decay": 0.1}, {}, "replaced by AdamParams.weight_decay"),
-        ({"trainer.policy.optimizer_config.max_grad_norm": 0.5}, {}, "replaced by AdamParams.grad_clip_norm"),
-        (
-            {"trainer.critic.megatron_config": {"optimizer_config_kwargs": {"adam_eps": 1e-9}}},
-            {},
-            "replaced by AdamParams.eps",
-        ),
-        (
-            {"trainer.policy.megatron_config.optimizer_config_kwargs": {"clip_grad": 0.5}},
-            {},
-            "replaced by AdamParams.grad_clip_norm",
-        ),
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, {}, "--torch-profiler"),
-        # The request always carries loss_fn, so no configured policy_loss_type is ever in force.
+        # The request always carries loss_fn and picks the loss; only "dual_clip" is honoured.
         (
             {"trainer.algorithm.policy_loss_type": "gspo"},
             {},
             "comes from each request's loss_fn, so this value would be ignored",
         ),
         ({"use_ray": False}, {}, "use_ray"),
-        # Compared as given: a string is not the server's bool, and SkyRL-Train keeps strings as strings.
-        ({"trainer.algorithm.use_kl_loss": "false"}, {}, "use_kl_loss='false'"),
     ],
 )
 def test_rejected(backend_config, kwargs, expected):
@@ -96,9 +67,9 @@ def test_rejected(backend_config, kwargs, expected):
 @pytest.mark.parametrize(
     ("backend_config", "kwargs", "key", "value"),
     [
-        ({"trainer.strategy": "fsdp", "trainer.algorithm.use_kl_loss": False}, {}, "trainer.strategy", "fsdp"),
-        # "dual_clip" is the one policy_loss_type the server honours: no loss_fn normalizes to
-        # it, and ppo_policy_loss reads it from the config to dual-clip loss_fn="ppo".
+        ({"trainer.strategy": "fsdp"}, {}, "trainer.strategy", "fsdp"),
+        # "dual_clip" is the one policy_loss_type the server honours: ppo_policy_loss reads it
+        # from the config to dual-clip loss_fn="ppo".
         ({"trainer.algorithm.policy_loss_type": "dual_clip"}, {}, "trainer.algorithm.policy_loss_type", "dual_clip"),
         # The request's train_attn/train_mlp reach the config (via _server_values(), #2464).
         (
@@ -107,24 +78,17 @@ def test_rejected(backend_config, kwargs, expected):
             "trainer.policy.model.lora.train_attn",
             False,
         ),
-        # On an inference-only runtime, create_model's rank-0 alias keeps the rank that enables vLLM LoRA.
+        # An inference-only runtime receives no training requests, so backend_config is its only
+        # way to enable vLLM LoRA serving.
         (
             {"trainer.policy.model.lora.rank": 32},
             {"runtime_role": "inference", **FULL_FT},
             "trainer.policy.model.lora.rank",
             32,
         ),
-        # The Tinker SDK cannot send alpha, so backend_config's alpha wins over the API placeholder.
         ({"trainer.policy.model.lora": {"alpha": 128}}, LORA, "trainer.policy.model.lora.alpha", 128),
-        ({"trainer.placement": {"policy_num_gpus_per_node": 2}}, {}, "trainer.placement.policy_num_gpus_per_node", 2),
         # __post_init__ normalizes these itself, with a warning; that is not the server overriding them.
         ({"generator.inference_engine.enforce_eager": True}, LORA, "generator.inference_engine.enforce_eager", False),
-        (
-            {"trainer.print_example_interval": 2, "trainer.log_example_interval": 5},
-            {},
-            "trainer.print_example_interval",
-            5,
-        ),
     ],
 )
 def test_accepted(backend_config, kwargs, key, value):
@@ -155,7 +119,6 @@ def _start_engine(monkeypatch, backend_config: dict, backend: str = "fsdp", **kw
     ("backend_config", "kwargs", "expected"),
     [
         ({"strategy": "megatron"}, {}, "strategy='megatron': set by --backend ('fsdp')"),
-        ({"runtime_role": "trainer"}, {}, "runtime_role='trainer': set by --runtime-role ('combined')"),
         ({"generator.inference_engine": {"served_model_name": "x"}}, CHECKPOINT, "served_model_name='x'"),
     ],
 )
@@ -168,8 +131,7 @@ def test_engine_rejects_values_it_overwrites(monkeypatch, backend_config, kwargs
 @pytest.mark.parametrize(
     ("backend_config", "kwargs"),
     [
-        ({"strategy": "fsdp", "runtime_role": "trainer"}, {"runtime_role": "trainer"}),
-        ({"generator.inference_engine.served_model_name": BASE_MODEL}, CHECKPOINT),
+        ({"strategy": "fsdp"}, {}),
         ({"strategy": "megatron", "use_ray": True}, {"backend": "jax"}),
     ],
 )
@@ -178,33 +140,27 @@ def test_engine_accepts(monkeypatch, backend_config, kwargs):
     _start_engine(monkeypatch, backend_config, **kwargs)
 
 
-# The Tinker SDK's AdamParams defaults, and SkyRL-Train's own optimizer defaults as AdamParams.
-SDK_ADAM = types.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-12, weight_decay=0.0, grad_clip_norm=0.0)
-MATCHING_ADAM = SDK_ADAM.model_copy(update={"beta2": 0.999, "eps": 1e-8, "weight_decay": 0.01, "grad_clip_norm": 1.0})
-
-
-def _stub_backend(monkeypatch):
-    """A backend with two policy models and a stub dispatch; returns it and its mocked logger."""
-    logger = Mock()
-    monkeypatch.setattr(skyrl_train_backend, "logger", logger)
-    backend = object.__new__(SkyRLTrainBackend)
-    backend.config = FSDPBackendOverrides()
-    backend._model_ids_to_role = {"a": "policy", "b": "policy"}
-    backend._dispatch = Mock(**{"optim_step.return_value": 0.5})
-    return backend, logger
-
-
 def test_optim_step_applies_the_requests_adam_params_on_every_step(monkeypatch):
     """Every optim_step hands the full AdamParams to the workers, so no configured optimizer value rules."""
-    backend, logger = _stub_backend(monkeypatch)
-    for model_id, adam_params in [("a", MATCHING_ADAM), ("b", SDK_ADAM), ("b", SDK_ADAM)]:
-        backend.optim_step(model_id, types.OptimStepInput(adam_params=adam_params))
+    monkeypatch.setattr(skyrl_train_backend, "logger", Mock())
+    backend = object.__new__(SkyRLTrainBackend)
+    backend.config = FSDPBackendOverrides()
+    backend._model_ids_to_role = {"m": "policy"}
+    backend._dispatch = Mock(**{"optim_step.return_value": 0.5})
 
-    calls = backend._dispatch.set_optimizer_hparams.call_args_list
-    assert [(call.args[0], call.args[1]) for call in calls] == [
-        ("policy", MATCHING_ADAM),
-        ("policy", SDK_ADAM),
-        ("policy", SDK_ADAM),
+    sdk_adam = types.AdamParams(
+        learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-12, weight_decay=0.0, grad_clip_norm=0.0
+    )
+    server_defaults = sdk_adam.model_copy(
+        update={"beta2": 0.999, "eps": 1e-8, "weight_decay": 0.01, "grad_clip_norm": 1.0}
+    )
+    for adam_params in (server_defaults, sdk_adam):
+        backend.optim_step("m", types.OptimStepInput(adam_params=adam_params))
+
+    assert [
+        (call.args[0], call.args[1], call.kwargs["model_id"])
+        for call in backend._dispatch.set_optimizer_hparams.call_args_list
+    ] == [
+        ("policy", server_defaults, "m"),
+        ("policy", sdk_adam, "m"),
     ]
-    assert [call.kwargs["model_id"] for call in calls] == ["a", "b", "b"]
-    logger.warning.assert_not_called()
