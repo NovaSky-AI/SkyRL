@@ -46,7 +46,6 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 
 - `strategy`, `runtime_role` and `served_model_name` stop the server at startup.
 - The other keys are checked when the first `create_model` request sets up training (on an inference-only runtime, at the first sample request). That request fails with the error, which also appears in the server log.
-- The critic's LoRA rank is checked when the critic's `create_model` request arrives, which fails the same way.
 - A `backend_config` LoRA alpha, for the policy or the critic, is used as given: the Tinker SDK cannot send alpha, so the request only carries a placeholder (32).
 - Values that SkyRL-Train itself adjusts while building the config are kept, and SkyRL-Train logs a warning for each (for example `enforce_eager: true` with LoRA on vLLM).
 
@@ -55,8 +54,10 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 | `strategy`, `trainer.strategy` | `--backend` | the value differs from `--backend` |
 | `runtime_role` | `--runtime-role` | the value differs from `--runtime-role` |
 | `trainer.policy.model.path`, `trainer.critic.model.path` | `--base-model` (or `--base-model-checkpoint-path`) | the value differs |
-| `trainer.{policy,critic}.model.lora.rank` | the LoRA rank the client passes to `create_model` | the value differs from the client's rank. With `--runtime-role inference` the policy rank is used as given: it enables LoRA on the inference engines |
+| `trainer.{policy,critic}.model.lora.rank` | the LoRA rank the client passes to `create_model` | always, on a runtime that trains — including a value equal to the client's rank. With `--runtime-role inference` the policy rank is used as given: it enables LoRA on the inference engines |
+| `trainer.{policy,critic}.model.lora.train_attn`, `…train_mlp` | the LoRA flags the client passes to `create_model` | always, on a runtime that trains — including values equal to the client's |
 | `trainer.{policy,critic}.optimizer_config.lr` | `AdamParams.learning_rate` on every `optim_step` | always |
+| `trainer.{policy,critic}.megatron_config.optimizer_config_kwargs.lr` | `AdamParams.learning_rate` on every `optim_step` | always |
 | `trainer.{policy,critic}.optimizer_config.scheduler`, `…num_warmup_steps` | the server, since the client schedules the learning rate | the value is not `constant_with_warmup` / `0` |
 | `trainer.algorithm.use_kl_loss` | not supported by the Tinker server | the value is `true` |
 | `trainer.algorithm.policy_loss_type` | the request's `loss_fn` | the value is not `regular` or `dual_clip` (`dual_clip` enables dual-clip PPO for `loss_fn="ppo"`) |
@@ -67,7 +68,7 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 
 ### Optimizer settings
 
-The SkyRL-Train backends apply only `learning_rate` from each `optim_step`'s `AdamParams`. Betas, weight decay and gradient clipping come from `trainer.policy.optimizer_config` (`adam_betas`, `weight_decay`, `max_grad_norm`), and eps is `1e-8`. On Megatron, `trainer.policy.megatron_config.optimizer_config_kwargs` takes precedence for the keys it sets (`adam_beta1`, `adam_beta2`, `adam_eps`, `weight_decay`, `clip_grad`), so eps can be changed there; on FSDP it is fixed. The server logs a warning on a model's first `optim_step` when the request's `beta1`, `beta2`, `eps`, `weight_decay` or `grad_clip_norm` differ from the values in use, naming the key that sets each one. Set those keys in `--backend-config` to match what the client sends.
+The SkyRL-Train backends apply only `learning_rate` from each `optim_step`'s `AdamParams`. Betas, weight decay and gradient clipping come from `trainer.policy.optimizer_config` (`adam_betas`, `weight_decay`, `max_grad_norm`), and eps is `1e-8`. On Megatron, `trainer.policy.megatron_config.optimizer_config_kwargs` takes precedence for the keys it sets (`adam_beta1`, `adam_beta2`, `adam_eps`, `weight_decay`, `clip_grad`), so eps can be changed there; on FSDP it is fixed. `lr` is not one of those keys: like `optimizer_config.lr`, a kwargs `lr` is rejected, since `AdamParams.learning_rate` is applied before every step. The server logs a warning on a model's first `optim_step` when the request's `beta1`, `beta2`, `eps`, `weight_decay` or `grad_clip_norm` differ from the values in use, naming the key that sets each one. Set those keys in `--backend-config` to match what the client sends.
 
 ## LoRA
 
@@ -83,7 +84,7 @@ python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 
 No server-side configuration is needed to switch between single-tenant LoRA and full-parameter fine-tuning.
 
-The fields a Tinker request carries — `rank`, `train_attn` and `train_mlp` — come only from the request. Setting `trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}` in `backend_config` is rejected, since the request would always overwrite it. The exception is an inference-only server (`--runtime-role inference`), which receives no training requests: there `trainer.policy.model.lora.rank` in `backend_config` is how LoRA serving is enabled. Settings the SDK cannot express, such as `dropout` and `target_modules`, are configured in `backend_config`, and so is the policy's `alpha`; the critic's `alpha` is always 32.
+The fields a Tinker request carries — `rank`, `train_attn` and `train_mlp` — come only from the request. Setting `trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}` in `backend_config` is rejected, since the request would always overwrite it. The exception is an inference-only server (`--runtime-role inference`), which receives no training requests: there `trainer.policy.model.lora.rank` in `backend_config` is how LoRA serving is enabled. Settings the SDK cannot express, such as `dropout` and `target_modules`, are configured in `backend_config`, and so is `alpha`, for the policy or the critic: the request only carries a placeholder (32).
 
 ### Multi-tenant LoRA
 

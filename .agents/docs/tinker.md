@@ -35,7 +35,10 @@ server would replace is an error instead of being silently ignored:
   inference-only runtime, the first sample request). That request fails with one error that
   lists every offending key and the value the server uses.
 - Values equal to the server's are accepted, and nested spellings
-  (`{"trainer.policy": {"optimizer_config": {"lr": 1e-5}}}`) are checked like dotted keys.
+  (`{"trainer.policy": {"optimizer_config": {"lr": 1e-5}}}`) are checked like dotted keys —
+  except the client-carried LoRA keys
+  (`trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}`), which a training
+  request always rejects, even when the value equals the request's.
 
 The full list is under "Keys the server sets" in `docs/content/docs/tinker/configuration.mdx`.
 
