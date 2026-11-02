@@ -1144,8 +1144,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         megatron_config = self.cfg.policy.megatron_config
-        self.empty_cuda_cache = megatron_config.empty_cuda_cache is not False
-        self.empty_cuda_cache_after_backward = megatron_config.empty_cuda_cache_after_backward()
+        expandable_segments = self.cfg.use_expandable_segments
+        self.empty_cuda_cache = megatron_config.empty_cuda_cache_after_forward(expandable_segments)
+        self.empty_cuda_cache_after_backward = megatron_config.empty_cuda_cache_after_backward(expandable_segments)
 
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.

@@ -424,12 +424,33 @@ def test_megatron_explicit_transformer_config_kwargs_override_top_level_fp8_fiel
     ],
 )
 def test_megatron_empty_cuda_cache_after_backward(empty_cuda_cache, optimizer_kwargs, expected):
-    """``empty_cuda_cache=None`` skips the post-backward empty only when the whole optimizer runs on CPU;
-    an explicit bool always wins."""
+    """Without expandable segments, ``empty_cuda_cache=None`` skips the post-backward empty only when the
+    whole optimizer runs on CPU; an explicit bool always wins."""
     from skyrl.train.config.config import MegatronConfig
 
     cfg = MegatronConfig(empty_cuda_cache=empty_cuda_cache, optimizer_config_kwargs=optimizer_kwargs)
     assert cfg.empty_cuda_cache_after_backward() is expected
+    assert cfg.empty_cuda_cache_after_backward(expandable_segments=False) is expected
+
+
+@pytest.mark.parametrize(
+    "empty_cuda_cache, expandable_segments, after_backward, after_forward",
+    [
+        (None, True, False, False),  # the trainer default: expandable segments do not fragment
+        (None, False, True, True),
+        (True, True, True, True),  # an explicit bool always wins
+        (False, False, False, False),
+    ],
+)
+def test_megatron_empty_cuda_cache_with_expandable_segments(
+    empty_cuda_cache, expandable_segments, after_backward, after_forward
+):
+    """``empty_cuda_cache=None`` skips both per-pass empties under expandable segments."""
+    from skyrl.train.config.config import MegatronConfig
+
+    cfg = MegatronConfig(empty_cuda_cache=empty_cuda_cache)
+    assert cfg.empty_cuda_cache_after_backward(expandable_segments) is after_backward
+    assert cfg.empty_cuda_cache_after_forward(expandable_segments) is after_forward
 
 
 def test_megatron_empty_cuda_cache_from_cli_override():
