@@ -345,7 +345,11 @@ def test_megatron_draft_source_selects_mtp_block_and_shared_weights():
 
     worker = SimpleNamespace(bridge=_Bridge(trunk + head), actor_module=[object()])
     source = MegatronPolicyWorkerBase._build_draft_weight_source(worker, torch.bfloat16)
-    assert [name for name, _ in source] == ["embedding.word_embeddings.weight", "output_layer.weight", *head]
+    assert [name for name, _ in source.iter_full()] == [
+        "embedding.word_embeddings.weight",
+        "output_layer.weight",
+        *head,
+    ]
 
     worker = SimpleNamespace(bridge=_Bridge(trunk), actor_module=[object()])
     with pytest.raises(ValueError, match="no `mtp.\\*` parameters"):

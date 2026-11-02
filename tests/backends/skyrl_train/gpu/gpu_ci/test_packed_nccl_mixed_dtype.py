@@ -39,7 +39,7 @@ def _serialized_pairs(device):
             )
 
     source = SerializedFp8WeightSource(DenseSource(), SerializedFp8Config(spec=QWEN35_FP8_SPEC))
-    return list(source)
+    return list(source.iter_full())
 
 
 @ray.remote(num_gpus=1)

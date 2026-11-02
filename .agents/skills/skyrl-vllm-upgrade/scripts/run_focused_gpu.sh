@@ -38,8 +38,9 @@ for group in "$@"; do
     case "$group" in
     cpu_vllm)
         # The CPU `vllm`-marker half of cpu_skyrl.yaml. It needs a Linux box with the vLLM
-        # wheel; GPUs are hidden so it behaves as it does on CI's CPU runner.
-        run_group cpu_vllm env CUDA_VISIBLE_DEVICES="" \
+        # wheel. GPUs stay visible: with CUDA_VISIBLE_DEVICES="" on a GPU node, the tests'
+        # ray.init() refuses to start ("Attempting to start raylet with 4 GPU ...").
+        run_group cpu_vllm \
             uv run --isolated --extra fsdp --extra dev pytest -q tests/train/ tests/backends/skyrl_train/ \
             --ignore=tests/backends/skyrl_train/gpu -m "vllm"
         ;;

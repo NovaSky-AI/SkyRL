@@ -294,6 +294,10 @@ class TestFilteredMegatronWeightSource:
         bridge = _Bridge()
         source = MegatronWeightSource(bridge, object(), torch.bfloat16, param_filter=is_megatron_draft_param)
         assert [m.name for m in source.metadata] == [n for n, _ in source.iter_full()]
-        assert [n for n, _ in source] == ["embedding.word_embeddings.weight", "mtp.layers.0.a", "mtp.layers.0.b"]
+        assert [n for n, _ in source.iter_full()] == [
+            "embedding.word_embeddings.weight",
+            "mtp.layers.0.a",
+            "mtp.layers.0.b",
+        ]
         # One export call per pass keeps every group_key's tasks together.
         assert all(len(args) == 3 for args in bridge.tasks_args)

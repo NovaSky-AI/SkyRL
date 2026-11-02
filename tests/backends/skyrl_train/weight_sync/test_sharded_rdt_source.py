@@ -218,7 +218,7 @@ class TestRdtFsdpWeightSource:
     def test_channels_agree_after_the_reorder(self):
         src = self._source(self._INTERLEAVED)
         meta = src.metadata
-        pairs = list(src)
+        pairs = list(src.iter_full())
         assert [m.name for m in meta] == [n for n, _ in pairs]
         assert [m.shape for m in meta] == [tuple(t.shape) for _, t in pairs]
         assert [m.dtype for m in meta] == [t.dtype for _, t in pairs]
@@ -266,7 +266,7 @@ class TestRdtMegatronWeightSource:
     def test_instantiates_and_streams(self):
         src = self._source(["model.embed_tokens.weight", "model.layers.0.a"])
         assert [m.name for m in src.metadata] == ["model.embed_tokens.weight", "model.layers.0.a"]
-        assert [n for n, _ in src] == ["model.embed_tokens.weight", "model.layers.0.a"]
+        assert [n for n, _ in src.iter_full()] == ["model.embed_tokens.weight", "model.layers.0.a"]
 
     def test_groups_partition_the_bridges_canonical_order(self):
         """The bridge yields HF-canonical order, which is already
