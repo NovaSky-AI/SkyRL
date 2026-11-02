@@ -42,10 +42,10 @@ server would replace is an error instead of being silently ignored:
 
 The full list is under "Keys the server sets" in `docs/content/docs/tinker/configuration.mdx`.
 
-Only `AdamParams.learning_rate` is applied per `optim_step`. Betas, weight decay and
-gradient clipping come from `trainer.<role>.optimizer_config` and eps is 1e-8; on Megatron,
-`megatron_config.optimizer_config_kwargs` overrides any of them it sets. The server logs once
-per model which request values it does not use.
+The full `AdamParams` is applied on every `optim_step`: learning rate, betas, eps, weight
+decay and grad clipping are written into the optimizer before the step, so
+`trainer.<role>.optimizer_config` and Megatron's `optimizer_config_kwargs` are only the
+build-time defaults.
 
 ## Key API Endpoints
 

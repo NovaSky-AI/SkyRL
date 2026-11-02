@@ -39,7 +39,6 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.tinker.config import check_backend_config, flatten_backend_config
 from skyrl.train.config import (
-    OptimizerConfig,
     SkyRLTrainConfig,
     get_config_as_yaml_str,
 )
@@ -54,57 +53,6 @@ from skyrl.utils.tok import get_tokenizer
 # Prefix the policy workers put on every loss-function metric (see
 # `worker.py`, which writes `status["loss_metrics/" + k]`).
 LOSS_METRICS_PREFIX = "loss_metrics/"
-
-# torch.optim.AdamW and Megatron's OptimizerConfig both default eps to 1e-8, and SkyRL-Train
-# does not set it.
-_OPTIMIZER_EPS = 1e-8
-
-
-# AdamParams fields that Megatron's optimizer_config_kwargs can set, by their Megatron name. They
-# take precedence over optimizer_config (init_megatron_optim_config applies them last).
-_MEGATRON_ADAM_KWARGS = {
-    "beta1": "adam_beta1",
-    "beta2": "adam_beta2",
-    "eps": "adam_eps",
-    "weight_decay": "weight_decay",
-    "grad_clip_norm": "clip_grad",
-}
-
-
-def _unapplied_adam_params(
-    adam_params: types.AdamParams,
-    optimizer_config: OptimizerConfig,
-    role: str,
-    megatron_kwargs: dict[str, Any] | None = None,
-) -> list[str]:
-    """Describe each AdamParams field whose value differs from the optimizer the workers built.
-
-    Only ``learning_rate`` is applied per step; betas, weight decay and gradient clipping come
-    from ``optimizer_config`` and eps is fixed. On Megatron, ``megatron_kwargs`` (the role's
-    ``megatron_config.optimizer_config_kwargs``) overrides them and can also set eps.
-    """
-    prefix = f"trainer.{role}.optimizer_config"
-    # Read like init_megatron_optim_config does, so extra entries don't fail optim_step here.
-    beta1, beta2 = optimizer_config.adam_betas[0], optimizer_config.adam_betas[1]
-    fields = {
-        "beta1": (beta1, f"{prefix}.adam_betas"),
-        "beta2": (beta2, f"{prefix}.adam_betas"),
-        "eps": (_OPTIMIZER_EPS, None),
-        "weight_decay": (optimizer_config.weight_decay, f"{prefix}.weight_decay"),
-        "grad_clip_norm": (optimizer_config.max_grad_norm, f"{prefix}.max_grad_norm"),
-    }
-    for name, megatron_name in _MEGATRON_ADAM_KWARGS.items():
-        if megatron_name in (megatron_kwargs or {}):
-            key = f"trainer.{role}.megatron_config.optimizer_config_kwargs.{megatron_name}"
-            fields[name] = (megatron_kwargs[megatron_name], key)
-    unapplied = []
-    for name, (used, key) in fields.items():
-        requested = getattr(adam_params, name)
-        if math.isclose(requested, used):
-            continue
-        source = f"set by {key}" if key is not None else "not configurable"
-        unapplied.append(f"{name}={requested!r} (the optimizer uses {used!r}, {source})")
-    return unapplied
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -289,8 +237,6 @@ class SkyRLTrainBackend(AbstractBackend):
         # Captured at first LoRA create_model; subsequent create_models must
         # match this signature exactly. None when no LoRA model is registered.
         self._base_lora_signature: tuple | None = None
-        # Models whose first optim_step has been compared against the optimizer config.
-        self._adam_params_checked: set[str] = set()
 
         # New inference infrastructure
         self._server_groups: list = []
@@ -414,7 +360,7 @@ class SkyRLTrainBackend(AbstractBackend):
         )
 
         # set to a large number for megatron scheduler init
-        # lr will be managed externally via set_lr()
+        # lr will be managed externally via set_optimizer_hparams()
         policy_num_training_steps = 1e9
         ray.get(
             policy_model.async_init_model(
@@ -797,8 +743,6 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
-        self._adam_params_checked.discard(model_id)
-
         # Inference-only model IDs are aliases for the same base-model runtime.
         # Keep that runtime alive while another alias is still registered.
         if self.config.runtime_role == "inference" and len(self._model_ids_to_role) > 1:
@@ -1394,11 +1338,27 @@ class SkyRLTrainBackend(AbstractBackend):
     REPLACED_PER_REQUEST = {
         "trainer.policy.optimizer_config.lr": "replaced by AdamParams.learning_rate before every optim_step",
         "trainer.critic.optimizer_config.lr": "replaced by AdamParams.learning_rate before every optim_step",
-        # init_megatron_optim_config applies optimizer_config_kwargs last, so a kwargs lr wins at
-        # optimizer creation — but Megatron's set_lr applies AdamParams.learning_rate before every
-        # step, so no configured value is ever used there either.
+        "trainer.policy.optimizer_config.adam_betas": "replaced by AdamParams.beta1/beta2 before every optim_step",
+        "trainer.critic.optimizer_config.adam_betas": "replaced by AdamParams.beta1/beta2 before every optim_step",
+        "trainer.policy.optimizer_config.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.critic.optimizer_config.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.policy.optimizer_config.max_grad_norm": "replaced by AdamParams.grad_clip_norm before every optim_step",
+        "trainer.critic.optimizer_config.max_grad_norm": "replaced by AdamParams.grad_clip_norm before every optim_step",
+        # init_megatron_optim_config applies optimizer_config_kwargs last, so the kwargs win at
+        # optimizer creation — but set_optimizer_hparams rewrites the param groups and the
+        # per-step clip before every step, so no configured value is ever used there either.
         "trainer.policy.megatron_config.optimizer_config_kwargs.lr": "replaced by AdamParams.learning_rate before every optim_step",
         "trainer.critic.megatron_config.optimizer_config_kwargs.lr": "replaced by AdamParams.learning_rate before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.adam_beta1": "replaced by AdamParams.beta1 before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.adam_beta1": "replaced by AdamParams.beta1 before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.adam_beta2": "replaced by AdamParams.beta2 before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.adam_beta2": "replaced by AdamParams.beta2 before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.adam_eps": "replaced by AdamParams.eps before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.adam_eps": "replaced by AdamParams.eps before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
     }
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
@@ -1406,24 +1366,11 @@ class SkyRLTrainBackend(AbstractBackend):
             raise RuntimeError("Training is unavailable in an inference-only runtime")
         role = self._get_role(model_id)
 
-        # Apply learning rate from AdamParams before optimizer step. The other AdamParams fields
-        # are fixed when the optimizer is created; a model's first step logs the ones that differ.
+        # The request's AdamParams are in force for the step: the workers rewrite the
+        # optimizer's param groups (lr, betas, eps, weight_decay) and the per-step clip
+        # (grad_clip_norm) before the step, so the build-time config values never rule.
         adam_params = request_data.adam_params
-        if model_id not in self._adam_params_checked:
-            self._adam_params_checked.add(model_id)
-            role_cfg = getattr(self._cfg.trainer, role)
-            megatron_kwargs = (
-                role_cfg.megatron_config.optimizer_config_kwargs if self._cfg.trainer.strategy == "megatron" else None
-            )
-            unapplied = _unapplied_adam_params(adam_params, role_cfg.optimizer_config, role, megatron_kwargs)
-            if unapplied:
-                logger.warning(
-                    "optim_step for model %s: SkyRL-Train applies only AdamParams.learning_rate, "
-                    "so these request values are not used: %s",
-                    model_id,
-                    "; ".join(unapplied),
-                )
-        self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
+        self._dispatch.set_optimizer_hparams(role, adam_params, model_id=model_id)
 
         grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")

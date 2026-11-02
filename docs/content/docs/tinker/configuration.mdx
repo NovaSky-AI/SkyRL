@@ -57,7 +57,10 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 | `trainer.{policy,critic}.model.lora.rank` | the LoRA rank the client passes to `create_model` | always, on a runtime that trains — including a value equal to the client's rank. With `--runtime-role inference` the policy rank is used as given: it enables LoRA on the inference engines |
 | `trainer.{policy,critic}.model.lora.train_attn`, `…train_mlp` | the LoRA flags the client passes to `create_model` | always, on a runtime that trains — including values equal to the client's |
 | `trainer.{policy,critic}.optimizer_config.lr` | `AdamParams.learning_rate` on every `optim_step` | always |
-| `trainer.{policy,critic}.megatron_config.optimizer_config_kwargs.lr` | `AdamParams.learning_rate` on every `optim_step` | always |
+| `trainer.{policy,critic}.optimizer_config.adam_betas` | `AdamParams.beta1`/`beta2` on every `optim_step` | always |
+| `trainer.{policy,critic}.optimizer_config.weight_decay` | `AdamParams.weight_decay` on every `optim_step` | always |
+| `trainer.{policy,critic}.optimizer_config.max_grad_norm` | `AdamParams.grad_clip_norm` on every `optim_step` | always |
+| `trainer.{policy,critic}.megatron_config.optimizer_config_kwargs.{lr,adam_beta1,adam_beta2,adam_eps,weight_decay,clip_grad}` | the matching `AdamParams` field on every `optim_step` | always |
 | `trainer.{policy,critic}.optimizer_config.scheduler`, `…num_warmup_steps` | the server, since the client schedules the learning rate | the value is not `constant_with_warmup` / `0` |
 | `trainer.algorithm.use_kl_loss` | not supported by the Tinker server | the value is `true` |
 | `trainer.algorithm.policy_loss_type` | the request's `loss_fn` | the value is not `regular` or `dual_clip` (`dual_clip` enables dual-clip PPO for `loss_fn="ppo"`) |
@@ -68,7 +71,7 @@ The server sets some SkyRL-Train config values itself, from its flags or from ea
 
 ### Optimizer settings
 
-The SkyRL-Train backends apply only `learning_rate` from each `optim_step`'s `AdamParams`. Betas, weight decay and gradient clipping come from `trainer.policy.optimizer_config` (`adam_betas`, `weight_decay`, `max_grad_norm`), and eps is `1e-8`. On Megatron, `trainer.policy.megatron_config.optimizer_config_kwargs` takes precedence for the keys it sets (`adam_beta1`, `adam_beta2`, `adam_eps`, `weight_decay`, `clip_grad`), so eps can be changed there; on FSDP it is fixed. `lr` is not one of those keys: like `optimizer_config.lr`, a kwargs `lr` is rejected, since `AdamParams.learning_rate` is applied before every step. The server logs a warning on a model's first `optim_step` when the request's `beta1`, `beta2`, `eps`, `weight_decay` or `grad_clip_norm` differ from the values in use, naming the key that sets each one. Set those keys in `--backend-config` to match what the client sends.
+Every `optim_step` applies the full `AdamParams` from the request: `learning_rate`, `beta1`/`beta2`, `eps` and `weight_decay` are written into the optimizer's param groups before the step, and `grad_clip_norm` becomes the per-step clip (`0` disables it, as in the Tinker SDK). On FSDP the request's `eps` applies too, instead of the previously fixed `1e-8`; Megatron's no-decay groups keep their `0`. `optimizer_config` and Megatron's `optimizer_config_kwargs` are only the build-time defaults, and since the request rewrites them before every step, every `AdamParams`-shaped key among them is rejected in `backend_config` (see the table above).
 
 ## LoRA
 

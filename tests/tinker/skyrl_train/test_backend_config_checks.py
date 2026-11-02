@@ -1,8 +1,7 @@
-"""CPU tests for the backend_config checks (engine startup and config build) and the AdamParams warning."""
+"""CPU tests for the backend_config checks (engine startup and config build) and the per-step AdamParams application."""
 
 import re
 from operator import attrgetter
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -14,12 +13,10 @@ from skyrl.backends.skyrl_train_backend import (  # noqa: E402
     FSDPBackendOverrides,
     SkyRLTrainBackend,
     _build_skyrl_train_config,
-    _unapplied_adam_params,
 )
 from skyrl.tinker import types  # noqa: E402
 from skyrl.tinker.config import EngineConfig, flatten_backend_config  # noqa: E402
 from skyrl.tinker.engine import TinkerEngine  # noqa: E402
-from skyrl.train.config import OptimizerConfig  # noqa: E402
 
 BASE_MODEL = "Qwen/Qwen3-0.6B"
 CHECKPOINT = {"base_model_checkpoint_path": "/models/custom"}
@@ -48,7 +45,7 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
         ({"trainer.policy.model.lora.train_mlp": False}, LORA, "may not set ['trainer.policy.model.lora.train_mlp']"),
         ({"trainer.critic.model.lora.train_attn": False}, LORA, "may not set ['trainer.critic.model.lora.train_attn']"),
         ({"trainer.critic": {"optimizer_config": {"lr": 1e-5}}}, {}, "replaced by AdamParams.learning_rate"),
-        # init_megatron_optim_config applies a kwargs lr at optimizer creation, but set_lr
+        # init_megatron_optim_config applies a kwargs lr at optimizer creation, but set_optimizer_hparams
         # replaces it with AdamParams.learning_rate before every step, so it can never be used.
         (
             {"trainer.policy.megatron_config.optimizer_config_kwargs": {"lr": 1e-5}},
@@ -59,6 +56,24 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
             {"trainer.critic": {"megatron_config": {"optimizer_config_kwargs": {"lr": 1e-5}}}},
             {},
             "replaced by AdamParams.learning_rate",
+        ),
+        # The same holds for every other AdamParams field, on both config spellings.
+        (
+            {"trainer.policy.optimizer_config.adam_betas": [0.9, 0.95]},
+            {},
+            "replaced by AdamParams.beta1/beta2",
+        ),
+        ({"trainer.critic.optimizer_config.weight_decay": 0.1}, {}, "replaced by AdamParams.weight_decay"),
+        ({"trainer.policy.optimizer_config.max_grad_norm": 0.5}, {}, "replaced by AdamParams.grad_clip_norm"),
+        (
+            {"trainer.critic.megatron_config": {"optimizer_config_kwargs": {"adam_eps": 1e-9}}},
+            {},
+            "replaced by AdamParams.eps",
+        ),
+        (
+            {"trainer.policy.megatron_config.optimizer_config_kwargs": {"clip_grad": 0.5}},
+            {},
+            "replaced by AdamParams.grad_clip_norm",
         ),
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, {}, "--torch-profiler"),
         ({"trainer.algorithm.policy_loss_type": "gspo"}, {}, "must be 'regular' or 'dual_clip'"),
@@ -156,51 +171,33 @@ def test_engine_accepts(monkeypatch, backend_config, kwargs):
     _start_engine(monkeypatch, backend_config, **kwargs)
 
 
-# The Tinker SDK's AdamParams defaults, and the same with SkyRL-Train's optimizer defaults.
+# The Tinker SDK's AdamParams defaults, and SkyRL-Train's own optimizer defaults as AdamParams.
 SDK_ADAM = types.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-12, weight_decay=0.0, grad_clip_norm=0.0)
 MATCHING_ADAM = SDK_ADAM.model_copy(update={"beta2": 0.999, "eps": 1e-8, "weight_decay": 0.01, "grad_clip_norm": 1.0})
 
 
-def test_unapplied_adam_params():
-    """Each field that differs from the optimizer names the value in use and the key that sets it."""
-    assert _unapplied_adam_params(MATCHING_ADAM, OptimizerConfig(), "critic") == []
-    assert _unapplied_adam_params(MATCHING_ADAM, OptimizerConfig(adam_betas=[0.9, 0.999, 0.5]), "critic") == []
-    assert _unapplied_adam_params(SDK_ADAM, OptimizerConfig(), "critic") == [
-        "beta2=0.95 (the optimizer uses 0.999, set by trainer.critic.optimizer_config.adam_betas)",
-        "eps=1e-12 (the optimizer uses 1e-08, not configurable)",
-        "weight_decay=0.0 (the optimizer uses 0.01, set by trainer.critic.optimizer_config.weight_decay)",
-        "grad_clip_norm=0.0 (the optimizer uses 1.0, set by trainer.critic.optimizer_config.max_grad_norm)",
-    ]
-
-
-def _stub_backend(monkeypatch, strategy: str = "fsdp", optimizer_config_kwargs: dict | None = None):
+def _stub_backend(monkeypatch):
     """A backend with two policy models and a stub dispatch; returns it and its mocked logger."""
     logger = Mock()
     monkeypatch.setattr(skyrl_train_backend, "logger", logger)
     backend = object.__new__(SkyRLTrainBackend)
     backend.config = FSDPBackendOverrides()
-    megatron_config = SimpleNamespace(optimizer_config_kwargs=optimizer_config_kwargs or {})
-    policy = SimpleNamespace(optimizer_config=OptimizerConfig(), megatron_config=megatron_config)
-    backend._cfg = SimpleNamespace(trainer=SimpleNamespace(strategy=strategy, policy=policy))
     backend._model_ids_to_role = {"a": "policy", "b": "policy"}
-    backend._adam_params_checked = set()
     backend._dispatch = Mock(**{"optim_step.return_value": 0.5})
     return backend, logger
 
 
-def test_optim_step_warns_once_per_model(monkeypatch):
-    """Only a model's first optim_step with differing AdamParams warns; the learning rate is always applied."""
+def test_optim_step_applies_the_requests_adam_params_on_every_step(monkeypatch):
+    """Every optim_step hands the full AdamParams to the workers, so no configured optimizer value rules."""
     backend, logger = _stub_backend(monkeypatch)
     for model_id, adam_params in [("a", MATCHING_ADAM), ("b", SDK_ADAM), ("b", SDK_ADAM)]:
         backend.optim_step(model_id, types.OptimStepInput(adam_params=adam_params))
 
-    assert logger.warning.call_count == 1 and "b" in logger.warning.call_args.args
-    backend._dispatch.set_lr.assert_called_with("policy", 1e-4, model_id="b")
-
-
-def test_megatron_optimizer_kwargs_are_what_the_optimizer_uses(monkeypatch):
-    """On Megatron, optimizer_config_kwargs override optimizer_config, so a request matching them is not warned about."""
-    kwargs = {"adam_beta2": 0.95, "adam_eps": 1e-12, "weight_decay": 0.0, "clip_grad": 0.0}
-    backend, logger = _stub_backend(monkeypatch, strategy="megatron", optimizer_config_kwargs=kwargs)
-    backend.optim_step("a", types.OptimStepInput(adam_params=SDK_ADAM))
+    calls = backend._dispatch.set_optimizer_hparams.call_args_list
+    assert [(call.args[0], call.args[1]) for call in calls] == [
+        ("policy", MATCHING_ADAM),
+        ("policy", SDK_ADAM),
+        ("policy", SDK_ADAM),
+    ]
+    assert [call.kwargs["model_id"] for call in calls] == ["a", "b", "b"]
     logger.warning.assert_not_called()

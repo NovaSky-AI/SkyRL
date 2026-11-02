@@ -470,17 +470,21 @@ class WorkerDispatch:
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
 
-    def set_lr(self, model: str, learning_rate: float, model_id: Optional[str] = None) -> None:
-        """Set learning rate for model's optimizer.
+    def set_optimizer_hparams(self, model: str, adam_params, model_id: Optional[str] = None) -> None:
+        """Apply the request's AdamParams to the model's optimizer on all workers.
 
-        This directly updates the optimizer's param_groups on all workers,
-        bypassing the scheduler. Useful for external learning rate schedules.
+        lr, betas, eps and weight_decay are written into the optimizer's param groups
+        (replacing the scheduler-managed lr), and grad_clip_norm becomes the per-step
+        clip. Directly updates the param_groups, bypassing the scheduler; useful for
+        external optimization schedules (e.g. from Tinker).
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         self.ensure_active_adapter(model, model_id)
         deadline.ray_get(
-            self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate),
-            "set_lr",
+            self._actor_groups[model].async_run_ray_method(
+                "pass_through", "set_optimizer_hparams", adam_params=adam_params
+            ),
+            "set_optimizer_hparams",
         )
 
     def set_algorithm_config(self, model: str, **kwargs) -> None:
