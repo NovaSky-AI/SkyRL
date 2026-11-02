@@ -648,9 +648,10 @@ class MegatronConfig(BaseConfig):
     (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
     validated per architecture at startup and forwarded to all Ray actors."""
     empty_cuda_cache: Optional[bool] = None
-    """Manually empty torch's CUDA cache after each forward/backward pass (before the optimizer step)
-    and after each forward-only pass. This frees reserved-but-unallocated memory, which can help
-    avoid OOMs from fragmentation.
+    """Empty torch's CUDA cache after each forward/backward and forward-only pass.
+
+    The empty after a forward/backward pass runs before the optimizer step. Emptying frees
+    reserved-but-unallocated memory, which can help avoid OOMs from fragmentation.
 
     ``None`` (default) skips both empties when the trainer runs with ``expandable_segments``
     (``trainer.use_expandable_segments``, on by default): that allocator does not fragment, so the
