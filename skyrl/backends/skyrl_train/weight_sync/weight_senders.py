@@ -154,6 +154,22 @@ def get_skyrl_ipc_trainer() -> "tuple[type, type]":
     return _TRAINER_ENGINE_CACHE[SKYRL_IPC_TRAINER_BACKEND]
 
 
+def mark_replay_only(source: WeightSource, *, backend: str, is_sender: bool) -> bool:
+    """Tell a source that this rank's iteration output is thrown away, if the source can use that.
+
+    Only vLLM's NCCL trainer engine discards a non-sender's stream (``_broadcast`` drains it with
+    ``for _ in source: pass`` to keep the rank in the export collectives). Under IPC every rank ships
+    its own handles, so non-senders there still need the real stream. Returns whether it marked.
+    """
+    if backend != "nccl" or is_sender:
+        return False
+    set_replay_only = getattr(source, "set_replay_only", None)
+    if set_replay_only is None:
+        return False
+    set_replay_only()
+    return True
+
+
 def build_trainer_engine(
     *,
     ie_cfg: "InferenceEngineConfig",
@@ -232,6 +248,7 @@ def build_trainer_engine(
 
     engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
     engine.skyrl_draft_source = draft_source
+    mark_replay_only(source, backend=backend, is_sender=getattr(engine, "is_sender", True))
 
     if backend == "sharded_rdt":
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send

@@ -157,6 +157,12 @@ matching FlashInfer settings are derived from them (`nvfp4_runtime_env`), so the
 both sides. Run vLLM's experts expert-parallel: under expert TP the down_proj input's per-token scale covers
 only a rank's slice. Serialized NVFP4 is incompatible with `fp8_weight_sync_mode` and the delta / sharded-RDT
 backends, and works with vLLM sleep level 2.
+Cost controls (all byte-identical on the wire): `metadata()` is shape-only (the serializer runs over the wrapped
+source's metadata with `Nvfp4ExpertSpecSerializer`, so it quantizes nothing); on NCCL non-sender ranks
+`build_trainer_engine` calls `mark_replay_only`, after which iteration only drains the Megatron export (its
+gathers are collectives) and skips quantization, since vLLM's NCCL engine discards a non-sender's stream (IPC
+non-senders still serialize: each ships its own handles); and the TE `NVFP4Quantizer` is cached per
+(settings, device) instead of rebuilt per expert.
 
 ### Control plane
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -79,28 +79,47 @@ class Nvfp4WeightQuantSettings:
         )
 
 
+# One TE quantizer per (settings, device). ``NVFP4Quantizer.quantize`` allocates a fresh output and does
+# not mutate the quantizer (no amax reduction, no stochastic-rounding state), so reusing it is
+# bitwise-identical to constructing one per expert, as the sync used to (~12k times per sync).
+_QUANTIZER_CACHE: Dict[Tuple[Nvfp4WeightQuantSettings, torch.device], Any] = {}
+
+
+def _nvfp4_quantizer(settings: Nvfp4WeightQuantSettings, device: torch.device):
+    key = (settings, device)
+    quantizer = _QUANTIZER_CACHE.get(key)
+    if quantizer is None:
+        from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+
+        quantizer = NVFP4Quantizer(
+            rowwise=True,
+            columnwise=False,
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=settings.two_d,
+            stochastic_rounding=False,
+            row_scaled_nvfp4=False,
+            nvfp4_use_4over6=settings.use_4over6,
+            nvfp4_e4m3_max=settings.e4m3_max,
+            nvfp4_4over6_err_mode=settings.err_mode,
+            with_random_sign_mask=False,
+        )
+        _QUANTIZER_CACHE[key] = quantizer
+    return quantizer
+
+
+def _check_nvfp4_cols(cols: int) -> None:
+    if cols % NVFP4_BLOCK_SIZE != 0:
+        raise ValueError(f"NVFP4 requires K divisible by {NVFP4_BLOCK_SIZE}, got {cols}")
+
+
 def quantize_nvfp4_matrix(
     weight: torch.Tensor, settings: Nvfp4WeightQuantSettings
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Quantize one ``[N, K]`` matrix with TE's NVFP4 kernel -> (packed uint8, e4m3 block scales, fp32 decode scale)."""
-    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-
     rows, cols = weight.shape
-    if cols % NVFP4_BLOCK_SIZE != 0:
-        raise ValueError(f"NVFP4 requires K divisible by {NVFP4_BLOCK_SIZE}, got {cols}")
-    quantizer = NVFP4Quantizer(
-        rowwise=True,
-        columnwise=False,
-        with_rht=False,
-        with_post_rht_amax=False,
-        with_2d_quantization=settings.two_d,
-        stochastic_rounding=False,
-        row_scaled_nvfp4=False,
-        nvfp4_use_4over6=settings.use_4over6,
-        nvfp4_e4m3_max=settings.e4m3_max,
-        nvfp4_4over6_err_mode=settings.err_mode,
-        with_random_sign_mask=False,
-    )
+    _check_nvfp4_cols(cols)
+    quantizer = _nvfp4_quantizer(settings, weight.device)
     pad = (-rows) % _TE_ROW_ALIGNMENT
     src = weight.contiguous()
     if pad:
@@ -123,6 +142,23 @@ def _emit(prefix: str, proj: str, packed: torch.Tensor, block_scale: torch.Tenso
     yield f"{base}.input_scale", torch.ones((), dtype=torch.float32, device=decode.device)
 
 
+class TensorSpec(NamedTuple):
+    """Dtype and shape of a stream entry, without data (what ``metadata()`` declares)."""
+
+    dtype: torch.dtype
+    shape: Tuple[int, ...]
+
+
+def _emit_spec(prefix: str, proj: str, rows: int, cols: int) -> Iterator[Tuple[str, TensorSpec]]:
+    """The entries :func:`_emit` yields for a quantized ``[rows, cols]`` projection, as specs."""
+    _check_nvfp4_cols(cols)
+    base = f"{prefix}.{proj}"
+    yield f"{base}.weight", TensorSpec(torch.uint8, (rows, cols // 2))
+    yield f"{base}.weight_scale", TensorSpec(torch.float8_e4m3fn, (rows, cols // NVFP4_BLOCK_SIZE))
+    yield f"{base}.weight_scale_2", TensorSpec(torch.float32, ())
+    yield f"{base}.input_scale", TensorSpec(torch.float32, ())
+
+
 class Nvfp4ExpertSerializer:
     """Stateful stream transform: routed-expert BF16 weights -> ModelOpt NVFP4 tensors; others pass through.
 
@@ -137,16 +173,16 @@ class Nvfp4ExpertSerializer:
             )
         self.settings = settings
         self.first_bf16_layer = num_layers - high_precision_last_layers
-        self._pending: Dict[str, Tuple[str, torch.Tensor]] = {}
+        self._pending: Dict[str, Tuple[str, Any]] = {}
 
-    def __call__(self, name: str, tensor: torch.Tensor) -> Iterator[Tuple[str, torch.Tensor]]:
+    def __call__(self, name: str, tensor: Any) -> Iterator[Tuple[str, Any]]:
         m = _EXPERT_RE.match(name)
         if m is None or int(m.group("layer")) >= self.first_bf16_layer:
             yield name, tensor
             return
         prefix, proj = m.group("prefix"), m.group("proj")
         if proj == "down_proj":
-            yield from _emit(prefix, proj, *quantize_nvfp4_matrix(tensor, self.settings))
+            yield from self._emit_single(prefix, proj, tensor)
             return
         other = self._pending.pop(prefix, None)
         if other is None:
@@ -154,8 +190,14 @@ class Nvfp4ExpertSerializer:
             return
         other_proj, other_tensor = other
         gate, up = (other_tensor, tensor) if other_proj == "gate_proj" else (tensor, other_tensor)
-        if gate.shape != up.shape:
+        if tuple(gate.shape) != tuple(up.shape):
             raise ValueError(f"{prefix}: gate {tuple(gate.shape)} and up {tuple(up.shape)} must match")
+        yield from self._emit_pair(prefix, gate, up)
+
+    def _emit_single(self, prefix: str, proj: str, tensor: torch.Tensor) -> Iterator[Tuple[str, torch.Tensor]]:
+        yield from _emit(prefix, proj, *quantize_nvfp4_matrix(tensor, self.settings))
+
+    def _emit_pair(self, prefix: str, gate: torch.Tensor, up: torch.Tensor) -> Iterator[Tuple[str, torch.Tensor]]:
         packed, block_scale, decode = quantize_nvfp4_matrix(torch.cat((gate, up), dim=0), self.settings)
         n = gate.shape[0]
         yield from _emit(prefix, "gate_proj", packed[:n].contiguous(), block_scale[:n].contiguous(), decode)
@@ -164,6 +206,25 @@ class Nvfp4ExpertSerializer:
     def finish(self) -> None:
         if self._pending:
             raise RuntimeError(f"NVFP4 sync: unpaired gate/up for {sorted(self._pending)[:4]} ...")
+
+
+class Nvfp4ExpertSpecSerializer(Nvfp4ExpertSerializer):
+    """The same stream transform over :class:`TensorSpec` inputs: names, order, dtypes and shapes, no data.
+
+    Shares the pairing / pass-through / emission-order code with :class:`Nvfp4ExpertSerializer`; only the
+    two quantizing leaves are replaced, so every rank can declare the serialized stream's metadata without
+    quantizing (or even materializing) anything. ``test_nvfp4_serializer.py`` pins the two against each
+    other, and the sender's ``_checked_iter`` raises on any divergence at runtime.
+    """
+
+    def _emit_single(self, prefix: str, proj: str, spec: TensorSpec) -> Iterator[Tuple[str, TensorSpec]]:
+        rows, cols = spec.shape
+        yield from _emit_spec(prefix, proj, rows, cols)
+
+    def _emit_pair(self, prefix: str, gate: TensorSpec, up: TensorSpec) -> Iterator[Tuple[str, TensorSpec]]:
+        rows, cols = gate.shape
+        yield from _emit_spec(prefix, "gate_proj", rows, cols)
+        yield from _emit_spec(prefix, "up_proj", rows, cols)
 
 
 # humans& "4-bitter Lesson" recipe defaults; any of these may be overridden in the driver environment.

@@ -221,8 +221,15 @@ class SerializedFp8WeightSource(WeightSource):
 class SerializedNvfp4WeightSource(WeightSource):
     """Serialize routed-expert weights into ModelOpt NVFP4 checkpoint tensors (see ``weight_sync/nvfp4.py``).
 
-    Like ``SerializedFp8WeightSource``: metadata comes from one dry conversion of the same stream. Each pass
-    uses a fresh serializer, so gate/up pairing state never leaks between passes.
+    ``metadata()`` runs ``Nvfp4ExpertSpecSerializer`` over the wrapped source's *metadata*: the same
+    pairing/emission code as iteration, so names, order, dtypes and shapes match, but nothing is
+    quantized or materialized beyond the wrapped source's own metadata. Each pass uses a fresh
+    serializer, so gate/up pairing state never leaks between passes.
+
+    On an NCCL non-sender rank (``set_replay_only``) iteration only replays the wrapped source -- the
+    Megatron export's TP/EP gathers are collectives every rank must join -- and skips quantization: vLLM's
+    NCCL trainer engine discards everything a non-sender yields (``for _ in source: pass``). The sender's
+    stream, i.e. the bytes on the wire, is unchanged.
     """
 
     def __init__(self, source: WeightSource, settings: Any, num_layers: int, high_precision_last_layers: int) -> None:
@@ -231,6 +238,11 @@ class SerializedNvfp4WeightSource(WeightSource):
         self._num_layers = num_layers
         self._high_precision_last_layers = high_precision_last_layers
         self._meta: Optional[List[ParamMeta]] = None
+        self._replay_only = False
+
+    def set_replay_only(self) -> None:
+        """Mark this rank as one whose iteration output is discarded (NCCL non-sender)."""
+        self._replay_only = True
 
     def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
         from skyrl.backends.skyrl_train.weight_sync.nvfp4 import Nvfp4ExpertSerializer
@@ -243,10 +255,25 @@ class SerializedNvfp4WeightSource(WeightSource):
 
     def metadata(self) -> List[ParamMeta]:
         if self._meta is None:
-            self._meta = [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self._serialized()]
+            from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
+                Nvfp4ExpertSpecSerializer,
+                TensorSpec,
+            )
+
+            serializer = Nvfp4ExpertSpecSerializer(self._settings, self._num_layers, self._high_precision_last_layers)
+            meta: List[ParamMeta] = []
+            for m in self._source.metadata():
+                for name, spec in serializer(m.name, TensorSpec(m.dtype, tuple(m.shape))):
+                    meta.append(ParamMeta(name, spec.dtype, tuple(spec.shape)))
+            serializer.finish()
+            self._meta = meta
         return self._meta
 
     def __iter__(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        if self._replay_only:
+            # Not the serialized stream: the caller only drains it to stay in the export collectives.
+            yield from self._source
+            return
         yield from self._serialized()
 
 
