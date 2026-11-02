@@ -101,8 +101,6 @@ DEFAULT_BACKEND_CONFIG=$(cat <<JSON
   "trainer.algorithm.off_policy_correction.sequence_mask_metric": "geometric",
   "trainer.algorithm.off_policy_correction.geo_mask_low": $GEO_MASK_LOW,
   "trainer.algorithm.off_policy_correction.geo_mask_high": $GEO_MASK_HIGH,
-  "trainer.policy.optimizer_config.weight_decay": $WEIGHT_DECAY,
-  "trainer.policy.optimizer_config.max_grad_norm": $MAX_GRAD_NORM,
   "generator.inference_engine.num_engines": $NUM_INFERENCE_ENGINES,
   "generator.inference_engine.tensor_parallel_size": $INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE,
   "generator.inference_engine.backend": "vllm",
