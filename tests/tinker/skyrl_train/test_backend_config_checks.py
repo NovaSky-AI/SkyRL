@@ -76,7 +76,17 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
             "replaced by AdamParams.grad_clip_norm",
         ),
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, {}, "--torch-profiler"),
-        ({"trainer.algorithm.policy_loss_type": "gspo"}, {}, "must be 'regular' or 'dual_clip'"),
+        # The request always carries loss_fn, so no configured policy_loss_type is ever in force.
+        (
+            {"trainer.algorithm.policy_loss_type": "gspo"},
+            {},
+            "replaced by each request's loss_fn before every forward_backward",
+        ),
+        (
+            {"trainer.algorithm.policy_loss_type": "dual_clip"},
+            {},
+            "replaced by each request's loss_fn before every forward_backward",
+        ),
         ({"use_ray": False}, {}, "use_ray"),
         # Compared as given: a string is not the server's bool, and SkyRL-Train keeps strings as strings.
         ({"trainer.algorithm.use_kl_loss": "false"}, {}, "use_kl_loss='false'"),
@@ -92,7 +102,6 @@ def test_rejected(backend_config, kwargs, expected):
     ("backend_config", "kwargs", "key", "value"),
     [
         ({"trainer.strategy": "fsdp", "trainer.algorithm.use_kl_loss": False}, {}, "trainer.strategy", "fsdp"),
-        ({"trainer.algorithm.policy_loss_type": "dual_clip"}, {}, "trainer.algorithm.policy_loss_type", "dual_clip"),
         # The request's train_attn/train_mlp reach the config (via _server_values(), #2464).
         (
             {},

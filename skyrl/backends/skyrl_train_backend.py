@@ -182,12 +182,6 @@ def _build_skyrl_train_config(
             f"(`create_lora_training_client(rank=..., train_attn=..., train_mlp=...)`); set them there."
         )
     check_backend_config(backend_config_values, server_values, unused_keys)
-    loss_type = backend_config_values.get("trainer.algorithm.policy_loss_type")
-    if loss_type is not None and loss_type not in SkyRLTrainBackend.TINKER_POLICY_LOSS_TYPES:
-        raise ValueError(
-            f"--backend-config sets trainer.algorithm.policy_loss_type={loss_type!r}: it must be 'regular' "
-            "or 'dual_clip', since the request's loss_fn picks the loss function"
-        )
 
     cfg = SkyRLTrainConfig.from_cli_overrides(
         {**backend_config, **{key: value for key, (value, _) in server_values.items()}}
@@ -1106,11 +1100,6 @@ class SkyRLTrainBackend(AbstractBackend):
         if role != "critic" and loss_fn == "ppo_critic":
             raise ValueError("loss_fn='ppo_critic' is only valid for critic models")
 
-    # backend_config values of `trainer.algorithm.policy_loss_type` that have an effect here. The
-    # request's loss_fn picks the loss function, and `ppo_policy_loss` (which loss_fn="ppo" maps
-    # to) reads policy_loss_type: "dual_clip" enables dual-clip, and any other value fails its assert.
-    TINKER_POLICY_LOSS_TYPES = ("regular", "dual_clip")
-
     def _normalize_policy_loss_request(
         self,
         role: str,
@@ -1359,6 +1348,7 @@ class SkyRLTrainBackend(AbstractBackend):
         "trainer.critic.megatron_config.optimizer_config_kwargs.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
         "trainer.policy.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
         "trainer.critic.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
+        "trainer.algorithm.policy_loss_type": "replaced by each request's loss_fn before every forward_backward",
     }
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
