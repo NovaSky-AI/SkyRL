@@ -163,6 +163,12 @@ runs is a capacity failure, not a test failure -- resubmit. `l4_ci` capacity is 
 exhausted (jobs sit in STARTING for 30+ min); `l40s_test` (4xL40S, same cloud) runs the same
 tests unchanged -- `COMPUTE_CONFIG=l40s_test bash .../submit_focused.sh ...`.
 
+Inside an Anyscale job the tests must attach to the job's Ray cluster: never export
+`RAY_ADDRESS=local` (or hide GPUs with `CUDA_VISIBLE_DEVICES=""`) in the entrypoint --
+every test then errors at `ray.init()` ("The current node timed out during startup" /
+"Attempting to start raylet with 4 GPU"). `RAY_ADDRESS=local` is only for a dev box that
+already runs a training cluster.
+
 Do not submit GPU jobs until sections 2-4 are done: in 0.33, three separate breakages
 (import-time `TypeError` in every weight source, moved `cli_args`, NCCL second-sync hang)
 would each have failed every group, and the first two are visible statically.

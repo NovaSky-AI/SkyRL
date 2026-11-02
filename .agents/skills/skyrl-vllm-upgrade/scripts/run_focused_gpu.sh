@@ -13,8 +13,10 @@
 set -uo pipefail
 
 export CI=true
-# Tests call bare ray.init(); keep them on a local instance, never a live cluster.
-export RAY_ADDRESS=local
+# Do NOT set RAY_ADDRESS=local here: as an Anyscale job entrypoint the tests' bare ray.init()
+# must attach to the job's own cluster (as ci/gpu_ci_run_*.sh do). Starting a second local
+# instance on that node times out ("The current node timed out during startup"). On a shared
+# dev box with a live training cluster, export RAY_ADDRESS=local yourself before running this.
 
 GPU_CI=tests/backends/skyrl_train/gpu/gpu_ci
 declare -A RESULT
@@ -38,8 +40,7 @@ for group in "$@"; do
     case "$group" in
     cpu_vllm)
         # The CPU `vllm`-marker half of cpu_skyrl.yaml. It needs a Linux box with the vLLM
-        # wheel. GPUs stay visible: with CUDA_VISIBLE_DEVICES="" on a GPU node, the tests'
-        # ray.init() refuses to start ("Attempting to start raylet with 4 GPU ...").
+        # wheel. GPUs stay visible (the tests attach to the job's Ray cluster, which has them).
         run_group cpu_vllm \
             uv run --isolated --extra fsdp --extra dev pytest -q tests/train/ tests/backends/skyrl_train/ \
             --ignore=tests/backends/skyrl_train/gpu -m "vllm"
