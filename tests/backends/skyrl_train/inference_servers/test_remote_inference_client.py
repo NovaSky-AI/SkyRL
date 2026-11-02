@@ -15,7 +15,12 @@ import pytest
 import pytest_asyncio
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 
 from skyrl.backends.skyrl_train.inference_servers import (
     remote_inference_client as remote_client_module,
@@ -117,6 +122,18 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/test/bad_request_text")
     async def bad_request_text():
         return PlainTextResponse("prompt too long", status_code=400)
+
+    @app.post("/test/control_body")
+    async def control_body(kind: str, chunked: bool, status: int = 200):
+        body = {
+            "json": b'{"success": true}',
+            "empty": b"",
+            "invalid": b"not-json",
+            "error": b'{"error": {"message": "reset unavailable"}}',
+        }[kind]
+        if chunked:
+            return StreamingResponse(iter([body]), media_type="application/json", status_code=status)
+        return Response(body, media_type="application/json", status_code=status)
 
     @app.post("/finish_session")
     async def finish_session(session_id: str = Query(...)):
@@ -810,6 +827,43 @@ class TestPackedSideChannelBodies:
 
 class TestControlPlane:
     """Test control plane methods (fan-out to all servers)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize("kind,expected", [("json", {"success": True}), ("empty", None)])
+    async def test_control_response_body(self, client, chunked, kind, expected):
+        url = client.server_urls[0]
+
+        result = await client._call_server(
+            url, "/test/control_body", params={"kind": kind, "chunked": str(chunked).lower()}
+        )
+
+        assert result == (url, {"status": 200, "body": expected})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    async def test_control_response_invalid_json(self, client, chunked):
+        with pytest.raises(json.JSONDecodeError):
+            await client._call_server(
+                client.server_urls[0],
+                "/test/control_body",
+                params={"kind": "invalid", "chunked": str(chunked).lower()},
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize("kind", ["error", "empty"])
+    async def test_control_response_http_error(self, client, chunked, kind):
+        with pytest.raises(aiohttp.ClientResponseError) as error:
+            await client._call_server(
+                client.server_urls[0],
+                "/test/control_body",
+                params={"kind": kind, "chunked": str(chunked).lower(), "status": 503},
+            )
+
+        assert error.value.status == 503
+        if kind == "error":
+            assert error.value.message == "reset unavailable"
 
     @pytest.mark.asyncio
     async def test_pause_keep_mode(self, client):

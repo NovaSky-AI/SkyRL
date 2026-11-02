@@ -1106,7 +1106,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
         async with session.request(method, url, json=json, params=params) as resp:
-            body = await resp.json() if resp.content_length else None
+            raw_body = await resp.read()
+            body = await resp.json() if raw_body else None
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
 

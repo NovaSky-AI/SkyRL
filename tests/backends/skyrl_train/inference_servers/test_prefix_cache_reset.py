@@ -13,7 +13,7 @@ import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 pytest.importorskip("vllm")
 
@@ -136,6 +136,18 @@ async def test_native_reset_query_and_result(backends, transport, flag):
 async def test_reset_defaults(backends, transport, expected):
     await reset(backends, transport)
     assert all(backend.app.state.engine_client.calls == [(expected, False)] for backend in backends)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["async", "sync"])
+async def test_reset_accepts_chunked_acknowledgment(backends, transport):
+    backends[0].app.state.engine_client.reply = StreamingResponse(
+        iter([b'{"success": true}']), media_type="application/json"
+    )
+
+    await reset(backends, transport, reset_running_requests=True)
+
+    assert all(backend.app.state.engine_client.calls == [(True, False)] for backend in backends)
 
 
 def test_only_native_reset_route(backends):
