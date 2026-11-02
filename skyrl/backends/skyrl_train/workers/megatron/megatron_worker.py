@@ -74,6 +74,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_grouped_expert_lora_fast_path import (
+    apply_grouped_expert_lora_fast_path_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -155,6 +158,8 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
+# Copy-free grouped_mm forward for per-expert grouped LoRA adapters (share_expert_adapters=false).
+apply_grouped_expert_lora_fast_path_patch()
 # Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
 apply_checkpoint_without_output_frozen_inputs_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
