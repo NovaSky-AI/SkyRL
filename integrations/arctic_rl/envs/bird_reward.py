@@ -137,17 +137,123 @@ def validate_response_format(response: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# LIMIT addition (mirrors V6b's _add_limit_to_query)
+# LIMIT addition (adapted from V6b's _add_limit_to_query; the top-level
+# detection below deliberately diverges from V6b's substring check)
 # ---------------------------------------------------------------------------
+
+_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+
+def _find_top_level_limit(query: str) -> tuple[bool, int | None]:
+    """Scan a query for a LIMIT clause that belongs to the outer query.
+
+    Returns (found, trailing_comment_start). ``found`` is True when a LIMIT
+    keyword token appears at parenthesis depth 0, outside string literals,
+    quoted identifiers, and comments. Keyword matching is case-insensitive,
+    as it was in the previous substring check. Identifiers that merely
+    contain "limit" (credit_limit, limit1) are single word tokens and never
+    match.
+
+    ``trailing_comment_start`` is the index of a comment at depth 0 that
+    consumes the rest of the query (a line comment with no terminating
+    newline, or an unterminated block comment), or None. Text appended to
+    such a query would land inside the comment, so callers that append must
+    insert before it instead.
+    """
+    depth = 0
+    trailing_comment_start = None
+    i = 0
+    n = len(query)
+    while i < n:
+        ch = query[i]
+        if ch == "'":
+            # String literal; a doubled '' is an escaped quote (SQLite has
+            # no backslash escapes in string literals).
+            i += 1
+            while i < n:
+                if query[i] == "'":
+                    if i + 1 < n and query[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch in ('"', "`"):
+            # Quoted identifier; a doubled quote character is the escape.
+            i += 1
+            while i < n:
+                if query[i] == ch:
+                    if i + 1 < n and query[i + 1] == ch:
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "[":
+            # Bracket-quoted identifier (SQLite); ends at the first ']'.
+            end = query.find("]", i + 1)
+            i = n if end == -1 else end + 1
+            continue
+        if ch == "-" and query[i + 1 : i + 2] == "-":
+            # Line comment, running to the next newline or end of string.
+            end = query.find("\n", i + 2)
+            if end == -1:
+                if depth == 0:
+                    trailing_comment_start = i
+                break
+            i = end + 1
+            continue
+        if ch == "/" and query[i + 1 : i + 2] == "*":
+            # Block comment; an unterminated one consumes the rest.
+            end = query.find("*/", i + 2)
+            if end == -1:
+                if depth == 0:
+                    trailing_comment_start = i
+                break
+            i = end + 2
+            continue
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if ch in _WORD_CHARS:
+            end = i + 1
+            while end < n and query[end] in _WORD_CHARS:
+                end += 1
+            if depth == 0 and query[i:end].upper() == "LIMIT":
+                return True, trailing_comment_start
+            i = end
+            continue
+        i += 1
+    return False, trailing_comment_start
 
 
 def _add_limit_to_query(query: str, limit: int = DEFAULT_LIMIT_NUMBER) -> str:
-    """Add LIMIT clause if the query doesn't already have one."""
+    """Add LIMIT clause if the query doesn't already have one at the top level.
+
+    Only a LIMIT clause of the outer query suppresses the cap. A LIMIT
+    inside a subquery, a string literal, a quoted identifier, or a comment
+    does not bound the rows the outer query returns, so the cap is still
+    appended (V6b's substring check treated all of those as an existing
+    LIMIT; this is the deliberate divergence from V6b).
+    """
     if not query:
         return query
-    upper = query.upper()
-    if "LIMIT " in upper or "LIMIT\n" in upper or "LIMIT\t" in upper:
+    has_limit, trailing_comment_start = _find_top_level_limit(query)
+    if has_limit:
         return query
+    if trailing_comment_start is not None:
+        # Appending would put the LIMIT inside the trailing comment, where
+        # SQLite would ignore it; insert before the comment instead.
+        head = query[:trailing_comment_start].rstrip().rstrip(";").rstrip()
+        if head:
+            return head + f" LIMIT {limit}; " + query[trailing_comment_start:]
     return query.rstrip().rstrip(";").rstrip() + f" LIMIT {limit};"
 
 
