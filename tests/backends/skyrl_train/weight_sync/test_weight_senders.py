@@ -474,3 +474,10 @@ def test_mark_replay_only_only_on_nccl_non_senders(backend, is_sender, expected)
 
 def test_mark_replay_only_ignores_sources_without_the_hook():
     assert mark_replay_only(object(), backend="nccl", is_sender=False) is False
+
+
+def test_packed_buffer_floor_honours_the_source_minimum():
+    torch_dtype = torch.bfloat16
+    base = _packed_buffer_size_bytes(None, 1.0, torch_dtype)
+    assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=base + 7) == base + 7
+    assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=1) == base

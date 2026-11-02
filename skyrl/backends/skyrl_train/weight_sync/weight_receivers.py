@@ -6,8 +6,9 @@ callback, so the only injection point is the ``self.model`` handle they read.
 That handle is whichever model the session targets -- the main model, or the
 spec-decode drafter under ``/start_draft_weight_update``.
 
-* **Checkpoint loading.** Split compact batched-MoE FP8 wire tensors from
-  ordinary checkpoint weights before calling the target model's loader.
+* **Checkpoint loading.** Split compact batched-MoE FP8 wire tensors and stacked
+  NVFP4 expert layers from ordinary checkpoint weights before calling the target
+  model's loader.
 * **LoRA staging.** When the round has been armed with a LoRA receive target
   (``weight_sync/lora_target.py``), the stream is a PEFT adapter rather than the
   model: the tensors are staged for vLLM's LoRA manager instead of loaded, and
@@ -71,17 +72,24 @@ class SkyrlCheckpointLoadMixin:
         from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import (
             _load_checkpoint_weights,
         )
+        from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked_receive import (
+            Nvfp4StackedReceiver,
+        )
 
         model = self.model
+        # Stacked NVFP4 expert layers (``expert_nvfp4_stacked_sync``) may span receive batches; the receiver
+        # holds a partial layer until it is complete. Its fallback is the ordinary per-expert path.
+        stacked = Nvfp4StackedReceiver(model, fallback_load=lambda w: model.load_weights(weights=w))
 
         def load_weights(weights: Any, **kwargs: Any) -> Any:
-            return _load_checkpoint_weights(model, weights, **kwargs)
+            return _load_checkpoint_weights(model, weights, nvfp4_stacked_receiver=stacked, **kwargs)
 
         # The proxy scopes the override to the `WeightTransferEngine` context
         # instead of mutating `load_weights` on the model object itself.
         self.model = _LoadWeightsProxy(model, load_weights)
         try:
             yield
+            stacked.finish()
         finally:
             # Restore the exact object we found, so this composes with the
             # worker's set_weight_update_target / reset_weight_update_target.

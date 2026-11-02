@@ -235,6 +235,7 @@ def build_trainer_engine(
         server_urls=server_urls,
         data_parallel_size=data_parallel_size,
         base_model_path=base_model_path,
+        min_packed_buffer_bytes=int(getattr(source, "skyrl_min_packed_buffer_bytes", 0) or 0),
     )
     client = SkyrlWeightSyncClient(
         server_urls,
@@ -257,7 +258,9 @@ def build_trainer_engine(
     return engine
 
 
-def _packed_buffer_size_bytes(base_model_path: Optional[str], threshold_in_gb: float, dtype: "torch.dtype") -> int:
+def _packed_buffer_size_bytes(
+    base_model_path: Optional[str], threshold_in_gb: float, dtype: "torch.dtype", min_bytes: int = 0
+) -> int:
     """Packed-buffer size for both push backends: the configured size, floored to
     fit the model's largest single parameter.
 
@@ -278,7 +281,9 @@ def _packed_buffer_size_bytes(base_model_path: Optional[str], threshold_in_gb: f
 
     configured = int(threshold_in_gb * 1024**3) if threshold_in_gb and threshold_in_gb > 0 else 0
     largest = max_param_numel(base_model_path) * dtype.itemsize if base_model_path else 0
-    return max(DEFAULT_PACKED_BUFFER_SIZE_BYTES, configured, largest)
+    # ``min_bytes``: a floor the source declares for tensors the checkpoint does not have (the stacked NVFP4
+    # expert layers of ``expert_nvfp4_stacked_sync``).
+    return max(DEFAULT_PACKED_BUFFER_SIZE_BYTES, configured, largest, int(min_bytes))
 
 
 def _build_sender_init_info(
@@ -291,6 +296,7 @@ def _build_sender_init_info(
     server_urls: list,
     data_parallel_size: int,
     base_model_path: Optional[str],
+    min_packed_buffer_bytes: int = 0,
 ):
     """Return ``(init_info, init_payload_fn)`` for an already-resolved backend.
 
@@ -323,7 +329,7 @@ def _build_sender_init_info(
                 # the handshake, so the two sides cannot disagree.
                 packed=True,
                 packed_buffer_size_bytes=_packed_buffer_size_bytes(
-                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype, min_packed_buffer_bytes
                 ),
                 rank=rank,
             ),
@@ -342,7 +348,7 @@ def _build_sender_init_info(
             ipc_init_info_cls(
                 packed=True,
                 packed_buffer_size_bytes=_packed_buffer_size_bytes(
-                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype, min_packed_buffer_bytes
                 ),
                 rank=rank,
             ),

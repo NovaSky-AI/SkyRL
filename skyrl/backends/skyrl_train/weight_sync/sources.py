@@ -19,7 +19,9 @@ Imports vLLM at module scope, so import this lazily from anything that must work
 without the wheel.
 """
 
+import os
 import re
+import time
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import torch
@@ -232,11 +234,24 @@ class SerializedNvfp4WeightSource(WeightSource):
     stream, i.e. the bytes on the wire, is unchanged.
     """
 
-    def __init__(self, source: WeightSource, settings: Any, num_layers: int, high_precision_last_layers: int) -> None:
+    def __init__(
+        self,
+        source: WeightSource,
+        settings: Any,
+        num_layers: int,
+        high_precision_last_layers: int,
+        stacked_num_experts: Optional[int] = None,
+        min_packed_buffer_bytes: int = 0,
+    ) -> None:
         self._source = source
         self._settings = settings
         self._num_layers = num_layers
         self._high_precision_last_layers = high_precision_last_layers
+        # Set -> ``expert_nvfp4_stacked_sync``: each NVFP4 MoE layer goes out as 8 stacked tensors over this
+        # many experts (``weight_sync/nvfp4_stacked.py``).
+        self._stacked_num_experts = stacked_num_experts
+        # Read by ``build_trainer_engine``: the packed buffer must hold the largest stacked tensor.
+        self.skyrl_min_packed_buffer_bytes = int(min_packed_buffer_bytes)
         self._meta: Optional[List[ParamMeta]] = None
         self._replay_only = False
 
@@ -244,23 +259,44 @@ class SerializedNvfp4WeightSource(WeightSource):
         """Mark this rank as one whose iteration output is discarded (NCCL non-sender)."""
         self._replay_only = True
 
-    def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
-        from skyrl.backends.skyrl_train.weight_sync.nvfp4 import Nvfp4ExpertSerializer
+    def _serializer(self, spec: bool):
+        from skyrl.backends.skyrl_train.weight_sync import nvfp4, nvfp4_stacked
 
-        serializer = Nvfp4ExpertSerializer(self._settings, self._num_layers, self._high_precision_last_layers)
+        args = (self._settings, self._num_layers, self._high_precision_last_layers)
+        if self._stacked_num_experts is None:
+            return (nvfp4.Nvfp4ExpertSpecSerializer if spec else nvfp4.Nvfp4ExpertSerializer)(*args)
+        cls = nvfp4_stacked.Nvfp4StackedExpertSpecSerializer if spec else nvfp4_stacked.Nvfp4StackedExpertSerializer
+        return cls(*args, num_experts=self._stacked_num_experts)
+
+    def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        timing = os.environ.get("SKYRL_NVFP4_SYNC_TIMING", "0") == "1"
+        produce_s, t_last, start = 0.0, time.perf_counter(), time.perf_counter()
+        serializer = self._serializer(spec=False)
         for name, tensor in self._source:
             for serialized_name, serialized_tensor in serializer(name, tensor):
-                yield serialized_name, serialized_tensor.detach().contiguous()
+                out = serialized_tensor.detach().contiguous()
+                if timing:
+                    produce_s += time.perf_counter() - t_last
+                yield serialized_name, out
+                if timing:
+                    t_last = time.perf_counter()
         serializer.finish()
+        if timing:
+            produce_s += time.perf_counter() - t_last
+            # Logging only: time spent producing the stream (Megatron export + quantize + stacking) vs. the
+            # wall time of the whole iteration (the rest is the consumer: packing + broadcast + waiting on vLLM).
+            logger.warning(
+                "NVFP4 sync sender: produce %.3fs of %.3fs iteration wall (stacked=%s)",
+                produce_s,
+                time.perf_counter() - start,
+                self._stacked_num_experts is not None,
+            )
 
     def metadata(self) -> List[ParamMeta]:
         if self._meta is None:
-            from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
-                Nvfp4ExpertSpecSerializer,
-                TensorSpec,
-            )
+            from skyrl.backends.skyrl_train.weight_sync.nvfp4 import TensorSpec
 
-            serializer = Nvfp4ExpertSpecSerializer(self._settings, self._num_layers, self._high_precision_last_layers)
+            serializer = self._serializer(spec=True)
             meta: List[ParamMeta] = []
             for m in self._source.metadata():
                 for name, spec in serializer(m.name, TensorSpec(m.dtype, tuple(m.shape))):

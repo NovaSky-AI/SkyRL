@@ -164,6 +164,20 @@ gathers are collectives) and skips quantization, since vLLM's NCCL engine discar
 non-senders still serialize: each ships its own handles); and the TE `NVFP4Quantizer` is cached per
 (settings, device) instead of rebuilt per expert.
 
+`megatron_config.expert_nvfp4_stacked_sync=true` (default false) ships each NVFP4 MoE layer as 8 tensors stacked
+over all experts, already in vLLM's ModelOpt-NVFP4 `FusedMoE` parameter layout (`weight_sync/nvfp4_stacked.py`,
+names `__skyrl_nvfp4_stacked__:<layer>.<w13|w2>_<weight|weight_scale|weight_scale_2|input_scale>`), instead of
+8 tensors per expert (~74k for Qwen3-30B-A3B). Quantization is the same per-expert TE call written into a
+preallocated stack, so the bytes are the per-expert stream's bytes. On vLLM, `SkyrlCheckpointLoadMixin` routes
+them to `nvfp4_stacked_receive.Nvfp4StackedReceiver`, which collects a layer and then runs vLLM 0.32's
+`_layerwise_process` steps itself (`process_layer_with_direct_copy`) with one `copy_` per parameter (the local
+experts' rows under EP) in place of the per-expert loader replay, so the TRT-LLM re-layout runs once per layer
+through vLLM's own `process_weights_after_loading`. `fast_path_plan` checks every precondition (ModelOpt NVFP4,
+MoE TP 1, no padded shards / redundant / fused-shared experts, exact parameter shapes, no other loadable
+tensors); otherwise the layer is unstacked and loaded per expert as before. The source declares the largest
+stacked tensor as a packed-buffer floor (`skyrl_min_packed_buffer_bytes`). `SKYRL_NVFP4_SYNC_TIMING=1` logs
+sender produce time and receiver layer-load time (logging only).
+
 ### Control plane
 
 `control_plane.SkyrlWeightSyncClient` is a **blocking** HTTP client over vLLM's native

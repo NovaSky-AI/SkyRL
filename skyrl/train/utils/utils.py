@@ -232,6 +232,10 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     policy_cfg = cfg.trainer.policy
+    if policy_cfg.megatron_config.expert_nvfp4_stacked_sync and not policy_cfg.megatron_config.expert_nvfp4:
+        raise ValueError(
+            "`megatron_config.expert_nvfp4_stacked_sync=true` requires `megatron_config.expert_nvfp4=true`"
+        )
     policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))
     if (
         policy_fp8_param

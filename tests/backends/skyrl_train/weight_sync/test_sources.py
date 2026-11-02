@@ -197,6 +197,9 @@ class TestSerializedNvfp4WeightSource:
             return packed, scale, weight.float().abs().amax().reshape(())
 
         monkeypatch.setattr(nvfp4, "quantize_nvfp4_matrix", quantize)
+        from skyrl.backends.skyrl_train.weight_sync import nvfp4_stacked
+
+        monkeypatch.setattr(nvfp4_stacked, "quantize_nvfp4_matrix", quantize)
         self.settings = nvfp4.Nvfp4WeightQuantSettings(
             use_4over6=True, e4m3_max=448, err_mode="MSE", row_scaled_activation=True, backward_override=None
         )
@@ -265,6 +268,53 @@ class TestSerializedNvfp4WeightSource:
             if a.dtype == torch.float8_e4m3fn:
                 a, b = a.view(torch.uint8), b.view(torch.uint8)
             assert torch.equal(a, b)
+
+    def test_stacked_channels_agree_and_declare_the_buffer_floor(self):
+        from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import (
+            NVFP4_STACKED_PREFIX,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            SerializedNvfp4WeightSource,
+        )
+
+        tensors = self._tensors()
+        inner = MegatronWeightSource(_FakeBridge(tensors), object(), torch.bfloat16)
+        source = SerializedNvfp4WeightSource(
+            inner,
+            self.settings,
+            num_layers=2,
+            high_precision_last_layers=1,
+            stacked_num_experts=1,
+            min_packed_buffer_bytes=1234,
+        )
+        assert source.skyrl_min_packed_buffer_bytes == 1234
+        source.metadata()
+        assert self.calls == []
+        _, pairs = _assert_channels_agree(source)
+        names = [n for n, _ in pairs]
+        prefix = f"{NVFP4_STACKED_PREFIX}model.layers.0.mlp.experts."
+        assert [n[len(prefix) :] for n in names if n.startswith(prefix)] == [
+            "w13_weight",
+            "w13_weight_scale",
+            "w13_weight_scale_2",
+            "w13_input_scale",
+            "w2_weight",
+            "w2_weight_scale",
+            "w2_weight_scale_2",
+            "w2_input_scale",
+        ]
+        assert "model.layers.1.mlp.experts.0.gate_proj.weight" in names  # BF16 tail stays per-expert
+
+        replay = SerializedNvfp4WeightSource(
+            MegatronWeightSource(_FakeBridge(tensors), object(), torch.bfloat16),
+            self.settings,
+            num_layers=2,
+            high_precision_last_layers=1,
+            stacked_num_experts=1,
+        )
+        replay.set_replay_only()
+        calls = len(self.calls)
+        assert [n for n, _ in replay] == [n for n, _ in tensors] and len(self.calls) == calls
 
 
 _NVFP4_SUFFIXES = ("weight", "weight_scale", "weight_scale_2", "input_scale")
