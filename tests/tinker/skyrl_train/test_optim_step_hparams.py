@@ -16,7 +16,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from skyrl.backends.skyrl_train.workers.worker import Worker  # noqa: E402
+from skyrl.backends.skyrl_train.workers.worker import (  # noqa: E402
+    Worker,
+    _apply_adam_params_to_group,
+)
 from skyrl.tinker import types  # noqa: E402
 
 ADAM = types.AdamParams(learning_rate=1e-4, beta1=0.8, beta2=0.95, eps=1e-12, weight_decay=0.05, grad_clip_norm=0.5)
@@ -69,6 +72,17 @@ def test_set_optimizer_hparams_can_turn_decay_back_on():
     decaying, zero = worker.optimizer.param_groups
     assert decaying["weight_decay"] == 0.05  # the decaying group decays again
     assert zero["weight_decay"] == 0.0  # a structurally no-decay group stays 0 forever
+
+
+def test_helper_latches_on_wd_mult_not_weight_decay():
+    """Megatron excludes params from decay via wd_mult; every group carries the same weight_decay until the param scheduler folds it."""
+    excluded = dict(wd_mult=0.0, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    _apply_adam_params_to_group(excluded, ADAM)
+    assert excluded["weight_decay"] == 0.01  # wd_mult=0: excluded, the request's decay never lands
+
+    decaying = dict(wd_mult=1.0, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    _apply_adam_params_to_group(decaying, ADAM)
+    assert decaying["weight_decay"] == 0.05
 
 
 def test_set_optimizer_hparams_without_an_optimizer_is_a_no_op():

@@ -101,7 +101,13 @@ def _apply_adam_params_to_group(param_group: dict, adam_params: tinker_types.Ada
     param_group["betas"] = (adam_params.beta1, adam_params.beta2)
     param_group["eps"] = adam_params.eps
     if "skyrl_decaying_group" not in param_group:
-        param_group["skyrl_decaying_group"] = bool(param_group["weight_decay"])
+        # Megatron's structural exclusion lives in wd_mult: bias and 1-shape groups get 0.0
+        # while every group's weight_decay holds the same build-time default until the param
+        # scheduler folds wd_mult into it (after optimizer.step). A torch-built group carries
+        # no wd_mult; there the build-time weight_decay is the decision.
+        param_group["skyrl_decaying_group"] = (
+            param_group["wd_mult"] != 0.0 if "wd_mult" in param_group else bool(param_group["weight_decay"])
+        )
     if param_group["skyrl_decaying_group"]:
         param_group["weight_decay"] = adam_params.weight_decay
 
