@@ -148,12 +148,14 @@ def get_neuron_sampling_params(sampling_params: Union[SamplingParams, DictConfig
     if temperature is not None:
         generate_kwargs["do_sample"] = temperature > 0
 
+    # ``top_k`` / ``min_p`` use SkyRL's disabled sentinels (``-1`` / ``0.0``). Emit an
+    # explicit transformers disabled value (``0``) rather than omitting the key: when the
+    # key is absent, ``generate`` falls back to the checkpoint's ``generation_config.top_k``
+    # (e.g. 20-50 for Qwen/Llama) and silently narrows the requested distribution.
     top_k = params.get("top_k")
-    if top_k is not None and top_k > 0:
-        generate_kwargs["top_k"] = top_k
+    generate_kwargs["top_k"] = top_k if top_k is not None and top_k > 0 else 0
     min_p = params.get("min_p")
-    if min_p is not None and min_p > 0:
-        generate_kwargs["min_p"] = min_p
+    generate_kwargs["min_p"] = min_p if min_p is not None and min_p > 0 else 0.0
 
     additional_kwargs = params.get("additional_kwargs")
     if additional_kwargs:

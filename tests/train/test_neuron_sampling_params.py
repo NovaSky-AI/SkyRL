@@ -35,11 +35,14 @@ def test_neuron_sampling_params_maps_generate_kwargs():
     assert "logprobs" not in kwargs
 
 
-def test_neuron_sampling_params_skips_disabled_knobs():
+def test_neuron_sampling_params_disables_knobs_explicitly():
     params = SamplingParams()  # defaults: top_k=-1, min_p=0.0, repetition_penalty=1.0
     kwargs = get_neuron_sampling_params(params)
-    assert "top_k" not in kwargs
-    assert "min_p" not in kwargs
+    # Disabled sentinels must be emitted as transformers' disabled value (0), not
+    # omitted: omission makes ``generate`` fall back to the checkpoint's generation
+    # config (e.g. top_k=50), silently narrowing the sampling distribution.
+    assert kwargs["top_k"] == 0
+    assert kwargs["min_p"] == 0.0
     # No stop strings: the key is left unset rather than emitted as a dead ``None``.
     assert "stop_strings" not in kwargs
     # temperature=1.0 must sample (vLLM semantics), not fall back to greedy.
@@ -73,7 +76,7 @@ def test_neuron_sampling_params_accepts_plain_dict():
     assert kwargs["top_k"] == 40
     assert kwargs["stop_strings"] == ["<|im_end|>"]
     assert kwargs["do_sample"] is True
-    assert "min_p" not in kwargs
+    assert kwargs["min_p"] == 0.0
     assert "logprobs" not in kwargs
     assert "stop" not in kwargs
 
