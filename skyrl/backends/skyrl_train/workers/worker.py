@@ -40,7 +40,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
-from skyrl.backends.skyrl_train.utils.device import device_type
+from skyrl.backends.skyrl_train.utils.device import device_module, device_type
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
@@ -122,7 +122,7 @@ class DistributedTorchRayActor:
 
         self.record_memory = record_memory
         if record_memory:
-            torch.get_device_module(device_type()).memory._record_memory_history(max_entries=MEMORY_HISTORY_MAX_ENTRIES)
+            device_module().memory._record_memory_history(max_entries=MEMORY_HISTORY_MAX_ENTRIES)
 
         # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
         from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
@@ -269,7 +269,7 @@ class DistributedTorchRayActor:
             every rank but 0 to the last node).
             """
             try:
-                props = torch.get_device_module(device_type()).get_device_properties(0)
+                props = device_module().get_device_properties(0)
                 bdf = f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
             except Exception:
                 return None
@@ -322,8 +322,8 @@ class Worker(DistributedTorchRayActor):
 
     def empty_cache(self) -> None:
         """Empty this worker's accelerator allocator cache."""
-        if torch.get_device_module(device_type()).is_available():
-            torch.get_device_module(device_type()).empty_cache()
+        if device_module().is_available():
+            device_module().empty_cache()
 
     def _set_expandable_segments(self, enabled: bool) -> None:
         """Toggle PyTorch's CUDA ``expandable_segments`` allocator at runtime.
@@ -339,7 +339,7 @@ class Worker(DistributedTorchRayActor):
         """
         if not self.cfg.use_expandable_segments:
             return
-        if not torch.get_device_module(device_type()).is_available():
+        if not device_module().is_available():
             return
         setting = f"expandable_segments:{enabled}"
         try:
@@ -379,7 +379,7 @@ class Worker(DistributedTorchRayActor):
             # 235B allocator scale.
             if not getattr(self, "_ipc_segment_cache_flushed", False):
                 self._ipc_segment_cache_flushed = True
-                torch.get_device_module(device_type()).empty_cache()
+                device_module().empty_cache()
         try:
             yield
         finally:
@@ -440,7 +440,7 @@ class Worker(DistributedTorchRayActor):
             offload_optimizer: Whether to offload optimizer state (no-op when there is no optimizer, e.g. Ref worker).
             offload_model: Whether to offload model parameters.
         """
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.get_device_module(device_type()).device_count())
+        self._set_numa_affinity(torch.distributed.get_rank() % device_module().device_count())
         self.strategy.offload_to_cpu(
             self._get_module_for_offload(),
             self.optimizer,
@@ -464,11 +464,11 @@ class Worker(DistributedTorchRayActor):
 
     def get_cuda_memory(self) -> Dict[str, Any]:
         """Get memory usage on worker's accelerator device."""
-        torch.get_device_module(device_type()).synchronize()
-        free, total = torch.get_device_module(device_type()).mem_get_info()
+        device_module().synchronize()
+        free, total = device_module().mem_get_info()
         return {
-            "allocated": torch.get_device_module(device_type()).memory_allocated(),
-            "reserved": torch.get_device_module(device_type()).memory_reserved(),
+            "allocated": device_module().memory_allocated(),
+            "reserved": device_module().memory_reserved(),
             "free": free,
             "total": total,
         }
@@ -504,7 +504,7 @@ class Worker(DistributedTorchRayActor):
         if io.exists(record_memory_path):
             # seeing issues if we don't remove the file first
             io.remove(record_memory_path)
-        torch.get_device_module(device_type()).memory._dump_snapshot(record_memory_path)
+        device_module().memory._dump_snapshot(record_memory_path)
 
     async def init_weight_sync_state(
         self,
@@ -599,15 +599,11 @@ class Worker(DistributedTorchRayActor):
         would all land on the wrong GPU. Capture it on the main thread, where it
         is correct, and select it inside the thread.
         """
-        device = (
-            torch.get_device_module(device_type()).current_device()
-            if torch.get_device_module(device_type()).is_available()
-            else None
-        )
+        device = device_module().current_device() if device_module().is_available() else None
 
         def run():
             if device is not None:
-                torch.get_device_module(device_type()).set_device(device)
+                device_module().set_device(device)
             return fn(*args, **kwargs)
 
         return asyncio.to_thread(run)
@@ -661,7 +657,7 @@ class Worker(DistributedTorchRayActor):
         if not engine.skyrl_handles_prefix_cache_reset:
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
 
-        torch.get_device_module(device_type()).empty_cache()
+        device_module().empty_cache()
 
         # Under colocate_all the CUDA-IPC path calls cudaIpcGetMemHandle, which
         # is incompatible with the VMM addresses expandable segments use; some
@@ -677,7 +673,7 @@ class Worker(DistributedTorchRayActor):
         # 0.25-0.53s per rank at 235B and buys nothing. Under colocation an
         # inference engine wants the physical memory, so empty regardless.
         if engine.skyrl_empty_cache_after_send or self.cfg.placement.colocate_all:
-            torch.get_device_module(device_type()).empty_cache()
+            device_module().empty_cache()
         torch.distributed.barrier()
 
     def forward(self, *args, **kwargs) -> WorkerOutput:
@@ -1106,7 +1102,7 @@ class PolicyWorkerBase(Worker):
         """
         self.model.train()
 
-        experience.to_device(torch.get_device_module(device_type()).current_device())
+        experience.to_device(device_module().current_device())
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
@@ -1423,7 +1419,7 @@ class PolicyWorkerBase(Worker):
                 ``loss_fn_outputs`` when callers read only ``metrics``.
         """
         self.model.eval()
-        experience.to_device(torch.get_device_module(device_type()).current_device())
+        experience.to_device(device_module().current_device())
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
@@ -1512,7 +1508,7 @@ class PolicyWorkerBase(Worker):
         }
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.get_device_module(device_type()).current_device()
+        device = device_module().current_device()
         micro_batch.to(device)
         self.model.eval()
         sequences = micro_batch["sequences"]
@@ -1674,7 +1670,7 @@ class CriticWorkerBase(Worker):
         """
         self.model.train()
 
-        experience.to_device(torch.get_device_module(device_type()).current_device())
+        experience.to_device(device_module().current_device())
 
         sequences = experience.sequences
         old_values = experience.values
@@ -1746,7 +1742,7 @@ class CriticWorkerBase(Worker):
         micro_batch: TrainingInputBatch,
     ) -> TrainingOutputBatch:
         """Generates critic values."""
-        device = torch.get_device_module(device_type()).current_device()
+        device = device_module().current_device()
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
@@ -1820,7 +1816,7 @@ class RefWorkerBase(Worker):
         return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.get_device_module(device_type()).current_device()
+        device = device_module().current_device()
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]

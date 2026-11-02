@@ -18,7 +18,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     PACKED_BATCH_FIELD_TYPES,
     TensorList,
 )
-from skyrl.backends.skyrl_train.utils.device import device_type
+from skyrl.backends.skyrl_train.utils.device import device_module, device_type
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import PackedSampleSupport
 
@@ -352,8 +352,8 @@ class NaiveReplayBuffer(ABC):
         self.limit = limit
         self.cpu_offload = cpu_offload
         self.target_device = (
-            torch.device(f"{device_type()}:{torch.get_device_module(device_type()).current_device()}")
-            if torch.get_device_module(device_type()).is_available()
+            torch.device(f"{device_type()}:{device_module().current_device()}")
+            if device_module().is_available()
             else torch.device("cpu")
         )
         self.items: List[BufferItem] = []

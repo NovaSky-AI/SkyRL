@@ -11,8 +11,14 @@ _ENABLED_TRAINING_ACCELERATORS = {"cuda", "xpu"}
 def device_type() -> str:
     """Return the device type training runs on. Eg: ``"cuda"`` or ``"xpu"``."""
 
-    if torch.accelerator.is_available():
+    if hasattr(torch, "accelerator") and torch.accelerator.is_available():
         accelerator = torch.accelerator.current_accelerator()
         if accelerator.type in _ENABLED_TRAINING_ACCELERATORS:
             return accelerator.type
     return "cuda"
+
+
+def device_module():
+    """Return the torch device module for ``device_type()``. Eg: ``torch.cuda`` or ``torch.xpu``."""
+
+    return torch.get_device_module(device_type())
