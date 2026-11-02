@@ -118,11 +118,12 @@ class _StopBeforeWorkers(Exception):
     pass
 
 
-def _build_critic_until_workers(monkeypatch, lora: types.LoraConfig):
+def _build_critic_until_workers(monkeypatch, lora: types.LoraConfig, overrides: FSDPBackendOverrides | None = None):
     """Run _build_critic up to the point where it would start Ray workers."""
+    overrides = overrides or FSDPBackendOverrides()
     backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
-    backend.config = FSDPBackendOverrides()  # _build_critic checks it against the request's rank
-    backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
+    backend.config = overrides  # _build_critic reads backend_config (model_extra) for the alpha
+    backend._cfg = _build_skyrl_train_config(BASE_MODEL, overrides, _lora())
     backend._colocate_pg = None
 
     def stop(*args, **kwargs):
@@ -166,6 +167,18 @@ def test_backend_config_alpha_still_overrides_the_api_placeholder():
     overrides = FSDPBackendOverrides(**{"trainer.policy.model.lora.alpha": 64})
     cfg = _build_skyrl_train_config(BASE_MODEL, overrides, _lora())
     assert cfg.trainer.policy.model.lora.alpha == 64
+
+
+@pytest.mark.parametrize(
+    ("backend_alpha", "request_alpha", "expected"),
+    [(64, 32.0, 64), (None, 16.0, 16)],
+    ids=["backend_config_wins", "requests_alpha_used"],
+)
+def test_backend_config_critic_alpha_wins_over_the_api_placeholder(monkeypatch, backend_alpha, request_alpha, expected):
+    """A backend_config critic alpha wins, as for the policy; without one, the request's is used."""
+    overrides = FSDPBackendOverrides(**({"trainer.critic.model.lora.alpha": backend_alpha} if backend_alpha else {}))
+    critic_lora = _build_critic_until_workers(monkeypatch, _lora(alpha=request_alpha), overrides)
+    assert critic_lora.alpha == expected
 
 
 def test_backend_config_rank_is_allowed_without_a_request():
