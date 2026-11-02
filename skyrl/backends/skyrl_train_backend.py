@@ -457,10 +457,9 @@ class SkyRLTrainBackend(AbstractBackend):
                 num_policy_gpus == num_critic_gpus
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
-        # Checked before writing, so a rejected request leaves the config unchanged.
-        critic_lora = {"trainer.critic.model.lora.rank": (lora_config.rank, "set by the critic's create_model")}
+        # No rank check here: _build_skyrl_train_config (#2464) already rejected every
+        # client-carried LoRA key in backend_config at the policy's first create_model.
         backend_config_values = flatten_backend_config(self.config.model_extra or {})
-        check_backend_config(backend_config_values, critic_lora)
         critic_lora_cfg = cfg.trainer.critic.model.lora
         critic_lora_cfg.rank = lora_config.rank
         # The Tinker SDK cannot send alpha (the API fills in 32), so a backend_config alpha wins, as for the policy.

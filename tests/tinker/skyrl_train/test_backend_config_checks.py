@@ -40,7 +40,7 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
         ({"trainer.policy.optimizer_config.scheduler": "cosine"}, {}, "optimizer_config.scheduler='cosine'"),
         ({"trainer.algorithm.use_kl_loss": True}, {}, "use_kl_loss=True"),
         ({"trainer.placement.colocate_all": True}, {"runtime_role": "trainer"}, "colocate_all=True"),
-        # Client-carried LoRA keys are rejected outright once a request carries them (#2529),
+        # Client-carried LoRA keys are rejected outright once a request carries them (#2464),
         # even when the value equals the request's — so the _server_values() rank row that
         # would have rejected only a differing value never gets the chance.
         ({"trainer.policy.model.lora.rank": 32}, FULL_FT, "may not set ['trainer.policy.model.lora.rank']"),
@@ -66,7 +66,7 @@ def test_rejected(backend_config, kwargs, expected):
     [
         ({"trainer.strategy": "fsdp", "trainer.algorithm.use_kl_loss": False}, {}, "trainer.strategy", "fsdp"),
         ({"trainer.algorithm.policy_loss_type": "dual_clip"}, {}, "trainer.algorithm.policy_loss_type", "dual_clip"),
-        # The request's train_attn/train_mlp reach the config (via _server_values(), #2529).
+        # The request's train_attn/train_mlp reach the config (via _server_values(), #2464).
         (
             {},
             {"lora_config": types.LoraConfig(rank=8, alpha=32, seed=0, train_attn=False, train_mlp=True)},
