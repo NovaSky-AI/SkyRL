@@ -172,6 +172,12 @@ class NeuronInferenceEngine(InferenceEngineInterface):
                 if model != self._active_lora_name:
                     self._model = self._adapters[model]
                     self._active_lora_name = model
+            elif self._model is not self._base_model:
+                # The base policy is requested (``model is None`` or the model path
+                # itself): deactivate any adapter a prior sampling call switched in so
+                # generation runs against the raw base model, not a stale LoRA.
+                self._model = self._base_model
+                self._active_lora_name = None
 
             # ``model.generate`` is a blocking call; keep the driver's event loop free.
             return await asyncio.to_thread(self._generate_sync, prompt_token_ids, generate_kwargs, mm_features)
@@ -223,10 +229,7 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         concatenates items along dim 0, so a single item holding the full concatenation
         round-trips unchanged).
         """
-        messages = [
-            {**message, "content": self._normalize_content(message.get("content"))}
-            for message in messages
-        ]
+        messages = [{**message, "content": self._normalize_content(message.get("content"))} for message in messages]
         images = self._extract_images(messages)
         text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         if images:
@@ -379,26 +382,29 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         # train step. A cached PeftModel keeps the step-0 tensors, so on a repeat name
         # reload the freshly exported safetensors into the existing adapter instead of
         # short-circuiting.
-        if lora_name in self._adapters:
-            adapter = self._adapters[lora_name]
-            adapter.load_adapter(lora_path, adapter_name=lora_name, is_trainable=False)
+        #
+        # Serialize against ``generate``: it reads ``self._model`` under the same lock,
+        # and the reload path mutates the adapter ``generate`` may be serving in-place,
+        # so swapping weights without the lock could race an in-flight forward.
+        async with self._generate_lock:
+            if lora_name in self._adapters:
+                adapter = self._adapters[lora_name]
+                adapter.load_adapter(lora_path, adapter_name=lora_name, is_trainable=False)
+                self._model = adapter
+                self._active_lora_name = lora_name
+                logger.info("Reloaded LoRA adapter %r from %s", lora_name, lora_path)
+                return {"status": "reloaded", "lora_name": lora_name}
+
+            from peft import PeftModel
+
+            adapter = PeftModel.from_pretrained(self._base_model, lora_path, adapter_name=lora_name, is_trainable=False)
+            adapter.to(self._device)
+            adapter.eval()
+            self._adapters[lora_name] = adapter
             self._model = adapter
             self._active_lora_name = lora_name
-            logger.info("Reloaded LoRA adapter %r from %s", lora_name, lora_path)
-            return {"status": "reloaded", "lora_name": lora_name}
-
-        from peft import PeftModel
-
-        adapter = PeftModel.from_pretrained(
-            self._base_model, lora_path, adapter_name=lora_name, is_trainable=False
-        )
-        adapter.to(self._device)
-        adapter.eval()
-        self._adapters[lora_name] = adapter
-        self._model = adapter
-        self._active_lora_name = lora_name
-        logger.info("Loaded LoRA adapter %r from %s", lora_name, lora_path)
-        return {"status": "ok", "lora_name": lora_name}
+            logger.info("Loaded LoRA adapter %r from %s", lora_name, lora_path)
+            return {"status": "ok", "lora_name": lora_name}
 
     async def teardown(self) -> None:
         del self._model
@@ -462,11 +468,11 @@ class NeuronInferenceEngine(InferenceEngineInterface):
             # stop token is not stripped.
             pad_id = eos_id
 
-        # ``sequences`` is ``[batch, input_width + max_new_tokens]``: the padded prompt
-        # (real tokens left-aligned, ``pad_id`` right-filling to ``max(prompt_lens)``)
-        # followed by the generated tokens (right-padded with ``pad_id``). Slice from the
-        # padded input width so only generated tokens remain; do not slice from
-        # ``prompt_lens[b]`` (that leaves prompt-side pads at the head of shorter prompts).
+        # ``sequences`` is ``[batch, input_width + max_new_tokens]``: the left-padded
+        # prompt (real tokens right-aligned, ``pad_id`` left-filling to
+        # ``max(prompt_lens)``) followed by the generated tokens. Slice from the padded
+        # input width so only generated tokens remain; do not slice from ``prompt_lens[b]``
+        # (that would keep prompt-side pads at the tail of shorter prompts).
         input_width = max(prompt_lens)
 
         response_ids: List[List[int]] = []
@@ -499,7 +505,12 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         )
 
     def _text_inputs(self, prompt_token_ids: List[List[int]]) -> Tuple[Dict[str, torch.Tensor], List[int]]:
-        """Pad a text batch into the ``{input_ids, attention_mask}`` ``generate`` inputs."""
+        """Pad a text batch into the ``{input_ids, attention_mask}`` ``generate`` inputs.
+
+        Prompts are left-padded so the final input position of every sample is a real
+        token: ``generate`` samples the first token from the logits at the last input
+        position, which would be a padding token under right-padding and yield garbage.
+        """
         prompt_lens = [len(ids) for ids in prompt_token_ids]
         max_prompt_len = max(prompt_lens)
 
@@ -507,12 +518,12 @@ class NeuronInferenceEngine(InferenceEngineInterface):
         if pad_id is None:
             pad_id = self._tokenizer.eos_token_id
         input_ids = torch.tensor(
-            [ids + [pad_id] * (max_prompt_len - len(ids)) for ids in prompt_token_ids],
+            [[pad_id] * (max_prompt_len - len(ids)) + ids for ids in prompt_token_ids],
             device=self._device,
             dtype=torch.long,
         )
         attention_mask = torch.tensor(
-            [[1] * pl + [0] * (max_prompt_len - pl) for pl in prompt_lens],
+            [[0] * (max_prompt_len - pl) + [1] * pl for pl in prompt_lens],
             device=self._device,
             dtype=torch.long,
         )

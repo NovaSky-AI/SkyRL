@@ -926,9 +926,7 @@ class WorkerDispatch:
         is ``None``); the driver then reloads the engine from that path.
         """
         if self._inference_engine_client is None:
-            raise RuntimeError(
-                "Neuron weight sync requires an in-process inference_engine_client on the driver."
-            )
+            raise RuntimeError("Neuron weight sync requires an in-process inference_engine_client on the driver.")
         if self.cfg.trainer.policy.model.lora.rank <= 0:
             raise NotImplementedError(
                 "Native neuron engine only supports LoRA weight sync; full-weight sync is not wired."

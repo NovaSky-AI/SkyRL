@@ -197,8 +197,9 @@ megatron = [
 
 # Trainium2 (TorchNeuron) native backend. ``torch`` is deliberately NOT pinned here:
 # it is supplied by ``torch-neuronx``, which is published on the AWS Neuron index, not
-# PyPI. Pass ``--extra-index-url https://pip.repos.neuron.amazonaws.com`` to ``uv run``
-# so it resolves inside the isolated env (see `.agents/docs/backends/neuron.md`).
+# PyPI. ``torch-neuronx`` is not a dependency of this extra and must be installed
+# explicitly (see `.agents/docs/backends/neuron.md`), so `--extra-index-url` alone does
+# not resolve it.
 # Everything CUDA/vLLM-only from ``skyrl-train`` -- ``vllm-router``, ``flash-attn``,
 # ``flash-linear-attention``, ``causal-conv1d``, ``nixl`` -- is omitted, as is the
 # base ``[project].dependencies`` floor on transformers when a newer release is

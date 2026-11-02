@@ -168,8 +168,8 @@ class HFModelWrapper(nn.Module):
         self.is_vlm = False
         if remove_microbatch_padding:
             assert (
-                self.attn_implementation == "flash_attention_2"
-            ), "Flash attention 2 should be used for `remove_microbatch_padding`"
+                self.attn_implementation == "flash_attention_2" and pad_input is not None and unpad_input is not None
+            ), "Flash attention 2 should be used for `remove_microbatch_padding` (flash-attn is not installed)"
 
         if isinstance(pretrain_or_model, str):
             if load_in_4bit:
@@ -566,7 +566,9 @@ def _get_critic_model(
             if remove_microbatch_padding:
                 assert (
                     config._attn_implementation == "flash_attention_2"
-                ), "Flash attention must be used with remove_microbatch_padding"
+                    and pad_input is not None
+                    and unpad_input is not None
+                ), "Flash attention must be used with remove_microbatch_padding (flash-attn is not installed)"
 
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)

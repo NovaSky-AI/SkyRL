@@ -10,6 +10,7 @@ The model is shown one endoscopic frame (the image lives in the prompt's
 the blended F1 reward. Single-turn (``max_turns=1``): the episode ends after the
 first — and only — response.
 """
+
 import json
 import re
 from typing import Any, Dict, Optional, Set
@@ -17,12 +18,24 @@ from typing import Any, Dict, Optional, Set
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 INSTRUMENTS = {"grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"}
-VERBS = {"grasp", "retract", "dissect", "coagulate", "clip", "cut",
-         "aspirate", "irrigate", "pack", "null_verb"}
-TARGETS = {"gallbladder", "cystic_plate", "cystic_duct", "cystic_artery",
-           "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity",
-           "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag",
-           "null_target"}
+VERBS = {"grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"}
+TARGETS = {
+    "gallbladder",
+    "cystic_plate",
+    "cystic_duct",
+    "cystic_artery",
+    "cystic_pedicle",
+    "blood_vessel",
+    "fluid",
+    "abdominal_wall_cavity",
+    "liver",
+    "adhesion",
+    "omentum",
+    "peritoneum",
+    "gut",
+    "specimen_bag",
+    "null_target",
+}
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _SPECIAL_RE = re.compile(r"<\|[^|]*\|>")  # <|im_end|>, <|im_start|>, <|image_pad|>, ...
@@ -40,8 +53,7 @@ def parse_triplets(text: Optional[str]) -> Optional[Set[str]]:
     t = _SPECIAL_RE.sub("", _THINK_RE.sub("", text)).strip()
     if t.lower() in ("", "none", "no action", "nothing", "no triplets"):
         return set()
-    parts = [p.strip().strip(".;()[]").lower()
-             for p in t.replace("\n", ",").split(",") if p.strip()]
+    parts = [p.strip().strip(".;()[]").lower() for p in t.replace("\n", ",").split(",") if p.strip()]
     trips: Set[str] = set()
     for p in parts:
         comps = p.split("-")
@@ -111,6 +123,9 @@ if __name__ == "__main__":
     }
     print("exact:", reward_single(parse_triplets("grasper-retract-gallbladder, hook-dissect-cystic_duct"), gt))
     print("one-of-two:", reward_single(parse_triplets("grasper-retract-gallbladder"), gt))
-    print("thinking-leak:", reward_single(parse_triplets("<think>hmm</think>\ngrasper-retract-gallbladder, hook-dissect-cystic_duct"), gt))
+    print(
+        "thinking-leak:",
+        reward_single(parse_triplets("<think>hmm</think>\ngrasper-retract-gallbladder, hook-dissect-cystic_duct"), gt),
+    )
     print("none:", reward_single(parse_triplets("none"), gt))
     print("malformed:", reward_single(parse_triplets("random garbage"), gt))

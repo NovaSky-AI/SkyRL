@@ -259,3 +259,55 @@ def test_teardown_releases_neuron_device_cache(monkeypatch):
     assert calls == [True]
     assert not hasattr(engine, "_model")
     assert not hasattr(engine, "_base_model")
+
+
+# -- text input padding -------------------------------------------------------
+
+
+def _text_engine(pad_token_id, eos_token_id):
+    from types import SimpleNamespace
+
+    engine = _engine_stub()
+    engine._tokenizer = SimpleNamespace(pad_token_id=pad_token_id, eos_token_id=eos_token_id)
+    return engine
+
+
+def test_text_inputs_left_pads_prompt_batch():
+    engine = _text_engine(pad_token_id=0, eos_token_id=2)
+    inputs, prompt_lens = engine._text_inputs([[7, 8, 9], [10]])
+
+    assert prompt_lens == [3, 1]
+    # Left-padded: the shorter prompt's pads precede its real tokens, so the last input
+    # position is always a real token (``generate`` samples from the logits there).
+    assert inputs["input_ids"].tolist() == [[7, 8, 9], [0, 0, 10]]
+    assert inputs["attention_mask"].tolist() == [[1, 1, 1], [0, 0, 1]]
+
+
+def test_text_inputs_uses_eos_as_pad_when_no_pad_token():
+    engine = _text_engine(pad_token_id=None, eos_token_id=2)
+    inputs, _ = engine._text_inputs([[7], [10, 11]])
+
+    assert inputs["input_ids"].tolist() == [[2, 7], [10, 11]]
+    assert inputs["attention_mask"].tolist() == [[0, 1], [1, 1]]
+
+
+# -- adapter swap under the generation lock -----------------------------------
+
+
+def test_generate_deactivates_adapter_when_base_model_requested():
+    import asyncio
+
+    engine = object.__new__(NeuronInferenceEngine)
+    engine._model_path = "policy"
+    engine._base_model = base = object()
+    engine._model = adapter = object()
+    engine._adapters = {"adapter": adapter}
+    engine._active_lora_name = "adapter"
+    engine._generate_lock = asyncio.Lock()
+    engine._generate_sync = lambda prompt_ids, kwargs, mm_features: "ok"
+
+    result = asyncio.run(engine.generate({"prompt_token_ids": [[1, 2, 3]], "sampling_params": {}}, model=None))
+
+    assert result == "ok"
+    assert engine._model is base
+    assert engine._active_lora_name is None

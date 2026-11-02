@@ -467,6 +467,22 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
+    # The native neuron backend runs every FSDP worker group (policy, ref, critic) as
+    # an independent Ray process that pins its NeuronCore to its local rank. On the
+    # single-node topology the neuron backend supports, those groups all claim logical
+    # cores ``0 .. world_size-1`` and collide -- a NeuronCore is not shareable across
+    # processes. Reject the multi-group topology up front (a supported neuron run is a
+    # single policy group with no reference model and no critic; the TRL-compatible
+    # CholecT50 leg sets ``use_kl_loss=false`` / ``beta=0.0``).
+    if cfg.generator.inference_engine.backend == "neuron" and (use_ref_model or cfg.trainer.critic.model.path):
+        raise ValueError(
+            "generator.inference_engine.backend='neuron' supports a single FSDP worker group "
+            "(the policy): each group pins disjoint NeuronCores by local rank, so a reference "
+            "model (use_kl_loss / use_kl_in_reward) or a critic would collide with the policy "
+            "workers on the same cores. Set use_kl_loss=false and use_kl_in_reward=false and "
+            "leave trainer.critic.model.path unset."
+        )
+
     if cfg.trainer.policy.language_model_only:
         assert (
             cfg.generator.inference_engine.language_model_only
@@ -605,9 +621,10 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled: generator backend must be vllm (or the native neuron engine,
         # which syncs LoRA adapters directly), training backend must be fsdp or megatron
-        assert cfg.generator.inference_engine.backend in ("vllm", "neuron"), (
-            "LoRA enabled requires vLLM or neuron backend"
-        )
+        assert cfg.generator.inference_engine.backend in (
+            "vllm",
+            "neuron",
+        ), "LoRA enabled requires vLLM or neuron backend"
         megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
         if megatron_lora_cfg.experts_shared_outer_loras and megatron_lora_cfg.lora_type != "lora":
             raise ValueError(

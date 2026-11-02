@@ -19,18 +19,27 @@ skyrl/backends/mm_codec.py  # vLLM-free safetensors codec for multimodal kwargs_
 ## Install
 
 `torch` comes from `torch-neuronx`, which is published on the AWS Neuron index, not
-PyPI. `uv run --isolated` builds a fresh environment per invocation, so a system-level
-`pip install torch-neuronx` is **not** visible to it — the Neuron index must be passed to
-`uv` itself so `torch-neuronx` resolves inside the isolated env alongside the extra:
+PyPI. The `neuron` extra deliberately does **not** declare `torch`/`torch-neuronx`
+(the pin belongs to the host DLAMI's Neuron runtime, not to the extra), so passing
+`--extra-index-url` alone does not select anything — `torch-neuronx` must be installed
+explicitly:
 
 ```bash
-uv run --isolated --extra neuron \
-  --extra-index-url https://pip.repos.neuron.amazonaws.com \
-  -m skyrl.train.entrypoints.main_base ...
+# Pin to the version your DLAMI's Neuron runtime expects. 2.14.3.0.282 is the tested
+# pin; the AMI-shipped 2.14.3.0.1 crashes on `repeat_interleave`. `--no-deps` keeps the
+# Neuron-index `torch-neuronx` from shadowing the PyPI `torch`.
+pip install --no-deps --extra-index-url https://pip.repos.neuron.amazonaws.com \
+  torch-neuronx==2.14.3.0.282
 ```
 
-(Keep the default PyPI index for everything else; the AWS Neuron index only supplies
-`torch-neuronx` and its runtime deps.)
+The AWS Neuron index only supplies `torch-neuronx` and its runtime deps; keep the default
+PyPI index for everything else.
+
+`uv run --isolated` builds a fresh environment per invocation and cannot see a
+system-level `pip install torch-neuronx`, so it is not a viable path here. The tested
+setup runs straight from the DLAMI venv — see `examples/train/cholec/run_cholec_neuron.sh`,
+which sources `/opt/aws_neuronx_venv_torch_neuronx_2_14_0/bin/activate` and installs SkyRL
+editable alongside the pinned torch-neuronx / transformers / PEFT / torchvision.
 
 The `neuron` extra mirrors `skyrl-train` minus the CUDA/vLLM-only pieces
 (`vllm-router`, `flash-attn`, `flash-linear-attention`, `causal-conv1d`, `nixl`).

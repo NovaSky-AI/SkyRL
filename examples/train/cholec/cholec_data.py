@@ -105,8 +105,7 @@ def _row_to_skyrl(row, idx: int) -> dict:
 
 
 def _convert(src: str, dst: str) -> int:
-    df = pq.read_table(src).to_pandas()
-    records = [_row_to_skyrl(row, i) for i, (_, row) in enumerate(df.iterrows())]
+    records = [_row_to_skyrl(row, i) for i, row in enumerate(pq.read_table(src).to_pylist())]
     out = pa.Table.from_pylist(records)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     pq.write_table(out, dst)
