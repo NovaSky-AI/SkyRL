@@ -372,8 +372,7 @@ class NewInferenceWorkerWrap:
     def skyrl_param_digest(self) -> dict:
         """Diagnostic: ``{name: "shape|dtype|blake2b"}`` over every parameter and buffer of the live model.
 
-        Used by ``task_scripts/sync_check.py`` to check that two weight-sync paths leave bitwise the same
-        model on the sampler. Copies each tensor to host to hash it; seconds per GB, not for training loops.
+        Used to check that two weight-sync paths leave bitwise the same model on the sampler. Copies each tensor to host to hash it; seconds per GB, not for training loops.
         """
         import hashlib
         import itertools
