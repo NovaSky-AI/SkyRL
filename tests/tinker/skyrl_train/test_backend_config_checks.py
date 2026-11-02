@@ -48,6 +48,18 @@ def _build(backend_config: dict, lora_config: types.LoraConfig | None = None, ru
         ({"trainer.policy.model.lora.train_mlp": False}, LORA, "may not set ['trainer.policy.model.lora.train_mlp']"),
         ({"trainer.critic.model.lora.train_attn": False}, LORA, "may not set ['trainer.critic.model.lora.train_attn']"),
         ({"trainer.critic": {"optimizer_config": {"lr": 1e-5}}}, {}, "replaced by AdamParams.learning_rate"),
+        # init_megatron_optim_config applies a kwargs lr at optimizer creation, but set_lr
+        # replaces it with AdamParams.learning_rate before every step, so it can never be used.
+        (
+            {"trainer.policy.megatron_config.optimizer_config_kwargs": {"lr": 1e-5}},
+            {},
+            "replaced by AdamParams.learning_rate",
+        ),
+        (
+            {"trainer.critic": {"megatron_config": {"optimizer_config_kwargs": {"lr": 1e-5}}}},
+            {},
+            "replaced by AdamParams.learning_rate",
+        ),
         ({"trainer.policy": {"torch_profiler_config": {"enable": True}}}, {}, "--torch-profiler"),
         ({"trainer.algorithm.policy_loss_type": "gspo"}, {}, "must be 'regular' or 'dual_clip'"),
         ({"use_ray": False}, {}, "use_ray"),

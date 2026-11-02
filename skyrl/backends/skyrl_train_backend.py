@@ -1391,6 +1391,11 @@ class SkyRLTrainBackend(AbstractBackend):
     REPLACED_PER_REQUEST = {
         "trainer.policy.optimizer_config.lr": "replaced by AdamParams.learning_rate before every optim_step",
         "trainer.critic.optimizer_config.lr": "replaced by AdamParams.learning_rate before every optim_step",
+        # init_megatron_optim_config applies optimizer_config_kwargs last, so a kwargs lr wins at
+        # optimizer creation — but Megatron's set_lr applies AdamParams.learning_rate before every
+        # step, so no configured value is ever used there either.
+        "trainer.policy.megatron_config.optimizer_config_kwargs.lr": "replaced by AdamParams.learning_rate before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.lr": "replaced by AdamParams.learning_rate before every optim_step",
     }
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
