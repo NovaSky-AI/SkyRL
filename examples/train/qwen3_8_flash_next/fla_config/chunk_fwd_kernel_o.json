@@ -1,0 +1,2 @@
+{"kernel_name": "chunk_fwd_kernel_o",
+ "default_config": {"kwargs": {"BK": 128, "BV": 128}, "num_warps": 4, "num_stages": 3, "num_ctas": 1}}
