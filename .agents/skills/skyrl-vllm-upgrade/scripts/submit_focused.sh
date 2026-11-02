@@ -32,7 +32,9 @@ fi
 
 # Large untracked local artifacts must not be uploaded with working_dir. The CLI echoes
 # the job's env vars, so its output is redacted.
+# COMPUTE_CONFIG=l40s_test overrides the spec's l4_ci when L4 capacity is exhausted.
 anyscale job submit -f "$spec" --name "vllm-upgrade-$flavor-$tag" --timeout 21000 \
+    ${COMPUTE_CONFIG:+--compute-config "$COMPUTE_CONFIG"} \
     --env "HF_TOKEN=$HF_TOKEN" \
     -e '*.whl' -e 'exp_logs/' -e 'agents_artifacts/' -e 'literature_review/' \
     ${cmd[@]+"${cmd[@]}"} 2>&1 | sed -E "s/'HF_TOKEN': '[^']*'/'HF_TOKEN': '<redacted>'/"

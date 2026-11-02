@@ -59,10 +59,46 @@ pools, `max_tokens` clamping), and the PR that added this skill (0.33).
    ```
    Resolution with the cross-platform forks takes 10+ minutes; run it in the background.
 
-## 2. Runtime patches (`skyrl/backends/skyrl_train/patches/vllm/`)
+## 2. Static checks before any GPU time
 
-Unpack the old and new wheels side by side (python files only are enough) and `diff -u`
-each patch target. For every patch decide: keep / update docstring / fix / remove.
+Unpack the old and new wheels side by side; everything in this section and the next reads them:
+
+```bash
+mkdir -p /tmp/vllm_bump && cd /tmp/vllm_bump
+for v in OLD NEW; do
+  curl -sL -o vllm-$v.whl "$(curl -s https://pypi.org/pypi/vllm/$v/json | python3 -c \
+    "import json,sys; print([u['url'] for u in json.load(sys.stdin)['urls'] if u['filename'].endswith('x86_64.whl')][0])")"
+  unzip -q vllm-$v.whl 'vllm/*' -d $v
+done
+diff -rq OLD/vllm NEW/vllm | grep -v '\.so ' | wc -l   # scale of the change (0.32 -> 0.33: ~1040 files)
+```
+
+Then, from the repo root:
+
+```bash
+# Every `from vllm... import X` in SkyRL resolves against the new tree (moved/removed modules).
+python3 -I .agents/skills/skyrl-vllm-upgrade/scripts/check_vllm_imports.py /tmp/vllm_bump/NEW
+# Only when torch is held below vLLM's pin (see 1.2):
+bash .agents/skills/skyrl-vllm-upgrade/scripts/check_vllm_torch_abi.sh NEW OLD <held-torch>
+```
+
+Both run on macOS. Neither catches *semantic* API changes (a contract that still imports but
+behaves differently -- every 0.33 weight-sync break was one). For those, run two read-only
+audits in parallel, one per surface below, each diffing the two trees:
+
+- **patches** (section 3): every patch's targets, anchors and upstream-fix status.
+- **integration** (section 4): every non-patch vLLM touch point -- the weight-transfer ABCs and
+  engines (`vllm/distributed/weight_transfer/`), the vendored `weight_sync/sharded_rdt/` copies
+  against upstream's `sharded_rdt_*`, sleep/wake and the cumem allocator, `EngineArgs` /
+  `FrontendArgs`, HTTP routes, `SpeculativeConfig`, LoRA, routed experts, KV connectors, and
+  pause/resume semantics in `v1/engine/core.py`.
+
+Verify each reported breakage yourself in the source before changing code.
+
+## 3. Runtime patches (`skyrl/backends/skyrl_train/patches/vllm/`)
+
+`diff -u` each patch target between the two trees. For every patch decide: keep / update
+docstring / fix / remove.
 
 - Text-match or source-anchor patches **silently stop applying** when the anchor moves.
 - A backport whose upstream PR landed must be removed -- and check that its "already fixed"
@@ -70,15 +106,28 @@ each patch target. For every patch decide: keep / update docstring / fix / remov
   attribute upstream never used, so it would have double-applied).
 - CPU tests under `tests/backends/skyrl_train/patches/vllm/` stub the patched function's
   collaborators; new upstream calls in those functions need stubs too.
-- Patches are installed from `inference_servers/new_inference_worker_wrap.py` and the
-  `vllm.general_plugins` entry points in `pyproject.toml`.
+- Patches are installed from `inference_servers/new_inference_worker_wrap.py` (worker
+  processes only, at worker-extension import) and the `vllm.general_plugins` entry points in
+  `pyproject.toml` (every vLLM process, including the API server and the registry's model
+  inspection subprocess). A patch whose effect vLLM reads **at config time** must be a general
+  plugin: 0.33's `LoRAConfig.verify_with_model_config` rejects `--enable-lora` from the
+  registry's model info before any worker starts, which broke the worker-only Kimi K2.5 LoRA
+  patch. That model info is also cached on disk keyed by the model module's file hash, so
+  re-register the architecture to a SkyRL module (see `vllm_kimi_k25_lora.vllm_general_plugin`,
+  `patch_deepseek_v41.py`) rather than mutating vLLM's class.
+- Patches without an "already fixed" probe keep installing after the upstream fix lands
+  (0.33 removed two such patches: `patch_multi_connector_stats`, whose override was also
+  subtly wrong, and `patch_deepseek_v41_prefill_workspace`).
 
 Record the per-patch verdict table in the PR description (see #2557 for the format).
 
-## 3. Integration points that broke before
+## 4. Integration points that broke before
 
 | Surface | What broke | Where it is tested |
 |---|---|---|
+| `WeightSource` contract | 0.33: `metadata` must be a `functools.cached_property` (checked in `__init_subclass__` -> **import-time `TypeError` in every source module**), `__iter__` became `iter_full()` / `iter_local()`, engines probe `source.metadata` inside `trainer_init`. A source whose metadata changes per round (LoRA adapter) must drop the cached value itself (`self.__dict__.pop("metadata")`) and must not raise before its first round | CPU `tests/backends/skyrl_train/weight_sync/`, GPU `inference_servers/test_weight_sync.py` |
+| NCCL metadata reuse | 0.33 sends an empty update info when a round's metadata equals the last; the worker looks the old one up by `self.model`, which SkyRL's receivers swap for a per-round proxy -> **second sync hangs**. SkyRL's NCCL trainer resets `_sent_meta` every round | `test_weight_sync.py` (syncs twice since 0.33) |
+| Moved entrypoint modules | 0.33 moved `vllm.entrypoints.launchers.cli_args` to `vllm.entrypoints.common.cli_args` -> every server start fails | `scripts/check_vllm_imports.py`; `inference_servers/test_inference_server_group.py` |
 | Weight-transfer engine ABCs / init infos | 0.28 moved `packed` into `NCCLWeightTransferInitInfo` (default False): trainer packs, worker unpacks one-by-one, **NCCL hangs** instead of erroring | `inference_servers/test_weight_sync.py`, `test_policy_local_engines_e2e.py` |
 | Vendored `weight_sync/sharded_rdt/*` | Imports vLLM internals; check each `from vllm...` still resolves and the upstream originals' changes | same, `sharded_rdt` params; megatron `test_megatron_policy_weight_sync[sharded_rdt_*]` |
 | Sleep / wake (`skyrl_sleep_for_weight_sync`) | 0.32 added `runtime` / `cudagraph` cumem pools; offloading only `kv_cache` caused illegal memory access after wake | `test_offload_kv_weight_sync.py` |
@@ -86,8 +135,13 @@ Record the per-patch verdict table in the PR description (see #2557 for the form
 | OpenAI API behavior | 0.32 clamps `max_tokens` to the context instead of 400 | `inference_servers/test_new_inference_generation.py -k context_length` |
 | LoRA loading | `PEFTHelper.validate_legal`, `_validate_moe_lora_format`, in-memory adapter patch | `test_lora.py`, `inference_servers/test_multi_lora_serving.py`, `patches/vllm` GPU tests |
 | Speculative decoding (MTP) | draft weights must be resynced and drafting must continue after a sync | `megatron/test_mtp_weight_sync.py`, `test_mtp_weight_roundtrip.py` |
+| Pause semantics | 0.33: `pause(mode=abort|wait)` rejects new requests with a retryable error until resume (it used to queue them). SkyRL pauses with `keep` except inside `sleep()`, and `wake_up` resumes | `test_offload_kv_weight_sync.py`, `test_prefix_cache_reset.py` |
 
-## 4. Validation
+Known gap (not a regression as of 0.33): `skyrl_sleep_for_weight_sync` mirrors `Worker.sleep`
+but not its KV-connector `unregister_kv_caches` / `restore_kv_caches`, so PD + KV offload for
+weight sync would leave NIXL/Mooncake registrations stale. Re-check on every bump.
+
+## 5. Validation
 
 Do not rely on the label-gated CI for the first pass: the full suites take hours and mix in
 training-only failures. Run the focused slice on the CI cloud first.
@@ -105,7 +159,13 @@ bash .agents/skills/skyrl-vllm-upgrade/scripts/submit_focused.sh fsdp <tag> infe
 
 Track jobs by the printed `prodjob_...` ID (names resolve to the most recent job). Read
 results with `anyscale job logs --id <id> | grep -A20 '== SUMMARY'`. A failed job with zero
-runs is a capacity failure, not a test failure -- resubmit.
+runs is a capacity failure, not a test failure -- resubmit. `l4_ci` capacity is often
+exhausted (jobs sit in STARTING for 30+ min); `l40s_test` (4xL40S, same cloud) runs the same
+tests unchanged -- `COMPUTE_CONFIG=l40s_test bash .../submit_focused.sh ...`.
+
+Do not submit GPU jobs until sections 2-4 are done: in 0.33, three separate breakages
+(import-time `TypeError` in every weight source, moved `cli_args`, NCCL second-sync hang)
+would each have failed every group, and the first two are visible statically.
 
 Every failure must be compared against `main` before it is attributed to the bump: rerun the
 same group on a `main` checkout when unsure.
@@ -113,7 +173,7 @@ same group on a `main` checkout when unsure.
 After the focused jobs are green, apply the full labels (`run_gpu_ci`, `run_megatron_gpu_ci`,
 and `run_h100_gpu_ci` for R3 / FP8) on the PR.
 
-## 5. PR description
+## 6. PR description
 
 Include: the package table (from -> to, where), why torch did or did not move, the override
 changes, the per-patch verdict table, every code change with the upstream change that forced
