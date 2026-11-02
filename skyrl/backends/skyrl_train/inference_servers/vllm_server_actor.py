@@ -152,7 +152,7 @@ class VLLMServerActor(ServerActorProtocol):
     called from anywhere (other actors, driver, external processes).
 
     Custom endpoints added for SkyRL:
-    - /reset_prefix_cache: Reset prefix cache
+    - /fetch_weights: Apply checkpoint-delta payloads before reload
 
     Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
     /update_weights, /get_world_size) from the RLHF router when VLLM_SERVER_DEV_MODE=1.
@@ -510,17 +510,6 @@ class VLLMServerActor(ServerActorProtocol):
             async def _metrics_worker_info():
                 """Identify the Ray frontend exporting this server's engine metrics."""
                 return Response(content=orjson.dumps(metrics_info), media_type="application/json")
-
-        @app.post("/reset_prefix_cache")
-        async def _reset_prefix_cache(request: Request):
-            """Reset the prefix cache, optionally resetting in-flight requests too."""
-            try:
-                data = await request.json()
-            except Exception:
-                data = {}
-            reset_running_requests = data.get("reset_running_requests", False)
-            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
-            return {"status": "ok"}
 
         @app.post("/fetch_weights")
         async def _fetch_weights(request: Request):
