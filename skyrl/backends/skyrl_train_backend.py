@@ -509,8 +509,10 @@ class SkyRLTrainBackend(AbstractBackend):
           weights, no KV cache, no GPU), keeping the training path
           (forward / forward_backward) free of inference-engine startup.
         """
-        if self._inference_engines_initialized and self._cfg.generator.inference_engine.backend != "neuron":
-            return self._inference_engine_client
+        if self._inference_engines_initialized:
+            cfg = getattr(self, "_cfg", None)
+            if cfg is None or cfg.generator.inference_engine.backend != "neuron":
+                return self._inference_engine_client
 
         from skyrl.backends.skyrl_train.inference_servers.render_server import (
             CPURenderServer,
