@@ -267,6 +267,18 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
+        # Load checkpoint state if resumption is enabled.
+        if self.resume_mode != ResumeMode.NONE:
+            with Timer("load_checkpoints"):
+                self.global_step, _ = self.load_checkpoints()
+
+        start_epoch = self._dataloader_epoch
+        self._current_epoch = start_epoch
+        if self.cfg.trainer.max_training_steps is not None and self.global_step >= self.cfg.trainer.max_training_steps:
+            logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}; no training steps remain.")
+            self.tracker.finish()
+            return
+
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
 
@@ -274,19 +286,10 @@ class RayPPOTrainer:
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()
 
-        # Load checkpoint state if resumption is enabled.
-        if self.resume_mode != ResumeMode.NONE:
-            with Timer("load_checkpoints"):
-                self.global_step, _ = self.load_checkpoints()
-
         # Prepare weights for sampling
         with Timer("sync_weights"):
             await self.dispatch.save_weights_for_sampler()
 
-        # Compute start_epoch up-front so callback metadata is ready before
-        # any event fires (including the baseline eval below).
-        start_epoch = self._dataloader_epoch
-        self._current_epoch = start_epoch
         self._training_control.reset()
 
         self._fire("on_train_start")
@@ -308,9 +311,7 @@ class RayPPOTrainer:
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
-        stop_training = (
-            self.cfg.trainer.max_training_steps is not None and self.global_step > self.cfg.trainer.max_training_steps
-        )
+        stop_training = False
 
         # booleans tracking whether we save ckpts
         # as well as hf model at step end
@@ -319,8 +320,6 @@ class RayPPOTrainer:
         self._profiler_start()
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
-                if stop_training:
-                    break
                 self._current_epoch = epoch
                 self._fire("on_epoch_start")
                 # ``step_started`` tracks the on_step_start/on_step_end pairing taking

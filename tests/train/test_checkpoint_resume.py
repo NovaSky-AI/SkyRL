@@ -155,9 +155,22 @@ def test_completed_step_limit_does_not_train_until_raised(tmp_path, monkeypatch,
     checkpoint = tmp_path / "resumed" / f"global_step_{limit}"
 
     completed, extra = _trainer(tmp_path / "resumed", monkeypatch, max_steps=limit, resume=checkpoint, **kwargs)
+    completed.cfg.trainer.eval_interval = 1
+    completed.cfg.trainer.eval_before_train = True
+    completed.cfg.trainer.hf_save_interval = 1
+    completed.init_weight_sync_state = MagicMock()
+    completed.eval = AsyncMock(return_value={})
+    completed.save_checkpoints = MagicMock(wraps=completed.save_checkpoints)
+    completed.save_models = MagicMock()
     asyncio.run(completed.train())
     assert extra == []
     assert completed.global_step == limit
+    completed.init_weight_sync_state.assert_not_called()
+    completed.dispatch.save_weights_for_sampler.assert_not_awaited()
+    completed.eval.assert_not_awaited()
+    completed.save_checkpoints.assert_not_called()
+    completed.save_models.assert_not_called()
+    completed.tracker.finish.assert_called_once_with()
 
     resumed, after = _trainer(
         tmp_path / "resumed",
