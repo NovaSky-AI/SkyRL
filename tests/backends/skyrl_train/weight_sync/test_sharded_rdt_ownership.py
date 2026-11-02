@@ -65,7 +65,7 @@ class TestPpLocalOwnership:
         src._owned_group_idx = []
         src._pp_geometry = lambda: (pp_size, my_pp)  # type: ignore[method-assign]
         src._exchange_pp_names = lambda mine: gathered  # type: ignore[method-assign]
-        src._meta = src._assemble_pp_metadata([])
+        src.__dict__["metadata"] = src._assemble_pp_metadata([])
         return src
 
     def test_metadata_is_the_whole_model_group_major_on_every_stage(self):
@@ -261,7 +261,7 @@ class TestExpertOwnership:
 
     def test_stamps_are_expert_index_over_n_local_and_minus_one_elsewhere(self):
         src = self._stub(ep_size=2, my_ep_rank=1)
-        src._meta = self._meta_of(
+        src.__dict__["metadata"] = self._meta_of(
             ["embed.weight"]
             + [f"model.layers.0.mlp.experts.{e}.gate_proj.weight" for e in range(4)]
             + ["model.layers.0.input_layernorm.weight", "lm_head.weight"]
@@ -272,7 +272,7 @@ class TestExpertOwnership:
 
     def test_an_expert_count_not_divisible_by_ep_size_raises(self):
         src = self._stub(ep_size=2)
-        src._meta = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
+        src.__dict__["metadata"] = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
         with pytest.raises(RuntimeError, match="not divisible"):
             src._name_owner()
 
@@ -376,7 +376,7 @@ class TestHeldNamesComposition:
         src._layer_geom = {}
         src._phase = {}
         src._phase_prefix = ""
-        src._meta = [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
+        src.__dict__["metadata"] = [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
         if owned is not None:
             src._owned_group_idx = owned
             src._group_stages = []

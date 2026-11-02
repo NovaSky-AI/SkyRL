@@ -60,7 +60,7 @@ class TestFsdpWeightSource:
     def test_yields_contiguous_tensors(self):
         # NCCL sends `numel` elements straight from data_ptr(), so a
         # non-contiguous view would ship whatever follows its base pointer.
-        assert all(t.is_contiguous() for _, t in FsdpWeightSource(_model(), torch.bfloat16))
+        assert all(t.is_contiguous() for _, t in FsdpWeightSource(_model(), torch.bfloat16).iter_full())
 
     def test_weight_prefix_applies_to_both_channels(self):
         source = FsdpWeightSource(_model(), torch.bfloat16, weight_prefix="language_model.")
