@@ -8,7 +8,8 @@ then deletes exactly this run's sandboxes, and Daytona deletes any left over onc
     uv run --isolated --extra daytona python -m skyrl.integration.sandboxes.daytona list --label owner=<you> --label run=<run>
     uv run --isolated --extra daytona python -m skyrl.integration.sandboxes.daytona cleanup --label owner=<you> --label run=<run>
 
-Harness adapters apply ``label_params`` where they create a sandbox (Harbor's ``LabelledDaytonaEnvironment``).
+Harness adapters apply ``label_params`` where they create a sandbox
+(``skyrl.integration.harbor.environments.LabelledDaytonaEnvironment``).
 """
 
 import argparse
@@ -17,6 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 #: The labels ``cleanup`` needs at least, so it can't reach other people's or other runs' sandboxes.
 SCOPE_LABELS = frozenset({"owner", "run"})
+COMMANDS = ("list", "cleanup")
 
 
 def check_labels(labels: Optional[Mapping[Any, Any]]) -> Dict[str, str]:
@@ -47,15 +49,28 @@ async def list_sandboxes(daytona: Any, labels: Mapping[str, str]) -> List[Any]:
 
 
 async def run(command: str, labels: Mapping[str, str], daytona: Any) -> List[Any]:
-    """``list`` or ``cleanup`` the sandboxes carrying every one of ``labels``. Returns them."""
+    """``list`` or ``cleanup`` the sandboxes carrying every one of ``labels``. Returns them.
+
+    Raises ``ValueError`` before reaching Daytona for any other command, or for ``labels`` without an owner and a
+    run label. ``cleanup`` tries every deletion, then raises ``RuntimeError`` if any failed.
+    """
+    if command not in COMMANDS:
+        raise ValueError(f"command must be one of {COMMANDS}, got {command!r}")
+    if command_is_unscoped(labels):
+        raise ValueError(f"labels need {sorted(SCOPE_LABELS)}, so cleanup can't reach other runs' sandboxes")
     sandboxes = await list_sandboxes(daytona, labels)
     if command == "list":
         for sandbox in sandboxes:
             print(sandbox.id, sandbox.state, sandbox.labels)
         print(f"{len(sandboxes)} sandboxes labelled {dict(labels)}")
         return sandboxes
-    await asyncio.gather(*(daytona.delete(sandbox) for sandbox in sandboxes))
-    print(f"deleted {len(sandboxes)} sandboxes labelled {dict(labels)}")
+    results = await asyncio.gather(*(daytona.delete(sandbox) for sandbox in sandboxes), return_exceptions=True)
+    failed = [(sandbox, result) for sandbox, result in zip(sandboxes, results) if isinstance(result, BaseException)]
+    for sandbox, error in failed:
+        print(f"could not delete sandbox {sandbox.id}: {type(error).__name__}: {error}")
+    print(f"deleted {len(sandboxes) - len(failed)} of {len(sandboxes)} sandboxes labelled {dict(labels)}")
+    if failed:
+        raise RuntimeError(f"{len(failed)} of {len(sandboxes)} sandboxes could not be deleted; run cleanup again")
     return sandboxes
 
 
@@ -68,7 +83,7 @@ async def _main(command: str, labels: Dict[str, str]) -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="List or delete the Daytona sandboxes carrying every given label.")
-    parser.add_argument("command", choices=["list", "cleanup"])
+    parser.add_argument("command", choices=COMMANDS)
     parser.add_argument("--label", action="append", required=True, metavar="KEY=VALUE")
     args = parser.parse_args(argv)
     if bad := [item for item in args.label if "=" not in item]:
@@ -81,7 +96,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
-    asyncio.run(_main(args.command, args.labels))
+    try:
+        asyncio.run(_main(args.command, args.labels))
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
 
 
 if __name__ == "__main__":

@@ -38,8 +38,8 @@ def test_the_cli_needs_an_owner_and_a_run_label() -> None:
 
 
 class FakeDaytona:
-    def __init__(self, sandboxes):
-        self.sandboxes, self.queries, self.deleted = sandboxes, [], []
+    def __init__(self, sandboxes, fail=()):
+        self.sandboxes, self.queries, self.deleted, self.fail = sandboxes, [], [], set(fail)
 
     async def list(self, query):
         self.queries.append(query)
@@ -48,6 +48,8 @@ class FakeDaytona:
                 yield sandbox
 
     async def delete(self, sandbox):
+        if sandbox.id in self.fail:
+            raise ConnectionError("network glitch")
         self.deleted.append(sandbox.id)
 
 
@@ -63,4 +65,29 @@ def test_list_and_cleanup_touch_only_the_labelled_sandboxes(command, capsys) -> 
 
     assert found == [ours] and client.queries[0].labels == {"owner": "me", "run": "r1"}
     assert client.deleted == (["a"] if command == "cleanup" else [])
-    assert "1 sandboxes" in capsys.readouterr().out
+    assert "1 sandboxes labelled" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "command, labels",
+    [("cleanup", {"owner": "me"}), ("cleanup", {"run": "r1"}), ("lists", {"owner": "me", "run": "r1"})],
+)
+def test_run_refuses_an_unscoped_or_unknown_command_before_reaching_daytona(command, labels) -> None:
+    client = FakeDaytona([SimpleNamespace(id="a", state="started", labels={"owner": "me", "run": "r1"})])
+    with pytest.raises(ValueError):
+        asyncio.run(daytona.run(command, labels, client))
+    assert client.queries == [] and client.deleted == []
+
+
+def test_cleanup_tries_every_deletion_then_reports_the_failures(capsys) -> None:
+    pytest.importorskip("daytona")
+    labels = {"owner": "me", "run": "r1"}
+    sandboxes = [SimpleNamespace(id=name, state="started", labels=labels) for name in "abc"]
+    client = FakeDaytona(sandboxes, fail={"b"})
+
+    with pytest.raises(RuntimeError, match="1 of 3 sandboxes could not be deleted"):
+        asyncio.run(daytona.run("cleanup", labels, client))
+
+    assert sorted(client.deleted) == ["a", "c"]
+    out = capsys.readouterr().out
+    assert "could not delete sandbox b: ConnectionError: network glitch" in out and "deleted 2 of 3" in out
