@@ -1721,10 +1721,9 @@ def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, m
         validate_optimizer_offload_to_disk_cfg(cfg)
 
 
-def test_expert_nvfp4_stacked_sync_requires_expert_nvfp4():
+def test_expert_nvfp4_stacked_sync_default_on_and_ignored_without_expert_nvfp4():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
-    assert cfg.trainer.policy.megatron_config.expert_nvfp4_stacked_sync is False
-    cfg.trainer.policy.megatron_config.expert_nvfp4_stacked_sync = True
-    with pytest.raises(ValueError, match="expert_nvfp4_stacked_sync"):
-        validate_megatron_cfg(cfg)
+    assert cfg.trainer.policy.megatron_config.expert_nvfp4_stacked_sync is True
+    assert cfg.trainer.policy.megatron_config.expert_nvfp4 is False
+    validate_megatron_cfg(cfg)  # a no-op without expert_nvfp4: must not raise

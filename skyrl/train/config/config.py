@@ -666,14 +666,16 @@ class MegatronConfig(BaseConfig):
     expert_nvfp4_high_precision_last_layers: int = 0
     """With ``expert_nvfp4``: keep the routed experts of the last N transformer layers in BF16, in the
     trainer and on the sampler."""
-    expert_nvfp4_stacked_sync: bool = False
+    expert_nvfp4_stacked_sync: bool = True
     """With ``expert_nvfp4``: ship each NVFP4 MoE layer's experts to vLLM as 8 tensors stacked over all experts,
     already in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout (``weight_sync/nvfp4_stacked.py``), instead of
     8 tensors per expert. vLLM then loads each layer with one copy per parameter and one
     ``process_weights_after_loading`` instead of buffering and replaying ~1.5k per-expert loader calls through
     its layerwise reload (~74k for a 48-layer, 128-expert model). Same quantization, same bytes; the receiver
     falls back to the per-expert path for any layer it cannot load directly (MoE TP > 1, redundant experts,
-    unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 tail layers are unaffected."""
+    unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 tail layers are unaffected. On by default (parity with
+    the per-expert path is bitwise, see ``tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stacked_sync.py``); set
+    ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use

@@ -209,7 +209,7 @@ def test_packed_buffer_floor_for_qwen3_30b():
 def test_flag_defaults_off():
     from skyrl.train.config.config import MegatronConfig
 
-    assert MegatronConfig().expert_nvfp4_stacked_sync is False
+    assert MegatronConfig().expert_nvfp4_stacked_sync is True
 
 
 class _FakeLayer(torch.nn.Module):

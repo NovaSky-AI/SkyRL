@@ -164,7 +164,7 @@ gathers are collectives) and skips quantization, since vLLM's NCCL engine discar
 non-senders still serialize: each ships its own handles); and the TE `NVFP4Quantizer` is cached per
 (settings, device) instead of rebuilt per expert.
 
-`megatron_config.expert_nvfp4_stacked_sync=true` (default false) ships each NVFP4 MoE layer as 8 tensors stacked
+`megatron_config.expert_nvfp4_stacked_sync` (default true; set false for the per-expert path) ships each NVFP4 MoE layer as 8 tensors stacked
 over all experts, already in vLLM's ModelOpt-NVFP4 `FusedMoE` parameter layout (`weight_sync/nvfp4_stacked.py`,
 names `__skyrl_nvfp4_stacked__:<layer>.<w13|w2>_<weight|weight_scale|weight_scale_2|input_scale>`), instead of
 8 tensors per expert (~74k for Qwen3-30B-A3B). Quantization is the same per-expert TE call written into a
