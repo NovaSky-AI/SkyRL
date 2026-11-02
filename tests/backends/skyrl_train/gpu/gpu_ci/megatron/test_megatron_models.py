@@ -60,6 +60,9 @@ KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
 # 2048), which HF, vLLM and the Megatron bridge all hash into the same way. A local override must
 # keep "Qwen3.8-Flash-Next" in its path: the qwen3.8 settings below are keyed on the model name.
 QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-Flash-Next-4layer")
+# 4-layer bf16 slice of moonshotai/Kimi-K3 built by examples/train/kimi_k3/make_slice.py. A local
+# override must keep "kimi-k3" in its path: the settings below are keyed on the model name.
+KIMI_K3_4LAYER = os.environ.get("SKYRL_KIMI_K3_4LAYER_PATH", "eatang/Kimi-K3-4layer")
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -80,7 +83,10 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
     # need to enable nvte fused attn for router replay tests when using moonlight models with remove_microbatch_padding=True
     cfg.trainer.logger = "console"
     is_mla_model = (
-        "moonlight" in model_name.lower() or "glm-4" in model_name.lower() or "kimi-k2.5" in model_name.lower()
+        "moonlight" in model_name.lower()
+        or "glm-4" in model_name.lower()
+        or "kimi-k2.5" in model_name.lower()
+        or "kimi-k3" in model_name.lower()
     )
     if is_mla_model:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
@@ -125,6 +131,13 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         cfg.trainer.policy.language_model_only = True
         cfg.trainer.ref.language_model_only = True
         cfg.generator.inference_engine.language_model_only = True
+    if "kimi-k3" in model_name.lower():
+        # VL checkpoint; megatron-bridge's KimiK3Bridge builds the language model only (vision
+        # tower passed through), and KDA needs packed (thd) sequences.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
     if "kimi-k2.5" in model_name.lower():
         # Unified VL checkpoint with a DeepSeek-V3 language model under a
         # `language_model.` prefix; MegatronWorker refuses it without
@@ -164,6 +177,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
         or ("qwen3.8-flash-next" in model_name.lower())
+        or ("kimi-k3" in model_name.lower())
     )
     if is_large_moe:
         cfg.trainer.policy.inference_only_init = True
@@ -175,7 +189,7 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
     env: dict[str, str] = {}
     # MLA models need cuDNN fused attention (the conftest globally sets
     # NVTE_FUSED_ATTN=0; re-enable it here so the fused backend is available).
-    if "moonlight" in model_name.lower() or "glm-4" in model_name.lower() or "kimi-k2.5" in model_name.lower():
+    if any(m in model_name.lower() for m in ("moonlight", "glm-4", "kimi-k2.5", "kimi-k3")):
         env["NVTE_FUSED_ATTN"] = "1"
     if fp8_mode and not fp8_mode.startswith("mxfp8"):
         # Serialized-FP8 block-scale contract, mirroring what
@@ -208,7 +222,7 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0" if is_blackwell_or_newer() else "1")
     # Same story for GLM-5.3-Flash's KDA layers, which run fla kernels too. Only forced on
     # Blackwell so the H100 rows keep whatever fla picks by default.
-    if "glm-5.3-flash" in model_name.lower() and is_blackwell_or_newer():
+    if ("glm-5.3-flash" in model_name.lower() or "kimi-k3" in model_name.lower()) and is_blackwell_or_newer():
         env["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "0")
     if "kimi-k2.5" in model_name.lower():
         # Cold vLLM graph capture can exceed the default 600 s health deadline.
@@ -216,6 +230,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S",
             os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"),
         )
+    if "kimi-k3" in model_name.lower() and is_blackwell_or_newer():
+        # vLLM's SM100-only fused GEMM + TP all-reduce (o_proj / down_proj) keeps its workspace in
+        # NVLink-multicast symmetric memory, which does not survive the level-2 sleep/wake around
+        # weight sync: the first post-sync forward hits an illegal memory access. H100 never
+        # enables it.
+        env["VLLM_KIMI_K3_GEMM_AR"] = "0"
     if "glm-5.3-flash" in model_name.lower():
         # On cold kernel caches the vLLM server JIT-compiles the TileLang mHC / fla KDA / DSA
         # kernels during CUDA-graph capture, then runs the JIT kernel warmup and the FlashInfer
@@ -284,6 +304,10 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # Custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's
         # cumem allocator at TP>1 (custom_all_reduce.cuh:164 'invalid argument' at engine start).
         overrides["engine_init_kwargs"]["disable_custom_all_reduce"] = True
+    if "kimi-k3" in model_name.lower():
+        # 1M default context; the slice is ~18B bf16 params, colocated with the Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.
@@ -510,6 +534,34 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             2048,
             id="glm-5.3-flash-4layer_h100_tp2_ep4_kpool_beyond_topk",
+            marks=pytest.mark.h100,
+        ),
+        # Kimi K3, 4-layer bf16 slice of the real checkpoint (KIMI_K3_4LAYER): KDA (dense MLP),
+        # KDA (MoE) x2, NoPE-MLA with output gate (MoE); latent MoE with the first 128 of 896
+        # routed experts, SiTU activation, and attention residuals with attn_res_block_size=2
+        # so the residual bank spans two blocks. Experts are dequantized from the MXFP4
+        # release (exactly), so both sides run bf16. Exercises megatron-bridge's upstream
+        # KimiK3Bridge (`language_model.model.*` prefix, A_log padding, vision passthrough)
+        # and weight sync into vLLM's kimi_k3 model.
+        #
+        # Measured on 4xB200 with vLLM held to the H100 budget (gpu_memory_utilization 0.22 of
+        # 183 GB ~= 0.5 of 80 GB): Megatron vs vLLM 0.073, post-sync common prefix 0.032, peak
+        # 59 GiB/GPU during the weight broadcast. The slice is flat enough that every greedy
+        # resync generation diverges at a near-tie token, hence the common-prefix comparison.
+        pytest.param(
+            4,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            KIMI_K3_4LAYER,
+            1e-1,
+            1e-1,
+            None,
+            None,
+            id="kimi-k3-4layer_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
         pytest.param(
@@ -828,7 +880,10 @@ async def test_logprobs_matching_roundtrip(
     """
     # See the comparison branch at the end of the test.
     compare_common_prefix = (
-        bool(fp8_mode) or "kimi-k2.5" in model_name.lower() or "qwen3.8-flash-next" in model_name.lower()
+        bool(fp8_mode)
+        or "kimi-k2.5" in model_name.lower()
+        or "kimi-k3" in model_name.lower()
+        or "qwen3.8-flash-next" in model_name.lower()
     )
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
@@ -1045,7 +1100,7 @@ async def test_logprobs_matching_roundtrip(
             # has a flat enough distribution that 53 of 80 sequences diverged
             # (~0.93 positional vs ~0.008 on prefixes). So does the 4-of-48-layer
             # Qwen3.8-Flash-Next slice, whose greedy output differs between two
-            # unsynced runs of the same engine.
+            # unsynced runs of the same engine. The Kimi K3 slice is the same story.
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
