@@ -32,6 +32,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/test_grouped_expert_lora_fast_path.py` | `patch_grouped_expert_lora_fast_path.py` vs the stock forward, incl. zero-token experts |
 | `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py` | `patch_checkpoint_without_output_frozen_inputs.py`; the unpatched case doubles as the landed check |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
@@ -351,6 +352,25 @@ recomputes from them. Applied unconditionally at `megatron_worker.py` import.
 - **Remove:** the module-level `apply_checkpoint_without_output_frozen_inputs_patch()` call and import in
   `megatron_worker.py`, the module, and
   `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py`.
+
+### `patch_grouped_expert_lora_fast_path.py`: no upstream PR yet
+
+Copy-free forward for Megatron-Bridge's per-expert grouped LoRA adapter (`GroupedExpertLinearAdapter`,
+used with `share_expert_adapters=false` on `TE*GroupedLinear` experts). The stock forward loops over the
+local experts in Python, pads and re-concatenates the expert token slices (a full copy of the expert input),
+gathers the active experts' adapter weights with `weight[indices]` (a copy, plus an index-scatter in
+backward) and uploads the `grouped_mm` offsets with a blocking host-to-device copy. With
+`expert_tensor_parallel_size=1` nothing needs padding, so the patch runs one `grouped_mm` per projection
+over all local experts straight on the input (zero-token experts are empty groups) with the offsets
+uploaded asynchronously from pinned memory. Expert TP > 1, FP8 and inputs `grouped_mm` cannot take fall
+through to the stock forward. Applied at `megatron_worker.py` import.
+- **Landed?** Bridge's `GroupedExpertLinearAdapter.forward` no longer concatenates `grouped_inputs` or
+  gathers `self.linear_in(active_expert_indices)` on the `grouped_mm` path (the patch raises at import when
+  the forward no longer matches).
+- **Remove:** the module-level `apply_grouped_expert_lora_fast_path_patch()` call and import in
+  `megatron_worker.py`, the module, and `gpu_ci/patches/megatron/test_grouped_expert_lora_fast_path.py`.
+- **Verify:** `gpu_ci/patches/megatron/test_grouped_expert_lora_fast_path.py` (1 GPU) and the
+  `glm-5.3-flash-4layer_*_lora` roundtrip row.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 
