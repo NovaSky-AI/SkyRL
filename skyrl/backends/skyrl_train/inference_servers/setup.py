@@ -296,7 +296,11 @@ def build_new_inference_client(
         from .neuron_engine import NeuronInferenceEngine
 
         engine = NeuronInferenceEngine(
-            model_path=ie_cfg.served_model_name or cfg.trainer.policy.model.path,
+            # ``served_model_name`` is an HTTP-endpoint alias, not a load path: the
+            # in-process engine calls ``from_pretrained`` directly, so it must receive
+            # the real checkpoint path (same value the vLLM path below passes as
+            # ``model_path``), never the alias.
+            model_path=cfg.trainer.policy.model.path,
             tokenizer=tokenizer,
         )
         server_setup = InferenceServerSetup(proxy_url="", server_urls=[])
