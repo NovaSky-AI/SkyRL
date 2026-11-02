@@ -25,6 +25,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `gpu_ci/patches/megatron/test_moe_dedup_alltoall.py` | `patch_moe_dedup_alltoall.py` dispatch/combine vs megatron-core's and a closed form (EP 2 and 4) |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
@@ -336,6 +337,21 @@ k-pool indexer (`index_kpool > 1`) selects through `fused_qk_topk_kpool` and byp
 - **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
+
+### `patch_moe_dedup_alltoall.py`: SkyRL-only, no upstream counterpart
+
+Opt-in (`SKYRL_MOE_DEDUP_A2A=1`): `MoEAlltoAllTokenDispatcher` sends one copy of a token per
+(token, expert) pair, so a top-k token crosses the expert-parallel all-to-all k times although its
+experts sit on fewer ranks (top-8 over EP8: ~5.3 ranks). The patch permutes by destination rank, sends
+each token once per rank with its routing mask and probabilities over that rank's local experts,
+permutes by local expert on the receiver (padded to the FP8/FP4 alignment in the same fused permute),
+and sums each copy's expert outputs before the return all-to-all. Same expert inputs; the combine sums
+in two stages. Applies to the dropless alltoall path with ETP 1, fused permute and no shared-expert
+overlap; anything else runs the stock methods.
+- **Landed?** Not an upstream fix: obsolete if megatron-core's alltoall dispatcher deduplicates per
+  destination rank itself (DeepEP-style), or once SkyRL moves to a dispatcher that does.
+- **Remove:** the `apply_moe_dedup_alltoall_patch()` call and import in `megatron_worker.py`, the
+  `SKYRL_MOE_DEDUP_A2A` entry in `prepare_runtime_environment`, the module, and its GPU test.
 
 ### `patch_checkpoint_without_output_frozen_inputs.py`: no upstream PR yet
 
