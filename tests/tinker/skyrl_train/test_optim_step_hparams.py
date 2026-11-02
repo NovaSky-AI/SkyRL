@@ -56,6 +56,21 @@ def test_set_optimizer_hparams_walks_every_param_group():
     assert worker.strategy.max_norm == 0.5
 
 
+def test_set_optimizer_hparams_can_turn_decay_back_on():
+    """A request's weight_decay=0 zeroes decay for that step, not forever."""
+    worker = Worker.__new__(Worker)
+    worker.optimizer = _two_group_optimizer()
+    worker.strategy = SimpleNamespace(max_norm=1.0)
+
+    # One step with the SDK-default weight_decay=0, then a request that decays again.
+    worker.set_optimizer_hparams(ADAM.model_copy(update={"weight_decay": 0.0}))
+    worker.set_optimizer_hparams(ADAM)
+
+    decaying, zero = worker.optimizer.param_groups
+    assert decaying["weight_decay"] == 0.05  # the decaying group decays again
+    assert zero["weight_decay"] == 0.0  # a structurally no-decay group stays 0 forever
+
+
 def test_set_optimizer_hparams_without_an_optimizer_is_a_no_op():
     """policy.inference_only_init builds no optimizer; applying hyperparameters must not raise."""
     worker = Worker.__new__(Worker)

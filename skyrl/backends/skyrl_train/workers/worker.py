@@ -92,12 +92,17 @@ def _apply_adam_params_to_group(param_group: dict, adam_params: tinker_types.Ada
     so per-step writes take effect without touching the optimizer objects.
     ``weight_decay`` is only written where the optimizer already decays at build time,
     so groups excluded from decay (e.g. Megatron's no-decay groups, ``wd_mult == 0``)
-    keep their ``0`` instead of decaying by the request's value.
+    keep their ``0`` instead of decaying by the request's value. Whether a group
+    decays is a build-time decision, so it is latched here on the first visit: a
+    request's ``weight_decay=0`` zeroes a decaying group for that step only and later
+    requests can decay again, while structurally no-decay groups stay ``0`` forever.
     """
     param_group["lr"] = adam_params.learning_rate
     param_group["betas"] = (adam_params.beta1, adam_params.beta2)
     param_group["eps"] = adam_params.eps
-    if param_group["weight_decay"]:
+    if "skyrl_decaying_group" not in param_group:
+        param_group["skyrl_decaying_group"] = bool(param_group["weight_decay"])
+    if param_group["skyrl_decaying_group"]:
         param_group["weight_decay"] = adam_params.weight_decay
 
 
