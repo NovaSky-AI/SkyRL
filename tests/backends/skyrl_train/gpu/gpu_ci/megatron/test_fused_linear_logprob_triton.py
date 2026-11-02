@@ -416,3 +416,32 @@ def test_epilogue_handles_strongly_negative_logits(logit_offset) -> None:
         torch.testing.assert_close(logprobs.double(), expected, rtol=1e-3, atol=1e-3)
     finally:
         fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = previous
+
+
+def test_frozen_weight_skips_weight_grad() -> None:
+    """A frozen output layer (LoRA) gets no weight gradient; log-probs and ``d_hidden`` are unchanged."""
+    device = torch.device("cuda")
+    num_tokens, hidden_size, vocab_size = 257, 128, 2048
+    generator = torch.Generator(device=device).manual_seed(7)
+    hidden = torch.randn(1, num_tokens, hidden_size, dtype=torch.bfloat16, device=device, generator=generator)
+    weight = (
+        torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device, generator=generator)
+        * hidden_size**-0.5
+    )
+    target = torch.randint(0, vocab_size, (1, num_tokens), device=device, generator=generator)
+    seed = torch.linspace(0.5, 1.5, num_tokens, device=device).unsqueeze(0)
+
+    ref_h = hidden.clone().requires_grad_(True)
+    ref_w = weight.clone().requires_grad_(True)
+    ref_lp = FusedLinearLogprobTriton.apply(ref_h, ref_w, target, 0, vocab_size, num_tokens, None, False)
+    ref_lp.backward(seed)
+    assert ref_w.grad is not None
+
+    h = hidden.clone().requires_grad_(True)
+    w = weight.clone()  # frozen
+    lp = FusedLinearLogprobTriton.apply(h, w, target, 0, vocab_size, num_tokens, None, False)
+    lp.backward(seed)
+
+    assert w.grad is None
+    torch.testing.assert_close(lp.detach(), ref_lp.detach())
+    torch.testing.assert_close(h.grad, ref_h.grad)
