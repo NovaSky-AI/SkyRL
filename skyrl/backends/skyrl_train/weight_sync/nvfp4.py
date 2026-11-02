@@ -235,7 +235,8 @@ _NVTE_RECIPE_DEFAULTS = {
     "NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING": "1",
     "NVTE_NVFP4_DISABLE_2D_QUANTIZATION": "1",
     "NVTE_NVFP4_4OVER6": "all",
-    # vLLM's per-token activation path hard-codes the 448 bound, so activations must use it to stay bit-exact.
+    # 4/6 E4M3 bound: 448 everywhere by default. 256 on activations (``activations`` / ``all``) needs the sampler's
+    # per-token base scale patched to 1/(256*6) -- see ``nvfp4_runtime_env`` and ``patch_nvfp4_per_token_e4m3_256``.
     "NVTE_NVFP4_4OVER6_E4M3_USE_256": "none",
     "NVTE_NVFP4_4OVER6_ERR_MODE": "MSE",
     "NVTE_USE_FAST_MATH": "0",
@@ -247,6 +248,17 @@ def nvfp4_runtime_env(environ: Dict[str, str]) -> Dict[str, str]:
 
     The FlashInfer activation quantizer must reproduce TE's per-token activation quantization bit for bit, so
     its 4/6 settings are derived from the TE ones, and an explicit contradicting setting is rejected.
+
+    E4M3 bound of the activation 4/6 candidates (``NVTE_NVFP4_4OVER6_E4M3_USE_256`` in ``activations`` / ``all``
+    with activation 4/6 on): the sampler quantizes MoE activations in two places, and both must use 256 too:
+
+    * GEMM2 input, inside FlashInfer's fused TRT-LLM MoE (``trtllm_fused_moe_runner.cu``): the per-token base scale
+      is 1/(256*6) iff ``FLASHINFER_NVFP4_4OVER6=1`` and ``FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1``, and the
+      quantization kernel picks the 256-bound 4/6 candidates from the same two variables -- set here.
+    * GEMM1 input, ``flashinfer.nvfp4_quantize(..., per_token_activation=True)`` called by vLLM's
+      ``quantize_nvfp4_per_token_input``: the 4/6 candidates follow the same env, but the base scale is vLLM's
+      ``flashinfer_utils.NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE`` = 1/(448*6). The vLLM worker patch
+      ``patches/vllm/patch_nvfp4_per_token_e4m3_256.py`` sets it to 1/(256*6) when this env asks for 256.
     """
     recipe = environ.get("SKYRL_NVFP4_RECIPE", "humans")
     if recipe == "pure":
@@ -272,18 +284,20 @@ def nvfp4_runtime_env(environ: Dict[str, str]) -> Dict[str, str]:
     env.setdefault("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE")
     if env["NVTE_NVFP4_ROW_SCALED_ACTIVATION"] != "1":
         raise ValueError("expert_nvfp4 sync needs per-token activations (NVTE_NVFP4_ROW_SCALED_ACTIVATION=1)")
-    act_4over6 = env["NVTE_NVFP4_4OVER6"] in ("all", "activations")
-    act_use_256 = act_4over6 and env["NVTE_NVFP4_4OVER6_E4M3_USE_256"] in ("all", "activations")
-    if act_use_256:
+    if env["NVTE_NVFP4_4OVER6_E4M3_USE_256"] not in ("none", "weights", "activations", "all"):
         raise ValueError(
-            "vLLM's per-token NVFP4 activations use the 448 bound; set NVTE_NVFP4_4OVER6_E4M3_USE_256 to none|weights"
+            "NVTE_NVFP4_4OVER6_E4M3_USE_256 must be none|weights|activations|all, "
+            f"got {env['NVTE_NVFP4_4OVER6_E4M3_USE_256']!r}"
         )
+    act_4over6 = env["NVTE_NVFP4_4OVER6"] in ("all", "activations")
+    # FlashInfer only quantizes activations, so only the activation bound reaches it (weights arrive quantized).
+    act_use_256 = act_4over6 and env["NVTE_NVFP4_4OVER6_E4M3_USE_256"] in ("all", "activations")
     derived = {
         "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": "1",
         "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": "1",
         "FLASHINFER_NVFP4_4OVER6": "1" if act_4over6 else "0",
         "FLASHINFER_NVFP4_4OVER6_ERR_MODE": env["NVTE_NVFP4_4OVER6_ERR_MODE"],
-        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "0",
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "1" if act_use_256 else "0",
     }
     for k, v in derived.items():
         if k in environ and environ[k] != v:

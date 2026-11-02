@@ -154,7 +154,11 @@ global scale -- and ships ModelOpt NVFP4 checkpoint tensors (`weight` uint8, `we
 override on the FlashInfer TRT-LLM backend; its layerwise reload only re-lays the tensors out, so the sampler's
 expert weights equal the trainer's bitwise. The TE recipe knobs come from the `NVTE_NVFP4_*` environment and the
 matching FlashInfer settings are derived from them (`nvfp4_runtime_env`), so the activation quantizers agree on
-both sides. Run vLLM's experts expert-parallel: under expert TP the down_proj input's per-token scale covers
+both sides. The 4/6 E4M3 bound 256 on activations (`NVTE_NVFP4_4OVER6_E4M3_USE_256=activations|all`) derives
+`FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1`; FlashInfer's fused-MoE GEMM2 quantization follows it by itself, and
+`patches/vllm/patch_nvfp4_per_token_e4m3_256.py` (applied in every vLLM worker, logs a `[skyrl nvfp4]` line) sets
+vLLM's GEMM1 per-token base scale `NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE` to 1/(256*6). Parity test:
+`gpu_ci/test_nvfp4_per_token_4over6_256_parity.py`. Run vLLM's experts expert-parallel: under expert TP the down_proj input's per-token scale covers
 only a rank's slice. Serialized NVFP4 is incompatible with `fp8_weight_sync_mode` and the delta / sharded-RDT
 backends, and works with vLLM sleep level 2.
 Cost controls (all byte-identical on the wire): `metadata()` is shape-only (the serializer runs over the wrapped

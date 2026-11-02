@@ -116,7 +116,10 @@ def test_runtime_env_pure_recipe_leaves_te_defaults():
     "environ",
     [
         {"FLASHINFER_NVFP4_4OVER6": "0"},  # contradicts the TE 4/6 setting
-        {"NVTE_NVFP4_4OVER6_E4M3_USE_256": "all"},  # vLLM's per-token activations use the 448 bound
+        {"NVTE_NVFP4_4OVER6_E4M3_USE_256": "bogus"},
+        # 256 on activations derives FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1; an explicit 0 contradicts it.
+        {"NVTE_NVFP4_4OVER6_E4M3_USE_256": "all", "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "0"},
+        {"NVTE_NVFP4_4OVER6_E4M3_USE_256": "none", "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "1"},
         {"NVTE_NVFP4_ROW_SCALED_ACTIVATION": "0"},
         {"SKYRL_NVFP4_RECIPE": "bogus"},
     ],
@@ -242,3 +245,46 @@ def test_spec_matches_real_quantize_outputs(fake_te):
         real = list(nvfp4._emit("p", "down_proj", *nvfp4.quantize_nvfp4_matrix(w, _SETTINGS)))
         spec = list(nvfp4._emit_spec("p", "down_proj", rows, 48))
         assert [(n, t.dtype, tuple(t.shape)) for n, t in real] == [(n, s.dtype, tuple(s.shape)) for n, s in spec]
+
+
+@pytest.mark.parametrize(
+    "four6, use_256, fi_4over6, fi_256",
+    [
+        ("none", "none", "0", "0"),
+        ("none", "weights", "0", "0"),
+        ("none", "activations", "0", "0"),  # no activation 4/6: the bound does not reach the sampler
+        ("none", "all", "0", "0"),
+        ("weights", "none", "0", "0"),
+        ("weights", "weights", "0", "0"),
+        ("weights", "activations", "0", "0"),
+        ("weights", "all", "0", "0"),
+        ("activations", "none", "1", "0"),
+        ("activations", "weights", "1", "0"),  # weights' 256 travels in the weights' own decode scales
+        ("activations", "activations", "1", "1"),
+        ("activations", "all", "1", "1"),
+        ("all", "none", "1", "0"),
+        ("all", "weights", "1", "0"),
+        ("all", "activations", "1", "1"),
+        ("all", "all", "1", "1"),
+    ],
+)
+def test_runtime_env_e4m3_256_derivation(four6, use_256, fi_4over6, fi_256):
+    env = nvfp4.nvfp4_runtime_env({"NVTE_NVFP4_4OVER6": four6, "NVTE_NVFP4_4OVER6_E4M3_USE_256": use_256})
+    assert env["NVTE_NVFP4_4OVER6"] == four6 and env["NVTE_NVFP4_4OVER6_E4M3_USE_256"] == use_256
+    assert env["FLASHINFER_NVFP4_4OVER6"] == fi_4over6
+    assert env["FLASHINFER_NVFP4_4OVER6_E4M3_USE_256"] == fi_256
+    # A matching explicit FlashInfer setting is accepted.
+    same = nvfp4.nvfp4_runtime_env(
+        {
+            "NVTE_NVFP4_4OVER6": four6,
+            "NVTE_NVFP4_4OVER6_E4M3_USE_256": use_256,
+            "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": fi_256,
+        }
+    )
+    assert same == env
+
+
+def test_runtime_env_defaults_keep_448():
+    env = nvfp4.nvfp4_runtime_env({})
+    assert env["NVTE_NVFP4_4OVER6_E4M3_USE_256"] == "none"
+    assert env["FLASHINFER_NVFP4_4OVER6_E4M3_USE_256"] == "0"
