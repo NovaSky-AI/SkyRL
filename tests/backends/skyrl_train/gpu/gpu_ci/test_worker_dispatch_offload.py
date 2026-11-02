@@ -306,9 +306,9 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
     ["fsdp", pytest.param("megatron", marks=pytest.mark.megatron)],
     ids=["fsdp", "megatron"],
 )
-async def test_dispatch_set_lr(ray_init_fixture, strategy):
+async def test_dispatch_set_optimizer_hparams(ray_init_fixture, strategy):
     """
-    Test that WorkerDispatch.set_lr updates the optimizer's learning rate.
+    Test that WorkerDispatch.set_optimizer_hparams updates the optimizer's learning rate.
     """
     cfg = get_test_config()
     cfg.trainer.strategy = strategy
@@ -332,7 +332,12 @@ async def test_dispatch_set_lr(ray_init_fixture, strategy):
         new_lr = 1e-5
         assert new_lr != initial_lr, "New LR should differ from initial for valid test"
 
-        dispatch.set_lr("policy", new_lr)
+        dispatch.set_optimizer_hparams(
+            "policy",
+            types.AdamParams(
+                learning_rate=new_lr, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0
+            ),
+        )
 
         # Verify the learning rate was updated
         updated_lrs = ray.get(policy_group.async_run_ray_method("pass_through", "get_lr"))
