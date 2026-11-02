@@ -25,6 +25,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `gpu_ci/patches/megatron/test_dsa_head_full.py` | `patch_dsa_head_full.py` all-to-alls vs megatron-core's and an all-gather reference (TP 2 and 4) |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
