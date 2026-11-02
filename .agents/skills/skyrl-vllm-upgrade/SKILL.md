@@ -51,7 +51,18 @@ pools, `max_tokens` clamping), and the PR that added this skill (0.33).
    curl -sL https://flashinfer.ai/whl/cu130/flashinfer-jit-cache-sm90a/ | grep -o '0\.[0-9.]*post[0-9]*' | sort -u
    curl -sL https://flashinfer.ai/whl/flashinfer-cubin/ | grep -o 'flashinfer_cubin-[^"]*whl' | sort -u
    ```
-4. Relock with the uv version that keeps `revision = 3` (`uv` >= 0.13 rewrites to revision 5
+4. **Runtime-only version floors.** Optional dependencies vLLM imports but does not declare
+   (`nixl`, mooncake, ...) are invisible to step 1, and an unpinned package keeps its old
+   locked version through a plain `uv lock`. 0.33 added `check_nixl_version("1.5.0")` in the
+   NixlConnector: with the locked nixl 1.4.1, every PD-disaggregation engine died at start.
+   Diff the floors between the two unpacked trees (section 2):
+   ```bash
+   diff <(grep -rhoE 'check_[a-z_]*version\("[0-9.]+"\)|>= ?[0-9.]+ is required' OLD/vllm | sort -u) \
+        <(grep -rhoE 'check_[a-z_]*version\("[0-9.]+"\)|>= ?[0-9.]+ is required' NEW/vllm | sort -u)
+   ```
+   For each new floor, add it to the SkyRL extra and relock that package with
+   `--upgrade-package <name>` (and its `-cu13` companion).
+5. Relock with the uv version that keeps `revision = 3` (`uv` >= 0.13 rewrites to revision 5
    and touches every marker), then check that only the intended packages changed:
    ```bash
    uvx --from uv==0.12.0 uv lock

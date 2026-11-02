@@ -111,7 +111,9 @@ skyrl-train = [
     # module, but vLLM imports `nixl._api`. Its metadata hard-depends on `nixl-cu12`
     # too; that variant is overridden out below (it would drag the CUDA-12 runtime
     # into the image for a module the shim would never load).
-    "nixl; sys_platform == 'linux'",
+    # vLLM 0.33's NixlConnector refuses NIXL < 1.5.0 at engine start (check_nixl_version);
+    # vLLM does not declare nixl, so the floor lives here.
+    "nixl>=1.5.0; sys_platform == 'linux'",
 ]
 
 fsdp = [
@@ -123,7 +125,9 @@ fsdp = [
     # module, but vLLM imports `nixl._api`. Its metadata hard-depends on `nixl-cu12`
     # too; that variant is overridden out below (it would drag the CUDA-12 runtime
     # into the image for a module the shim would never load).
-    "nixl; sys_platform == 'linux'",
+    # vLLM 0.33's NixlConnector refuses NIXL < 1.5.0 at engine start (check_nixl_version);
+    # vLLM does not declare nixl, so the floor lives here.
+    "nixl>=1.5.0; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
@@ -174,7 +178,9 @@ megatron = [
     # module, but vLLM imports `nixl._api`. Its metadata hard-depends on `nixl-cu12`
     # too; that variant is overridden out below (it would drag the CUDA-12 runtime
     # into the image for a module the shim would never load).
-    "nixl; sys_platform == 'linux'",
+    # vLLM 0.33's NixlConnector refuses NIXL < 1.5.0 at engine start (check_nixl_version);
+    # vLLM does not declare nixl, so the floor lives here.
+    "nixl>=1.5.0; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
     "flashinfer-python==0.7.2.post1; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",

@@ -5741,18 +5741,18 @@ wheels = [
 
 [[package]]
 name = "nixl"
-version = "1.4.1"
+version = "1.5.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "nixl-cu13", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e0/5a/57be266e12d796fc18b44f87a31ebe164b471d3b4fe3b349d3996e4f05cf/nixl-1.4.1-py3-none-any.whl", hash = "sha256:40168c1fd9e6b77761d9e0f9225bd616cc3e48c75a9592fff488745ca33244df", size = 11744, upload-time = "2026-09-01T23:45:05.881Z" },
+    { url = "https://files.pythonhosted.org/packages/07/25/670a0913285e12d3682520ecb10e50fb4fc01cbbb107e192a6666b6f5731/nixl-1.5.2-py3-none-any.whl", hash = "sha256:e4ef5e16f60be11622030e23333387bd73101102fc9f62efa1c99021d51550a6", size = 11806, upload-time = "2026-10-29T19:48:26.861Z" },
 ]
 
 [[package]]
 name = "nixl-cu13"
-version = "1.4.1"
+version = "1.5.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and sys_platform == 'linux') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (python_full_version >= '3.13' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra == 'extra-5-skyrl-gpu' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu') or (sys_platform != 'linux' and extra != 'extra-5-skyrl-gpu' and extra != 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
@@ -5760,12 +5760,12 @@ dependencies = [
     { name = "torch", marker = "sys_platform == 'linux' or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-jax') or (extra == 'extra-5-skyrl-fsdp' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-gpu' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-jax' and extra == 'extra-5-skyrl-megatron') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-miniswe') or (extra == 'extra-5-skyrl-megatron' and extra == 'extra-5-skyrl-tpu') or (extra == 'extra-5-skyrl-miniswe' and extra == 'extra-5-skyrl-tpu')" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/76/bf/8c9e9aa147f3bb70549f12c20b699561a8e57bbb80853a08ff84f92eb740/nixl_cu13-1.4.1-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:07622a8db6043922ac5bda821755deb764375c7ff6f5802f4201fce2579d36a0", size = 55140620, upload-time = "2026-09-01T23:43:47.793Z" },
-    { url = "https://files.pythonhosted.org/packages/85/20/708ae695d86aa377497f6341e8666e22dd36e62ad126b3086df28bec10a1/nixl_cu13-1.4.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:ddaddc36b89d290c94a205fe546f7b6570b9e12edce192d5c4d381aa2e206af7", size = 56911924, upload-time = "2026-09-01T23:41:45.705Z" },
-    { url = "https://files.pythonhosted.org/packages/21/df/676e75407416efa2849a41858b8d7d1d83f2079384e0fcb47f2119a02561/nixl_cu13-1.4.1-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:23f229d3f73f810c59011231692e9497c78ec8942b083e9038f2e7707d984814", size = 55140149, upload-time = "2026-09-01T23:44:12.257Z" },
-    { url = "https://files.pythonhosted.org/packages/67/76/2893c9c588b633cad9ce30d4b48bde4f79d1b253d90481d89de830d38db9/nixl_cu13-1.4.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:39b5e5e60843c50e5e3f6f538fb8b8f66755eb8532b4f071a29aa01f91cc99d9", size = 56911761, upload-time = "2026-09-01T23:42:08.913Z" },
-    { url = "https://files.pythonhosted.org/packages/24/93/5000f0064e03318e3d7e2f533b56644f75586fcb947b16f2b58e7c42ebcc/nixl_cu13-1.4.1-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:92ed77bbd81d4c81a0d7fe8cf88b20fd739245ec326ff6a3fe13e6f60fbaf2d6", size = 55143086, upload-time = "2026-09-01T23:44:33.242Z" },
-    { url = "https://files.pythonhosted.org/packages/66/93/d79464ec15db61518f64c88397d8374cb6687316e4478f17c2637d3d84d8/nixl_cu13-1.4.1-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:01955b22e9d05dc9ef5db40a58e8f646768b5b74403b8ee7dc68f95f504185bb", size = 56912902, upload-time = "2026-09-01T23:42:31.484Z" },
+    { url = "https://files.pythonhosted.org/packages/16/d2/66739397843f8f60590be14513b4dbe2c382ffb4c2daa6aeb9156c64a29d/nixl_cu13-1.5.2-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:c7b3f604f6ace597e0a806926699de12cbc464c50610af75f696136a6fbad273", size = 75539693, upload-time = "2026-10-29T19:46:24.865Z" },
+    { url = "https://files.pythonhosted.org/packages/31/90/cfcad1475c05c759a47f14f8edd30ebe77db2b7fae31bcdfa098fa2cfa46/nixl_cu13-1.5.2-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:591eda3f14b72769590cd71b6b46fc5e483ef1b5a90a29a8ff464310c9cf6af2", size = 77371407, upload-time = "2026-10-29T19:43:08.287Z" },
+    { url = "https://files.pythonhosted.org/packages/00/d9/1ba9016611e3f9d773ed55fbf37fc6bb92c0d0dac6386f37e7228c76cdd1/nixl_cu13-1.5.2-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:ac83c16b59aa0027c0604ad636bd5b8a172512db09af73038be8fefdb3eca16c", size = 75548014, upload-time = "2026-10-29T19:46:56.288Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/be/e398acacfbd26dba4c720215942681746418b2999013f8a7116744f6a4b8/nixl_cu13-1.5.2-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:f1137c583df7f98997e411f386286c045b7e5c251c08198ce4f55e3f2b464fc5", size = 77375091, upload-time = "2026-10-29T19:43:42.902Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/c7/3611e8a0b59a32a02d6184f257885af6e0f1f8d3e3d71d3282ed25e0adb7/nixl_cu13-1.5.2-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:2a81b811c90dd2d462e49401f88ff3f4f8efff2e210fd2bcaba94b58302cd7a2", size = 75543556, upload-time = "2026-10-29T19:47:28.336Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/1f/38b52f1c84c1c366e60e9b7e335f7e175f22c05a4d650f400f84d01fd7f5/nixl_cu13-1.5.2-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:f0d6abd7ebb7a48650617fa65fd02cb44bf82c5e407a731764adb754fc0d16cf", size = 77376896, upload-time = "2026-10-29T19:44:24.201Z" },
 ]
 
 [[package]]
@@ -9664,9 +9664,9 @@ requires-dist = [
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "mooncake-transfer-engine-cuda13", marker = "python_full_version < '3.14' and sys_platform == 'linux' and extra == 'mooncake'" },
     { name = "ninja", marker = "extra == 'skyrl-train'" },
-    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'fsdp'" },
-    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'megatron'" },
-    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'skyrl-train'" },
+    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'fsdp'", specifier = ">=1.5.0" },
+    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = ">=1.5.0" },
+    { name = "nixl", marker = "sys_platform == 'linux' and extra == 'skyrl-train'", specifier = ">=1.5.0" },
     { name = "nvidia-modelopt", marker = "sys_platform == 'linux' and extra == 'megatron'" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'linux' and extra == 'megatron'", git = "https://github.com/NVIDIA/nvidia-resiliency-ext?rev=6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d" },
     { name = "omegaconf", marker = "extra == 'skyrl-train'" },
