@@ -466,6 +466,19 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
+    if cfg.trainer.old_logprobs_from_first_minibatch:
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("trainer.old_logprobs_from_first_minibatch is only supported by the Megatron backend.")
+        if cfg.trainer.update_epochs_per_batch != 1:
+            raise ValueError(
+                "trainer.old_logprobs_from_first_minibatch requires trainer.update_epochs_per_batch=1, "
+                f"got {cfg.trainer.update_epochs_per_batch}."
+            )
+        if cfg.trainer.algorithm.use_kl_in_reward:
+            raise ValueError(
+                "trainer.old_logprobs_from_first_minibatch requires trainer.algorithm.use_kl_in_reward=false."
+            )
+
     if cfg.trainer.policy.language_model_only:
         assert (
             cfg.generator.inference_engine.language_model_only

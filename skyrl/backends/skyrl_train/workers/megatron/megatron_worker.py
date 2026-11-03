@@ -1313,6 +1313,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         return_per_token_outputs: bool = True,
+        old_logprobs_from_current: bool = False,
     ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
@@ -1330,6 +1331,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn_config: Optional config overrides for the loss function.
             return_per_token_outputs: When False, skip building per-token
                 ``loss_fn_outputs`` when callers read only ``metrics``.
+            old_logprobs_from_current: Use this forward's detached logprobs as the old
+                logprobs instead of ``data["action_log_probs"]``. Valid only before the
+                first optimizer step on this batch (see
+                ``trainer.old_logprobs_from_first_minibatch``).
 
         Returns:
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
@@ -1455,6 +1460,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn=loss_fn,
             loss_fn_config=loss_fn_config,
             return_per_token_outputs=return_per_token_outputs,
+            old_logprobs_from_current=old_logprobs_from_current,
         )
 
         if self.empty_cuda_cache_after_backward:
