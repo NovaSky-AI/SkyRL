@@ -95,6 +95,22 @@ class TestPpLocalOwnership:
             "model.norm.weight",
         ]
 
+    def test_assembled_metadata_keeps_each_names_wire_dtype(self):
+        """fp32 parameters (an MoE router) cross the RDT wire in fp32, as on the push
+        backends: the stages exchange each name's dtype with its shape, so every stage
+        declares the same per-name dtypes."""
+        stage0 = [
+            ("model.embed_tokens.weight", [8, 4], "bfloat16"),
+            ("model.layers.0.mlp.gate.weight", [2, 4], "float32"),
+        ]
+        stage1 = [
+            ("model.layers.1.mlp.gate.e_score_correction_bias", [2], "float32"),
+            ("model.norm.weight", [4], "bfloat16"),
+        ]
+        for my_pp in (0, 1):
+            meta = self._source(2, my_pp, [stage0, stage1]).metadata
+            assert [m.dtype for m in meta] == [torch.bfloat16, torch.float32, torch.float32, torch.bfloat16]
+
     def test_metadata_is_group_contiguous_even_when_a_stage_holds_both_ends(self):
         """The assembled order must satisfy the engine's group-contiguity check —
         ``flat(layerwise_groups(names)) == names`` — for whatever the stages
