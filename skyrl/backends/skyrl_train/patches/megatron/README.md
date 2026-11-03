@@ -25,6 +25,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `gpu_ci/patches/megatron/test_dsa_head_full.py` | `patch_dsa_head_full.py` all-to-alls vs megatron-core's and an all-gather reference (TP 2 and 4) |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
@@ -325,6 +326,19 @@ bypasses the hook.
 - **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
+
+### `patch_dsa_head_full.py` (+ `_block_copy_kernel.py`): SkyRL-only, no upstream counterpart
+
+Opt-in (`SKYRL_DSA_HEAD_FULL=1`, with `SKYRL_DSA_HEAD_FULL_FAST_PERMUTE=1` and
+`SKYRL_DSA_HEAD_FULL_ZIGZAG=1`): wraps the `run_fused_absorbed_sparse_attention` DSA hook in a
+Ulysses-style all-to-all so each TP rank runs all heads on 1/TP of the query rows, instead of
+`heads / TP` heads (padded to the kernel's 16- or 64/128-head tile) on every row. The fast-permute
+flag does the all-to-all's layout moves with one Triton block copy; zigzag balances rows whose cost
+grows with position. Applies to absorbed-MLA DSA (GLM-5 / GLM-5.3, DeepSeek-V3.2) under TP > 1.
+- **Landed?** Not an upstream fix: obsolete once megatron-core's DSA kernels run efficiently at
+  `heads / TP` heads per rank, or megatron-core shards absorbed sparse attention by query rows itself.
+- **Remove:** the `apply_dsa_head_full_patch()` call and import in `megatron_worker.py`, the
+  `SKYRL_DSA_HEAD_FULL*` entries in `prepare_runtime_environment`, and both modules.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 

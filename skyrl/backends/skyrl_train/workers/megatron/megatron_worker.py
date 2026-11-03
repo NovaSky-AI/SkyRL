@@ -69,6 +69,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype im
 from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
     apply_distopt_mixed_dtype_group_index_patch,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_head_full import (
+    apply_dsa_head_full_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
 )
@@ -156,6 +159,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
+apply_dsa_head_full_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()

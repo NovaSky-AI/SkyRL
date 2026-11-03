@@ -1165,6 +1165,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Selects the DSA indexer top-k backend under dsa_kernel_backend=cudnn
         # (patches/megatron/patch_dsa_hybrid_indexer.py); read in the Megatron workers.
         "SKYRL_DSA_INDEXER_BACKEND",
+        # GLM-5.3-Flash k-pool indexer query sharding (glm5_next/dsa.py) and head-full sparse
+        # attention (patches/megatron/patch_dsa_head_full.py); read in the Megatron workers.
+        "SKYRL_DSA_INDEXER_TP_SHARD",
+        "SKYRL_DSA_HEAD_FULL",
+        "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
+        "SKYRL_DSA_HEAD_FULL_ZIGZAG",
         # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
         "VLLM_ALLREDUCE_USE_FLASHINFER",
         "VLLM_ALLREDUCE_USE_SYMM_MEM",
