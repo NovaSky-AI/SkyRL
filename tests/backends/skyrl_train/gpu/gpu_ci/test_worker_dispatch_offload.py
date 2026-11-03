@@ -19,6 +19,7 @@ from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import GPUState, WorkerDispatch
+from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.utils import ResolvedPlacementGroup, validate_cfg
