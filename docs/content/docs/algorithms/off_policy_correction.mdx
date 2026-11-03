@@ -290,7 +290,7 @@ trainer:
   algorithm:
     policy_loss_type: rollout_is  # or reinforce, dppo, cispo with cispo_anchor: rollout
     enable_sample_support_replay: true
-    enable_score_centering: true
+    enable_score_centering: null  # default: on whenever replay and the loss allow it; true raises otherwise
 generator:
   inference_engine:
     enable_return_sample_support_set: true
