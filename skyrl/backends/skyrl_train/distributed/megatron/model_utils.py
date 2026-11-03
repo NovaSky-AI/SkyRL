@@ -274,6 +274,21 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None
 
 
+def _capped_chunk_logits(
+    logits: torch.Tensor, softcap: Optional[float], temperature: float
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Apply a final logit softcap, then the temperature, to fp32 chunk logits.
+
+    Returns ``(softcap * tanh(z / softcap) / temperature, tanh(z / softcap))``; backward needs the
+    tanh (``d/dz = (1 - tanh²) / temperature``). Without a softcap the callers fold the
+    temperature into the weight, and this returns ``(logits, None)``.
+    """
+    if softcap is None:
+        return logits, None
+    tanh = torch.tanh(logits / softcap)
+    return tanh * (softcap / temperature), tanh
+
+
 class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
     """Fused LM-head + distributed token-logprob, chunked over the sequence.
 
@@ -299,6 +314,9 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         hidden: [B, S, H]                (decoder output, this CP/TP rank)
         weight: [V//TP, H]               (output-layer weight, this TP rank)
         target: [B, S]                   (already rolled by the caller)
+        softcap: final logit softcap (``softcap * tanh(logits / softcap)``, e.g. Beam), or None.
+        temperature: applied after the softcap; only used with a softcap (otherwise the caller
+            folds it into ``weight``).
     """
 
     @staticmethod
@@ -314,6 +332,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         inference_only: bool = False,
         compute_entropy: bool = False,
         entropy_requires_grad: bool = False,
+        softcap: Optional[float] = None,
+        temperature: float = 1.0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if entropy_requires_grad and not compute_entropy:
             raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
@@ -340,6 +360,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             logits = torch.matmul(hidden[:, chunk_start:chunk_end, :].to(weight.dtype), weight.t()).to(
                 dtype=torch.float32
             )
+            logits, _ = _capped_chunk_logits(logits, softcap, temperature)
 
             distributed_log_probs = _compute_distributed_log_softmax(logits, group=tp_group)
             if compute_entropy:
@@ -371,6 +392,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             ctx.chunk_size = chunk_size
             ctx.tp_group = tp_group
             ctx.entropy_requires_grad = entropy_requires_grad
+            ctx.softcap = softcap
+            ctx.temperature = temperature
 
         if not compute_entropy:
             return log_probs
@@ -418,6 +441,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
 
             h_chunk = hidden[:, chunk_start:chunk_end, :]
             logits = torch.matmul(h_chunk.to(weight.dtype), weight.t()).to(dtype=torch.float32)
+            logits, tanh = _capped_chunk_logits(logits, ctx.softcap, ctx.temperature)
             distributed_log_probs = _compute_distributed_log_softmax(logits, group=tp_group)
             if ctx.entropy_requires_grad:
                 softmax_output = distributed_log_probs.exp()
@@ -456,6 +480,9 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
                     * (distributed_log_probs + chunk_entropy.unsqueeze(-1))
                     * chunk_grad_entropy.unsqueeze(-1)
                 )
+            if tanh is not None:
+                # Chain through the softcap and temperature: d/dz = (1 - tanh²) / T.
+                grad_logits.mul_(tanh.square_().neg_().add_(1.0).div_(ctx.temperature))
 
             grad_logits = grad_logits.to(dtype=weight.dtype)  # [B, cs, V//TP]
 
@@ -473,7 +500,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
                 grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
 
         grad_weight_out = grad_weight.to(weight.dtype) if compute_weight_grad else None
-        grads = (grad_hidden, grad_weight_out, None, None, None, None, None, None, None, None)
+        grads = (grad_hidden, grad_weight_out, None, None, None, None, None, None, None, None, None, None)
         return grads[: len(ctx.needs_input_grad)]
 
 
@@ -489,16 +516,25 @@ def _fused_lm_head_logprob_apply(
     inference_only: bool,
     compute_entropy: bool = False,
     entropy_requires_grad: bool = False,
+    softcap: Optional[float] = None,
+    temperature: float = 1.0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Dispatch the fused LM-head token-logprob to the requested backend.
 
     ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; ``"triton"``
     uses ``FusedLinearLogprobTriton`` when CUDA + triton are available and
     otherwise warns and falls back to torch. Both return TP-combined ``[B, S]``
-    log-probs and, when requested, entropy.
+    log-probs and, when requested, entropy. Only the torch backend applies a final
+    logit ``softcap`` (and then ``temperature``); with a softcap, triton falls back to it.
     """
     if entropy_requires_grad and not compute_entropy:
         raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
+    if backend == "triton" and softcap is not None:
+        warnings.warn(
+            "fused_lm_head_logprob_backend='triton' has no final logit softcap; using the PyTorch backend.",
+            stacklevel=2,
+        )
+        backend = "torch"
     if backend == "triton":
         try:
             from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
@@ -539,6 +575,8 @@ def _fused_lm_head_logprob_apply(
         inference_only,
         compute_entropy,
         entropy_requires_grad,
+        softcap,
+        temperature,
     )
 
 
@@ -782,6 +820,7 @@ def from_parallel_hidden_to_logprobs(
     fused_backend: str = "torch",
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
+    softcap: Optional[float] = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fused-LM-head variant of :func:`from_parallel_logits_to_logprobs`.
 
@@ -794,12 +833,14 @@ def from_parallel_hidden_to_logprobs(
     ``temperature`` scaling is applied by dividing the weight (``hidden @
     (W/T)ᵀ == logits/T``); autograd then chains the ``1/T`` factor onto both
     ``grad_hidden`` and ``grad_weight`` exactly, so the op itself stays
-    temperature-agnostic. ``return_entropy`` reuses the same projection; set
+    temperature-agnostic. With a final logit ``softcap`` (the output layer's
+    ``softcap * tanh(logits / softcap)``) the temperature has to follow the cap,
+    so the op applies both itself. ``return_entropy`` reuses the same projection; set
     ``entropy_requires_grad`` when entropy contributes to the RL loss.
     """
     if entropy_requires_grad and not return_entropy:
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
-    if temperature != 1.0:
+    if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
@@ -824,6 +865,8 @@ def from_parallel_hidden_to_logprobs(
         inference_only,
         return_entropy,
         entropy_requires_grad,
+        softcap=softcap,
+        temperature=temperature,
     )
     if return_entropy:
         logprobs, entropy = result
@@ -906,6 +949,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     fused_backend: str = "torch",
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
+    softcap: Optional[float] = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fused-LM-head variant of
     :func:`from_parallel_logits_to_logprobs_packed_sequences`.
@@ -913,13 +957,13 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     Identical packed-sequence / CP / scatter-back logic, but the output
     projection is fused into the chunked logprob op (``hidden`` [1, T//CP, H] +
     ``lm_head_weight`` [V//TP, H] instead of logits [1, T//CP, V//TP]).
-    ``temperature`` is applied by dividing the weight (see
-    ``from_parallel_hidden_to_logprobs``). Optional entropy uses the same packed
+    ``temperature`` and ``softcap`` are applied as in
+    ``from_parallel_hidden_to_logprobs``. Optional entropy uses the same packed
     CP gather and scatter-back layout as log-probs.
     """
     if entropy_requires_grad and not return_entropy:
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
-    if temperature != 1.0:
+    if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
     hidden = hidden.squeeze(0)
     target = target.squeeze(0)
@@ -963,6 +1007,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         inference_only,
         return_entropy,
         entropy_requires_grad,
+        softcap=softcap,
+        temperature=temperature,
     )
     if return_entropy:
         probs, entropy_probs = result

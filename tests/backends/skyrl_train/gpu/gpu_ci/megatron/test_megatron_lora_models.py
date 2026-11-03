@@ -42,11 +42,16 @@ from skyrl.train.config import SamplingParams, SkyRLLoraConfig, SkyRLTrainConfig
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
+from tests.backends.skyrl_train.gpu.gpu_ci.megatron.megatron_tiny_models.create_beam_tiny import (
+    create_beam_tiny,
+)
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_models import (
+    BEAM_TINY,
     MAX_GENERATE_LENGTH,
     QWEN38_4LAYER,
     _engine_overrides_for_model,
     _extra_env_vars_for_model,
+    _is_beam,
     generate_with_vllm,
     get_test_actor_config,
 )
@@ -173,6 +178,9 @@ async def _sync_weights(policy, client, cfg, label: str):
     [
         pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, False, id="qwen3.5-0.8b-dense_tp2_adapter"),
         pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, True, id="qwen3.5-0.8b-dense_tp2_merged"),
+        # Tiny random Beam, same mesh as its row in test_megatron_models.py. Merged only: vLLM 0.33's
+        # BeamForCausalLM does not implement SupportsLoRA, so it cannot serve an unmerged adapter.
+        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, True, id="beam-tiny_tp2_ep2_merged"),
         # Large MoE row on 4xH100-80G, same mesh and engine overrides as the
         # bf16 row in test_megatron_models.py.
         pytest.param(
@@ -251,6 +259,8 @@ async def test_lora_logprobs_matching_roundtrip(
     Check that logprob diff matches across vllm and megatron with a zero LoRA adapter and
     again after publishing a perturbed one.
     """
+    if _is_beam(model_name):
+        create_beam_tiny(model_name)
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
         cfg = get_test_lora_actor_config(
             model_name=model_name, merge_lora=merge_lora, lora_sync_path=str(tmp_path / "adapter")
