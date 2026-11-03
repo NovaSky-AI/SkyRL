@@ -78,6 +78,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_mhc_kernels_int64_offsets import (
+    apply_mhc_kernels_int64_offsets_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -160,6 +163,8 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
 apply_dsa_head_full_patch()
+# Fused mHC kernels: int64 row offsets past 2**31 / (n_streams * hidden) rows (DSv4 / V4.1 at >104k tokens).
+apply_mhc_kernels_int64_offsets_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()
