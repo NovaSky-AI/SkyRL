@@ -416,3 +416,45 @@ def test_epilogue_handles_strongly_negative_logits(logit_offset) -> None:
         torch.testing.assert_close(logprobs.double(), expected, rtol=1e-3, atol=1e-3)
     finally:
         fused_linear_logprob_triton.FORCE_FP32_IEEE_PRECISION = previous
+
+
+def test_frozen_weight_skips_weight_grad(monkeypatch) -> None:
+    """A frozen output layer (LoRA) makes the backward skip ``d_weight``; log-probs and ``d_hidden`` are
+    unchanged. A trainable-weight run is the control."""
+    device = torch.device("cuda")
+    num_tokens, hidden_size, vocab_size = 257, 128, 2048
+    generator = torch.Generator(device=device).manual_seed(7)
+    hidden = torch.randn(1, num_tokens, hidden_size, dtype=torch.bfloat16, device=device, generator=generator)
+    weight = (
+        torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device, generator=generator)
+        * hidden_size**-0.5
+    )
+    target = torch.randint(0, vocab_size, (1, num_tokens), device=device, generator=generator)
+    seed = torch.linspace(0.5, 1.5, num_tokens, device=device).unsqueeze(0)
+
+    # Record what the backward host function returns for d_weight in each run.
+    returned_d_weight = []
+    real_backward = fused_linear_logprob_triton.efficient_entropy_backward
+
+    def recording_backward(*args, **kwargs):
+        d_hidden, d_weight = real_backward(*args, **kwargs)
+        returned_d_weight.append(d_weight)
+        return d_hidden, d_weight
+
+    monkeypatch.setattr(fused_linear_logprob_triton, "efficient_entropy_backward", recording_backward)
+
+    ref_h = hidden.clone().requires_grad_(True)
+    ref_w = weight.clone().requires_grad_(True)
+    ref_lp = FusedLinearLogprobTriton.apply(ref_h, ref_w, target, 0, vocab_size, num_tokens, None, False)
+    ref_lp.backward(seed)
+
+    h = hidden.clone().requires_grad_(True)
+    w = weight.clone()  # frozen
+    lp = FusedLinearLogprobTriton.apply(h, w, target, 0, vocab_size, num_tokens, None, False)
+    lp.backward(seed)
+
+    assert len(returned_d_weight) == 2
+    assert returned_d_weight[0] is not None and ref_w.grad is not None
+    assert returned_d_weight[1] is None and w.grad is None
+    torch.testing.assert_close(lp.detach(), ref_lp.detach())
+    torch.testing.assert_close(h.grad, ref_h.grad)

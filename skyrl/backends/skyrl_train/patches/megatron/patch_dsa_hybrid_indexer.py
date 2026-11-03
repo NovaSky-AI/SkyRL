@@ -24,9 +24,8 @@ indices itself (``_prepare_attention_topk_indices``). The indexer-loss hook
 
 Scope: models on megatron-core's stock ``DSAttention`` (GLM-5 / GLM-5.3 ``glm_moe_dsa``,
 DeepSeek-V3.2), which select top-k through the ``run_fused_qk_topk`` hook. GLM-5.3-Flash
-(``glm5_next``, ``index_kpool > 1``) selects through SkyRL's own k-pool indexer
-(``Glm5NextDSAttention`` / ``fused_qk_topk_kpool``), which bypasses the hook, so this patch does not
-change its indexer.
+(``glm5_next``, ``index_kpool > 1``) selects through megatron-core's k-pool indexer
+(``fused_qk_topk_kpool``), which bypasses the hook, so this patch does not change its indexer.
 
 The cudnn backend imports FlashMLA (``flash_mla.flash_mla_sparse_fwd``) for the sparse-attention
 forward; it is not on PyPI (see the ``flash-mla`` dependency in the megatron extra).

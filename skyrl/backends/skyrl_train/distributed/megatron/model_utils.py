@@ -401,8 +401,15 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         # weight grad is accumulated in fp32. The full [B, S, V//TP] logit grad
         # is never built — each chunk's logit grad is immediately projected onto
         # grad_hidden / grad_weight and then freed.
+        # A frozen output layer (LoRA, or any run that does not train the LM head) needs no
+        # weight gradient: skip the per-chunk [V//TP, H] GEMM and the fp32 accumulator.
+        compute_weight_grad = ctx.needs_input_grad[1]
         grad_hidden = torch.empty_like(hidden)
-        grad_weight = torch.zeros((partition_vocab_size, hidden_size), dtype=torch.float32, device=weight.device)
+        grad_weight = (
+            torch.zeros((partition_vocab_size, hidden_size), dtype=torch.float32, device=weight.device)
+            if compute_weight_grad
+            else None
+        )
 
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * chunk_size
@@ -454,17 +461,19 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
 
             # Project chunk logit-grad back to hidden / weight grads.
             grad_hidden[:, chunk_start:chunk_end, :] = torch.matmul(grad_logits, weight)
-            grad_logits_2d = grad_logits.reshape(-1, partition_vocab_size)
-            h_2d = h_chunk.reshape(-1, hidden_size)
-            # Run the [V//TP, H] weight-grad matmul in the low-precision compute
-            # dtype (grad_logits.dtype == weight.dtype) so it hits Tensor Cores,
-            # then cast up to fp32 for the accumulator. This matches what
-            # ColumnParallelLinear's own backward does and is much faster / uses
-            # less memory than an fp32 matmul, while the cross-chunk accumulation
-            # still happens in fp32.
-            grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
+            if compute_weight_grad:
+                grad_logits_2d = grad_logits.reshape(-1, partition_vocab_size)
+                h_2d = h_chunk.reshape(-1, hidden_size)
+                # Run the [V//TP, H] weight-grad matmul in the low-precision compute
+                # dtype (grad_logits.dtype == weight.dtype) so it hits Tensor Cores,
+                # then cast up to fp32 for the accumulator. This matches what
+                # ColumnParallelLinear's own backward does and is much faster / uses
+                # less memory than an fp32 matmul, while the cross-chunk accumulation
+                # still happens in fp32.
+                grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
 
-        grads = (grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None, None, None)
+        grad_weight_out = grad_weight.to(weight.dtype) if compute_weight_grad else None
+        grads = (grad_hidden, grad_weight_out, None, None, None, None, None, None, None, None)
         return grads[: len(ctx.needs_input_grad)]
 
 

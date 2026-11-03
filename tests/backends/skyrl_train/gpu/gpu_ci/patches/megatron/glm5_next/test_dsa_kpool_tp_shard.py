@@ -1,4 +1,4 @@
-"""Two-rank check: ``fused_qk_topk_kpool(query_shard_group=...)`` selects exactly what one rank does alone.
+"""Two-rank check: k-pool selection through ``make_sharded_kpool_topk`` matches one rank alone.
 
 With ``SKYRL_DSA_INDEXER_TP_SHARD=1`` every tensor-parallel rank scores only its slice of query rows
 and the pool selections are all-gathered. Each row is computed from the same inputs either way, so
@@ -7,7 +7,7 @@ split evenly across ranks (the last shard is padded before the all-gather).
 
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s \
-    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py
+    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py
 """
 
 import pytest
@@ -40,11 +40,16 @@ class _Worker:
 
     def run(self, rank, master_addr, master_port, seq_lens, score_chunk_rows):
         import torch.distributed as dist
+        from megatron.core.transformer.experimental_attention_variant import (
+            dsa as mcore_dsa,
+        )
         from megatron.core.transformer.experimental_attention_variant.dsa_masking import (
             generate_varlen_mask_params_for_positions,
         )
 
-        from skyrl.backends.skyrl_train.patches.megatron.mcore_ext import dsa_kpool
+        from skyrl.backends.skyrl_train.patches.megatron.glm5_next.dsa import (
+            make_sharded_kpool_topk,
+        )
 
         torch.cuda.set_device(0)
         dist.init_process_group("nccl", init_method=f"tcp://{master_addr}:{master_port}", rank=rank, world_size=_WORLD)
@@ -62,10 +67,19 @@ class _Worker:
             starts, ends = generate_varlen_mask_params_for_positions(cu, positions)
             if score_chunk_rows:
                 num_pools = sum(n // POOL_SIZE for n in seq_lens)
-                dsa_kpool._KPOOL_SCORE_CHUNK_ELEMS = score_chunk_rows * N_HEADS * num_pools
+                mcore_dsa._KPOOL_SCORE_CHUNK_BYTES = score_chunk_rows * N_HEADS * num_pools * 4
 
             def select(group):
-                return dsa_kpool.fused_qk_topk_kpool(
+                original = mcore_dsa._kpool_topk_from_score_chunks
+                if group is not None:
+                    mcore_dsa._kpool_topk_from_score_chunks = make_sharded_kpool_topk(original, group)
+                try:
+                    return run_kpool()
+                finally:
+                    mcore_dsa._kpool_topk_from_score_chunks = original
+
+            def run_kpool():
+                return mcore_dsa.fused_qk_topk_kpool(
                     q,
                     k,
                     weights,
@@ -77,7 +91,7 @@ class _Worker:
                     varlen_ends=ends,
                     cu_seqlens_kv=cu,
                     always_select_tail=True,
-                    query_shard_group=group,
+                    return_index_scores=False,
                 )[1]
 
             return torch.equal(select(None), select(dist.group.WORLD))
