@@ -55,6 +55,17 @@ jobs:
           # label above; don't leave the base repo token on disk for it.
           allow-unsafe-pr-checkout: true
           persist-credentials: false
+      # The steps below run these ci/ files on this runner with ANYSCALE_CLI_TOKEN in
+      # the environment, so they are taken from the base branch, not the PR head. The
+      # job entrypoint (ci/gpu_ci_run_*.sh) and the rest of the tree still come from the PR.
+      - name: Use the base branch's Anyscale submission files
+        id: restore_ci
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.sha }}"
+          git checkout FETCH_HEAD -- \
+            ci/submit_anyscale_job.sh \
+            ci/terminate_anyscale_jobs.sh \
+            ci/anyscale_gpu_ci_h100.yaml
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -80,8 +91,10 @@ jobs:
           rm -f ci/anyscale_gpu_ci_h100_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
       # `if: cancelled()` steps, so this is where an orphaned GPU job gets reaped.
+      # Gated on the restore step: until it succeeds, ci/terminate_anyscale_jobs.sh is
+      # still the PR's copy, and no Anyscale job has been submitted yet.
       - name: Terminate Anyscale jobs on cancellation
-        if: cancelled()
+        if: cancelled() && steps.restore_ci.outcome == 'success'
         env:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com

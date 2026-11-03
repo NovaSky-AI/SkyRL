@@ -36,6 +36,13 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+    CHECKPOINT_SUBDIR as OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+    OffloadedDistributedOptimizer,
+    disk_state_stores,
+)
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
@@ -329,6 +336,8 @@ class MegatronStrategy(DistributedStrategy):
         """
         optimizers = getattr(optimizer, "chained_optimizers", [optimizer])
         for opt in optimizers:
+            if isinstance(opt, OffloadedDistributedOptimizer):
+                continue  # its state is on disk, checkpointed by save_to()
             init_fn = getattr(opt, "init_state_fn", None)
             inner_opt = getattr(opt, "optimizer", None)
             cfg = getattr(opt, "config", None)
@@ -385,6 +394,8 @@ class MegatronStrategy(DistributedStrategy):
         tokenizer: Optional[PreTrainedTokenizer] = None,
     ):
         global _async_calls
+        if disk_state_stores(optimizer) and io.is_cloud_path(ckpt_dir):
+            raise NotImplementedError("optimizer_offload_to_disk checkpoints require a local ckpt_path.")
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
@@ -455,6 +466,10 @@ class MegatronStrategy(DistributedStrategy):
             else:
                 assert async_save_request is None, "save() must not return a request when sync"
 
+            # Offloaded optimizer state is not in the distributed checkpoint: each rank copies its own files.
+            for store in disk_state_stores(optimizer):
+                store.save_to(os.path.join(work_dir, OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR))
+
             # Only global rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
                 hf_dir = os.path.join(work_dir, "huggingface")
@@ -486,6 +501,12 @@ class MegatronStrategy(DistributedStrategy):
         No-op when ``async_dist_ckpt_save`` is off or nothing is pending.
         """
         self._finalize_async_calls()
+
+    @staticmethod
+    def release_optimizer_state_files(optimizer) -> None:
+        """Delete the files of an ``optimizer_offload_to_disk`` optimizer; the optimizer is unusable afterwards."""
+        for store in disk_state_stores(optimizer):
+            store.close()
 
     def _get_rank_path(self, ckpt_dir):
         tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -528,6 +549,8 @@ class MegatronStrategy(DistributedStrategy):
     ):
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+        if load_optimizer_states and disk_state_stores(optimizer) and io.is_cloud_path(ckpt_dir):
+            raise NotImplementedError("optimizer_offload_to_disk checkpoints require a local ckpt_path.")
 
         # A reload must observe a fully-written checkpoint.
         self.finalize_pending_saves()
@@ -582,6 +605,8 @@ class MegatronStrategy(DistributedStrategy):
             ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             with _without_stub_optimizers(optimizer):
                 optimizer.load_state_dict(state_dict["optimizer"])
+            for store in disk_state_stores(optimizer):
+                store.load_from(os.path.join(ckpt_dir, OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR))
             self.print("Loaded optimizer state dict.")
 
         if scheduler and load_lr_scheduler_states:

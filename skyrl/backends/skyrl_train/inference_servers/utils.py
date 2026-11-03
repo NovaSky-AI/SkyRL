@@ -30,9 +30,11 @@ from skyrl.backends.skyrl_train.weight_sync import (
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     BLOCKWISE_FP8,
+    engine_exclude_list,
     get_serialized_fp8_quantization_config,
     registered_fp8_spec_names,
     resolve_fp8_spec,
+    resolve_user_provided_exclude_list,
 )
 from skyrl.backends.skyrl_train.weight_sync.register import register_receive_engines
 from skyrl.train.config import (
@@ -47,7 +49,12 @@ logger = logging.getLogger(__name__)
 VLLM_LOGPROBS_MODE = "processed_logprobs"
 
 
-def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str = BLOCKWISE_FP8) -> list[str]:
+def _serialized_fp8_engine_exclude_list(
+    model_path: Optional[str],
+    wire_format: str = BLOCKWISE_FP8,
+    exclude_modules: Optional[List[str]] = None,
+) -> list[str]:
+    """Return the modules vLLM builds unquantized: the model spec's base list plus ``exclude_modules``."""
     if not model_path:
         raise ValueError("A model path is required when FP8 weight sync is enabled")
     try:
@@ -56,7 +63,7 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str =
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     except Exception as exc:
         raise RuntimeError(
-            "Could not inspect the model config required to derive FP8 ignored layers: " f"model_path={model_path!r}"
+            "Could not inspect the model config required to derive the FP8 exclude list: " f"model_path={model_path!r}"
         ) from exc
     spec = resolve_fp8_spec(hf_config)
     if spec is None:
@@ -64,7 +71,8 @@ def _serialized_fp8_ignored_layers(model_path: Optional[str], wire_format: str =
             "FP8 weight sync has no registered model spec for this checkpoint layout "
             f"(registered specs: {', '.join(registered_fp8_spec_names())}); model_path={model_path!r}"
         )
-    return spec.ignored_layers(hf_config, wire_format)
+    user_provided_exclude_list = resolve_user_provided_exclude_list(spec, hf_config, wire_format, exclude_modules or ())
+    return engine_exclude_list(spec, hf_config, wire_format, user_provided_exclude_list)
 
 
 def _set_or_validate(mapping: Dict[str, Any], key: str, expected: Any, *, context: str) -> None:
@@ -82,6 +90,7 @@ def _apply_serialized_fp8_weight_sync_defaults(
 
     Wire-format-agnostic apart from ``wire_to_engine_quantization`` and the
     injected quantization config, both of which key off the concrete wire.
+    A user-supplied ``quantization_config`` in HF overrides is rejected.
     """
 
     mode = ie_cfg.fp8_weight_sync_mode
@@ -99,33 +108,23 @@ def _apply_serialized_fp8_weight_sync_defaults(
     if not isinstance(hf_overrides, dict):
         raise ValueError("engine_init_kwargs.hf_overrides must be a dict when FP8 weight sync is enabled")
 
-    qcfg_value = hf_overrides.get("quantization_config")
-    qcfg = {} if qcfg_value is None else copy.deepcopy(qcfg_value)
-    if not isinstance(qcfg, dict):
+    if hf_overrides.get("quantization_config") is not None:
         raise ValueError(
-            "engine_init_kwargs.hf_overrides.quantization_config must be a dict when FP8 weight sync is enabled"
+            "engine_init_kwargs.hf_overrides.quantization_config cannot be set when FP8 weight sync is "
+            "enabled: SkyRL builds the vLLM quantization config itself. Configure it with "
+            "fp8_weight_sync_mode and fp8_weight_sync_exclude_modules instead."
         )
 
-    ignored_layers = _serialized_fp8_ignored_layers(model_path, mode)
-    if ignored_layers:
-        logger.info(
-            "FP8 weight sync (%s) will leave %d vLLM modules unquantized "
-            "to match the model's FP8 quantization spec.",
-            mode,
-            len(ignored_layers),
-        )
-
-    for key, value in get_serialized_fp8_quantization_config(
-        ignored_layers=ignored_layers,
+    exclude_list = _serialized_fp8_engine_exclude_list(model_path, mode, ie_cfg.fp8_weight_sync_exclude_modules)
+    logger.info(
+        "vLLM engine init (%s FP8 weights): %d names are built unquantized.",
+        mode,
+        len(exclude_list),
+    )
+    hf_overrides["quantization_config"] = get_serialized_fp8_quantization_config(
+        exclude_list=exclude_list,
         wire_format=mode,
-    ).items():
-        _set_or_validate(
-            qcfg,
-            key,
-            value,
-            context="engine_init_kwargs.hf_overrides.quantization_config",
-        )
-    hf_overrides["quantization_config"] = qcfg
+    )
     engine_kwargs["hf_overrides"] = hf_overrides
 
 
@@ -205,16 +204,17 @@ def resolve_policy_model_name(cfg: SkyRLTrainConfig) -> str:
     return cfg.generator.inference_engine.served_model_name or cfg.trainer.policy.model.path
 
 
-# TODO: Add a test for validation
-def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
-    """Build CLI args for vLLM server from config."""
+def _base_vllm_cli_args(model_path: str, ie_cfg: InferenceEngineConfig, seed: int) -> Namespace:
+    """Build the role-independent vLLM server args for ``model_path`` from an engine config.
+
+    Everything a served model needs whether it is the policy (weight-synced, slept, possibly
+    LoRA-wrapped) or a frozen model that is only ever read (a distillation teacher). The two
+    role builders below add their own settings on top and apply ``engine_init_kwargs`` last.
+    """
     from vllm import AsyncEngineArgs
-    from vllm.config import WeightTransferConfig
     from vllm.entrypoints.launchers.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-    register_receive_engines()
 
     # This function may run a GPU-less Ray head
     # node, where ``current_platform`` resolves to ``UnspecifiedPlatform`` with
@@ -235,52 +235,66 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     # parse args without any command line arguments
     args: Namespace = parser.parse_args(args=[])
 
-    ie_cfg = cfg.generator.inference_engine
     overrides = dict(
-        model=cfg.trainer.policy.model.path,
+        model=model_path,
         tensor_parallel_size=ie_cfg.tensor_parallel_size,
         pipeline_parallel_size=ie_cfg.pipeline_parallel_size,
         dtype=ie_cfg.model_dtype,
         data_parallel_size=ie_cfg.data_parallel_size,
-        seed=cfg.trainer.seed,
+        seed=seed,
         gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
         enable_prefix_caching=ie_cfg.enable_prefix_caching,
         enforce_eager=ie_cfg.enforce_eager,
         max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
         enable_expert_parallel=ie_cfg.expert_parallel_size > 1,
         max_num_seqs=ie_cfg.max_num_seqs,
-        # Sleep mode is required for colocated (offload/backload each step) and also when
-        # non-colocated weight sync opts into offloading the KV cache around the sync.
-        enable_sleep_mode=cfg.trainer.placement.colocate_all or ie_cfg.offload_kv_for_weight_sync,
-        enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
-        weight_transfer_config=WeightTransferConfig(
-            backend=get_vllm_receive_backend(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
-        ),
         worker_extension_cls=VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS,
         # NOTE (sumanthrh): We set generation config to be vLLM so that the generation behaviour of the server is same as using the vLLM Engine APIs directly
         generation_config="vllm",
         # NOTE: vllm expects a list entry for served_model_name
-        served_model_name=(
-            [cfg.generator.inference_engine.served_model_name]
-            if cfg.generator.inference_engine.served_model_name
-            else None
-        ),
+        served_model_name=([ie_cfg.served_model_name] if ie_cfg.served_model_name else None),
         language_model_only=ie_cfg.language_model_only,
         mm_processor_cache_gb=0,
         kv_cache_metrics=True,
         # models with custom modeling code (MiMo, Qwen3.5, DeepSeek-V3, ...) require it to load.
-        # Overridable via generator.inference_engine.engine_init_kwargs.trust_remote_code below.
+        # Overridable via engine_init_kwargs.trust_remote_code below.
         trust_remote_code=True,
         # Logprobs are computed from the sampling distribution (after temperature and top-k/top-p).
         # Other values from engine kwargs are rejected by _validate_logprobs_mode.
         logprobs_mode=VLLM_LOGPROBS_MODE,
     )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+
+    return args
+
+
+def _apply_engine_init_kwargs(args: Namespace, engine_kwargs: Dict[str, Any]) -> None:
+    """Apply the user's pass-through engine kwargs last, so they can override any computed default."""
+    for key, value in engine_kwargs.items():
+        setattr(args, key, value)
+
+
+def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
+    """Build CLI args for the policy's vLLM servers from config."""
+    from vllm.config import WeightTransferConfig
+
+    register_receive_engines()
+
+    ie_cfg = cfg.generator.inference_engine
+    args = _base_vllm_cli_args(cfg.trainer.policy.model.path, ie_cfg, cfg.trainer.seed)
+
+    # Sleep mode is required for colocated (offload/backload each step) and also when
+    # non-colocated weight sync opts into offloading the KV cache around the sync.
+    args.enable_sleep_mode = cfg.trainer.placement.colocate_all or ie_cfg.offload_kv_for_weight_sync
+    args.enable_return_routed_experts = ie_cfg.enable_return_routed_experts
+    args.weight_transfer_config = WeightTransferConfig(
+        backend=get_vllm_receive_backend(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
+    )
     # Sample-support capture asks for one logprob per top-k candidate, post-filter, so the
     # -inf entries that mark filtered candidates survive to the capture path.
     if ie_cfg.enable_return_sample_support_set:
-        overrides["max_logprobs"] = cfg.generator.sampling_params.top_k
-    for key, value in overrides.items():
-        setattr(args, key, value)
+        args.max_logprobs = cfg.generator.sampling_params.top_k
 
     # The sharded_rdt backend pulls weight slices from a named trainer actor over
     # Ray's NIXL tensor transport, so the inference workers MUST be Ray actors.
@@ -338,8 +352,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         engine_kwargs,
         cfg.trainer.policy.model.path,
     )
-    for key, value in engine_kwargs.items():
-        setattr(args, key, value)
+    _apply_engine_init_kwargs(args, engine_kwargs)
 
     if args.enable_lora:
         expert_rank = _resolve_max_expert_lora_rank(cfg)
@@ -351,6 +364,23 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
             }
             logger.info(f"vLLM MoE expert LoRA slot rank: {expert_rank} (max_lora_rank={args.max_lora_rank})")
 
+    return args
+
+
+def build_frozen_vllm_cli_args(model_path: str, ie_cfg: InferenceEngineConfig, seed: int) -> Namespace:
+    """Build CLI args for vLLM servers of a model that is only ever read, such as a distillation teacher.
+
+    The base args plus ``enable_sleep_mode=False`` (nothing ever offloads it) and ``enable_lora=False``
+    (no adapters). No weight-transfer config, routed-expert return, speculative decoding or FP8
+    weight-sync defaults: those belong to the policy, and vLLM's parser defaults leave them off.
+    ``engine_init_kwargs`` is applied last, as for the policy.
+    """
+    args = _base_vllm_cli_args(model_path, ie_cfg, seed)
+    args.enable_sleep_mode = False
+    args.enable_lora = False
+    engine_kwargs = get_config_as_dict(ie_cfg.engine_init_kwargs)
+    _validate_logprobs_mode(engine_kwargs, context="engine_init_kwargs")
+    _apply_engine_init_kwargs(args, engine_kwargs)
     return args
 
 

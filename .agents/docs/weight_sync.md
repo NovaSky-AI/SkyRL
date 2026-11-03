@@ -128,7 +128,25 @@ metadata is derived from that same serialized stream, so the trainer engine's bu
 layout remains identical to the tensors sent on the wire.
 
 The inference launch path supplies vLLM's FP8 dummy-load configuration, including the
-model-specific ignored layers. The receiver reload proxy recognizes the compact batched
+model-specific base exclude list. That quantization config is built entirely by SkyRL; a
+user-supplied `engine_init_kwargs.hf_overrides.quantization_config` raises an error.
+
+`generator.inference_engine.fp8_weight_sync_exclude_modules` (HF module-name globs) keeps
+more modules in the model dtype. `resolve_user_provided_exclude_list` expands it against
+the spec's `fp8_modules` (one name per FP8 tensor, as exported minus `.weight`); the driver
+calls it for the engine (`engine_exclude_list`, the spec's `base_exclude_list` plus the
+user's modules) and each trainer rank calls it for the sender
+(`SerializedFp8Config.user_provided_exclude_list`), on the same config, so the two cannot
+disagree. A pattern that matches nothing is rejected before engine init, and so is excluding
+only some of a layer's routed experts, which vLLM runs at one precision without rejecting the
+split; vLLM itself rejects excluding part of a fused module. Excluded routed experts go out
+in BF16 under their checkpoint names (Qwen3.5's stacked tensors, GLM-5's per-expert ones)
+through the model's own loader. The Megatron side has its
+own, independent knobs (`fp8_exclude_modules`, `num_layers_at_{start,end}_in_bf16`,
+`te_precision_config_file` on `MegatronConfig`); nothing checks the two sides against each
+other. See `fp8/models/README.md`.
+
+The receiver reload proxy recognizes the compact batched
 MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this keeps
 the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
 is incompatible with the delta and sharded-RDT transfer backends.
@@ -552,7 +570,7 @@ Non-colocated normally keeps the engine fully awake and does `pause_generation �
 
 The fully-async path is driven entirely from SkyRL — no vLLM patch. It deliberately avoids the `/sleep`+`/wake_up` HTTP endpoints (which route through `EngineCore.sleep`, force-clearing the prefix cache and preempting every running request at level ≥ 1). Instead it drives the per-worker `CuMemAllocator` directly via two `NewInferenceWorkerWrap` methods invoked over `/collective_rpc`:
 
-- `skyrl_sleep_for_weight_sync(offload_kv)` — `allocator.sleep(offload_tags=("kv_cache",) if offload_kv else ())`: **discards** the weights pool (the broadcast overwrites every parameter on wake) and either offloads the KV cache to CPU or discards it. Model buffers live in the weights pool and are NOT covered by the parameter broadcast (e.g. non-persistent rotary `inv_freq`), so they are saved to CPU here and restored on wake — mirroring `GPUWorker.sleep(level=2)`. All GPU memory is freed regardless. The scheduler is untouched, so KEEP-paused requests stay frozen with valid block tables.
+- `skyrl_sleep_for_weight_sync(offload_kv)` — `allocator.sleep(offload_tags=("runtime", "cudagraph", "kv_cache") if offload_kv else ("runtime", "cudagraph"))`: **discards** the weights pool (the broadcast overwrites every parameter on wake) and either offloads the KV cache to CPU or discards it. The `runtime` (KV-init state) and `cudagraph` pools, new in vLLM 0.32.0, are always offloaded like upstream `CuMemBackend.suspend` does: any wake remaps them, so discarding them crashes the next forward with an illegal memory access. Model buffers live in the weights pool and are NOT covered by the parameter broadcast (e.g. non-persistent rotary `inv_freq`), so they are saved to CPU here and restored on wake — mirroring `GPUWorker.sleep(level=2)`. All GPU memory is freed regardless. The scheduler is untouched, so KEEP-paused requests stay frozen with valid block tables.
 - `skyrl_wake_for_weight_sync(tags)` — `torch.cuda.empty_cache()` (release the broadcast's transient buffers so cumem can remap the KV pool) then `allocator.wake_up(tags)`, which remaps to the **same virtual addresses** and copies CPU→GPU so block tables remain valid. On the `weights` wake it restores the saved buffers; on the `kv_cache` wake it re-inits fp8 KV scales. Does not resume the scheduler (the client does that via `/resume`).
 
 Validated in `validate_inference_engine_cfg`. vLLM-version coupled (mirrors `GPUWorker.sleep`/`wake_up` and the `CuMemAllocator` API) — re-verify on vLLM bumps via the GPU weight-sync test.
@@ -623,6 +641,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `DeltaWeightTransferEngine` (receive side) | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |
 | Who pauses / resets the prefix cache | `test_prefix_cache_reset.py` **and** `distributed/test_worker_dispatch.py` |
 | `DeltaWeightSyncConfig` defaults or validation | `tests/train/test_config.py` |
+| Serialized FP8 (`fp8/` specs, exclusions, wire formats) | `tests/backends/skyrl_train/weight_sync/fp8/` (CPU; `test_fp8_exclusions_vllm.py` runs SkyRL's exclude list through vLLM's matching and needs the vllm extra) **and** GPU `megatron/test_megatron_models.py -m b200 -k mxfp8` (or `-m h100 -k full_fp8` on Hopper) |
 
 ## vLLM version coupling
 

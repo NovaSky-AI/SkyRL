@@ -1,15 +1,20 @@
+import re
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
     is_fp8_enabled,
     is_mxfp8_recipe,
+    reject_stage_local_layer_patterns,
     resolve_auto_fp8_recipe,
     resolve_auto_wire_format,
     resolve_text_config,
     validate_concrete_fp8_recipe,
+    validate_fp8_exclude_modules_matched,
     validate_mxfp8_gdn_tp_alignment,
     wire_to_engine_quantization,
 )
@@ -219,3 +224,94 @@ def test_mxfp8_gdn_tp_alignment_ignores_non_mxfp8_configs(kwargs):
 
 def test_mxfp8_gdn_tp_alignment_ignores_models_without_gdn():
     validate_mxfp8_gdn_tp_alignment(_MXFP8_KWARGS, SimpleNamespace(hidden_size=4096), 8)
+
+
+def test_fp8_exclude_recipe_keeps_the_matched_modules_in_bf16():
+    recipe = fp8_exclude_recipe(["*.shared_experts.*", "decoder.layers.0.*"])
+
+    # A TE recipe with neither an FP8 nor an FP4 setting runs and stores the module in BF16.
+    assert recipe["configs"] == {
+        "bf16": {"transformer_engine_config_type": "TEQuantizationParams", "training_recipe": {}}
+    }
+    assert list(recipe["matchers"].values()) == [
+        {"config": "bf16", "type": "glob", "pattern": "*.shared_experts.*", "enabled": True},
+        {"config": "bf16", "type": "glob", "pattern": "decoder.layers.0.*", "enabled": True},
+    ]
+
+
+def test_fp8_exclude_recipe_matches_megatron_module_paths():
+    quant_config = pytest.importorskip("megatron.core.quantization.quant_config")
+    recipe = quant_config.RecipeConfig.from_config_dict(
+        fp8_exclude_recipe(["*.shared_experts.*", "decoder.layers.0.*"])
+    )
+
+    def config_key(module_path):
+        return recipe.match_to_config_key(quant_config.MatchContext(module_path=module_path, layer_number=None))
+
+    assert config_key("decoder.layers.3.mlp.shared_experts.linear_fc1") == "bf16"
+    assert config_key("decoder.layers.0.self_attention.in_proj") == "bf16"
+    assert config_key("decoder.layers.10.self_attention.linear_qkv") is None
+    assert config_key("decoder.layers.3.mlp.experts.linear_fc1") is None
+
+
+def test_reject_stage_local_layer_patterns_checks_precision_file_matchers(tmp_path):
+    quant_config = pytest.importorskip("megatron.core.quantization.quant_config")
+    recipe_file = tmp_path / "recipe.yaml"
+    recipe_file.write_text(
+        "configs:\n"
+        "  bf16: {transformer_engine_config_type: TEQuantizationParams, training_recipe: {}}\n"
+        "matchers:\n"
+        "  shared: {config: bf16, type: glob, pattern: '*.shared_experts.*', enabled: true}\n"
+        "  mtp: {config: bf16, type: glob, pattern: 'mtp.layers.0.*', enabled: true}\n"
+        "  first: {config: bf16, type: glob, pattern: 'decoder.layers.0.*', enabled: true}\n"
+    )
+    patterns = [m.pattern for m in quant_config.RecipeConfig.from_yaml_file(str(recipe_file)).matchers]
+
+    # MTP layers all sit on one stage, so only the decoder layer index is rejected.
+    expected = "te_precision_config_file patterns ['decoder.layers.0.*'] select layers by index"
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        reject_stage_local_layer_patterns(patterns, "te_precision_config_file")
+    reject_stage_local_layer_patterns(patterns[:2], "te_precision_config_file")
+
+
+class _TELayer(torch.nn.Module):
+    """Stands in for a Transformer Engine layer, which Megatron marks with ``finish_init``."""
+
+    def finish_init(self, quantization_config):
+        pass
+
+
+def _ddp_wrapped_model():
+    layer = torch.nn.Module()
+    layer.self_attention = torch.nn.Module()
+    layer.self_attention.linear_qkv = _TELayer()
+    layer.mlp = torch.nn.Module()
+    layer.mlp.linear_fc1 = _TELayer()
+    model = torch.nn.Module()
+    model.decoder = torch.nn.Module()
+    model.decoder.layers = torch.nn.ModuleList([layer])
+    wrapper = torch.nn.Module()
+    wrapper.module = model
+    return [wrapper]
+
+
+def test_validate_fp8_exclude_modules_matched_accepts_patterns_that_match(monkeypatch):
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda counts: None)
+    validate_fp8_exclude_modules_matched(
+        _ddp_wrapped_model(), ["*.self_attention.*", "decoder.layers.0.mlp.linear_fc1"]
+    )
+
+
+@pytest.mark.parametrize("pattern", ["*.self_atention.*", "decoder.layers.0.mlp"])
+def test_validate_fp8_exclude_modules_matched_refuses_patterns_that_match_no_fp8_layer(monkeypatch, pattern):
+    """A misspelled pattern and one that names only a container module both leave every layer in FP8."""
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda counts: None)
+    expected = f"fp8_exclude_modules patterns {[pattern]} match none of the layers Megatron can run in FP8."
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        validate_fp8_exclude_modules_matched(_ddp_wrapped_model(), ["*.self_attention.*", pattern])
+
+
+def test_validate_fp8_exclude_modules_matched_counts_matches_on_other_pipeline_stages(monkeypatch):
+    # Another pipeline stage holds the only layer the second pattern matches.
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda counts: counts.add_(torch.tensor([0, 1])))
+    validate_fp8_exclude_modules_matched(_ddp_wrapped_model(), ["*.self_attention.*", "decoder.layers.5.*"])
