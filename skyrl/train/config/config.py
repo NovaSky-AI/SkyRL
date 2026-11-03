@@ -1786,6 +1786,15 @@ class TrainerConfig(BaseConfig):
     This makes the microbatch packing — and therefore the resulting logprobs/values — identical to
     what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
     first inner step."""
+    balance_dp_tokens: bool = False
+    """Reorder rows within each mini-batch so every data-parallel rank gets about the same number of tokens.
+
+    Mini-batches are split into equal-sized contiguous chunks per DP rank in prompt order, so the
+    samples of long-response prompts can pile up on one rank while the others wait for it (and pad
+    their micro-batch count to match). With this on, the policy/critic forward and training steps
+    stage each mini-batch in a token-balanced row order (same sample count per rank); forward
+    outputs are returned in the original order. Applies to the per-mini-batch staged paths
+    (``recompute_old_logprobs_per_minibatch``, training)."""
     update_ref_every_epoch: bool = False
     """Re-sync the reference model from the policy model at every epoch boundary."""
     remove_microbatch_padding: bool = True

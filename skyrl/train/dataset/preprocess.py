@@ -489,3 +489,56 @@ def compute_prompt_mini_batch_boundaries(
             assert end - start == expected_num_seq_in_mini_batch
 
     return boundaries
+
+
+def balance_dp_token_permutation(
+    token_counts: List[int],
+    mini_batch_boundaries: List[Tuple[int, int]],
+    dp_size: int,
+) -> Optional[List[int]]:
+    """Row order under which each mini-batch's contiguous DP chunks carry about equal token counts.
+
+    Mini-batches are staged by cutting each ``(start, end)`` slice into ``dp_size`` contiguous,
+    equal-sized chunks, one per data-parallel rank (``MeshDispatch.stage_chunks``). Rows are in
+    prompt order there, so the samples of a few long-response prompts can land on one rank and
+    every other rank waits on it. This reorders rows inside each mini-batch (never across
+    mini-batches) so the chunks keep their sample counts and get balanced token counts: rows are
+    taken longest first and each goes to the chunk with the fewest tokens that still has room. A
+    mini-batch keeps its order unless this lowers its largest chunk.
+
+    Args:
+        token_counts: Tokens per row (e.g. ``attention_mask.sum(-1)``).
+        mini_batch_boundaries: ``(start, end)`` row slices, one per mini-batch.
+        dp_size: Number of data-parallel ranks.
+
+    Returns:
+        ``perm`` such that row ``i`` of the reordered batch is row ``perm[i]`` of the original, or
+        ``None`` when nothing changes or ``dp_size == 1``. Also ``None`` if any mini-batch size is not
+        divisible by ``dp_size``: staging pads those, which shifts the positions of later rows.
+    """
+    if dp_size <= 1 or any((end - start) % dp_size for start, end in mini_batch_boundaries):
+        return None
+    perm = list(range(len(token_counts)))
+    changed = False
+    for start, end in mini_batch_boundaries:
+        size = end - start
+        if size == 0:
+            continue
+        per_rank = size // dp_size
+        rows = sorted(range(start, end), key=lambda r: (-token_counts[r], r))
+        loads = [0] * dp_size
+        assigned: List[List[int]] = [[] for _ in range(dp_size)]
+        for row in rows:
+            rank = min(
+                (r for r in range(dp_size) if len(assigned[r]) < per_rank),
+                key=lambda r: (loads[r], r),
+            )
+            assigned[rank].append(row)
+            loads[rank] += token_counts[row]
+        contiguous_max = max(
+            sum(token_counts[start + i * per_rank : start + (i + 1) * per_rank]) for i in range(dp_size)
+        )
+        if max(loads) < contiguous_max:
+            perm[start:end] = [row for rank_rows in assigned for row in sorted(rank_rows)]
+            changed = True
+    return perm if changed else None

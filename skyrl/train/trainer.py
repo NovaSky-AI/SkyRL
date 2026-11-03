@@ -54,6 +54,7 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
+    balance_dp_token_permutation,
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
@@ -1343,15 +1344,36 @@ class RayPPOTrainer:
             # serialization is amortized off the dispatch critical path across mini-batches. The
             # staged chunks use the same partition as `_execute_training_step`'s `stage_data`, so
             # the packing — and resulting logprobs/values — match what forward_backward recomputes.
-            all_chunk_refs = self.dispatch.stage_data(model, data_fwd_pass, mini_batch_boundaries)
+            perm = self._dp_balance_permutation(model, data_fwd_pass, mini_batch_boundaries)
+            staged = data_fwd_pass.index_select(perm) if perm is not None else data_fwd_pass
+            all_chunk_refs = self.dispatch.stage_data(model, staged, mini_batch_boundaries)
             combined_outputs: List[Dict[str, Any]] = []
             for chunk_refs in all_chunk_refs:
                 mb_output = self.dispatch.forward_from_staged(model, chunk_refs)
                 combined_outputs.extend(mb_output.loss_fn_outputs)
+            if perm is not None:
+                # Row i of the staged batch is row perm[i] of the original.
+                restored: List[Optional[Dict[str, Any]]] = [None] * len(combined_outputs)
+                for staged_row, original_row in enumerate(perm[: len(combined_outputs)]):
+                    restored[original_row] = combined_outputs[staged_row]
+                combined_outputs = restored
             return loss_fn_outputs_to_tensor(combined_outputs, key=key)
 
         output = self.dispatch.forward(model, data_fwd_pass)
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key=key)
+
+    def _dp_balance_permutation(
+        self, model: str, data: TrainingInputBatch, mini_batch_boundaries: Optional[List[Tuple[int, int]]]
+    ) -> Optional[List[int]]:
+        """Token-balanced row order for staging ``model``'s mini-batches (``trainer.balance_dp_tokens``).
+
+        A function of the attention mask and the boundaries only, so the old-logprob forward and the
+        training step stage the same rows on the same DP ranks.
+        """
+        if not self.cfg.trainer.balance_dp_tokens or not mini_batch_boundaries:
+            return None
+        token_counts = data["attention_mask"].sum(dim=-1).tolist()
+        return balance_dp_token_permutation(token_counts, mini_batch_boundaries, self.dispatch.dp_size(model))
 
     def _skip_policy_forward(self, training_input: TrainingInputBatch) -> bool:
         """Whether the policy forward pass producing the "old" logprobs can be skipped.
@@ -1613,8 +1635,13 @@ class RayPPOTrainer:
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
         # Pre-stage all per-DP mini-batch chunks in the object store so that
-        # serialization is fully off the critical path during training.
-        all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
+        # serialization is fully off the critical path during training. With
+        # trainer.balance_dp_tokens the rows are staged in the same token-balanced order as the
+        # old-logprob forward (advantages are already normalized per mini-batch above).
+        perm = self._dp_balance_permutation(model, data, boundaries)
+        all_chunk_refs = self.dispatch.stage_data(
+            model, data.index_select(perm) if perm is not None else data, boundaries
+        )
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
