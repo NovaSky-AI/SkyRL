@@ -14,6 +14,7 @@ import torch
 from skyrl.backends.skyrl_train.mtp.native_loss_patch import (
     _skyrl_skip_native_mtp_loss,
     disable_native_mtp_loss,
+    mtp_block_skipped,
 )
 
 
@@ -134,3 +135,26 @@ def test_noop_returns_first_chunk():
         mtp_num_layers = None
 
     assert _skyrl_skip_native_mtp_loss(hidden, config=NoMTPCfg()) is hidden
+
+
+def test_noop_keeps_hidden_states_whole_when_the_block_was_skipped(monkeypatch):
+    """GPTModel still calls process_mtp_loss when the MTP block is skipped; splitting would halve
+    the trunk's hidden states."""
+    _install_fake_megatron(monkeypatch)
+    disable_native_mtp_loss()
+
+    class Cfg:
+        mtp_num_layers = 1
+
+    trunk = torch.arange(6.0).reshape(3, 2)
+    with mtp_block_skipped():
+        assert _skyrl_skip_native_mtp_loss(hidden_states=trunk, config=Cfg()) is trunk
+    hidden = torch.cat([trunk, trunk + 100], dim=0)
+    assert torch.equal(_skyrl_skip_native_mtp_loss(hidden_states=hidden, config=Cfg()), trunk)
+
+
+def test_skipping_the_block_requires_the_patch(monkeypatch):
+    _install_fake_megatron(monkeypatch)
+    with pytest.raises(RuntimeError, match="disable_native_mtp_loss"):
+        with mtp_block_skipped():
+            pass

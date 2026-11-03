@@ -233,13 +233,15 @@ async def _train_sync_and_check_lora_adapter(policy, client, cfg: SkyRLTrainConf
 @pytest.mark.asyncio
 @pytest.mark.h100
 @pytest.mark.parametrize(
-    "tp,pp,cp,ep,etp,extra_tf_kwargs,use_lora",
+    "tp,pp,cp,ep,etp,extra_tf_kwargs,use_lora,executor_backend",
     [
-        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, False, id="tp2_pp2_ep2"),
-        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, True, id="tp2_pp2_ep2_lora"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, False, "mp", id="tp2_pp2_ep2"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, True, "mp", id="tp2_pp2_ep2_lora"),
+        # Routed experts cross Ray's compiled-DAG shared-memory channel on the ray executor.
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_first_pipeline_stage": 13}, False, "ray", id="tp2_pp2_ep2_ray"),
     ],
 )
-async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs, use_lora):
+async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs, use_lora, executor_backend):
     """
     Check that logprob diff is lower when using router replay. Runs on 4xH100.
 
@@ -256,6 +258,7 @@ async def test_logprobs(tp, pp, cp, ep, etp, extra_tf_kwargs, use_lora):
         cfg.generator.inference_engine.enable_return_routed_experts = True
         cfg.generator.inference_engine.tensor_parallel_size = 4
         cfg.generator.inference_engine.num_engines = 1
+        cfg.generator.inference_engine.distributed_executor_backend = executor_backend
         cfg.generator.sampling_params = SamplingParams(
             max_generate_length=MAX_GENERATE_LENGTH,
             logprobs=1,

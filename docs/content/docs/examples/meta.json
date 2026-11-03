@@ -13,9 +13,12 @@
     "geometry3k",
     "visgym",
     "quantized_rollouts",
+    "kimi_k2_int4_lora",
+    "beam",
     "spec_decode",
     "mini_swe_agent",
     "openenv",
-    "delta_weight_sync"
+    "delta_weight_sync",
+    "on_policy_distillation"
   ]
 }

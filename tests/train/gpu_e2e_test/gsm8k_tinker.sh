@@ -10,6 +10,8 @@ SCRIPT_DIR=$(dirname $(realpath $0))
 SKYRL_REPO_ROOT=$(realpath "$SCRIPT_DIR/../../..")
 LOG_DIR="$HOME/tinker_logs/$RUN_NAME"
 mkdir -p "$LOG_DIR"
+# The cookbook deletes LOG_DIR at startup; keep the server log beside it.
+SERVER_LOG="$HOME/tinker_logs/${RUN_NAME}.server.log"
 
 # Thresholds: 5% allowance from min/max of the 26 finished nightly runs since 20th Jul 2026
 # (as of 31st Aug 2026), matching the convention in gsm8k_colocate.sh (#1664). Observed:
@@ -28,7 +30,7 @@ BACKEND_CONFIG='{"trainer.placement.colocate_all": true, "trainer.placement.poli
 # Start tinker server in its own process group so we can clean up the engine subprocess too.
 setsid uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
   --base-model "Qwen/Qwen3-0.6B" --backend fsdp --port 8000 \
-  --backend-config "$BACKEND_CONFIG" >"$LOG_DIR/server.log" 2>&1 &
+  --backend-config "$BACKEND_CONFIG" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 # On failure, dump the server log plus the newest SkyRL infra log: Ray actor output
@@ -39,7 +41,7 @@ cleanup() {
   status=$?
   if [ "$status" -ne 0 ]; then
     echo "=== tinker server log tail (exit $status) ===" >&2
-    tail -n 200 "$LOG_DIR/server.log" >&2 || true
+    tail -n 200 "$SERVER_LOG" >&2 || true
     infra_log=$(ls -t /tmp/skyrl-logs/infra-*.log 2>/dev/null | head -1 || true)
     if [ -n "${infra_log:-}" ]; then
       echo "=== skyrl infra log tail ($infra_log) ===" >&2
@@ -56,12 +58,12 @@ deadline=$(( $(date +%s) + 1800 ))
 until curl -sSf http://localhost:8000/docs >/dev/null 2>&1; do
   if (( $(date +%s) > deadline )); then
     echo "Tinker server did not become ready within 30 minutes" >&2
-    tail -n 200 "$LOG_DIR/server.log" >&2 || true
+    tail -n 200 "$SERVER_LOG" >&2 || true
     exit 1
   fi
   if ! kill -0 $SERVER_PID 2>/dev/null; then
     echo "Tinker server exited early" >&2
-    tail -n 200 "$LOG_DIR/server.log" >&2 || true
+    tail -n 200 "$SERVER_LOG" >&2 || true
     exit 1
   fi
   sleep 5

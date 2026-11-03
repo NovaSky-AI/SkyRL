@@ -68,6 +68,31 @@ def _fused_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
     return out.detach(), h.grad.detach(), w.grad.detach()
 
 
+def _fused_entropy_loss_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
+    """Return fused log-prob, entropy, and their combined gradients."""
+    h = hidden.detach().clone().requires_grad_(True)
+    w = weight.detach().clone().requires_grad_(True)
+    out, entropy = FusedLinearChunkedDistributedLogprob.apply(
+        h, w, target, vstart, vend, chunk_size, tp_group, False, True, True
+    )
+    entropy_seed = torch.linspace(-0.25, 0.75, steps=entropy.numel(), device=entropy.device).reshape(entropy.shape)
+    ((out * _grad_seed(out)).sum() + (entropy * entropy_seed).sum()).backward()
+    return out.detach(), entropy.detach(), h.grad.detach(), w.grad.detach()
+
+
+def _materialized_entropy_loss_fb(hidden, weight, target):
+    """Full-vocabulary autograd reference for the entropy-loss path."""
+    h = hidden.detach().clone().requires_grad_(True)
+    w = weight.detach().clone().requires_grad_(True)
+    logits = torch.matmul(h.to(w.dtype), w.t()).float()
+    log_probs = torch.log_softmax(logits, dim=-1)
+    out = log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+    entropy_seed = torch.linspace(-0.25, 0.75, steps=entropy.numel(), device=entropy.device).reshape(entropy.shape)
+    ((out * _grad_seed(out)).sum() + (entropy * entropy_seed).sum()).backward()
+    return out.detach(), entropy.detach(), h.grad.detach(), w.grad.detach()
+
+
 def _reference_fb(hidden, weight, target, vstart, vend, tp_group, chunk_size):
     """Materialize logits = hidden @ weightᵀ then the validated ChunkedDistributedLogprob.
 
@@ -163,6 +188,22 @@ def test_fused_forward_matches_liger_flce(tp_group):
     torch.testing.assert_close(out_f.reshape(-1), (-ce).float(), atol=1e-2, rtol=1e-2)
 
 
+def test_fused_entropy_loss_matches_materialized_logits(tp_group):
+    device = torch.device("cuda")
+    torch.manual_seed(123)
+    B, S, V = 2, 31, 4096
+    hidden = torch.randn(B, S, H, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(V, H, dtype=torch.bfloat16, device=device) * (H**-0.5)
+    target = torch.randint(0, V, (B, S), device=device, dtype=torch.long)
+
+    actual = _fused_entropy_loss_fb(hidden, weight, target, 0, V, tp_group, 7)
+    expected = _materialized_entropy_loss_fb(hidden, weight, target)
+    torch.testing.assert_close(actual[0], expected[0], atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(actual[1], expected[1], atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(actual[2], expected[2], atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(actual[3].float(), expected[3].float(), atol=4e-2, rtol=4e-2)
+
+
 # ---------------------------------------------------------------------------
 # TP>1: vocab-parallel correctness via torchrun (spawned as a subprocess).
 # ---------------------------------------------------------------------------
@@ -200,6 +241,18 @@ def _distributed_main():
         torch.testing.assert_close(gh_f, gh_r, atol=5e-3, rtol=5e-3)
         torch.testing.assert_close(gw_f.float(), gw_r.float(), atol=5e-3, rtol=5e-3)
 
+        out_el, entropy_el, gh_el, gw_el = _fused_entropy_loss_fb(
+            hidden, weight, target, vstart, vend, tp_group, chunk_size
+        )
+        out_er, entropy_er, gh_er, gw_er = _materialized_entropy_loss_fb(hidden, w_full.to(dev), target)
+        torch.testing.assert_close(out_el, out_er, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(entropy_el, entropy_er, atol=1e-4, rtol=1e-4)
+        # The fused op leaves grad_hidden's TP all-reduce to the caller.
+        gh_el = gh_el.float()
+        dist.all_reduce(gh_el, group=tp_group)
+        torch.testing.assert_close(gh_el, gh_er.float(), atol=5e-3, rtol=5e-3)
+        torch.testing.assert_close(gw_el.float(), gw_er[vstart:vend].float(), atol=5e-3, rtol=5e-3)
+
     ok = torch.tensor([1.0], device=dev)
     dist.all_reduce(ok, op=dist.ReduceOp.MIN)
     if rank == 0:
@@ -224,6 +277,51 @@ def test_fused_linear_logprob_tp(nproc):
     ]
     res = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
     assert "RESULT: PASS" in (res.stdout + res.stderr), f"TP={nproc} failed:\n{res.stdout}\n{res.stderr}"
+
+
+@pytest.mark.parametrize("chunk_size", [7, 512])
+def test_fused_frozen_weight_skips_weight_grad(tp_group, chunk_size, monkeypatch):
+    """A frozen output layer (LoRA) skips the per-chunk weight-grad matmul; log-probs and ``grad_hidden`` are
+    unchanged. A trainable-weight run is the control for the matmul count."""
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    B, S, V = 4, 32, 4096
+    hidden = torch.randn(B, S, H, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(V, H, dtype=torch.bfloat16, device=device) * (H**-0.5)
+    target = torch.randint(0, V, (B, S), device=device, dtype=torch.long)
+    num_chunks = -(-S // chunk_size)
+
+    matmul_calls = 0
+    real_matmul = torch.matmul
+
+    def counting_matmul(*args, **kwargs):
+        nonlocal matmul_calls
+        matmul_calls += 1
+        return real_matmul(*args, **kwargs)
+
+    def run(weight_requires_grad):
+        """Forward + backward; returns (logprob, grad_hidden, weight, matmul calls made by backward)."""
+        nonlocal matmul_calls
+        h = hidden.detach().clone().requires_grad_(True)
+        w = weight.detach().clone().requires_grad_(weight_requires_grad)
+        out = FusedLinearChunkedDistributedLogprob.apply(h, w, target, 0, V, chunk_size, tp_group, False)
+        matmul_calls = 0
+        with monkeypatch.context() as m:
+            m.setattr(torch, "matmul", counting_matmul)
+            out.backward(_grad_seed(out))
+        return out.detach(), h.grad.detach(), w, matmul_calls
+
+    out_ref, gh_ref, w_ref, trainable_calls = run(weight_requires_grad=True)
+    out, gh, w, frozen_calls = run(weight_requires_grad=False)
+
+    assert w_ref.grad is not None
+    assert w.grad is None
+    # Backward recomputes logits and projects grad_hidden per chunk in both runs; only the trainable run
+    # adds the [V, H] weight-grad matmul, once per chunk.
+    assert frozen_calls > 0
+    assert trainable_calls - frozen_calls == num_chunks
+    torch.testing.assert_close(out, out_ref)
+    torch.testing.assert_close(gh, gh_ref)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from skyrl.env_vars import SKYRL_HTTP_CONNECTION_LIMIT
 from skyrl.tinker import types
 from skyrl.tinker.config import (
     EngineConfig,
@@ -92,6 +93,11 @@ _MISSING_PROFILER_ROW = "profiler control row is missing; the server did not ini
 PROFILER_START_ACK_TIMEOUT_SEC = 30.0
 PROFILER_STOP_ACK_TIMEOUT_SEC = 600.0
 
+# Idle keep-alive for client connections. Under a burst of completions the
+# event loop can be busy for many seconds; with uvicorn's 5s default every
+# idle SDK connection is closed during such a burst and all clients reconnect
+# at once, overflowing the accept backlog. Hold connections across bursts.
+HTTP_KEEP_ALIVE_TIMEOUT_SECONDS = 75
 
 # How often poll_futures looks for newly finished requests. A single query
 # covers every waiter, so this can stay tight without the load scaling up with
@@ -222,6 +228,14 @@ async def _close_external_inference(app: FastAPI) -> None:
             await aclose()
 
 
+def _should_forward_sample_requests(config: EngineConfig) -> bool:
+    """Return whether samples can bypass the engine for managed inference."""
+    if config.backend not in ("megatron", "fsdp") or config.runtime_role != "combined":
+        return False
+    backend_config = config.backend_config or {}
+    return not bool(backend_config.get("trainer.placement.colocate_all", True))
+
+
 async def _close_runtime(app: FastAPI, background_engine: asyncio.subprocess.Process) -> None:
     try:
         await _close_external_inference(app)
@@ -330,29 +344,29 @@ async def lifespan(app: FastAPI):
     # Three cases:
     #   1. external_inference_url set: forward sample requests to a fully
     #      external vLLM (existing behavior).
-    #   2. backend in (megatron, fsdp) and colocate_all=False: install
+    #   2. combined SkyRL-Train runtime with colocate_all=False: install
     #      SkyRLTrainInferenceForwardingClient so sample requests go directly
-    #      to the SkyRL-Train-managed vLLM, bypassing the engine's serial loop.
-    #   3. otherwise (JAX, colocated SkyRL-Train, etc.): route everything
-    #      through the engine subprocess.
+    #      to the managed vLLM, bypassing the engine's serial loop.
+    #   3. otherwise (JAX, dedicated roles, colocated SkyRL-Train, etc.):
+    #      route everything through the engine subprocess.
     #
-    # The colocated path stays on the engine because vLLM is asleep during
-    # training and only the engine's synchronous sample path knows how to
-    # wake it (save_weights_for_sampler → broadcast → sample).
+    # Colocated sampling stays on the engine because only that path can wake
+    # vLLM. Dedicated roles stay there for trainer-only rejection and
+    # inference-only lazy startup.
     backend_name = app.state.engine_config.backend
-    backend_cfg = app.state.engine_config.backend_config or {}
-    # SkyRL-Train default is colocate_all=True; only opt into forwarding
-    # when the operator explicitly sets it to False.
-    is_colocated = bool(backend_cfg.get("trainer.placement.colocate_all", True))
+    store_ttls = dict(
+        retrieved_ttl_sec=app.state.engine_config.external_future_retrieved_ttl_sec,
+        completed_ttl_sec=app.state.engine_config.external_future_completed_ttl_sec,
+    )
     if app.state.engine_config.external_inference_url:
-        app.state.external_future_store = ExternalFutureStore()
+        app.state.external_future_store = ExternalFutureStore(**store_ttls)
         await app.state.external_future_store.start()
         app.state.external_inference_client = ExternalInferenceClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
         )
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
-    elif backend_name in ("megatron", "fsdp") and not is_colocated:
-        app.state.external_future_store = ExternalFutureStore()
+    elif _should_forward_sample_requests(app.state.engine_config):
+        app.state.external_future_store = ExternalFutureStore(**store_ttls)
         await app.state.external_future_store.start()
         app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
             app.state.engine_config, app.state.db_engine, app.state.external_future_store
@@ -515,6 +529,74 @@ class LoRAConfig(BaseModel):
     seed: int | None = Field(
         default=None, description="Seed for LoRA weight initialization. If None, a random seed is used."
     )
+    train_attn: bool = Field(default=True, description="Whether to add LoRA to the attention layers.")
+    train_mlp: bool = Field(default=True, description="Whether to add LoRA to the MLP layers.")
+    # Defaults mirror tinker.types.LoraConfig, including train_unembed=True --
+    # the SDK sends it on every request, so a server-side default of False would
+    # never apply and would misrepresent what clients actually ask for.
+    train_unembed: bool = Field(
+        default=True,
+        description="Whether to add LoRA to the unembedding layer. Not supported: True is accepted with a "
+        "warning and treated as False.",
+    )
+
+    def to_types(self, *, seed: int, alpha: float) -> types.LoraConfig:
+        """Convert to the internal type, resolving the server-chosen values.
+
+        Args:
+            seed: The resolved seed -- the request's, or a generated one.
+            alpha: The server-side alpha; Tinker's wire format has no such field.
+
+        Returns:
+            The internal :class:`types.LoraConfig`.
+        """
+        return types.LoraConfig(
+            rank=self.rank,
+            alpha=alpha,
+            seed=seed,
+            train_attn=self.train_attn,
+            train_mlp=self.train_mlp,
+            train_unembed=self.train_unembed,
+        )
+
+    @classmethod
+    def from_types(cls, lora_config: types.LoraConfig) -> "LoRAConfig":
+        """Rebuild the wire model from a stored internal config, losing nothing.
+
+        Args:
+            lora_config: The stored internal config.
+
+        Returns:
+            The wire-format equivalent, including the resolved seed.
+        """
+        return cls(
+            rank=lora_config.rank,
+            seed=lora_config.seed,
+            train_attn=lora_config.train_attn,
+            train_mlp=lora_config.train_mlp,
+            train_unembed=lora_config.train_unembed,
+        )
+
+
+def _supported_lora_config(lora: LoRAConfig) -> LoRAConfig:
+    """Drop the LoRA options this server does not apply, so the stored and echoed config match the adapter."""
+    if lora.rank == 0:
+        return lora  # full fine-tuning: no adapter, so the group flags do not apply
+    if not (lora.train_attn or lora.train_mlp):
+        raise HTTPException(
+            status_code=400,
+            detail="LoRA requires at least one of `train_attn` or `train_mlp` to be True; "
+            "`train_unembed` is not supported, so with both False there would be nothing to train.",
+        )
+    if not lora.train_unembed:
+        return lora
+    # Warn rather than reject: the SDK sends train_unembed=True by default.
+    covered = " and ".join(name for name, on in (("attention", lora.train_attn), ("MLP", lora.train_mlp)) if on)
+    logger.warning(
+        "`train_unembed=True` is not supported and is ignored"
+        + (f"; the adapter covers the {covered} projections only." if covered else ".")
+    )
+    return lora.model_copy(update={"train_unembed": False})
 
 
 class CreateModelRequest(BaseModel):
@@ -673,6 +755,9 @@ class Datum(BaseModel):
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
                 values=inp["values"].to_types() if "values" in inp else types.TensorData(data=[]),
                 returns=inp["returns"].to_types() if "returns" in inp else types.TensorData(data=[]),
+                rollout_logprobs=(
+                    inp["rollout_logprobs"].to_types() if "rollout_logprobs" in inp else types.TensorData(data=[])
+                ),
             ),
             model_input=self.model_input.to_types(),
         )
@@ -854,6 +939,10 @@ class FutureResponse(BaseModel):
     request_id: str
 
 
+class SampleFutureResponse(FutureResponse):
+    sample_sequence_ids: list[str]
+
+
 class TelemetryEvent(BaseModel):
     event: str
     event_id: str
@@ -955,6 +1044,23 @@ class WeightsInfoResponse(BaseModel):
     base_model: str
     is_lora: bool
     lora_rank: int | None = None
+    train_unembed: bool | None = None
+    train_mlp: bool | None = None
+    train_attn: bool | None = None
+
+    @classmethod
+    def from_types(cls, base_model: str, lora_config: types.LoraConfig) -> "WeightsInfoResponse":
+        """Describe a stored model so the SDK can recreate an adapter of the same shape on resume."""
+        if lora_config.rank == 0:
+            return cls(base_model=base_model, is_lora=False, lora_rank=0)
+        return cls(
+            base_model=base_model,
+            is_lora=True,
+            lora_rank=lora_config.rank,
+            train_unembed=lora_config.train_unembed,
+            train_mlp=lora_config.train_mlp,
+            train_attn=lora_config.train_attn,
+        )
 
 
 class ClientConfigResponse(BaseModel):
@@ -1319,7 +1425,8 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
     # Generate a random seed if not provided
     seed = request.lora_config.seed if request.lora_config.seed is not None else random.randint(0, 2**31 - 1)
-    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0, seed=seed)
+    lora = _supported_lora_config(request.lora_config)
+    lora_config = lora.to_types(seed=seed, alpha=32.0)
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.CREATE_MODEL,
@@ -1342,7 +1449,8 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     return CreateModelResponse(
         model_id=model_id,
         base_model=request.base_model,
-        lora_config=request.lora_config,
+        # The resolved config, including the server-generated seed and train_unembed=False.
+        lora_config=LoRAConfig.from_types(lora_config),
         status="created",
         request_id=str(request_id),
     )
@@ -1384,7 +1492,9 @@ async def get_model_info(request: GetInfoRequest, session: AsyncSession = Depend
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
     model_data = ModelData(
-        base_model=model.base_model, lora_config=LoRAConfig(rank=lora_config.rank), model_name=model.base_model
+        base_model=model.base_model,
+        lora_config=LoRAConfig.from_types(lora_config),
+        model_name=model.base_model,
     )
 
     return ModelInfoResponse(model_id=model.model_id, status=model.status, model_data=model_data)
@@ -1661,7 +1771,7 @@ async def validate_sampler_checkpoint_once(
         validated.add(key)
 
 
-@app.post("/api/v1/asample", response_model=FutureResponse)
+@app.post("/api/v1/asample", response_model=SampleFutureResponse)
 async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Generates samples from the model (async version)."""
     if request.sampling_session_id is not None and ":" in request.sampling_session_id:
@@ -1722,7 +1832,12 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         )
         await session.commit()
 
-    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+    return SampleFutureResponse(
+        future_id=str(request_id),
+        status="pending",
+        request_id=str(request_id),
+        sample_sequence_ids=[uuid4().hex for _ in range(request.num_samples)],
+    )
 
 
 @app.get("/api/v1/get_server_capabilities", response_model=GetServerCapabilitiesResponse)
@@ -1765,18 +1880,31 @@ async def retrieve_future(request: RetrieveFutureRequest, req: Request):
         # The SDK only accepts sample/forward/forward_backward results in proto
         # wire format. Errors and other result types stay JSON.
         if types.RequestType(request_type) in PROTO_SERIALIZABLE_REQUEST_TYPES:
-            async with req.app.state.proto_serialization_lock:
-                content = await asyncio.to_thread(
-                    _serialize_proto_result,
-                    types.RequestType(request_type),
-                    result_data,
-                )
+            # Forwarded samples are stored as proto already and go out as-is;
+            # anything stored as JSON is encoded once here and cached.
+            content = external_future_store.proto_result(request_id) if found_in_memory else None
+            if content is None:
+                async with req.app.state.proto_serialization_lock:
+                    content = external_future_store.proto_result(request_id) if found_in_memory else None
+                    if content is None:
+                        content = await asyncio.to_thread(
+                            _serialize_proto_result,
+                            types.RequestType(request_type),
+                            result_data,
+                        )
+                        if found_in_memory:
+                            external_future_store.cache_proto(request_id, content)
             response: Response = Response(content=content, media_type=PROTO_CONTENT_TYPE)
         else:
             response = raw_json_response(result_data)
         # Start the retry-grace clock now that the response is built and about to
-        # be sent, so a large result is never evicted mid-delivery.
-        if found_in_memory:
+        # be sent, so a large result is never evicted mid-delivery -- but only if
+        # this client is still there to receive it. The SDK abandons a poll after
+        # 45s and retries the same request_id; if the result lands after that,
+        # this handler wakes on a dead connection (uvicorn drops the send
+        # silently) and starting the short clock here would let the sweeper
+        # evict a result nobody received, turning the retry into a 404.
+        if found_in_memory and not await req.is_disconnected():
             external_future_store.mark_retrieved(request_id)
         return response
 
@@ -2051,13 +2179,7 @@ async def get_weights_info(request: WeightsInfoRequest, req: Request, session: A
     await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
 
     lora_config = types.LoraConfig.model_validate(model.lora_config)
-    is_lora = lora_config.rank > 0
-
-    return WeightsInfoResponse(
-        base_model=model.base_model,
-        is_lora=is_lora,
-        lora_rank=lora_config.rank,
-    )
+    return WeightsInfoResponse.from_types(model.base_model, lora_config)
 
 
 @app.get("/")
@@ -2109,4 +2231,13 @@ if __name__ == "__main__":
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config
 
-    uvicorn.run(app, host=args.host, port=args.port, log_config=get_uvicorn_log_config())
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_config=get_uvicorn_log_config(),
+        # Pending connections queue in the kernel while the loop is busy instead
+        # of being refused (effective value is capped by net.core.somaxconn).
+        backlog=SKYRL_HTTP_CONNECTION_LIMIT,
+        timeout_keep_alive=HTTP_KEEP_ALIVE_TIMEOUT_SECONDS,
+    )

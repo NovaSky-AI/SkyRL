@@ -112,6 +112,25 @@ class TestPackedBufferSize:
         assert _packed_buffer_size_bytes("m", 0.0, torch.float32) == 151936 * 4096 * 4
 
 
+def test_max_param_numel_skips_tensors_that_are_never_synced(tmp_path):
+    """DeepSeek-V4.1's Engram tables stay in the inference engine; sizing the buffer for one would ask for
+    hundreds of GiB."""
+    from safetensors.torch import save_file
+
+    from skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes import max_param_numel
+
+    save_file(
+        {
+            "layers.1.engram.embed.weight": torch.zeros(64, 8),
+            "layers.1.engram.embed.scale": torch.zeros(64, 1),
+            "layers.1.engram.wkv.weight": torch.zeros(4, 8),
+            "embed.weight": torch.zeros(10, 8),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    assert max_param_numel(str(tmp_path)) == 80
+
+
 def test_the_threshold_applies_to_nccl_as_well_as_ipc():
     """``weight_transfer_threshold_cuda_ipc_GB`` sizes the packed buffer on both
     push backends, despite naming only IPC."""
@@ -274,7 +293,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
         def _fake_trainer_init(init_info, *, client, source=None):
             seen["init_info"] = init_info
             seen["source"] = source
-            return object()
+            return SimpleNamespace()
 
         monkeypatch.setattr(WeightTransferTrainerFactory, "trainer_init", _fake_trainer_init)
 
@@ -288,11 +307,13 @@ class TestBuildTrainerEngineResolvesTheBackend:
                 model_dtype="bfloat16",
                 weight_transfer_threshold_cuda_ipc_GB=1.0,
                 fp8_weight_sync_mode=fp8_weight_sync_mode,
+                speculative_config=None,
             ),
             colocate_all=colocate_all,
             rank=0,
             inference_world_size=4,
             source_factory=source_factory,
+            draft_source_factory=None,
             server_urls=["http://a"],
             data_parallel_size=1,
             base_model_path=None,

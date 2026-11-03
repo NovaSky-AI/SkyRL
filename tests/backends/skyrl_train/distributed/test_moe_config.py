@@ -68,3 +68,14 @@ class TestMegatronConfigMoEFields:
         assert cfg.tensor_model_parallel_size == 4
         assert cfg.pipeline_model_parallel_size == 2
         assert cfg.expert_model_parallel_size == 8
+
+    def test_lora_config_defaults(self):
+        cfg = MegatronConfig()
+        assert cfg.lora_config.lora_type == "lora"
+        assert cfg.lora_config.merge_lora is True
+        assert cfg.lora_config.experts_shared_outer_loras is False
+
+    def test_lora_config_from_dict(self):
+        d = {"lora_config": {"experts_shared_outer_loras": True}}
+        cfg = build_nested_dataclass(MegatronConfig, d)
+        assert cfg.lora_config.experts_shared_outer_loras is True

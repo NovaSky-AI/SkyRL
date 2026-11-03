@@ -1,7 +1,10 @@
 """Proto wire-format conversion for the Tinker SDK's binary paths.
 
 Two directions, both required by tinker SDK >= 0.25.0 (older SDKs negotiate
-these via server-side client_config flags and fall back to JSON):
+these via server-side client_config flags and fall back to JSON). Written
+against the SDK's ``tinker_public.proto`` as of 0.27.x; 0.28.0 renamed
+``TopkPromptLogprobs`` to ``TopkLogprobs`` (``prompt_length`` -> ``length``),
+which the top-k serializer below does not yet handle:
 
 - **Responses**: the SDK retrieves ``sample``, ``forward``, and
   ``forward_backward`` results as protobuf (``Accept: application/x-protobuf``
@@ -19,6 +22,8 @@ these via server-side client_config flags and fall back to JSON):
 """
 
 import base64
+import math
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 from tinker.proto import tinker_public_pb2 as pb
@@ -55,6 +60,10 @@ _TENSOR_DTYPE_TO_NUMPY = {"float32": np.float32, "int64": np.int64}
 # Request tensors only arrive as the public dtypes (the SDK collapses to
 # {float32, int64} on the write path).
 _PROTO_DTYPE_TO_NUMPY = {pb.DTYPE_FLOAT32: np.float32, pb.DTYPE_INT64: np.int64}
+
+# SDK >= 0.27 schemas carry the tagged loss_fn_config_v2 map; the server runs
+# against whichever SDK is installed, so feature-detect it.
+_HAS_LOSS_FN_CONFIG_V2 = "loss_fn_config_v2" in pb.ForwardBackwardRequest.DESCRIPTOR.fields_by_name
 
 
 def parse_forward_backward_request(body: bytes) -> tuple[dict, bool]:
@@ -98,10 +107,32 @@ def parse_forward_backward_request(body: bytes) -> tuple[dict, bool]:
         "forward_backward_input": {
             "data": data,
             "loss_fn": msg.loss_fn,
-            "loss_fn_config": dict(msg.loss_fn_config) or None,
+            "loss_fn_config": _loss_fn_config_from_proto(msg),
         },
     }
     return request_dict, msg.forward_only
+
+
+def _loss_fn_config_from_proto(msg: pb.ForwardBackwardRequest) -> dict[str, float | str] | None:
+    """Read ``loss_fn_config`` from whichever map the SDK populated.
+
+    SDK >= 0.27 writes every entry to ``loss_fn_config_v2`` (a tagged
+    number/text union) and mirrors only the numeric ones into the legacy
+    float-only ``loss_fn_config`` map, so the legacy map silently drops string
+    values. Prefer v2 whenever it is set; text values pass through unchanged
+    and the API's ``ForwardBackwardInput`` model rejects them, since no SkyRL
+    loss takes a string parameter.
+    """
+    if _HAS_LOSS_FN_CONFIG_V2 and msg.loss_fn_config_v2:
+        config: dict[str, float | str] = {}
+        for key, value in msg.loss_fn_config_v2.items():
+            arm = value.WhichOneof("value")
+            if arm == "text":
+                config[key] = value.text
+            else:
+                config[key] = value.number
+        return config
+    return dict(msg.loss_fn_config) or None
 
 
 def _tensor_from_proto(tensor: pb.Tensor) -> dict:
@@ -124,24 +155,44 @@ def serialize_result(request_type: types.RequestType, result_data: dict) -> byte
 
 def _serialize_sample_output(result_data: dict) -> bytes:
     output = types.SampleOutput.model_validate(result_data)
+    return serialize_sample_output(
+        [(seq.stop_reason, seq.tokens, seq.logprobs) for seq in output.sequences],
+        output.prompt_logprobs,
+        output.topk_prompt_logprobs,
+    )
+
+
+def serialize_sample_output(
+    sequences: Iterable[tuple[str, Sequence[int], Sequence[float]]],
+    prompt_logprobs: Sequence[float | None] | None,
+    topk_prompt_logprobs: Sequence[Sequence[tuple[int, float]] | None] | None,
+) -> bytes:
+    """Build ``SampleResponse`` wire bytes from plain Python data.
+
+    ``sequences`` holds ``(stop_reason, tokens, logprobs)`` per sequence. This is
+    the hot path for forwarded samples: the vLLM body is decoded once and
+    encoded straight to proto, with no pydantic model and no JSON text in
+    between (each of which costs about as much as this whole function for a
+    32k-token result).
+    """
     proto = pb.SampleResponse()
 
-    for seq in output.sequences:
+    for stop_reason, tokens, logprobs in sequences:
         proto.sequences.append(
             pb.SampledSequence(
-                stop_reason=_STOP_REASON_TO_PROTO[seq.stop_reason],
-                tokens=np.asarray(seq.tokens, dtype=np.int32).tobytes(),
-                logprobs=np.asarray(seq.logprobs, dtype=np.float32).tobytes(),
+                stop_reason=_STOP_REASON_TO_PROTO[stop_reason],
+                tokens=np.asarray(tokens, dtype=np.int32).tobytes(),
+                logprobs=np.asarray(logprobs, dtype=np.float32).tobytes(),
             )
         )
 
-    if output.prompt_logprobs is not None:
+    if prompt_logprobs is not None:
         proto.prompt_logprobs = np.array(
-            [np.nan if lp is None else lp for lp in output.prompt_logprobs], dtype=np.float32
+            [np.nan if lp is None else lp for lp in prompt_logprobs], dtype=np.float32
         ).tobytes()
 
-    if output.topk_prompt_logprobs is not None:
-        rows = output.topk_prompt_logprobs
+    if topk_prompt_logprobs is not None:
+        rows = topk_prompt_logprobs
         # k is not recorded in the result, so recover it from the widest row.
         # With every row undefined, use k=1 so prompt_length stays encoded
         # (the client maps fully-masked rows back to None).
@@ -169,7 +220,8 @@ def _serialize_forward_backward_output(result_data: dict) -> bytes:
     proto = pb.ForwardBackwardOutput()
     proto.loss_fn_output_type = output.loss_fn_output_type
     for name, value in output.metrics.items():
-        proto.metrics[name] = float(value)
+        # Older futures stored non-finite metrics as null, losing the exact value.
+        proto.metrics[name] = math.nan if value is None else float(value)
 
     if not output.loss_fn_outputs:
         return proto.SerializeToString()

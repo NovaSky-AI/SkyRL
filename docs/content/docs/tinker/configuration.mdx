@@ -54,6 +54,8 @@ python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 
 No server-side configuration is needed to switch between single-tenant LoRA and full-parameter fine-tuning.
 
+The fields a Tinker request carries — `rank`, `train_attn` and `train_mlp` — come only from the request. Setting `trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}` in `backend_config` is rejected, since the request would always overwrite it. The exception is an inference-only server (`--runtime-role inference`), which receives no training requests: there `trainer.policy.model.lora.rank` in `backend_config` is how LoRA serving is enabled. Settings the SDK cannot express, such as `dropout` and `target_modules`, are configured in `backend_config`, and so is the policy's `alpha`; the critic's `alpha` is always 32.
+
 ### Multi-tenant LoRA
 
 Hosting multiple LoRA tenants concurrently against one server *does* require server-side configuration on the Megatron backend. At minimum:
@@ -67,7 +69,7 @@ Hosting multiple LoRA tenants concurrently against one server *does* require ser
 }
 ```
 
-`merge_lora: false` is required so vLLM serves each tenant's adapter by name (with `merge_lora: true` vLLM only sees the merged base and per-tenant sampling returns the wrong weights). `max_cpu_loras` must be sized to the peak number of concurrent tenants — there is no on-demand reload, and if vLLM evicts an adapter the next `sample()` against it 404s. All adapters on one server must share the same `(rank, alpha, target_modules)` signature; mismatched signatures are hard-rejected at `create_model`.
+`merge_lora: false` is required so vLLM serves each tenant's adapter by name (with `merge_lora: true` vLLM only sees the merged base and per-tenant sampling returns the wrong weights). `max_cpu_loras` must be sized to the peak number of concurrent tenants — there is no on-demand reload, and if vLLM evicts an adapter the next `sample()` against it 404s. All adapters on one server must share the same `(rank, alpha, train_attn, train_mlp)` signature; mismatched signatures are hard-rejected at `create_model`.
 
 See [Multi-tenancy](./multi_tenancy) for the full operator contract and SFT/RL quickstarts.
 

@@ -15,8 +15,11 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
+    fold_lora_alpha_for_vllm,
     fold_lora_rank_scale_for_vllm,
     lora_rank_from_tensors,
+    mark_alpha_folded,
+    normalized_moe_expert_lora_rank,
 )
 
 ALPHA = 32
@@ -131,6 +134,73 @@ def test_lora_rank_from_tensors_reads_both_layouts_and_rejects_mismatch():
         lora_rank_from_tensors(None, torch.zeros(4))
 
 
+@pytest.mark.parametrize(
+    "lora_rank,topk,etp,expected",
+    [
+        (64, 8, 1, 8),
+        # Rounded up to a multiple of the expert tensor parallel size.
+        (64, 8, 16, 16),
+        (64, 8, 64, 64),
+        (32, 8, 1, 4),
+    ],
+)
+def test_normalized_moe_expert_lora_rank(lora_rank, topk, etp, expected):
+    assert normalized_moe_expert_lora_rank(lora_rank, topk, etp) == expected
+
+
 def test_invalid_config_rank_rejected():
     with pytest.raises(ValueError, match="config_rank"):
         fold_lora_rank_scale_for_vllm({}, config_rank=0)
+
+
+class TestAlphaFold:
+    """vLLM scales lora_b in place at load; the alpha fold makes its scale 1."""
+
+    def test_lora_b_carries_alpha_over_r_and_lora_a_is_untouched(self):
+        state = _state_per_expert_layout(dtype=torch.float32)
+        folded = fold_lora_alpha_for_vllm(state, config_rank=CONFIG_RANK, alpha=2 * CONFIG_RANK)
+        assert list(folded) == list(state)
+        for key, tensor in state.items():
+            if key.endswith(".lora_B.weight"):
+                assert torch.equal(folded[key], tensor * 2.0)
+            else:
+                assert folded[key] is tensor
+
+    def test_unit_scale_is_a_no_op(self):
+        state = _state_per_expert_layout(dtype=torch.bfloat16)
+        folded = fold_lora_alpha_for_vllm(state, config_rank=CONFIG_RANK, alpha=CONFIG_RANK)
+        assert all(folded[k] is state[k] for k in state)
+
+    def test_power_of_two_scale_is_exact_in_bf16(self):
+        state = _state_per_expert_layout(dtype=torch.bfloat16)
+        folded = fold_lora_alpha_for_vllm(state, config_rank=CONFIG_RANK, alpha=CONFIG_RANK // 2)
+        for key, tensor in state.items():
+            if key.endswith(".lora_B.weight"):
+                assert torch.equal(folded[key].float(), tensor.float() * 0.5)
+
+    def test_both_folds_reproduce_the_trainer_delta_with_unit_vllm_scale(self):
+        """rank fold then alpha fold == (alpha / effective_rank) * B @ A, with nothing left for vLLM."""
+        alpha = 2 * CONFIG_RANK
+        state = _state_per_expert_layout(dtype=torch.float32)
+        folded, _ = fold_lora_rank_scale_for_vllm(state, config_rank=CONFIG_RANK)
+        folded = fold_lora_alpha_for_vllm(folded, config_rank=CONFIG_RANK, alpha=alpha)
+        for key in state:
+            if not key.endswith(".lora_B.weight"):
+                continue
+            a_key = key[: -len(".lora_B.weight")] + ".lora_A.weight"
+            rank = state[key].shape[-1]
+            trainer = (alpha / rank) * (state[key] @ state[a_key])
+            vllm_with_unit_scale = folded[key] @ folded[a_key]
+            torch.testing.assert_close(vllm_with_unit_scale, trainer)
+
+    def test_mark_alpha_folded_sets_lora_alpha_to_r(self):
+        cfg = mark_alpha_folded({"r": 32, "lora_alpha": 64, "alpha_pattern": {}})
+        assert cfg["lora_alpha"] == 32 and cfg["r"] == 32
+        with pytest.raises(ValueError, match="alpha_pattern"):
+            mark_alpha_folded({"r": 32, "lora_alpha": 64, "alpha_pattern": {"x": 1}})
+
+    def test_rejects_non_positive_inputs(self):
+        with pytest.raises(ValueError):
+            fold_lora_alpha_for_vllm({}, config_rank=0, alpha=32)
+        with pytest.raises(ValueError):
+            fold_lora_alpha_for_vllm({}, config_rank=32, alpha=0)

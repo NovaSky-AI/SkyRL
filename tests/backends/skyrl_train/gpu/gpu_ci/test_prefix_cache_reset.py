@@ -65,10 +65,14 @@ def _make_worker(worker_cls, engine):
     worker.cfg = SimpleNamespace(
         fully_async=SimpleNamespace(enabled=False, clear_kv_cache_on_weight_sync=False),
         placement=SimpleNamespace(colocate_all=False),
-        policy=SimpleNamespace(megatron_config=SimpleNamespace(lora_config=SimpleNamespace(merge_lora=False))),
+        policy=SimpleNamespace(
+            model=SimpleNamespace(lora=SimpleNamespace(sync_mode="disk")),
+            megatron_config=SimpleNamespace(lora_config=SimpleNamespace(merge_lora=False)),
+        ),
     )
     worker._weight_sync_engine = engine
     worker._weight_sync_inference_client = None
+    worker.actor_module = []
     # FSDP dereferences self.model.model before the LoRA branch, so it must exist even
     # though _is_lora is False and the resulting peft_model goes unused.
     worker.model = SimpleNamespace(model=SimpleNamespace())

@@ -13,9 +13,15 @@ import numpy as np
 import orjson
 import pytest
 import pytest_asyncio
+import ray
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 
 from skyrl.backends.skyrl_train.inference_servers import (
     remote_inference_client as remote_client_module,
@@ -25,13 +31,14 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedArrayKey,
     PackedField,
     decode_packed_routed_experts,
-    pack_ndarray,
+    decode_packed_sample_support,
     pack_routed_experts,
     pack_sample_support,
-    unpack_ndarray,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
+    InferenceServerHTTPError,
+    InferenceServerTimeoutError,
     PauseMode,
     RemoteGenerateClient,
     RemoteInferenceClient,
@@ -40,8 +47,8 @@ from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,
 )
 from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense
 
-_SUPPORT_DTYPES = frozenset({np.dtype(np.float32)})
 _ROUTES = np.arange(12).reshape(3, 2, 2)
 
 
@@ -49,7 +56,7 @@ async def _fake_detokenize(token_id_lists: List[List[int]]) -> List[str]:
     return ["text"] * len(token_id_lists)
 
 
-_SUPPORT = np.arange(6, dtype=np.float32).reshape(2, 3)
+_SUPPORT = csr([[7, 8, -1], [-1, -1, -1], [9, 10, 11]])
 
 
 def _packed_generate_body(*, two_blobs: bool) -> dict:
@@ -59,7 +66,7 @@ def _packed_generate_body(*, two_blobs: bool) -> dict:
         PackedField.ROUTED_EXPERTS.value: pack_routed_experts(_ROUTES),
     }
     if two_blobs:
-        choice[PackedField.ROLLOUT_SAMPLE_SUPPORT.value] = pack_ndarray(_SUPPORT, allowed_dtypes=_SUPPORT_DTYPES)
+        choice[PackedField.ROLLOUT_SAMPLE_SUPPORT.value] = pack_sample_support(_SUPPORT)
     return {"choices": [choice]}
 
 
@@ -117,6 +124,35 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/test/bad_request_text")
     async def bad_request_text():
         return PlainTextResponse("prompt too long", status_code=400)
+
+    @app.post("/test/control_body")
+    async def control_body(kind: str, chunked: bool, status: int = 200):
+        body = {
+            "json": b'{"success": true}',
+            "empty": b"",
+            "invalid": b"not-json",
+            "error": b'{"error": {"message": "reset unavailable"}}',
+        }[kind]
+        if chunked:
+            return StreamingResponse(iter([body]), media_type="application/json", status_code=status)
+        return Response(body, media_type="application/json", status_code=status)
+
+    @app.post("/test/control_hang")
+    async def control_hang():
+        await asyncio.sleep(30)
+        return {"status": "ok"}
+
+    @app.post("/test/control_plain_error")
+    async def control_plain_error():
+        return PlainTextResponse("engine is dead", status_code=502)
+
+    @app.post("/test/control_json_array_error")
+    async def control_json_array_error():
+        return JSONResponse(["engine is dead"], status_code=502)
+
+    @app.post("/test/control_malformed_json_error")
+    async def control_malformed_json_error():
+        return Response(content="<html>bad gateway</html>", media_type="application/json", status_code=502)
 
     @app.post("/finish_session")
     async def finish_session(session_id: str = Query(...)):
@@ -324,16 +360,16 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"is_sleeping": False}
 
     @app.post("/sleep")
-    async def sleep(level: int = 2, tags: Optional[List[str]] = Query(None)):
-        return {"status": "sleeping", "server_id": server_id, "level": level, "tags": tags}
+    async def sleep(level: int = 2, mode: str = "abort", tags: Optional[List[str]] = Query(None)):
+        return {"status": "sleeping", "server_id": server_id, "level": level, "mode": mode, "tags": tags}
 
     @app.post("/wake_up")
     async def wake_up(tags: Optional[List[str]] = Query(None)):
         return {"status": "awake", "server_id": server_id, "tags": tags}
 
     @app.post("/reset_prefix_cache")
-    async def reset_prefix_cache(request: Request):
-        return {"status": "cache_reset", "server_id": server_id, "body": await request.json()}
+    async def reset_prefix_cache(reset_running_requests: bool = Query(False)):
+        return {"success": True, "reset_running_requests": reset_running_requests}
 
     @app.post("/init_weight_transfer_engine")
     async def init_weight_transfer_engine(request: Request):
@@ -496,6 +532,64 @@ def error_router():
     time.sleep(0.2)
 
 
+def _assert_picklable_http_error(exc: BaseException, *, status: int, message: str) -> None:
+    assert isinstance(exc, InferenceServerHTTPError)
+    restored = pickle.loads(pickle.dumps(exc))
+    assert type(restored) is InferenceServerHTTPError
+    assert (restored.status, restored.message, str(restored)) == (status, message, str(exc))
+
+
+class TestInferenceServerHTTPError:
+    """aiohttp's ClientResponseError can't be pickled, so Ray would replace it with a bare RayError."""
+
+    def test_survives_a_ray_task(self):
+        @ray.remote
+        def fail():
+            exc = InferenceServerHTTPError("POST", "http://127.0.0.1:1/pause", 503, "overloaded", [("X-A", "1")])
+            exc.add_note("while pausing")
+            raise exc
+
+        with pytest.raises(InferenceServerHTTPError) as exc_info:
+            ray.get(fail.remote())
+        assert exc_info.value.status == 503
+        assert exc_info.value.message == "overloaded"
+        assert exc_info.value.request_info.method == "POST"
+        assert exc_info.value.headers["X-A"] == "1"
+        assert "while pausing" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "endpoint,message",
+        [
+            ("/test/control_plain_error", "engine is dead"),
+            ("/test/control_json_array_error", "Bad Gateway"),
+            ("/test/control_malformed_json_error", "<html>bad gateway</html>"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_control_plane_error_body(self, client, mock_servers, endpoint, message):
+        with pytest.raises(InferenceServerHTTPError) as exc_info:
+            await client._call_server(mock_servers["server_urls"][0], endpoint)
+        _assert_picklable_http_error(exc_info.value, status=502, message=message)
+
+
+class TestControlPlaneTimeout:
+    @pytest.mark.asyncio
+    async def test_hung_control_plane_call_raises_picklable_timeout(self, client, mock_servers, monkeypatch):
+        monkeypatch.setattr(remote_client_module, "SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S", 0.2)
+        url = mock_servers["server_urls"][0]
+        with pytest.raises(InferenceServerTimeoutError) as exc_info:
+            await asyncio.wait_for(client._call_server(url, "/test/control_hang"), timeout=10)
+        err = exc_info.value
+        assert (err.method, err.url, err.timeout_s) == ("POST", f"{url}/test/control_hang", 0.2)
+        restored = pickle.loads(pickle.dumps(err))
+        assert (restored.method, restored.url, restored.timeout_s, str(restored)) == (
+            err.method,
+            err.url,
+            err.timeout_s,
+            str(err),
+        )
+
+
 class TestRemoteInferenceClientInit:
     """Test client initialization and serialization."""
 
@@ -585,9 +679,7 @@ class TestDataPlane:
                         "token_ids": [7],
                         "finish_reason": "stop",
                         "logprobs": {"content": [{"logprob": -0.1}]},
-                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
-                            np.array([[7, 8]], dtype=np.int32)
-                        ),
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(csr([[7, 8]])),
                     }
                 ]
             }
@@ -604,7 +696,7 @@ class TestDataPlane:
         assert captured["url"].endswith("/skyrl/v1/generate")
         assert captured["json"]["return_sample_support"] is True
         assert captured["packed_side_channels"] is True
-        assert np.array_equal(result.sample_support, np.array([[7, 8]], dtype=np.int32))
+        assert np.array_equal(dense(result.sample_support), [[7, 8]])
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("input_batch_opts", [{}, {"return_sample_support": False}])
@@ -647,9 +739,7 @@ class TestDataPlane:
                     {
                         "token_ids": [7],
                         "finish_reason": "stop",
-                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(
-                            np.array([[7, 8]], dtype=np.int32)
-                        ),
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(csr([[7, 8]])),
                     }
                 ]
             }
@@ -660,7 +750,7 @@ class TestDataPlane:
         result = await client.generate({"prompt_token_ids": [[1, 2]], "return_sample_support": True})
 
         assert captured["json"]["return_sample_support"] is True
-        assert np.array_equal(result["rollout_sample_support"][0], np.array([[7, 8]], dtype=np.int32))
+        assert np.array_equal(dense(result["rollout_sample_support"][0]), [[7, 8]])
 
     @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):
@@ -740,8 +830,8 @@ class TestPackedSideChannelBodies:
         assert isinstance(choice[PackedField.ROUTED_EXPERTS][PackedArrayKey.DATA], memoryview)
         assert isinstance(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT][PackedArrayKey.DATA], memoryview)
         assert np.array_equal(decode_packed_routed_experts(choice[PackedField.ROUTED_EXPERTS]), _ROUTES)
-        support, _ = unpack_ndarray(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT], allowed_dtypes=_SUPPORT_DTYPES, ndim=2)
-        assert np.array_equal(support, _SUPPORT)
+        support = decode_packed_sample_support(choice[PackedField.ROLLOUT_SAMPLE_SUPPORT])
+        assert np.array_equal(dense(support), dense(_SUPPORT))
 
     @pytest.mark.asyncio
     async def test_drifted_layout_raises_without_retrying(self, client, mock_servers):
@@ -770,8 +860,9 @@ class TestPackedSideChannelBodies:
 
     @pytest.mark.asyncio
     async def test_client_error_with_non_json_body_surfaces_the_text(self, client, mock_servers):
-        with pytest.raises(aiohttp.ClientResponseError, match="prompt too long"):
+        with pytest.raises(aiohttp.ClientResponseError, match="prompt too long") as exc_info:
             await client._post(f"{mock_servers['proxy_url']}/test/bad_request_text", json={})
+        _assert_picklable_http_error(exc_info.value, status=400, message="prompt too long")
 
     @pytest.mark.asyncio
     async def test_non_routed_expert_generate_never_scans_the_body(self, client, monkeypatch):
@@ -810,6 +901,43 @@ class TestPackedSideChannelBodies:
 
 class TestControlPlane:
     """Test control plane methods (fan-out to all servers)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize("kind,expected", [("json", {"success": True}), ("empty", None)])
+    async def test_control_response_body(self, client, chunked, kind, expected):
+        url = client.server_urls[0]
+
+        result = await client._call_server(
+            url, "/test/control_body", params={"kind": kind, "chunked": str(chunked).lower()}
+        )
+
+        assert result == (url, {"status": 200, "body": expected})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    async def test_control_response_invalid_json(self, client, chunked):
+        with pytest.raises(json.JSONDecodeError):
+            await client._call_server(
+                client.server_urls[0],
+                "/test/control_body",
+                params={"kind": "invalid", "chunked": str(chunked).lower()},
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize("kind", ["error", "empty"])
+    async def test_control_response_http_error(self, client, chunked, kind):
+        with pytest.raises(aiohttp.ClientResponseError) as error:
+            await client._call_server(
+                client.server_urls[0],
+                "/test/control_body",
+                params={"kind": kind, "chunked": str(chunked).lower(), "status": 503},
+            )
+
+        assert error.value.status == 503
+        if kind == "error":
+            assert error.value.message == "reset unavailable"
 
     @pytest.mark.asyncio
     async def test_pause_keep_mode(self, client):
@@ -868,6 +996,9 @@ class TestControlPlane:
         assert len(result) == 2
         for url, response in result.items():
             assert response["body"]["level"] == 2
+            # In-flight requests are aborted by a separate /pause first, so /sleep itself
+            # pauses in "keep" mode (required by vLLM with routed-experts capture enabled).
+            assert response["body"]["mode"] == "keep"
             assert response["body"]["tags"] is None
 
     @pytest.mark.asyncio
@@ -901,13 +1032,13 @@ class TestControlPlane:
             assert response["body"]["tags"] == ["weights"]
 
     @pytest.mark.asyncio
-    async def test_reset_prefix_cache(self, client):
-        """Test reset_prefix_cache fans out to all servers with the request body."""
-        result = await client.reset_prefix_cache(reset_running_requests=True)
+    @pytest.mark.parametrize("reset_running_requests", [False, True])
+    async def test_reset_prefix_cache(self, client, reset_running_requests):
+        """Reset uses vLLM's query parameter on every server."""
+        result = await client.reset_prefix_cache(reset_running_requests=reset_running_requests)
         assert set(result) == set(client.server_urls)
         for response in result.values():
-            assert response["body"]["status"] == "cache_reset"
-            assert response["body"]["body"] == {"reset_running_requests": True}
+            assert response["body"] == {"success": True, "reset_running_requests": reset_running_requests}
 
 
 class TestWeightSync:
@@ -1386,8 +1517,9 @@ class TestLoRAControlPlane:
     @pytest.mark.asyncio
     async def test_unload_unknown_lora_raises(self, client, mock_servers):
         # Server returns 404, surfaced as ClientResponseError via raise_for_status.
-        with pytest.raises(aiohttp.ClientResponseError):
+        with pytest.raises(aiohttp.ClientResponseError) as exc_info:
             await client.unload_lora_adapter("nonexistent-lora")
+        _assert_picklable_http_error(exc_info.value, status=404, message="Not Found")
         registries = await _get_lora_registries(mock_servers["server_urls"])
         for reg in registries:
             assert "nonexistent-lora" not in reg
