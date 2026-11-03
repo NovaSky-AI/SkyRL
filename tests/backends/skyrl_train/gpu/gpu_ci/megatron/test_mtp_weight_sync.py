@@ -120,7 +120,7 @@ class MtpExportPolicyWorker(MegatronPolicyWorkerBase):
     def skyrl_export_draft_to_file(self):
         tensors = {}
         rank = torch.distributed.get_rank()
-        for name, tensor in self._build_draft_weight_source(torch.bfloat16):
+        for name, tensor in self._build_draft_weight_source(torch.bfloat16).iter_full():
             if rank == 0:
                 tensors[name] = tensor.detach().cpu().contiguous()
         if rank != 0:

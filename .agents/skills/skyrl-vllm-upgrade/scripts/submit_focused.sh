@@ -5,7 +5,8 @@
 #   bash .agents/skills/skyrl-vllm-upgrade/scripts/submit_focused.sh <fsdp|megatron> <tag> [group...]
 #
 # <tag> makes the job name unique (query jobs by the printed ID, not by name).
-# Groups default to the spec's entrypoint; pass them to run a subset or a rerun.
+# Groups default to the spec's entrypoint; pass them to run a subset or a rerun. For a targeted
+# rerun of individual tests, set FOCUSED_TESTS="<node id> ..." and pass the tests_<flavor> group.
 # HF_TOKEN is taken from the environment, else from .env.ray, and passed with --env
 # so it is never written to a file.
 set -euo pipefail
@@ -36,5 +37,6 @@ fi
 anyscale job submit -f "$spec" --name "vllm-upgrade-$flavor-$tag" --timeout 21000 \
     ${COMPUTE_CONFIG:+--compute-config "$COMPUTE_CONFIG"} \
     --env "HF_TOKEN=$HF_TOKEN" \
+    ${FOCUSED_TESTS:+--env "FOCUSED_TESTS=$FOCUSED_TESTS"} \
     -e '*.whl' -e 'exp_logs/' -e 'agents_artifacts/' -e 'literature_review/' \
     ${cmd[@]+"${cmd[@]}"} 2>&1 | sed -E "s/'HF_TOKEN': '[^']*'/'HF_TOKEN': '<redacted>'/"

@@ -5,8 +5,9 @@
 # Usage (as an Anyscale entrypoint, from the repo root):
 #   bash .agents/skills/skyrl-vllm-upgrade/scripts/run_focused_gpu.sh <group>...
 #
-# Groups (fsdp image): cpu_vllm  inference  weight_sync  mooncake
-# Groups (megatron image): megatron
+# Groups (fsdp image): cpu_vllm  inference  weight_sync  mooncake  tests_fsdp
+# Groups (megatron image): megatron  tests_megatron
+# tests_* run the pytest node IDs in $FOCUSED_TESTS (set by submit_focused.sh).
 #
 # Every group runs even if an earlier one fails; the exit code is non-zero if any
 # failed, and a per-group summary is printed at the end (grep for "== SUMMARY").
@@ -87,6 +88,13 @@ for group in "$@"; do
             "$GPU_CI/megatron/test_shared_outer_lora.py" \
             "$GPU_CI/test_lora.py" \
             -m "megatron"
+        ;;
+    tests_fsdp | tests_megatron)
+        # Targeted rerun: the pytest node IDs in $FOCUSED_TESTS (space-separated).
+        prepare_data
+        extra=${group#tests_}
+        # shellcheck disable=SC2086
+        run_group "$group" uv run --isolated --extra dev --extra "$extra" pytest -s $FOCUSED_TESTS
         ;;
     *)
         echo "unknown group: $group" >&2
