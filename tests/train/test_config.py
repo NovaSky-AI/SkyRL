@@ -529,6 +529,32 @@ def test_megatron_empty_cuda_cache_with_expandable_segments(
     assert cfg.empty_cuda_cache_after_forward(expandable_segments) is after_forward
 
 
+@pytest.mark.parametrize(
+    "strategy, empty_cuda_cache, expandable_segments, expected",
+    [
+        ("megatron", None, True, False),  # the default: expandable segments do not fragment
+        ("megatron", None, False, True),
+        ("megatron", True, True, True),  # an explicit bool always wins
+        ("megatron", False, False, False),
+        ("fsdp2", None, True, True),  # other strategies keep the unconditional empty
+    ],
+)
+def test_empty_cache_between_trainer_phases(strategy, empty_cuda_cache, expandable_segments, expected):
+    """The empties after the forward passes and after training follow the per-pass rule."""
+    from types import SimpleNamespace
+
+    from skyrl.train.config.config import MegatronConfig
+    from skyrl.train.trainer import RayPPOTrainer
+
+    trainer_cfg = SimpleNamespace(
+        strategy=strategy,
+        use_expandable_segments=expandable_segments,
+        policy=SimpleNamespace(megatron_config=MegatronConfig(empty_cuda_cache=empty_cuda_cache)),
+    )
+    stub = SimpleNamespace(cfg=SimpleNamespace(trainer=trainer_cfg))
+    assert RayPPOTrainer._empty_cache_between_phases(stub) is expected
+
+
 def test_megatron_empty_cuda_cache_from_cli_override():
     """The CLI form used by launch scripts resolves the same way as the dataclass."""
     cfg = SkyRLTrainConfig.from_cli_overrides(
