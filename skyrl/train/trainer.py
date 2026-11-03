@@ -1343,15 +1343,31 @@ class RayPPOTrainer:
             # serialization is amortized off the dispatch critical path across mini-batches. The
             # staged chunks use the same partition as `_execute_training_step`'s `stage_data`, so
             # the packing — and resulting logprobs/values — match what forward_backward recomputes.
-            all_chunk_refs = self.dispatch.stage_data(model, data_fwd_pass, mini_batch_boundaries)
-            combined_outputs: List[Dict[str, Any]] = []
-            for chunk_refs in all_chunk_refs:
-                mb_output = self.dispatch.forward_from_staged(model, chunk_refs)
-                combined_outputs.extend(mb_output.loss_fn_outputs)
-            return loss_fn_outputs_to_tensor(combined_outputs, key=key)
+            return self._forward_per_minibatch(model, data_fwd_pass, key, mini_batch_boundaries)
 
         output = self.dispatch.forward(model, data_fwd_pass)
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key=key)
+
+    def _forward_per_minibatch(
+        self,
+        model: str,
+        data_fwd_pass: TrainingInputBatch,
+        key: str,
+        mini_batch_boundaries: List[Tuple[int, int]],
+    ) -> torch.Tensor:
+        """Forward ``model`` over each mini-batch and return a ``[len(data_fwd_pass), T]`` tensor.
+
+        Row ``i`` holds sample ``i``'s output; rows outside ``mini_batch_boundaries`` (e.g. the
+        trailing step-wise padding) stay zero. ``stage_data`` pads every mini-batch to a multiple of
+        the DP size and those padding rows come back at the end of the mini-batch's outputs, so
+        they are dropped here instead of shifting the rows of later mini-batches.
+        """
+        outputs: List[Dict[str, Any]] = [{key: []} for _ in range(len(data_fwd_pass))]
+        all_chunk_refs = self.dispatch.stage_data(model, data_fwd_pass, mini_batch_boundaries)
+        for (start, end), chunk_refs in zip(mini_batch_boundaries, all_chunk_refs):
+            mb_outputs = self.dispatch.forward_from_staged(model, chunk_refs).loss_fn_outputs
+            outputs[start:end] = mb_outputs[: end - start]
+        return loss_fn_outputs_to_tensor(outputs, key=key)
 
     def _skip_policy_forward(self, training_input: TrainingInputBatch) -> bool:
         """Whether the policy forward pass producing the "old" logprobs can be skipped.
@@ -1447,12 +1463,8 @@ class RayPPOTrainer:
             first_minibatch_end = boundaries[0][1]
             action_log_probs = torch.zeros_like(training_input["loss_mask"], dtype=torch.float32)
             if len(boundaries) > 1:
-                rest_outputs: List[Dict[str, Any]] = []
-                for chunk_refs in self.dispatch.stage_data("policy", data_fwd_pass, boundaries[1:]):
-                    rest_outputs.extend(self.dispatch.forward_from_staged("policy", chunk_refs).loss_fn_outputs)
-                rest = loss_fn_outputs_to_tensor(rest_outputs, key="logprobs")
-                rest = rest[: len(training_input["sequences"]) - first_minibatch_end]
-                action_log_probs[first_minibatch_end:, : rest.shape[1]] = rest
+                rest = self._forward_per_minibatch("policy", data_fwd_pass, "logprobs", boundaries[1:])
+                action_log_probs[:, : rest.shape[1]] = rest
         else:
             action_log_probs = self._execute_forward_pass(
                 "policy",

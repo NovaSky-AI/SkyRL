@@ -103,6 +103,33 @@ def test_policy_forward_skips_first_minibatch(boundaries, expected_forward_minib
         assert "policy/rollout_train_logprobs_abs_diff_mean" not in trainer.all_metrics
 
 
+def test_policy_forward_drops_minibatch_padding_rows():
+    """``stage_data`` pads each mini-batch to a multiple of the DP size and the padding rows come
+    back at the end of that mini-batch's outputs; they must not shift later mini-batches' rows."""
+    cfg = example_dummy_config()
+    cfg.trainer.old_logprobs_from_first_minibatch = True
+    trainer = _make_trainer(cfg)
+    dp_size, response_len = 2, 3
+    stage_data, _ = _staged_forward(response_len)
+
+    def forward_from_staged(model, chunk_refs):
+        (start, end) = chunk_refs[0]
+        outputs = [{"logprobs": [-(i + 1.0)] * response_len} for i in range(start, end)]
+        outputs += [{"logprobs": [99.0] * response_len}] * ((-(end - start)) % dp_size)
+        return WorkerOutput(loss_fn_outputs=outputs)
+
+    trainer.dispatch.stage_data.side_effect = stage_data
+    trainer.dispatch.forward_from_staged.side_effect = forward_from_staged
+
+    out = trainer.fwd_logprobs_values_reward(_batch(7, response_len, [(0, 2), (2, 5), (5, 7)]))
+
+    logprobs = out["action_log_probs"]
+    assert logprobs.shape == (7, response_len)
+    assert torch.all(logprobs[:2] == 0)
+    for row in range(2, 7):
+        assert torch.all(logprobs[row] == -(row + 1.0))
+
+
 def test_training_step_flags_only_first_policy_minibatch():
     cfg = example_dummy_config()
     cfg.trainer.old_logprobs_from_first_minibatch = True
