@@ -9,6 +9,7 @@ import torch
 from pytest import approx
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.device import device_type
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
 from skyrl.train.config import SkyRLTrainConfig
 
@@ -89,7 +90,7 @@ def _make_loss_scaling_cfg(loss_fn, micro_batch_size):
 
 def _patch_worker_cuda_for_cpu():
     stack = ExitStack()
-    stack.enter_context(patch("torch.cuda.current_device", return_value=torch.device("cpu")))
+    stack.enter_context(patch(f"torch.{device_type()}.current_device", return_value=torch.device("cpu")))
     stack.enter_context(patch("torch.autocast", side_effect=lambda *args, **kwargs: nullcontext()))
     return stack
 

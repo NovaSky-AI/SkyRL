@@ -1,0 +1,148 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["skyrl*"]
+
+[project]
+name = "skyrl"
+dynamic = ["version"]
+description = "Unified API for training and inference"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "datasets>=4.0.0",
+    "pillow>=11.3.0",
+    "rich>=14.1.0",
+    "safetensors>=0.6.2",
+    "tokenizers>=0.23.1",
+    "transformers>=5.6.1,<=5.16.1",
+    "typer>=0.17.4",
+    "peft==0.18.1",
+    "hf_transfer",
+    "cloudpathlib>=0.23.0",
+    "zstandard>=0.23.0",
+    "xxhash>=3.0.0",
+]
+
+[project.optional-dependencies]
+tinker = [
+    "tinker>=0.25.0,<0.28.0",
+    "fastapi[standard]",
+    "sqlmodel",
+    "sqlalchemy[asyncio]",
+    "aiosqlite",
+    "asyncpg",
+    "psycopg2-binary",
+]
+
+skyrl-train = [
+    "loguru",
+    "tqdm",
+    "ninja",
+    "tensorboard",
+    "func_timeout",
+    "hydra-core==1.3.4",
+    "accelerate",
+    "torchdata",
+    "omegaconf",
+    "ray==2.57.0",
+    "peft==0.18.1",
+    "debugpy==1.8.0",
+    "hf_transfer",
+    "wandb",
+    "datasets>=4.0.0",
+    "tensordict",
+    "jaxtyping",
+    "skyrl-gym",
+    "polars",
+    "s3fs",
+    "s5cmd>=0.3.3",
+    "gcsfs",
+    "fastapi",
+    "orjson>=3.11.9",
+    "pybase64>=1.4.2",
+    "uvicorn",
+    "vllm-router",
+    "pybind11",
+    "setuptools",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    # torch's XPU wheel pins triton-xpu, which is only published on the XPU index.
+    # Listed directly so its [tool.uv.sources] entry is honored.
+    "triton-xpu==3.7.2",
+    # Loads FlashAttention 2 for XPU from the Hugging Face kernels hub. The range is
+    # the one transformers 5.16.1 accepts (`transformers/integrations/hub_kernels.py`).
+    "kernels>=0.16.0,<0.17.0",
+    # Ray detects Intel GPUs (the `GPU` resource) through dpctl; without it a node
+    # reports zero GPUs.
+    "dpctl",
+]
+
+fsdp = [
+    "skyrl[skyrl-train]",
+]
+
+dev = [
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings[python]>=0.24.0",
+    "pymdown-extensions>=10.7",
+    "pytest",
+    "pytest-forked",
+    "pytest-asyncio",
+    "pre-commit",
+    "litellm",
+    "torch",
+    "ty",
+    "cloudpathlib[s3]",
+    "alembic",
+    "griffe2md",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["*.patch"]
+
+[tool.setuptools.dynamic]
+version = {attr = "skyrl.__version__"}
+
+[tool.uv]
+# torch publishes XPU wheels for Linux x86_64 only.
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+override-dependencies = [
+    # torch 2.13.0+xpu pins pyzes==0.1.1, whose wheel installs a top-level `examples`
+    # package. A regular package takes precedence over the repository's `examples/`
+    # namespace package wherever it is on sys.path, so `examples.*` imports fail.
+    # 0.1.3 moves it to `pyzes.examples`; the `pyzes` module torch imports is unchanged.
+    "pyzes==0.1.3",
+]
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.uv.sources]
+skyrl-gym = { path = "./skyrl-gym", editable = true }
+torch = { index = "pytorch-xpu" }
+torchvision = { index = "pytorch-xpu" }
+triton-xpu = { index = "pytorch-xpu" }
+vllm-router = { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl" }
+
+[tool.pytest.ini_options]
+markers = [
+    "vllm: requires the vllm package (present under the fsdp/megatron extras)",
+    "megatron: requires the megatron extra",
+    "megatron_models: long-running Megatron model-parity tests",
+    "integrations: third-party integration tests with extra install steps",
+    "mooncake: requires the mooncake extra (mooncake-transfer-engine)",
+]

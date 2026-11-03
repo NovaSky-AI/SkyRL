@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from skyrl.backends.skyrl_train.distributed.ulysses import utils as ulysses_utils
+from skyrl.backends.skyrl_train.utils.device import device_type
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import RatioBand
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
@@ -448,7 +449,7 @@ def test_the_worker_centers_rollout_is_with_the_post_override_band():
     )
 
     with (
-        patch("torch.cuda.current_device", return_value=torch.device("cpu")),
+        patch(f"torch.{device_type()}.current_device", return_value=torch.device("cpu")),
         patch("torch.autocast", side_effect=lambda *args, **kwargs: nullcontext()),
     ):
         status = worker._forward_backward_micro(
