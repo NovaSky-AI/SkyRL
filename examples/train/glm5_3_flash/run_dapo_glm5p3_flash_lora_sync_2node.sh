@@ -40,6 +40,9 @@ MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=12
 EVAL_N_SAMPLES_PER_PROMPT=12
 MAX_TOKENS_PER_MICROBATCH=8192  # must hold one full sequence; 16384 OOM'd at step 1 on GSM8K
+# Each MoE chunk runs its own expert-parallel all-to-alls; at 8k-token micro-batches 64 chunks are
+# ~32 tokens per call and the training step ran ~8x slower than with 1 (2x8 B200, EP16).
+MLP_CHUNKS_FOR_TRAINING=1
 
 # Rollout router replay (R3): vLLM returns the experts it routed each token to and Megatron
 # replays that routing, so the trainer scores rollouts with the router the sampler used. On a
@@ -164,7 +167,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[core_attn,moe] \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
-  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=64 \
+  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=$MLP_CHUNKS_FOR_TRAINING \
   trainer.policy.megatron_config.transformer_config_kwargs.gradient_accumulation_fusion=false \
   trainer.policy.megatron_config.transformer_config_kwargs.disable_parameter_transpose_cache=true \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \
