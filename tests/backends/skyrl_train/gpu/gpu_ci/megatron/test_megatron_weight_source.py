@@ -9,6 +9,9 @@ names the first divergent parameter; this test gets there first.
 Two parametrizations: a multimodal MoE model that exercises the grouped expert
 export, and a small dense model as a non-MoE sanity check.
 
+``test_stacked_rdt_source_keeps_fp32_params`` checks the sharded-RDT stacked source's
+per-name dtypes on a model with an fp32 parameter (the MoE expert bias).
+
 Run with::
     uv run --isolated --extra megatron --extra dev pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_weight_source.py
 
@@ -63,6 +66,27 @@ class _ProbeMegatronRefWorker(MegatronRefWorkerBase):
             "iter_names": iter_names,
             "iter_shapes": iter_shapes,
         }
+
+    def probe_rdt_source_dtypes(self, dtype_str: str) -> dict:
+        """Return this rank's sharded-RDT source type, its ``metadata()`` dtypes, the
+        dtypes of the tensors ``iter_groups()`` yields, and the push source's
+        ``metadata()`` dtypes."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            make_megatron_weight_source,
+        )
+        from skyrl.train.utils.utils import str_to_torch_dtype
+
+        dtype = str_to_torch_dtype(dtype_str)
+        source = make_megatron_weight_source(self.bridge, self.actor_module, dtype)
+        meta = [(m.name, str(m.dtype)) for m in source.metadata]
+        yielded = {}
+        for names, tensors in source.iter_groups():
+            for name, tensor in zip(names, tensors):
+                if tensor is not None:
+                    yielded[name] = str(tensor.dtype)
+            del names, tensors
+        push = {m.name: str(m.dtype) for m in MegatronWeightSource(self.bridge, self.actor_module, dtype).metadata}
+        return {"source": type(source).__name__, "meta": meta, "yielded": yielded, "push": push}
 
 
 _ProbeRefWorker = ray.remote(num_gpus=1)(_ProbeMegatronRefWorker)
@@ -168,3 +192,46 @@ def test_megatron_source_channel_agreement(ray_init_fixture, model_name):
             )
     finally:
         _megatron_worker_mod.RefWorker = _orig_ref_worker
+
+
+@pytest.mark.megatron
+def test_stacked_rdt_source_keeps_fp32_params(ray_init_fixture):
+    """The sharded-RDT stacked source must ship each parameter in the dtype the push
+    source does: fp32 for the MoE expert bias (``e_score_correction_bias``), the
+    inference dtype for the rest. Moonlight (DeepSeek-V3 architecture) is cut to one
+    dense and one MoE layer at PP=2 x EP=2, so the expert bias lives on stage 1 only and
+    stage 0 learns its dtype through the PP metadata exchange."""
+    cfg = _make_ref_cfg("moonshotai/Moonlight-16B-A3B-Instruct")
+    cfg.trainer.flash_attn = False
+    mc = cfg.trainer.ref.megatron_config
+    mc.tensor_model_parallel_size = 1
+    mc.pipeline_model_parallel_size = 2
+    mc.expert_model_parallel_size = 2
+    mc.transformer_config_kwargs.pop("fp8", None)
+    mc.transformer_config_kwargs["num_layers"] = 2
+    mc.transformer_config_kwargs["moe_layer_freq"] = [0, 1]
+    validate_cfg(cfg)
+
+    _orig_ref_worker = _megatron_worker_mod.RefWorker
+    _megatron_worker_mod.RefWorker = _ProbeRefWorker
+    try:
+        ref = init_worker_with_type("ref", shared_pg=None, colocate_all=False, num_gpus_per_node=4, cfg=cfg)
+        results = ray.get(ref.async_run_ray_method("pass_through", "probe_rdt_source_dtypes", "bfloat16"))
+    finally:
+        _megatron_worker_mod.RefWorker = _orig_ref_worker
+
+    assert len(results) == 4
+    meta = results[0]["meta"]
+    declared = dict(meta)
+    fp32 = sorted(n for n, dt in meta if dt == "torch.float32")
+    print(f"stacked source metadata: {len(meta)} names, fp32: {fp32}")
+    assert fp32 and all("e_score_correction_bias" in n for n in fp32), fp32
+    for rank, result in enumerate(results):
+        assert result["source"] == "MegatronStackedWeightSource", (rank, result["source"])
+        assert result["meta"] == meta, f"rank {rank} metadata differs from rank 0"
+        assert result["push"] == declared, f"rank {rank}: stacked and push sources declare different dtypes"
+        assert result["yielded"], f"rank {rank} yielded nothing"
+        for name, dt in result["yielded"].items():
+            assert dt == declared[name], f"rank {rank}: {name} yielded {dt}, metadata declares {declared[name]}"
+    yielded_fp32 = {n for r in results for n in r["yielded"] if n in fp32}
+    assert sorted(yielded_fp32) == fp32, "no rank yielded the fp32 expert bias"
