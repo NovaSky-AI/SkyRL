@@ -22,10 +22,13 @@ export UV_CACHE_DIR=/shared/hackskyrl/uv_cache
 export UV_PROJECT_ENVIRONMENT=/shared/hackskyrl/uv_venvs/tput_dsv4
 export MAX_TRAINING_STEPS=${STEPS:-3}
 # vLLM 0.32's DSv4.1 decoder SWA bounded replay asserts on a PP stage that starts at the last KV source layer
-# (layer 20, where an even 20/20 split puts stage 1): split 19/21 so stage 1 runs layer 19 first.
-export VLLM_PP_LAYER_PARTITION=${VLLM_PP_LAYER_PARTITION:-19,21}
+# (20); PP splits must also sit on a KV-sharing group boundary (2/8/14/20), so the only balanced split is 20/20.
+# Turn replay off (it only trims eager prefill) instead of splitting 14/26.
+VLLM_LORA_TARGET_MODULES='["fused_wqa_wkv", "wq_b", "wo_b", "gate_up_proj", "down_proj", "experts"]'
+ENGINE_INIT_KWARGS=${ENGINE_INIT_KWARGS:-'{"max_model_len": 4608, "attention_backend": "FLASHMLA_SPARSE_DSV41", "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'}
 bash throughput_push_deepseek_v1/sim/run_dapo_dsv41_flash_lora_sync_2node.sh \
   trainer.train_batch_size=${TBS:-32} trainer.policy_mini_batch_size=${MBS:-32} \
   generator.n_samples_per_prompt=${NSAMP:-12} \
   trainer.eval_before_train=false trainer.eval_interval=1000 trainer.ckpt_interval=1000 \
+  generator.inference_engine.engine_init_kwargs="$ENGINE_INIT_KWARGS" \
   "$@" > $LOG 2>&1
