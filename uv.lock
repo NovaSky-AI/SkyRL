@@ -55,7 +55,7 @@ overrides = [
     { name = "tilelang", marker = "sys_platform == 'linux'", specifier = "==0.1.13" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = "==2.14.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform == 'linux'", specifier = "==0.29.0", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux'", specifier = "==2.19.0" },
+    { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux'", specifier = "==2.19.0", index = "https://wheels.astral.sh/simple/cu130/" },
     { name = "transformers", marker = "sys_platform == 'linux'", specifier = ">=5.6.1,<=5.16.1" },
 ]
 
@@ -9315,7 +9315,7 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'fsdp'", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'megatron'", index = "https://download.pytorch.org/whl/cu130" },
     { name = "tqdm", marker = "extra == 'skyrl-train'" },
-    { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.19.0" },
+    { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.19.0", index = "https://wheels.astral.sh/simple/cu130/" },
     { name = "transformer-engine-cu13", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.19.0+cu.13.0", index = "https://wheels.astral.sh/simple/cu130/" },
     { name = "transformer-engine-torch", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.19.0+cu.13.0.torch.2.14", index = "https://wheels.astral.sh/simple/cu130/" },
     { name = "transformers", specifier = ">=5.6.1,<=5.16.1" },
@@ -10096,9 +10096,9 @@ wheels = [
 [[package]]
 name = "transformer-engine"
 version = "2.19.0"
-source = { registry = "https://pypi.org/simple" }
+source = { registry = "https://wheels.astral.sh/simple/cu130/" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4a/22/09e9ed5e69ee0c8c955bb6ee6d81748e4384f0cd24308ff1580387d09f7c/transformer_engine-2.19.0-py3-none-any.whl", hash = "sha256:965d78429d287f7db6978bf299cfcecf68c730247f05cc830ecc6983a123bbc7", size = 1135745, upload-time = "2026-09-11T16:18:37.173Z" },
+    { url = "https://wheels.astral.sh/artifacts/319b7b4b60b9f2835b0f3667c2f72b4c6d4f2edfb31c5d2c9bb088a88a20ed40/transformer_engine-2.19.0-py3-none-any.whl", hash = "sha256:319b7b4b60b9f2835b0f3667c2f72b4c6d4f2edfb31c5d2c9bb088a88a20ed40", size = 1137378, upload-time = "2026-10-03T17:05:47Z" },
 ]
 
 [package.optional-dependencies]
