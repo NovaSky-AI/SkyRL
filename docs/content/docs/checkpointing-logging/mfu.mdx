@@ -3,14 +3,14 @@ title: "Model FLOPs Utilization (MFU)"
 ---
 
 SkyRL logs how much of the GPUs' peak compute the policy's training step uses. Logging is on by
-default for the Megatron backend:
+default for the Megatron backend, through `cfg.trainer.log_mfu`. To turn it off, override it on
+the command line:
 
-```yaml
-trainer:
-  log_mfu: true
+```bash
+bash examples/train/gsm8k/run_gsm8k.sh trainer.log_mfu=false
 ```
 
-SFT uses the top-level `log_mfu` field instead.
+SFT uses the top-level `log_mfu` field instead (`log_mfu=false`).
 
 ## Metrics
 
@@ -25,7 +25,7 @@ RL logs these under `trainer/` and SFT under `train/`, once per step:
 | `hfu_est` | `mfu` plus the forward recomputed under full activation recompute; only logged with full recompute |
 
 Full recompute is SkyRL's default for Megatron
-(`megatron_config.transformer_config_kwargs.recompute_granularity: full`), so `hfu_est` is
+(`recompute_granularity="full"` in `megatron_config.transformer_config_kwargs`), so `hfu_est` is
 logged by default.
 
 The gap between `mfu` and `mfu_e2e` is driver-side work in the training step, such as staging
