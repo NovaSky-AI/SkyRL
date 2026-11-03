@@ -63,9 +63,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
-from skyrl.backends.skyrl_train.patches.megatron.patch_checkpoint_without_output_frozen_inputs import (
-    apply_checkpoint_without_output_frozen_inputs_patch,
-)
 from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype import (
     apply_clip_grads_mixed_dtype_patch,
 )
@@ -159,8 +156,6 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
-# Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
-apply_checkpoint_without_output_frozen_inputs_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()

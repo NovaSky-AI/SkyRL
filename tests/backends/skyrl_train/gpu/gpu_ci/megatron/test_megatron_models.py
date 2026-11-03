@@ -452,6 +452,8 @@ async def construct_training_input_from_generator_output(generator_output, token
         # Threshold: the truncated slice has a very spread next-token distribution, so bf16
         # per-token logprob noise is larger than on a full model (HF-bf16 vs HF-fp32 already
         # differs by ~0.05 mean |dlogprob| on real text); vLLM vs Megatron lands at ~0.06.
+        # Measured values per megatron-core / Megatron-Bridge / vLLM pin: "Reference values" in
+        # skyrl/backends/skyrl_train/patches/megatron/README.md. Add a column there on each bump.
         pytest.param(
             2,
             1,
@@ -484,6 +486,7 @@ async def construct_training_input_from_generator_output(generator_output, token
         # Thresholds: megatron_threshold (Megatron vs vLLM) is the real check here and is kept at
         # the short row's 1e-1 -- about 0.053 with the k-pool top-k, the same as the dense path
         # below the budget. Token-level selection past the budget (no k-pool) gives about 0.059.
+        # Measured values per pin: "Reference values" in patches/megatron/README.md.
         #
         # vllm_threshold is looser than the other rows because it compares vLLM before vs after
         # weight sync, and over a 2048-token greedy generation that measures divergence, not sync
