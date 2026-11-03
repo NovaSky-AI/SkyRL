@@ -44,6 +44,7 @@ GLM-5.3-Flash LoRA 2-node work (agent-A, same branch): `mlp_chunks_for_training=
 
 | who | what | result | commit |
 |---|---|---|---|
+| agent-A | vLLM 0.32 DSv4.1 with PP2 (the 2-node recipe's TP8 x PP2 engine) asserts at engine start (`_run_layers`: `residual is not None`): decoder SWA bounded replay turns on for the stage holding the last KV source layer (20), and an even 20/20 split makes that stage start at layer 20, so its pre-replay loop runs no layers. Workaround `VLLM_PP_LAYER_PARTITION=19,21` (now forwarded to the engine workers); the #2573 recipe ran on vLLM 0.31, which has no replay | engine starts | see git log |
 | agent-B | carried over from `throughput-push-v1` (cherry-picked): DSv4.1 FP8 load in 32-wide blocks (#2610) + full-weight sync 32-wide export and FP8/e8m0 wire dtype (#2612); R3 out-of-range id error; trainer-only harness (multi-turn masks, synthetic routes); fused cuDNN V4.1 indexer scoring (`SKYRL_DSV41_INDEXER_IMPL=fused`, Megatron-LM#7285 backport); skip between-phase `empty_cache` under expandable segments. Not carried: Bridge #6456 scale-cache backport (already in this branch's Bridge pin 7171584b) | on throughput-push-v1, 16k DSv4.1 slice trainer step 48.4 -> 20.6 s (with fused LM head) | see git log |
 
 ## Measurement setup / notes
