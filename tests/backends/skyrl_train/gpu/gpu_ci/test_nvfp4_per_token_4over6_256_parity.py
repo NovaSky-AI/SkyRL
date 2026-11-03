@@ -15,7 +15,7 @@ Sampler, both MoE quantization points:
   per-token path (``nvfp4_quant_and_per_token_scale_sm100``); it is called with the runner's ``globalScaleInv`` rule
   and an ``expanded_idx_to_permuted_idx`` row map (as the runner passes), linear SF layout.
 
-Asserted per case (T in {1, 7, 128, 1000}, H in {2048, 768}, randn / heavy-tail / zero rows): packed FP4 bytes and
+Asserted per case (T in {16, 128, 1008, 1024} (TE needs multiples of 16), H in {2048, 768}, randn / heavy-tail / zero rows): packed FP4 bytes and
 E4M3 block scales equal TE's, and the per-token FP32 scales equal ``1 / fl(fl(1/globalScaleInv) / amax_TE)`` (FlashInfer's
 formula on TE's row amax; the value TE's own GEMM derives from that amax is reported, not asserted). The 256 run also
 checks that 256 vs 448 changes the bytes (so the test can fail) and that vLLM's constant was patched.
@@ -34,7 +34,8 @@ import sys
 
 import pytest
 
-SHAPES = [(t, h) for t in (1, 7, 128, 1000) for h in (2048, 768)]
+# TE requires the NVFP4 row count to be a multiple of 16 (training pads token rows to that).
+SHAPES = [(t, h) for t in (16, 128, 1008, 1024) for h in (2048, 768)]
 
 
 def _env(bound: int) -> dict:
