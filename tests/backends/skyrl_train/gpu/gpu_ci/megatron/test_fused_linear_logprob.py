@@ -279,5 +279,50 @@ def test_fused_linear_logprob_tp(nproc):
     assert "RESULT: PASS" in (res.stdout + res.stderr), f"TP={nproc} failed:\n{res.stdout}\n{res.stderr}"
 
 
+@pytest.mark.parametrize("chunk_size", [7, 512])
+def test_fused_frozen_weight_skips_weight_grad(tp_group, chunk_size, monkeypatch):
+    """A frozen output layer (LoRA) skips the per-chunk weight-grad matmul; log-probs and ``grad_hidden`` are
+    unchanged. A trainable-weight run is the control for the matmul count."""
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    B, S, V = 4, 32, 4096
+    hidden = torch.randn(B, S, H, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(V, H, dtype=torch.bfloat16, device=device) * (H**-0.5)
+    target = torch.randint(0, V, (B, S), device=device, dtype=torch.long)
+    num_chunks = -(-S // chunk_size)
+
+    matmul_calls = 0
+    real_matmul = torch.matmul
+
+    def counting_matmul(*args, **kwargs):
+        nonlocal matmul_calls
+        matmul_calls += 1
+        return real_matmul(*args, **kwargs)
+
+    def run(weight_requires_grad):
+        """Forward + backward; returns (logprob, grad_hidden, weight, matmul calls made by backward)."""
+        nonlocal matmul_calls
+        h = hidden.detach().clone().requires_grad_(True)
+        w = weight.detach().clone().requires_grad_(weight_requires_grad)
+        out = FusedLinearChunkedDistributedLogprob.apply(h, w, target, 0, V, chunk_size, tp_group, False)
+        matmul_calls = 0
+        with monkeypatch.context() as m:
+            m.setattr(torch, "matmul", counting_matmul)
+            out.backward(_grad_seed(out))
+        return out.detach(), h.grad.detach(), w, matmul_calls
+
+    out_ref, gh_ref, w_ref, trainable_calls = run(weight_requires_grad=True)
+    out, gh, w, frozen_calls = run(weight_requires_grad=False)
+
+    assert w_ref.grad is not None
+    assert w.grad is None
+    # Backward recomputes logits and projects grad_hidden per chunk in both runs; only the trainable run
+    # adds the [V, H] weight-grad matmul, once per chunk.
+    assert frozen_calls > 0
+    assert trainable_calls - frozen_calls == num_chunks
+    torch.testing.assert_close(out, out_ref)
+    torch.testing.assert_close(gh, gh_ref)
+
+
 if __name__ == "__main__":
     _distributed_main()

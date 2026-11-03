@@ -130,7 +130,7 @@ def test_vllm_serialized_fp8_quantization_config():
         "activation_scheme": "dynamic",
         "weight_block_size": [128, 128],
     }
-    assert get_serialized_fp8_quantization_config(ignored_layers=["model.layers.0.linear_attn.in_proj_b"]) == {
+    assert get_serialized_fp8_quantization_config(exclude_list=["model.layers.0.linear_attn.in_proj_b"]) == {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
         "weight_block_size": [128, 128],
@@ -138,7 +138,7 @@ def test_vllm_serialized_fp8_quantization_config():
     }
 
 
-def test_qwen35_fp8_ignored_layers_keep_shared_experts_fp8():
+def test_qwen35_base_exclude_list_keeps_shared_experts_fp8():
     hf_config = SimpleNamespace(
         model_type="qwen3_5_text",
         shared_expert_intermediate_size=512,
@@ -149,7 +149,7 @@ def test_qwen35_fp8_ignored_layers_keep_shared_experts_fp8():
         ],
     )
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == [
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == [
         "model.layers.0.linear_attn.in_proj_b",
         "model.layers.0.linear_attn.in_proj_a",
         "model.language_model.layers.0.linear_attn.in_proj_b",
@@ -161,24 +161,24 @@ def test_qwen35_fp8_ignored_layers_keep_shared_experts_fp8():
     ]
 
 
-def test_qwen35_fp8_ignored_layers_do_not_hide_shared_experts_for_other_tp_sizes():
+def test_qwen35_base_exclude_list_does_not_hide_shared_experts_for_other_tp_sizes():
     hf_config = SimpleNamespace(
         model_type="qwen3_5_text",
         shared_expert_intermediate_size=512,
         layer_types=["full_attention"],
     )
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == []
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == []
 
 
-def test_qwen35_ignored_layers_include_only_checkpoint_vision_prefixes():
+def test_qwen35_base_exclude_list_includes_only_checkpoint_vision_prefixes():
     hf_config = SimpleNamespace(
         model_type="qwen3_5",
         text_config=SimpleNamespace(model_type="qwen3_5_text", layer_types=[]),
         vision_config=SimpleNamespace(depth=2),
     )
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == [
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == [
         "model.visual.blocks.0.attn.proj",
         "model.visual.blocks.0.mlp.linear_fc1",
         "model.visual.blocks.0.mlp.linear_fc2",
@@ -188,24 +188,24 @@ def test_qwen35_ignored_layers_include_only_checkpoint_vision_prefixes():
     ]
 
 
-def test_qwen35_ignored_layers_are_not_inferred_from_unrelated_hybrid_config():
+def test_qwen35_base_exclude_list_is_not_inferred_from_unrelated_hybrid_config():
     hf_config = SimpleNamespace(model_type="unrelated_hybrid", layer_types=["linear_attention"])
 
-    assert QWEN35_FP8_SPEC.ignored_layers(hf_config) == []
+    assert QWEN35_FP8_SPEC.base_exclude_list(hf_config) == []
 
 
-def test_moe_batched_expert_spec_recognizes_and_splits_gate_up():
+def test_stacked_experts_recognizes_and_splits_gate_up():
     base = "model.language_model.layers.5.mlp.experts"
-    gate_up = QWEN35_FP8_SPEC.moe_expert_spec(f"{base}.gate_up_proj")
+    gate_up = QWEN35_FP8_SPEC.stacked_experts(f"{base}.gate_up_proj")
     assert gate_up.experts_base == base
-    assert [p.hf_name for p in gate_up.projections] == ["gate_proj", "up_proj"]
+    assert gate_up.projections == ("gate_proj", "up_proj")
     assert gate_up.split_dim == 1
-    down = QWEN35_FP8_SPEC.moe_expert_spec(f"{base}.down_proj")
+    down = QWEN35_FP8_SPEC.stacked_experts(f"{base}.down_proj")
     assert down.experts_base == base
-    assert [p.hf_name for p in down.projections] == ["down_proj"]
+    assert down.projections == ("down_proj",)
     assert down.split_dim is None
-    assert QWEN35_FP8_SPEC.moe_expert_spec("model.layers.5.mlp.gate.weight") is None
-    assert QWEN35_FP8_SPEC.moe_expert_spec("model.layers.5.self_attn.q_proj.weight") is None
+    assert QWEN35_FP8_SPEC.stacked_experts("model.layers.5.mlp.gate.weight") is None
+    assert QWEN35_FP8_SPEC.stacked_experts("model.layers.5.self_attn.q_proj.weight") is None
 
 
 def test_moe_shared_expert_serialization_follows_the_main_fp8_policy():
@@ -317,7 +317,7 @@ def test_resolve_fp8_spec_matches_qwen35_and_rejects_unknown_layouts():
     assert resolve_fp8_spec(SimpleNamespace(model_type="llama")) is None
 
 
-def test_batched_moe_wire_targets_derive_from_registered_specs():
+def test_batched_moe_wire_targets_follow_vllms_fused_moe_slots():
     assert batched_moe_wire_targets() == {
         ".experts.gate_proj.weight": (".experts.w13_weight", "w1"),
         ".experts.up_proj.weight": (".experts.w13_weight", "w3"),
