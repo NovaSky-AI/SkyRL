@@ -16,6 +16,7 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.quantization.quant_config import RecipeConfig
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
@@ -51,22 +52,25 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
     is_fp8_enabled,
+    reject_stage_local_layer_patterns,
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
+    validate_fp8_exclude_modules_matched,
     validate_mxfp8_gdn_tp_alignment,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
-)
-from skyrl.backends.skyrl_train.patches.megatron.patch_checkpoint_without_output_frozen_inputs import (
-    apply_checkpoint_without_output_frozen_inputs_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype import (
     apply_clip_grads_mixed_dtype_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
     apply_distopt_mixed_dtype_group_index_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_head_full import (
+    apply_dsa_head_full_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
@@ -155,8 +159,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
-# Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
-apply_checkpoint_without_output_frozen_inputs_patch()
+apply_dsa_head_full_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()
@@ -403,6 +406,19 @@ class MegatronWorker:
         if megatron_config.moe_router_enable_expert_bias is not None:
             provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
         provider.moe_enable_routing_replay = megatron_config.moe_enable_routing_replay
+
+        # Supply a quant recipe via either user-provided config file or derived config file
+        # from user-provided exclude list.
+        if megatron_config.te_precision_config_file:
+            provider.quant_recipe = RecipeConfig.from_yaml_file(megatron_config.te_precision_config_file)
+            if megatron_config.pipeline_model_parallel_size > 1:
+                reject_stage_local_layer_patterns(
+                    [m.pattern for m in provider.quant_recipe.matchers], "te_precision_config_file"
+                )
+        elif megatron_config.fp8_exclude_modules:
+            provider.quant_recipe = RecipeConfig.from_config_dict(
+                fp8_exclude_recipe(list(megatron_config.fp8_exclude_modules))
+            )
 
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
@@ -739,6 +755,8 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        if self.megatron_config.fp8_exclude_modules:
+            validate_fp8_exclude_modules_matched(model, list(self.megatron_config.fp8_exclude_modules))
         if lora_config is not None and getattr(self, "_lora_import_plan", None) is not None:
             self._load_lora_init_adapter(model)
         return model
@@ -1609,7 +1627,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
                     f"got {resolved_backend!r}."
                 )
-            self._serialized_fp8_config = resolve_serialized_fp8_config(mode, self.strategy.hf_config)
+            self._serialized_fp8_config = resolve_serialized_fp8_config(
+                mode,
+                self.strategy.hf_config,
+                inference_engine_cfg.fp8_weight_sync_exclude_modules,
+            )
 
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
