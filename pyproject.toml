@@ -160,11 +160,10 @@ megatron = [
     # — without it the meta package's sanity check fails with "Found empty
     # `transformer-engine` meta package installed". cu13 is what
     # `transformer-engine-torch`'s metadata requires under a cu13 torch, so the two
-    # agree without an override. The version is plain `2.19.0`, not
-    # `2.19.0+cu.13.0`: that local segment was an artifact of Astral's cu130 index,
-    # which stops at 2.16.0. The meta and core packages now come from PyPI, which
-    # publishes both prebuilt -- see [tool.uv.sources].
-    "transformer-engine-cu13==2.19.0; sys_platform == 'linux'",
+    # agree without an override. Astral's transformer-engine-torch hard-depends on
+    # Astral's own core build (`==2.19.0+cu.13.0`), so the core comes from Astral too;
+    # the pure-Python meta package stays on PyPI -- see [tool.uv.sources].
+    "transformer-engine-cu13==2.19.0+cu.13.0; sys_platform == 'linux'",
     "flash-attn==2.8.3.post1; sys_platform == 'linux'",
     "flash-linear-attention; sys_platform == 'linux'",
     "causal-conv1d==1.7.0+cu.13.0.torch.2.14; sys_platform == 'linux'",
@@ -456,11 +455,12 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # (Astral builds no 1.6.x for torch >= 2.13). Check for a newer torch with:
 #   curl -sL https://wheels.astral.sh/simple/cu130/mamba-ssm/ | grep -o 'torch\.2\.[0-9]*' | sort -uV
 #
-# The TE meta and core packages carry no torch coupling and come from PyPI, which publishes
-# both prebuilt at 2.19.0.
+# transformer-engine-torch hard-depends on Astral's TE core build (`2.19.0+cu.13.0`), so the core
+# comes from Astral as well; the pure-Python TE meta package comes from PyPI.
 causal-conv1d = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 mamba-ssm = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 transformer-engine-torch = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+transformer-engine-cu13 = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
 
 # flash-attn: combined FA2+FA4 wheels, repacked from Astral's
 # `2.8.3.post1+cu.13.0.torch.2.14` FA2 wheels (compiled extension byte-identical) with the stale
