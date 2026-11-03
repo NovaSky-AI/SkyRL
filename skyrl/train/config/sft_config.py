@@ -145,9 +145,10 @@ class SFTConfig(BaseConfig):
     language_model_only: bool = False
     """Build only the language-model backbone of a multimodal checkpoint (required for GLM-5.3-Flash).
     Maps to ``trainer.policy.language_model_only``."""
-    fused_lm_head_logprob: bool = False
+    fused_lm_head_logprob: Optional[bool] = None
     """Compute the LM head + log-probs in ``logprobs_chunk_size`` token chunks without materializing
-    the full ``[T, vocab]`` logits (Megatron). Maps to ``trainer.fused_lm_head_logprob``."""
+    the full ``[T, vocab]`` logits (Megatron). Maps to ``trainer.fused_lm_head_logprob``; ``None``
+    enables it wherever it is supported."""
     logprobs_chunk_size: Optional[int] = 1024
     """Token chunk size for the fused LM head. Maps to ``trainer.logprobs_chunk_size``."""
     record_memory: bool = False

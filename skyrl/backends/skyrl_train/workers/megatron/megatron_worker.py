@@ -636,6 +636,9 @@ class MegatronWorker:
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
             target_modules=None if lora_config.target_modules == "all-linear" else list(lora_config.target_modules),
         )
+        if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob is None:
+            logger.warning("fused_lm_head_logprob=None: using the unfused LM head (init_adapter_path trains lm_head)")
+            self.cfg.fused_lm_head_logprob = False
         if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob:
             raise ValueError(
                 "init_adapter_path: the adapter trains lm_head, which trainer.fused_lm_head_logprob=true bypasses "

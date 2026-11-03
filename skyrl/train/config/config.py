@@ -1850,11 +1850,18 @@ class TrainerConfig(BaseConfig):
     ``None`` disables chunking."""
     vocab_entropy_chunk_memory_mb: int = 512
     """Approximate per-chunk temporary memory budget for auto-sized Megatron vocab entropy chunks."""
-    fused_lm_head_logprob: bool = False
+    fused_lm_head_logprob: Optional[bool] = None
     """Megatron only. Fuse the LM-head projection into log-prob / entropy
     computation so the full ``[B, S, vocab//TP]`` logits tensor is never
     materialized. Metric-only entropy and ``use_entropy_loss`` share the same
-    projection. Uses ``logprobs_chunk_size`` to bound peak memory."""
+    projection. Uses ``logprobs_chunk_size`` to bound peak memory.
+
+    ``None`` (the default) enables it wherever it is supported. The Megatron worker resolves
+    it against the built model and uses the unfused path, with a warning, when LoRA targets
+    ``output_layer`` or an ``init_adapter_path`` adapter trains ``lm_head``, and for models the
+    fused path cannot run (MXFP8 output projection, MuP, MTP heads, or a model class without
+    the ``output_processor`` hook). Other strategies ignore ``None``. ``True`` raises in those
+    cases instead of falling back; ``False`` always disables it."""
     fused_lm_head_logprob_backend: str = "torch"
     """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
     The Triton backend requires CUDA + triton and falls back to ``"torch"``

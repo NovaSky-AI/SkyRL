@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
+from loguru import logger
 from megatron.bridge.peft.utils import (
     enable_expert_parallel_grad_sync_in_finalize,
     finalize_model_grads_with_expert_adapter_sync,
@@ -18,6 +19,7 @@ from omegaconf import OmegaConf
 from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
     call_model_with_fused_lm_head,
     fused_lm_head_output_processor,
+    fused_lm_head_unsupported_reason,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
@@ -233,7 +235,7 @@ class MegatronModelWrapper:
         # Fuse the LM-head projection into the chunked log-prob/entropy via the
         # GPTModel output_processor hook (avoids materializing the full
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
-        self._fused_lm_head = bool(getattr(self.cfg, "fused_lm_head_logprob", False))
+        self._fused_lm_head = self._resolve_fused_lm_head()
         self._fused_lm_head_backend = getattr(self.cfg, "fused_lm_head_logprob_backend", "torch")
         # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
         # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
@@ -352,6 +354,28 @@ class MegatronModelWrapper:
         finally:
             for chunk in self.actor_module:
                 chunk.scale_gradients(1.0 / num_tokens_global)
+
+    def _resolve_fused_lm_head(self) -> bool:
+        """Resolve ``trainer.fused_lm_head_logprob`` against the built model.
+
+        ``None`` enables the fused LM head unless the model is one it cannot run, in which case
+        it falls back to the unfused path; ``True`` keeps the fused path and lets an unsupported
+        model raise when it runs.
+        """
+        setting = getattr(self.cfg, "fused_lm_head_logprob", None)
+        if setting is not None:
+            return bool(setting)
+        lora = self.cfg.policy.model.lora
+        if lora.rank > 0 and isinstance(lora.target_modules, (list, tuple)) and "output_layer" in lora.target_modules:
+            reason = "LoRA targets output_layer, which the fused path reads as the base weight"
+        else:
+            reason = fused_lm_head_unsupported_reason(self.actor_module[0])
+        if reason is None and getattr(get_model_config(self.actor_module[0]), "mtp_num_layers", None):
+            reason = "MTP draft training distills against the main logits, which the fused path never materializes"
+        if reason is not None:
+            logger.warning(f"fused_lm_head_logprob=None: using the unfused LM head ({reason})")
+            return False
+        return True
 
     def run_pending_grad_sync(self) -> None:
         """Reduce gradients across DP/TP/PP exactly once for the accumulated window.

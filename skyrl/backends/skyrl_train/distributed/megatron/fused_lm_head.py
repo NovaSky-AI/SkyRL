@@ -36,6 +36,42 @@ def fused_lm_head_output_processor(
     return hidden_states
 
 
+def _takes_output_processor(unwrapped_model: Any) -> bool:
+    """Whether the model's forward accepts Megatron's ``output_processor`` hook.
+
+    GPTModel takes it directly. VL wrappers (e.g. Megatron-Bridge's Qwen3VLModel) take
+    ``**kwargs`` and pass them to a GPT-style language model that takes it; a wrapper without
+    ``**kwargs`` would reject the hook.
+    """
+    wrapper_params = inspect.signature(unwrapped_model.forward).parameters
+    language_model = getattr(unwrapped_model, "language_model", None)
+    return "output_processor" in wrapper_params or (
+        language_model is not None
+        and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in wrapper_params.values())
+        and "output_processor" in inspect.signature(language_model.forward).parameters
+    )
+
+
+def fused_lm_head_unsupported_reason(model: Any) -> str | None:
+    """Return why ``call_model_with_fused_lm_head`` cannot run ``model``, or ``None`` if it can."""
+    from megatron.core.fp8_utils import is_mxfp8_output_proj_active
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+    from megatron.core.utils import unwrap_model
+
+    unwrapped_model = unwrap_model(model)
+    if is_mxfp8_output_proj_active(unwrapped_model.config):
+        return "fused_lm_head_logprob does not support MXFP8 output projection"
+    if unwrapped_model.config.use_mup:
+        return "fused_lm_head_logprob does not support MuP logit scaling"
+    if _takes_output_processor(unwrapped_model):
+        return None
+    if not isinstance(unwrapped_model, HybridModel):
+        return f"fused_lm_head_logprob is not supported for {type(unwrapped_model).__name__}"
+    if unwrapped_model.config.mtp_num_layers:
+        return "fused_lm_head_logprob does not support HybridModel with MTP enabled"
+    return None
+
+
 def call_model_with_fused_lm_head(
     model: Any,
     *args: Any,
@@ -45,39 +81,23 @@ def call_model_with_fused_lm_head(
 ) -> Any:
     """Run GPT-style or HybridModel forwards without materializing logits."""
     # Megatron is optional outside the Megatron backend, so keep these imports lazy.
-    from megatron.core.fp8_utils import is_mxfp8_output_proj_active
-    from megatron.core.models.hybrid.hybrid_model import HybridModel
     from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
         FineGrainedActivationOffloadingInterface as off_interface,
     )
     from megatron.core.utils import unwrap_model
 
+    reason = fused_lm_head_unsupported_reason(model)
+    if reason is not None:
+        raise NotImplementedError(reason)
     unwrapped_model = unwrap_model(model)
-    if is_mxfp8_output_proj_active(unwrapped_model.config):
-        raise NotImplementedError("fused_lm_head_logprob does not support MXFP8 output projection")
-    if unwrapped_model.config.use_mup:
-        raise NotImplementedError("fused_lm_head_logprob does not support MuP logit scaling")
-    # Standard GPTModel objects directly take `output_processor`, just call the model like normal
-    # VL wrappers (e.g. Megatron-Bridge's Qwen3VLModel) take **kwargs and pass them to a GPT-style language
-    # model that takes `output_processor`. A wrapper without **kwargs would reject the hook.
-    wrapper_params = inspect.signature(unwrapped_model.forward).parameters
-    language_model = getattr(unwrapped_model, "language_model", None)
-    if "output_processor" in wrapper_params or (
-        language_model is not None
-        and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in wrapper_params.values())
-        and "output_processor" in inspect.signature(language_model.forward).parameters
-    ):
+    if _takes_output_processor(unwrapped_model):
         return model(
             *args,
             output_processor=output_processor,
             output_processor_context=output_processor_context,
             **kwargs,
         )
-    if not isinstance(unwrapped_model, HybridModel):
-        raise NotImplementedError(f"fused_lm_head_logprob is not supported for {type(unwrapped_model).__name__}")
-
-    if unwrapped_model.config.mtp_num_layers:
-        raise NotImplementedError("fused_lm_head_logprob does not support HybridModel with MTP enabled")
+    # HybridModel: run the decoder with post-processing disabled and apply the processor here.
     if not unwrapped_model.post_process:
         return model(*args, **kwargs)
 

@@ -1747,6 +1747,18 @@ def test_fused_lm_head_logprob_rejects_output_layer_lora(target_modules, raises)
             TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
     else:
         TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
+    # The auto default is left for the Megatron worker to resolve against the built model.
+    assert TrainerConfig(strategy="megatron", policy=policy).fused_lm_head_logprob is None
+
+
+@pytest.mark.parametrize("strategy", ["megatron", "fsdp"])
+def test_fused_lm_head_logprob_defaults_to_auto(strategy):
+    assert TrainerConfig(strategy=strategy).fused_lm_head_logprob is None
+
+
+def test_fused_lm_head_logprob_true_rejects_fsdp():
+    with pytest.raises(ValueError, match="only supported with the Megatron backend"):
+        TrainerConfig(strategy="fsdp", fused_lm_head_logprob=True)
 
 
 _SCORE_CENTERING_BASE = [
