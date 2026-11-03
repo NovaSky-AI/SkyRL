@@ -216,7 +216,7 @@ class TestSerializedNvfp4WeightSource:
             expert(0, 0, "down_proj", rows=32, cols=16),
             expert(0, 0, "gate_proj"),
             ("model.layers.0.mlp.gate.weight", torch.ones(2, 32, dtype=torch.bfloat16)),
-            expert(1, 0, "gate_proj"),  # BF16 tail with high_precision_last_layers=1
+            expert(1, 0, "gate_proj"),  # BF16 layer (bf16_layers=[1])
             expert(1, 0, "up_proj"),
             ("model.layers.0.mlp.router.e_score_correction_bias", torch.zeros(2, dtype=torch.float32)),
         ]
@@ -228,7 +228,7 @@ class TestSerializedNvfp4WeightSource:
 
         bridge = _FakeBridge(tensors)
         inner = MegatronWeightSource(bridge, object(), torch.bfloat16)
-        return SerializedNvfp4WeightSource(inner, self.settings, num_layers=2, high_precision_last_layers=1), bridge
+        return SerializedNvfp4WeightSource(inner, self.settings, bf16_layers=[1]), bridge
 
     def test_channels_agree_without_quantizing_for_metadata(self):
         source, _ = self._source(self._tensors())
@@ -282,8 +282,7 @@ class TestSerializedNvfp4WeightSource:
         source = SerializedNvfp4WeightSource(
             inner,
             self.settings,
-            num_layers=2,
-            high_precision_last_layers=1,
+            bf16_layers=[1],
             stacked_num_experts=1,
             min_packed_buffer_bytes=1234,
         )
@@ -303,13 +302,12 @@ class TestSerializedNvfp4WeightSource:
             "w2_weight_scale_2",
             "w2_input_scale",
         ]
-        assert "model.layers.1.mlp.experts.0.gate_proj.weight" in names  # BF16 tail stays per-expert
+        assert "model.layers.1.mlp.experts.0.gate_proj.weight" in names  # BF16 layer stays per-expert
 
         replay = SerializedNvfp4WeightSource(
             MegatronWeightSource(_FakeBridge(tensors), object(), torch.bfloat16),
             self.settings,
-            num_layers=2,
-            high_precision_last_layers=1,
+            bf16_layers=[1],
             stacked_num_experts=1,
         )
         replay.set_replay_only()

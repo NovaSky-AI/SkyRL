@@ -1018,8 +1018,13 @@ def efficient_entropy_backward(
     temperature: typing.Optional[float] = 1.0,
     dist_process_group: typing.Optional[dist.ProcessGroup] = None,
     compute_entropy: bool = True,
+    compute_weight_grad: bool = True,
 ) -> list:
-    """Backward host function; returns shard-local ``d_hidden`` without TP all-reduce."""
+    """Backward host function; returns shard-local ``d_hidden`` without TP all-reduce.
+
+    ``compute_weight_grad=False`` (frozen output layer, e.g. LoRA) skips the per-split
+    ``[vocab, H]`` weight-grad GEMM and returns ``None`` for ``d_weight``.
+    """
     assert hidden.is_cuda and weight.is_cuda and labels.is_cuda
     assert weight.device == hidden.device and labels.device == hidden.device
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
@@ -1042,7 +1047,7 @@ def efficient_entropy_backward(
 
     grad_dtype = torch.float32 if should_return_fp32_grad else hidden.dtype
     d_hidden = torch.empty_like(hidden, dtype=grad_dtype)
-    d_weight = torch.empty_like(weight, dtype=grad_dtype)
+    d_weight = torch.empty_like(weight, dtype=grad_dtype) if compute_weight_grad else None
     assert maximum.shape == labels.shape == acc.shape
     assert maximum.is_contiguous() and acc.is_contiguous()
     if compute_entropy:
@@ -1112,11 +1117,12 @@ def efficient_entropy_backward(
             torch.matmul(split_d_logits, split_weight, out=d_hidden)
         else:
             d_hidden += torch.matmul(split_d_logits, split_weight)
-        torch.matmul(
-            split_d_logits.T,
-            hidden,
-            out=d_weight[split_idx * vocab_per_split : right_bound],
-        )
+        if compute_weight_grad:
+            torch.matmul(
+                split_d_logits.T,
+                hidden,
+                out=d_weight[split_idx * vocab_per_split : right_bound],
+            )
 
     return d_hidden, d_weight
 
@@ -1275,6 +1281,8 @@ class FusedLinearLogprobTriton(torch.autograd.Function):
             1.0,  # temperature (pre-baked into hidden by the caller)
             tp_group,
             compute_entropy=ctx.entropy_requires_grad,
+            # A frozen output layer (LoRA) needs no weight gradient.
+            compute_weight_grad=ctx.needs_input_grad[1],
         )
 
         # d_hidden is this rank's partial; SP gather backward performs TP reduction.

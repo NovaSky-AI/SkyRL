@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -163,21 +163,17 @@ class Nvfp4ExpertSerializer:
     """Stateful stream transform: routed-expert BF16 weights -> ModelOpt NVFP4 tensors; others pass through.
 
     Gate and up of an expert may arrive in either order and not adjacently, so the first one is held until its
-    partner arrives. Experts in the last ``high_precision_last_layers`` layers stay BF16.
+    partner arrives. Experts of the layers in ``bf16_layers`` (see :func:`nvfp4_bf16_layers`) stay BF16.
     """
 
-    def __init__(self, settings: Nvfp4WeightQuantSettings, num_layers: int, high_precision_last_layers: int):
-        if not 0 <= high_precision_last_layers < num_layers:
-            raise ValueError(
-                f"high_precision_last_layers must be in [0, {num_layers}), got {high_precision_last_layers}"
-            )
+    def __init__(self, settings: Nvfp4WeightQuantSettings, bf16_layers: Iterable[int] = ()):
         self.settings = settings
-        self.first_bf16_layer = num_layers - high_precision_last_layers
+        self.bf16_layers = frozenset(bf16_layers)
         self._pending: Dict[str, Tuple[str, Any]] = {}
 
     def __call__(self, name: str, tensor: Any) -> Iterator[Tuple[str, Any]]:
         m = _EXPERT_RE.match(name)
-        if m is None or int(m.group("layer")) >= self.first_bf16_layer:
+        if m is None or int(m.group("layer")) in self.bf16_layers:
             yield name, tensor
             return
         prefix, proj = m.group("prefix"), m.group("proj")
@@ -306,10 +302,30 @@ def nvfp4_runtime_env(environ: Dict[str, str]) -> Dict[str, str]:
     return env
 
 
-def get_nvfp4_vllm_engine_overrides(num_layers: int, high_precision_last_layers: int) -> Dict[str, Any]:
+def nvfp4_bf16_layers(num_layers: int, megatron_config: Any) -> List[int]:
+    """Layer indices whose routed experts stay BF16: the first ``num_layers_at_start_in_bf16`` and last
+    ``num_layers_at_end_in_bf16`` layers, the same knobs (and the same Megatron ``first_last_layers_bf16``
+    mechanism) as FP8 training. Accepts a ``MegatronConfig`` or a Megatron provider."""
+    kwargs = getattr(megatron_config, "transformer_config_kwargs", None) or {}
+    enabled = kwargs.get("first_last_layers_bf16", getattr(megatron_config, "first_last_layers_bf16", False))
+    if not enabled:
+        return []
+    start = int(
+        kwargs.get("num_layers_at_start_in_bf16", getattr(megatron_config, "num_layers_at_start_in_bf16", 0)) or 0
+    )
+    end = int(kwargs.get("num_layers_at_end_in_bf16", getattr(megatron_config, "num_layers_at_end_in_bf16", 0)) or 0)
+    if start < 0 or end < 0 or start + end >= num_layers:
+        raise ValueError(
+            f"num_layers_at_start_in_bf16={start} + num_layers_at_end_in_bf16={end} must leave at least one "
+            f"NVFP4 layer of {num_layers}"
+        )
+    return list(range(start)) + list(range(num_layers - end, num_layers))
+
+
+def get_nvfp4_vllm_engine_overrides(bf16_layers: Iterable[int] = ()) -> Dict[str, Any]:
     """vLLM engine kwargs for a ModelOpt NVFP4 expert-only engine with per-token activations."""
     ignore: List[str] = list(NVFP4_EXPERT_ONLY_IGNORE)
-    ignore += [f"*layers.{i}.mlp.experts*" for i in range(num_layers - high_precision_last_layers, num_layers)]
+    ignore += [f"*layers.{i}.mlp.experts*" for i in sorted(bf16_layers)]
     return {
         "quantization": "modelopt_fp4",
         "load_format": "dummy",

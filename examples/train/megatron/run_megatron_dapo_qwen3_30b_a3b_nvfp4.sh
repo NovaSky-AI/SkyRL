@@ -64,7 +64,7 @@ TIS_TYPE=token
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.expert_nvfp4=true \
-  trainer.policy.megatron_config.expert_nvfp4_high_precision_last_layers=7 \
+  trainer.policy.megatron_config.num_layers_at_end_in_bf16=7 \
   generator.inference_engine.expert_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \

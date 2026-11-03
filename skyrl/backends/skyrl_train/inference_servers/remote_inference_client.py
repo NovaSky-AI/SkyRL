@@ -1209,7 +1209,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
         async with _control_plane_request(session, method, url, json=json, params=params) as resp:
-            body = await _read_json_body(resp) if resp.content_length else None
+            raw_body = await resp.read()
+            body = await _read_json_body(resp) if raw_body else None
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
 
@@ -1357,8 +1358,37 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         Returns:
             Dict mapping server_url to response.
+
+        Raises:
+            RuntimeError: A server did not confirm the reset.
         """
-        return await self._call_all_servers("/reset_prefix_cache", {"reset_running_requests": reset_running_requests})
+        # Settle every reset before raising so none remain in flight on return.
+        with deadline.operation("/reset_prefix_cache"):
+            results = await asyncio.gather(
+                *[
+                    self._call_server(
+                        url,
+                        "/reset_prefix_cache",
+                        params={"reset_running_requests": str(reset_running_requests).lower()},
+                    )
+                    for url in self.server_urls
+                ],
+                return_exceptions=True,
+            )
+        responses = {}
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            url, response = result
+            responses[url] = response
+        failed_servers = [
+            url
+            for url, response in responses.items()
+            if not isinstance(response["body"], dict) or response["body"].get("success") is not True
+        ]
+        if failed_servers:
+            raise RuntimeError(f"Prefix cache reset failed on {failed_servers}")
+        return responses
 
     # ---------------------------
     # Weight Sync (control plane - fan-out)

@@ -19,7 +19,7 @@ named ``__skyrl_nvfp4_stacked__:<hf layer prefix>.<leaf>`` (``<layer>`` = ``mode
 Quantization is unchanged -- the same TE call per expert on the same ``[gate; up]`` matrix -- and each result is
 written into a preallocated stack, so the bytes are exactly the per-expert stream's bytes, concatenated in the
 order vLLM's ``FusedMoE.weight_loader`` would place them (gate into rows ``[0, N)``, up into ``[N, 2N)``).
-Layers in the BF16 tail (``high_precision_last_layers``) are untouched, as are all non-expert tensors.
+BF16 layers (``num_layers_at_{start,end}_in_bf16``) are untouched, as are all non-expert tensors.
 
 The receiver is ``nvfp4_stacked_receive.py``; ``unstack_to_per_expert`` turns a stacked layer back into the
 per-expert stream (its fallback, and the tests' reference).
@@ -28,7 +28,7 @@ per-expert stream (its fallback, and the tests' reference).
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -153,7 +153,7 @@ class _LayerStack:
 class Nvfp4StackedExpertSerializer(Nvfp4ExpertSerializer):
     """:class:`Nvfp4ExpertSerializer` that emits each NVFP4 MoE layer as 8 stacked tensors once it is complete.
 
-    Pairing, pass-through, the BF16 tail and the per-expert quantization are the parent's; only the two emission
+    Pairing, pass-through, the BF16 layers and the per-expert quantization are the parent's; only the two emission
     leaves change, from yielding per-expert tensors to writing them into the layer's stacks.
     """
 
@@ -162,11 +162,11 @@ class Nvfp4StackedExpertSerializer(Nvfp4ExpertSerializer):
     def __init__(
         self,
         settings: Nvfp4WeightQuantSettings,
-        num_layers: int,
-        high_precision_last_layers: int,
+        bf16_layers: Iterable[int] = (),
+        *,
         num_experts: int,
     ):
-        super().__init__(settings, num_layers, high_precision_last_layers)
+        super().__init__(settings, bf16_layers)
         if num_experts < 1:
             raise ValueError(f"num_experts must be >= 1, got {num_experts}")
         self.num_experts = num_experts

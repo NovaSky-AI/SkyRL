@@ -634,6 +634,41 @@ class MegatronConfig(BaseConfig):
     """TransformerEngine amax history reduction, e.g. ``"most_recent"`` or ``"max"``. Folded
     into ``transformer_config_kwargs["fp8_amax_compute_algo"]``; an explicit kwarg takes
     precedence."""
+    fp8_exclude_modules: Optional[List[str]] = None
+    """Megatron module-path globs whose linear layers train in BF16 while the rest use FP8.
+
+    Patterns use ``fnmatch`` syntax and match Megatron module paths such as
+    ``decoder.layers.3.self_attention.linear_qkv``, ``decoder.layers.3.self_attention.in_proj``
+    (GDN), ``decoder.layers.3.mlp.experts.linear_fc1``, ``decoder.layers.3.mlp.shared_experts.linear_fc2``
+    and ``output_layer`` (an FP8 layer only with ``fp8_output_proj`` and ``fp8_recipe=mxfp8``).
+    Examples: ``["*.shared_experts.*"]``, ``["*.self_attention.*"]``. A pattern that matches none of
+    the layers Megatron can run in FP8 raises when the model is built. Megatron
+    numbers ``layers.N`` within each pipeline stage, so layer-indexed patterns are rejected when
+    ``pipeline_model_parallel_size > 1`` (except ``mtp.layers.N``, whose numbering does not depend on
+    the pipeline split); use ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` for layer ranges.
+
+    Built into Megatron's per-module ``quant_recipe``. These are training-side names only; the
+    rollout's FP8 modules are set separately by ``generator.inference_engine.fp8_weight_sync_exclude_modules``.
+    Mutually exclusive with ``te_precision_config_file``."""
+    num_layers_at_start_in_bf16: int = 0
+    """Number of leading transformer layers trained in BF16 instead of FP8 (or, with ``expert_nvfp4``, whose
+    routed experts stay BF16 in the trainer and on the sampler). Layer numbers are global, so this
+    works under pipeline parallelism. If this conflicts with a custom ``te_precision_config_file`` which indicates
+    a layer to be FP8, this config wins and the layer is kept in BF16, unless that file's config for the layer sets
+    ``override_nonquantized_autocast: true`` (Megatron defaults it to false), in which case the file wins and the
+    layer runs in FP8."""
+    num_layers_at_end_in_bf16: int = 0
+    """Number of trailing transformer layers trained in BF16 instead of FP8; see
+    ``num_layers_at_start_in_bf16``."""
+    te_precision_config_file: Optional[str] = None
+    """Path to a Megatron per-module precision YAML (the ``--te-precision-config-file`` format),
+    loaded as ``quant_recipe`` on every training worker, so it must be readable there.
+
+    The file holds named ``configs`` (TE quantization recipes, e.g. BF16, ``blockwise``, ``mxfp8``)
+    and ordered glob ``matchers`` over Megatron module paths; the first matching matcher picks a
+    module's config, and unmatched modules use the global ``fp8`` / ``fp8_recipe``.
+    Layer-indexed patterns are rejected under pipeline parallelism, as for ``fp8_exclude_modules``.
+    Mutually exclusive with ``fp8_exclude_modules``."""
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
@@ -648,24 +683,30 @@ class MegatronConfig(BaseConfig):
     (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
     validated per architecture at startup and forwarded to all Ray actors."""
     empty_cuda_cache: Optional[bool] = None
-    """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
-    This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer.
+    """Empty torch's CUDA cache after each forward/backward and forward-only pass.
 
-    ``None`` (default) empties it unless the optimizer is fully offloaded to CPU
-    (``optimizer_cpu_offload=True`` with ``optimizer_offload_fraction=1.0``): the optimizer step then
-    allocates little GPU memory, and under ``expandable_segments`` the empty releases every cached page
-    to the driver, which the next forward pass maps again (seconds per step at high memory use).
-    ``True`` / ``False`` force it on / off. Forward-only passes empty the cache unless this is ``False``."""
+    The empty after a forward/backward pass runs before the optimizer step. Emptying frees
+    reserved-but-unallocated memory, which can help avoid OOMs from fragmentation.
+
+    ``None`` (default) skips both empties when the trainer runs with ``expandable_segments``
+    (``trainer.use_expandable_segments``, on by default): that allocator does not fragment, so the
+    empty buys no headroom inside the process, while it releases every cached page to the driver and
+    the next pass maps them all again (seconds per step at high memory use; up to ~3x slower steps on
+    long-context MoE runs). The trainer still empties the cache around offload and weight sync. Without
+    ``expandable_segments``, ``None`` empties after each pass, except after forward/backward when the
+    optimizer is fully offloaded to CPU (``optimizer_cpu_offload=True`` with
+    ``optimizer_offload_fraction=1.0``), whose step allocates little GPU memory.
+    ``True`` / ``False`` force both empties on / off."""
     expert_nvfp4: bool = False
     """Run routed-expert GEMMs (``*.experts.linear_fc1/fc2``) through Transformer Engine's NVFP4 recipe and
     sync the same NVFP4 expert weights to vLLM (ModelOpt NVFP4, per-token activations, no re-quantization on
     the sampler). Everything else stays BF16. The recipe itself (per-token activations, 4/6 block scaling,
     dequantized backward, no RHT / stochastic rounding / 2D blocks) is read by TE from the ``NVTE_NVFP4_*``
     and ``NVTE_BACKWARD_OVERRIDE`` environment, forwarded to all Ray actors together with the matching
-    ``FLASHINFER_*`` sampler settings. Requires ``moe_grouped_gemm`` and SM100."""
-    expert_nvfp4_high_precision_last_layers: int = 0
-    """With ``expert_nvfp4``: keep the routed experts of the last N transformer layers in BF16, in the
-    trainer and on the sampler."""
+    ``FLASHINFER_*`` sampler settings. Requires ``moe_grouped_gemm`` and SM100.
+
+    ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` keep the routed experts of the first / last
+    N layers in BF16, in the trainer and on the sampler (the vLLM ignore list and the weight sync follow them)."""
     expert_nvfp4_stacked_sync: bool = True
     """With ``expert_nvfp4``: ship each NVFP4 MoE layer's experts to vLLM as 8 tensors stacked over all experts,
     already in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout (``weight_sync/nvfp4_stacked.py``), instead of
@@ -673,7 +714,7 @@ class MegatronConfig(BaseConfig):
     ``process_weights_after_loading`` instead of buffering and replaying ~1.5k per-expert loader calls through
     its layerwise reload (~74k for a 48-layer, 128-expert model). Same quantization, same bytes; the receiver
     falls back to the per-expert path for any layer it cannot load directly (MoE TP > 1, redundant experts,
-    unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 tail layers are unaffected. On by default (parity with
+    unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 layers are unaffected. On by default (parity with
     the per-expert path is bitwise, see ``tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stacked_sync.py``); set
     ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
     model_config_kwargs: dict = field(default_factory=dict)
@@ -721,12 +762,12 @@ class MegatronConfig(BaseConfig):
     """Copy shards to host memory on the training rank before handing them to the async
     checkpoint writer, instead of letting the writer pull them over CUDA IPC.
 
-    Enable this when using async save on machines with restricted ptrace permissions. 
+    Enable this when using async save on machines with restricted ptrace permissions.
     megatron-core hands the writer the *GPU* tensors and copies them in the writer process;
-    with ``expandable_segments:True`` those handles are file descriptors that the writer 
-    imports via ``pidfd_getfd``, which needs ptrace-attach permission on the rank. 
-    Where that is refused (e.g. ``kernel.yama.ptrace_scope=1``, as on some CI runners) 
-    the writer dies with ``pidfd_getfd: Operation not permitted`` and every rank then 
+    with ``expandable_segments:True`` those handles are file descriptors that the writer
+    imports via ``pidfd_getfd``, which needs ptrace-attach permission on the rank.
+    Where that is refused (e.g. ``kernel.yama.ptrace_scope=1``, as on some CI runners)
+    the writer dies with ``pidfd_getfd: Operation not permitted`` and every rank then
     hangs on the preload barrier.
 
     Off by default: prestaging shrinks the rank's blocking
@@ -734,6 +775,12 @@ class MegatronConfig(BaseConfig):
     See ``_stage_async_request_to_host``."""
 
     def __post_init__(self):
+
+        from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+            is_fp8_enabled,
+            reject_stage_local_layer_patterns,
+        )
+
         # Backfill defaults for any keys the user didn't override so an override dict
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
@@ -748,6 +795,34 @@ class MegatronConfig(BaseConfig):
         ):
             if value is not None:
                 self.transformer_config_kwargs.setdefault(key, value)
+        if self.expert_nvfp4 and (self.fp8_exclude_modules or self.te_precision_config_file):
+            raise ValueError(
+                "expert_nvfp4 builds its own per-module quant recipe; fp8_exclude_modules and "
+                "te_precision_config_file are not supported with it."
+            )
+        # expert_nvfp4 honours num_layers_at_{start,end}_in_bf16 through the same Megatron first/last-layer
+        # mechanism, so the layer counts are valid with FP8 or with expert_nvfp4.
+        if (
+            not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False))
+            and not self.expert_nvfp4
+            and (self.fp8_exclude_modules or self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0)
+        ):
+            raise ValueError(
+                "FP8 disabled but one or more of these quantization config is requested: exclude modules, num start/end layers to keep at BF16. "
+            )
+        if self.num_layers_at_start_in_bf16 < 0 or self.num_layers_at_end_in_bf16 < 0:
+            raise ValueError("num_layers_at_start_in_bf16 and num_layers_at_end_in_bf16 must be >= 0")
+        if self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0:
+            self.transformer_config_kwargs.setdefault("first_last_layers_bf16", True)
+            self.transformer_config_kwargs.setdefault("num_layers_at_start_in_bf16", self.num_layers_at_start_in_bf16)
+            self.transformer_config_kwargs.setdefault("num_layers_at_end_in_bf16", self.num_layers_at_end_in_bf16)
+        if self.fp8_exclude_modules and self.te_precision_config_file:
+            raise ValueError(
+                "fp8_exclude_modules and te_precision_config_file both set per-module precision; "
+                "Please only use one of the two."
+            )
+        if self.pipeline_model_parallel_size > 1:
+            reject_stage_local_layer_patterns(self.fp8_exclude_modules or [], "fp8_exclude_modules")
         for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
             self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
         if self.optimizer_config_kwargs is None:
@@ -755,14 +830,22 @@ class MegatronConfig(BaseConfig):
         for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
             self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
 
-    def empty_cuda_cache_after_backward(self) -> bool:
+    def empty_cuda_cache_after_backward(self, expandable_segments: bool = False) -> bool:
         """Whether to empty the CUDA cache after the forward/backward pass (resolves ``empty_cuda_cache=None``)."""
         if self.empty_cuda_cache is not None:
             return self.empty_cuda_cache
+        if expandable_segments:
+            return False
         optimizer_on_cpu = bool(self.optimizer_config_kwargs.get("optimizer_cpu_offload")) and (
             float(self.optimizer_config_kwargs.get("optimizer_offload_fraction") or 0.0) >= 1.0
         )
         return not optimizer_on_cpu
+
+    def empty_cuda_cache_after_forward(self, expandable_segments: bool = False) -> bool:
+        """Whether to empty the CUDA cache after a forward-only pass (resolves ``empty_cuda_cache=None``)."""
+        if self.empty_cuda_cache is not None:
+            return self.empty_cuda_cache
+        return not expandable_segments
 
 
 # ---------------------------------------------------------------------------
@@ -946,12 +1029,12 @@ class CISPOConfig(BaseConfig):
 
     cispo_eps_clip_low: float = 1.0
     """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
-    
+
     The lower bound used is ``1-cispo_eps_clip_low``. The default lower bound is 0 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
     """
     cispo_eps_clip_high: float = 4.0
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
-    
+
     The upper bound used is ``1+cispo_eps_clip_high``. The default upper bound is 5 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
     """
     cispo_anchor: str = "old"
@@ -1039,7 +1122,7 @@ class AlgorithmConfig(BaseConfig):
     temperature: Optional[float] = None
     """Temperature for scaling logits in policy loss computation.
     If ``None``, will be set to the temperature provided by ``generator.sampling_params.temperature`` during config validation.
-    
+
     NOTE: When using HTTP endpoints directly, make sure to set this value to the temperature used during generation
     """
     advantage_batch_normalize: bool = False
@@ -1284,7 +1367,7 @@ class DeltaWeightSyncConfig(BaseConfig):
         "vllm_multi_thread_safetensors"
     )
     """Receiver reload iterator for the prepared local checkpoint.
-    
+
     `vllm_multi_thread_safetensors` loads safetensor files from disk to CPU storage with N parallel workers using vLLM's native safetensors iterator. Tensors are then loaded onto GPU memory iterately.
 
     `vllm_fastsafetensors` loads tensors from safetensor files on disk directly into GPU memory in a highly parallelized way.
@@ -1338,7 +1421,29 @@ class InferenceEngineConfig(BaseConfig):
     ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
     this needs (``quantization``, ``load_format="dummy"``, and the matching
     ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
-    automatically; the first weight sync supplies real weights before any generation."""
+    automatically, and a user-supplied ``quantization_config`` is rejected; the first weight sync
+    supplies real weights before any generation.
+
+    Which modules are FP8 is the model spec's policy, minus ``fp8_weight_sync_exclude_modules``.
+    This is configured independently of the trainer's FP8 settings."""
+    fp8_weight_sync_exclude_modules: Optional[List[str]] = None
+    """HF module-name globs to keep in ``model_dtype`` on the FP8 rollout, on top of the model spec.
+
+    Patterns use ``fnmatch`` syntax and match the names of the tensors synced as FP8, as the HF
+    checkpoint names them, without the ``.weight`` suffix, e.g.
+    ``model.language_model.layers.3.self_attn.q_proj``. Routed experts are their exported tensors:
+    Qwen3.5's stacked ``<layer>.mlp.experts.gate_up_proj`` / ``down_proj``, GLM-5's per-expert
+    ``<layer>.mlp.experts.<n>.gate_proj``, ... Examples:
+    ``["*.layers.0.*", "*.layers.39.*"]`` (first and last layer of a 40-layer model),
+    ``["*.mlp.shared_expert.*"]``, ``["*.layers.3.mlp.experts.*"]``.
+
+    SkyRL uses this for both the vLLM engine initialization and weight sync, so the two steps are always
+    in sync. Patterns are matched only against tensors the model spec syncs as FP8; a pattern that
+    matches none of them is an error. A layer's routed experts run at one precision in vLLM, so
+    excluding only some of them is an error too. Modules vLLM fuses into one must be excluded
+    together (for Qwen3.5: ``q_proj``/``k_proj``/``v_proj``, ``gate_proj``/``up_proj``,
+    ``in_proj_qkv``/``in_proj_z``), or vLLM fails at engine init.
+    Requires ``fp8_weight_sync_mode``."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
@@ -1426,7 +1531,7 @@ class InferenceEngineConfig(BaseConfig):
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
     distributed_executor_backend: str = "ray"
     """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
-    or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
+    or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine
     placement groups are created when ``"mp"`` is used."""
     language_model_only: bool = False
     """When True, pass ``language_model_only=True`` to the vLLM engine so that
@@ -1695,8 +1800,8 @@ class TrainerConfig(BaseConfig):
     """Micro batch size during the forward pass, i.e. log probability or value computation.
     Common to both policy and critic. Each mini batch is split into micro batches of this size."""
     max_tokens_per_microbatch: int = -1
-    """Maximum number of tokens per microbatch for both forward and training steps. When > 0, microbatches 
-    are formed by bin-packing samples based on their token counts (from attention_mask) instead of using a 
+    """Maximum number of tokens per microbatch for both forward and training steps. When > 0, microbatches
+    are formed by bin-packing samples based on their token counts (from attention_mask) instead of using a
     fixed sample count, and micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu are ignored.
     -1 means disabled (use sample-based micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu).
     Applies to both forward and training micro-batching.

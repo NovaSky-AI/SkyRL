@@ -73,11 +73,11 @@ def _bits(t):
 
 
 def _per_expert():
-    return _run(nvfp4.Nvfp4ExpertSerializer(_SETTINGS, NUM_LAYERS, 1), _stream())
+    return _run(nvfp4.Nvfp4ExpertSerializer(_SETTINGS, [NUM_LAYERS - 1]), _stream())
 
 
 def _stacked():
-    return _run(Nvfp4StackedExpertSerializer(_SETTINGS, NUM_LAYERS, 1, num_experts=NUM_EXPERTS), _stream())
+    return _run(Nvfp4StackedExpertSerializer(_SETTINGS, [NUM_LAYERS - 1], num_experts=NUM_EXPERTS), _stream())
 
 
 def test_stacked_names_shapes_and_order():
@@ -146,7 +146,7 @@ def test_w13_rows_are_gate_then_up_and_scale2_shared():
 def test_spec_serializer_declares_the_stacked_stream():
     real = _stacked()
     specs = [(n, nvfp4.TensorSpec(t.dtype, tuple(t.shape))) for n, t in _stream()]
-    declared = _run(Nvfp4StackedExpertSpecSerializer(_SETTINGS, NUM_LAYERS, 1, num_experts=NUM_EXPERTS), specs)
+    declared = _run(Nvfp4StackedExpertSpecSerializer(_SETTINGS, [NUM_LAYERS - 1], num_experts=NUM_EXPERTS), specs)
     assert [(n, s.dtype, tuple(s.shape)) for n, s in declared] == [(n, t.dtype, tuple(t.shape)) for n, t in real]
 
 
@@ -158,13 +158,13 @@ def test_metadata_shrinks():
 
 
 def test_incomplete_layer_and_duplicate_expert_raise():
-    serializer = Nvfp4StackedExpertSerializer(_SETTINGS, NUM_LAYERS, 0, num_experts=NUM_EXPERTS)
+    serializer = Nvfp4StackedExpertSerializer(_SETTINGS, num_experts=NUM_EXPERTS)
     for name, tensor in _stream()[:5]:
         list(serializer(name, tensor))
     with pytest.raises(RuntimeError, match="unpaired|incomplete MoE layers"):
         serializer.finish()
 
-    serializer = Nvfp4StackedExpertSerializer(_SETTINGS, NUM_LAYERS, 0, num_experts=NUM_EXPERTS)
+    serializer = Nvfp4StackedExpertSerializer(_SETTINGS, num_experts=NUM_EXPERTS)
     down = ("model.layers.0.mlp.experts.1.down_proj.weight", torch.randn(HIDDEN, INTER))
     list(serializer(*down))
     with pytest.raises(ValueError, match="twice"):

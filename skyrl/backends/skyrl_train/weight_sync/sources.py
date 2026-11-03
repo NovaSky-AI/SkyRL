@@ -22,7 +22,17 @@ without the wheel.
 import os
 import re
 import time
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import torch
 from loguru import logger
@@ -238,15 +248,14 @@ class SerializedNvfp4WeightSource(WeightSource):
         self,
         source: WeightSource,
         settings: Any,
-        num_layers: int,
-        high_precision_last_layers: int,
+        bf16_layers: Sequence[int] = (),
         stacked_num_experts: Optional[int] = None,
         min_packed_buffer_bytes: int = 0,
     ) -> None:
         self._source = source
         self._settings = settings
-        self._num_layers = num_layers
-        self._high_precision_last_layers = high_precision_last_layers
+        # Layers whose routed experts stay BF16 (``num_layers_at_{start,end}_in_bf16``).
+        self._bf16_layers = tuple(bf16_layers)
         # Set -> ``expert_nvfp4_stacked_sync``: each NVFP4 MoE layer goes out as 8 stacked tensors over this
         # many experts (``weight_sync/nvfp4_stacked.py``).
         self._stacked_num_experts = stacked_num_experts
@@ -262,7 +271,7 @@ class SerializedNvfp4WeightSource(WeightSource):
     def _serializer(self, spec: bool):
         from skyrl.backends.skyrl_train.weight_sync import nvfp4, nvfp4_stacked
 
-        args = (self._settings, self._num_layers, self._high_precision_last_layers)
+        args = (self._settings, self._bf16_layers)
         if self._stacked_num_experts is None:
             return (nvfp4.Nvfp4ExpertSpecSerializer if spec else nvfp4.Nvfp4ExpertSerializer)(*args)
         cls = nvfp4_stacked.Nvfp4StackedExpertSpecSerializer if spec else nvfp4_stacked.Nvfp4StackedExpertSerializer

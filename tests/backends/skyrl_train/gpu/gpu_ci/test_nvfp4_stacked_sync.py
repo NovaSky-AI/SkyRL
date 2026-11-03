@@ -95,9 +95,9 @@ def _worker_sync(worker, mode, seed):
         use_4over6=False, e4m3_max=448, err_mode="MAE", row_scaled_activation=True, backward_override=None
     )
     if mode == "stacked":
-        serializer = nvfp4_stacked.Nvfp4StackedExpertSerializer(settings, NUM_LAYERS, 0, num_experts=NUM_EXPERTS)
+        serializer = nvfp4_stacked.Nvfp4StackedExpertSerializer(settings, num_experts=NUM_EXPERTS)
     else:
-        serializer = nvfp4.Nvfp4ExpertSerializer(settings, NUM_LAYERS, 0)
+        serializer = nvfp4.Nvfp4ExpertSerializer(settings)
 
     gen = torch.Generator(device="cpu").manual_seed(seed)
     stream = []
