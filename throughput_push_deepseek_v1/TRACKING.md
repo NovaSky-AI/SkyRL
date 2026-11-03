@@ -37,12 +37,14 @@ GLM-5.3-Flash LoRA 2-node work (agent-A, same branch): `mlp_chunks_for_training=
 
 | who | what | started |
 |---|---|---|
+| agent-B (claude, session 01Jj5NZE) | **trainer-only** DSv4.1-Flash sim on **one** 8xB200 node (no vLLM: `examples/train_scripts/full_context` harness with multi-turn loss masks + synthetic R3 routes, `throughput_push_deepseek_v1/sim/trainer_sim.sh`), 8-layer / 64-expert slice with the real layer roles (`sim/make_dsv41_flash_slice.py`), **256k context** + multi-turn + R3. First: where a 256k sequence breaks (memory / time per phase); SkyRL's V4.1 attention has no CP (`cp.size() == 1` assert) -- candidates: CP / THD / full recompute from Megatron-LM#8018 / #7285. Not touching the 2-node LoRA E2E (agent-A) | 2026-11-03 |
 | agent-A (claude, session 01Jj5NZC) | **real 40-layer DSv4.1-Flash, LoRA, colocated on 2x8 B200** (shapes of `run_dapo_dsv41_flash_lora_sync_2node.sh` from #2573: Megatron EP16 TP1, vLLM TP8 x PP2, R3), compressed batch; phase breakdown and fixes. Then multi-turn and a long-context layer slice | 2026-11-03 |
 
 ## Done
 
 | who | what | result | commit |
 |---|---|---|---|
+| agent-B | carried over from `throughput-push-v1` (cherry-picked): DSv4.1 FP8 load in 32-wide blocks (#2610) + full-weight sync 32-wide export and FP8/e8m0 wire dtype (#2612); R3 out-of-range id error; trainer-only harness (multi-turn masks, synthetic routes); fused cuDNN V4.1 indexer scoring (`SKYRL_DSV41_INDEXER_IMPL=fused`, Megatron-LM#7285 backport); skip between-phase `empty_cache` under expandable segments. Not carried: Bridge #6456 scale-cache backport (already in this branch's Bridge pin 7171584b) | on throughput-push-v1, 16k DSv4.1 slice trainer step 48.4 -> 20.6 s (with fused LM head) | see git log |
 
 ## Measurement setup / notes
 
