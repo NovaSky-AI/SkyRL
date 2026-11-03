@@ -1439,8 +1439,22 @@ class RayPPOTrainer:
 
         # Policy forward. Skipped for losses that optimize against rollout logprobs (see
         # `_skip_policy_forward`), where the resulting logprobs are never read.
+        first_minibatch_end = 0
         if self._skip_policy_forward(training_input):
             action_log_probs = None
+        elif self.cfg.trainer.old_logprobs_from_first_minibatch:
+            # The first mini-batch's old logprobs come from its training forward (see
+            # `trainer.old_logprobs_from_first_minibatch`); its rows stay zero here.
+            boundaries = training_input.metadata["policy_mini_batch_boundaries"]
+            first_minibatch_end = boundaries[0][1]
+            action_log_probs = torch.zeros_like(training_input["loss_mask"], dtype=torch.float32)
+            if len(boundaries) > 1:
+                rest_outputs: List[Dict[str, Any]] = []
+                for chunk_refs in self.dispatch.stage_data("policy", data_fwd_pass, boundaries[1:]):
+                    rest_outputs.extend(self.dispatch.forward_from_staged("policy", chunk_refs).loss_fn_outputs)
+                rest = loss_fn_outputs_to_tensor(rest_outputs, key="logprobs")
+                rest = rest[: len(training_input["sequences"]) - first_minibatch_end]
+                action_log_probs[first_minibatch_end:, : rest.shape[1]] = rest
         else:
             action_log_probs = self._execute_forward_pass(
                 "policy",
@@ -1466,10 +1480,10 @@ class RayPPOTrainer:
         if training_input.get("rollout_logprobs", None) is not None and action_log_probs is not None:
             # Abs diff between rollout and forward-pass logprobs, over response tokens. When the
             # forward pass is skipped, the worker's `minibatch_rollout_logprobs_abs_diff_*` is used.
-            logprobs_diff = (
-                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
-                - action_log_probs[training_input["loss_mask"] > 0]
-            ).abs()
+            # Rows whose old logprobs come from the training forward are excluded.
+            diff_mask = training_input["loss_mask"] > 0
+            diff_mask[:first_minibatch_end] = False
+            logprobs_diff = (training_input["rollout_logprobs"][diff_mask] - action_log_probs[diff_mask]).abs()
 
             # Guard: a batch with no trainable response tokens (loss_mask all zero, e.g. every
             # response dropped by overlong filtering) leaves logprobs_diff empty, and .max()/.min()
@@ -1623,9 +1637,12 @@ class RayPPOTrainer:
         # summed over mini-batches into timing/<model>_forward_backward and timing/<model>_optim_step.
         fwd_bwd_seconds = optim_seconds = 0.0
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            for chunk_refs in all_chunk_refs:
+            for mini_batch_idx, chunk_refs in enumerate(all_chunk_refs):
+                worker_kwargs = {}
+                if model == "policy" and mini_batch_idx == 0 and self.cfg.trainer.old_logprobs_from_first_minibatch:
+                    worker_kwargs["old_logprobs_from_current"] = True
                 started = time.perf_counter()
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs, **worker_kwargs)
                 fwd_bwd_seconds += time.perf_counter() - started
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
