@@ -1,7 +1,7 @@
-"""DeepSeek-V4.1 export re-quantizes in the released checkpoint's layout (32x32 FP8 blocks, MXFP4 experts).
+"""DeepSeek-V4.1 load / export use the released checkpoint's layout (32x32 FP8 blocks, MXFP4 experts).
 
-V4's export hook assumed 128x128 FP8 blocks and rejected V4.1's scales, so a full-weight sync of the
-released checkpoint failed with ``Unsupported FP8 scale geometry``.
+V4's hooks assume 128x128 FP8 blocks: the export rejected V4.1's scales (``Unsupported FP8 scale
+geometry``), and the load silently applied the wrong scales.
 """
 
 from dataclasses import dataclass
@@ -61,3 +61,22 @@ def test_v41_export_uses_32_wide_fp8_blocks_and_mxfp4_experts():
     # With an export dtype set, V4's hook returns the weights unquantized.
     plain = bridge.maybe_modify_converted_hf_weight(Task(torch.bfloat16), converted, hf_state_dict)
     assert plain["layers.0.attn.wkv.weight"] is attn
+
+
+@pytest.mark.skipif(E8M0 is None, reason="needs torch.float8_e8m0fnu")
+def test_v41_load_dequantizes_fp8_in_32_wide_blocks():
+    torch.manual_seed(0)
+    bridge = object.__new__(DeepSeekV41Bridge)
+    # Distinct power-of-two scale per 32x32 block, so a 128-wide decode is visibly wrong.
+    scale = (2.0 ** torch.randint(-4, 4, (8, 8)).float()).to(E8M0)
+    weight = torch.randn(256, 256).clamp(-2, 2).to(torch.float8_e4m3fn)
+    state = {"layers.0.attn.wq_b.weight": weight, "layers.0.attn.wq_b.scale": scale}
+
+    out = bridge.maybe_modify_loaded_hf_weight("layers.0.attn.wq_b.weight", state)
+
+    expected = weight.float() * scale.float().repeat_interleave(32, 0).repeat_interleave(32, 1)
+    assert out.dtype == torch.bfloat16
+    torch.testing.assert_close(out.float(), expected, rtol=1e-2, atol=1e-2)
+    # A dict hf_param (gated MLP) decodes each entry.
+    both = bridge.maybe_modify_loaded_hf_weight({"gate": "layers.0.attn.wq_b.weight"}, state)
+    torch.testing.assert_close(both["gate"], out)

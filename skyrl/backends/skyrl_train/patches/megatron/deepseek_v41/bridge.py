@@ -143,6 +143,31 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
         provider.dsv41_engram_group_size = ENGRAM_GROUP_SIZE
         return provider
 
+    def maybe_modify_loaded_hf_weight(self, hf_param, hf_state_dict):
+        """Dequantize the released checkpoint's FP8 weights in its 32x32 blocks.
+
+        V4's hook dequantizes FP8 with 128x128 blocks. On V4.1's 32x32 scales that does not raise -- the
+        repeated scale is cropped to the weight's shape -- it applies the wrong scale to most blocks
+        (``layers.3.attn.wq_b``: 68% relative error), so every FP8 weight (attention, shared experts)
+        loaded wrong, LoRA's frozen base included. Same decode as NVIDIA-NeMo/Megatron-Bridge#6199's
+        ``DeepSeekV41Bridge.maybe_modify_loaded_hf_weight`` (open); everything else (MXFP4 routed experts,
+        synthesized gate bias, legacy indexer names) is V4's hook unchanged.
+        """
+        if isinstance(hf_param, dict):
+            return {key: self.maybe_modify_loaded_hf_weight(value, hf_state_dict) for key, value in hf_param.items()}
+        name = hf_param
+        if name not in hf_state_dict:
+            legacy = name.replace(".indexer.scorer.weights_proj.", ".indexer.weights_proj.")
+            name = legacy if legacy in hf_state_dict else name
+        scale_key = name.removesuffix(".weight") + ".scale"
+        if name.endswith(".weight") and name in hf_state_dict and scale_key in hf_state_dict:
+            weight = hf_state_dict[name]
+            if weight.dtype == torch.float8_e4m3fn:
+                return quantization_utils.dequantize_fp8_e4m3fn_with_scale(
+                    weight, hf_state_dict[scale_key], name=name, block_size=FP8_BLOCK_SIZE, dtype=torch.bfloat16
+                )
+        return super().maybe_modify_loaded_hf_weight(hf_param, hf_state_dict)
+
     def maybe_modify_converted_hf_weight(self, task, converted_weights_dict, hf_state_dict):
         """Re-quantize an exported weight in the released 32-wide FP8 / packed-MXFP4 layout.
 
