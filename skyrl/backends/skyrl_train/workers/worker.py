@@ -425,6 +425,18 @@ class Worker(DistributedTorchRayActor):
         """Return this rank's last-window kernel summary, or None."""
         return self.profiler.get_kernel_summary() if self.profiler is not None else None
 
+    def get_device_name(self) -> str:
+        """Returns this worker's CUDA device name, e.g. ``"NVIDIA B200"``, or ``""`` without a GPU."""
+        return torch.cuda.get_device_name() if torch.cuda.is_available() else ""
+
+    def model_flops(self, num_seqs: int, seqlen_sum: int, seqlen_squared_sum: int) -> Optional[Dict[str, float]]:
+        """Returns the forward + backward model FLOPs of a batch, or None if not supported."""
+        return None
+
+    def pop_train_compute_seconds(self) -> Optional[float]:
+        """Returns the seconds spent in training calls since the last call, or None if not tracked."""
+        return None
+
     def _get_module_for_offload(self):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
         return self.model

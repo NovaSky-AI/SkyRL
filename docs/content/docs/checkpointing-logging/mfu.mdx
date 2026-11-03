@@ -1,0 +1,109 @@
+---
+title: "Model FLOPs Utilization (MFU)"
+---
+
+SkyRL logs how much of the GPUs' peak compute the policy's training step uses. Logging is on by
+default for the Megatron backend:
+
+```yaml
+trainer:
+  log_mfu: true
+```
+
+SFT uses the top-level `log_mfu` field instead.
+
+## Metrics
+
+RL logs these under `trainer/` and SFT under `train/`, once per step:
+
+| Metric | Meaning |
+|---|---|
+| `mfu` | Model FLOPs per second per GPU, over the time the GPUs spent training, divided by the GPU's dense BF16 peak |
+| `mfu_e2e` | The same, over the driver's wall-clock time for the step, which also includes data staging and dispatch |
+| `model_tflops_per_gpu` | Model TFLOP/s per GPU over the training time; it doesn't depend on a peak |
+| `flops_per_token` | Forward + backward model FLOPs per token for this step's batch |
+| `hfu_est` | `mfu` plus the forward recomputed under full activation recompute; only logged with full recompute |
+
+Full recompute is SkyRL's default for Megatron
+(`megatron_config.transformer_config_kwargs.recompute_granularity: full`), so `hfu_est` is
+logged by default.
+
+The gap between `mfu` and `mfu_e2e` is driver-side work in the training step, such as staging
+data for the workers and, in RL, normalizing advantages and moving models on and off the GPU in
+colocated runs.
+
+`flops_per_token` changes with the batch. Attention cost grows with sequence length, so a step
+with longer sequences does more work per token. When `tokens_per_second` drops because responses
+got longer, `mfu` stays flat if the GPUs are just as busy.
+
+## How MFU is computed
+
+```
+mfu = passes × model FLOPs of the batch / (training seconds × GPUs × peak FLOP/s per GPU)
+```
+
+**Model FLOPs** are the forward + backward FLOPs of the policy over the step's batch, from
+Megatron-Bridge's per-layer-type formula
+(`megatron.bridge.training.utils.flop_utils.num_floating_point_operations`), evaluated on the
+finalized model provider. Each layer is costed by its type (dense attention, multi-latent and
+sparse attention, linear attention, Mamba, dense MLP, MoE with routed and shared experts) and the
+per-layer costs are summed, so hybrid models are not treated as uniform transformers. Attention
+uses each document's own length (`sum(s^2)` over documents), not the padded or packed row length.
+Padding rows added to balance data-parallel ranks are not counted.
+
+Activation recompute and the optimizer's own arithmetic are not counted, which is the standard
+definition. Recompute therefore lowers `mfu`; `hfu_est` adds it back for full recompute.
+
+**`passes`** is `update_epochs_per_batch` in RL and 1 in SFT.
+
+**Training seconds** for `mfu` and `model_tflops_per_gpu` is the time the slowest policy worker
+spent inside `forward_backward` and `optim_step` during the step, measured on the worker with
+CUDA synchronization. Optimizer time is included, so offloading the optimizer state to CPU or disk
+lowers MFU by the time the transfers add. Time between those calls, such as moving models on and
+off the GPU in colocated runs, is not included.
+
+**Training seconds** for `mfu_e2e` is the driver's timing of the step: `timing/policy_train` in RL
+and `timing/forward_backward + timing/optim_step` in SFT.
+
+In RL, critic training, the reference and old-logprob forward passes, generation and weight sync
+are excluded from both.
+
+### Example
+
+For a dense transformer with `N` parameters outside the embeddings, hidden size `h`, `L` layers
+and vocabulary `V`, forward + backward costs about
+
+```
+6 × N + 6 × h × V + 6 × L × h × s   FLOPs per token
+```
+
+for a document of length `s`. The terms are the linear layers, the output layer, and causal
+attention. For Qwen2.5-1.5B (`N ≈ 1.31B`, `h = 1536`, `L = 28`, `V = 151936`) at `s = 4096` this
+is about 9.26 + 1.06 ≈ 10.3 GFLOPs per token. Training at 20,000 tokens per second per GPU on a
+B200 gives `10.3e9 × 20,000 / 2250e12 ≈ 9%` MFU.
+
+## Peak FLOPs
+
+| GPU | Dense BF16 TFLOP/s |
+|---|---|
+| GB200 | 2500 |
+| B200 | 2250 |
+| H100 SXM, H200 | 989 |
+| H100 NVL | 835 |
+| H100 PCIe | 756 |
+| A100 | 312 |
+
+On other GPUs, `mfu`, `mfu_e2e` and `hfu_est` are not logged and a warning is printed once.
+`model_tflops_per_gpu` and `flops_per_token` are still logged.
+
+## When MFU is not logged
+
+- **FP8 training:** FP8 GEMMs run at the FP8 peak, while attention, logits and other kernels run
+  at the BF16 peak, so no single peak gives a meaningful ratio. `model_tflops_per_gpu` and
+  `flops_per_token` are still logged. A warning is printed at startup.
+- **LoRA:** the formula assumes full fine-tuning and would overstate LoRA's backward, since the
+  frozen base weights compute no weight gradients. Nothing is logged, and a warning is printed.
+- **Multi-token prediction (MTP) heads:** SkyRL trains MTP heads with a separate draft loss whose
+  backward the formula does not model. Nothing is logged while MTP heads are active, and a
+  warning is printed.
+- **FSDP backend:** not supported yet.

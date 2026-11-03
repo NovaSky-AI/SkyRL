@@ -1,6 +1,8 @@
 import dataclasses
+import functools
 import os
 import shutil
+import time
 from collections import defaultdict
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -156,6 +158,7 @@ import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
     maybe_force_qwen35_text_bridge,
 )
+from skyrl.backends.skyrl_train.workers.megatron.model_flops import model_flops
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
@@ -195,6 +198,8 @@ def drop_unsupported_recompute_modules(provider) -> None:
 
 
 class MegatronWorker:
+    _mfu_mtp_warned = False
+
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
 
@@ -522,6 +527,25 @@ class MegatronWorker:
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
+
+    def model_flops(self, num_seqs: int, seqlen_sum: int, seqlen_squared_sum: int) -> Optional[Dict[str, float]]:
+        """Returns the forward + backward model FLOPs of a batch with these per-document statistics.
+
+        See :func:`~skyrl.backends.skyrl_train.workers.megatron.model_flops.model_flops`. Returns None
+        when MTP heads are active: they are trained with a decoupled draft loss whose backward the
+        formula does not model. Telemetry only: also returns None on any failure rather than ending
+        the run.
+        """
+        if getattr(self.provider, "mtp_num_layers", None):
+            if not self._mfu_mtp_warned:
+                logger.warning("[mfu] MTP heads are active; model FLOPs and MFU are not logged.")
+                self._mfu_mtp_warned = True
+            return None
+        try:
+            return model_flops(self.provider, num_seqs, seqlen_sum, seqlen_squared_sum)
+        except Exception as e:
+            logger.warning(f"[mfu] could not compute model FLOPs: {e}")
+            return None
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
         check_lora_group_flags(
@@ -980,9 +1004,31 @@ class MegatronWorker:
             data["pixel_values"] = None
 
 
+def _counts_train_compute(method):
+    """Adds the method's CUDA-synchronized wall-clock time to ``self._train_compute_seconds``.
+
+    Timing, and its two device synchronizations, run only when ``log_mfu`` is enabled.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if not self.cfg.log_mfu:
+            return method(self, *args, **kwargs)
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            torch.cuda.synchronize()
+            self._train_compute_seconds += time.perf_counter() - start
+
+    return wrapper
+
+
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._train_compute_seconds = 0.0
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -1311,6 +1357,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             m_batch["num_tokens_local"] = count
             m_batch["num_tokens_global"] = int(total.item())
 
+    @_counts_train_compute
     def forward_backward(
         self,
         data: TrainingInputBatch,
@@ -1529,6 +1576,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
+    def pop_train_compute_seconds(self) -> float:
+        """Returns the seconds spent in ``forward_backward`` and ``optim_step`` since the last call."""
+        seconds, self._train_compute_seconds = self._train_compute_seconds, 0.0
+        return seconds
+
+    @_counts_train_compute
     def optim_step(self) -> Optional[float]:
         """
         Perform optimizer step.

@@ -35,6 +35,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
+| `patches/megatron/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/provider.py` `kimi_*` FLOPs-formula fields |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -172,6 +173,10 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
   - Tests that import from `glm5_next`: repoint them at Megatron-Bridge.
   - `.agents/docs/backends/megatron.md` and `docs/content/docs/.../supported_models.mdx`: update
     the model entry.
+  - The `kimi_*` fields in `glm5_next/provider.py` and their assignments in `glm5_next/bridge.py`:
+    check that the upstream provider sets the fields megatron-bridge's FLOPs formula
+    (`flop_utils.num_floating_point_operations`) reads for KDA layers, then delete them with
+    `test_glm5_next_flops_fields.py`.
   - Before deleting the local bridge, compare its behaviour with upstream's:
     - `language_model_only=True` handling;
     - the `head_dim=0` NoPE RoPE skip;
