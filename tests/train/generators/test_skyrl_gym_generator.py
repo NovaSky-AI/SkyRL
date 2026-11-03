@@ -342,6 +342,54 @@ async def test_cache_salt_threaded_to_engine_input(
     assert captured["cache_salt"] == expected_salt
 
 
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+@pytest.mark.parametrize("use_cache_salt,expected_base", [(True, "my-model:5"), (False, "trajectory")])
+async def test_cache_salt_per_trajectory(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg, use_cache_salt, expected_base
+):
+    """With ``cache_salt_per_trajectory`` every trajectory gets its own salt (the version salt plus its index), so
+    samples of one prompt never share cached prefixes."""
+    generator_cfg.batched = False
+    generator_cfg.use_cache_salt = use_cache_salt
+    generator_cfg.cache_salt_per_trajectory = True
+    generator_cfg.sampling_params.logprobs = None
+
+    mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    mock_tokenizer.eos_token_id = 4
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    salts = []
+
+    def mock_generate(input_batch, model=None):
+        salts.append(input_batch.get("cache_salt"))
+        return {"responses": ["4"], "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()], "stop_reasons": ["stop"]}
+
+    mock_llm.generate = AsyncMock(side_effect=mock_generate)
+    mock_llm.weight_version = 5
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+        policy_model_name="my-model",
+    )
+    generator.base_conversation_token_ids = []
+
+    prompt = [{"role": "user", "content": "What is 2 + 2?"}]
+    input_batch = {
+        "prompts": [prompt, prompt, prompt],
+        "env_classes": [mock_env_cfg.env_class] * 3,
+        "env_extras": [{"answer": "4"}] * 3,
+        "batch_metadata": BatchMetadata(global_step=7, training_phase="train"),
+    }
+    await generator.generate(input_batch, disable_tqdm=True)
+
+    assert sorted(salts) == [f"{expected_base}-{i}" for i in range(3)]
+
+
 def test_cache_salt_is_vllm_safe_for_hf_model_names():
     salt = build_vllm_cache_salt(123, f"Qwen/{'x' * 160}@adapter")
 

@@ -1,5 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, Tuple, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Hashable,
+    List,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
@@ -31,7 +41,8 @@ class InferenceEngineInput(TypedDict):
     mm_features: Optional[List[MultiModalFeatures]]
     # Optional prefix-cache salt forwarded to vLLM as the request ``cache_salt`` so cache blocks are
     # only shared between requests carrying the same salt. See ``GeneratorConfig.use_cache_salt``.
-    cache_salt: Optional[str]
+    # A list gives each prompt its own salt (``GeneratorConfig.cache_salt_per_trajectory``).
+    cache_salt: Optional[Union[str, List[str]]]
     routed_experts_prompt_starts: Optional[List[int]]
     # Per-batch opt-in; the engine must enable sample-support capture at startup.
     return_sample_support: Optional[bool]

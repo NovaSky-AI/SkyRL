@@ -842,7 +842,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         env_extras: List[Dict[str, Any]],
         max_tokens: int,
         sampling_params: Optional[Dict[str, Any]] = None,
-        cache_salt: Optional[str] = None,
+        cache_salt: Optional[Union[str, List[str]]] = None,
         training_phase: TrainingPhase = TRAINING_PHASE_TRAIN,
     ) -> GeneratorOutput:
         """
@@ -978,6 +978,11 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Prefix-cache salt derived from the engine weight version. Captured once per `generate` call so
         # every trajectory in this batch shares one salt (the policy version at the start of the batch).
         cache_salt = self._compute_cache_salt()
+        trajectory_salts = None
+        if self.generator_cfg.cache_salt_per_trajectory:
+            # vLLM caps a salt at 128 characters; keep room for the index.
+            base = (cache_salt or "trajectory")[:100]
+            trajectory_salts = [f"{base}-{i}" for i in range(len(prompts))]
 
         # The phase controls per-request sample-support capture.
         batch_metadata = input_batch.get("batch_metadata", None)
@@ -992,7 +997,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 env_extras,
                 max_tokens,
                 sampling_params,
-                cache_salt=cache_salt,
+                cache_salt=trajectory_salts if trajectory_salts is not None else cache_salt,
                 training_phase=training_phase,
             )
 
@@ -1008,7 +1013,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     max_input_length,
                     sampling_params=sampling_params,
                     trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
-                    cache_salt=cache_salt,
+                    cache_salt=trajectory_salts[i] if trajectory_salts is not None else cache_salt,
                     training_phase=training_phase,
                 )
             )
