@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
 )
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type
 
 
@@ -195,7 +196,7 @@ def test_megatron_source_channel_agreement(ray_init_fixture, model_name):
 
 
 @pytest.mark.megatron
-def test_stacked_rdt_source_keeps_fp32_params(ray_init_fixture):
+def test_stacked_rdt_source_keeps_fp32_params():
     """The sharded-RDT stacked source must ship each parameter in the dtype the push
     source does: fp32 for the MoE expert bias (``e_score_correction_bias``), the
     inference dtype for the rest. Moonlight (DeepSeek-V3 architecture) is cut to one
@@ -214,9 +215,11 @@ def test_stacked_rdt_source_keeps_fp32_params(ray_init_fixture):
 
     _orig_ref_worker = _megatron_worker_mod.RefWorker
     _megatron_worker_mod.RefWorker = _ProbeRefWorker
+    # MLA builds with TE fused attention; the gpu_ci conftest disables it by default.
     try:
-        ref = init_worker_with_type("ref", shared_pg=None, colocate_all=False, num_gpus_per_node=4, cfg=cfg)
-        results = ray.get(ref.async_run_ray_method("pass_through", "probe_rdt_source_dtypes", "bfloat16"))
+        with ray_init(extra_env_vars={"NVTE_FUSED_ATTN": "1"}):
+            ref = init_worker_with_type("ref", shared_pg=None, colocate_all=False, num_gpus_per_node=4, cfg=cfg)
+            results = ray.get(ref.async_run_ray_method("pass_through", "probe_rdt_source_dtypes", "bfloat16"))
     finally:
         _megatron_worker_mod.RefWorker = _orig_ref_worker
 
