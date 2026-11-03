@@ -929,7 +929,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             yield held.pop(gi)
 
     def _exchange_pp_names(self, mine: list) -> list:
-        """All-gather ``[(name, shape)]`` over the PP group; one entry per stage."""
+        """All-gather ``[(name, shape, dtype_name)]`` over the PP group; one entry per stage."""
         from megatron.core import parallel_state
 
         pp_size, _my_pp = self._pp_geometry()

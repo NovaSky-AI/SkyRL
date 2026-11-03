@@ -467,6 +467,42 @@ class TestStampedYieldValidation:
         e._validate_held_yields(0, ["anything"], [None])
 
 
+class TestYieldDtypeValidation:
+    """The consumers carve each packed slice by the dtype in the sender's
+    metadata, so a yielded tensor in another dtype must fail at the gather loop,
+    and ranks whose metadata differs only in a dtype must fail the digest check."""
+
+    @staticmethod
+    def _engine(dtypes):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
+            ParamMeta,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+            SkyRLShardedRDTTrainerWeightTransferEngine,
+        )
+
+        e = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
+        e._meta = [ParamMeta(f"w{i}", dt, (2,)) for i, dt in enumerate(dtypes)]
+        e._group_dtypes = [list(dtypes)]
+        return e
+
+    def test_matching_dtypes_pass(self):
+        e = self._engine([torch.bfloat16, torch.float32, torch.bfloat16])
+        e._validate_yield_dtypes(0, ["w0", "w1", "w2"], [torch.zeros(2, dtype=torch.bfloat16), torch.zeros(2), None])
+
+    def test_a_dtype_other_than_the_declared_one_raises(self):
+        e = self._engine([torch.bfloat16, torch.float32])
+        with pytest.raises(RuntimeError, match="metadata declares torch.float32"):
+            e._validate_yield_dtypes(
+                0, ["w0", "w1"], [torch.zeros(2, dtype=torch.bfloat16), torch.zeros(2, dtype=torch.bfloat16)]
+            )
+
+    def test_the_metadata_digest_covers_dtypes(self):
+        bf16 = self._engine([torch.bfloat16, torch.bfloat16])._meta_digest()
+        fp32 = self._engine([torch.bfloat16, torch.float32])._meta_digest()
+        assert bf16 != fp32
+
+
 @pytest.mark.megatron
 class TestQkvIndexDeviceCtx:
     """``_qkv_index_device_ctx`` keeps the QKV split's index tensors on the weight's
