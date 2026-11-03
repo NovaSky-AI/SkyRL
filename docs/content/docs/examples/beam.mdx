@@ -8,15 +8,8 @@ the model and vLLM generates responses, sharing the same GPUs. The examples run 
 AIME24 and AIME25.
 
 <Callout type="info">
-Full fine-tuning (bf16 and MXFP8) runs on `main`: vLLM 0.33 serves Beam and the pinned Megatron-Bridge trains it, both
-installed by SkyRL's `megatron` extra. The LoRA scripts still need the
-[`beam-release`](https://github.com/NovaSky-AI/SkyRL/tree/beam-release) branch and its SkyRL Beam image
-(`novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron-beam`): they serve the adapter unmerged, and vLLM 0.33's
-Beam model does not support LoRA yet.
-</Callout>
-
-<Callout type="info">
-The examples need 2 to 8 nodes of 8 x B200 GPUs.
+Beam runs on `main`: vLLM 0.33 serves it and the pinned Megatron-Bridge trains it, both installed by SkyRL's `megatron`
+extra. The examples need 2 to 8 nodes of 8 x B200 GPUs.
 </Callout>
 
 ## Before you start
@@ -24,7 +17,7 @@ The examples need 2 to 8 nodes of 8 x B200 GPUs.
 You need the [Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B) checkpoint, a SkyRL
 checkout, and GPUs.
 
-The full fine-tuning scripts are in
+The example scripts are in
 [`examples/train/models/reflection/beam/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/models/reflection/beam).
 All commands on this page run from the root of the checkout.
 
@@ -60,8 +53,8 @@ scripts.
 
 | Configuration | Hardware | How it runs | Script |
 |---|---|---|---|
-| LoRA (`beam-release` branch) | 2 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_2node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_lora_2node.sh) |
-| LoRA (`beam-release` branch) | 4 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_lora_4node.sh) |
+| LoRA | 2 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_2node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_lora_2node.sh) |
+| LoRA | 4 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_lora_4node.sh) |
 | Full fine-tuning | 8 nodes x 8 B200 GPUs | Training and generation share the GPUs; the full model is trained | [`run_dapo_beam_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_fullft_8node.sh) |
 | MXFP8 full fine-tuning | 8 nodes x 8 B200 GPUs | MXFP8 training and MXFP8 rollouts; the full model is trained | [`run_dapo_beam_fp8_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_fp8_fullft_8node.sh) |
 
@@ -77,8 +70,6 @@ All scripts use these settings:
   responses per problem.
 
 ### 32 B200 GPUs LoRA
-
-The LoRA scripts run from a `beam-release` checkout in the SkyRL Beam image (see the note at the top of this page).
 
 Train rank-64 adapters with alpha 64 on all linear layers, keeping the base model frozen. Each of the 256 experts gets
 its own adapter. The learning rate is `1e-5`.
@@ -107,7 +98,8 @@ The LoRA scripts also turn on these throughput and memory optimizations:
 - **MoE LoRA slots sized at the expert rank.** With `normalize_moe_lora=true`, each expert adapter has rank
   `rank / top_k` (8 for rank 64). The scripts pass `additional_config.max_expert_lora_rank` so that vLLM sizes its MoE
   LoRA slots at that rank instead of the full rank. This speeds up decoding and leaves more memory for the KV cache.
-- **Pinned host staging for the in-memory adapter sync** (`SKYRL_LORA_STAGE_DEVICE=gpu_offload`).
+- **Unmerged adapter serving.** vLLM 0.33's Beam model has no LoRA support; SkyRL registers a LoRA-capable subclass
+  under the same architecture (`patches/vllm/patch_beam_lora.py`), and the adapter is synced in memory.
 - **LoRA sequence-parallel input regathering** (`lora_config.sequence_parallel_input_regather=true`), which keeps only
   each rank's shard of the LayerNorm output for the LoRA backward pass.
 - **Fused LM-head log-probabilities with logit softcapping** (`trainer.fused_lm_head_logprob=true`).

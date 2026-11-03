@@ -8,21 +8,24 @@ DAPO-Math-17k and evaluates on AIME-2024 and AIME-2025.
 
 | Configuration | Hardware | Script |
 |---|---|---|
+| LoRA, minimal setup | 2 nodes x 8 B200 | [`run_dapo_beam_lora_2node.sh`](run_dapo_beam_lora_2node.sh) |
+| LoRA (reference run) | 4 nodes x 8 B200 | [`run_dapo_beam_lora_4node.sh`](run_dapo_beam_lora_4node.sh) |
 | BF16 full fine-tuning | 8 nodes x 8 B200 | [`run_dapo_beam_fullft_8node.sh`](run_dapo_beam_fullft_8node.sh) |
 | MXFP8 full fine-tuning | 8 nodes x 8 B200 | [`run_dapo_beam_fp8_fullft_8node.sh`](run_dapo_beam_fp8_fullft_8node.sh) |
 
 All scripts train for 50 steps by default (`MAX_TRAINING_STEPS`) and evaluate every 5 steps. Other cluster shapes work
 by adjusting the parallelism and memory settings in the scripts.
 
-**LoRA.** vLLM 0.33's `BeamForCausalLM` does not support LoRA, so a Beam adapter cannot be served unmerged
-(`megatron_config.lora_config.merge_lora=false`). Megatron LoRA training itself works, and `merge_lora=true` syncs
-merged full weights instead.
-
 ## Environment
 
 Beam needs vLLM >= 0.33.0 (`vllm.models.beam`) and the pinned Megatron-Bridge (`megatron.bridge.models.beam`), both in
-SkyRL's `megatron` extra. transformers ships `BeamConfig` from 5.22, past SkyRL's pin, so SkyRL registers its own copy
-(`skyrl/backends/skyrl_train/patches/transformers/configuration_beam.py`).
+SkyRL's `megatron` extra. SkyRL adds two pieces on top:
+
+- transformers ships `BeamConfig` from 5.22, past SkyRL's pin, so SkyRL registers its own copy
+  (`skyrl/backends/skyrl_train/patches/transformers/configuration_beam.py`).
+- vLLM 0.33's `BeamForCausalLM` does not support LoRA. SkyRL registers a LoRA-capable subclass under the same
+  architecture (`skyrl/backends/skyrl_train/patches/vllm/patch_beam_lora.py`, a `vllm.general_plugins` entry point),
+  which the LoRA recipes need to serve the adapter unmerged.
 
 The scripts launch through `uv run --isolated --extra megatron --extra fa4`. Start a Ray cluster across the nodes first
 and run the script on the head node; SkyRL places the trainer and the engines. The scripts use Flash Attention 4 and
@@ -44,6 +47,36 @@ DATA_DIR=$HOME/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.s
 ```
 
 The scripts read `MODEL_PATH` (default `reflection/Beam-1.0-501B-A23B`) and `DATA_DIR` (default `$HOME/data/dapo`).
+
+## LoRA
+
+Trains rank-64 adapters (alpha 64) on all linear layers, with one adapter per expert, and keeps the base model frozen.
+The learning rate is `1e-5`. The adapter is synced to vLLM in memory (`lora.sync_mode=memory`) and served unmerged.
+
+The 4-node reference script uses Megatron TP4/PP2/EP8 (DP4) and two vLLM engines, each TP8 x PP2. It samples
+64 prompts x 8 responses per step, split into two mini-batches:
+
+```bash
+MODEL_PATH=/path/to/models/Beam-1.0-501B-A23B ENV_FILE=/path/to/.env \
+  bash examples/train/models/reflection/beam/run_dapo_beam_lora_4node.sh
+```
+
+The 2-node script keeps the same Megatron layout (DP2) with one vLLM engine of TP8 x PP2. It halves the batch to
+32 prompts x 8 responses and keeps the mini-batch size of 32 prompts, so each step is one optimizer update:
+
+```bash
+MODEL_PATH=/path/to/models/Beam-1.0-501B-A23B ENV_FILE=/path/to/.env \
+  bash examples/train/models/reflection/beam/run_dapo_beam_lora_2node.sh
+```
+
+Both LoRA scripts turn on these throughput and memory optimizations:
+
+- MoE LoRA slots in vLLM sized at the per-expert rank (`additional_config.max_expert_lora_rank`).
+- LoRA sequence-parallel input regathering.
+- Fused LM-head log-probabilities with logit softcapping.
+
+They pass vLLM's adapted module names in `lora_target_modules` (`qkv_gate_proj`, `qkv_proj`, `output_gate_proj`,
+`o_proj`, `gate_up_proj`, `down_proj`, `experts`), which leaves the fp32 router unwrapped.
 
 ## BF16 full fine-tuning
 
@@ -105,7 +138,8 @@ within the 8K response budget. Override it with, for example, `REASONING_EFFORT=
 ## Checkpoints and resuming
 
 Each script writes checkpoints to `CKPT_PATH` (default `$HOME/ckpts/<run name>`) and exports and evaluation dumps to
-`EXPORT_PATH` (default `$HOME/exports/<run name>`). The scripts save every 25 steps and resume from the latest
+`EXPORT_PATH` (default `$HOME/exports/<run name>`). The LoRA scripts save the adapters every 10 steps; rerun the same
+command with `RESUME_MODE=latest` to resume. The full fine-tuning scripts save every 25 steps and resume from the latest
 checkpoint in `CKPT_PATH` by default. A full checkpoint is about 7 TB (about 0.9 TB per node), so make sure each node
 has room for every checkpoint you keep. To resume from a specific checkpoint, pass `RESUME_MODE=from_path` with the
 Hydra override `trainer.resume_path=<checkpoint dir>`.
@@ -121,14 +155,14 @@ Hydra override `trainer.resume_path=<checkpoint dir>`.
 | `MAX_TRAINING_STEPS` | `50` | Training steps. |
 | `REASONING_EFFORT` | `minimal` | Beam's reasoning effort: `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. |
 | `EVAL_INTERVAL`, `EVAL_BEFORE_TRAIN` | `5`, `true` | Evaluate every N steps, and once before training. |
-| `CKPT_INTERVAL` | `25` | Checkpoint every N steps; `0` turns saving off. |
-| `RESUME_MODE` | `latest` | `latest` resumes from the newest checkpoint in `CKPT_PATH`; `from_path` with `trainer.resume_path=<dir>`. |
-| `INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION` | `0.6` (BF16), `0.55` (MXFP8) | vLLM's GPU memory fraction. |
+| `CKPT_INTERVAL` | `10` (LoRA), `25` (full FT) | Checkpoint every N steps; `0` turns saving off. |
+| `RESUME_MODE` | `null` (LoRA), `latest` (full FT) | `latest` resumes from the newest checkpoint in `CKPT_PATH`; `from_path` with `trainer.resume_path=<dir>`. |
+| `INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION` | `0.7` (LoRA), `0.6` (BF16 full FT), `0.55` (MXFP8) | vLLM's GPU memory fraction. |
 | `PROJECT_NAME`, `RUN_NAME` | `skyrl-beam`, `beam_...` | W&B project and run names. |
 | `CKPT_PATH`, `EXPORT_PATH`, `LOG_PATH` | `$HOME/ckpts/<run>`, `$HOME/exports/<run>`, `$HOME/skyrl-logs` | Output locations. |
-| `OPTIMIZER_STATE_DISK_DIR` | `$HOME/skyrl_optimizer_state` | Node-local NVMe directory for the optimizer state. Empty uses the CPU optimizer. |
-| `OPTIMIZER_STATE_DISK_MOMENT_DTYPE` | `fp32` | On-disk dtype of the Adam moments; `bf16` reads and writes a third fewer bytes per step. |
-| `LR` | `1e-6` | Learning rate. |
+| `OPTIMIZER_STATE_DISK_DIR` | `$HOME/skyrl_optimizer_state` | Full FT only: node-local NVMe directory for the optimizer state. Empty uses the CPU optimizer. |
+| `OPTIMIZER_STATE_DISK_MOMENT_DTYPE` | `fp32` | Full FT only: on-disk dtype of the Adam moments; `bf16` reads and writes a third fewer bytes per step. |
+| `LR` | `1e-5` (LoRA), `1e-6` (full FT) | Learning rate. |
 | `KV_CACHE_DTYPE` | `auto` (bf16) | MXFP8 only: `fp8_e4m3` decodes faster but raises the rollout/train mismatch. |
 | `SEQUENCE_MASK_METRIC` | `geometric` | MXFP8 only: off-policy sequence masking; empty turns it off. |
 | `FP8_ROLLOUT` | `1` | MXFP8 only: `0` keeps bf16 rollouts while training in MXFP8. |
@@ -141,8 +175,8 @@ other Hydra override can be appended, e.g.
 
 ## Multi-node networking
 
-Both recipes span several nodes for Megatron (pipeline and data parallel), and the BF16 recipe's vLLM engines span two
-nodes (PP2), so NCCL must use your cluster's high-speed fabric:
+Every recipe spans several nodes for Megatron (pipeline and data parallel), and the LoRA and BF16 recipes' vLLM
+engines span two nodes (PP2), so NCCL must use your cluster's high-speed fabric:
 
 - Set `NCCL_NET`, `NCCL_IB_*` / `NCCL_SOCKET_IFNAME` and any NCCL net or tuner plugin settings for your cluster
   (InfiniBand, RoCE or EFA) in your `ENV_FILE`, so that every Ray worker picks them up.

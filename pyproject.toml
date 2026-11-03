@@ -294,6 +294,8 @@ skyrl_r3_pp_relay = "skyrl.backends.skyrl_train.patches.vllm.patch_routed_expert
 skyrl_deepseek_v41 = "skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41:vllm_general_plugin"
 # Declares Kimi K2.5-family checkpoints LoRA-capable before vLLM 0.33's config-time LoRA support check.
 skyrl_kimi_k25_lora = "skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora:vllm_general_plugin"
+# Serves Beam with vLLM's BeamForCausalLM plus SupportsLoRA (vLLM 0.33's class has no LoRA support).
+skyrl_beam_lora = "skyrl.backends.skyrl_train.patches.vllm.patch_beam_lora:vllm_general_plugin"
 
 [tool.uv]
 # Resolve only the Linux architectures covered by the CUDA wheels, plus the

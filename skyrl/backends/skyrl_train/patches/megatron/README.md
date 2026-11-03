@@ -248,6 +248,8 @@ needed. SkyRL still carries:
 - Not a patch, but Beam-specific in SkyRL code: the fused LM-head log-prob path applies the
   config's `final_logit_softcapping` (`model_utils._capped_chunk_logits`), because it bypasses
   `BeamOutputLayer`.
+- On the vLLM side, `../vllm/patch_beam_lora.py` serves Beam with LoRA (vLLM 0.33's class has no `SupportsLoRA`);
+  its docstring has the removal plan.
 - **Verify:** the `beam-tiny_*` rows of `gpu_ci/megatron/test_megatron_{,lora_}models.py`,
   `tests/backends/skyrl_train/patches/transformers/` and
   `tests/backends/skyrl_train/distributed/test_fused_lm_head_softcap.py` (CPU).
