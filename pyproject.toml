@@ -127,7 +127,9 @@ fsdp = [
     # too; that variant is overridden out below (it would drag the CUDA-12 runtime
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
-    "flash-linear-attention; sys_platform == 'linux'",
+    # 0.6.0+: with 0.5.2 + Triton 3.7.1, fla autotunes the GDN chunk_fwd_kernel_o to 8 warps on B200 (sm_100),
+    # which hits a Triton race (triton-lang/triton#10590) and corrupts GDN outputs in ~40% of calls.
+    "flash-linear-attention==0.6.0; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
@@ -163,7 +165,9 @@ megatron = [
     # publishes both prebuilt -- see [tool.uv.sources].
     "transformer-engine-cu13==2.19.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "flash-linear-attention; sys_platform == 'linux'",
+    # 0.6.0+: with 0.5.2 + Triton 3.7.1, fla autotunes the GDN chunk_fwd_kernel_o to 8 warps on B200 (sm_100),
+    # which hits a Triton race (triton-lang/triton#10590) and corrupts GDN outputs in ~40% of calls.
+    "flash-linear-attention==0.6.0; sys_platform == 'linux'",
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
     # FlashMLA sparse-attention forward for megatron-core's `dsa_kernel_backend="cudnn"` DSA path
