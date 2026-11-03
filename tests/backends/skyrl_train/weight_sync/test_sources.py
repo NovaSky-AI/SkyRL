@@ -173,6 +173,21 @@ class TestMegatronWeightSource:
         assert [n for n, _ in source] == [n for n, _ in source]
         assert bridge.export_calls == 2
 
+    def test_keeps_quantized_exports_in_their_dtype(self):
+        """An export re-quantized to the checkpoint's FP8 layout must reach vLLM as FP8 + e8m0 scales,
+        not widened to the bf16 wire dtype (vLLM's scale loader asserts on it)."""
+        e8m0 = getattr(torch, "float8_e8m0fnu", None)
+        if e8m0 is None:
+            pytest.skip("needs torch.float8_e8m0fnu")
+        tensors = [
+            ("layers.0.attn.wkv.weight", torch.ones(4, 4).to(torch.float8_e4m3fn)),
+            ("layers.0.attn.wkv.scale", torch.ones(1, 1).to(e8m0)),
+            ("layers.0.attn_norm.weight", torch.ones(4, dtype=torch.float16)),
+        ]
+        meta, pairs = _assert_channels_agree(MegatronWeightSource(_FakeBridge(tensors), object(), torch.bfloat16))
+        assert [m.dtype for m in meta] == [torch.float8_e4m3fn, e8m0, torch.bfloat16]
+        assert [t.dtype for _, t in pairs] == [m.dtype for m in meta]
+
     def test_reads_the_module_it_was_given(self):
         module = object()
         bridge = _FakeBridge(self._tensors(), expect_module=module)

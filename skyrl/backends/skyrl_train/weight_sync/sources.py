@@ -156,7 +156,12 @@ class MegatronWeightSource(WeightSource):
         # bf16 round trip changes them by ~1/256, enough to move router top-k choices.
         # Integer tables (DeepSeek-V4's hash-routing tid2eid) keep their dtype: bf16 holds
         # integers exactly only up to 256.
+        # Floats narrower than the wire dtype keep theirs too: an export that re-quantizes to the
+        # checkpoint's layout (DeepSeek-V4 / V4.1: FP8 E4M3 weights, e8m0 scales) is already in the
+        # dtype vLLM loads, and vLLM's scale loaders reject a widened scale.
         if tensor.dtype == torch.float32 or not tensor.is_floating_point():
+            return tensor.dtype
+        if tensor.element_size() < self._dtype.itemsize:
             return tensor.dtype
         return self._dtype
 
