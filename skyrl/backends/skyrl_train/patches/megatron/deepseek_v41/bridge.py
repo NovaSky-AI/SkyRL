@@ -9,6 +9,7 @@ built or mapped. The Engram tables are frozen buffers loaded by ``engram.py`` an
 its own copy), so weight sync skips them.
 """
 
+import dataclasses
 import os
 
 import torch
@@ -166,6 +167,46 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
                     weight, hf_state_dict[scale_key], name=name, block_size=FP8_BLOCK_SIZE, dtype=torch.bfloat16
                 )
         return super().maybe_modify_loaded_hf_weight(hf_param, hf_state_dict)
+
+    def maybe_modify_converted_hf_weight(self, task, converted_weights_dict, hf_state_dict):
+        """Re-quantize an exported weight in the released 32-wide FP8 / packed-MXFP4 layout.
+
+        V4's hook re-quantizes FP8 weights in 128x128 blocks, which V4.1's 32x32 scales reject
+        (``Unsupported FP8 scale geometry``), so a full-weight sync (not LoRA) of the released checkpoint
+        fails. V4's key restoration still applies: running its hook with an export dtype set returns the
+        restored keys before it re-quantizes. The re-quantization is NVIDIA-NeMo/Megatron-Bridge#6199's
+        ``DeepSeekV41Bridge.maybe_modify_converted_hf_weight`` (open): routed experts as MXFP4, every
+        other scaled weight as FP8 with 32-wide blocks. Remove with the switch to upstream's V4.1 bridge.
+        """
+        if task.weight_dtype is not None:
+            return super().maybe_modify_converted_hf_weight(task, converted_weights_dict, hf_state_dict)
+        restored = super().maybe_modify_converted_hf_weight(
+            dataclasses.replace(task, weight_dtype=torch.bfloat16), converted_weights_dict, hf_state_dict
+        )
+        result = {}
+        for hf_param, weight in restored.items():
+            if not hf_param.endswith(".weight"):
+                paired_weight = hf_param.removesuffix(".scale") + ".weight"
+                if hf_param.endswith(".scale") and paired_weight in restored:
+                    continue
+                result[hf_param] = weight
+                continue
+            scale_key = hf_param.removesuffix(".weight") + ".scale"
+            if scale_key not in hf_state_dict:
+                result[hf_param] = weight
+                continue
+            source_scale = hf_state_dict[scale_key]
+            if ".ffn.experts." in hf_param and ".shared_experts." not in hf_param:
+                q_weight, q_scale = quantization_utils.quantize_mxfp4_e2m1_like_scale(
+                    weight, source_scale, name=hf_param
+                )
+            else:
+                q_weight, q_scale = quantization_utils.quantize_fp8_e4m3fn_like_scale(
+                    weight, source_scale, name=hf_param, block_size=FP8_BLOCK_SIZE
+                )
+            result[hf_param] = q_weight
+            result[scale_key] = q_scale
+        return result
 
     def mapping_registry(self) -> MegatronMappingRegistry:
         hf_config = self.hf_config
