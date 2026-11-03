@@ -28,13 +28,6 @@ export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
 # fla's TileLang GDN backward aborts on Blackwell; these recipes target B200, so default to Triton.
 export FLA_TILELANG="${FLA_TILELANG:-0}"
-# B200 GDN race workaround: fla 0.5.2 + Triton 3.7.1 autotune chunk_fwd_kernel_o to 8 warps on sm_100,
-# which races (a ~10% error in one 16-row block in ~40% of calls). Pin it to 4 warps (< 1% slower).
-# FLA_CONFIG_DIR must be the same path on every node; SkyRL forwards both vars to the Ray workers.
-# Not needed after the fla >= 0.6.0 / Triton >= 3.8 bump.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export FLA_CACHE_MODE="${FLA_CACHE_MODE:-default}"
-export FLA_CONFIG_DIR="${FLA_CONFIG_DIR:-$SCRIPT_DIR/fla_config}"
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"

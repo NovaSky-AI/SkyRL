@@ -128,24 +128,9 @@ class Qwen4ExpGatedDeltaNet(GatedDeltaNet):
     only the unfused gated norm is overridden (the bridge disables the fused one).
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if os.environ.get("SKYRL_QWEN4_GDN_TORCH_REF", "0") == "1":
-            # Debug: megatron-core's torch reference instead of FLA's chunk kernel, which is
-            # nondeterministic on B200. One packed sequence per micro-batch only (no cu_seqlens).
-            self.gated_delta_rule = _torch_gdn_single_sequence
-
     def _apply_gated_norm_unfused(self, x: Tensor, gate: Tensor) -> Tensor:
         y = self.out_norm(x.reshape(-1, x.shape[-1])).reshape(x.shape)
         return (y * torch.sigmoid(gate.float())).to(x.dtype)
-
-
-def _torch_gdn_single_sequence(*args, cu_seqlens=None, **kwargs):
-    from megatron.core.ssm.gated_delta_net import torch_chunk_gated_delta_rule
-
-    if cu_seqlens is not None and cu_seqlens.numel() != 2:
-        raise NotImplementedError("SKYRL_QWEN4_GDN_TORCH_REF=1 supports one packed sequence per micro-batch.")
-    return torch_chunk_gated_delta_rule(*args, **kwargs)
 
 
 # ------------------------------------------------------------------------------------------------

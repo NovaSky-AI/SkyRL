@@ -1034,11 +1034,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # TileLang default (works on Hopper); export FLA_TILELANG=0 on Blackwell (B200),
         # where the TileLang packed backward aborts, to fall back to the Triton kernels.
         env_vars["FLA_TILELANG"] = os.environ.get("FLA_TILELANG", "1")
-        # fla's per-kernel config pinning (FLA_CACHE_MODE=default + FLA_CONFIG_DIR/<kernel>.json), e.g. the
-        # B200 workaround that pins chunk_fwd_kernel_o to 4 warps (examples/train/qwen3_8_flash_next/README.md).
-        for fla_var in ("FLA_CACHE_MODE", "FLA_CONFIG_DIR"):
-            if os.environ.get(fla_var):
-                env_vars[fla_var] = os.environ[fla_var]
         if cfg.trainer.flash_attn:
             # disable fused attention for megatron with flash_attn
             # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
@@ -1120,11 +1115,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if os.environ.get("WANDB_API_KEY"):
         logger.info("Exporting wandb api key to ray runtime env")
         env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
-        # The key belongs to one wandb host: forward the driver's host / entity with it, or workers
-        # use whatever their node's environment sets (e.g. a different hosted instance).
-        for key in ("WANDB_BASE_URL", "WANDB_ENTITY"):
-            if os.environ.get(key):
-                env_vars[key] = os.environ[key]
 
     if os.environ.get("MLFLOW_TRACKING_URI"):
         logger.info("Exporting mlflow tracking uri to ray runtime env")

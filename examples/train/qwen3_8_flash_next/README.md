@@ -33,23 +33,3 @@ MEGATRON_TP=2 MEGATRON_EP=32 LR=3e-6 RUN_NAME=qwen3_8_flash_next_dapo_sync_fullf
   trainer.policy.model.lora.rank=0 \
   trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32=false
 ```
-
-### B200: fla GDN race workaround
-
-With fla 0.5.2 and Triton 3.7.1, fla's autotuner picks 8 warps for `chunk_fwd_kernel_o` (the GDN chunk forward) on
-sm_100. A Triton codegen race (triton-lang/triton#10590) then corrupts one 16-row block in about 40% of calls. This
-hits every GDN model on B200, with or without CP. Two identical full-model forwards differ by 0.057 mean abs dlogp.
-
-The 262K script pins that kernel to 4 warps, which costs under 1%:
-
-```bash
-export FLA_CACHE_MODE=default
-export FLA_CONFIG_DIR=examples/train/qwen3_8_flash_next/fla_config   # absolute path, same on every node
-```
-
-`fla_config/chunk_fwd_kernel_o.json` holds the pinned config. Other kernels keep autotuning. SkyRL forwards
-`FLA_CACHE_MODE` / `FLA_CONFIG_DIR` to the Ray workers. Export the same two variables to apply the workaround to the
-other recipes. vLLM's vendored fla copy has no config-dir hook, so the pin applies only to the trainer; vLLM is unaffected, because its copy autotunes chunk_fwd_kernel_o to 2 warps.
-
-The permanent fix is fla >= 0.6.0 (it drops 8-warp configs on Blackwell with Triton < 3.8) or Triton >= 3.8. That
-dependency bump will be a separate PR.
