@@ -42,7 +42,7 @@ from skycap.paths import load_rule
 from tqdm import tqdm
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
-from skyrl.integration.sandboxes.quota import require_concurrency_cap
+from skyrl.integration.sandbox_helpers.quota import require_concurrency_cap
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,

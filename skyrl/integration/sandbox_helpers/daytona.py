@@ -5,8 +5,8 @@ counting against an org quota others share, until something deletes them through
 sandbox a run creates carries the run's ``labels`` and a hard ``ttl_minutes`` (``label_params``): ``cleanup``
 then deletes exactly this run's sandboxes, and Daytona deletes any left over once their time is up.
 
-    uv run --isolated --extra daytona python -m skyrl.integration.sandboxes.daytona list --label owner=<you> --label run=<run>
-    uv run --isolated --extra daytona python -m skyrl.integration.sandboxes.daytona cleanup --label owner=<you> --label run=<run>
+    uv run --isolated --extra daytona python -m skyrl.integration.sandbox_helpers.daytona list --label owner=<you> --label run=<run>
+    uv run --isolated --extra daytona python -m skyrl.integration.sandbox_helpers.daytona cleanup --label owner=<you> --label run=<run>
 
 Harness adapters apply ``label_params`` where they create a sandbox
 (``skyrl.integration.harbor.environments.LabelledDaytonaEnvironment``).

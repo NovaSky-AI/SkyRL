@@ -233,7 +233,7 @@ miniswe = [
 harbor = [
     "harbor[daytona,modal]",
 ]
-# Daytona's SDK, for labelled sandboxes and their cleanup (skyrl/integration/sandboxes) without a harness.
+# Daytona's SDK, for labelled sandboxes and their cleanup (skyrl/integration/sandbox_helpers) without a harness.
 daytona = [
     "daytona",
 ]

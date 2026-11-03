@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skyrl.integration.sandboxes import daytona
+from skyrl.integration.sandbox_helpers import daytona
 
 
 def test_labels_are_required_and_stringified() -> None:

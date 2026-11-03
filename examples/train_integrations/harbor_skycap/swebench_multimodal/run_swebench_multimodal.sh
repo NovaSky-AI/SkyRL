@@ -17,7 +17,7 @@
 #                             Daytona org is shared: keep it well under what others leave free
 #   SANDBOX_OWNER             required: the `owner` label on every sandbox; `run` is the experiment name.
 #                             After a crash: uv run --isolated --extra daytona python -m
-#                             skyrl.integration.sandboxes.daytona cleanup
+#                             skyrl.integration.sandbox_helpers.daytona cleanup
 #                             --label owner=$SANDBOX_OWNER --label run=<experiment>
 #   SANDBOX_TTL_MINUTES       hard lifetime of a sandbox, whatever happens to this run (default 180)
 #   SANDBOX_CPUS, SANDBOX_MEMORY_MB, SANDBOX_STORAGE_MB   per sandbox (default 1, 16384, 10240). The agent's own
@@ -298,5 +298,5 @@ echo
 echo "==> done: $EXPERIMENT"
 echo "    skycap records: $RUN_DIR/skycap"
 echo "    Harbor trials:  $RUN_DIR/trials"
-echo "    leftover sandboxes: uv run --isolated --extra daytona python -m skyrl.integration.sandboxes.daytona list \\"
+echo "    leftover sandboxes: uv run --isolated --extra daytona python -m skyrl.integration.sandbox_helpers.daytona list \\"
 echo "        --label owner=$SANDBOX_OWNER --label run=$EXPERIMENT"

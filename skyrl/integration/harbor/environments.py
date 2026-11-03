@@ -1,7 +1,7 @@
 """Harbor environments for SkyRL runs.
 
 ``LabelledDaytonaEnvironment`` is Harbor's Daytona environment, tagging every sandbox it creates with
-``labels`` and giving it a hard ``ttl_minutes`` (``skyrl.integration.sandboxes.daytona``), so ``cleanup``
+``labels`` and giving it a hard ``ttl_minutes`` (``skyrl.integration.sandbox_helpers.daytona``), so ``cleanup``
 can delete exactly this run's sandboxes, and Daytona deletes any left over once their time is up. Use it in
 place of ``type: daytona``:
 
@@ -9,14 +9,14 @@ place of ``type: daytona``:
     harbor_trial_config.environment.kwargs.labels.owner=<you> harbor_trial_config.environment.kwargs.labels.run=<run>
     harbor_trial_config.environment.kwargs.ttl_minutes=180
 
-    uv run --isolated --extra daytona python -m skyrl.integration.sandboxes.daytona cleanup --label owner=<you> --label run=<run>
+    uv run --isolated --extra daytona python -m skyrl.integration.sandbox_helpers.daytona cleanup --label owner=<you> --label run=<run>
 """
 
 from typing import Any, Dict, Optional
 
 from harbor.environments.daytona import DaytonaEnvironment
 
-from skyrl.integration.sandboxes.daytona import check_labels, label_params
+from skyrl.integration.sandbox_helpers.daytona import check_labels, label_params
 
 
 class LabelledDaytonaEnvironment(DaytonaEnvironment):

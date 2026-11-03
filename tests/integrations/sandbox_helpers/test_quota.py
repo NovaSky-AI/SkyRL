@@ -2,7 +2,10 @@
 
 import pytest
 
-from skyrl.integration.sandboxes.quota import max_concurrency, require_concurrency_cap
+from skyrl.integration.sandbox_helpers.quota import (
+    max_concurrency,
+    require_concurrency_cap,
+)
 from skyrl.train.utils.rate_limiter import RateLimiterConfig
 
 
@@ -36,7 +39,7 @@ def test_importing_the_package_pulls_in_no_harness_or_provider() -> None:
     import sys
 
     code = (
-        "import sys; import skyrl.integration.sandboxes.daytona, skyrl.integration.sandboxes.quota; "
+        "import sys; import skyrl.integration.sandbox_helpers.daytona, skyrl.integration.sandbox_helpers.quota; "
         "print(sorted(m for m in ('harbor', 'verifiers', 'skycap', 'daytona', 'skyrl.train') if m in sys.modules))"
     )
     out = subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True).stdout

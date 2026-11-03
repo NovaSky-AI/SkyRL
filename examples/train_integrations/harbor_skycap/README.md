@@ -104,7 +104,7 @@ run's leftovers can be found and deleted without touching anyone else's:
   harbor_trial_config.environment.import_path=skyrl.integration.harbor.environments:LabelledDaytonaEnvironment \
   harbor_trial_config.environment.kwargs.labels.owner=<you> harbor_trial_config.environment.kwargs.labels.run=<run> \
   harbor_trial_config.environment.kwargs.ttl_minutes=180
-uv run --isolated --extra daytona python -m skyrl.integration.sandboxes.daytona cleanup --label owner=<you> --label run=<run>
+uv run --isolated --extra daytona python -m skyrl.integration.sandbox_helpers.daytona cleanup --label owner=<you> --label run=<run>
 ```
 
 ## Images
