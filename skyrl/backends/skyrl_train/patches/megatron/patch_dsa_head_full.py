@@ -41,13 +41,16 @@ _APPLIED = False
 _HOOK = "run_fused_absorbed_sparse_attention"
 _FAST_PERMUTE = os.environ.get("SKYRL_DSA_HEAD_FULL_FAST_PERMUTE", "0").lower() in ("1", "true")
 _ZIGZAG = os.environ.get("SKYRL_DSA_HEAD_FULL_ZIGZAG", "0").lower() in ("1", "true")
+_WARNED_ZIGZAG_FALLBACK = False
 
 
 def _block_copy(src, dst, blocks, rows, cols, src_strides, dst_strides):
     """``dst[blk, row, :cols] = src[blk, row, :cols]`` with (block, row) strides; unit column stride."""
     import triton
 
-    from skyrl.backends.skyrl_train.patches.megatron._block_copy_kernel import block_copy_kernel
+    from skyrl.backends.skyrl_train.patches.megatron._block_copy_kernel import (
+        block_copy_kernel,
+    )
 
     br, bc = 16, 512
     grid = (triton.cdiv(rows, br), triton.cdiv(cols, bc), blocks)
@@ -144,6 +147,17 @@ class _SeqToHead(torch.autograd.Function):
         return _scatter_rows(grad.contiguous(), ctx.group, ctx.zigzag), None, None
 
 
+def _warn_zigzag_fallback(sq, tp):
+    """Zigzag needs ``sq`` divisible by ``2 * TP``; say once that a call ran with contiguous rows."""
+    global _WARNED_ZIGZAG_FALLBACK
+    if not _WARNED_ZIGZAG_FALLBACK:
+        _WARNED_ZIGZAG_FALLBACK = True
+        logger.warning(
+            f"SKYRL_DSA_HEAD_FULL_ZIGZAG=1, but sequence length {sq} is not divisible by 2 * TP ({2 * tp}): "
+            "head-full sparse attention uses contiguous query rows for such calls (logged once)"
+        )
+
+
 def _head_full(fn):
     from megatron.core import parallel_state as mpu
     from megatron.core.tensor_parallel.mappings import (
@@ -159,6 +173,8 @@ def _head_full(fn):
             return fn(query, key, topk_indices, softmax_scale, v_channels, topk_length)
         local_sq = sq // tp
         zigzag = _ZIGZAG and sq % (2 * tp) == 0
+        if _ZIGZAG and not zigzag:
+            _warn_zigzag_fallback(sq, tp)
         # [sq * b, h * d] -> [sq * b / TP, TP * h * d]: rank r keeps rows [r * sq/TP, (r+1) * sq/TP)
         # of every source rank (or its zigzag pair of chunks), and source ranks' heads concatenate
         # in global head order.
