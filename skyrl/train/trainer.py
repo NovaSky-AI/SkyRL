@@ -391,7 +391,8 @@ class RayPPOTrainer:
 
                         if self.colocate_all:
                             # if we are not continuing sampling, we sleep the inference engine
-                            await self.inference_engine_client.sleep()
+                            with Timer("inference_engine_sleep", self.all_timings):
+                                await self.inference_engine_client.sleep()
 
                         # The train rollout for this step is done generating; close
                         # its metrics window. ``vllm/eval/*`` is collected separately
