@@ -70,6 +70,8 @@ class WorkerDispatch:
         # Seconds spent moving colocated models between CPU and GPU since the last
         # get_timing_metrics() call, keyed by "<model>_backload" / "<model>_offload".
         self._colocate_seconds: Dict[str, float] = {}
+        # Colocated sync stages around the transfer (residency swaps), by stage name.
+        self.last_weight_sync_stage_seconds: Dict[str, float] = {}
 
         # Actor groups by name.
         # TODO: Remove these role-specific identifiers. We will move to using model IDs and add support for generic models beyond these.
@@ -751,6 +753,7 @@ class WorkerDispatch:
         self._colocate_seconds = {}
         if self.last_weight_sync_seconds is not None:
             metrics["sync_weights_only_transfer"] = self.last_weight_sync_seconds
+            metrics.update({f"sync_weights_{name}": t for name, t in self.last_weight_sync_stage_seconds.items()})
         return metrics
 
     async def _prepare_for_weight_sync(self, adapter_only_sync: bool = False) -> None:
@@ -856,14 +859,21 @@ class WorkerDispatch:
             self.last_weight_sync_seconds = time.perf_counter() - start
 
         # Sync weights to inference engine
+        stages = self.last_weight_sync_stage_seconds = {}
+        start = time.perf_counter()
         await self._prepare_for_weight_sync(adapter_only_sync=adapter_only_sync)
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
         if self.colocate_all:
+            stages["prepare"] = time.perf_counter() - start
+            start = time.perf_counter()
             await self._inference_engine_client.wake_up(tags=["weights"])
+            stages["wake_weights"] = time.perf_counter() - start
             await _broadcast_and_finish()
+            start = time.perf_counter()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
+            stages["wake_kv_cache"] = time.perf_counter() - start
         else:
             strategy = self.cfg.trainer.strategy
             is_lora = self.cfg.trainer.policy.model.lora.rank > 0
