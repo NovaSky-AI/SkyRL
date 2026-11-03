@@ -96,7 +96,7 @@ export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:
 RUN_NAME="${RUN_NAME:-dsv41_flash_dapo_sync_lora_r${LORA_RANK}_resp${MAX_RESPONSE_LENGTH}_ep${MEGATRON_EP}}"
 CKPT_PATH="${CKPT_PATH:-$HOME/ckpts/$RUN_NAME}"
 
-uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+uv run --no-sync --extra megatron python -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.strategy=megatron \
