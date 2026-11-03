@@ -15,6 +15,10 @@ micro-batches, and vLLM as 4 engines x TP8 with `max_model_len` 262,144. CP for 
 (split-K cuDNN QSA over CP chunks with an LSE merge, Blackwell only, so install the cudnn-frontend wheel via
 `QSA_CUDNN_WHEEL`), the PLE halo, and the QSA indexer's pooled-key all-gather. GDN needs TP x CP <= 16.
 
+If the image puts its own cuDNN on `LD_LIBRARY_PATH` (e.g. `/opt/cudnn`), the Ray workers load those sublibraries
+instead of the pip cuDNN, and the QSA kernels run on that older version. Drop that entry from `LD_LIBRARY_PATH` and set
+`SKYRL_LD_LIBRARY_PATH_EXPORT=1`, so the workers get the same path as the driver.
+
 The stock DAPO prompts are short. To fill 262K, set `TRAIN_FILE` / `TEST_FILE` to a dataset of ~255K-token prompts.
 
 Measured on 4 x 8 B200 (262,144-token sequences, one per DP rank):
