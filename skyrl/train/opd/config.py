@@ -228,6 +228,13 @@ def validate_opd_cfg(cfg) -> None:
             "policy_loss_type='cispo' with cispo.cispo_anchor='rollout' skips the old-logprob forward pass, "
             "which the OPD term reads (action_log_probs); use cispo_anchor='old'"
         )
+    if cfg.trainer.old_logprobs_from_first_minibatch:
+        # The first mini-batch's rows of action_log_probs are left at zero before training, but the
+        # OPD term reads them when computing advantages.
+        raise ValueError(
+            "trainer.old_logprobs_from_first_minibatch skips the old-logprob forward pass for the first "
+            "mini-batch, which the OPD term reads (action_log_probs)"
+        )
     if algorithm.advantage_estimator == "gae" and not opd.use_task_reward:
         raise ValueError(
             "advantage_estimator='gae' needs a task reward (opd.use_task_reward=true): with zero rewards GAE's "

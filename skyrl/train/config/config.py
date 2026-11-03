@@ -1786,6 +1786,15 @@ class TrainerConfig(BaseConfig):
     This makes the microbatch packing — and therefore the resulting logprobs/values — identical to
     what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
     first inner step."""
+    old_logprobs_from_first_minibatch: bool = False
+    """Take the first policy mini-batch's "old" logprobs from its own training forward instead of a separate forward pass.
+
+    No optimizer step has run when the first mini-batch trains, so the detached training-forward
+    logprobs are exactly the old logprobs and the PPO ratio is 1 at that step. The policy forward
+    pass then runs only over the remaining mini-batches; with one mini-batch per step
+    (``train_batch_size == policy_mini_batch_size``) it is skipped entirely. Megatron only. Requires
+    ``update_epochs_per_batch=1`` and ``algorithm.use_kl_in_reward=false``, which read the old
+    logprobs outside the first training forward."""
     update_ref_every_epoch: bool = False
     """Re-sync the reference model from the policy model at every epoch boundary."""
     remove_microbatch_padding: bool = True
