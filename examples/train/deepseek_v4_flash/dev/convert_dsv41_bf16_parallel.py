@@ -1,4 +1,4 @@
-"""Parallel text-only BF16 conversion of DeepSeek-V4.1-Flash (or an N-layer slice of it).
+"""Parallel text-only BF16 (or, with KEEP_QUANT=1, FP8 / MXFP4 as released) conversion of DeepSeek-V4.1-Flash (or an N-layer slice of it).
 
 Same output as make_slice_v41.py (dequantized FP8 / MXFP4 -> BF16, Engram tables kept FP8, MTP / vision
 dropped), but each layer is converted by its own worker process, so the full 40-layer model takes minutes
@@ -25,6 +25,9 @@ from safetensors import safe_open  # noqa: E402
 from safetensors.torch import save_file  # noqa: E402
 
 SHARD_BYTES = 4 << 30
+# KEEP_QUANT=1: keep the released FP8 / MXFP4 tensors and quantization_config (what vLLM serves natively;
+# Megatron dequantizes them on load) instead of dequantizing to BF16.
+KEEP_QUANT = os.environ.get("KEEP_QUANT", "0") == "1"
 
 
 def convert_group(args):
@@ -64,6 +67,9 @@ def convert_group(args):
 
     keys = set(keys_by_layer)
     for key in sorted(keys):
+        if KEEP_QUANT and not ms.KEEP_FP8.match(key):
+            emit(rename(key), fetch(key))
+            continue
         if ms.KEEP_FP8.match(key):
             if key.endswith(".weight"):
                 flush()
@@ -126,7 +132,8 @@ def main():
         weight_map.update({k: final for k in names})
     with open(os.path.join(out, "model.safetensors.index.json"), "w") as f:
         json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
-    config.pop("quantization_config")
+    if not KEEP_QUANT:
+        config.pop("quantization_config")
     config.pop("vision_config", None)
     with open(os.path.join(out, "config.json"), "w") as f:
         json.dump(config, f, indent=2)

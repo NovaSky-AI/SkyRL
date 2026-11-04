@@ -1,0 +1,152 @@
+set -x
+
+# Fully async, multi-turn LoRA RL for DeepSeek-V4.1-Flash (text only) with Megatron + vLLM on separate GPUs.
+#   - trainer: NUM_TRAIN_NODES x 8 GPUs, Megatron TP1 / EP (= all trainer GPUs), LoRA without merge;
+#   - sampler: NUM_ENGINES vLLM engines of TP8 (one per 8-GPU node) serving the released FP8 / MXFP4 weights
+#     (FP4 routed experts), the adapter synced in memory after every step;
+#   - R3 (rollout routing replay), off-policy correction as masked IS (rollout_is + geometric sequence mask) and
+#     score centering (needs the sampler's recorded support), multi-turn episodes with per-trajectory prefix caching.
+# Defaults are 1 trainer node + 2 sampler nodes (8 + 16 GPUs). On 2 nodes: NUM_ENGINES=1.
+#
+# MODEL_PATH: the release in its own format, text only. Build it (all layers, minutes; or a layer slice) with
+#   KEEP_QUANT=1 DSV41_LOCAL_DIR=<release dir> python examples/train/deepseek_v4_flash/dev/convert_dsv41_bf16_parallel.py <out>
+# vLLM serves it as released; Megatron dequantizes the FP8 / MXFP4 weights to BF16 on load (the frozen LoRA base).
+#
+# DATA_DIR / ENV_CLASS: gsm8k_multi_turn is a stand-in for a long-horizon multi-turn environment:
+#   uv run --isolated --extra fsdp -m examples.train.turn_level_rewards.gsm8k_multi_turn_dataset --output_dir $DATA_DIR
+# Context: MAX_TURNS x (MAX_GENERATE_LENGTH + observation) + prompt must fit MAX_MODEL_LEN (256k: MAX_MODEL_LEN=262144).
+#
+#   bash examples/train/deepseek_v4_flash/run_async_multiturn_dsv41_flash_lora.sh [overrides]
+
+: "${MODEL_PATH:?text-only FP8/MXFP4 DeepSeek-V4.1-Flash dir (convert_dsv41_bf16_parallel.py with KEEP_QUANT=1)}"
+: "${DATA_DIR:=$HOME/data/gsm8k_multi_turn}"
+: "${ENV_CLASS:=gsm8k_multi_turn}"
+: "${NUM_TRAIN_NODES:=1}"
+: "${NUM_ENGINES:=2}"
+: "${MAX_TURNS:=4}"
+: "${MAX_PROMPT_LENGTH:=2048}"
+: "${MAX_GENERATE_LENGTH:=4096}"
+: "${MAX_MODEL_LEN:=32768}"
+: "${TRAIN_BATCH_SIZE:=32}"          # prompts per training step
+: "${N_SAMPLES_PER_PROMPT:=8}"
+: "${MAX_STALENESS_STEPS:=2}"
+: "${NUM_PARALLEL_GENERATION_WORKERS:=$(( TRAIN_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
+: "${MAX_TRAINING_STEPS:=20}"
+: "${LOGGER:=wandb}"
+: "${RUN_NAME:=dsv41_flash_async_multiturn_lora}"
+: "${CKPT_PATH:=$HOME/ckpts/$RUN_NAME}"
+: "${ENABLE_ROUTING_REPLAY:=true}"
+: "${INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION:=0.85}"
+# Score centering needs a bounded sampler support (top_k > 1); 20 as examples/train/top_p_replay.
+: "${TOP_K:=20}"
+: "${TOP_P:=1.0}"
+
+LORA_RANK=32
+LORA_ALPHA=32
+LORA_TARGET_MODULES='[linear_q_down_proj,linear_q_up_proj,linear_kv_proj,linear_proj,linear_fc1,linear_fc2]'
+VLLM_LORA_TARGET_MODULES='["fused_wqa_wkv", "wq_b", "wo_b", "gate_up_proj", "down_proj", "experts"]'
+MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
+
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
+ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
+
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
+export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
+export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
+# Fused cuDNN dense scoring for the V4.1 indexer (Megatron-LM#7285 backport).
+export SKYRL_DSV41_INDEXER_IMPL="${SKYRL_DSV41_INDEXER_IMPL:-fused}"
+
+uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_async \
+  data.train_data="['$DATA_DIR/train.parquet']" \
+  data.val_data="['$DATA_DIR/validation.parquet']" \
+  environment.env_class=$ENV_CLASS \
+  generator.max_turns=$MAX_TURNS \
+  generator.batched=false \
+  `# vLLM's V4.1 decode drifts after a prefix-cache hit from another trajectory (#2573 HANDOFF); a per-trajectory` \
+  `# salt keeps each episode's own turns cached, which is where multi-turn's hit rate comes from.` \
+  generator.cache_salt_per_trajectory=true \
+  trainer.fully_async.enabled=true \
+  trainer.fully_async.max_staleness_steps=$MAX_STALENESS_STEPS \
+  trainer.fully_async.num_parallel_generation_workers=$NUM_PARALLEL_GENERATION_WORKERS \
+  trainer.fully_async.clear_kv_cache_on_weight_sync=false \
+  trainer.strategy=megatron \
+  trainer.policy.model.path="$MODEL_PATH" \
+  trainer.placement.colocate_all=false \
+  trainer.placement.policy_num_nodes=$NUM_TRAIN_NODES \
+  trainer.placement.policy_num_gpus_per_node=8 \
+  trainer.policy.megatron_config.tensor_model_parallel_size=1 \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=1 \
+  trainer.policy.megatron_config.context_parallel_size=1 \
+  trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
+  trainer.policy.megatron_config.expert_tensor_parallel_size=1 \
+  trainer.policy.megatron_config.mtp_num_layers=0 \
+  trainer.policy.megatron_config.moe_grouped_gemm=true \
+  trainer.policy.megatron_config.moe_token_dispatcher_type="alltoall" \
+  trainer.policy.megatron_config.moe_enable_routing_replay=$ENABLE_ROUTING_REPLAY \
+  generator.inference_engine.enable_return_routed_experts=$ENABLE_ROUTING_REPLAY \
+  `# As the 2-node LoRA recipe: DSv4 attention rejects core_attn recompute, mHC rejects full recompute.` \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="selective" \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_modules=[moe,mhc,layernorm] \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_method=null \
+  trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=null \
+  trainer.policy.megatron_config.transformer_config_kwargs.gradient_accumulation_fusion=false \
+  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=false \
+  trainer.policy.model.lora.rank=$LORA_RANK \
+  trainer.policy.model.lora.alpha=$LORA_ALPHA \
+  trainer.policy.model.lora.target_modules="$LORA_TARGET_MODULES" \
+  trainer.policy.model.lora.sync_mode=memory \
+  trainer.policy.megatron_config.lora_config.merge_lora=false \
+  `# Masked IS against the sampler (MIS) + score centering; both optimize against the rollout logprobs, so the` \
+  `# separate old-logprob forward is skipped.` \
+  trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.policy_loss_type="rollout_is" \
+  trainer.algorithm.off_policy_correction.sequence_mask_metric=geometric \
+  trainer.algorithm.off_policy_correction.geo_mask_high=1.01 \
+  trainer.algorithm.off_policy_correction.geo_mask_low=0.99 \
+  trainer.algorithm.enable_score_centering=true \
+  trainer.algorithm.enable_sample_support_replay=true \
+  generator.inference_engine.enable_return_sample_support_set=true \
+  trainer.algorithm.use_kl_loss=false \
+  trainer.algorithm.loss_reduction="token_mean" \
+  trainer.policy.optimizer_config.lr=1e-5 \
+  trainer.policy.optimizer_config.max_grad_norm=1.0 \
+  trainer.policy.optimizer_config.weight_decay=0.1 \
+  `# Fused LM-head logprob (Triton row kernels); no packed (THD) sequences for DSv4 attention.` \
+  trainer.fused_lm_head_logprob=true \
+  trainer.fused_lm_head_logprob_backend=triton \
+  trainer.remove_microbatch_padding=false \
+  trainer.use_expandable_segments=true \
+  trainer.micro_forward_batch_size_per_gpu=1 \
+  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.train_batch_size=$TRAIN_BATCH_SIZE \
+  trainer.policy_mini_batch_size=$TRAIN_BATCH_SIZE \
+  trainer.update_epochs_per_batch=1 \
+  trainer.epochs=1 \
+  trainer.max_training_steps=$MAX_TRAINING_STEPS \
+  trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
+  trainer.algorithm.max_seq_len=$MAX_MODEL_LEN \
+  trainer.eval_before_train=false \
+  trainer.eval_interval=-1 \
+  trainer.ckpt_interval=10 \
+  trainer.resume_mode=null \
+  trainer.ckpt_path="$CKPT_PATH" \
+  generator.inference_engine.backend=vllm \
+  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.num_engines=$NUM_ENGINES \
+  generator.inference_engine.tensor_parallel_size=8 \
+  generator.inference_engine.weight_sync_backend=nccl \
+  generator.inference_engine.gpu_memory_utilization=$INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION \
+  generator.inference_engine.enforce_eager=false \
+  generator.inference_engine.engine_init_kwargs="$ENGINE_INIT_KWARGS" \
+  generator.inference_engine.router_init_kwargs="$ROUTER_INIT_KWARGS" \
+  generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+  generator.sampling_params.temperature=1.0 \
+  generator.sampling_params.top_p=$TOP_P \
+  generator.sampling_params.top_k=$TOP_K \
+  generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  trainer.logger="$LOGGER" \
+  trainer.project_name="dsv41_flash_async" \
+  trainer.run_name="$RUN_NAME" \
+  "$@"
