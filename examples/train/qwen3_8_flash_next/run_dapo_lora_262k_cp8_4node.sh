@@ -73,10 +73,11 @@ if [ "$MEGATRON_CP" -gt 1 ] && [ -z "$QSA_CUDNN_WHEEL" ]; then
   exit 1
 fi
 
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-257024}"
 # The KeyChain filter was calibrated at 12,288-token responses.
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-12288}"
-INFERENCE_ENGINE_MAX_MODEL_LEN=262144        # prompt + response + chat-template headroom
+INFERENCE_ENGINE_MAX_MODEL_LEN=262144
+# Prompt + response fit in one vLLM sequence and one trainer micro-batch.
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-$((INFERENCE_ENGINE_MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))}"
 OVERLONG_BUFFER_LEN=1024                     # penalty starts 1024 tokens before the cap
 # Half-strength soft overlong penalty. At 1.0, full FT learned to cut its reasoning short: by step 20,
 # held-out AIME accuracy on finished responses fell to 0.86 (0.99 at 0.5) with 33/240 finished-wrong.
