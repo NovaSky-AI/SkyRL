@@ -353,14 +353,13 @@ class Worker(DistributedTorchRayActor):
     def _expandable_segments_disabled_for_sync(self, force: bool = False):
         """Disable expandable_segments for the duration of CUDA-IPC weight sync.
 
-        By default only toggles under ``colocate_all`` (the colocated IPC path, which
-        only shares CUDA memory when trainer and inference share GPUs); under
-        non-colocated runs the push backends use NCCL broadcast, which has its own
-        buffers and is unaffected. ``force`` comes from the trainer engine's
-        ``skyrl_force_disable_expandable_segments``, for backends that CUDA-IPC share
-        regardless of colocation: sharded_rdt shares every gathered group with its
-        sidecar producer over ``reduce_tensor``/CUDA IPC, and expandable-segment
-        (VMM) memory makes that export/rebuild ~5-10x slower per storage
+        By default toggles under ``colocate_all`` for native CUDA IPC. NCCL
+        broadcast has its own buffers and is unaffected. ``force`` comes from
+        the trainer engine's ``skyrl_force_disable_expandable_segments`` for
+        engines that CUDA-IPC share regardless of placement: sharded_rdt and
+        explicit ``ipc`` for the external Dynamo profile. Sharded RDT shares
+        every gathered group with its sidecar producer over ``reduce_tensor``/CUDA IPC,
+        and expandable-segment (VMM) memory makes that export/rebuild ~5-10x slower per storage
         (measured: publish rebuild 7.2s/rank/sync at 30B, the dominant
         weight-sync cost). :meth:`_set_expandable_segments` itself no-ops when
         the feature is disabled.
@@ -535,6 +534,9 @@ class Worker(DistributedTorchRayActor):
 
         # Fetch the total inference world size from the servers.
         inference_world_size, _ = await inference_engine_client.get_world_size()
+        device = torch.cuda.current_device()
+        device_uuid = str(torch.cuda.get_device_properties(device).uuid)
+        control_spec = await inference_engine_client.weight_sync_control_spec(device_uuid)
 
         # Off the event loop, on every rank: rank 0 drives the inference-side
         # handshake with blocking HTTP while the others return immediately.
@@ -557,6 +559,7 @@ class Worker(DistributedTorchRayActor):
             server_urls=list(inference_engine_client.server_urls),
             data_parallel_size=int(inference_engine_client.data_parallel_size),
             base_model_path=self.cfg.policy.model.path,
+            control_spec=control_spec,
         )
 
         # # Register signal handlers for termination only on rank 0
@@ -622,7 +625,9 @@ class Worker(DistributedTorchRayActor):
 
         Returned rather than awaited so the caller can overlap it with the send.
         """
-        if not self._should_reset_prefix_cache(inference_engine_cfg):
+        if inference_engine_client.owns_weight_update_lifecycle is True or not self._should_reset_prefix_cache(
+            inference_engine_cfg
+        ):
             return None
         if torch.distributed.get_rank() != 0:
             return None
@@ -657,10 +662,8 @@ class Worker(DistributedTorchRayActor):
 
         torch.cuda.empty_cache()
 
-        # Under colocate_all the CUDA-IPC path calls cudaIpcGetMemHandle, which
-        # is incompatible with the VMM addresses expandable segments use; some
-        # engines (sharded_rdt) share GPU memory on every run and ask for the
-        # toggle unconditionally.
+        # The CUDA-IPC send path requires non-VMM allocations. Sharded RDT and the IPC engine
+        # share GPU memory regardless of placement and request the toggle explicitly.
         with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
             await self._weight_sync_thread(engine.send_weights)
 

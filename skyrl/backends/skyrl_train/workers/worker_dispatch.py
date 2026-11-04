@@ -844,6 +844,10 @@ class WorkerDispatch:
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
+        if self._inference_engine_client.owns_weight_update_lifecycle is True:
+            async with self._inference_engine_client.weight_update_transaction():
+                await _broadcast_and_finish()
+            return
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             await _broadcast_and_finish()

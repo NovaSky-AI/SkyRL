@@ -55,6 +55,7 @@ from enum import Enum
 from typing import (
     Any,
     AsyncIterator,
+    ClassVar,
     Dict,
     Iterable,
     List,
@@ -86,6 +87,10 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
 )
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
+from skyrl.backends.skyrl_train.weight_sync.control_spec import (
+    DirectWeightSyncControlSpec,
+    WeightSyncControlSpec,
+)
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.env_vars import (
     SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
@@ -500,6 +505,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
     proxy_url: str
     """Data plane URL (single endpoint - router or direct server)."""
 
+    owns_weight_update_lifecycle: ClassVar[bool] = False
+    """Whether the provider owns the complete update bracket, including cache invalidation."""
+
     server_urls: List[str]
     """Control plane URLs (list of backend servers for fan-out)."""
 
@@ -571,6 +579,10 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def get_endpoint_url(self) -> str:
         """Data-plane endpoint base URL (the router/proxy that load-balances requests)."""
         return self.proxy_url
+
+    async def weight_sync_control_spec(self, device_uuid: str) -> WeightSyncControlSpec:
+        """Validate this trainer and return its picklable control-plane contract."""
+        return DirectWeightSyncControlSpec(tuple(self.server_urls), self.data_parallel_size)
 
     # ---------------------------
     # Session Management

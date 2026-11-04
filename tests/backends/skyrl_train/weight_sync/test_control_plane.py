@@ -32,6 +32,20 @@ class _NotJsonable:
         return isinstance(other, _NotJsonable)
 
 
+def test_public_serializer_preserves_input_and_serializes_ipc_handles():
+    import pickle
+
+    from skyrl.backends.skyrl_train.weight_sync.control_plane import json_safe
+
+    handles = {"GPU-test": (_NotJsonable(), b"handle")}
+    update = {"names": ["weight"], "ipc_handles": handles}
+    serialized = json_safe(update)
+    assert serialized["names"] == ["weight"]
+    assert "ipc_handles" not in serialized
+    assert pickle.loads(base64.b64decode(serialized["ipc_handles_pickled"])) == handles
+    assert update == {"names": ["weight"], "ipc_handles": handles}
+
+
 class _Resp:
     def __init__(self, status_code: int = 200, body: Any = None, reason: str = "OK") -> None:
         self.status_code = status_code

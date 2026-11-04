@@ -35,6 +35,8 @@ from skyrl.backends.skyrl_train.weight_sync.weight_senders import (  # noqa: E40
 class _RecordingClient:
     """Synchronous vLLM client double that records the native engine contract."""
 
+    fail_closed_transfers = False
+
     def __init__(self):
         self.events: list[tuple[str, object | None]] = []
         self.update_infos: list[dict] = []

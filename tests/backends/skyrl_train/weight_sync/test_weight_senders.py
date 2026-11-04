@@ -279,7 +279,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
     source. A mismatch here means the trainer and receive engines disagree,
     which the driver has no way to catch."""
 
-    def _build(self, monkeypatch, weight_sync_backend, colocate_all, fp8_weight_sync_mode=None):
+    def _build(self, monkeypatch, weight_sync_backend, colocate_all, fp8_weight_sync_mode=None, control_spec=None):
         from vllm.distributed.weight_transfer.factory import (
             WeightTransferTrainerFactory,
         )
@@ -293,6 +293,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
         def _fake_trainer_init(init_info, *, client, source=None):
             seen["init_info"] = init_info
             seen["source"] = source
+            seen["client"] = client
             return SimpleNamespace()
 
         monkeypatch.setattr(WeightTransferTrainerFactory, "trainer_init", _fake_trainer_init)
@@ -317,6 +318,7 @@ class TestBuildTrainerEngineResolvesTheBackend:
             server_urls=["http://a"],
             data_parallel_size=1,
             base_model_path=None,
+            control_spec=control_spec,
         )
         return seen
 
@@ -345,6 +347,13 @@ class TestBuildTrainerEngineResolvesTheBackend:
     def test_source_factory_gets_the_inference_dtype(self, monkeypatch):
         seen = self._build(monkeypatch, "nccl", False)
         assert seen["factory_args"][0] is torch.bfloat16
+
+    def test_direct_sender_keeps_existing_client(self, monkeypatch):
+        from skyrl.backends.skyrl_train.weight_sync.control_plane import (
+            SkyrlWeightSyncClient,
+        )
+
+        assert isinstance(self._build(monkeypatch, "nccl", False)["client"], SkyrlWeightSyncClient)
 
     def test_the_built_source_is_handed_to_the_engine(self, monkeypatch):
         seen = self._build(monkeypatch, "nccl", False)
@@ -376,15 +385,15 @@ class TestCapabilityDeclarations:
         assert SkyrlTrainerCapabilities.skyrl_force_disable_expandable_segments is False
         assert SkyrlTrainerCapabilities.skyrl_empty_cache_after_send is True
 
-    def test_nccl_and_ipc_inherit_the_defaults(self):
+    def test_push_backends_declare_their_ipc_allocator_requirements(self):
         from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
             get_skyrl_ipc_trainer,
             get_skyrl_nccl_trainer,
         )
 
-        for _, engine_cls in (get_skyrl_nccl_trainer(), get_skyrl_ipc_trainer()):
+        for backend, (_, engine_cls) in zip(("nccl", "ipc"), (get_skyrl_nccl_trainer(), get_skyrl_ipc_trainer())):
             assert engine_cls.skyrl_handles_prefix_cache_reset is False
-            assert engine_cls.skyrl_force_disable_expandable_segments is False
+            assert engine_cls.skyrl_force_disable_expandable_segments is (backend == "ipc")
             assert engine_cls.skyrl_empty_cache_after_send is True
 
     def test_delta_declares_it_resets_the_prefix_cache(self):
