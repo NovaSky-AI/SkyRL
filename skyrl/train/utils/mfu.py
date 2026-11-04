@@ -23,7 +23,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 PEAK_BF16_DENSE_TFLOPS = (
     ("NVIDIA GB200", 2500.0),
     ("NVIDIA B200", 2250.0),
+    ("NVIDIA H200 NVL", 835.0),
     ("NVIDIA H200", 989.0),
+    ("NVIDIA GH200", 989.0),
     ("NVIDIA H100 PCIe", 756.0),
     ("NVIDIA H100 NVL", 835.0),
     ("NVIDIA H100", 989.0),
@@ -184,10 +186,14 @@ class MFUTracker:
         self._resolved = False
 
     def _resolve_peak(self, dispatch: Any) -> None:
-        self._resolved = True
         if not self.support.log_utilization:
+            self._resolved = True
             return
         device_name = dispatch.get_device_name("policy")
+        if not device_name:
+            # The lookup failed; retry on the next step.
+            return
+        self._resolved = True
         self._peak_tflops = resolve_peak_tflops(device_name)
         if self._peak_tflops is None:
             logger.warning(

@@ -61,14 +61,29 @@ def kpool_indexer_overcount(provider: Any, seqlen_sum: int, seqlen_squared_sum: 
     return (1 - 1 / kpool) * share * per_token * seqlen_sum
 
 
+def unsupported_reason(provider: Any) -> Optional[str]:
+    """Returns why the formula can't cost ``provider``'s model, or None if it can."""
+    if getattr(provider, "mtp_num_layers", None):
+        return "MTP heads are active, and SkyRL trains them with a decoupled draft loss the formula does not model"
+    if hasattr(provider, "qwen4_indexer_budget"):
+        return (
+            "the model has QSA sparse attention, per-layer embeddings and hyper-connections, which "
+            "megatron-bridge's formula does not model"
+        )
+    return None
+
+
 def full_recompute_fraction(provider: Any) -> float:
     """Returns the fraction of decoder layers recomputed in backward; 0 unless recompute is full."""
     if getattr(provider, "recompute_granularity", None) != "full":
         return 0.0
     if getattr(provider, "recompute_method", None) == "block":
+        # ``recompute_num_layers`` counts layers per model chunk: one per pipeline stage, or one
+        # per virtual stage under interleaved pipelining.
         pp = getattr(provider, "pipeline_model_parallel_size", 1) or 1
-        layers_per_stage = provider.num_layers / pp
-        return min(1.0, (getattr(provider, "recompute_num_layers", 0) or 0) / layers_per_stage)
+        vpp = getattr(provider, "virtual_pipeline_model_parallel_size", None) or 1
+        layers_per_chunk = provider.num_layers / (pp * vpp)
+        return min(1.0, (getattr(provider, "recompute_num_layers", 0) or 0) / layers_per_chunk)
     # "uniform" recomputes every layer, in chunks of recompute_num_layers.
     return 1.0
 
@@ -89,7 +104,8 @@ def logits_flops(provider: Any, seqlen_sum: int) -> float:
 def model_flops(provider: Any, num_seqs: int, seqlen_sum: int, seqlen_squared_sum: int) -> Optional[Dict[str, float]]:
     """Returns the forward + backward model FLOPs of a batch with these per-document statistics.
 
-    The count assumes full fine-tuning and no active MTP heads; callers skip both.
+    The count assumes full fine-tuning and a model the formula supports (see
+    :func:`unsupported_reason`); callers skip other runs.
 
     Args:
         provider: Finalized Megatron model provider.

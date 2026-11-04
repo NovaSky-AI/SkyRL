@@ -26,7 +26,8 @@ RL logs these under `trainer/` and SFT under `train/`, once per step:
 
 Full recompute is SkyRL's default for Megatron
 (`recompute_granularity="full"` in `megatron_config.transformer_config_kwargs`), so `hfu_est` is
-logged by default.
+logged by default. Models that SkyRL switches to selective recompute, such as models with
+hyper-connections, don't log it.
 
 The gap between `mfu` and `mfu_e2e` is driver-side work in the training step, such as staging
 data for the workers and, in RL, normalizing advantages and moving models on and off the GPU in
@@ -51,6 +52,10 @@ per-layer costs are summed, so hybrid models are not treated as uniform transfor
 uses each document's own length (`sum(s^2)` over documents), not the padded or packed row length.
 Padding rows added to balance data-parallel ranks are not counted.
 
+Some work is not in the formula, so `mfu` understates the GPUs' real throughput when it is present:
+the vision encoder of vision-language models, and hyper-connection (mHC) mixing in models that use
+it.
+
 Activation recompute and the optimizer's own arithmetic are not counted, which is the standard
 definition. Recompute therefore lowers `mfu`; `hfu_est` adds it back for full recompute.
 
@@ -59,8 +64,11 @@ definition. Recompute therefore lowers `mfu`; `hfu_est` adds it back for full re
 **Training seconds** for `mfu` and `model_tflops_per_gpu` is the time the slowest policy worker
 spent inside `forward_backward` and `optim_step` during the step, measured on the worker with
 CUDA synchronization. Optimizer time is included, so offloading the optimizer state to CPU or disk
-lowers MFU by the time the transfers add. Time between those calls, such as moving models on and
-off the GPU in colocated runs, is not included.
+lowers MFU by the time the transfers add. So is the CUDA cache flush at the end of
+`forward_backward` (`megatron_config.empty_cuda_cache`, on by default unless the optimizer is fully
+offloaded), together with the cost of mapping the freed memory again on the next forward. For
+throughput comparisons, set `empty_cuda_cache=false` if memory allows and report the setting. Time
+between those calls, such as moving models on and off the GPU in colocated runs, is not included.
 
 **Training seconds** for `mfu_e2e` is the driver's timing of the step: `timing/policy_train` in RL
 and `timing/forward_backward + timing/optim_step` in SFT.
@@ -88,8 +96,8 @@ B200 gives `10.3e9 × 20,000 / 2250e12 ≈ 9%` MFU.
 |---|---|
 | GB200 | 2500 |
 | B200 | 2250 |
-| H100 SXM, H200 | 989 |
-| H100 NVL | 835 |
+| H100 SXM, H200, GH200 | 989 |
+| H100 NVL, H200 NVL | 835 |
 | H100 PCIe | 756 |
 | A100 | 312 |
 
@@ -106,4 +114,6 @@ On other GPUs, `mfu`, `mfu_e2e` and `hfu_est` are not logged and a warning is pr
 - **Multi-token prediction (MTP) heads:** SkyRL trains MTP heads with a separate draft loss whose
   backward the formula does not model. Nothing is logged while MTP heads are active, and a
   warning is printed.
+- **Models with layer types the formula doesn't cost:** for example models with QSA sparse
+  attention and per-layer embeddings. Nothing is logged, and a warning is printed.
 - **FSDP backend:** not supported yet.

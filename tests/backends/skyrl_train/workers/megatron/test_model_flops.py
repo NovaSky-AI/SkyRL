@@ -24,6 +24,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_flops import (  # noqa: E
     full_recompute_fraction,
     logits_flops,
     model_flops,
+    unsupported_reason,
 )
 
 _PROVIDER_DEFAULTS = dict(
@@ -281,20 +282,85 @@ def test_glm53_without_kimi_fields_costs_kda_as_dsa():
     assert wrong > 1.1 * expected
 
 
-def test_model_flops_skipped_with_mtp():
+# ---------------------------------------------------------------------------------------------
+# Worker wiring
+# ---------------------------------------------------------------------------------------------
+
+
+def _flops_worker(provider):
     from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
         MegatronWorker,
     )
 
-    worker = SimpleNamespace(provider=SimpleNamespace(mtp_num_layers=1), _mfu_mtp_warned=False)
-    assert MegatronWorker.model_flops(worker, num_seqs=1, seqlen_sum=10, seqlen_squared_sum=100) is None
+    class _Worker(MegatronWorker):
+        def __init__(self, provider):
+            self.provider = provider
+
+    return _Worker(provider)
+
+
+def test_worker_model_flops_on_bridge_provider():
+    # A real bridge-built provider must reach the formula; a failure would be swallowed as None.
+    from megatron.bridge import AutoBridge
+
+    provider = AutoBridge.from_hf_pretrained("Qwen/Qwen3-0.6B").to_megatron_provider(load_weights=False)
+    provider.finalize()
+    stats = dict(num_seqs=2, seqlen_sum=4096, seqlen_squared_sum=2 * 2048**2)
+    result = _flops_worker(provider).model_flops(**stats)
+    assert result is not None
+    assert result["flops"] == pytest.approx(model_flops(provider, **stats)["flops"])
+
+
+@pytest.mark.parametrize(
+    "extra_fields, unsupported",
+    [
+        ({}, False),
+        ({"mtp_num_layers": 0}, False),
+        ({"mtp_num_layers": 1}, True),
+        ({"qwen4_indexer_budget": 2048}, True),
+    ],
+    ids=["dense", "mtp_off", "mtp_on", "qwen4_exp"],
+)
+def test_worker_skips_unsupported_models(extra_fields, unsupported):
+    provider = _provider(
+        hidden_size=1536,
+        num_layers=28,
+        num_attention_heads=12,
+        num_query_groups=2,
+        kv_channels=128,
+        ffn_hidden_size=8960,
+        vocab_size=151936,
+        **extra_fields,
+    )
+    assert (unsupported_reason(provider) is not None) == unsupported
+    result = _flops_worker(provider).model_flops(num_seqs=1, seqlen_sum=10, seqlen_squared_sum=100)
+    assert (result is None) == unsupported
+
+
+def test_drop_kda_layers_beyond_num_layers():
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+        _drop_kda_layers_beyond,
+    )
+
+    provider = SimpleNamespace(num_layers=4, kimi_kda_layers=(1, 2, 3, 5, 6, 7))
+    _drop_kda_layers_beyond(provider)
+    assert provider.kimi_kda_layers == (1, 2, 3)
+
+
+def test_policy_train_calls_are_timed():
+    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+        MegatronPolicyWorkerBase,
+    )
+
+    assert hasattr(MegatronPolicyWorkerBase.forward_backward, "__wrapped__")
+    assert hasattr(MegatronPolicyWorkerBase.optim_step, "__wrapped__")
 
 
 def test_train_compute_seconds_accumulate_and_reset(monkeypatch):
     from skyrl.backends.skyrl_train.workers.megatron import megatron_worker
 
     monkeypatch.setattr(megatron_worker.torch.cuda, "synchronize", lambda: None)
-    clock = iter([0.0, 2.0, 10.0, 10.5])
+    clock = iter([0.0, 2.0, 10.0])
     monkeypatch.setattr(megatron_worker.time, "perf_counter", lambda: next(clock))
 
     class _Worker:
@@ -311,11 +377,11 @@ def test_train_compute_seconds_accumulate_and_reset(monkeypatch):
 
     worker = _Worker()
     assert worker.forward_backward() == "status"
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="step failed"):
         worker.optim_step()
-    # 2 s in forward_backward plus 0.5 s in the failed optim_step.
+    # 2 s in forward_backward; the failed optim_step is not counted.
     pop = megatron_worker.MegatronPolicyWorkerBase.pop_train_compute_seconds
-    assert pop(worker) == pytest.approx(2.5)
+    assert pop(worker) == pytest.approx(2.0)
     assert pop(worker) == 0.0
 
 
@@ -338,3 +404,17 @@ def test_train_compute_seconds_off_without_log_mfu(monkeypatch):
     worker = _Worker()
     assert worker.forward_backward() == "status"
     assert worker._train_compute_seconds == 0.0
+
+
+@pytest.mark.parametrize("vpp, expected", [(None, 0.5), (2, 1.0)])
+def test_block_recompute_fraction_counts_layers_per_model_chunk(vpp, expected):
+    # 16 layers on PP=2: 8 per stage, or 4 per virtual stage with VPP=2.
+    provider = SimpleNamespace(
+        recompute_granularity="full",
+        recompute_method="block",
+        recompute_num_layers=4,
+        num_layers=16,
+        pipeline_model_parallel_size=2,
+        virtual_pipeline_model_parallel_size=vpp,
+    )
+    assert full_recompute_fraction(provider) == pytest.approx(expected)

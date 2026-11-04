@@ -3,6 +3,8 @@
 uv run --isolated --extra dev --extra skyrl-train pytest tests/train/utils/test_mfu.py
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from loguru import logger
@@ -61,6 +63,8 @@ def test_resolve_peak_tflops():
     assert resolve_peak_tflops("NVIDIA H100 80GB HBM3") == 989.0
     assert resolve_peak_tflops("NVIDIA H100 PCIe") == 756.0
     assert resolve_peak_tflops("NVIDIA H100 NVL") == 835.0
+    assert resolve_peak_tflops("NVIDIA H200 NVL") == 835.0
+    assert resolve_peak_tflops("NVIDIA GH200 480GB") == 989.0
     assert resolve_peak_tflops("NVIDIA A100-SXM4-80GB") == 312.0
     assert resolve_peak_tflops("NVIDIA L4") is None
 
@@ -118,14 +122,15 @@ def test_mfu_metrics_without_step_time_skips_e2e():
 
 
 class _FakeDispatch:
-    def __init__(self, flops, compute_seconds=2.0):
+    def __init__(self, flops, compute_seconds=2.0, device_names=("NVIDIA H100 80GB HBM3",)):
         self.flops = flops
         self.compute_seconds = compute_seconds
+        self.device_names = list(device_names)
         self.calls = []
         self.pops = 0
 
     def get_device_name(self, model):
-        return "NVIDIA H100 80GB HBM3"
+        return self.device_names.pop(0) if len(self.device_names) > 1 else self.device_names[0]
 
     def model_flops(self, model, num_seqs, seqlen_sum, seqlen_squared_sum):
         self.calls.append((num_seqs, seqlen_sum, seqlen_squared_sum))
@@ -164,6 +169,81 @@ def test_tracker_without_compute_time_logs_nothing():
     dispatch = _FakeDispatch({"flops": 989e12}, compute_seconds=None)
     tracker = MFUTracker(mfu_support("megatron", MegatronConfig(), 0), num_gpus=1, prefix="trainer")
     assert tracker.step_metrics(dispatch, _padded_batch([3, 5]), step_seconds=4.0) == {}
+
+
+def test_tracker_retries_peak_after_failed_device_lookup():
+    # get_device_name returns "" when the lookup fails; the next step tries again.
+    dispatch = _FakeDispatch({"flops": 989e12}, compute_seconds=2.0, device_names=("", "NVIDIA H100 80GB HBM3"))
+    tracker = MFUTracker(mfu_support("megatron", MegatronConfig(), 0), num_gpus=1, prefix="trainer")
+    assert "trainer/mfu" not in tracker.step_metrics(dispatch, _padded_batch([3, 5]), step_seconds=4.0)
+    assert tracker.step_metrics(dispatch, _padded_batch([3, 5]), step_seconds=4.0)["trainer/mfu"] == pytest.approx(0.5)
+
+
+class _RecordingTracker:
+    def __init__(self):
+        self.calls = []
+
+    def step_metrics(self, dispatch, batch, step_seconds, passes=1):
+        self.calls.append((step_seconds, passes))
+        return {"trainer/mfu": 0.5}
+
+
+def test_rl_trainer_times_policy_train_and_counts_epochs():
+    from skyrl.train.trainer import RayPPOTrainer
+
+    tracker = _RecordingTracker()
+    trainer = SimpleNamespace(
+        _mfu_tracker=tracker,
+        dispatch=object(),
+        all_timings={"policy_train": 3.0, "critic_train": 9.0},
+        cfg=SimpleNamespace(trainer=SimpleNamespace(update_epochs_per_batch=2)),
+    )
+    assert RayPPOTrainer.policy_mfu_metrics(trainer, _padded_batch([4])) == {"trainer/mfu": 0.5}
+    assert tracker.calls == [(3.0, 2)]
+    trainer._mfu_tracker = None
+    assert RayPPOTrainer.policy_mfu_metrics(trainer, _padded_batch([4])) == {}
+
+
+def test_sft_trainer_times_forward_backward_and_optim_step():
+    from skyrl.train.sft_trainer import SFTTrainer
+
+    tracker = _RecordingTracker()
+    trainer = SimpleNamespace(_mfu_tracker=tracker, dispatch=object())
+    timings = {"forward_backward": 1.5, "optim_step": 0.5, "step": 9.0}
+    SFTTrainer._mfu_metrics(trainer, _padded_batch([4]), timings)
+    assert tracker.calls == [(2.0, 1)]
+
+
+def test_sft_config_maps_log_mfu():
+    from skyrl.train.config.sft_config import SFTConfig, build_skyrl_config_for_sft
+
+    assert build_skyrl_config_for_sft(SFTConfig(log_mfu=False)).trainer.log_mfu is False
+    assert build_skyrl_config_for_sft(SFTConfig()).trainer.log_mfu is True
+
+
+class _FakeActorGroup:
+    def async_run_ray_method(self, dispatch_type, method):
+        assert (dispatch_type, method) == ("pass_through", "pop_train_compute_seconds")
+        return ["ref0", "ref1", "ref2"]
+
+
+@pytest.mark.parametrize(
+    "rank_seconds, expected",
+    [([1.0, 3.0, 2.0], 3.0), ([None, None, None], None), (RuntimeError("actor died"), None)],
+    ids=["max_over_ranks", "untracked", "dispatch_failure"],
+)
+def test_dispatch_pop_train_compute_seconds(monkeypatch, rank_seconds, expected):
+    from skyrl.backends.skyrl_train.workers import worker_dispatch
+
+    def ray_get(refs, operation):
+        if isinstance(rank_seconds, Exception):
+            raise rank_seconds
+        return rank_seconds
+
+    monkeypatch.setattr(worker_dispatch.deadline, "ray_get", ray_get)
+    dispatch = SimpleNamespace(_actor_groups={"policy": _FakeActorGroup()})
+    assert worker_dispatch.WorkerDispatch.pop_train_compute_seconds(dispatch, "policy") == expected
+    assert worker_dispatch.WorkerDispatch.pop_train_compute_seconds(dispatch, "critic") is None
 
 
 def test_sft_validation_warns_for_fp8():

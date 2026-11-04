@@ -158,7 +158,10 @@ import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
     maybe_force_qwen35_text_bridge,
 )
-from skyrl.backends.skyrl_train.workers.megatron.model_flops import model_flops
+from skyrl.backends.skyrl_train.workers.megatron.model_flops import (
+    model_flops,
+    unsupported_reason,
+)
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
@@ -198,7 +201,7 @@ def drop_unsupported_recompute_modules(provider) -> None:
 
 
 class MegatronWorker:
-    _mfu_mtp_warned = False
+    _mfu_warned = False
 
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
@@ -465,6 +468,7 @@ class MegatronWorker:
                 f"{provider.num_layers} entries to match the configured num_layers"
             )
             provider.linear_attention_freq = linear_attention_freq[: provider.num_layers]
+        _drop_kda_layers_beyond(provider)
 
         # Check the resolved provider because it may supply its own VPP default. Interleaved
         # chunks desynchronise each RouterReplay instance's backward FIFO.
@@ -532,20 +536,26 @@ class MegatronWorker:
         """Returns the forward + backward model FLOPs of a batch with these per-document statistics.
 
         See :func:`~skyrl.backends.skyrl_train.workers.megatron.model_flops.model_flops`. Returns None
-        when MTP heads are active: they are trained with a decoupled draft loss whose backward the
-        formula does not model. Telemetry only: also returns None on any failure rather than ending
-        the run.
+        for models the formula does not support (see
+        :func:`~skyrl.backends.skyrl_train.workers.megatron.model_flops.unsupported_reason`).
+        Telemetry only: also returns None on any failure rather than ending the run. Either case
+        logs one warning per worker.
         """
-        if getattr(self.provider, "mtp_num_layers", None):
-            if not self._mfu_mtp_warned:
-                logger.warning("[mfu] MTP heads are active; model FLOPs and MFU are not logged.")
-                self._mfu_mtp_warned = True
+        reason = unsupported_reason(self.provider)
+        if reason is not None:
+            self._warn_mfu_once(f"[mfu] model FLOPs and MFU are not logged: {reason}.")
             return None
         try:
             return model_flops(self.provider, num_seqs, seqlen_sum, seqlen_squared_sum)
         except Exception as e:
-            logger.warning(f"[mfu] could not compute model FLOPs: {e}")
+            self._warn_mfu_once(f"[mfu] could not compute model FLOPs, so MFU is not logged: {e}")
             return None
+
+    def _warn_mfu_once(self, message: str) -> None:
+        """Logs ``message`` if no MFU warning has been logged on this worker yet."""
+        if not self._mfu_warned:
+            logger.warning(message)
+            self._mfu_warned = True
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
         check_lora_group_flags(
@@ -1004,10 +1014,18 @@ class MegatronWorker:
             data["pixel_values"] = None
 
 
+def _drop_kda_layers_beyond(provider: Any) -> None:
+    """Drops ``kimi_kda_layers`` entries past ``num_layers``, which the FLOPs formula rejects."""
+    kda_layers = getattr(provider, "kimi_kda_layers", None)
+    if kda_layers and provider.num_layers is not None:
+        provider.kimi_kda_layers = tuple(n for n in kda_layers if n <= provider.num_layers)
+
+
 def _counts_train_compute(method):
     """Adds the method's CUDA-synchronized wall-clock time to ``self._train_compute_seconds``.
 
-    Timing, and its two device synchronizations, run only when ``log_mfu`` is enabled.
+    Timing, and its two device synchronizations, run only when ``log_mfu`` is enabled. A call that
+    raises is not counted.
     """
 
     @functools.wraps(method)
@@ -1016,11 +1034,10 @@ def _counts_train_compute(method):
             return method(self, *args, **kwargs)
         torch.cuda.synchronize()
         start = time.perf_counter()
-        try:
-            return method(self, *args, **kwargs)
-        finally:
-            torch.cuda.synchronize()
-            self._train_compute_seconds += time.perf_counter() - start
+        result = method(self, *args, **kwargs)
+        torch.cuda.synchronize()
+        self._train_compute_seconds += time.perf_counter() - start
+        return result
 
     return wrapper
 
