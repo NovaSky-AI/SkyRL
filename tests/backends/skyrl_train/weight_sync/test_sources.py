@@ -45,6 +45,18 @@ def _assert_channels_agree(source):
     return meta, pairs
 
 
+def test_wire_dtype_keeps_fp32_and_integer_parameters():
+    """The rule every Megatron source (push and sharded RDT) applies per tensor."""
+    from skyrl.backends.skyrl_train.weight_sync.sources import wire_dtype
+
+    assert wire_dtype(torch.zeros(2, dtype=torch.bfloat16), torch.bfloat16) == torch.bfloat16
+    assert wire_dtype(torch.zeros(2, dtype=torch.float16), torch.bfloat16) == torch.bfloat16
+    # fp32 router weight / expert bias: a bf16 round trip would move top-k choices.
+    assert wire_dtype(torch.zeros(2, dtype=torch.float32), torch.bfloat16) == torch.float32
+    # Integer tables (hash routing) are exact only in their own dtype.
+    assert wire_dtype(torch.zeros(2, dtype=torch.int64), torch.bfloat16) == torch.int64
+
+
 class TestFsdpWeightSource:
     def test_channels_agree(self):
         meta, pairs = _assert_channels_agree(FsdpWeightSource(_model(), torch.bfloat16))

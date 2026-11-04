@@ -49,6 +49,20 @@ _MEGATRON_MTP_RE = re.compile(r"(^|\.)mtp\.")
 _MEGATRON_SHARED_WITH_DRAFT = ("embedding.word_embeddings.weight", "output_layer.weight")
 
 
+def wire_dtype(tensor: torch.Tensor, dtype: torch.dtype) -> torch.dtype:
+    """The dtype a Megatron parameter goes out in: ``dtype``, except fp32 and integer tensors.
+
+    Parameters a model keeps in fp32 under bf16 training (Beam's and DeepSeek-V3/V4's MoE router
+    weight and expert bias, DeepSeek-V4's mHC mixing weights and attention sinks) go out in fp32:
+    vLLM keeps them in fp32 too, and a bf16 round trip changes them by ~1/256, enough to move router
+    top-k choices. Integer tables (DeepSeek-V4's hash-routing tid2eid) keep their dtype: bf16 holds
+    integers exactly only up to 256.
+    """
+    if tensor.dtype == torch.float32 or not tensor.is_floating_point():
+        return tensor.dtype
+    return dtype
+
+
 def is_megatron_mtp_param(name: str) -> bool:
     """Whether a global Megatron parameter name is in the MTP block."""
     return _MEGATRON_MTP_RE.search(name) is not None
@@ -153,14 +167,7 @@ class MegatronWeightSource(WeightSource):
         return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
 
     def _wire_dtype(self, tensor: torch.Tensor) -> torch.dtype:
-        # Parameters a model keeps in fp32 under bf16 training (DeepSeek-V4's mHC mixing weights,
-        # attention sinks and router expert bias) go out in fp32: vLLM keeps them in fp32 too, and a
-        # bf16 round trip changes them by ~1/256, enough to move router top-k choices.
-        # Integer tables (DeepSeek-V4's hash-routing tid2eid) keep their dtype: bf16 holds
-        # integers exactly only up to 256.
-        if tensor.dtype == torch.float32 or not tensor.is_floating_point():
-            return tensor.dtype
-        return self._dtype
+        return wire_dtype(tensor, self._dtype)
 
     @cached_property
     def metadata(self) -> List[ParamMeta]:
