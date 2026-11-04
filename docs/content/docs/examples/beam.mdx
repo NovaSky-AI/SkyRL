@@ -7,61 +7,24 @@ model (23B active parameters), to solve math problems with reinforcement learnin
 the model and vLLM generates responses, sharing the same GPUs. The examples run DAPO on DAPO-Math-17K and evaluate on
 AIME24 and AIME25.
 
-<Callout type="warn">
-Beam support currently lives on the
-[`beam-release`](https://github.com/NovaSky-AI/SkyRL/tree/beam-release) branch, not on `main`. The example scripts,
-the Beam patches and the `pyproject.toml` that installs the Beam builds of vLLM and Megatron-Bridge are only on that
-branch. Check it out before running anything on this page:
-
-```bash
-git clone -b beam-release https://github.com/NovaSky-AI/SkyRL.git
-cd SkyRL
-```
-
-If you already have a SkyRL checkout, run `git fetch origin beam-release && git checkout beam-release` instead.
-</Callout>
-
 <Callout type="info">
-The examples need 2 to 8 nodes of 8 x B200 GPUs and the SkyRL Beam image
-(`novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron-beam`).
+Beam runs on `main`: vLLM 0.33 serves it and the pinned Megatron-Bridge trains it, both installed by SkyRL's `megatron`
+extra. The examples need 2 to 8 nodes of 8 x B200 GPUs.
 </Callout>
 
 ## Before you start
 
 You need the [Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B) checkpoint, a SkyRL
-checkout of the `beam-release` branch (see above), the Beam builds of vLLM and Megatron-Bridge, and GPUs.
+checkout, and GPUs.
 
 The example scripts are in
-[`examples/train/models/reflection/beam/`](https://github.com/NovaSky-AI/SkyRL/tree/beam-release/examples/train/models/reflection/beam)
-on the `beam-release` branch. All commands on this page run from the root of that checkout.
-
-### Docker image
-
-The SkyRL Beam image ships the Beam builds of vLLM and Megatron-Bridge as wheels under `/opt/skyrl-wheels`, along with
-prebuilt FlashInfer kernels. SkyRL's
-[`pyproject.toml`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/pyproject.toml) on the `beam-release` branch
-installs both from that path.
-
-Start one container per node with host networking and access to the GPUs and RDMA devices. Mount the SkyRL checkout,
-the model and the data at the same paths on every node:
-
-```bash
-docker run -d --name skyrl-beam --gpus all --network host --ipc host --shm-size 64g \
-  --device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 \
-  -v /path/to/SkyRL:/path/to/SkyRL -v /path/to/models:/path/to/models -v $HOME/data:$HOME/data \
-  novaskyai/skyrl-train-ray-2.57.0-py3.12-cu13.0-megatron-beam sleep infinity
-```
+[`examples/train/models/reflection/beam/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/models/reflection/beam).
+All commands on this page run from the root of the checkout.
 
 ### Ray cluster
 
-Start Ray inside the containers, then launch every script from the head node's container:
-
-```bash
-# head node
-docker exec skyrl-beam ray start --head --port=6379 --num-gpus=8
-# every other node
-docker exec skyrl-beam ray start --address=<head-ip>:6379 --num-gpus=8
-```
+Start a Ray cluster across the nodes, with access to the GPUs and RDMA devices, and launch every script from the head
+node. Mount the SkyRL checkout, the model and the data at the same paths on every node.
 
 Put your NCCL settings for the cluster fabric (InfiniBand, RoCE or EFA), together with `WANDB_API_KEY` and
 `HF_TOKEN`, in an env file. Pass it to the scripts with `ENV_FILE=/path/to/.env`. The env file must be at the same path
@@ -90,10 +53,10 @@ scripts.
 
 | Configuration | Hardware | How it runs | Script |
 |---|---|---|---|
-| LoRA | 2 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_2node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_lora_2node.sh) |
-| LoRA | 4 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_lora_4node.sh) |
-| Full fine-tuning | 8 nodes x 8 B200 GPUs | Training and generation share the GPUs; the full model is trained | [`run_dapo_beam_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_fullft_8node.sh) |
-| MXFP8 full fine-tuning | 8 nodes x 8 B200 GPUs | MXFP8 training and MXFP8 rollouts; the full model is trained | [`run_dapo_beam_fp8_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/run_dapo_beam_fp8_fullft_8node.sh) |
+| LoRA | 2 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_2node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_lora_2node.sh) |
+| LoRA | 4 nodes x 8 B200 GPUs | Training and generation share the GPUs; only adapters are trained | [`run_dapo_beam_lora_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_lora_4node.sh) |
+| Full fine-tuning | 8 nodes x 8 B200 GPUs | Training and generation share the GPUs; the full model is trained | [`run_dapo_beam_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_fullft_8node.sh) |
+| MXFP8 full fine-tuning | 8 nodes x 8 B200 GPUs | MXFP8 training and MXFP8 rollouts; the full model is trained | [`run_dapo_beam_fp8_fullft_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/run_dapo_beam_fp8_fullft_8node.sh) |
 
 All scripts use these settings:
 
@@ -135,7 +98,8 @@ The LoRA scripts also turn on these throughput and memory optimizations:
 - **MoE LoRA slots sized at the expert rank.** With `normalize_moe_lora=true`, each expert adapter has rank
   `rank / top_k` (8 for rank 64). The scripts pass `additional_config.max_expert_lora_rank` so that vLLM sizes its MoE
   LoRA slots at that rank instead of the full rank. This speeds up decoding and leaves more memory for the KV cache.
-- **Pinned host staging for the in-memory adapter sync** (`SKYRL_LORA_STAGE_DEVICE=gpu_offload`).
+- **Unmerged adapter serving.** vLLM 0.33's Beam model has no LoRA support; SkyRL registers a LoRA-capable subclass
+  under the same architecture (`patches/vllm/patch_beam_lora.py`), and the adapter is synced in memory.
 - **LoRA sequence-parallel input regathering** (`lora_config.sequence_parallel_input_regather=true`), which keeps only
   each rank's shard of the LayerNorm output for the LoRA backward pass.
 - **Fused LM-head log-probabilities with logit softcapping** (`trainer.fused_lm_head_logprob=true`).
@@ -206,9 +170,10 @@ AIME25 metrics are logged as `eval/aime-2025/*`. Because of its dataset label, A
 
 ## How it works
 
-- **Beam builds of vLLM and Megatron-Bridge.** The image ships vLLM `0.1.0+beam2` and Megatron-Bridge `0.7.0+beam1`.
-  Megatron-Bridge builds Beam as a megatron-core `HybridModel`, with sandwich norms, hybrid sliding-window and NoPE
-  attention with SSMax, per-head Q/K norms, an output gate, a final logit softcap and an FP32 MoE router.
+- **vLLM and Megatron-Bridge.** vLLM 0.33 serves Beam, and Megatron-Bridge builds it as a megatron-core
+  `HybridModel`, with sandwich norms, hybrid sliding-window and NoPE attention with SSMax, per-head Q/K norms, an
+  output gate, a final logit softcap and an FP32 MoE router. SkyRL registers a `BeamConfig` for transformers, which
+  ships one only from 5.22, and applies the final logit softcap in its fused LM-head log-probability path.
 - **Colocated training and generation.** The trainer and the vLLM replicas share the GPUs, and SkyRL syncs weights in
   memory after each step. The FP32 router weights stay FP32 through the sync.
 - **Rollout Routing Replay (R3).** vLLM returns the experts it routed each token to, and the trainer replays them. This
@@ -219,6 +184,6 @@ AIME25 metrics are logged as `eval/aime-2025/*`. Because of its dataset label, A
 
 ## Learn more
 
-See the [recipe README](https://github.com/NovaSky-AI/SkyRL/blob/beam-release/examples/train/models/reflection/beam/README.md)
-on the `beam-release` branch for the full list of script variables, and the
+See the [recipe README](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/reflection/beam/README.md)
+for the full list of script variables, and the
 [SkyRL blog post](https://blog.skyrl.ai/blog/day-0-beam) for how Beam support was built and validated.

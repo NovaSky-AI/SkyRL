@@ -95,6 +95,22 @@ class TestPpLocalOwnership:
             "model.norm.weight",
         ]
 
+    def test_assembled_metadata_keeps_each_names_wire_dtype(self):
+        """fp32 parameters (an MoE router) cross the RDT wire in fp32, as on the push
+        backends: the stages exchange each name's dtype with its shape, so every stage
+        declares the same per-name dtypes."""
+        stage0 = [
+            ("model.embed_tokens.weight", [8, 4], "bfloat16"),
+            ("model.layers.0.mlp.gate.weight", [2, 4], "float32"),
+        ]
+        stage1 = [
+            ("model.layers.1.mlp.gate.e_score_correction_bias", [2], "float32"),
+            ("model.norm.weight", [4], "bfloat16"),
+        ]
+        for my_pp in (0, 1):
+            meta = self._source(2, my_pp, [stage0, stage1]).metadata
+            assert [m.dtype for m in meta] == [torch.bfloat16, torch.float32, torch.float32, torch.bfloat16]
+
     def test_metadata_is_group_contiguous_even_when_a_stage_holds_both_ends(self):
         """The assembled order must satisfy the engine's group-contiguity check —
         ``flat(layerwise_groups(names)) == names`` — for whatever the stages
@@ -449,6 +465,42 @@ class TestStampedYieldValidation:
     def test_unstamped_sources_are_never_checked(self):
         e = self._engine(None)
         e._validate_held_yields(0, ["anything"], [None])
+
+
+class TestYieldDtypeValidation:
+    """The consumers carve each packed slice by the dtype in the sender's
+    metadata, so a yielded tensor in another dtype must fail at the gather loop,
+    and ranks whose metadata differs only in a dtype must fail the digest check."""
+
+    @staticmethod
+    def _engine(dtypes):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
+            ParamMeta,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+            SkyRLShardedRDTTrainerWeightTransferEngine,
+        )
+
+        e = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
+        e._meta = [ParamMeta(f"w{i}", dt, (2,)) for i, dt in enumerate(dtypes)]
+        e._group_dtypes = [list(dtypes)]
+        return e
+
+    def test_matching_dtypes_pass(self):
+        e = self._engine([torch.bfloat16, torch.float32, torch.bfloat16])
+        e._validate_yield_dtypes(0, ["w0", "w1", "w2"], [torch.zeros(2, dtype=torch.bfloat16), torch.zeros(2), None])
+
+    def test_a_dtype_other_than_the_declared_one_raises(self):
+        e = self._engine([torch.bfloat16, torch.float32])
+        with pytest.raises(RuntimeError, match="metadata declares torch.float32"):
+            e._validate_yield_dtypes(
+                0, ["w0", "w1"], [torch.zeros(2, dtype=torch.bfloat16), torch.zeros(2, dtype=torch.bfloat16)]
+            )
+
+    def test_the_metadata_digest_covers_dtypes(self):
+        bf16 = self._engine([torch.bfloat16, torch.bfloat16])._meta_digest()
+        fp32 = self._engine([torch.bfloat16, torch.float32])._meta_digest()
+        assert bf16 != fp32
 
 
 @pytest.mark.megatron

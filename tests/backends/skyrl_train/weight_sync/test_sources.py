@@ -45,6 +45,18 @@ def _assert_channels_agree(source):
     return meta, pairs
 
 
+def test_wire_dtype_keeps_fp32_and_integer_parameters():
+    """The rule every Megatron source (push and sharded RDT) applies per tensor."""
+    from skyrl.backends.skyrl_train.weight_sync.sources import wire_dtype
+
+    assert wire_dtype(torch.zeros(2, dtype=torch.bfloat16), torch.bfloat16) == torch.bfloat16
+    assert wire_dtype(torch.zeros(2, dtype=torch.float16), torch.bfloat16) == torch.bfloat16
+    # fp32 router weight / expert bias: a bf16 round trip would move top-k choices.
+    assert wire_dtype(torch.zeros(2, dtype=torch.float32), torch.bfloat16) == torch.float32
+    # Integer tables (hash routing) are exact only in their own dtype.
+    assert wire_dtype(torch.zeros(2, dtype=torch.int64), torch.bfloat16) == torch.int64
+
+
 class TestFsdpWeightSource:
     def test_channels_agree(self):
         meta, pairs = _assert_channels_agree(FsdpWeightSource(_model(), torch.bfloat16))
@@ -280,25 +292,26 @@ class TestLoraAdapterWeightSource:
         assert source.exports == 2
         assert source.receive_target["lora_name"] == "next"
 
-    def test_reading_an_unprepared_source_never_exports(self):
+    def test_reading_an_unprepared_source_raises_instead_of_exporting(self):
         """The export is a collective. A source that ran it implicitly would have
         whichever rank asked run it alone, hanging the job in an EP all-gather
-        for the full NCCL watchdog timeout instead of failing. ``metadata`` is
-        empty (the engine's init-time ownership probe reads it before any round);
-        iteration raises."""
+        for the full NCCL watchdog timeout instead of failing."""
         source = self._source()
-        assert source.metadata == []
+        with pytest.raises(RuntimeError, match="no prepared adapter"):
+            source.metadata
         with pytest.raises(RuntimeError, match="no prepared adapter"):
             list(source.iter_full())
         assert source.exports == 0
 
-    def test_metadata_read_before_prepare_does_not_go_stale(self):
-        """``metadata`` is a cached property; prepare() must drop the value cached
-        by an earlier read, or the round would declare an empty stream."""
+    def test_each_round_declares_its_own_adapter(self):
+        """``metadata`` is a cached property; the next round's prepare() must drop the
+        value cached in this one, or it would declare the previous adapter."""
         source = self._source()
-        assert source.metadata == []
         source.prepare()
-        assert [m.name for m in source.metadata] == [n for n, _ in source.iter_full()]
+        first = [m.name for m in source.metadata]
+        assert first == [n for n, _ in source.iter_full()]
+        source.prepare()
+        assert [m.name for m in source.metadata] == first and source.exports == 2
 
     def test_reading_after_the_stream_is_consumed_never_re_exports(self):
         """The trap the trainer fell into: the round is over, the cache is gone,
@@ -306,7 +319,8 @@ class TestLoraAdapterWeightSource:
         source = self._source()
         source.prepare()
         list(source.iter_full())
-        assert source.metadata == []
+        with pytest.raises(RuntimeError, match="no prepared adapter"):
+            source.metadata
         with pytest.raises(RuntimeError, match="no prepared adapter"):
             list(source.iter_full())
         assert source.exports == 1
@@ -331,3 +345,30 @@ class TestLoraAdapterWeightSource:
         source.set_lora_name("tenant")
         with pytest.raises(RuntimeError, match="dropped aliased keys"):
             source.prepare()
+
+
+def test_adapter_target_modules_uses_the_bridge_hook():
+    """The model bridge's ``_adapter_target_modules`` decides the PEFT ``target_modules`` (Beam returns
+    full paths, since its attention ``self_attn.gate_proj`` and MLP ``mlp.gate_proj`` share a leaf
+    name); ``base_layer`` is dropped and the result is sorted and deduplicated."""
+    calls = []
+
+    class _ModelBridge:
+        def _adapter_target_modules(self, names):
+            calls.append(names)
+            return ["model.layers.0.self_attn.gate_proj", "base_layer", "model.layers.0.mlp.down_proj"] * 2
+
+    class _AutoBridge:
+        _model_bridge = _ModelBridge()
+
+    names = (f"base_model.model.model.layers.0.self_attn.gate_proj.lora_{ab}.weight" for ab in "AB")
+    assert sources_mod.adapter_target_modules(_AutoBridge(), names) == [
+        "model.layers.0.mlp.down_proj",
+        "model.layers.0.self_attn.gate_proj",
+    ]
+    assert calls == [
+        [
+            "base_model.model.model.layers.0.self_attn.gate_proj.lora_A.weight",
+            "base_model.model.model.layers.0.self_attn.gate_proj.lora_B.weight",
+        ]
+    ]

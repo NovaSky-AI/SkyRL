@@ -45,6 +45,9 @@ from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
+from tests.backends.skyrl_train.gpu.gpu_ci.megatron.megatron_tiny_models.create_beam_tiny import (
+    create_beam_tiny,
+)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
@@ -63,6 +66,16 @@ QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-
 # 4-layer bf16 slice of moonshotai/Kimi-K3 built by examples/train/kimi_k3/make_slice.py. A local
 # override must keep "kimi-k3" in its path: the settings below are keyed on the model name.
 KIMI_K3_4LAYER = os.environ.get("SKYRL_KIMI_K3_4LAYER_PATH", "eatang/Kimi-K3-4layer")
+# Tiny random Beam checkpoint, built on first use by megatron_tiny_models/create_beam_tiny.py. The
+# "_fused_lm_head" copy is the same checkpoint run through trainer.fused_lm_head_logprob (the fused
+# path applies Beam's final logit softcap itself). Settings below are keyed on "beam" in the path.
+BEAM_TINY = os.environ.get("SKYRL_BEAM_TINY_PATH", "/tmp/skyrl-beam-tiny-random")
+BEAM_TINY_FUSED_LM_HEAD = f"{BEAM_TINY}_fused_lm_head"
+
+
+def _is_beam(model_name: str) -> bool:
+    return "beam" in model_name.lower()
+
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -166,6 +179,8 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
         cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
         cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
+    if _is_beam(model_name) and model_name.endswith("_fused_lm_head"):
+        cfg.trainer.fused_lm_head_logprob = True
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -308,6 +323,12 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # 1M default context; the slice is ~18B bf16 params, colocated with the Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if _is_beam(model_name):
+        # The 24 GB L4 CI shape: the tiny checkpoint's 1M-token max_position_embeddings is capped
+        # at 4096 and the KV pool is kept small next to the colocated Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["max_num_seqs"] = 128
+        overrides["gpu_memory_utilization"] = 0.6
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.
@@ -417,6 +438,29 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             id="qwen3-moe_pp2_cp2",
         ),
+        # Tiny random Beam (4 layers: sliding-window RoPE x3 + NoPE/SSMax full attention, dense +
+        # 3 grouped-sigmoid MoE layers with an fp32 router, gated attention with per-head gate bias,
+        # sandwich norms, final logit softcap). Megatron side is Megatron-Bridge's BeamBridge
+        # (HybridModel), vLLM side is vLLM's BeamForCausalLM; both on the 4 x L4 CI mesh.
+        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, id="beam-tiny_tp2_ep2"),
+        pytest.param(
+            2,
+            1,
+            1,
+            2,
+            1,
+            2,
+            4,
+            BEAM_TINY_FUSED_LM_HEAD,
+            1e-1,
+            2e-1,
+            None,
+            None,
+            id="beam-tiny_tp2_ep2_fused_lm_head",
+        ),
+        # PP splits at Beam-layer (attention + MLP) boundaries; CP with sliding-window attention
+        # runs cp_comm_type="a2a" (default_cp_comm_type_for_sliding_window).
+        pytest.param(1, 2, 2, 1, None, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, id="beam-tiny_pp2_cp2"),
         # GLM-4.7-Flash (~31B MoE, MLA) on 4xH100-80G. Mesh: TP=4 EP=4 ETP=1
         # -> DP=1, vLLM TP=4 colocated on the same GPUs, same layout as the
         # other large-MoE entries below.
@@ -884,7 +928,10 @@ async def test_logprobs_matching_roundtrip(
         or "kimi-k2.5" in model_name.lower()
         or "kimi-k3" in model_name.lower()
         or "qwen3.8-flash-next" in model_name.lower()
+        or _is_beam(model_name)
     )
+    if _is_beam(model_name):
+        create_beam_tiny(model_name)
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which

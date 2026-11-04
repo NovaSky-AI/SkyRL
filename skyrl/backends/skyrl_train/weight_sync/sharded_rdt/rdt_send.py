@@ -31,6 +31,7 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import 
 from skyrl.backends.skyrl_train.weight_sync.sources import (
     FsdpWeightSource,
     MegatronWeightSource,
+    wire_dtype,
 )
 
 logger = logging.getLogger(__name__)
@@ -792,9 +793,11 @@ class MegatronStackedWeightSource(GroupedWeightSource):
                     names, tensors = [], []
                 prev_layer = layer
                 # Warm steady state: bridge already yields target dtype on-device —
-                # skip the no-op .to()/.contiguous() dispatches.
-                if tensor.dtype != self._dtype or (target_dev is not None and tensor.device != target_dev):
-                    tensor = tensor.to(device=target_dev, dtype=self._dtype)
+                # skip the no-op .to()/.contiguous() dispatches. fp32 / integer parameters
+                # (e.g. the MoE router) keep their dtype, as on the push backends.
+                dtype = wire_dtype(tensor, self._dtype)
+                if tensor.dtype != dtype or (target_dev is not None and tensor.device != target_dev):
+                    tensor = tensor.to(device=target_dev, dtype=dtype)
                 tensor = tensor.detach()
                 if not tensor.is_contiguous():
                     tensor = tensor.contiguous()
@@ -842,8 +845,10 @@ class MegatronStackedWeightSource(GroupedWeightSource):
     def metadata(self) -> List[ParamMeta]:
         meta: List[ParamMeta] = []
         for name, tensor in self._iter_impl(collect_meta=True):
+            # Foreign experts are never materialized; experts are always stacked in the wire dtype.
             shape = self._foreign_expert_shape(name) if tensor is None else tuple(tensor.shape)
-            meta.append(ParamMeta(name, self._dtype, shape))
+            dtype = self._dtype if tensor is None else tensor.dtype
+            meta.append(ParamMeta(name, dtype, shape))
             del tensor
         return self._assemble_pp_metadata(meta) if self._pp_local else meta
 
@@ -866,21 +871,23 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         that.
         """
         _pp_size, my_pp = self._pp_geometry()
-        gathered = self._exchange_pp_names([(m.name, list(m.shape)) for m in local])
+        gathered = self._exchange_pp_names([(m.name, list(m.shape), str(m.dtype).split(".")[-1]) for m in local])
 
         shapes: dict = {}
+        dtypes: dict = {}
         stages_of: dict = {}
         for stage, entries in enumerate(gathered):
-            for name, shape in entries or []:
+            for name, shape, *dtype in entries or []:
                 # A name two stages both produce (a tied weight) keeps the first
                 # shape and records both stages, so its group reads as shared.
                 shapes.setdefault(name, tuple(shape))
+                dtypes.setdefault(name, getattr(torch, dtype[0]) if dtype else self._dtype)
                 stages_of.setdefault(name, set()).add(stage)
         groups = layerwise_groups(list(shapes))
         self._group_stages = [set().union(*(stages_of[n] for n in g)) for g in groups]
         self._owned_group_idx = [gi for gi, st in enumerate(self._group_stages) if my_pp in st]
         self._group_index_of_name = {n: gi for gi, g in enumerate(groups) for n in g}
-        return [ParamMeta(n, self._dtype, shapes[n]) for g in groups for n in g]
+        return [ParamMeta(n, dtypes[n], shapes[n]) for g in groups for n in g]
 
     def _walk_in_group_order(self, gen: Iterator[tuple]) -> Iterator[tuple]:
         """Reorder a PP-local walk into the assembled partition's group order.
@@ -922,7 +929,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             yield held.pop(gi)
 
     def _exchange_pp_names(self, mine: list) -> list:
-        """All-gather ``[(name, shape)]`` over the PP group; one entry per stage."""
+        """All-gather ``[(name, shape, dtype_name)]`` over the PP group; one entry per stage."""
         from megatron.core import parallel_state
 
         pp_size, _my_pp = self._pp_geometry()
