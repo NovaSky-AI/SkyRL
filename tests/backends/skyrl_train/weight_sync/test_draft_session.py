@@ -96,8 +96,13 @@ class _Engine(SkyrlDraftSessionMixin, SkyrlTrainerCapabilities, _VllmLikeEngine)
     pass
 
 
+class _ListSource(list):
+    """A list of (name, tensor) pairs with an instance ``__dict__``, as real sources have:
+    ``build_trainer_engine`` seeds the cached ``metadata`` there around vLLM's NCCL/IPC init."""
+
+
 def _source(*names):
-    return [(name, torch.zeros(1)) for name in names]
+    return _ListSource((name, torch.zeros(1)) for name in names)
 
 
 class TestDraftSessionMixin:
@@ -293,7 +298,11 @@ class TestFilteredMegatronWeightSource:
 
         bridge = _Bridge()
         source = MegatronWeightSource(bridge, object(), torch.bfloat16, param_filter=is_megatron_draft_param)
-        assert [m.name for m in source.metadata()] == [n for n, _ in source]
-        assert [n for n, _ in source] == ["embedding.word_embeddings.weight", "mtp.layers.0.a", "mtp.layers.0.b"]
+        assert [m.name for m in source.metadata] == [n for n, _ in source.iter_full()]
+        assert [n for n, _ in source.iter_full()] == [
+            "embedding.word_embeddings.weight",
+            "mtp.layers.0.a",
+            "mtp.layers.0.b",
+        ]
         # One export call per pass keeps every group_key's tasks together.
         assert all(len(args) == 3 for args in bridge.tasks_args)

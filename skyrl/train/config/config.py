@@ -18,6 +18,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Type, TypeVar,
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl.train.fused_lm_head import FUSED_LM_HEAD_BACKENDS, FusedLmHeadBackend
 from skyrl_gym.envs.search.env import SearchEnvConfig
 from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
 
@@ -1842,6 +1843,13 @@ class TrainerConfig(BaseConfig):
     See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    log_mfu: bool = True
+    """Log model FLOPs utilization (MFU) metrics for policy training each step.
+
+    Logs ``trainer/mfu``, ``trainer/mfu_e2e``, ``trainer/model_tflops_per_gpu``,
+    ``trainer/flops_per_token`` and, under full activation recompute, ``trainer/hfu_est``. Megatron
+    only; not logged for LoRA or with active MTP heads, and the utilization ratios are not logged for
+    FP8 training or on GPUs without a known peak."""
     tags: Optional[List[str]] = None
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
@@ -1886,9 +1894,13 @@ class TrainerConfig(BaseConfig):
     materialized. Metric-only entropy and ``use_entropy_loss`` share the same
     projection. Uses ``logprobs_chunk_size`` to bound peak memory."""
     fused_lm_head_logprob_backend: str = "torch"
-    """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
-    The Triton backend requires CUDA + triton and falls back to ``"torch"``
-    when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
+    """Fused LM-head backend: ``"torch"``, ``"triton"``, or
+    ``"triton_block_sparse"``. The block-sparse backend preserves token order
+    and skips wholly inactive loss-mask row tiles for SFT or RL. It can regress
+    near a fully active mask; select it only after benchmarking representative
+    masks and sharding. Sample-support replay is not supported. Triton backends
+    require CUDA + triton and fall back to ``"torch"`` when unavailable.
+    Ignored unless ``fused_lm_head_logprob`` is true."""
 
     grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
     """Optional Grafana run annotation publishing, disabled by default."""
@@ -1942,11 +1954,16 @@ class TrainerConfig(BaseConfig):
                 "adapter on output_layer; remove output_layer from trainer.policy.model.lora.target_modules "
                 "or disable fused_lm_head_logprob."
             )
-        if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
+        if self.fused_lm_head_logprob_backend not in FUSED_LM_HEAD_BACKENDS:
             raise ValueError(
-                "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
+                f"fused_lm_head_logprob_backend must be one of {FUSED_LM_HEAD_BACKENDS}, "
                 f"got {self.fused_lm_head_logprob_backend!r}."
             )
+        if (
+            self.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+            and not self.fused_lm_head_logprob
+        ):
+            raise ValueError("fused_lm_head_logprob_backend='triton_block_sparse' requires fused_lm_head_logprob=True.")
         if self.vocab_entropy_chunk_size is not None and (
             isinstance(self.vocab_entropy_chunk_size, bool)
             or not isinstance(self.vocab_entropy_chunk_size, int)

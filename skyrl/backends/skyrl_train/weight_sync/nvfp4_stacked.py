@@ -1,7 +1,7 @@
 """Stacked per-layer NVFP4 expert sync (``expert_nvfp4_stacked_sync``): the wire format and the sender side.
 
 The per-expert NVFP4 stream (``nvfp4.py``) carries 8 tensors per expert -- ~74k tensors for a 48-layer,
-128-expert model -- and vLLM 0.32's layerwise reload spends its time in per-tensor Python bookkeeping
+128-expert model -- and vLLM's layerwise reload spends its time in per-tensor Python bookkeeping
 (``inspect.Signature.bind`` + a ``TorchDispatchMode`` copy counter per loader call, then a replay through
 ``FusedMoE.weight_loader`` per expert and shard). This mode ships each MoE layer's experts as 8 tensors already
 in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout, over all *global* experts:

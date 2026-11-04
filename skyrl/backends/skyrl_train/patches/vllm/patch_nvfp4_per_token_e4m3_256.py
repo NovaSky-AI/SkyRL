@@ -1,6 +1,6 @@
 """Runtime patch: per-token NVFP4 MoE activations with the 4/6 E4M3 bound 256 on vLLM's GEMM1 input.
 
-vLLM 0.32 quantizes the routed-expert GEMM1 input with
+vLLM (0.32, 0.33) quantizes the routed-expert GEMM1 input with
 ``flashinfer_utils.quantize_nvfp4_per_token_input``, which calls
 ``flashinfer.nvfp4_quantize(h, NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE, per_token_activation=True)`` with the module
 constant ``NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE = 1 / (448 * 6)``. FlashInfer's kernel takes its 4/6 candidate bound

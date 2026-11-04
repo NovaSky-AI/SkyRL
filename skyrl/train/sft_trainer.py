@@ -67,6 +67,7 @@ from skyrl.train.utils.callbacks import (
     TrainingCallback,
     TrainingControl,
 )
+from skyrl.train.utils.mfu import MFUTracker, mfu_support
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
@@ -837,6 +838,13 @@ class SFTTrainer:
 
         self._num_training_gpus: int = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.enable_ray_gpu_monitor else None
+        self._mfu_tracker: MFUTracker | None = None
+        if cfg.log_mfu:
+            self._mfu_tracker = MFUTracker(
+                mfu_support(cfg.strategy, cfg.megatron_config, cfg.model.lora.rank),
+                num_gpus=self._num_training_gpus,
+                prefix="train",
+            )
 
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
@@ -1725,6 +1733,17 @@ class SFTTrainer:
             "peak_mem": {k: v for k, v in metrics.items() if k.startswith("peak_mem_")},
         }
 
+    def _mfu_metrics(self, batch: TrainingInputBatch, timings: dict[str, float]) -> dict[str, float]:
+        """Returns FLOPs/MFU metrics for one training step.
+
+        ``mfu`` divides by the workers' time in ``forward_backward`` and ``optim_step``, and
+        ``mfu_e2e`` by the driver's ``forward_backward`` + ``optim_step`` timings.
+        """
+        if self._mfu_tracker is None:
+            return {}
+        seconds = timings.get("forward_backward", 0.0) + timings.get("optim_step", 0.0)
+        return self._mfu_tracker.step_metrics(self.dispatch, batch, seconds)
+
     def _validate_batch_parallelism(self):
         """Validate that batch_size is compatible with data-parallel and micro-batch sizes."""
         batch_size = self.sft_cfg.batch_size
@@ -1838,6 +1857,7 @@ class SFTTrainer:
                     "train/actual_num_tokens": actual_num_tokens,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
+                log_dict.update(self._mfu_metrics(batch, step_result["timings"]))
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
                 log_dict.update({f"memory/{k}": v for k, v in step_result["peak_mem"].items()})
                 if self._ray_gpu_monitor is not None:
@@ -2072,6 +2092,7 @@ class SFTTrainer:
                     "train/batch_padded_seq_len": batch_padded_seq_len,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
+                log_dict.update(self._mfu_metrics(batch, step_result["timings"]))
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())

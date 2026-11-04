@@ -99,20 +99,41 @@ disagree.
 ### Weight sources
 
 `sources.py` implements exactly vLLM's two-channel contract, and the two channels must
-agree element for element — `metadata()` declares what iteration will yield, and the
+agree element for element — `metadata` declares what `iter_full()` will yield, and the
 engine sizes the worker's receive buffers and cuts its packed chunk boundaries from it.
+Since vLLM 0.33, `metadata` must be a `functools.cached_property` (`WeightSource`
+rejects anything else at class definition) and iteration is `iter_full()`. A source whose
+metadata changes between rounds (the LoRA adapter) drops the cached value itself.
+
+vLLM 0.33's NCCL and IPC `trainer_init` read `source.metadata` for ownership checks. For a
+Megatron source that would be a full dry export at init, possibly against an offloaded
+model, so `build_trainer_engine` seeds the cached value empty for that call: metadata is
+first computed at the first send. The checks are vacuous for SkyRL (every rank owns every
+parameter). `sharded_rdt` reads real metadata at init, to plan the pulls.
+
+vLLM 0.33's NCCL engine also skips the names when a round's metadata equals the last one's,
+and the worker then looks the old update info up by `self.model`. SkyRL's receivers swap
+`self.model` for a per-round proxy, so that lookup would miss and the broadcast would hang:
+`SkyrlNCCLTrainerWeightTransferEngine.send_weights` resets `_sent_meta` so the names always
+ship, and the receive mixin clears vLLM's update-info cache after every round so no proxy
+(or the LoRA adapter copy it stages) outlives its round.
 `NCCLTrainerWeightTransferEngine._checked_iter` enforces that at runtime and names the
 first divergent parameter; the Megatron GPU test
 (`gpu_ci/megatron/test_megatron_weight_source.py`) is the regression check that gets
 there first.
 
 - `FsdpWeightSource` — `state_dict()` for metadata (FSDP2 `DTensor.shape` is already the
-  global shape, so declaring costs no collective); iteration all-gathers via
+  global shape, so declaring costs no collective); `iter_full()` all-gathers via
   `materialize_full_tensor`. `weight_prefix` handles syncing a CausalLM backbone into a
   vLLM multimodal namespace.
 - `MegatronWeightSource` — `bridge.export_hf_weights(conversion_tasks=None)`, a lazy
-  generator in HF-canonical order that gathers TP/PP/EP internally. `metadata()` must
+  generator in HF-canonical order that gathers TP/PP/EP internally. `metadata` must
   materialize once to learn shapes, so it runs a dry export and caches.
+  Tensors go out in the inference dtype except fp32 and integer ones (`sources.wire_dtype`):
+  parameters the trainer keeps in fp32 (MoE router expert bias, DeepSeek-V4 mHC weights and
+  attention sinks) and integer tables keep their dtype, so vLLM routes as the trainer does.
+  `MegatronStackedWeightSource` (sharded RDT) applies the same rule, and its PP-local
+  metadata exchange carries each name's dtype so every stage declares the same ones.
 - `LoraAdapterWeightSource` / `MegatronLoraAdapterSource` — a PEFT adapter rather than the
   model, for `lora.sync_mode=memory` (see *Targets* below). The one source that must be
   **prepared before the send**: the dedupe decides which keys exist, so one export has to
@@ -192,7 +213,7 @@ over all experts, already in vLLM's ModelOpt-NVFP4 `FusedMoE` parameter layout (
 names `__skyrl_nvfp4_stacked__:<layer>.<w13|w2>_<weight|weight_scale|weight_scale_2|input_scale>`), instead of
 8 tensors per expert (~74k for Qwen3-30B-A3B). Quantization is the same per-expert TE call written into a
 preallocated stack, so the bytes are the per-expert stream's bytes. On vLLM, `SkyrlCheckpointLoadMixin` routes
-them to `nvfp4_stacked_receive.Nvfp4StackedReceiver`, which collects a layer and then runs vLLM 0.32's
+them to `nvfp4_stacked_receive.Nvfp4StackedReceiver`, which collects a layer and then runs vLLM's
 `_layerwise_process` steps itself (`process_layer_with_direct_copy`) with one `copy_` per parameter (the local
 experts' rows under EP) in place of the per-expert loader replay, so the TRT-LLM re-layout runs once per layer
 through vLLM's own `process_weights_after_loading`. `fast_path_plan` checks every precondition (ModelOpt NVFP4,
@@ -431,7 +452,7 @@ change arrives for free):
 Three source flavors, chosen by `make_megatron_weight_source` / `make_fsdp_weight_source`:
 
 - `RdtFsdpWeightSource` — the shared FSDP source re-ordered **group-major**, so
-  `layerwise_groups` partitions `metadata()` exactly. The push backends do not care about
+  `layerwise_groups` partitions `metadata` exactly. The push backends do not care about
   order (any permutation transfers identically as long as the two channels agree), which
   is why only RDT pays for the reorder.
 - `MegatronStackedWeightSource` — PP-local and EP-local, gathering experts at stack

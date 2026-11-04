@@ -38,17 +38,18 @@ _1GiB = 1024**3
 
 
 class _Source:
-    """Only ``metadata()`` is read here; the engines are not constructed."""
+    """Only ``metadata`` is read here; the engines are not constructed."""
 
     def __init__(self, shapes=((4, 4),), dtype=None):
         self.metadata_calls = 0
         self._meta = [ParamMeta(f"w{i}", dtype or torch.bfloat16, s) for i, s in enumerate(shapes)]
 
+    @property
     def metadata(self):
         self.metadata_calls += 1
         return self._meta
 
-    def __iter__(self):
+    def iter_full(self):
         return iter(())
 
 
@@ -481,3 +482,50 @@ def test_packed_buffer_floor_honours_the_source_minimum():
     base = _packed_buffer_size_bytes(None, 1.0, torch_dtype)
     assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=base + 7) == base + 7
     assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=1) == base
+
+
+@pytest.mark.parametrize("backend", ["nccl", "ipc"])
+def test_trainer_init_does_not_compute_the_source_metadata(monkeypatch, backend):
+    """vLLM 0.33's NCCL/IPC ``trainer_init`` reads ``source.metadata``. For a Megatron source that
+    is a full export, which at init can run against an offloaded model; it must wait for the first
+    send, and must not be cached empty."""
+    from functools import cached_property
+
+    import vllm.distributed.weight_transfer.factory as factory
+
+    import skyrl.backends.skyrl_train.weight_sync as weight_sync
+    from skyrl.backends.skyrl_train.weight_sync import weight_senders
+
+    class Source:
+        exports = 0
+
+        @cached_property
+        def metadata(self):
+            Source.exports += 1
+            return [ParamMeta("w", torch.bfloat16, (2, 2))]
+
+    seen = []
+
+    def fake_trainer_init(init_info, *, client, source):
+        seen.append(list(source.metadata))
+        return SimpleNamespace()
+
+    monkeypatch.setattr(weight_sync, "get_transfer_strategy", lambda *_: backend)
+    monkeypatch.setattr(weight_senders, "_build_sender_init_info", lambda **_: (SimpleNamespace(), None))
+    monkeypatch.setattr(weight_senders, "SkyrlWeightSyncClient", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(factory.WeightTransferTrainerFactory, "trainer_init", staticmethod(fake_trainer_init))
+
+    source = Source()
+    weight_senders.build_trainer_engine(
+        ie_cfg=SimpleNamespace(weight_sync_backend="nccl", model_dtype="bfloat16", speculative_config=None),
+        colocate_all=backend == "ipc",
+        rank=0,
+        inference_world_size=1,
+        source_factory=lambda dtype, backend: source,
+        draft_source_factory=lambda dtype: None,
+        server_urls=["http://x"],
+        data_parallel_size=1,
+        base_model_path=None,
+    )
+    assert seen == [[]] and Source.exports == 0
+    assert [m.name for m in source.metadata] == ["w"] and Source.exports == 1

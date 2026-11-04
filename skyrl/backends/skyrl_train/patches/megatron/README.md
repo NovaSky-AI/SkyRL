@@ -35,6 +35,9 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
+| `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
+| `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
+| `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -172,6 +175,10 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
   - Tests that import from `glm5_next`: repoint them at Megatron-Bridge.
   - `.agents/docs/backends/megatron.md` and `docs/content/docs/.../supported_models.mdx`: update
     the model entry.
+  - The `kimi_*` fields in `glm5_next/provider.py` and their assignments in `glm5_next/bridge.py`:
+    check that the upstream provider sets the fields megatron-bridge's FLOPs formula
+    (`flop_utils.num_floating_point_operations`) reads for KDA layers, then delete them with
+    `test_glm5_next_flops_fields.py`.
   - Before deleting the local bridge, compare its behaviour with upstream's:
     - `language_model_only=True` handling;
     - the `head_dim=0` NoPE RoPE skip;
@@ -327,6 +334,22 @@ bypasses the hook.
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
 
+### `patch_dist_ckpt_exchange_wait.py`: megatron-core fully-parallel checkpoint load
+
+`exchange_loaded_tensors_broadcast` never waits on the async broadcasts of shards a rank only discards,
+so their receive buffers stay allocated after the load. The patch waits on them.
+- **Landed?** Self-checking: a no-op with a warning once upstream's source contains `.wait()`.
+- **Remove:** the `apply_dist_ckpt_exchange_wait_patch()` call and import in `megatron_worker.py`, the
+  module, and its CPU test.
+
+### `patch_dist_optim_te_load_state_dict.py`: megatron-core distributed optimizer + TE FusedAdam
+
+`DistributedOptimizer.load_state_dict` calls the inner `state_dict()`, which for TE's `FusedAdam` makes
+fp32 copies of all optimizer state. With allocated FusedAdam state the patch restores only the param groups.
+- **Landed?** `DistributedOptimizer.load_state_dict` no longer calls `self.optimizer.state_dict()`.
+- **Remove:** the `apply_dist_optim_te_load_state_dict_patch()` call and import in `megatron_worker.py`,
+  the module, and its CPU test.
+
 ### `patch_dsa_head_full.py` (+ `_block_copy_kernel.py`): SkyRL-only, no upstream counterpart
 
 Opt-in (`SKYRL_DSA_HEAD_FULL=1`, with `SKYRL_DSA_HEAD_FULL_FAST_PERMUTE=1` and
@@ -398,21 +421,25 @@ Mean |logprob diff| over the response tokens, as the tests print them. Compare a
 newest column on the same GPU type and add a column for it. A column changes one pin at a time
 where possible, so a shift can be pinned on Megatron or on vLLM.
 
-| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump | bump rebased on 7d4b02fe |
-|---|---|---|---|---|
-| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b |
-| vLLM | not recorded | 0.32.0 | 0.32.0 | 0.32.0 |
-| GPU | not recorded | 4x B200 | 4x B200 | 4x B200 |
-| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 | 0.0654 |
-| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 | 0.1338 |
-| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 | 0.0583 |
-| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 | 0.2835 |
-| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 | 0.0650 |
-| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 | 0.1532 |
-| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 | 0.0661 |
+| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump | bump rebased on 7d4b02fe | vLLM 0.33 bump (#2604) |
+|---|---|---|---|---|---|
+| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b |
+| vLLM | not recorded | 0.32.0 | 0.32.0 | 0.32.0 | 0.33.0 |
+| GPU | not recorded | 4x B200 | 4x B200 | 4x B200 | 4x H100 |
+| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 | 0.0654 | 0.0650 |
+| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 | 0.1338 | 0.1295 |
+| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 | 0.0583 | 0.0541 |
+| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 | 0.2835 | 0.2897 |
+| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 | 0.0650 | 0.0659 |
+| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 | 0.1532 | 0.1583 |
+| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 | 0.0661 | 0.0651 |
 
 Two values in a cell are two runs. The megatron bump sits about 0.008 above main on `tp2_ep4`
 (reproduced, not investigated, well inside 0.1); the same pins with vLLM 0.31.0 gave 0.0630 there.
 Rebased onto main 7d4b02fe the same row gave 0.0654. That run also passed the rows that landed on main
 after the bump was cut: Qwen3.8-Flash-Next (Megatron vs vLLM 0.0487 / 0.0518, adapter rows 0.050-0.057)
 and `kimi-k2.5-2layer-int4-qat` (0.0264).
+
+The vLLM 0.33 column is the first on H100, so it has no same-GPU column to compare against yet; its
+values sit within 0.006 of the newest B200 column (`bump rebased on 7d4b02fe`) on every row. A B200 column for vLLM 0.33 is still to be
+recorded.

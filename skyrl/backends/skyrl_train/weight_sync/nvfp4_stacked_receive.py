@@ -12,8 +12,8 @@ no redundant experts, and parameters whose shapes equal the stack's local slice 
 anything else falls back to :func:`unstack_to_per_expert` through ``model.load_weights``, i.e. exactly today's
 path.
 
-Pinned to vLLM 0.32's layerwise reload internals (``vllm/model_executor/model_loader/reload/``). If they cannot be
-imported, every layer takes the fallback.
+Pinned to vLLM's layerwise reload internals (``vllm/model_executor/model_loader/reload/``; written for 0.32,
+re-checked unchanged in 0.33). If they cannot be imported, every layer takes the fallback.
 """
 
 from __future__ import annotations
@@ -217,7 +217,7 @@ class Nvfp4StackedReceiver:
 
 
 def process_layer_with_direct_copy(module: torch.nn.Module, info: Any, load: Callable[[], None]) -> None:
-    """vLLM 0.32's ``layerwise._layerwise_process`` with its buffered-loader replay replaced by ``load()``.
+    """vLLM's (0.32/0.33) ``layerwise._layerwise_process`` with its buffered-loader replay replaced by ``load()``.
 
     Kept line for line with upstream (materialize; reset the online-quant flag; unwrap the layerwise loaders;
     *load*; ``process_weights_after_loading`` under the same timing context; ``update_param_tp_status``; copy into

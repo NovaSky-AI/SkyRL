@@ -973,7 +973,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
                 "weight sync (allocate gather buffers in classic segments)."
             )
 
-        engine._meta = list(source.metadata())
+        engine._meta = list(source.metadata)
         names = [m.name for m in engine._meta]
         engine._groups = layerwise_groups(names)
         flat = [n for g in engine._groups for n in g]
@@ -983,6 +983,8 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
                 "group-contiguous. Reorder the source so all names sharing a "
                 "layer index are adjacent."
             )
+        dtypes = iter([m.dtype for m in engine._meta])
+        engine._group_dtypes = [[next(dtypes) for _ in g] for g in engine._groups]
 
         world, rank = engine._world_and_rank()
         engine._resolve_ownership(world, rank)
@@ -1027,7 +1029,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
             unknown = sorted(held_set - set(names))
             if unknown:
                 raise ValueError(
-                    f"WeightSource.held_names() lists {len(unknown)} name(s) not " f"in metadata(), e.g. {unknown[:3]}."
+                    f"WeightSource.held_names() lists {len(unknown)} name(s) not " f"in metadata, e.g. {unknown[:3]}."
                 )
             if not held_set:
                 raise ValueError(
@@ -1048,7 +1050,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
         mismatched = [r for r, (d, *_rest) in enumerate(per_rank) if d != digest]
         if mismatched:
             raise ValueError(
-                f"WeightSource.metadata() disagrees across trainer ranks "
+                f"WeightSource.metadata disagrees across trainer ranks "
                 f"(rank {rank} digest {digest}, differing ranks {mismatched[:4]}). "
                 "Every rank must describe the WHOLE model, even when it holds "
                 "only some of it."
@@ -1065,7 +1067,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
             owners = tuple(r for r, m in enumerate(masks) if m[i >> 3] & (1 << (i & 7)))
             if not owners:
                 raise ValueError(
-                    f"no trainer rank holds {n!r}; every name in metadata() must "
+                    f"no trainer rank holds {n!r}; every name in metadata must "
                     "be held by at least one rank or it can never be served."
                 )
             ci = class_of_owners.get(owners)
@@ -1103,14 +1105,27 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
                     "and None for the rest (see WeightSource.held_names)."
                 )
 
+    def _validate_yield_dtypes(self, gi: int, names, tensors) -> None:
+        """Check each yielded tensor's dtype against its metadata entry.
+
+        The consumers size and carve every packed slice by the dtype in the
+        sender's metadata, while the producer packs the tensor it was handed, so
+        a disagreement would shift every later slice of the chunk."""
+        for name, tensor, dtype in zip(names, tensors, self._group_dtypes[gi]):
+            if tensor is not None and tensor.dtype != dtype:
+                raise RuntimeError(
+                    f"WeightSource yielded {name!r} as {tensor.dtype} in group {gi}, but its "
+                    f"metadata declares {dtype}; iteration dtypes must match metadata."
+                )
+
     def _meta_digest(self) -> str:
-        """Stable digest of this rank's metadata (name order + count)."""
+        """Stable digest of this rank's metadata (name order, dtypes, count)."""
         import hashlib
 
         h = hashlib.sha256()
         h.update(f"{len(self._meta)}\n".encode())
         for m in self._meta:
-            h.update(m.name.encode())
+            h.update(f"{m.name}:{m.dtype}".encode())
             h.update(b"\n")
         return h.hexdigest()[:16]
 
@@ -1326,6 +1341,7 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
                         f"{group[:2]!r}; iteration order must match metadata."
                     )
                 self._validate_held_yields(gi, names, tensors)
+                self._validate_yield_dtypes(gi, names, tensors)
                 # Share each unique STORAGE once and describe every name as an
                 # as_strided view onto it. ``None`` means a name this rank does not
                 # hold (a foreign expert); the source keeps it in the list so the
