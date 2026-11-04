@@ -52,8 +52,8 @@ _MEGATRON_SHARED_WITH_DRAFT = ("embedding.word_embeddings.weight", "output_layer
 def wire_dtype(tensor: torch.Tensor, dtype: torch.dtype) -> torch.dtype:
     """The dtype a Megatron parameter goes out in: ``dtype``, except fp32 and integer tensors.
 
-    Parameters a model keeps in fp32 under bf16 training (Beam's and DeepSeek-V3/V4's MoE router
-    weight and expert bias, DeepSeek-V4's mHC mixing weights and attention sinks) go out in fp32:
+    Parameters a model keeps in fp32 under bf16 training (the MoE router expert bias; Beam's router
+    weight too; DeepSeek-V4's mHC mixing weights and attention sinks) go out in fp32:
     vLLM keeps them in fp32 too, and a bf16 round trip changes them by ~1/256, enough to move router
     top-k choices. Integer tables (DeepSeek-V4's hash-routing tid2eid) keep their dtype: bf16 holds
     integers exactly only up to 256.
