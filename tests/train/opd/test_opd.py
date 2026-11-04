@@ -35,6 +35,7 @@ from skyrl.train.opd.teacher_client import (
 from skyrl.train.opd.teacher_launch import _teacher_start_port
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
+    STUDENT_LOGPROB_FLOOR,
     TEACHER_LOGPROBS_KEY,
     apply_opd_to_advantages,
     pad_teacher_logprobs,
@@ -156,6 +157,32 @@ def test_apply_opd_to_advantages_without_stabilization_is_unchanged():
     assert torch.equal(new, advantages - 0.7 * reverse_kl)
     assert metrics["opd/divergence_clip_fraction"] == 0.0
     assert metrics["opd/advantage_clip_fraction"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "opd",
+    [
+        OPDConfig(),
+        OPDConfig(divergence_clip=1.0),
+        OPDConfig(advantage_clip_max=5.0),
+        OPDConfig(advantage_log_compress=True),
+    ],
+)
+def test_an_infinite_student_logprob_stays_finite(opd):
+    # Unfloored, -inf gives an inf term, and exp(-inf) * -inf = NaN slips past the divergence clip.
+    student = torch.tensor([[float("-inf"), -1.0]])
+    teacher = torch.tensor([[-2.0, -2.0]])
+
+    new, metrics = apply_opd_to_advantages(torch.zeros(1, 2), student, teacher, torch.ones(1, 2), opd)
+
+    assert torch.isfinite(new).all()
+    assert all(np.isfinite(value) for value in metrics.values())
+
+
+def test_an_infinite_student_logprob_is_floored():
+    student = torch.tensor([[float("-inf")]])
+    new, _ = apply_opd_to_advantages(torch.zeros(1, 1), student, torch.tensor([[-2.0]]), torch.ones(1, 1), OPDConfig())
+    assert new.item() == -2.0 - STUDENT_LOGPROB_FLOOR
 
 
 def test_divergence_clip_drops_only_confident_disagreements():

@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from skyrl.train.opd.config import OPDConfig
 
 TEACHER_LOGPROBS_KEY = "teacher_logprobs"
+# Floor on the student's logprob in the OPD term. A -inf would make the term inf and the pointwise KL NaN.
+STUDENT_LOGPROB_FLOOR = -99999.0
 
 
 def split_generator_input(input_batch: GeneratorInput, group_size: int) -> List[GeneratorInput]:
@@ -101,7 +103,8 @@ def apply_opd_to_advantages(
     ``opd``'s stabilization settings act on ``a`` alone, before ``kl_coef``, so their bounds are in nats and a
     task-reward advantage passes through untouched: the divergence clip, then either the advantage bounds or log
     compression (alternatives, see ``validate_opd_cfg``). With none set this is
-    ``advantages - kl_coef * (log pi_student - log pi_teacher)`` exactly.
+    ``advantages - kl_coef * (log pi_student - log pi_teacher)`` exactly, with ``log pi_student`` floored at
+    ``STUDENT_LOGPROB_FLOOR``.
 
     Returns the new advantages and metrics under ``opd/``.
     """
@@ -112,6 +115,7 @@ def apply_opd_to_advantages(
             f"teacher_logprobs={tuple(teacher_logprobs.shape)} loss_mask={tuple(loss_mask.shape)}"
         )
     mask = loss_mask.to(dtype=torch.bool)
+    action_log_probs = action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR)
     reverse_kl = torch.where(mask, action_log_probs - teacher_logprobs, torch.zeros_like(action_log_probs))
     signal = -reverse_kl
     divergence_clipped = torch.zeros_like(mask)
@@ -120,7 +124,7 @@ def apply_opd_to_advantages(
         signal = torch.where(divergence_clipped, torch.zeros_like(signal), signal)
     advantage_clipped = torch.zeros_like(mask)
     if opd.advantage_clip_min is not None or opd.advantage_clip_max is not None:
-        clamped = signal.clamp(opd.advantage_clip_min, opd.advantage_clip_max)
+        clamped = signal.clamp(min=opd.advantage_clip_min, max=opd.advantage_clip_max)
         advantage_clipped = clamped != signal
         signal = clamped
     if opd.advantage_log_compress:
