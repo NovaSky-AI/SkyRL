@@ -129,6 +129,11 @@ there first.
 - `MegatronWeightSource` — `bridge.export_hf_weights(conversion_tasks=None)`, a lazy
   generator in HF-canonical order that gathers TP/PP/EP internally. `metadata` must
   materialize once to learn shapes, so it runs a dry export and caches.
+  Tensors go out in the inference dtype except fp32 and integer ones (`sources.wire_dtype`):
+  parameters the trainer keeps in fp32 (MoE router expert bias, DeepSeek-V4 mHC weights and
+  attention sinks) and integer tables keep their dtype, so vLLM routes as the trainer does.
+  `MegatronStackedWeightSource` (sharded RDT) applies the same rule, and its PP-local
+  metadata exchange carries each name's dtype so every stage declares the same ones.
 - `LoraAdapterWeightSource` / `MegatronLoraAdapterSource` — a PEFT adapter rather than the
   model, for `lora.sync_mode=memory` (see *Targets* below). The one source that must be
   **prepared before the send**: the dedupe decides which keys exist, so one export has to
