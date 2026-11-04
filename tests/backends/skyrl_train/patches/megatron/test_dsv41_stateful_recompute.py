@@ -37,7 +37,7 @@ def toy_layer_forward(layer, hidden, scale, *, state_getter):
         state.csa2.global_kv = layer.kv(hidden)  # differentiable, consumed by later layers
         state.csa2.global_indices = (hidden.sum(-1) > 0).to(torch.int32)  # integer state
         state.csa2.compress_ratio = 2
-    pre = state.pending_pre if state.pending_pre is not None else torch.ones(SEQ, 1)
+    pre = state.pending_pre if state.pending_pre is not None else hidden.new_ones(SEQ, 1)
     out = torch.tanh(layer.proj(hidden)) * pre * scale
     if state.csa2.global_kv is not None:
         out = out + 0.5 * state.csa2.global_kv * state.csa2.global_indices.unsqueeze(-1)
@@ -87,3 +87,72 @@ def test_stateful_recompute_matches_no_recompute(pattern):
             assert got is None or torch.count_nonzero(got) == 0
         else:
             torch.testing.assert_close(got, want)
+
+
+def test_stateful_recompute_trains_params_when_the_input_is_frozen():
+    """LoRA: the embedding is frozen, so the stack's input does not require grad; the layers' parameters must still
+    get the same gradients as without recompute (they are not inputs of the checkpoint Function)."""
+    torch.manual_seed(0)
+    layers = torch.nn.ModuleList(ToyLayer(source) for source in (True, False, True)).double()
+    x = torch.randn(SEQ, HIDDEN, dtype=torch.float64)  # requires_grad=False
+
+    def grads(stateful):
+        for p in layers.parameters():
+            p.grad = None
+        run_stack(layers, x, stateful).backward()
+        return [None if p.grad is None else p.grad.clone() for p in layers.parameters()]
+
+    ref = grads(stateful=False)
+    got = grads(stateful=True)
+    assert any(g is not None and torch.count_nonzero(g) for g in got)
+    for g, r in zip(got, ref):
+        if r is None:
+            assert g is None or torch.count_nonzero(g) == 0
+        else:
+            torch.testing.assert_close(g, r)
+
+
+def test_stateful_recompute_with_offload_matches_on_cuda(monkeypatch):
+    """Offloaded layer inputs (pinned pool, side-stream copies, backward prefetch) give the same gradients;
+    two iterations so pooled host buffers are reused."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    monkeypatch.setattr(recompute, "OFFLOAD", True)
+    torch.manual_seed(0)
+    layers = torch.nn.ModuleList(ToyLayer(source) for source in (True, False, True, False, False)).double().cuda()
+    for _ in range(2):
+        x = torch.randn(SEQ, HIDDEN, dtype=torch.float64, device="cuda", requires_grad=True)
+        results = []
+        for stateful in (False, True):
+            for p in [x, *layers.parameters()]:
+                p.grad = None
+            loss = run_stack(layers, x, stateful)
+            loss.backward()
+            results.append((loss.detach(), [p.grad.clone() for p in [x, *layers.parameters()] if p.grad is not None]))
+        (ref_loss, ref_grads), (loss, grads) = results
+        torch.testing.assert_close(loss, ref_loss)
+        assert len(grads) == len(ref_grads)
+        for got, want in zip(grads, ref_grads):
+            torch.testing.assert_close(got, want)
+    assert not recompute._PENDING
+    assert recompute._POOL.free  # buffers returned to the pool
+
+
+def test_offload_respects_the_pinned_host_limit(monkeypatch):
+    """With no pinned budget every layer input stays on the GPU, and gradients are unchanged."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    monkeypatch.setattr(recompute, "OFFLOAD", True)
+    monkeypatch.setattr(recompute, "_POOL", recompute._PinnedPool())
+    monkeypatch.setattr(recompute._POOL, "limit", 0)
+    torch.manual_seed(0)
+    layers = torch.nn.ModuleList(ToyLayer(source) for source in (True, False, True)).double().cuda()
+    x = torch.randn(SEQ, HIDDEN, dtype=torch.float64, device="cuda", requires_grad=True)
+    ref = run_stack(layers, x, stateful=False)
+    ref.backward()
+    ref_grad = x.grad.clone()
+    x.grad = None
+    loss = run_stack(layers, x, stateful=True)
+    loss.backward()
+    torch.testing.assert_close(x.grad, ref_grad)
+    assert recompute._POOL.live_bytes == 0 and not recompute._PENDING

@@ -26,14 +26,130 @@ from typing import Any, Callable, Optional, Sequence, Tuple
 import torch
 
 OFFLOAD = os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD", "0").lower() in ("1", "true")
+# With offload on, the inputs of the stack's last N hybrid layers stay on the GPU: their backward runs first (no
+# copy back to wait for) and the host keeps N fewer layer inputs pinned.
+OFFLOAD_KEEP_LAST = int(os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD_KEEP_LAST", "0"))
+_BUCKET = 1 << 30  # pool capacity granularity
 # CSA2State tensor fields threaded through each layer checkpoint (``attention.CSA2State``).
 STATE_FIELDS = ("global_kv", "indexer_k", "global_indices", "candidate_blocks")
 
 
-def _to_host(tensor: torch.Tensor) -> torch.Tensor:
-    host = torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True)
-    host.copy_(tensor, non_blocking=True)  # stream-ordered: the source's storage is reused only after the copy
-    return host
+def _default_host_limit_bytes() -> int:
+    """Pinned-host budget per process: half the node's RAM over its local ranks (unswappable pages; a pool that
+    outgrew this took a 2 TB node down)."""
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        return 0
+    local_ranks = int(os.environ.get("LOCAL_WORLD_SIZE", "8") or 8)
+    return total // 2 // max(1, local_ranks)
+
+
+class _PinnedPool:
+    """Pinned host buffers for offloaded layer inputs, under a hard per-process byte limit.
+
+    All buffers share one capacity -- the largest request so far, rounded up to 1 GiB -- so once the longest
+    sequence has been seen every later request reuses a pooled buffer and pinning (seconds per ~10 GB buffer) is
+    paid once. Every live buffer, pooled or in use, counts against ``limit`` (``SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB``,
+    default half the node's RAM over 8 local ranks); a request that would exceed it gets ``None`` and the caller
+    keeps that input on the GPU. When the capacity grows, smaller buffers are released as they come back and
+    PyTorch's host cache emptied, so old and new buffers never add up past the limit."""
+
+    def __init__(self):
+        self.free: list = []
+        self.capacity = 0
+        self.live_bytes = 0
+        limit_gb = os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB")
+        self.limit = int(float(limit_gb) * (1 << 30)) if limit_gb else _default_host_limit_bytes()
+
+    def _release(self, buf: torch.Tensor) -> None:
+        self.live_bytes -= buf.numel()
+        del buf
+        empty_host_cache = getattr(torch._C, "_host_emptyCache", None)
+        if empty_host_cache is not None:
+            empty_host_cache()
+
+    def get(self, nbytes: int) -> Optional[torch.Tensor]:
+        if nbytes > self.capacity:
+            self.capacity = -(-nbytes // _BUCKET) * _BUCKET
+            while self.free:
+                self._release(self.free.pop())
+        if self.free:
+            return self.free.pop()
+        if self.live_bytes + self.capacity > self.limit:
+            return None
+        self.live_bytes += self.capacity
+        return torch.empty(self.capacity, dtype=torch.uint8, device="cpu", pin_memory=True)
+
+    def put(self, buf: torch.Tensor) -> None:
+        if buf.numel() == self.capacity:
+            self.free.append(buf)
+        else:
+            self._release(buf)
+
+
+_POOL = _PinnedPool()
+_COPY_STREAM = None
+# Offloaded layer inputs of the current forward, in forward order; backward walks them in reverse and prefetches
+# the next one (the previous layer) while the current layer replays.
+_PENDING: list = []
+
+
+def _copy_stream():
+    global _COPY_STREAM
+    if _COPY_STREAM is None:
+        _COPY_STREAM = torch.cuda.Stream()
+    return _COPY_STREAM
+
+
+class _Offloaded:
+    """One layer input parked in pinned host memory: the device-to-host copy runs on a side stream (overlapping the
+    forward's compute; the source stays allocated until it finishes), and the copy back can start early."""
+
+    @classmethod
+    def try_offload(cls, tensor: torch.Tensor):
+        """The offloaded input, or the tensor itself (kept on the GPU) when the pinned budget is used up."""
+        buf = _POOL.get(tensor.numel() * tensor.element_size())
+        return tensor.detach() if buf is None else cls(tensor, buf)
+
+    def __init__(self, tensor: torch.Tensor, buf: torch.Tensor):
+        self.shape, self.dtype, self.device = tensor.shape, tensor.dtype, tensor.device
+        nbytes = tensor.numel() * tensor.element_size()
+        self.buf = buf
+        host = self.buf[:nbytes].view(self.dtype).view(self.shape)
+        stream = _copy_stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            host.copy_(tensor, non_blocking=True)
+        tensor.record_stream(stream)  # keep the source's storage until the copy is done
+        self.host = host
+        self.device_copy = None
+        self.ready = None
+        _PENDING.append(self)
+
+    def prefetch(self) -> None:
+        if self.device_copy is not None or self.host is None:
+            return
+        stream = _copy_stream()
+        with torch.cuda.stream(stream):
+            self.device_copy = self.host.to(self.device, non_blocking=True)
+            self.ready = torch.cuda.Event()
+            self.ready.record(stream)
+
+    def fetch(self) -> torch.Tensor:
+        self.prefetch()
+        torch.cuda.current_stream().wait_event(self.ready)
+        out = self.device_copy
+        out.record_stream(torch.cuda.current_stream())
+        self.ready.synchronize()  # the host buffer is free for reuse once the copy back has landed
+        buf, self.buf, self.host, self.device_copy = self.buf, None, None, None
+        _POOL.put(buf)  # after dropping our views, so a released buffer is really unpinned
+        if self in _PENDING:
+            index = _PENDING.index(self)
+            if index > 0:
+                _PENDING[index - 1].prefetch()  # the layer whose backward runs next
+            del _PENDING[index:]
+        return out
 
 
 class StatefulLayerRecompute(torch.autograd.Function):
@@ -49,7 +165,7 @@ class StatefulLayerRecompute(torch.autograd.Function):
         ctx.meta = [(t.requires_grad, t.device) if torch.is_tensor(t) else None for t in inputs]
         ctx.offload_first = offload_first and torch.is_tensor(inputs[0]) and inputs[0].is_cuda
         ctx.inputs = [
-            (_to_host(t) if i == 0 and ctx.offload_first else t.detach()) if torch.is_tensor(t) else t
+            (_Offloaded.try_offload(t) if i == 0 and ctx.offload_first else t.detach()) if torch.is_tensor(t) else t
             for i, t in enumerate(inputs)
         ]
         with torch.no_grad():
@@ -65,7 +181,7 @@ class StatefulLayerRecompute(torch.autograd.Function):
                 inputs.append(t)
                 continue
             requires_grad, device = meta
-            x = t.to(device, non_blocking=True) if (i == 0 and ctx.offload_first) else t
+            x = t.fetch() if isinstance(t, _Offloaded) else t
             inputs.append(x.detach().requires_grad_(requires_grad))
         with torch.enable_grad():
             outputs = ctx.run(*inputs)
@@ -112,9 +228,18 @@ def stateful_layer_forward(
         csa2 = local.csa2
         return (output, *(getattr(csa2, name) for name in STATE_FIELDS), local.pending_pre)
 
+    # ``config.num_layers`` counts hybrid layers (from ``hybrid_layer_pattern``), as ``layer_number`` does.
+    num_layers = getattr(getattr(layer, "config", None), "num_layers", None) or 0
+    layer_number = getattr(layer, "layer_number", 0)
+    keep_on_gpu = OFFLOAD_KEEP_LAST > 0 and num_layers > 0 and layer_number > num_layers - OFFLOAD_KEEP_LAST
+    if not hidden_states.requires_grad:
+        # The layer's parameters are not inputs of the Function, so its outputs only join the graph when an input
+        # does. With a frozen embedding (LoRA) nothing upstream requires grad: without this the whole stack would be
+        # cut out of backward and the adapters would get no gradient (as HF ``enable_input_require_grads``).
+        hidden_states = hidden_states.detach().requires_grad_(True)
     outputs = StatefulLayerRecompute.apply(
         run,
-        OFFLOAD,
+        OFFLOAD and not keep_on_gpu,
         hidden_states,
         *(getattr(state.csa2, name) for name in STATE_FIELDS),
         state.pending_pre,
