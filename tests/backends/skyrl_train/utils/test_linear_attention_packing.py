@@ -1,5 +1,6 @@
 """Unit tests for packed-sequence boundary kwargs handed to Gated DeltaNet layers."""
 
+import functools
 import inspect
 import sys
 import types
@@ -134,6 +135,41 @@ def test_accepts_kwarg_read_with_explicit_default(fla_with_varlen):
             return hidden_states, kwargs.pop("cu_seq_lens_q", None)
 
     check_boundaries_consumed(DefaultedGatedDeltaNet())
+
+
+def test_accepts_boundary_aware_forward_with_multiple_decorator_layers(fla_with_varlen):
+    def transparent_decorator(forward):
+        @functools.wraps(forward)
+        def wrapped(*args, **kwargs):
+            return forward(*args, **kwargs)
+
+        return wrapped
+
+    class DecoratedGatedDeltaNet(torch.nn.Module):
+        @transparent_decorator
+        @transparent_decorator
+        def forward(self, hidden_states, **kwargs):
+            return hidden_states, kwargs.pop("cu_seq_lens_q", None)
+
+    check_boundaries_consumed(DecoratedGatedDeltaNet())
+
+
+def test_rejects_boundary_blind_forward_with_multiple_decorator_layers(fla_with_varlen):
+    def transparent_decorator(forward):
+        @functools.wraps(forward)
+        def wrapped(*args, **kwargs):
+            return forward(*args, **kwargs)
+
+        return wrapped
+
+    class DecoratedLeakyGatedDeltaNet(torch.nn.Module):
+        @transparent_decorator
+        @transparent_decorator
+        def forward(self, hidden_states, **kwargs):
+            return hidden_states
+
+    with pytest.raises(RuntimeError, match="does not read cu_seq_lens_q"):
+        check_boundaries_consumed(DecoratedLeakyGatedDeltaNet())
 
 
 def test_boundary_check_does_not_read_source_files(monkeypatch, fla_with_varlen):

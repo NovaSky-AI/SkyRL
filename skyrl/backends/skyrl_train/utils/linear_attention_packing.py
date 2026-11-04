@@ -64,7 +64,8 @@ def check_boundaries_consumed(gdn: torch.nn.Module) -> None:
     # Read the kwarg from the compiled code object rather than the source file: source may be
     # unavailable (compiled, frozen, or exec'd classes), and skipping the check there would
     # silently disable this guard.
-    consts = getattr(getattr(type(gdn).forward, "__code__", None), "co_consts", ())
+    forward = inspect.unwrap(type(gdn).forward)
+    consts = getattr(getattr(forward, "__code__", None), "co_consts", ())
     if CU_SEQ_LENS_KWARG not in consts:
         raise RuntimeError(
             f"{type(gdn).__name__}.forward does not read {CU_SEQ_LENS_KWARG}; packed sequences "
