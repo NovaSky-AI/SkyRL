@@ -89,5 +89,20 @@ What allocates that shared memory during the Megatron load is **not identified y
 `MemAvailable`) on every node during the first load. Options: hosts with more RAM, or spreading the engine and Megatron
 over more nodes so each node holds less.
 
-The same recipe layout runs on a 9-layer slice (all 384 experts, every V4.1 layer role) on this cluster; see
-`throughput_push_deepseek_v1/TRACKING.md` for the slice results.
+## Validated here: 9-layer slice, recipe layout, 2 x 8 B200
+
+The 9-layer slice keeps all 384 experts and every V4.1 layer role (release layers 0,1,2,3,20,21,22,23,24). It ran this
+recipe unchanged except for `VLLM_PP_LAYER_PARTITION=4,5`, 32 prompts x 12 samples as one mini-batch, and no
+eval/ckpt (`throughput_push_deepseek_v1/sim/dsv41_sim.sh`). Layout: Megatron EP16 TP1, vLLM TP8 x PP2, LoRA r32,
+R3 on.
+
+| step | total | generate | old-logprob fwd | train | LoRA sync |
+|---|---|---|---|---|---|
+| 1 (warmup) | 294 s | 55 | 92 | 128 | 16 |
+| 2 | 123 s | 60 | 12 | 40 | 10 |
+| 3 | 115 s | 57 | 11 | 35 | 10 |
+
+- **Logprob agreement:** rollout-vs-trainer logprob |diff| mean is 0.015.
+- **Grad norm:** 0.36.
+- **Rewards:** negative. A 9-of-40-layer slice is not a working LM; rewards need the full model.
+- **Host memory:** the lowest MemAvailable was ~1.2 TB per node.
