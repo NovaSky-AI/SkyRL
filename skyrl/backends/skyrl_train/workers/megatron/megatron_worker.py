@@ -729,6 +729,14 @@ class MegatronWorker:
 
         patch_moe_release_dispatcher_probs()
 
+        # Same for hybrid mHC attention layers (DeepSeek-V4 / V4.1): the fast path leaves the input-layernorm
+        # offload interface, and with it the layer's input and graph, on the layer until its next forward.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_hybrid_mhc_release_attn_norm_manager import (
+            patch_hybrid_mhc_release_attn_norm_manager,
+        )
+
+        patch_hybrid_mhc_release_attn_norm_manager()
+
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
         # dense O(L^2) softmax. Delete along with the patch module once the megatron-core pin
