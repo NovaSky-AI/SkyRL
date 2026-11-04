@@ -33,31 +33,20 @@ The balanced 20/20 split breaks (2). The recipe turns replay off (it only trims 
 (`VLLM_PP_LAYER_PARTITION=14,26`), which keeps replay but unbalances the stages. #2573's recipes ran on vLLM 0.31, which
 has no replay.
 
-## On Modal
+## Running on another platform (e.g. Modal)
 
-`examples/train_integrations/modal/main_multinode.py` runs a command on a cluster of `MODAL_NODES` GPU containers,
-built with `modal.clustered(size=..., rdma=True)`, joined into one Ray cluster. It uses the same image and
-volume (`/root/data`) as `main.py`. It also has a CPU-only `prep` function. **Not tested on Modal yet**: there was no
-Modal account on the machine this branch was built on.
+The recipe reads every path from the environment, so a launcher only has to provide:
 
-```bash
-cd examples/train_integrations/modal
-# one time: release download, BF16 conversion, DAPO data (LAYERS=0,1,2,3,20,21,22,23,24 for the 9-layer slice)
-modal run main_multinode.py::prep --command "HF_TOKEN=... bash examples/train/deepseek_v4_flash/modal/prepare_dsv41_modal.sh"
-# training, 2 x B200:8
-MODAL_NODES=2 MODAL_GPU=B200:8 modal run main_multinode.py \
-  --command "WANDB_API_KEY=... bash examples/train/deepseek_v4_flash/modal/run_dsv41_lora_2node_modal.sh"
-```
-
-Things to check on the first Modal run:
-
-- **Host RAM per container.** `MODAL_MEMORY_GB` defaults to 1800. The full model did not fit 2 TB hosts here (see
-  below), so start with the slice, or more nodes.
-- **Local disk.** `MODAL_EPHEMERAL_DISK_GB` defaults to 3000. It holds the LoRA-frozen base offload and the ~20 GB
-  adapter sync dir. With the full model the offload is the Megatron base weights per node.
-- **Environment build.** `uv run --isolated --extra megatron` builds the megatron env in every container. The first
-  run takes a while (megatron-core / Bridge are built from git).
-- **Ray placement.** Each container should show 8 GPUs in `ray status`; rank 0 waits up to 15 min for all nodes.
+- **A Ray cluster across 2 x 8 B200** (the recipe sets `NUM_NODES=2`, `NUM_GPUS_PER_NODE=8`) with this branch's uv env.
+  The recipe uses `uv run --isolated --extra megatron`, which builds megatron-core and Bridge from git on first use.
+- **The BF16 checkpoint, readable on every node**: `MODEL_PATH`. Build it once with
+  `dev/convert_dsv41_bf16_parallel.py` (step 2 below). A shared volume works; node-local NVMe loads faster.
+- **DAPO data at `DATA_DIR`** (`dapo-math-17k-cleaned.parquet`, `aime-2024-cleaned.parquet`), and `CKPT_PATH` on persistent
+  storage.
+- **Container-local disk, the same path on every node**, for `SKYRL_FROZEN_OFFLOAD_DIR` (LoRA-frozen base offload; the
+  default `/data/...` falls back to pinned RAM when it is missing) and `LORA_SYNC_PATH` (~20 GB adapter per sync).
+- **Host RAM**: see "Host memory" below. Request the most RAM per node the platform allows, or start with the 9-layer slice
+  (`convert_dsv41_bf16_parallel.py <out> 0,1,2,3,20,21,22,23,24`, plus `VLLM_PP_LAYER_PARTITION=4,5`).
 
 ## Steps
 
