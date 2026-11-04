@@ -47,11 +47,14 @@ LORA_TARGET_MODULES='[linear_q_down_proj,linear_q_up_proj,linear_kv_proj,linear_
 VLLM_LORA_TARGET_MODULES='["fused_wqa_wkv", "wq_b", "wo_b", "gate_up_proj", "down_proj", "experts"]'
 MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 
-# async_scheduling: false works around a vLLM 0.32 crash in this layout: with async scheduling on, the engine hits
-# "CUDA error: an illegal memory access" within ~1 s after a LoRA weight sync while generation is running (3rd-9th
-# sync; B200 and B300; in-memory and disk sync; with or without score centering or a keep-mode pause around the
-# swap). Off, 15 steps ran clean (step 35.6 s vs ~20-25 s on: generation sometimes falls behind training).
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
+# swa_bounded_replay: false avoids an out-of-bounds write in vLLM 0.32's LoRA kernels. With bounded replay on, the
+# DSv4.1 decoder re-runs its last layers on a subset of the batch's rows in eager prefill steps
+# (models/deepseek_v41/decoder_replay_layers.py), but the punica LoRA token metadata still covers the whole batch, so
+# _lora_expand_kernel writes past the subset: "CUDA error: an illegal memory access" (or a hang, or NaN logprobs) at
+# high concurrency, first seen ~1 min into step 1 at 32x8 rollouts. Off, the sliding-window cache joins prefix caching.
+# The colocated recipe sets it off too. ASYNC_SCHEDULING=false is no longer needed (it only lowered concurrency).
+: "${ASYNC_SCHEDULING:=true}"
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
