@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
@@ -42,8 +43,10 @@ def get_test_config(
     get_logprobs,
     enable_return_routed_experts,
     enable_return_sample_support_set=False,
+    enable_score_centering=False,
 ):
     cfg = SkyRLTrainConfig()
+    cfg.trainer.algorithm.enable_score_centering = enable_score_centering
     cfg.trainer.policy.model.path = model
     cfg.generator.sampling_params = SamplingParams(
         max_generate_length=max_generate_length,
@@ -129,6 +132,7 @@ async def run_generator_end_to_end(
     get_logprobs: bool = False,
     enable_return_routed_experts: bool = False,
     enable_return_sample_support_set: bool = False,
+    enable_score_centering: bool = False,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -149,6 +153,7 @@ async def run_generator_end_to_end(
         get_logprobs,
         enable_return_routed_experts,
         enable_return_sample_support_set,
+        enable_score_centering,
     )
 
     # Use InferenceEngineState to launch and clean up local inference servers.
@@ -519,8 +524,10 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
-    """Capture top-p/top-k support through the multi-turn agent-loop trace."""
+@pytest.mark.parametrize("score_centering", [False, True], ids=["support", "support-and-logprobs"])
+async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture, score_centering):
+    """Capture top-p/top-k support, and with score centering each member's sampler logprob, through
+    the multi-turn agent-loop trace."""
     num_prompts = 5
     n_samples_per_prompt = 2
     generator_output: GeneratorOutput = await run_generator_end_to_end(
@@ -540,29 +547,50 @@ async def test_generator_multi_turn_gsm8k_sample_support(ray_init_fixture):
         max_env_workers=0,
         is_step_wise=False,
         temperature=1.0,
+        get_logprobs=score_centering,
         enable_return_sample_support_set=True,
+        enable_score_centering=score_centering,
     )
 
     rollout_sample_support = generator_output["rollout_sample_support"]
     assert rollout_sample_support is not None
     assert len(rollout_sample_support) == num_prompts * n_samples_per_prompt
 
-    for response_ids, loss_mask, support_rows in zip(
+    for response_ids, loss_mask, support in zip(
         generator_output["response_ids"],
         generator_output["loss_masks"],
         rollout_sample_support,
     ):
-        assert len(support_rows) == len(response_ids) == len(loss_mask)
-        for token_id, is_loss_active, support_row in zip(response_ids, loss_mask, support_rows):
-            support_row = np.asarray(support_row).tolist()
-            assert len(support_row) == SAMPLE_SUPPORT_TOP_K
-            assert all(candidate_id >= -1 for candidate_id in support_row)
-            first_padding = next(
-                (index for index, candidate_id in enumerate(support_row) if candidate_id == -1),
-                len(support_row),
-            )
-            assert all(candidate_id == -1 for candidate_id in support_row[first_padding:])
+        assert isinstance(support, CompactSampleSupport) and support.top_k == SAMPLE_SUPPORT_TOP_K
+        assert len(support) == len(response_ids) == len(loss_mask)
+        for row, (token_id, is_loss_active) in enumerate(zip(response_ids, loss_mask)):
+            members = support.token_ids[support.offsets[row] : support.offsets[row + 1]].tolist()
+            assert len(members) <= SAMPLE_SUPPORT_TOP_K and len(set(members)) == len(members)
+            # A sampled token's row holds it; a token the model didn't sample has an empty row.
             if is_loss_active:
-                assert token_id in support_row
+                assert token_id in members
             else:
-                assert support_row == [-1] * SAMPLE_SUPPORT_TOP_K
+                assert members == []
+        assert (support.logprobs is not None) == score_centering
+    if score_centering:
+        _assert_member_logprobs_are_the_samplers(generator_output)
+
+
+def _assert_member_logprobs_are_the_samplers(generator_output: GeneratorOutput) -> None:
+    """Each scored row is a processed distribution over its members, and its sampled member's score
+    is the rollout logprob of the sampled token."""
+    for response_ids, loss_mask, logprobs, support in zip(
+        generator_output["response_ids"],
+        generator_output["loss_masks"],
+        generator_output["rollout_logprobs"],
+        generator_output["rollout_sample_support"],
+    ):
+        assert support.logprobs.dtype == np.float32 and np.isfinite(support.logprobs).all()
+        for row, (token_id, is_loss_active, logprob) in enumerate(zip(response_ids, loss_mask, logprobs)):
+            if not is_loss_active:
+                continue
+            start, stop = support.offsets[row], support.offsets[row + 1]
+            members = support.token_ids[start:stop].tolist()
+            scores = support.logprobs[start:stop]
+            assert (scores <= 0).all() and np.exp(scores.astype(np.float64)).sum() <= 1 + 1e-3
+            assert scores[members.index(token_id)] == pytest.approx(logprob, abs=1e-5)

@@ -264,6 +264,44 @@ Token masking can be combined with other corrections (TIS, sequence masking, out
 
 When enabled, the metric `token_mask_ratio` is logged, representing the fraction of originally-valid tokens that were zeroed by the token mask.
 
+## Score Centering
+
+Under a training-inference mismatch, the expected policy-gradient update at a prefix contains a *drift* term, $\mathbb E_q[A] \cdot \mathbb E_{v \sim q}[\nabla \log \pi_\theta(v)]$, that distills the trainer toward the sampler $q$ and compounds as weights sync back. [Score centering](https://arxiv.org/abs/2609.20807) subtracts that expected score, so the update is unbiased in expectation under any constant advantage.
+
+With sample-support replay, tokens are drawn from the recorded top-k/top-p support $S$, so the expectation is exact over $S$ alone. It composes with the loss's own importance weight $f$ ([App. A.2](https://arxiv.org/abs/2609.20807)): the expectation of the *weighted* score is subtracted, with the same $f$ evaluated on every member:
+
+$$
+L_t = -A_t \Big( \text{sg}\big[f(r_t)\big] \log \pi^S_\theta(x_t) - \sum_{v \in S_t} \text{sg}\big[\tilde q(v) f(r_v)\big] \log \pi^S_\theta(v) \Big), \qquad r_v = \frac{\pi^S_\theta(v)}{\tilde q(v)}
+$$
+
+Here $\pi^S_\theta$ and $\tilde q$ are the trainer and the sampler renormalized over $S_t$. The sampler's member logprobs come from vLLM's processed logprobs, captured alongside the support. The weight must be relative to the sampler, so score centering takes the losses that have no ratio or a rollout-anchored one:
+
+| `policy_loss_type` | $f$ |
+| --- | --- |
+| `reinforce` | $1$: plain score centering |
+| `rollout_is` | $r \cdot \mathbb{1}[1-\epsilon_l < r < 1+\epsilon_h]$ (masked IS) |
+| `cispo` with `cispo_anchor: rollout` | $\text{clamp}(r, 1-\epsilon_l, 1+\epsilon_h)$; truncated IS with `cispo_eps_clip_low: 1.0` |
+| `dppo` | $r$ inside DPPO's trust region, which depends on the advantage's sign |
+
+A loss weighted by $\pi_\theta / \pi_{\text{old}}$ (`regular`, `dual_clip`, `gspo`, `sapo`, `cispo` with `cispo_anchor: old`) is rejected: $\pi_{\text{old}}$ comes from the trainer itself, so that ratio never sees the training-inference mismatch.
+
+```yaml
+trainer:
+  algorithm:
+    policy_loss_type: rollout_is  # or reinforce, dppo, cispo with cispo_anchor: rollout
+    enable_sample_support_replay: true
+    enable_score_centering: true
+generator:
+  inference_engine:
+    enable_return_sample_support_set: true
+  sampling_params:
+    top_k: 64  # must exceed the top-p nucleus
+```
+
+Score centering rejects `tis_ratio_type` and the `token_mask_is_threshold_*` masks, which weight or drop only the sampled token by $\pi_{\text{old}} / \mu$; the loss's own $f$ is the importance correction instead. Sequence and outlier masks apply to both terms but are approximate, and they turn the skipped old-logprob forward pass back on.
+
+Metrics, under `policy/`: `score_centering/term_abs_mean` (magnitude of the centering term), `score_centering/support_tv_mean` (total variation between trainer and sampler over the support), and `score_centering/sampler_row_mass_min` (the sampler mass captured on a row, below 1 when the capture missed part of the support).
+
 # Metrics and Monitoring
 If off-policy correction is enabled, you can view relevant metrics, like the mean/std of the importance sampling ratio, the mean/std of logprob diffs, and the fraction of masked sequences in the logger of your choice under `policy/loss_metrics`.
 
@@ -274,7 +312,7 @@ When rollout logprobs are available, SkyRL logs the absolute difference between 
 - `policy/rollout_train_logprobs_abs_diff_{mean,std,max,min}`: computed from the policy forward pass over the full training batch (i.e. $\pi_{\theta_{\text{old}}}$ vs $\mu_{\theta_{\text{old}}}$).
 - `policy/minibatch_rollout_logprobs_abs_diff_{mean,std,max,min}`: computed inside each gradient mini-batch from the logprobs the loss actually optimizes against. When `train_batch_size > policy_mini_batch_size`, the policy drifts as it updates across mini-batches, so this captures the diff under that drift.
 
-For losses that optimize directly against the rollout logprobs and do not need the "old" policy logprobs (`policy_loss_type="rollout_is"` or `"dppo"`), the policy forward pass is skipped to save compute when no other component needs those logprobs (no off-policy correction and `use_kl_in_reward=False`). In that case the forward-pass `rollout_train_logprobs_abs_diff` metric is unavailable, and the per-mini-batch `minibatch_rollout_logprobs_abs_diff` metric should be used to monitor logprob drift instead.
+For losses that optimize directly against the rollout logprobs, or need no logprobs, and do not need the "old" policy logprobs (`policy_loss_type="rollout_is"`, `"dppo"` or `"reinforce"`), the policy forward pass is skipped to save compute when no other component needs those logprobs (no off-policy correction and `use_kl_in_reward=False`). In that case the forward-pass `rollout_train_logprobs_abs_diff` metric is unavailable, and the per-mini-batch `minibatch_rollout_logprobs_abs_diff` metric should be used to monitor logprob drift instead.
 
 Some examples are shown below:
 
@@ -304,3 +342,4 @@ The full WandB report is available [here](https://api.wandb.ai/links/sky-posttra
 - [When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch](https://yingru.notion.site/When-Speed-Kills-Stability-Demystifying-RL-Collapse-from-the-Training-Inference-Mismatch-271211a558b7808d8b12d403fd15edda)
 - [Your Efficient RL Framework Secretly Brings You Off-Policy RL Training](https://fengyao.notion.site/off-policy-rl)
 - [Stabilizing Reinforcement Learning with LLMs: Formulation and Practices](https://arxiv.org/pdf/2512.01374)
+- [Score Centering Stabilizes Off-policy Reinforcement Learning](https://arxiv.org/abs/2609.20807)

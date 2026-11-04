@@ -10,7 +10,6 @@ import pytest
 
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
     SampleSupportTrace,
 )
 from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
@@ -29,6 +28,7 @@ from skyrl.train.generators.skyrl_gym_generator import (
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense
 
 # Mock constants, where 4 is the eos token id
 MOCK_LLM_OUTPUT_IDS = [1, 10, 12, 4]
@@ -43,12 +43,12 @@ def test_turn_output_masks_uncaptured_suffix():
         new_obs=[],
         obs_ids=[20, 21],
         reward=1.0,
-        rollout_sample_support=np.array([[10, 100], [11, 101]], dtype=np.int32),
+        rollout_sample_support=csr([[10, 100], [11, 101]]),
         added_eos=True,
     )
 
     np.testing.assert_array_equal(
-        output.get_turn_rollout_sample_support(),
+        dense(output.get_turn_rollout_sample_support()),
         np.array([[10, 100], [11, 101], [-1, -1], [-1, -1], [-1, -1]], dtype=np.int32),
     )
     assert output.get_turn_loss_mask() == [1, 1, 0, 0, 0]
@@ -478,7 +478,7 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
             # The second turn routes to an expert id above the uint8 range so the
             # trace must widen the first turn's compacted rows.
             routes[0, 0, 0] = 300
-        sample_support = np.array([[10, 100 + generation_index], [11, 110 + generation_index]], dtype=np.int32)
+        sample_support = csr([[10, 100 + generation_index], [11, 110 + generation_index]])
         generation_index += 1
         return {
             "responses": ["mocked output"],
@@ -510,10 +510,11 @@ async def test_agent_loop_uses_incremental_replay_metadata_traces(
     assert routed is not None and routed.dtype == np.int16
     assert routed[5, 0, 0] == 300
     support = output.rollout_sample_support
-    assert support.dtype == SAMPLE_SUPPORT_DTYPE
+    assert support.token_ids.dtype == SAMPLE_SUPPORT_DTYPE
+    support = dense(support)
     np.testing.assert_array_equal(support[:2], np.array([[10, 100], [11, 110]], dtype=SAMPLE_SUPPORT_DTYPE))
     np.testing.assert_array_equal(support[-2:], np.array([[10, 101], [11, 111]], dtype=SAMPLE_SUPPORT_DTYPE))
-    assert np.all(support[2:-2] == SAMPLE_SUPPORT_PADDING)
+    assert np.all(support[2:-2] == -1)
 
 
 @pytest.mark.asyncio
@@ -551,9 +552,7 @@ async def test_generate_requests_sample_support_capture_only_for_the_train_phase
             "response_ids": [[10, 11]] * num_prompts,
             "stop_reasons": ["stop"] * num_prompts,
             "rollout_sample_support": (
-                [np.array([[10, 100], [11, 110]], dtype=np.int32)] * num_prompts
-                if input_batch["return_sample_support"]
-                else None
+                [csr([[10, 100], [11, 110]])] * num_prompts if input_batch["return_sample_support"] else None
             ),
         }
 
@@ -761,7 +760,9 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
             "responses": ["mocked output"],
             "response_ids": [[10, 11, 4]],
             "stop_reasons": ["stop"],
-            "rollout_sample_support": [np.array([[10, 110], [11, 111], eos_support_row], dtype=np.int32)],
+            "rollout_sample_support": [
+                csr([[10, 110], [11, 111], eos_support_row], logprobs=[[-0.1, -2.0], [-0.2, -2.1], [-0.3, -2.2]])
+            ],
         }
 
     mock_llm.generate = AsyncMock(side_effect=generate)
@@ -784,8 +785,11 @@ async def test_agent_loop_keeps_the_generated_eos_support_row_in_single_turn_mod
     assert output.response_ids == [10, 11, 4]
     assert output.loss_mask == [1, 1, 1]
     np.testing.assert_array_equal(
-        output.rollout_sample_support,
+        dense(output.rollout_sample_support),
         np.array([[10, 110], [11, 111], eos_support_row], dtype=SAMPLE_SUPPORT_DTYPE),
+    )
+    np.testing.assert_array_equal(
+        output.rollout_sample_support.logprobs, np.float32([-0.1, -2.0, -0.2, -2.1, -0.3, -2.2])
     )
 
 
@@ -815,7 +819,7 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
             "responses": ["mocked output"],
             "response_ids": [[10, 11]],
             "stop_reasons": ["stop"],
-            "rollout_sample_support": [np.array([[10, 110], [11, 111]], dtype=np.int32)],
+            "rollout_sample_support": [csr([[10, 110], [11, 111]], logprobs=[[-0.1, -2.0], [-0.2, -2.1]])],
         }
 
     mock_llm.generate = AsyncMock(side_effect=generate)
@@ -836,9 +840,11 @@ async def test_agent_loop_pads_a_stop_string_eos_support_row_in_single_turn_mode
     )
 
     assert output.response_ids == [10, 11, 4]
-    padding_row = [SAMPLE_SUPPORT_PADDING, SAMPLE_SUPPORT_PADDING]
+    # The appended EOS row has no members, so it adds no logprobs.
+    np.testing.assert_array_equal(output.rollout_sample_support.logprobs, np.float32([-0.1, -2.0, -0.2, -2.1]))
+    padding_row = [-1, -1]
     np.testing.assert_array_equal(
-        output.rollout_sample_support,
+        dense(output.rollout_sample_support),
         np.array([[10, 110], [11, 111], padding_row], dtype=SAMPLE_SUPPORT_DTYPE),
     )
 

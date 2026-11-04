@@ -1,3 +1,4 @@
+import math
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from functools import partial
@@ -28,8 +29,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     to_te_attention_mask,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-    _fused_vocab_parallel_entropy_from_hidden,
-    from_parallel_hidden_to_entropy_packed_sequences,
     from_parallel_hidden_to_logprobs,
     from_parallel_hidden_to_logprobs_packed_sequences,
     from_parallel_logits_to_logprobs,
@@ -56,40 +55,50 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     shift_mask_for_mtp,
     unpadded_vocab_shard_width,
 )
-from skyrl.backends.skyrl_train.training_batch import TensorList
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.training_batch import (
+    PACKED_BATCH_FIELD_TYPES,
+    TensorList,
+)
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    PolicyLossType,
     compute_approx_kl,
+    score_centering_weight,
 )
 from skyrl.backends.skyrl_train.utils.replay_utils import (
     router_replay_schedule,
     setup_per_microbatch_replay_backward,
     setup_per_microbatch_replay_forward,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    PackedSampleSupport,
+)
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
     reject_unsupported_sample_support_packing,
+    score_centering_loss_inputs,
+    score_centering_metrics,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
 from skyrl.train.config import TrainerConfig
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 
 
-def _build_packed_targets(
-    sequences: torch.Tensor,
+def _pack_sequence_values(
+    values: torch.Tensor,
     attention_mask: torch.Tensor,
     packed_seq_params,
     sub_seq_lengths: Optional[list[list[int]]] = None,
 ) -> torch.Tensor:
-    """Pack full target token IDs without context-parallel sharding."""
-    cu_padded = packed_seq_params.cu_seqlens_q_padded.to(device=sequences.device, dtype=torch.long)
+    """Apply the model's sequence-packing layout to an aligned tensor."""
+    cu_padded = packed_seq_params.cu_seqlens_q_padded.to(device=values.device, dtype=torch.long)
     total_padded_tokens = int(cu_padded[-1].item())
 
-    targets = torch.zeros((total_padded_tokens,), dtype=sequences.dtype, device=sequences.device)
+    packed = torch.zeros((total_padded_tokens,), dtype=values.dtype, device=values.device)
     if sub_seq_lengths is not None:
         cu_padded_cpu = cu_padded.detach().cpu().tolist()
         seg_idx = 0
@@ -100,7 +109,7 @@ def _build_packed_targets(
                 if seg_idx + 1 >= len(cu_padded_cpu):
                     raise ValueError("sub_seq_lengths contains more sub-sequences than packed_seq_params")
                 packed_start = cu_padded_cpu[seg_idx]
-                targets[packed_start : packed_start + seq_len] = sequences[row_idx, row_offset : row_offset + seq_len]
+                packed[packed_start : packed_start + seq_len] = values[row_idx, row_offset : row_offset + seq_len]
                 row_offset += cu_padded_cpu[seg_idx + 1] - cu_padded_cpu[seg_idx]
                 seg_idx += 1
         if seg_idx != len(cu_padded_cpu) - 1:
@@ -108,52 +117,34 @@ def _build_packed_targets(
                 f"sub_seq_lengths describes {seg_idx} sub-sequences, "
                 f"but packed_seq_params describes {len(cu_padded_cpu) - 1}"
             )
-        return targets.unsqueeze(0)
+        return packed.unsqueeze(0)
 
-    attention_mask = attention_mask.to(device=sequences.device, dtype=torch.bool)
+    attention_mask = attention_mask.to(device=values.device, dtype=torch.bool)
     token_offsets = attention_mask.to(torch.long).cumsum(dim=1) - 1
     packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
-    targets[packed_indices[attention_mask]] = sequences[attention_mask]
-    return targets.unsqueeze(0)
+    packed[packed_indices[attention_mask]] = values[attention_mask]
+    return packed.unsqueeze(0)
 
 
-def _build_packed_valid_mask(
-    attention_mask: torch.Tensor,
-    packed_seq_params,
-    sub_seq_lengths: Optional[list[list[int]]] = None,
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Build a ``[1, T]`` real-token mask aligned to the packed (THD) logits layout.
-
-    1.0 for real tokens, 0.0 for the per-segment alignment padding that ``preprocess_packed_seqs``
-    inserts between sub-sequences. This is the packed counterpart of the ``[batch, seq]``
-    ``attention_mask`` the decoupled MTP draft loss uses to mask invalid positions; mirrors the
-    index math of :func:`_build_packed_targets` but scatters ones instead of token ids.
-    """
-    cu_padded = packed_seq_params.cu_seqlens_q_padded.to(device=attention_mask.device, dtype=torch.long)
-    total_padded_tokens = int(cu_padded[-1].item())
-    mask = torch.zeros((total_padded_tokens,), dtype=dtype, device=attention_mask.device)
-    if sub_seq_lengths is not None:
-        cu_padded_cpu = cu_padded.detach().cpu().tolist()
-        seg_idx = 0
-        for row_lens in sub_seq_lengths:
-            for seq_len in row_lens:
-                seq_len = int(seq_len)
-                packed_start = cu_padded_cpu[seg_idx]
-                mask[packed_start : packed_start + seq_len] = 1.0
-                seg_idx += 1
-        return mask.unsqueeze(0)
-
-    attn = attention_mask.to(device=cu_padded.device, dtype=torch.bool)
-    token_offsets = attn.to(torch.long).cumsum(dim=1) - 1
-    packed_indices = cu_padded[:-1].unsqueeze(1) + token_offsets
-    mask[packed_indices[attn]] = 1.0
-    return mask.unsqueeze(0)
+def _build_active_mask(loss_mask: torch.Tensor, num_actions: int, sequence_length: int) -> torch.Tensor:
+    """Expand the action loss mask into prediction-row coordinates."""
+    if loss_mask.dim() != 2 or loss_mask.shape[1] != num_actions:
+        raise ValueError(f"Expected loss_mask shape [batch, {num_actions}], got {tuple(loss_mask.shape)}")
+    if num_actions > sequence_length - 1:
+        raise ValueError(f"num_actions={num_actions} exceeds the {sequence_length - 1} prediction rows")
+    active_mask = torch.zeros(
+        (loss_mask.shape[0], sequence_length - 1),
+        dtype=torch.bool,
+        device=loss_mask.device,
+    )
+    if num_actions > 0:
+        active_mask[:, -num_actions:] = loss_mask > 0
+    return active_mask
 
 
 def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
     """Move all tensors in a nested microbatch to a CUDA device."""
-    if torch.is_tensor(value) or isinstance(value, (TensorList, PackedTensor)):
+    if torch.is_tensor(value) or isinstance(value, (TensorList, *PACKED_BATCH_FIELD_TYPES)):
         return value.to(device=device, non_blocking=True)
     if isinstance(value, dict):
         return {key: _copy_tensor_tree_to_device(item, device) for key, item in value.items()}
@@ -173,7 +164,7 @@ def _microbatch_sample_support(
     sub_seq_lengths: Optional[list[list[int]]],
     *,
     enabled: bool,
-) -> Optional[PackedTensor]:
+) -> Optional[PackedSampleSupport]:
     """Return this microbatch's recorded sampler support, rejecting layouts replay cannot score."""
     sample_support = batch.get(SAMPLE_SUPPORT_FIELD) if enabled else None
     if sample_support is not None:
@@ -184,11 +175,12 @@ def _microbatch_sample_support(
 def _build_replay_metadata_layout(
     attention_mask: torch.Tensor,
     rollout_expert_indices: Optional[torch.Tensor],
-    sample_support: Optional[PackedTensor],
+    sample_support: Optional[PackedSampleSupport],
     *,
     packed: bool,
     fp8_enabled: bool,
     fp8_recipe: Optional[str],
+    seq_align: int = 1,
 ) -> Optional[TokenMetadataLayout]:
     """Build the token layout needed by router or sample-support replay."""
     if rollout_expert_indices is None and sample_support is None:
@@ -199,6 +191,7 @@ def _build_replay_metadata_layout(
         packed=packed,
         fp8_enabled=fp8_enabled,
         fp8_recipe=fp8_recipe,
+        seq_align=seq_align,
     )
 
 
@@ -223,13 +216,39 @@ class MegatronModelWrapper:
         # Fuse the LM-head projection into the chunked log-prob/entropy via the
         # GPTModel output_processor hook (avoids materializing the full
         # [B, S, vocab//TP] logits + its fp32 grad). See model_utils.
-        self._fused_lm_head = bool(getattr(self.cfg, "fused_lm_head_logprob", False))
-        self._fused_lm_head_backend = getattr(self.cfg, "fused_lm_head_logprob_backend", "torch")
+        self._fused_lm_head = self.cfg.fused_lm_head_logprob
+        self._fused_lm_head_backend = self.cfg.fused_lm_head_logprob_backend
+        self._fused_lm_head_block_sparse = self._fused_lm_head_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+        if self._fused_lm_head_block_sparse and self.cfg.algorithm.enable_sample_support_replay:
+            raise ValueError("The triton_block_sparse fused LM-head backend does not support sample-support replay")
         # Pending grad-sync request recorded by `_defer_finalize_model_grads`, replayed
         # by `run_pending_grad_sync`. See those methods for why the sync is deferred.
         self._pending_grad_sync: Optional[dict] = None
 
         config = get_model_config(self.actor_module[0])
+        # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
+        # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
+        # a per-rank piece count hangs the EP group. Pad the unpacked length (remove_left_padding and the replay
+        # metadata layout alike) so every rank gets n pieces: with sequence parallelism the MLP sees the length
+        # divided by TP, so pad to a multiple of n * TP. The packed path is not covered.
+        mlp_chunks = getattr(config, "mlp_chunks_for_training", 1) or 1
+        sp_size = (
+            mpu.get_tensor_model_parallel_world_size()
+            if mlp_chunks > 1 and getattr(config, "sequence_parallel", False)
+            else 1
+        )
+        self._seq_align = mlp_chunks * sp_size if mlp_chunks > 1 else 1
+        # megatron-core's DeepSeek-V4 compressed sparse attention raises on any explicit mask. On the
+        # unpacked path remove_left_padding left-aligns every row, so the implicit causal mask
+        # already keeps real tokens off the trailing padding; the mask is still used for logprobs.
+        self._implicit_causal_mask_only = getattr(config, "experimental_attention_variant", None) == "dsv4_hybrid"
+        if self._implicit_causal_mask_only:
+            # Its compressed attention (and cuDNN's indexer) also needs seqlen_q <= seqlen_k * ratio, i.e. the
+            # unpacked length padded to a multiple of every layer's compression ratio as well (ratio 0 is a
+            # sliding-window-only layer). Trailing pad only completes the last compressed block, which only pad
+            # positions can attend to under the causal mask.
+            ratios = [r for r in (getattr(config, "csa_compress_ratios", None) or []) if r > 0]
+            self._seq_align = math.lcm(self._seq_align, *ratios)
         # Megatron-Bridge's Qwen-VL providers force calculate_per_token_loss when CP > 1 (VLM CP).
         self._per_token_loss = bool(getattr(config, "calculate_per_token_loss", False))
         if self._per_token_loss and any(
@@ -252,6 +271,11 @@ class MegatronModelWrapper:
         # scaling, and any explicit loss_scale configuration).
         if actor_optimizer is not None:
             config.grad_scale_func = actor_optimizer.scale_loss
+
+    def _model_attention_mask(self, attention_mask):
+        if self._implicit_causal_mask_only:
+            return None
+        return to_te_attention_mask(attention_mask)
 
     def _defer_finalize_model_grads(self, model, num_tokens=None, **kwargs) -> None:
         """Record Megatron's end-of-schedule grad sync instead of running it.
@@ -530,7 +554,7 @@ class MegatronModelWrapper:
                     shard_for_cp=not self.model_owns_vlm_packing,
                 )
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = _build_packed_targets(
+                batch["packed_targets"] = _pack_sequence_values(
                     sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
                 )
                 new_attention_mask = None
@@ -543,6 +567,7 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    seq_align=self._seq_align,
                 )
                 packed_seq_params = None
                 # Qwen-style VLMs recompute 3D mRoPE positions internally from
@@ -557,6 +582,7 @@ class MegatronModelWrapper:
                 packed=packed_seq_params is not None,
                 fp8_enabled=fp8_enabled,
                 fp8_recipe=fp8_recipe,
+                seq_align=self._seq_align,
             )
 
             model_replay_kwargs = {}
@@ -584,7 +610,7 @@ class MegatronModelWrapper:
                         model,
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         output_processor=fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
@@ -596,7 +622,7 @@ class MegatronModelWrapper:
                     outputs = model(
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         **model_replay_kwargs,
                         **vlm_inputs,
@@ -706,6 +732,9 @@ class MegatronModelWrapper:
 
         # Resolve loss function
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
+        if self._fused_lm_head_block_sparse and resolved_loss_name == PolicyLossType.CROSS_ENTROPY:
+            if return_per_token_outputs:
+                raise ValueError("The triton_block_sparse fused LM-head backend does not support per-token outputs")
         if loss_fn is not None:
             current_loss_fn = PolicyLossRegistry.get(loss_fn)
         else:
@@ -717,6 +746,11 @@ class MegatronModelWrapper:
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
+        centering_weight = (
+            score_centering_weight(resolved_loss_name, loss_config)
+            if self.cfg.algorithm.enable_score_centering and not forward_only
+            else None
+        )
 
         def loss_func(logits, *, data, metadata_layout: Optional[TokenMetadataLayout]):
             sequences = data["sequences"]
@@ -735,6 +769,19 @@ class MegatronModelWrapper:
             # KL/entropy terms over real microbatches only. Falls back to
             # num_microbatches when not provided (no padding microbatches).
             num_real_microbatches = data.get("num_real_microbatches", num_microbatches)
+
+            sparse_active_mask = None
+            if self._fused_lm_head_block_sparse:
+                if loss_mask is None:
+                    raise ValueError("The triton_block_sparse fused LM-head backend requires a loss mask")
+                sparse_active_mask = _build_active_mask(loss_mask, num_actions, sequences.shape[1])
+                if packed_seq_params is not None:
+                    sparse_active_mask = _pack_sequence_values(
+                        torch.nn.functional.pad(sparse_active_mask, (0, 1), value=False),
+                        data["attention_mask"],
+                        packed_seq_params,
+                        data.get("sub_seq_lengths_list"),
+                    )
 
             dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
             tp_grp = mpu.get_tensor_model_parallel_group()
@@ -790,8 +837,11 @@ class MegatronModelWrapper:
 
             shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
             support_entropy = None
+            support_scores = None
+            fused_entropy_BS = None
+            compute_fused_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
             if self.cfg.algorithm.enable_sample_support_replay:
-                compute_support_entropy = resolved_loss_name != "cross_entropy"
+                compute_support_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
                 support_scores = compute_sample_support_scores(
                     logits,
                     sequences,
@@ -808,11 +858,12 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     compute_entropy=compute_support_entropy,
                     entropy_requires_grad=compute_support_entropy and loss_config.use_entropy_loss,
+                    centering_weight=centering_weight,
                 )
                 token_logprobs = support_scores.logprobs
                 support_entropy = support_scores.entropy
             elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
-                token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
+                fused_result = from_parallel_hidden_to_logprobs_packed_sequences(
                     logits,  # decoder hidden states [1, T, H]
                     lm_head_weight,
                     packed_targets,
@@ -828,9 +879,16 @@ class MegatronModelWrapper:
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    active_mask=sparse_active_mask,
+                    return_entropy=compute_fused_entropy,
+                    entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
                 )
+                if compute_fused_entropy:
+                    token_logprobs, fused_entropy_BS = fused_result
+                else:
+                    token_logprobs = fused_result
             elif fused_lm_head:
-                token_logprobs = from_parallel_hidden_to_logprobs(
+                fused_result = from_parallel_hidden_to_logprobs(
                     logits,  # decoder hidden states [B, S, H]
                     lm_head_weight,
                     sequences,
@@ -842,7 +900,14 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    active_mask=sparse_active_mask,
+                    return_entropy=compute_fused_entropy,
+                    entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
                 )
+                if compute_fused_entropy:
+                    token_logprobs, fused_entropy_BS = fused_result
+                else:
+                    token_logprobs = fused_result
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
                     logits,
@@ -871,7 +936,29 @@ class MegatronModelWrapper:
                 )
 
             action_log_probs = token_logprobs[:, -num_actions:]
+            if self._fused_lm_head_block_sparse and resolved_loss_name != PolicyLossType.CROSS_ENTROPY:
+                # Several RL objectives form ratios before applying loss_mask.
+                # Give inactive operands the same finite value so masked rows
+                # cannot create overflow or NaN in those intermediates.
+                inactive = loss_mask <= 0
+                if old_action_log_probs is not None:
+                    old_action_log_probs = old_action_log_probs.masked_fill(inactive, 0.0)
+                advantages = advantages.masked_fill(inactive, 0.0)
+                if rollout_action_logprobs is not None:
+                    rollout_action_logprobs = rollout_action_logprobs.masked_fill(inactive, 0.0)
+                if base_action_log_probs is not None:
+                    base_action_log_probs = base_action_log_probs.masked_fill(inactive, 0.0)
 
+            # Megatron's canonical positions are next-token predictions, so actions are the last columns.
+            action_positions = slice(-num_actions, None)
+            centering_inputs = None
+            loss_rollout_logprobs, score_centering_kwargs = rollout_action_logprobs, {}
+            if centering_weight is not None:
+                centering_inputs = score_centering_loss_inputs(
+                    support_scores, action_positions, rollout_action_logprobs, advantages
+                )
+                loss_rollout_logprobs = centering_inputs.sampler_logprobs
+                score_centering_kwargs = centering_inputs.loss_kwargs()
             # policy loss should be calculated based on the selected token logprobs
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
@@ -879,7 +966,8 @@ class MegatronModelWrapper:
                 advantages,
                 config=loss_config,
                 loss_mask=loss_mask,
-                rollout_logprobs=rollout_action_logprobs,
+                rollout_logprobs=loss_rollout_logprobs,
+                **score_centering_kwargs,
             )
 
             # Decoupled MTP / draft loss: soft-CE distillation of the detached-input MTP head against
@@ -945,8 +1033,9 @@ class MegatronModelWrapper:
                 del data["mtp_student_logits"]
                 student_logits_list = None
 
-            # SFT path: cross_entropy loss (negative log likelihood)
-            if resolved_loss_name == "cross_entropy":
+            # SFT objectives need no RL entropy/KL pass. Anchored objectives
+            # already include their token-level KL in ``policy_loss``.
+            if resolved_loss_name == PolicyLossType.CROSS_ENTROPY:
                 # Policy loss masks are pre-scaled to achieve the correct reduction
                 # when summing across the entire minibatch (see `DefaultCollator`).
                 loss = policy_loss * grad_sum_correction_factor
@@ -957,12 +1046,6 @@ class MegatronModelWrapper:
 
                 # Only build per-token outputs for callers that consume them.
                 if return_per_token_outputs:
-                    # Tinker consumes per-token NLL.
-                    with torch.no_grad():
-                        elementwise_loss = -action_log_probs
-                        if loss_mask is not None:
-                            elementwise_loss = elementwise_loss * loss_mask
-
                     # Build per-sequence loss_fn_outputs.
                     # Compute valid_lens vectorized on GPU, then move tensors to CPU
                     # exactly once before iterating in Python — avoids ~3N GPU->CPU
@@ -979,20 +1062,23 @@ class MegatronModelWrapper:
                         )
 
                     action_log_probs_cpu = action_log_probs.detach().cpu()
+                    # Per-token output remains the selected-token NLL; aggregate
+                    # SFT objectives may reweight it internally.
+                    with torch.no_grad():
+                        elementwise_loss = -action_log_probs
+                        if loss_mask is not None:
+                            elementwise_loss = elementwise_loss * loss_mask
                     elementwise_loss_cpu = elementwise_loss.detach().cpu()
                     valid_lens = valid_lens_t.cpu().tolist()
 
                     loss_fn_outputs = []
                     for i in range(batch_size):
                         valid_len = valid_lens[i]
-                        loss_fn_outputs.append(
-                            {
-                                "logprobs": (action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []),
-                                "elementwise_loss": (
-                                    elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
-                                ),
-                            }
+                        output = {"logprobs": action_log_probs_cpu[i, -valid_len:].tolist() if valid_len > 0 else []}
+                        output["elementwise_loss"] = (
+                            elementwise_loss_cpu[i, -valid_len:].tolist() if valid_len > 0 else []
                         )
+                        loss_fn_outputs.append(output)
                 else:
                     loss_fn_outputs = [{} for _ in range(action_log_probs.shape[0])]
 
@@ -1001,6 +1087,8 @@ class MegatronModelWrapper:
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
+                for key, value in loss_metrics.items():
+                    metrics["loss_metrics/" + key] = value
                 if draft_loss is not None:
                     metrics["mtp_loss"] = draft_loss.detach().item()
                 return loss_output(loss, metrics)
@@ -1010,36 +1098,8 @@ class MegatronModelWrapper:
                 if support_entropy is not None:
                     entropy = masked_mean(support_entropy[:, -num_actions:], loss_mask)
                     entropy_for_loss = entropy
-                elif fused_lm_head and loss_config.use_entropy_loss:
-                    raise NotImplementedError(
-                        "fused_lm_head_logprob does not support use_entropy_loss=True "
-                        "(the fused entropy is a no-grad metric)."
-                    )
-                elif fused_lm_head and packed_seq_params is not None and packed_targets is not None:
-                    entropy, entropy_for_loss = from_parallel_hidden_to_entropy_packed_sequences(
-                        logits,  # decoder hidden states [1, T, H]
-                        lm_head_weight,
-                        packed_seq_params.cu_seqlens_q_padded,
-                        sequences.shape[1],
-                        num_actions,
-                        data["attention_mask"],
-                        loss_mask,
-                        mpu.get_context_parallel_group(),
-                        tp_group=tp_grp,
-                        sub_seq_lengths=data.get("sub_seq_lengths_list"),
-                        chunk_size=self.cfg.logprobs_chunk_size,
-                        temperature=temperature,
-                    )
-                elif fused_lm_head:
-                    action_hidden = logits[:, -num_actions - 1 : -1, :]
-                    entropy_BS = _fused_vocab_parallel_entropy_from_hidden(
-                        action_hidden,
-                        lm_head_weight,
-                        tp_grp,
-                        chunk_size=self.cfg.logprobs_chunk_size,
-                        temperature=temperature,
-                    )
-                    entropy = masked_mean(entropy_BS, loss_mask)
+                elif fused_entropy_BS is not None:
+                    entropy = masked_mean(fused_entropy_BS[:, -num_actions:], loss_mask)
                     entropy_for_loss = entropy
                 elif packed_seq_params is not None and packed_targets is not None:
                     entropy, entropy_for_loss = vocab_parallel_entropy_packed_sequences(
@@ -1128,6 +1188,8 @@ class MegatronModelWrapper:
                 metrics["mtp_loss"] = draft_loss.detach().item()
             for k, v in loss_metrics.items():
                 metrics["loss_metrics/" + k] = v
+            if centering_inputs is not None:
+                metrics.update(score_centering_metrics(support_scores, centering_inputs, action_positions, loss_mask))
             metrics.update(
                 compute_minibatch_rollout_logprob_diff_metrics(action_log_probs, rollout_action_logprobs, loss_mask)
             )
@@ -1187,7 +1249,7 @@ class MegatronModelWrapper:
                     shard_for_cp=not self.model_owns_vlm_packing,
                 )
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = _build_packed_targets(
+                batch["packed_targets"] = _pack_sequence_values(
                     sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
                 )
                 new_attention_mask = None
@@ -1211,6 +1273,7 @@ class MegatronModelWrapper:
                     pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
+                    seq_align=self._seq_align,
                 )
                 packed_seq_params = None
                 # Qwen-style VLMs recompute 3D mRoPE positions internally from
@@ -1227,6 +1290,7 @@ class MegatronModelWrapper:
                 packed=packed_seq_params is not None,
                 fp8_enabled=fp8_enabled,
                 fp8_recipe=fp8_recipe,
+                seq_align=self._seq_align,
             )
 
             model_replay_kwargs = {}
@@ -1290,7 +1354,7 @@ class MegatronModelWrapper:
                         model,
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         output_processor=fused_lm_head_output_processor,
                         output_processor_context=_op_ctx,
@@ -1302,7 +1366,7 @@ class MegatronModelWrapper:
                     outputs = model(
                         new_sequences,
                         new_position_ids,
-                        to_te_attention_mask(new_attention_mask),
+                        self._model_attention_mask(new_attention_mask),
                         packed_seq_params=packed_seq_params,
                         **model_replay_kwargs,
                         **vlm_inputs,
@@ -1324,8 +1388,11 @@ class MegatronModelWrapper:
                 student_logits = project_mtp_hidden_to_logits(student_hidden, student_model)
                 if self.remove_microbatch_padding:
                     batch["mtp_student_logits"] = student_logits
-                    batch["mtp_packed_mask"] = _build_packed_valid_mask(
-                        attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
+                    batch["mtp_packed_mask"] = _pack_sequence_values(
+                        attention_mask.to(dtype=torch.float32),
+                        attention_mask,
+                        packed_seq_params,
+                        sub_seq_lengths=sub_seq_lengths,
                     )
                 else:
                     batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]

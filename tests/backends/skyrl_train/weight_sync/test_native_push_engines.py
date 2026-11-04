@@ -7,6 +7,7 @@ GPU: vLLM's CUDA packers are replaced with recorders while the real trainer
 engines build their update payloads and drive the control-plane client.
 """
 
+from functools import cached_property
 from types import SimpleNamespace
 
 import pytest
@@ -62,11 +63,12 @@ class _StaticWeightSource(WeightSource):
         self.metadata_calls = 0
         self.iterations = 0
 
+    @cached_property
     def metadata(self) -> list[ParamMeta]:
         self.metadata_calls += 1
         return self._metadata
 
-    def __iter__(self):
+    def iter_full(self):
         self.iterations += 1
         yield from self._pairs
 
@@ -75,7 +77,7 @@ def _serialized_fp8_source() -> SerializedFp8WeightSource:
     """A real FP8-expanded stream: FP8 weight, FP32 scale, then BF16 weight."""
 
     class DenseSource:
-        def __iter__(self):
+        def iter_full(self):
             yield (
                 "model.layers.0.mlp.down_proj.weight",
                 torch.ones(128, 128, dtype=torch.bfloat16),
@@ -89,7 +91,7 @@ def _serialized_fp8_source() -> SerializedFp8WeightSource:
 
 
 def _stream_signature(source: WeightSource) -> list[tuple[str, torch.dtype, tuple[int, ...]]]:
-    return [(meta.name, meta.dtype, meta.shape) for meta in source.metadata()]
+    return [(meta.name, meta.dtype, meta.shape) for meta in source.metadata]
 
 
 def _assert_update_matches(source: WeightSource, update_info: dict) -> None:
@@ -216,7 +218,7 @@ def test_native_nccl_trainer_uses_precomputed_weight_source_metadata(monkeypatch
     engine.send_weights()
 
     _assert_update_matches(source, client.update_infos[0])
-    assert source.metadata_calls == 2  # Native send plus the assertion above.
+    assert source.metadata_calls == 1  # A cached property: the send and the assertion share it.
     assert source.iterations == 1
     assert [name for name, _ in observed] == client.update_infos[0]["names"]
     assert [event for event, _ in client.events] == ["start", "update", "finish"]

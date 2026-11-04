@@ -85,6 +85,10 @@ lora_config:
 # null (default): on, unless the optimizer is fully offloaded to CPU (optimizer_cpu_offload with
 # optimizer_offload_fraction 1.0), where emptying only makes the next forward map the memory again.
 empty_cuda_cache: null
+optimizer_offload_to_disk: # optimizer state on node-local disk, see "Optimizer state on disk" below
+  dir: null # null (default): off
+  moment_storage_dtype: "fp32"
+  staging_buffer_mb: 256
 
 ```
 
@@ -132,6 +136,50 @@ Field-specific checks:
 <Callout type="warn">
 `optimizer_config_kwargs.use_precision_aware_optimizer=true` can cause checkpointing to fail. See:
 https://github.com/nvidia/megatron-lm/issues/1820. We recommend leaving this setting to `false`.
+</Callout>
+
+### Optimizer state on disk
+
+For full fine-tuning where the distributed optimizer's state does not fit (12 bytes per parameter per DP
+shard: fp32 master weights plus two fp32 Adam moments), `optimizer_offload_to_disk` keeps that state in files on
+node-local disk:
+
+```bash
+# node-local NVMe; unset (default) disables it
+trainer.policy.megatron_config.optimizer_offload_to_disk.dir=/mnt/local_storage/skyrl_optimizer_state
+# optional: moments stored as bf16 (8 instead of 12 bytes/param of I/O, not bit-identical); default fp32
+trainer.policy.megatron_config.optimizer_offload_to_disk.moment_storage_dtype=bf16
+# optional: pinned host staging buffer per rank and optimizer; default 256
+trainer.policy.megatron_config.optimizer_offload_to_disk.staging_buffer_mb=256
+```
+
+or, with the Python config API:
+
+```python
+cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = "/mnt/local_storage/skyrl_optimizer_state"
+```
+
+The optimizer step reads the state into the GPU one chunk at a time, runs Adam there, and writes it back, so
+the GPU holds one chunk at a time (`SKYRL_OPTIMIZER_OFFLOAD_TO_DISK_CHUNK_NUMEL`, default 200M elements, about
+2.4 GB) and host RAM holds only the staging buffers (one per rank and optimizer). The state file uses ordinary
+buffered I/O, so the kernel may keep recently used parts of it in the page cache, which is reclaimable. Unlike
+`optimizer_cpu_offload`, the update runs on the GPU and no gradients or optimizer state are copied to host memory.
+With fp32 moments the result is identical to the regular optimizer. The cost is the I/O: every step reads and
+writes the whole state, 12 B x (local params / DP size) per GPU, so it pays off only on fast local NVMe. Each GPU
+needs that much free disk. Example: `examples/train/megatron/run_megatron_optimizer_offload_to_disk.sh`.
+
+Requirements: the distributed optimizer (the default), bf16 training, `grad_reduce_in_fp32=true` (the default),
+`optimizer_cpu_offload=false`, `use_precision_aware_optimizer=false`, Adam, no fp8 or fp4 params (fp8 compute is
+fine), no `optimizer_cuda_graph`, no Megatron-FSDP, full fine-tuning (not LoRA). Concurrent runs on one node need
+different `trainer.run_name` values.
+
+Each run keeps its files in `<dir>/<run_name>/rank<global rank>/`, cleared at startup and removed at the end of
+training. A killed run's files are not removed: a later run with the same `run_name` clears only the rank
+directories of its own ranks on each node, so delete the rest by hand.
+
+<Callout type="warn">
+Checkpoints store this state as per-rank files next to the distributed checkpoint. They resume only with the
+same parallelism, DDP bucket size and chunk size, and only from a local `ckpt_path`.
 </Callout>
 
 ## Parallelism Resources
