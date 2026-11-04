@@ -887,10 +887,14 @@ class MegatronWorker:
                         micro.get(SAMPLE_SUPPORT_FIELD) if self.enable_sample_support_replay else None
                     ),
                     # Sparse scoring and sample-support replay both derive active rows from this mask.
+                    # Forward-only sparse scoring is opt-in: without the mask the pass stays dense.
                     "loss_mask": (
                         micro.get("loss_mask")
                         if self.enable_sample_support_replay
-                        or self.cfg.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+                        or (
+                            self.cfg.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+                            and self.cfg.fused_lm_head_block_sparse_forward_only
+                        )
                         else None
                     ),
                     "sub_seq_lengths": micro.get("sub_seq_lengths"),

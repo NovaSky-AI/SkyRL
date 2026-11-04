@@ -610,6 +610,21 @@ def test_block_sparse_fused_lm_head_requires_fused_path():
         TrainerConfig(strategy="megatron", fused_lm_head_logprob_backend="triton_block_sparse")
 
 
+def test_block_sparse_forward_only_defaults_to_dense():
+    cfg = TrainerConfig(
+        strategy="megatron", fused_lm_head_logprob=True, fused_lm_head_logprob_backend="triton_block_sparse"
+    )
+    assert cfg.fused_lm_head_block_sparse_forward_only is False
+
+    cfg = TrainerConfig(
+        strategy="megatron",
+        fused_lm_head_logprob=True,
+        fused_lm_head_logprob_backend="triton_block_sparse",
+        fused_lm_head_block_sparse_forward_only=True,
+    )
+    assert cfg.fused_lm_head_block_sparse_forward_only is True
+
+
 def test_block_sparse_fused_lm_head_accepts_backend_selection():
     cfg = TrainerConfig(
         strategy="megatron",

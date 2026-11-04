@@ -1430,7 +1430,10 @@ class RayPPOTrainer:
             - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
         """
         fwd_keys = ["sequences", "attention_mask"]
-        if self.cfg.trainer.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE:
+        if (
+            self.cfg.trainer.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+            and self.cfg.trainer.fused_lm_head_block_sparse_forward_only
+        ):
             fwd_keys.append("loss_mask")
         if training_input.get("rollout_expert_indices") is not None:
             fwd_keys.append("rollout_expert_indices")

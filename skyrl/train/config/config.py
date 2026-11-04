@@ -1871,6 +1871,13 @@ class TrainerConfig(BaseConfig):
     masks and sharding. Sample-support replay is not supported. Triton backends
     require CUDA + triton and fall back to ``"torch"`` when unavailable.
     Ignored unless ``fused_lm_head_logprob`` is true."""
+    fused_lm_head_block_sparse_forward_only: bool = False
+    """Also run forward-only log-prob passes (old/ref policy, Tinker ``forward``)
+    block-sparse under ``"triton_block_sparse"``. Off by default: forward-only
+    passes stay dense so every position gets a real log-prob. When on, positions
+    with ``loss_mask == 0`` return 0.0, which is safe for SkyRL's trainer (its
+    consumers mask by ``loss_mask``) but not for API callers reading every
+    position. Ignored for other backends."""
 
     grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
     """Optional Grafana run annotation publishing, disabled by default."""
