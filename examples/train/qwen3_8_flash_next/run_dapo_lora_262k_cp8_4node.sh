@@ -11,8 +11,8 @@ set -x
 # The stock DAPO prompts are short, so with them this recipe runs the 262K configuration (CP8,
 # 262K vLLM max_model_len, 262K micro-batches) without filling it. To actually exercise 262K, point
 # TRAIN_FILE / TEST_FILE at a dataset of ~255K-token prompts (same schema, e.g. long-document
-# retrieval scored by env_class=aime as "Answer: N"). See README.md for the measured numbers
-# and the full-FT TP2 x CP8 x EP32 overrides.
+# retrieval scored by env_class=aime as "Answer: N"). See README.md for the measured numbers;
+# run_dapo_fullft_262k_cp8_4node.sh is the full-FT variant.
 #
 # Everything else matches run_dapo_qwen3_8_flash_next_lora_sync_4node.sh (per-setting reasoning
 # there and in run_gsm8k_qwen3_8_flash_next_lora_4node.sh).
