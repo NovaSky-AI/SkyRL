@@ -11,7 +11,13 @@ set -x
 # The stock DAPO prompts are short, so with them this recipe runs the 262K configuration (CP8,
 # 262K vLLM max_model_len, 262K micro-batches) without filling it. To actually exercise 262K, point
 # TRAIN_FILE / TEST_FILE at a dataset of ~255K-token prompts (same schema, e.g. long-document
-# retrieval scored by env_class=aime as "Answer: N"). See README.md for the measured numbers.
+# retrieval scored by env_class=aime as "Answer: N").
+#
+# Context parallelism for qwen4_exp covers the QSA attention (split-K cuDNN QSA over CP chunks with an
+# LSE merge), the PLE halo and the QSA indexer's pooled-key all-gather; GDN CP is megatron-core's.
+# If the image puts its own cuDNN on LD_LIBRARY_PATH (e.g. /opt/cudnn), the Ray workers load those
+# sublibraries instead of the pip cuDNN and QSA runs on that older version: drop that entry and set
+# SKYRL_LD_LIBRARY_PATH_EXPORT=1 so the workers get the driver's path.
 #
 # This is run_dapo_lora_262k_cp8_4node.sh with full fine-tuning instead of LoRA: TP2 (with sequence
 # parallelism) and EP32 so the optimizer stays on the GPU, bf16 gradient reduction, and the full-FT

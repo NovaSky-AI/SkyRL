@@ -11,8 +11,16 @@ set -x
 # The stock DAPO prompts are short, so with them this recipe runs the 262K configuration (CP8,
 # 262K vLLM max_model_len, 262K micro-batches) without filling it. To actually exercise 262K, point
 # TRAIN_FILE / TEST_FILE at a dataset of ~255K-token prompts (same schema, e.g. long-document
-# retrieval scored by env_class=aime as "Answer: N"). See README.md for the measured numbers;
-# run_dapo_fullft_262k_cp8_4node.sh is the full-FT variant.
+# retrieval scored by env_class=aime as "Answer: N"). run_dapo_fullft_262k_cp8_4node.sh is the
+# full-FT variant.
+#
+# Context parallelism for qwen4_exp covers the QSA attention (split-K cuDNN QSA over CP chunks with an
+# LSE merge), the PLE halo and the QSA indexer's pooled-key all-gather; GDN CP is megatron-core's.
+# If the image puts its own cuDNN on LD_LIBRARY_PATH (e.g. /opt/cudnn), the Ray workers load those
+# sublibraries instead of the pip cuDNN and QSA runs on that older version: drop that entry and set
+# SKYRL_LD_LIBRARY_PATH_EXPORT=1 so the workers get the driver's path.
+# Measured on 4 x 8 B200, ~255K-token prompts: warm RL step ~200 s (generate 46 / logprobs 35 /
+# train 104 / weight sync 10 s), peak 74.2 GB allocated.
 #
 # Everything else matches run_dapo_qwen3_8_flash_next_lora_sync_4node.sh (per-setting reasoning
 # there and in run_gsm8k_qwen3_8_flash_next_lora_4node.sh).
