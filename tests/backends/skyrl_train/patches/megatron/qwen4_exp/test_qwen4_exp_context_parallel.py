@@ -246,3 +246,195 @@ def test_cp_global_positions_zigzag():
     cu = torch.tensor([0, 8, 24])  # chunks of 2 and 4 tokens at CP=2
     assert cp_global_positions(cu, 0, 2).tolist() == [0, 1, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23]
     assert cp_global_positions(cu, 1, 2).tolist() == [2, 3, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19]
+
+
+# --- Split-K QSA attention under CP (_CudnnQSAContextParallel): forward and backward vs CP=1 ---
+
+
+def _qsa_allowed(sel, lo, hi, blk_base, tok_base, block_size):
+    """[T, T] keys each query may attend to under the cuDNN QSA metadata rule (qsa.md)."""
+    total, nb = sel.shape
+    j = torch.arange(total, device=sel.device)[None]
+    b = blk_base[:, None].long() + torch.div(j - tok_base[:, None], block_size, rounding_mode="floor")
+    in_range = (lo[:, None] <= j) & (j <= hi[:, None]) & (b >= 0) & (b < nb)
+    return in_range & (sel.gather(1, b.clamp(0, nb - 1)) != 0)
+
+
+def _ref_scores(q, k, scale, allowed):
+    k = k.float().repeat_interleave(q.shape[1] // k.shape[1], dim=1)
+    s = torch.einsum("qhd,khd->hqk", q.float(), k) * scale
+    return s.masked_fill(~allowed[None], float("-inf")), k
+
+
+def _ref_qsa_forward(q, k, v, sel, lo, hi, blk_base, tok_base, block_first, block_last, scale, block_size=4):
+    """Torch stand-in for ``cudnn.ops.qsa_forward``. Queries with no allowed key get junk (out 1,
+    LSE 0): the caller must mask them, not rely on the kernel's values."""
+    allowed = _qsa_allowed(sel, lo, hi, blk_base, tok_base, block_size)
+    s, _ = _ref_scores(q, k, scale, allowed)
+    lse = torch.logsumexp(s, dim=-1)
+    p = torch.where(allowed[None], torch.exp(s - lse[..., None]), 0.0)
+    out = torch.einsum("hqk,khd->qhd", p, v.float().repeat_interleave(q.shape[1] // v.shape[1], dim=1))
+    empty = ~allowed.any(dim=1)
+    out, lse = out.masked_fill(empty[:, None, None], 1.0), lse.masked_fill(empty[None], 0.0)
+    return {"out": out.to(q.dtype), "out_fp32": out, "lse": lse}
+
+
+def _ref_qsa_backward(
+    g, q, k, v, out, lse, sel, lo, hi, blk_base, tok_base, block_first, block_last, scale, block_size=4
+):
+    """Torch stand-in for ``cudnn.ops.qsa_backward``: P and rowsum(dO * O) come from the given O / LSE."""
+    rep = q.shape[1] // k.shape[1]
+    allowed = _qsa_allowed(sel, lo, hi, blk_base, tok_base, block_size)
+    s, kr = _ref_scores(q, k, scale, allowed)
+    p = torch.where(allowed[None], torch.exp(s - lse[..., None]), 0.0)
+    g = g.float()
+    dv = torch.einsum("hqk,qhd->khd", p, g)
+    dp = torch.einsum("qhd,khd->hqk", g, v.float().repeat_interleave(rep, dim=1))
+    ds = p * (dp - (g * out).sum(-1).T[..., None])
+    dq = torch.einsum("hqk,khd->qhd", ds, kr) * scale
+    dk = torch.einsum("hqk,qhd->khd", ds, q.float()) * scale
+
+    def fold(t):  # query heads -> their key group
+        return t.reshape(t.shape[0], k.shape[1], rep, t.shape[-1]).sum(2)
+
+    return {"dq": dq.to(q.dtype), "dk": fold(dk).to(k.dtype), "dv": fold(dv).to(v.dtype)}
+
+
+def _cp_attention_case(cp, scale_len, device):
+    """A pack of sparse, dense and very sparse sequences (padded lengths, whole blocks per chunk) and
+    random block masks. Rows whose own block is complete keep it, so every query has a key; in the
+    very sparse sequence many queries select nothing in some key chunks (empty rows of a pair)."""
+    r = 4
+    unit = 2 * cp * r * scale_len
+    lengths = [8 * unit, 2 * unit, 6 * unit]
+    gen = torch.Generator().manual_seed(0)
+    masks = []
+    for n, p in zip(lengths, [0.3, None, 0.05]):
+        if p is None:
+            masks.append(None)
+            continue
+        t = torch.arange(n)
+        m = (torch.rand(n, n // r, generator=gen) < p) & (torch.arange(n // r) < ((t + 1) // r)[:, None])
+        full = (t + 1) % r == 0
+        m[t[full], (t // r)[full]] = True
+        masks.append(m.to(device))
+    cu = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32, device=device)
+    return r, lengths, cu, masks
+
+
+def _cp_attention_run(cp, q, k, v, go, scale, r, lengths, cu, masks):
+    """Every CP rank's ``_CudnnQSAContextParallel`` in one process. The gathered keys are shared
+    leaves, so their gradient is the sum over ranks (what ``CPLayout.gather``'s reduce-scatter
+    hands each owner). Returns global-order out / dq / dk / dv and whether some pair had empty rows."""
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import (
+        CPLayout,
+        cp_global_positions,
+    )
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+        QSASelection,
+        QSASequenceSelection,
+        _CPPairs,
+        _CudnnQSAContextParallel,
+    )
+
+    all_pos = torch.cat([cp_global_positions(cu, i, cp) for i in range(cp)])
+    inverse = torch.empty_like(all_pos)
+    inverse[all_pos] = torch.arange(all_pos.numel(), device=all_pos.device)
+    k_all, v_all = (t.detach().clone().requires_grad_() for t in (k, v))
+    out, dq = torch.zeros_like(q, dtype=torch.float32), torch.zeros_like(q, dtype=torch.float32)
+    empty_rows = False
+    n_local = all_pos.numel() // cp
+    for rank in range(cp):
+        pos = all_pos[rank * n_local : (rank + 1) * n_local]
+        layout = CPLayout(None, cp, rank, cu, pos, all_pos, inverse)
+        seqs = []
+        for start, n, m in zip(cu[:-1].tolist(), lengths, masks):
+            lo, nl = start // cp, n // cp
+            seqs.append(QSASequenceSelection(lo, nl, None if m is None else m[pos[lo : lo + nl] - start]))
+        selection = QSASelection(seqs, r, cp_layout=layout)
+        pairs = _CPPairs(selection, q.device)
+        for half in range(2):
+            for j in range(pairs.chunk_index(half) + 1):
+                meta, empty = pairs.metadata(half, j)
+                empty_rows |= meta is not None and bool(empty.any())
+        q_local = q[pos].detach().clone().requires_grad_()
+        out_local = _CudnnQSAContextParallel.apply(q_local, k_all, v_all, scale, selection)
+        (out_local.float() * go[pos]).sum().backward()
+        out[pos], dq[pos] = out_local.detach().float(), q_local.grad.float()
+    return out, dq, k_all.grad.float(), v_all.grad.float(), empty_rows
+
+
+def _dense_reference(q, k, v, go, scale, r, lengths, cu, masks):
+    """fp32 autograd attention of the whole pack under the per-sequence ``_qsa_token_mask``."""
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+        _qsa_token_mask,
+    )
+
+    total = int(cu[-1])
+    allowed = torch.zeros(total, total, dtype=torch.bool, device=q.device)
+    for start, n, m in zip(cu[:-1].tolist(), lengths, masks):
+        allowed[start : start + n, start : start + n] = _qsa_token_mask(m, 0, n, r, q.device)
+    qf, kf, vf = (t.detach().float().requires_grad_() for t in (q, k, v))
+    s, _ = _ref_scores(qf, kf, scale, allowed)
+    rep = q.shape[1] // k.shape[1]
+    out = torch.einsum("hqk,khd->qhd", torch.softmax(s, dim=-1), vf.repeat_interleave(rep, dim=1))
+    (out * go).sum().backward()
+    return out.detach(), qf.grad, kf.grad, vf.grad
+
+
+@pytest.mark.parametrize("cp", [2, 4])
+def test_cp_qsa_attention_matches_cp1(cp, monkeypatch):
+    """The split-K schedule, LSE merge and backward replay of ``_CudnnQSAContextParallel`` (with a
+    torch stand-in for the cuDNN kernels, fp32, CPU): outputs and dq / dk / dv over every CP rank
+    equal single-rank attention, for sparse and dense sequences and rows without keys in a pair."""
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp import modules
+
+    monkeypatch.setattr(modules, "_cudnn_qsa_ops", (_ref_qsa_forward, _ref_qsa_backward))
+    r, lengths, cu, masks = _cp_attention_case(cp, 1, "cpu")
+    total, hq, hkv, d = int(cu[-1]), 4, 2, 16
+    torch.manual_seed(2)
+    q, k, v, go = (torch.randn(total, h, d) for h in (hq, hkv, hkv, hq))
+    scale = d**-0.5
+    got = _cp_attention_run(cp, q, k, v, go, scale, r, lengths, cu, masks)
+    assert got[-1], "the case should have pairs with empty rows"
+    for name, a, b in zip(
+        ("out", "dq", "dk", "dv"), got[:4], _dense_reference(q, k, v, go, scale, r, lengths, cu, masks)
+    ):
+        torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-5, msg=name)
+
+
+def test_cp_qsa_attention_cudnn_matches_cp1():
+    """``_CudnnQSAContextParallel`` with the real cuDNN kernels (Blackwell, bf16, Qwen3.8 heads) at
+    CP=4: each of out / dq / dk / dv is as close to an fp32 reference as the CP=1 cuDNN path is."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+        QSASelection,
+        QSASequenceSelection,
+        _cudnn_qsa_usable,
+        _CudnnQSA,
+        cudnn_qsa_metadata,
+    )
+
+    cp, hq, hkv, d = 4, 24, 2, 256
+    r, lengths, cu, masks = _cp_attention_case(cp, 4, "cuda")
+    total = int(cu[-1])
+    torch.manual_seed(2)
+    q, k, v = (torch.randn(total, h, d, device="cuda", dtype=torch.bfloat16) for h in (hq, hkv, hkv))
+    go = torch.randn(total, hq, d, device="cuda")
+    if not _cudnn_qsa_usable(q, k, v, r):
+        pytest.skip("needs the cuDNN QSA kernels (Blackwell, cudnn-frontend >= 1.32)")
+    scale = d**-0.5
+    ref = _dense_reference(q, k, v, go, scale, r, lengths, cu, masks)
+    got = _cp_attention_run(cp, q, k, v, go, scale, r, lengths, cu, masks)
+
+    seqs = [QSASequenceSelection(s, n, m) for s, n, m in zip(cu[:-1].tolist(), lengths, masks)]
+    q1, k1, v1 = (t.detach().clone().requires_grad_() for t in (q, k, v))
+    out1 = _CudnnQSA.apply(q1, k1, v1, scale, *cudnn_qsa_metadata(QSASelection(seqs, r), total, q.device))
+    (out1.float() * go).sum().backward()
+    cp1 = (out1.detach().float(), q1.grad.float(), k1.grad.float(), v1.grad.float())
+
+    for name, x, b, c in zip(("out", "dq", "dk", "dv"), got[:4], cp1, ref):
+        err_cp, err_cp1 = ((x - c).norm() / c.norm()).item(), ((b - c).norm() / c.norm()).item()
+        print(f"{name}: CP{cp} rel err {err_cp:.2e}, CP1 rel err {err_cp1:.2e}")
+        assert err_cp <= 2 * err_cp1 + 1e-3, f"{name}: CP{cp} {err_cp:.2e} vs CP1 {err_cp1:.2e}"

@@ -49,6 +49,20 @@ MAX_MODEL_LEN = PROMPT_TOKENS + 768 + 512  # prompt + response + chat-template h
 NUM_PROMPTS = int(os.environ.get("SKYRL_QWEN38_QSA_NUM_PROMPTS", "8"))  # default: two per DP rank at EP=4
 
 
+def _blackwell_with_cudnn_qsa() -> bool:
+    """Whether this node can run QSA under CP (split-K cuDNN QSA): an SM10x GPU and cudnn-frontend's
+    QSA ops. Asks NVML, so the test process creates no CUDA context next to the colocated engines."""
+    try:
+        import pynvml
+        from cudnn.ops import qsa_backward, qsa_forward  # noqa: F401
+
+        pynvml.nvmlInit()
+        major, _ = pynvml.nvmlDeviceGetCudaComputeCapability(pynvml.nvmlDeviceGetHandleByIndex(0))
+    except Exception:
+        return False
+    return major == 10
+
+
 def _long_context_input(model_name, tokenizer):
     """GSM8K prompts whose user turn is replaced by ~PROMPT_TOKENS tokens of concatenated questions."""
     batch = get_test_generator_input(model=model_name, num_prompts=400, n_samples_per_prompt=1)
@@ -80,7 +94,16 @@ def _long_context_input(model_name, tokenizer):
         # Sequence parallelism: the indexer selects on the TP-gathered sequence.
         pytest.param(2, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_tp2_ep4_qsa8k"),
         # Context parallelism (split-K cuDNN QSA: Blackwell only), for the long-context prompt sizes.
-        pytest.param(1, 8, 8, 1e-1, id="qwen3.8-flash-next-4layer_cp8_ep8"),
+        pytest.param(
+            1,
+            8,
+            8,
+            1e-1,
+            id="qwen3.8-flash-next-4layer_cp8_ep8",
+            marks=pytest.mark.skipif(
+                not _blackwell_with_cudnn_qsa(), reason="CP QSA needs Blackwell and cudnn-frontend's QSA ops"
+            ),
+        ),
         # The CP=1 reference on the same 8 GPUs (prompts that fit one GPU, e.g. 32K).
         pytest.param(1, 1, 8, 1e-1, id="qwen3.8-flash-next-4layer_cp1_ep8"),
     ],
