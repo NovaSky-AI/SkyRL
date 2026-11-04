@@ -36,6 +36,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
+| `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
+| `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -330,6 +332,22 @@ bypasses the hook.
   for packed inputs), or exposes per-hook backend selection.
 - **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
+  the module, and its CPU test.
+
+### `patch_dist_ckpt_exchange_wait.py`: megatron-core fully-parallel checkpoint load
+
+`exchange_loaded_tensors_broadcast` never waits on the async broadcasts of shards a rank only discards,
+so their receive buffers stay allocated after the load. The patch waits on them.
+- **Landed?** Self-checking: a no-op with a warning once upstream's source contains `.wait()`.
+- **Remove:** the `apply_dist_ckpt_exchange_wait_patch()` call and import in `megatron_worker.py`, the
+  module, and its CPU test.
+
+### `patch_dist_optim_te_load_state_dict.py`: megatron-core distributed optimizer + TE FusedAdam
+
+`DistributedOptimizer.load_state_dict` calls the inner `state_dict()`, which for TE's `FusedAdam` makes
+fp32 copies of all optimizer state. With allocated FusedAdam state the patch restores only the param groups.
+- **Landed?** `DistributedOptimizer.load_state_dict` no longer calls `self.optimizer.state_dict()`.
+- **Remove:** the `apply_dist_optim_te_load_state_dict_patch()` call and import in `megatron_worker.py`,
   the module, and its CPU test.
 
 ### `patch_dsa_head_full.py` (+ `_block_copy_kernel.py`): SkyRL-only, no upstream counterpart
