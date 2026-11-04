@@ -21,6 +21,7 @@ backward (``REPLAY_BACKWARD``), the same as megatron-core's own recompute.
 """
 
 import os
+from contextlib import nullcontext
 from typing import Any, Callable, Optional, Sequence, Tuple
 
 import torch
@@ -187,6 +188,10 @@ class StatefulLayerRecompute(torch.autograd.Function):
         with torch.no_grad():
             outputs = run(*inputs)
         ctx.mark_non_differentiable(*[o for o in outputs if torch.is_tensor(o) and not o.is_floating_point()])
+        # Integer selections this layer produced (an index source's top-k, the candidate source's blocks): the
+        # replay reuses them rather than running the indexer again (``attention.reuse_selection``).
+        produced = getattr(run, "produced_selection", None)
+        ctx.selection = produced(inputs, outputs) if produced is not None else None
         return outputs
 
     @staticmethod
@@ -199,8 +204,10 @@ class StatefulLayerRecompute(torch.autograd.Function):
             requires_grad, device = meta
             x = t.fetch() if isinstance(t, _Offloaded) else t
             inputs.append(x.detach().requires_grad_(requires_grad))
-        with torch.enable_grad():
+        reuse = getattr(ctx.run, "reuse_selection", None)
+        with torch.enable_grad(), (reuse(*ctx.selection) if reuse is not None and ctx.selection else nullcontext()):
             outputs = ctx.run(*inputs)
+        ctx.selection = None
         pairs = [(o, g) for o, g in zip(outputs, grads) if torch.is_tensor(o) and o.requires_grad and g is not None]
         if pairs:
             torch.autograd.backward([o for o, _ in pairs], [g for _, g in pairs])
@@ -228,6 +235,7 @@ def stateful_layer_forward(
     forward's CSA2 / mHC state passed through as checkpoint inputs and written back from its outputs."""
     from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.attention import (
         CSA2State,
+        reuse_selection,
     )
 
     state = state_getter()
@@ -249,6 +257,16 @@ def stateful_layer_forward(
         extras["context"] = context
         csa2 = local.csa2
         return (output, *(getattr(csa2, name) for name in STATE_FIELDS), local.pending_pre)
+
+    index_fields = [STATE_FIELDS.index("global_indices"), STATE_FIELDS.index("candidate_blocks")]
+
+    def produced_selection(inputs, outputs):
+        # inputs/outputs: (hidden, *STATE_FIELDS, pending_pre) / (output, *STATE_FIELDS, pending_pre)
+        new = [outputs[1 + i] if outputs[1 + i] is not inputs[1 + i] else None for i in index_fields]
+        return tuple(new) if new[0] is not None else None
+
+    run.produced_selection = produced_selection
+    run.reuse_selection = reuse_selection
 
     def clear_state():
         local = state_getter()

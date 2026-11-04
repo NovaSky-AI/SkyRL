@@ -182,3 +182,47 @@ def test_offload_respects_the_pinned_host_limit(monkeypatch):
     loss.backward()
     torch.testing.assert_close(x.grad, ref_grad)
     assert recompute._POOL.live_bytes == 0 and not recompute._PENDING
+
+
+def test_replay_reuses_the_forward_top_k(monkeypatch):
+    """Index sources select once per step: the replay in backward gets the forward's integer selection
+    (``attention.reuse_selection``) instead of running the indexer again; gradients are unchanged."""
+    from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41 import attention
+
+    selections = []
+
+    def selecting_layer_forward(layer, hidden, scale, *, state_getter):
+        state = state_getter()
+        if layer.source:
+            replayed = attention._replayed_selection()
+            if replayed is not None and replayed[0] is not None:
+                state.csa2.global_indices = replayed[0]
+            else:
+                selections.append(layer)
+                state.csa2.global_indices = (hidden.sum(-1) > 0).to(torch.int32)
+            state.csa2.global_kv = layer.kv(hidden)
+            state.csa2.compress_ratio = 2
+        pre = state.pending_pre if state.pending_pre is not None else hidden.new_ones(hidden.shape[0], 1)
+        out = torch.tanh(layer.proj(hidden)) * pre * scale
+        if state.csa2.global_kv is not None:
+            out = out + 0.5 * state.csa2.global_kv * state.csa2.global_indices.unsqueeze(-1)
+        state.pending_pre = torch.sigmoid(out.mean(-1, keepdim=True))
+        return out, None
+
+    monkeypatch.setitem(globals(), "toy_layer_forward", selecting_layer_forward)
+    torch.manual_seed(0)
+    layers = torch.nn.ModuleList(ToyLayer(source) for source in (True, False, True, False)).double()
+    x = torch.randn(SEQ, HIDDEN, dtype=torch.float64, requires_grad=True)
+    grads = []
+    for stateful in (False, True):
+        selections.clear()
+        for p in [x, *layers.parameters()]:
+            p.grad = None
+        run_stack(layers, x, stateful).backward()
+        grads.append([None if p.grad is None else p.grad.clone() for p in [x, *layers.parameters()]])
+        assert len(selections) == 2  # once per source, forward only
+    for got, want in zip(grads[1], grads[0]):
+        if want is None:
+            assert got is None or torch.count_nonzero(got) == 0
+        else:
+            torch.testing.assert_close(got, want)
