@@ -102,6 +102,36 @@ def _run_round(engine, update_info=None):
     engine.finish_weight_update()
 
 
+class _NcclCachingEngine(_Engine):
+    """vLLM 0.33's NCCL receiver caches each round's update info keyed by ``self.model``."""
+
+    def __init__(self, weights):
+        super().__init__(weights)
+        self._last_update_info = {}
+        self.proxies = []
+
+    def receive_weights(self, update_info):
+        self._last_update_info[self.model] = update_info
+        self.proxies.append(weakref.ref(self.model))
+        super().receive_weights(update_info)
+
+
+@pytest.mark.parametrize("armed", [True, False], ids=["lora_round", "base_round"])
+def test_no_round_proxy_outlives_its_round(armed):
+    """The per-round proxy (and, for a LoRA round, the adapter copy its closure stages on the GPU)
+    must not stay reachable through vLLM's update-info cache after the round."""
+    import gc
+
+    engine = _NcclCachingEngine([("a", torch.ones(1))])
+    for _ in range(2):
+        if armed:
+            engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {}, {}))
+        _run_round(engine)
+    gc.collect()
+    assert engine._last_update_info == {}
+    assert all(ref() is None for ref in engine.proxies)
+
+
 class TestArmedRound:
     def test_stages_the_adapter_and_never_touches_the_model(self):
         buffer = torch.arange(6, dtype=torch.float32)

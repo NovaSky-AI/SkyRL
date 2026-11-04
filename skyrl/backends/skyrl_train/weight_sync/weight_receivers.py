@@ -61,14 +61,6 @@ class _LoadWeightsProxy:
         # Only reached for attributes not set on the proxy itself.
         return getattr(self._model, name)
 
-    # vLLM's NCCL receiver caches each round's update info keyed by `self.model`. A fresh proxy per
-    # round would add one entry per sync; keying as the wrapped model keeps it at one.
-    def __hash__(self) -> int:
-        return hash(self._model)
-
-    def __eq__(self, other: object) -> bool:
-        return self._model is getattr(other, "_model", other)
-
 
 class SkyrlCheckpointLoadMixin:
     """Split the compact batched-MoE FP8 wire tensors from ordinary checkpoint weights."""
@@ -272,12 +264,21 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
             super().start_weight_update()
 
     def receive_weights(self, update_info: Any) -> None:
-        if self.skyrl_lora_armed():
-            with torch.device(self.device), self.skyrl_lora_staging():
+        try:
+            if self.skyrl_lora_armed():
+                with torch.device(self.device), self.skyrl_lora_staging():
+                    super().receive_weights(update_info)
+                return
+            with torch.device(self.device), self.skyrl_checkpoint_load():
                 super().receive_weights(update_info)
-            return
-        with torch.device(self.device), self.skyrl_checkpoint_load():
-            super().receive_weights(update_info)
+        finally:
+            # vLLM's NCCL receiver caches each round's update info keyed by `self.model`, which here
+            # is a per-round proxy whose `load_weights` closure holds the round's staged tensors (a
+            # LoRA round's adapter copy on the GPU). SkyRL's trainer always ships the names, so the
+            # cache is never read: drop it so no proxy, or what it holds, outlives its round.
+            last = getattr(self, "_last_update_info", None)
+            if last is not None:
+                last.clear()
 
     def skyrl_release_receive_buffers(self) -> None:
         """Release receive buffers the vLLM engine holds until the end of a round.

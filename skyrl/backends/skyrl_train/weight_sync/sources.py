@@ -243,9 +243,8 @@ class LoraAdapterWeightSource(WeightSource):
 
     ``metadata`` is a cached property (vLLM requires it), but this source's
     metadata changes every round, so :meth:`prepare` and the end of iteration
-    both drop the cached value. Read before any :meth:`prepare` -- the engine's
-    init-time ownership probe does -- it is empty rather than an error: it
-    reads no export, so it cannot run a collective.
+    both drop the cached value. Reading it outside a prepared round raises, like
+    iteration (``build_trainer_engine`` keeps vLLM's init-time probe off it).
 
     Retaining the unique adapter between the two channels is what the model
     sources avoid, and is affordable for exactly the same reason the dedupe
@@ -331,9 +330,7 @@ class LoraAdapterWeightSource(WeightSource):
 
     @cached_property
     def metadata(self) -> List[ParamMeta]:
-        if self._prepared is None:
-            return []
-        to_send, _, _ = self._prepared
+        to_send, _, _ = self._prepared_state()
         return [ParamMeta(name, self._dtype, tuple(t.shape)) for name, t in to_send.items()]
 
     def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
