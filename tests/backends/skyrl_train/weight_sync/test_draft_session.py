@@ -96,8 +96,13 @@ class _Engine(SkyrlDraftSessionMixin, SkyrlTrainerCapabilities, _VllmLikeEngine)
     pass
 
 
+class _ListSource(list):
+    """A list of (name, tensor) pairs with an instance ``__dict__``, as real sources have:
+    ``build_trainer_engine`` seeds the cached ``metadata`` there around vLLM's NCCL/IPC init."""
+
+
 def _source(*names):
-    return [(name, torch.zeros(1)) for name in names]
+    return _ListSource((name, torch.zeros(1)) for name in names)
 
 
 class TestDraftSessionMixin:
