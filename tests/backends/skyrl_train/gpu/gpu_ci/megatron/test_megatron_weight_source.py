@@ -46,13 +46,13 @@ class _ProbeMegatronRefWorker(MegatronRefWorkerBase):
 
         source = MegatronWeightSource(self.bridge, self.actor_module, str_to_torch_dtype(dtype_str))
 
-        meta = source.metadata()
+        meta = source.metadata
         meta_names = [m.name for m in meta]
         meta_shapes = [list(m.shape) for m in meta]
 
         iter_names: list[str] = []
         iter_shapes: list[list[int]] = []
-        for name, tensor in source:
+        for name, tensor in source.iter_full():
             iter_names.append(name)
             iter_shapes.append(list(tensor.shape))
             del tensor

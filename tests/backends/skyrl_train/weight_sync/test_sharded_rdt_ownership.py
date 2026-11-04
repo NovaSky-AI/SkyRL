@@ -65,7 +65,7 @@ class TestPpLocalOwnership:
         src._owned_group_idx = []
         src._pp_geometry = lambda: (pp_size, my_pp)  # type: ignore[method-assign]
         src._exchange_pp_names = lambda mine: gathered  # type: ignore[method-assign]
-        src._meta = src._assemble_pp_metadata([])
+        src.__dict__["metadata"] = src._assemble_pp_metadata([])
         return src
 
     def test_metadata_is_the_whole_model_group_major_on_every_stage(self):
@@ -82,7 +82,7 @@ class TestPpLocalOwnership:
             "model.norm.weight",
         ]
         for my_pp in (0, 1):
-            meta = self._source(2, my_pp, [stage0, stage1]).metadata()
+            meta = self._source(2, my_pp, [stage0, stage1]).metadata
             assert [m.name for m in meta] == expected
             assert [tuple(m.shape) for m in meta] == [(8, 4), (4, 4), (4, 4), (4,)]
         # ... and each stage claims exactly the names it produced.
@@ -115,7 +115,7 @@ class TestPpLocalOwnership:
         per_stage = []
         for my_pp in (0, 1):
             src = self._source(2, my_pp, [stage0, stage1])
-            names = [m.name for m in src.metadata()]
+            names = [m.name for m in src.metadata]
             assert [n for g in layerwise_groups(names) for n in g] == names
             per_stage.append(names)
         assert per_stage[0] == per_stage[1]
@@ -142,7 +142,7 @@ class TestPpLocalOwnership:
         # Re-asking is still None: a demoted source holds everything.
         assert src.held_names() is None
         # Metadata is still the whole model, so the digest check still passes.
-        assert [m.name for m in src.metadata()] == [
+        assert [m.name for m in src.metadata] == [
             "model.embed_tokens.weight",
             "model.layers.0.w",
             "model.layers.1.w",
@@ -156,7 +156,7 @@ class TestPpLocalOwnership:
         the consumers two plan entries for one tensor — and mark its group shared."""
         tied = ("model.embed_tokens.weight", [8, 4])
         src = self._source(2, 0, [[tied, ("model.layers.0.w", [4, 4])], [tied]])
-        assert [m.name for m in src.metadata()] == ["model.embed_tokens.weight", "model.layers.0.w"]
+        assert [m.name for m in src.metadata] == ["model.embed_tokens.weight", "model.layers.0.w"]
         assert src._group_stages[0] == {0, 1}
         assert src.held_names() is None
 
@@ -261,7 +261,7 @@ class TestExpertOwnership:
 
     def test_stamps_are_expert_index_over_n_local_and_minus_one_elsewhere(self):
         src = self._stub(ep_size=2, my_ep_rank=1)
-        src._meta = self._meta_of(
+        src.__dict__["metadata"] = self._meta_of(
             ["embed.weight"]
             + [f"model.layers.0.mlp.experts.{e}.gate_proj.weight" for e in range(4)]
             + ["model.layers.0.input_layernorm.weight", "lm_head.weight"]
@@ -272,7 +272,7 @@ class TestExpertOwnership:
 
     def test_an_expert_count_not_divisible_by_ep_size_raises(self):
         src = self._stub(ep_size=2)
-        src._meta = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
+        src.__dict__["metadata"] = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
         with pytest.raises(RuntimeError, match="not divisible"):
             src._name_owner()
 
@@ -376,7 +376,7 @@ class TestHeldNamesComposition:
         src._layer_geom = {}
         src._phase = {}
         src._phase_prefix = ""
-        src._meta = [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
+        src.__dict__["metadata"] = [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
         if owned is not None:
             src._owned_group_idx = owned
             src._group_stages = []
