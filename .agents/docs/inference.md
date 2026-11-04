@@ -29,8 +29,10 @@ Prefill-Decode disaggregation:
 - **Sleep mode.** SkyRL enables vLLM sleep mode whenever `placement.colocate_all` or `offload_kv_for_weight_sync` is
   set. From vLLM 0.33 the engine refuses sleep mode for connectors that cannot follow the KV-cache remap
   (`supports_sleep_mode`): `MooncakeConnector` only over RDMA (`mooncake_protocol: rdma`, no `MC_FORCE_MNNVL` /
-  `MC_INTRANODE_NVLINK` / `MC_USE_TENT`), `NixlConnector` only with the UCX backend, and never the NIXL push
-  connector. Such a PD setup must run non-colocated without KV offload.
+  `MC_INTRANODE_NVLINK` / `MC_USE_TENT` / `MC_USE_TEV1`), `NixlConnector` only with the UCX backend, and never the
+  NIXL push connector or `MooncakeStoreConnector`. A `MultiConnector` supports sleep mode only if every child does,
+  so Mooncake + MooncakeStore can never run colocated. Such a PD setup must run non-colocated without KV offload;
+  otherwise the engine fails at start with `... does not support sleep mode.`
 - **Role-specific engine kwargs**: `prefill_init_kwargs` and `decode_init_kwargs` are per-role pass-through vLLM engine
   kwargs (e.g. a different `all2all_backend`, or per-role `kv_role`) applied on top of the base args by
   `get_pd_cli_args`. They are **mutually exclusive** with `engine_init_kwargs` and require `enable_pd=true`; when used,
