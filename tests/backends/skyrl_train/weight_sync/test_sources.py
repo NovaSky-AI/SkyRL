@@ -292,25 +292,26 @@ class TestLoraAdapterWeightSource:
         assert source.exports == 2
         assert source.receive_target["lora_name"] == "next"
 
-    def test_reading_an_unprepared_source_never_exports(self):
+    def test_reading_an_unprepared_source_raises_instead_of_exporting(self):
         """The export is a collective. A source that ran it implicitly would have
         whichever rank asked run it alone, hanging the job in an EP all-gather
-        for the full NCCL watchdog timeout instead of failing. ``metadata`` is
-        empty (the engine's init-time ownership probe reads it before any round);
-        iteration raises."""
+        for the full NCCL watchdog timeout instead of failing."""
         source = self._source()
-        assert source.metadata == []
+        with pytest.raises(RuntimeError, match="no prepared adapter"):
+            source.metadata
         with pytest.raises(RuntimeError, match="no prepared adapter"):
             list(source.iter_full())
         assert source.exports == 0
 
-    def test_metadata_read_before_prepare_does_not_go_stale(self):
-        """``metadata`` is a cached property; prepare() must drop the value cached
-        by an earlier read, or the round would declare an empty stream."""
+    def test_each_round_declares_its_own_adapter(self):
+        """``metadata`` is a cached property; the next round's prepare() must drop the
+        value cached in this one, or it would declare the previous adapter."""
         source = self._source()
-        assert source.metadata == []
         source.prepare()
-        assert [m.name for m in source.metadata] == [n for n, _ in source.iter_full()]
+        first = [m.name for m in source.metadata]
+        assert first == [n for n, _ in source.iter_full()]
+        source.prepare()
+        assert [m.name for m in source.metadata] == first and source.exports == 2
 
     def test_reading_after_the_stream_is_consumed_never_re_exports(self):
         """The trap the trainer fell into: the round is over, the cache is gone,
@@ -318,7 +319,8 @@ class TestLoraAdapterWeightSource:
         source = self._source()
         source.prepare()
         list(source.iter_full())
-        assert source.metadata == []
+        with pytest.raises(RuntimeError, match="no prepared adapter"):
+            source.metadata
         with pytest.raises(RuntimeError, match="no prepared adapter"):
             list(source.iter_full())
         assert source.exports == 1

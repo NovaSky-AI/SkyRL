@@ -731,8 +731,8 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             raise ValueError("FP8 weight sync requires trainer.strategy='megatron'")
         if ie_cfg.weight_sync_backend in {"sharded_rdt", "delta"}:
             # Neither backend can carry the quantized payload + scale pairs that
-            # FP8 weight sync is made of: the RDT weight sources export bridge
-            # tensors cast to the inference dtype, and the delta checkpoint format
+            # FP8 weight sync is made of: the RDT weight sources export plain bridge
+            # tensors (inference dtype, fp32 / integer params kept), and the delta checkpoint format
             # cannot represent the marker names and scale tensors. Both senders
             # refuse at send time too, but vLLM is built with quantization="fp8"
             # and load_format="dummy" long before the first sync, so the model is
