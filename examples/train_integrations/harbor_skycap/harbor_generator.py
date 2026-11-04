@@ -365,6 +365,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             for provider in ("OPENAI", "HOSTED_VLLM"):
                 env[f"{provider}_API_BASE"] = base_url
                 env[f"{provider}_API_KEY"] = key
+            # Codex and Harbor's other OpenAI-SDK-style agents read OPENAI_BASE_URL, not the LiteLLM names above.
+            env["OPENAI_BASE_URL"] = base_url
             env["MSWEA_API_KEY"] = key
         kwargs = config["agent"]["kwargs"]
         kwargs["api_base"] = base_url

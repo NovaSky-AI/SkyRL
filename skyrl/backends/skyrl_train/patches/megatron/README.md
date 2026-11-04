@@ -18,23 +18,24 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 
 | test | covers |
 |---|---|
-| `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) | `mcore_ext/dsa_kpool.py` key compression vs HF |
+| `patches/megatron/glm5_next/test_dsa_kpool_math.py` (CPU) | megatron-core k-pool key compression vs HF |
 | `patches/megatron/mcore_ext/test_hyper_connection_proj_rms.py` (CPU) | `mcore_ext/hyper_connection.py` projection: bitwise vs plain autograd, no saved FP32 copy |
 | `patches/megatron/mcore_ext/test_mhc_moe_chunking.py` (CPU) | `mcore_ext/mhc_transformer_layer.py` `chunked_mlp`: chunked MLP/MoE matches one call |
-| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` | `mcore_ext/dsa_kpool.py` pooled top-k selection, query chunking |
+| `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool.py` | megatron-core k-pool top-k selection at GLM-5.3-Flash's shapes, query chunking |
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `gpu_ci/patches/megatron/test_dsa_head_full.py` | `patch_dsa_head_full.py` all-to-alls vs megatron-core's and an all-gather reference (TP 2 and 4) |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
-| `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool_tp_shard.py` | `mcore_ext/dsa_kpool.py` TP query sharding (two ranks) |
-| `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py` | `patch_checkpoint_without_output_frozen_inputs.py`; the unpatched case doubles as the landed check |
+| `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
+| `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -56,12 +57,12 @@ delete its tests here in the same change.
 5. Update this file: delete the entry, or narrow it to whatever is still carried.
 
 Do not keep a vendored module "just in case" once upstream has it. Two implementations drifting
-apart is how the k-pool indexer ended up silently unused in training (see
-`glm5_next/dsa.py`, `Glm5NextDSAttention._forward_with_kpool_topk`).
+apart is how the k-pool indexer once ended up silently unused in training.
 
 ## GLM-5.3-Flash (`glm5_next`)
 
-GLM-5.3-Flash needs four upstream Megatron-LM PRs and a Megatron-Bridge model. `mcore_ext/` holds
+GLM-5.3-Flash needs four upstream Megatron-LM PRs (#7522, the k-pool indexer, has landed) and a
+Megatron-Bridge model. `mcore_ext/` holds
 the megatron-core pieces and `glm5_next/` holds the Bridge model built on them. Once all of the
 megatron-core pieces have landed, `mcore_ext/` is deleted entirely. Once Megatron-Bridge ships the
 model, `glm5_next/` is deleted too.
@@ -108,6 +109,9 @@ Two pieces, which may land separately.
     `TransformerLayer._forward_mlp`.
 - **Landed?** megatron-core's `HyperConnectionTransformerLayer` accepts a MoE MLP submodule, with
   no `NotImplementedError` for MoE. Check that it honors `mlp_chunks_for_training` before switching.
+  - Status at megatron-core `ed9c2c8c`: upstream's layer accepts MoE (it only rejects MoE CUDA-graph
+    scopes), but it chunks the MLP in training only, and it builds megatron-core's
+    `HyperConnectionModule`, so it can't be switched to until (a) lands too.
 - **Remove:**
   - `glm5_next/layer_specs.py`: build the specs on megatron-core's layer.
   - `workers/megatron/megatron_worker.py`: the `enable_mhc_connections` block in `init_configs`
@@ -123,62 +127,35 @@ Two pieces, which may land separately.
   `patches/megatron/mcore_ext/test_mhc_moe_chunking.py`; the GLM roundtrip rows.
   These run with the default full recompute, so they exercise the worker block above.
 
-### NVIDIA/Megatron-LM#7522: k-pool DSA indexer
+### NVIDIA/Megatron-LM#7522: k-pool DSA indexer (landed)
 
-This is the riskiest entry. A wrong k-pool selection doesn't raise. It silently attends to
-different tokens than vLLM once a sequence is longer than `dsa_indexer_topk` (2048).
+Landed in megatron-core `ed9c2c8c`: `DSAIndexer` owns the k-pool gate/ape parameters and
+`DSAttention.forward` selects through `fused_qk_topk_kpool`. The vendored kernels
+(`mcore_ext/dsa_kpool.py`), `Glm5NextDSAIndexer` and `_forward_with_kpool_topk` are gone. What is
+left in `glm5_next/`:
 
-- **Carried as:**
-  - `mcore_ext/dsa_kpool.py`: the six k-pool kernels, copied from #7522. One deliberate
-    deviation: `fused_qk_topk_kpool` scores and selects in query chunks. Verbatim, it
-    materializes FP32 `[sq, b, heads, sq / kpool]` per-head scores (32 GiB/GPU at 32k), so
-    GLM-5.3-Flash can't train past ~16k. Top-k is per query row, so chunking is exact
-    (`test_kpool_query_chunking_is_exact`); `SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS` sets the chunk
-    cap (default 2 GiB of FP32 scores). Past one chunk the loop follows #7522 @ `b27efd8`, which
-    now chunks too: no-grad, in-place ReLU and head weighting, one FP32 cast of the pooled keys, a
-    preallocated selection. Upstream's cap is a fixed 256 MiB; at 512k (65,536 query rows per TP8
-    rank x 131,072 pools, one B200) one selection takes 3.31 s there vs 2.64 s at 2 GiB and
-    2.60 s at 8 GiB, with peak extra memory 0.6 / 2.4 / 8.6 GiB. When removing, carry the
-    configurable cap over unless upstream's default has grown.
-    Second deviation, opt-in with `SKYRL_DSA_INDEXER_TP_SHARD=1` (wired in `glm5_next/dsa.py`):
-    `query_shard_group` splits the query rows across the tensor-parallel group, whose ranks all
-    score the same gathered sequence with the same frozen indexer weights, and all-gathers the
-    pool selections. The scoring is O(sq^2) (every query scores every pool) and was redundant on
-    every TP rank: at 512k tokens, TP8, 64 B200 (TCP NCCL) sharding cut warm fwd+bwd 1545 -> 1094 s,
-    i.e. ~1/3 of the step was replicated indexer scoring. Bitwise-identical selections
-    (`test_dsa_kpool_tp_shard.py`).
-  - `glm5_next/dsa.py`:
-    - `Glm5NextDSAIndexer`: k-pool gate/ape parameters and the gate score, hand-merged onto the
-      pinned `DSAIndexer`;
-    - `Glm5NextDSAttention._forward_with_kpool_topk`: swaps the pinned `DSAttention.forward`'s
-      token-level top-k for `fused_qk_topk_kpool`, and raises if the pooled selection doesn't run
-      exactly once;
-    - the `kpool <= 1` long-sequence guard.
-  - `glm5_next/layer_specs.py`: the `core_attention.module` / `submodules.indexer.module` swaps.
-  - `glm5_next/provider.py`: `dsa_indexer_kpool`, `dsa_indexer_kpool_always_select_tail`.
-- **Landed?** megatron-core's `experimental_attention_variant/dsa.py` defines
-  `fused_qk_topk_kpool`, `DSAttention.forward` dispatches on the indexer's `index_kpool`, and
-  `TransformerConfig` has `dsa_indexer_kpool`.
-- **Remove:**
-  - `glm5_next/layer_specs.py`: stop swapping in `Glm5NextDSAIndexer`, and in
-    `Glm5NextDSAttention` if nothing else is left in it.
-  - `glm5_next/dsa.py`: delete `Glm5NextDSAIndexer` and `_forward_with_kpool_topk`. Delete the
-    whole module if `Glm5NextDSAttention` only has the guard left.
-  - `glm5_next/provider.py`: drop the k-pool fields if `TransformerConfig` declares them.
-  - `glm5_next/bridge.py`: keep reading `index_kpool` / `index_kpool_always_select_tail` from the
-    HF config into the provider. Upstream's parameter names for the compress gate/ape must match
-    the bridge mapping.
-  - Tests:
-    - `tests/backends/skyrl_train/patches/megatron/mcore_ext/test_dsa_kpool_math.py` imports
-      `mcore_ext.dsa_kpool._kpool_compress_keys`. Repoint it at megatron-core.
-    - `tests/.../gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` (GPU kernel checks): same.
-  - Delete `mcore_ext/dsa_kpool.py`.
-- **Verify** (all required):
-  - `patches/megatron/mcore_ext/test_dsa_kpool_math.py` (CPU) and `gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py` (GPU).
+- `glm5_next/bridge.py` sets `dsa_indexer_weights_proj_output_dtype="fp32"` (and turns off its
+  quantization) when `index_kpool > 1`. The vendored indexer always computed the head-gate
+  projection in FP32 on the k-pool path; upstream defaults to bf16.
+- `glm5_next/dsa.py` (`Glm5NextDSAttention`):
+  - the `kpool <= 1` long-sequence guard;
+  - opt-in `SKYRL_DSA_INDEXER_TP_SHARD=1`: `make_sharded_kpool_topk` wraps megatron-core's
+    `_kpool_topk_from_score_chunks` so each tensor-parallel rank scores only its slice of query
+    rows, then all-gathers the pool selections. The scoring is O(sq^2) and otherwise replicated on
+    every TP rank, which all score the same gathered sequence with the same frozen indexer weights:
+    at 512k tokens, TP8, 64 B200 (TCP NCCL) sharding cut warm fwd+bwd 1545 -> 1094 s.
+    Bitwise-identical selections (`test_dsa_kpool_tp_shard.py`). Skipped when megatron-core already
+    keeps the indexer rows sequence-local. On a megatron-core bump, check that
+    `_kpool_topk_from_score_chunks` is still called with keyword arguments and that every
+    per-query input is still indexed by query row along dim 0 (`mask` along dim 0 or 1).
+- Upstream's score-chunk cap (`_KPOOL_SCORE_CHUNK_BYTES`) is 2 GiB, the default of the old
+  `SKYRL_DSA_KPOOL_SCORE_CHUNK_ELEMS`, which is gone.
+- **Verify** (all required on a megatron-core bump):
+  - `patches/megatron/glm5_next/test_dsa_kpool_math.py` (CPU) and
+    `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool.py`, `test_dsa_kpool_tp_shard.py` (GPU).
   - `test_logprobs_matching_roundtrip[glm-5.3-flash-4layer_h100_tp2_ep4_kpool_beyond_topk]`. This
     is the only test that runs sequences past `index_topk`. Its logprob diff must not get worse
-    than with the vendored code (about 0.053; token-level selection, i.e. no k-pool, gives about
-    0.059).
+    than about 0.053 (token-level selection, i.e. no k-pool, gives about 0.059).
 
 ### NVIDIA/Megatron-LM#7523: FP8 wgrad
 
@@ -196,11 +173,17 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
   - Tests that import from `glm5_next`: repoint them at Megatron-Bridge.
   - `.agents/docs/backends/megatron.md` and `docs/content/docs/.../supported_models.mdx`: update
     the model entry.
+  - The `kimi_*` fields in `glm5_next/provider.py` and their assignments in `glm5_next/bridge.py`:
+    check that the upstream provider sets the fields megatron-bridge's FLOPs formula
+    (`flop_utils.num_floating_point_operations`) reads for KDA layers, then delete them with
+    `test_glm5_next_flops_fields.py`.
   - Before deleting the local bridge, compare its behaviour with upstream's:
     - `language_model_only=True` handling;
     - the `head_dim=0` NoPE RoPE skip;
-    - the k-pool field mapping;
+    - the k-pool field mapping, including the FP32 indexer weights projection;
     - the mHC scale mappings.
+  - Move `Glm5NextDSAttention`'s opt-in TP sharding to wherever upstream builds the model, or
+    drop it if upstream shards the k-pool scoring itself.
   - Delete `glm5_next/`.
 - **Verify:** the full [Verification](#verification) set.
 
@@ -322,6 +305,17 @@ the two functions (`_group_grads_by_dtype`).
 - **Remove:** the `apply_clip_grads_mixed_dtype_patch()` call and import in `megatron_worker.py`, the module, and
   `patches/megatron/test_clip_grads_mixed_dtype.py`.
 
+### `patch_packed_per_expert_sharded_state_dict.py`: Megatron-Bridge#6184
+
+`PackedPerExpertLinear.sharded_state_dict` (the per-expert side of
+`experts_shared_outer_loras=True` adapters) omits the required `pg_collection` kwarg, so
+dist-checkpoint saving raises `TypeError`.
+- **Landed?** The patch checks for itself: it's a no-op when
+  `PackedPerExpertLinear.sharded_state_dict`'s source contains `pg_collection`. It's also a
+  silent no-op if Bridge drops `PackedPerExpertLinear`, so check the class still exists.
+- **Remove:** the `apply_packed_per_expert_sharded_state_dict_patch()` call and import in
+  `megatron_worker.py`, and the module.
+
 ### `patch_dsa_hybrid_indexer.py`: SkyRL-only, no upstream counterpart
 
 Opt-in (`SKYRL_DSA_INDEXER_BACKEND=tilelang` with `dsa_kernel_backend="cudnn"`): resolves the
@@ -329,7 +323,8 @@ Opt-in (`SKYRL_DSA_INDEXER_BACKEND=tilelang` with `dsa_kernel_backend="cudnn"`):
 cuDNN/FlashMLA. On the packed THD path the cudnn backend's indexer top-k is a per-head fp32
 `torch.bmm` fallback; TileLang's is a fused kernel. -32% trainer fwd+bwd for GLM-5.3 on B200.
 Applies to stock `DSAttention` (GLM-5 / GLM-5.3 `glm_moe_dsa`, DeepSeek-V3.2); GLM-5.3-Flash's
-k-pool indexer (`index_kpool > 1`) selects through `fused_qk_topk_kpool` and bypasses the hook.
+k-pool indexer (`index_kpool > 1`) selects through megatron-core's `fused_qk_topk_kpool` and
+bypasses the hook.
 - **Landed?** Not an upstream fix: it is obsolete once megatron-core's cudnn backend has a fused
   varlen indexer top-k (`_indexer_topk_bshd` no longer falls back to `_indexer_topk_from_score_chunks`
   for packed inputs), or exposes per-hook backend selection.
@@ -337,20 +332,18 @@ k-pool indexer (`index_kpool > 1`) selects through `fused_qk_topk_kpool` and byp
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
 
-### `patch_checkpoint_without_output_frozen_inputs.py`: no upstream PR yet
+### `patch_dsa_head_full.py` (+ `_block_copy_kernel.py`): SkyRL-only, no upstream counterpart
 
-`CheckpointWithoutOutput` (the `mhc` / `layernorm` / `moe_act` selective-recompute modules) saves its
-inputs with `save_for_backward`, which keeps nothing when none of them requires grad, but its recompute
-hook still fires once a later consumer is trainable. Under LoRA (frozen embeddings and early base weights,
-trainable adapters after the first mHC / layernorm block) backward then runs off the end of
-`ctx.saved_tensors`: `RuntimeError: coroutine raised StopIteration` (DeepSeek-V4 LoRA with
-`recompute_modules=[..., mhc, layernorm]`). The patch keeps references to such inputs on the ctx and
-recomputes from them. Applied unconditionally at `megatron_worker.py` import.
-- **Landed?** megatron-core recomputes (or keeps) inputs that do not require grad: the GPU test
-  `test_unpatched_recompute_fails_on_frozen_inputs` then fails because backward no longer raises.
-- **Remove:** the module-level `apply_checkpoint_without_output_frozen_inputs_patch()` call and import in
-  `megatron_worker.py`, the module, and
-  `gpu_ci/patches/megatron/test_checkpoint_without_output_frozen_inputs.py`.
+Opt-in (`SKYRL_DSA_HEAD_FULL=1`, with `SKYRL_DSA_HEAD_FULL_FAST_PERMUTE=1` and
+`SKYRL_DSA_HEAD_FULL_ZIGZAG=1`): wraps the `run_fused_absorbed_sparse_attention` DSA hook in a
+Ulysses-style all-to-all so each TP rank runs all heads on 1/TP of the query rows, instead of
+`heads / TP` heads (padded to the kernel's 16- or 64/128-head tile) on every row. The fast-permute
+flag does the all-to-all's layout moves with one Triton block copy; zigzag balances rows whose cost
+grows with position. Applies to absorbed-MLA DSA (GLM-5 / GLM-5.3, DeepSeek-V3.2) under TP > 1.
+- **Landed?** Not an upstream fix: obsolete once megatron-core's DSA kernels run efficiently at
+  `heads / TP` heads per rank, or megatron-core shards absorbed sparse attention by query rows itself.
+- **Remove:** the `apply_dsa_head_full_patch()` call and import in `megatron_worker.py`, the
+  `SKYRL_DSA_HEAD_FULL*` entries in `prepare_runtime_environment`, and both modules.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 
@@ -388,17 +381,43 @@ Use `RAY_ADDRESS=local` if a Ray cluster is already up on the box. Don't put `--
 
 ```bash
 # CPU
-uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/patches/megatron/mcore_ext/test_dsa_kpool_math.py
+uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/patches/megatron/glm5_next/test_dsa_kpool_math.py
 
-# GPU (4+ GPUs): kernels, KDA/mHC vs HF, and the three GLM roundtrip rows vs vLLM
-uv run --isolated --extra dev --extra megatron pytest -s -v -m "h100 or not h100" \
-  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_dsa_kpool.py \
-  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py \
+# GPU (4+ GPUs): k-pool kernels and TP sharding, KDA/mHC vs HF
+uv run --isolated --extra dev --extra megatron pytest -s -v \
+  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/glm5_next/ \
+  tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py
+
+# GPU (4 GPUs; needs ~/data/gsm8k from examples/train/gsm8k/gsm8k_dataset.py):
+# the three GLM-5.3-Flash roundtrip rows vs vLLM. Run one roundtrip session per machine at a
+# time: every session's vLLM server binds port 8000, so a second one on other GPUs sends its
+# requests to the first one's server.
+uv run --isolated --extra dev --extra megatron pytest -s -v -m "h100 or not h100" -k "glm-5.3" \
   tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_models.py \
-  -k "kpool_selects or glm5_next_modules or glm-5.3"
+  tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py
 ```
 
-Expected Megatron-vs-vLLM logprob diffs (threshold 0.1):
-- `glm-5.3-flash-4layer_h100_tp2_ep4`: 0.0651
-- `..._kpool_beyond_topk`: 0.0527
-- `..._lora`: 0.0620
+### Reference values
+
+Mean |logprob diff| over the response tokens, as the tests print them. Compare a bump against the
+newest column on the same GPU type and add a column for it. A column changes one pin at a time
+where possible, so a shift can be pinned on Megatron or on vLLM.
+
+| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump | bump rebased on 7d4b02fe |
+|---|---|---|---|---|
+| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b |
+| vLLM | not recorded | 0.32.0 | 0.32.0 | 0.32.0 |
+| GPU | not recorded | 4x B200 | 4x B200 | 4x B200 |
+| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 | 0.0654 |
+| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 | 0.1338 |
+| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 | 0.0583 |
+| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 | 0.2835 |
+| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 | 0.0650 |
+| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 | 0.1532 |
+| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 | 0.0661 |
+
+Two values in a cell are two runs. The megatron bump sits about 0.008 above main on `tp2_ep4`
+(reproduced, not investigated, well inside 0.1); the same pins with vLLM 0.31.0 gave 0.0630 there.
+Rebased onto main 7d4b02fe the same row gave 0.0654. That run also passed the rows that landed on main
+after the bump was cut: Qwen3.8-Flash-Next (Megatron vs vLLM 0.0487 / 0.0518, adapter rows 0.050-0.057)
+and `kimi-k2.5-2layer-int4-qat` (0.0264).

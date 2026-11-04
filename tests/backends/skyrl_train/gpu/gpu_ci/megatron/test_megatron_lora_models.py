@@ -193,7 +193,8 @@ async def _sync_weights(policy, client, cfg, label: str):
         # mesh as its row in test_megatron_models.py. Adapter sync covers vLLM booting with
         # enable_lora on glm5_next, the packed-module mapping and kv_b_proj decode patches in
         # patch_glm5next_lora_packing, KDA's non-contiguous f_a/g_a through lora_shrink, and the
-        # per-expert adapter export and hot-load.
+        # per-expert adapter export and hot-load. Measured values per megatron-core /
+        # Megatron-Bridge / vLLM pin: "Reference values" in patches/megatron/README.md.
         pytest.param(
             2,
             1,
