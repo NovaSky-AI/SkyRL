@@ -48,6 +48,9 @@ TINY_CONFIG = {
     "max_position_embeddings": 4096,
     "layer_types": LAYER_TYPES,
     "mlp_layer_types": MLP_LAYER_TYPES,
+    # The release's cap (30) never binds on a model this small; with the wider lm_head init below the
+    # top logits reach ~7, so a cap of 4 bends them and a path that drops the softcap fails parity.
+    "final_logit_softcapping": 4.0,
 }
 
 
@@ -65,7 +68,7 @@ def _beam_tiny_state_dict(config: dict, generator: torch.Generator) -> dict[str,
 
     tensors = {
         "model.embed_tokens.weight": normal(config["vocab_size"], hidden),
-        "lm_head.weight": normal(config["vocab_size"], hidden),
+        "lm_head.weight": normal(config["vocab_size"], hidden, std=0.1),
         "model.norm.weight": norm(hidden),
     }
     for i, mlp_type in enumerate(config["mlp_layer_types"]):

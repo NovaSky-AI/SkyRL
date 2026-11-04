@@ -299,6 +299,8 @@ def test_router_replay_schedule_clears_after_exception(router_replay_module):
 
 # DeepSeek-V4 as the pinned Megatron-Bridge builds it: 43 blocks of (W/C/H attention, MoE) -> 86 hybrid layers.
 _DSV4_PATTERN = "WEWE" + "CEHE" * 20 + "CE"
+# GLM-5.x as the pinned Megatron-Bridge builds it: 3 dense blocks then 75 (DSA attention, MoE) -> 156 hybrid layers.
+_GLM5_PATTERN = "D-" * 3 + "DE" * 75
 
 
 @pytest.mark.parametrize(
@@ -310,6 +312,10 @@ _DSV4_PATTERN = "WEWE" + "CEHE" * 20 + "CE"
         # 43 decoder layers and must still be mapped; stage 1's overflow them.
         (_DSV4_PATTERN, 43, list(range(1, 43, 2)), list(range(21))),
         (_DSV4_PATTERN, 43, list(range(43, 86, 2)), list(range(21, 43))),
+        # GLM-5.x: MoE routers at hybrid 7, 9, ..., 155 -> decoder layers 3..77 (out of range unmapped at PP=1),
+        # and a PP stage-0 slice, which fits below 78 unmapped and would silently replay the wrong layers.
+        (_GLM5_PATTERN, 78, list(range(7, 156, 2)), list(range(3, 78))),
+        (_GLM5_PATTERN, 78, list(range(7, 78, 2)), list(range(3, 39))),
         # Beam: decoder layer = attention + MLP/MoE pair; MoE routers at hybrid 7, 9, 11.
         ("*-*-*-*E*E*E", 6, [7, 9, 11], [3, 4, 5]),
         # Pipeline separators and MTP suffixes are ignored.

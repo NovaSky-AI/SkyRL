@@ -242,12 +242,14 @@ needed. SkyRL still carries:
   `skyrl/backends/skyrl_train/__init__.py`): transformers ships `BeamConfig` from 5.22, past the
   `transformers<=5.16.1` pin. It keeps `rope_parameters` keyed by layer type, which `BeamBridge`
   requires (vLLM's own `BeamConfig` flattens it). **Remove** once transformers >= 5.22 is pinned.
-- `default_cp_comm_type_for_sliding_window` in `workers/megatron/megatron_worker.py`: defaults
-  `cp_comm_type="a2a"` under context parallelism, since TE has no `p2p` CP path for sliding-window
-  attention. **Remove** once the Bridge's Beam config sets it.
-- Not a patch, but Beam-specific in SkyRL code: the fused LM-head log-prob path applies the
-  config's `final_logit_softcapping` (`model_utils._capped_chunk_logits`), because it bypasses
-  `BeamOutputLayer`.
+- `default_cp_comm_type_for_sliding_window` in `workers/megatron/megatron_worker.py` (Beam only):
+  defaults `cp_comm_type="a2a"` under context parallelism, or `"all_gather"` when the per-TP-rank
+  head counts do not divide by CP, since TE has no `p2p` CP path for sliding-window attention.
+  **Remove** once the Bridge's Beam config sets it.
+- Not a patch, and not Beam-only: the fused LM-head log-prob path applies the provider's
+  `final_logit_softcapping` (`model_utils._capped_chunk_logits`) for any model that sets it,
+  because it bypasses the model's output layer (`BeamOutputLayer`, Megatron-Bridge's
+  `Gemma4OutputLayer`). Such models use the torch fused backend; the Triton one has no softcap.
 - On the vLLM side, `../vllm/patch_beam_lora.py` serves Beam with LoRA (vLLM 0.33's class has no `SupportsLoRA`);
   its docstring has the removal plan.
 - **Verify:** the `beam-tiny_*` rows of `gpu_ci/megatron/test_megatron_{,lora_}models.py`,

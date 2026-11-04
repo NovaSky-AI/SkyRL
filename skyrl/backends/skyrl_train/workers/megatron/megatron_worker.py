@@ -199,14 +199,20 @@ def default_cp_comm_type_for_sliding_window(config) -> None:
 
     Transformer Engine has no ``"p2p"`` (or ``"a2a+p2p"``) context-parallel path for sliding-window
     attention, and megatron-core uses ``"p2p"`` when ``cp_comm_type`` is unset, so the sliding-window
-    layers would fail at the first forward. ``"a2a"`` is picked when nothing is set and a ring-based
-    choice is rejected up front. ``"a2a"`` needs the per-TP-rank query and KV head counts divisible by
-    the context-parallel size. Used for Beam, whose Megatron-Bridge provider leaves it unset.
+    layers would fail at the first forward. When nothing is set this picks ``"a2a"``, which needs the
+    per-TP-rank query and KV head counts divisible by the context-parallel size, and falls back to
+    ``"all_gather"`` when they are not. A ring-based choice is rejected up front. Used for Beam, whose
+    Megatron-Bridge provider leaves it unset.
     """
-    if (getattr(config, "context_parallel_size", 1) or 1) <= 1 or getattr(config, "window_size", None) is None:
+    cp = getattr(config, "context_parallel_size", 1) or 1
+    if cp <= 1 or getattr(config, "window_size", None) is None:
         return
     if config.cp_comm_type is None:
-        config.cp_comm_type = "a2a"
+        tp = getattr(config, "tensor_model_parallel_size", 1) or 1
+        heads = config.num_attention_heads
+        kv_heads = getattr(config, "num_query_groups", None) or heads
+        a2a_ok = heads % tp == 0 and kv_heads % tp == 0 and (heads // tp) % cp == 0 and (kv_heads // tp) % cp == 0
+        config.cp_comm_type = "a2a" if a2a_ok else "all_gather"
     elif isinstance(config.cp_comm_type, str) and config.cp_comm_type in ("p2p", "a2a+p2p"):
         raise ValueError(
             f"cp_comm_type={config.cp_comm_type!r} does not support sliding-window attention under "
