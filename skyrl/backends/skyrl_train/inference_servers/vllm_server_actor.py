@@ -553,17 +553,21 @@ class VLLMServerActor(ServerActorProtocol):
                 lora_path = in_memory_lora_path(lora_name)
 
             models = request.app.state.openai_serving_models
+            # SKYRL_DSV41_LORA_NEW_ID_PER_LOAD=1 registers every load under a fresh adapter id instead of
+            # replacing the live one in place: requests already running keep the previous id, new requests
+            # get the new one, and vLLM's LRU evicts old ids (needs max_loras >= the versions in flight).
+            new_id_per_load = os.environ.get("SKYRL_DSV41_LORA_NEW_ID_PER_LOAD") == "1"
             async with models.lora_resolver_lock[lora_name]:
                 lora_int_id = (
                     models.lora_requests[lora_name].lora_int_id
-                    if lora_name in models.lora_requests
+                    if lora_name in models.lora_requests and not new_id_per_load
                     else models.lora_id_counter.inc(1)
                 )
                 lora_request = LoRARequest(
                     lora_name=lora_name,
                     lora_int_id=lora_int_id,
                     lora_path=lora_path,
-                    load_inplace=True,
+                    load_inplace=not new_id_per_load,
                 )
                 await models.engine_client.add_lora(lora_request)
                 lora_request.load_inplace = False
