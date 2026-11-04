@@ -25,12 +25,12 @@ class TeacherConfig:
 
 @dataclass
 class DistillationConfig:
-    trajectory_distillation: bool = False  # opt-in terminal trajectories with observation loss masks
-    use_sample_routing: bool = False  # SRPO requires multiple responses per prompt
-    srpo_route_positive_rewards: bool = False  # >0 GRPO; ==0 SDPO; no teacher means skip
-    srpo_route_success_only: bool = False  # threshold GRPO; lower rewards SDPO or skip
-    vision_language: bool = False  # opt-in image inputs; text benchmarks unchanged
-    limit_response_logits: bool = False  # model must support logits_to_keep
+    trajectory_distillation: bool = False  # allow feedback-only multi-turn; masks still come from the generator
+    use_sample_routing: bool = False  # route rows between SDPO and GRPO; requires G>1
+    srpo_route_positive_rewards: bool = False  # reward>0 GRPO; reward==0 with a teacher SDPO; otherwise skip
+    srpo_route_success_only: bool = False  # reward>=threshold GRPO; lower rewards SDPO with a teacher, else skip
+    vision_language: bool = False  # required for image inputs, visual feedback, and VLM policies
+    limit_response_logits: bool = False  # FSDP passes logits_to_keep and scores response positions
     megatron_teacher_cache_gib: float = 128.0
     """CPU response-logit budget per final-stage TP rank; minimum one microbatch."""
     teacher_first: bool = False
@@ -43,8 +43,8 @@ class DistillationConfig:
     loss_chunk_size: int = 128
     reduction: str = "global_token_mean"
     rollout_is_clip: float | None = None
-    advantage_is_clip: float | None = None  # multiple of running mean |advantage| (e.g. 3.0)
-    skip_correct_singletons: bool = True  # opt out to train correct G=1 responses too
+    advantage_is_clip: float | None = None  # clip at this multiple of the running mean |log p - log q|
+    skip_correct_singletons: bool = True  # skip correct responses whose prompt group has size 1
     success_reward_threshold: float = 1.0
     sibling_selection: str = "first_success"  # or group-wide best_reward
     exclude_self_demonstration: bool = True
@@ -58,12 +58,12 @@ class DistillationConfig:
     feedback_only_without_solution: bool = True
     feedback_key: str = "feedback"  # optional per-row env_metrics entry
     demonstration_source: str = "sibling"
-    expert_trace_key: str = "expert_trace"  # top-level dataset column
+    expert_trace_key: str = "expert_trace"  # dataset column, read from env_extras
     expert_trace_template: str = "\n\nExpert reference solution:\n\n{expert_trace}\n"
     expert_trace_include_thinking: bool = False
     max_teacher_prompt_length: int = 4096
     max_teacher_sequence_length: int = 8192
-    overflow: str = "skip"  # "error" or explicit upstream-style "truncate_right"
+    overflow: str = "skip"  # or "error" or "truncate_right"
     chat_template_kwargs: dict = field(default_factory=dict)
     filter_ineligible_demonstrations: bool = True
     reprompt_template: str = (
@@ -72,7 +72,7 @@ class DistillationConfig:
     solution_template: str = "\n\nCorrect solution:\n\n{successful_previous_attempt}\n"
     feedback_template: str = "\n\nThe following is feedback from your unsuccessful earlier attempt:\n\n{feedback_raw}\n"
     use_entropy_weighting: bool = False  # independent of sample routing
-    entropy_beta: float = 1.0  # DW-SDPO strength when use_entropy_weighting=true
+    entropy_beta: float = 1.0  # weight is exp(-beta * teacher entropy); 0 is uniform
 
     def __post_init__(self):
         if not math.isfinite(self.megatron_teacher_cache_gib) or self.megatron_teacher_cache_gib <= 0:

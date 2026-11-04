@@ -1,94 +1,85 @@
 # Self-Distillation Policy Optimization (SDPO)
 
-This example implements **SDPO** from
-[Hübotter et al., *Reinforcement Learning via Self-Distillation* (2026)](https://arxiv.org/abs/2601.20802)
-(original implementation: [lasgroup/SDPO](https://github.com/lasgroup/SDPO)), and
-**SRPO** from
-[Li et al., *Unifying Group-Relative and Self-Distillation Policy Optimization via Sample Routing* (2026)](https://arxiv.org/abs/2604.02288).
+This example implements [SDPO](https://arxiv.org/abs/2601.20802) (Hübotter et al., 2026; original code [lasgroup/SDPO](https://github.com/lasgroup/SDPO)) and [SRPO](https://arxiv.org/abs/2604.02288) (Li et al., 2026).
 
-For each prompt, the student samples a group of responses. Successful responses
-(and, optionally, environment feedback) become extra context for a self-teacher,
-which scores the student's own responses. The student is trained with a
-top-k distillation loss (forward KL, reverse KL, or JSD) toward the teacher's
-next-token distribution. SRPO routes each response instead: correct responses
-take a GRPO update, failed responses with a teacher hint take an
-entropy-weighted SDPO update.
+For each prompt, the student samples a group of responses. The teacher sees one successful response from that group (a sibling), and can also see environment feedback. It scores the sampled responses. The student is trained to match those scores with a top-k distillation loss: forward KL, reverse KL, or JSD.
 
-Everything lives in this folder; no SkyRL core changes are required.
+SRPO uses a different update for each outcome where correct responses go through GRPO. Failed responses that have a teacher hint go through an entropy-weighted SDPO update.
 
 ## Layout
 
-| File | Contents |
-|---|---|
-| `main_sdpo.py` | `SDPOGenerator`, `SDPOTrainer`, `SDPOExp`, and the CLI/Ray entrypoint. Recipes subclass `SDPOExp`. |
-| `sdpo_config.py` | `trainer.distillation.*` config dataclasses and validation of supported SkyRL settings. |
-| `fsdp_worker.py` | FSDP policy worker: teacher scoring, the distillation loss, and SRPO routing. |
-| `megatron/` | Megatron policy worker (`megatron_worker.py`) with vocab-parallel loss (`loss.py`), EMA teacher (`teacher.py`), and response-only logit projection (`response_logits.py`). |
-| `teachers.py` | FSDP teacher providers: `self`, `ema`, `frozen`. |
-| `utils.py` | Teacher prompt construction, paired student/teacher inputs, routing masks, and losses. |
-| `reproduction/` | The SDPO paper's Section 3 science and tool-use benchmarks: data conversion, reward environments, and the `run_sdpo.sh` / `run_srpo.sh` launchers. |
+- `main_sdpo.py`: SkyRL endpoint and defines`SDPOGenerator`, `SDPOTrainer`, and `SDPOExp`
+- `sdpo_config.py`: defines and validates `trainer.distillation` config and instantiates them
+- `fsdp_worker.py`: handles FSDP worker scoring, the distillation loss, and SRPO routing
+- `teachers.py`: implements the `self`, `ema`, and `frozen` teachers as separate models
+- `megatron/`: the FSDP worker, teacher, and loss do not apply here. Each rank holds one vocabulary shard, and pipeline stages pass hidden states rather than logits. Prompt building and routing masks still come from `utils.py`.
+  - `megatron_worker.py`: runs the student and teacher through Megatron's pipeline schedule. Only the last stage keeps response logits, and a CPU teacher is offloaded before the student step. `fsdp_worker.py` cannot do this: it calls one Hugging Face module. Sample routing stays there.
+  - `loss.py`: the same top-k, tail, and JSD objective as `utils.sdpo_loss`, on each rank's vocabulary shard. Log-softmax, top-k, and the tail are reduced across the tensor-parallel group, so the full vocabulary is never gathered onto one GPU.
+  - `teacher.py`: EMA or frozen copy of the Megatron weights. LoRA is merged before the average, because averaging the adapters is not the same as averaging the merged weight. `teachers.py` only handles FSDP shards and PEFT.
+  - `response_logits.py`: keeps response positions before the vocabulary projection. Megatron has no Hugging Face `logits_to_keep`. Sequence-parallel hidden states are gathered, sliced, and sharded again so the output layer's gradients stay valid.
+- `utils.py`: builds teacher prompts, paired inputs, routing masks, and the loss
+- `reproduction/run_sdpo.sh` and `run_srpo.sh`: scripts for reproducing across SciKnowEval `biology`, `chemistry`, `material`, and `physics`, and ToolAlpaca `tooluse`
 
-## Quickstart: SDPO paper benchmarks
-
-The Section 3 / Table 3 benchmarks are SciKnowEval `biology`, `chemistry`,
-`material`, `physics`, and ToolAlpaca `tooluse`. Convert the original splits
-(pinned to SDPO commit `7c457fc1b1f636ae794eb0362ba37d4743b06fbc`, no resplitting):
+## Quickstart
 
 ```bash
 git clone https://github.com/lasgroup/SDPO $HOME/SDPO
 uv run --isolated --extra fsdp -m examples.train.sdpo.reproduction.prepare_data \
   --sdpo-repo $HOME/SDPO --output-dir $HOME/data/sdpo
+
+export WANDB_API_KEY=<your_key_here>
+bash examples/train/sdpo/reproduction/run_sdpo.sh chemistry   # EMA teacher, JSD, top-100 + tail
+bash examples/train/sdpo/reproduction/run_srpo.sh chemistry   # same recipe, with sample routing
 ```
 
-Then launch a task. Both scripts use 4 GPUs (2 FSDP training, 2 vLLM) and
-Qwen3-8B in non-thinking mode; set `MODEL=allenai/Olmo-3-7B-Instruct` for OLMo-3.
-This placement is sized for 141 GB GPUs (H200). On 80 GB GPUs, full-parameter
-Qwen3-8B with an EMA teacher does not fit on 2 training GPUs; raise
-`NUM_POLICY_GPUS`.
+Both scripts use 4 GPUs: 2 for FSDP and 2 for vLLM. The default model is `Qwen/Qwen3-8B` with thinking disabled. This setup is sized for 141 GB GPUs. On 80 GB GPUs, raise `NUM_POLICY_GPUS` so the model and the EMA teacher fit.
+
+Each step uses 32 prompts and 8 responses per prompt. The learning rate is `1e-5`, the EMA update rate is `0.05`, and the rollout importance-sampling cap is `2.0`. Responses can be up to 8192 tokens. Every 5 steps, the run evaluates avg@16 at temperature 0.6 and top-p 0.95.
+
+Training runs for up to 30 epochs. The paper reports the best avg@16 within 1 hour and within 5 hours, so compare `eval/all/avg_score` at the same wall-clock time. Arguments after the task name are config overrides.
 
 ```bash
-export WANDB_API_KEY=<your_key_here>
+# Olmo-3-7B. On 80 GB GPUs, set NUM_POLICY_GPUS=4 so the model and the EMA teacher fit.
+MODEL=allenai/Olmo-3-7B-Instruct NUM_POLICY_GPUS=4 \
+  bash examples/train/sdpo/reproduction/run_sdpo.sh physics
 
-# SDPO: EMA self-teacher conditioned on a successful sibling, JSD (alpha=0.5) over top-100 + tail
-bash examples/train/sdpo/reproduction/run_sdpo.sh chemistry
+# alpha=0 is forward KL, alpha=1 is reverse KL, and 0 < alpha < 1 is generalized JSD (0.5 is symmetric).
+# topk is the student's top-k, and the teacher uses the same set. add_tail keeps the remaining probability as one bin.
+# topk=null keeps the full vocabulary. advantage_is_clip requires alpha=1.
+bash examples/train/sdpo/reproduction/run_sdpo.sh chemistry \
+  trainer.distillation.alpha=1 \
+  trainer.distillation.topk=null \
+  trainer.distillation.add_tail=false \
+  trainer.distillation.teacher.kind=frozen \
+  trainer.distillation.rollout_is_clip=2.0 \
+  trainer.distillation.advantage_is_clip=3.0
 
-# SRPO: same recipe with sample routing and teacher-entropy weighting
-bash examples/train/sdpo/reproduction/run_srpo.sh chemistry
+# teacher.kind is ema (set teacher.update_rate in [0, 1]), frozen, or self.
+# demonstration_source is sibling, expert_only, expert_then_sibling, sibling_then_expert, or feedback_only.
+bash examples/train/sdpo/reproduction/run_sdpo.sh tooluse \
+  trainer.distillation.teacher.kind=self \
+  trainer.distillation.demonstration_source=feedback_only \
+  trainer.distillation.include_environment_feedback=true \
+  trainer.distillation.include_student_response=true \
+  trainer.distillation.remove_thinking=true \
+  trainer.distillation.train_on_reasoning_tokens=false
+
+# What run_srpo.sh adds to the SDPO recipe. entropy_beta=0 uses uniform weights.
+bash examples/train/sdpo/reproduction/run_sdpo.sh chemistry \
+  trainer.algorithm.advantage_estimator=grpo \
+  trainer.distillation.use_sample_routing=true \
+  trainer.distillation.use_entropy_weighting=true \
+  trainer.distillation.entropy_beta=1.0
+
+# Stop after 2 steps.
+bash examples/train/sdpo/reproduction/run_sdpo.sh physics trainer.max_training_steps=2
 ```
 
-Extra arguments are forwarded as config overrides, e.g.
-`bash examples/train/sdpo/reproduction/run_sdpo.sh physics trainer.max_training_steps=2`.
+The scripts above pass `--extra fsdp`. To run the same module with Megatron, pass `--extra megatron` and set `trainer.strategy=megatron`.
 
-The recipe follows the paper: 32 prompts × 8 responses per step, learning rate
-1e-5, EMA rate 0.05, rollout importance-ratio cap 2.0, 8192-token responses,
-and avg@16 evaluation every 5 steps (temperature 0.6, top-p 0.95). The paper
-reports the best avg@16 within 1 and 5 hours of training time; the scripts run
-up to 30 epochs, so compare on the logged `eval/all/avg_score` curve at
-matching wall time.
+Megatron supports dense models with tensor and sequence parallelism. Pipeline parallelism can be 1–3. Context parallelism and expert parallelism must stay at 1. Use `loss=distribution` and `reduction=global_token_mean`. Sample routing is only available on the FSDP worker.
 
-## Megatron backend
-
-`trainer.strategy=megatron` selects the [Megatron SDPO worker](megatron/megatron_worker.py).
-It uses the same teacher prompt construction and student-selected top-k/tail
-KL/JSD objective as FSDP, normalizing across vocabulary shards without gathering
-full vocabulary tensors. The EMA tracks effective weights (base plus merged LoRA
-update) with an FP32 CPU accumulator, optional teacher CPU storage, and per-rank
-checkpoint state.
-
-Supported: dense models with TP/SP, PP=1, 2 or 3, CP=EP=1, sample-based
-microbatching, the distribution loss, global-token-mean reduction, teacher-entropy
-weighting, rollout importance-ratio clipping, and advantage clipping with
-`alpha=1`. SRPO, FP8, packing, context parallelism, and more than three pipeline
-stages are rejected at validation.
-
-The teacher is loaded once to score a batch, then offloaded before student
-forward/backward. Response logits stay vocabulary-sharded in a CPU cache, and
-each entry is released after its student backward.
-`trainer.distillation.megatron_teacher_cache_gib` (default 128) caps the cache
-per final-stage TP rank; batches that exceed it are scored and trained in bounded
-windows (at least one microbatch per window). Megatron projects only
-response-predicting hidden states onto the vocabulary through the model's
-`output_processor` hook; the transformer still processes the full context.
+With the settings below, the teacher is stored on CPU, scored once, and offloaded before the student step:
 
 ```text
 trainer.strategy=megatron
@@ -97,131 +88,9 @@ trainer.policy.megatron_config.pipeline_model_parallel_size=1
 trainer.policy.megatron_config.context_parallel_size=1
 trainer.policy.megatron_config.ddp_config.overlap_grad_reduce=false
 trainer.distillation.limit_response_logits=false
+trainer.distillation.reduction=global_token_mean
 trainer.distillation.teacher.storage=cpu
 trainer.distillation.teacher_first=true
+trainer.distillation.megatron_teacher_cache_gib=128
 ```
 
-## Objective and conditioning knobs
-
-All fields below are under `trainer.distillation` unless qualified otherwise.
-For response position $t$, write $p_t(v)=\pi_\theta(v\mid x,y_{<t})$ for the
-student and $q_t(v)=\pi_{\bar\theta}(v\mid x,h,y_{<t})$ for the detached teacher.
-The hint $h$ can contain an expert answer, judge feedback, and the student's
-previous answer. Both models score the same sampled continuation. Probabilities
-use the configured training temperature. The teacher does not receive gradients.
-
-### Distribution objective: `loss`, `alpha`, `topk`, `add_tail`
-
-`loss=distribution` uses these per-token losses:
-
-- `alpha=0`: forward KL, $D_{KL}(q_t\|p_t)$.
-- `alpha=1`: reverse KL, $D_{KL}(p_t\|q_t)$.
-- $0<\alpha<1$: generalized JSD,
-  $(1-\alpha)D_{KL}(p_t\|m_t)+\alpha D_{KL}(q_t\|m_t)$,
-  where $m_t=(1-\alpha)p_t+\alpha q_t$.
-
-The endpoint values are explicitly special-cased to KL; they are not the limits
-of the interior JSD expression. `alpha=0.5` is ordinary equally weighted JSD.
-
-`topk=k` selects the student's top $k$ vocabulary entries at each position and
-scores both distributions on those same entries. `add_tail=true` adds one
-category with the remaining probability mass, $p_{tail}=1-\sum_{v\in K}p(v)$,
-and likewise for the teacher; the tail is summed in log space so it survives a
-peaked distribution. Thus top-100 plus tail has 101 categories; it is
-not top-1 supervision. With no tail, each selected distribution is renormalized.
-`topk=null` retains the full vocabulary.
-
-### Advantage clipping: `advantage_is_clip`
-
-Here "advantage" denotes a teacher/student log-probability difference, not a
-normalized task reward. Let $\delta_t(v)=\log p_t(v)-\log q_t(v)$ and let
-$\operatorname{sg}$ mean stop-gradient. The clip threshold for update $u$ is
-$C_u=c\,\overline{|\delta|}_{<u}$, where $c$ is `advantage_is_clip` and the mean
-uses cumulative statistics from prior updates. The first update only collects
-statistics and is unclipped. These running statistics are checkpointed.
-
-For **distribution reverse KL** (FSDP and Megatron), the mean is student-probability-weighted
-over eligible positions and vocabulary categories. The clipped gradient is the
-gradient of
-
-$$\sum_v p_t(v)\,\operatorname{clip}(\operatorname{sg}[\delta_t(v)],-C_u,C_u).$$
-
-The implementation keeps the original KL as the reported forward loss while
-substituting this surrogate gradient. Clipping works on the compressed categories
-when top-k/tail is enabled. Advantage clipping requires `alpha=1`; JSD and forward
-KL are rejected.
-
-For **FSDP `loss=sampled_reverse_kl`**, the implementation uses the sampled-token
-surrogate
-
-$$\operatorname{clip}(\operatorname{sg}[\delta_t(y_t)],-C_u,C_u)\log p_t(y_t),$$
-
-with an unweighted historical mean over eligible sampled tokens. The running
-statistics are restored on resume only when `loss`, `alpha`, `topk`, `add_tail`
-and the temperature match the checkpoint. `null` disables clipping.
-Smaller $c$ suppresses extreme distillation gradients
-more aggressively; it does not impose a hard KL trust region.
-
-### Teacher entropy weighting: `use_entropy_weighting`, `entropy_beta`
-
-Compute entropy from the teacher's full vocabulary distribution:
-
-$$H_t=-\sum_v q_t(v)\log q_t(v),\qquad a_t=\exp(-\beta H_t).$$
-
-For valid SDPO-token mask $M_t$, normalize across the entire optimizer batch,
-including all microbatches and data-parallel ranks:
-
-$$\mu=\frac{\sum_t M_t a_t}{\sum_t M_t},\qquad w_t=a_t/\mu.$$
-
-With `reduction=global_token_mean`, the weighted objective is
-$L=\sum_t M_t w_t\ell_t/\sum_t M_t$. The denominator remains the valid-token
-count, not the number of microbatches. Weights are detached. Lower-entropy
-(confident) teacher positions receive more weight. Increasing $\beta$ sharpens
-that preference; $\beta=0$ gives unit weights. This is not an entropy bonus for
-the student and does not itself encourage exploration. GRPO-routed tokens are
-unaffected. Both backends use batch-wide normalization.
-
-### Rollout importance clipping: `rollout_is_clip`
-
-For the actual sampled token and behavior-policy probability $b_t(y_t)$,
-
-$$r_t=\operatorname{sg}\!\left[\min\left(\exp(\log p_t(y_t)-\log b_t(y_t)),c_{IS}\right)\right].$$
-
-This multiplies the SDPO per-token loss, so the combined objective becomes
-$\sum_t M_t w_t r_t\ell_t/\sum_t M_t$. It requires stored rollout log-probabilities.
-The cap is one-sided, with no lower clipping bound, and is distinct from PPO's
-$[1-\epsilon,1+\epsilon]$ clipping. `null` means no importance correction.
-
-### Teacher updates and prompt contents
-
-`teacher.kind=ema` updates effective teacher weights after an optimizer step:
-$\bar\theta_{u+1}=(1-\eta)\bar\theta_u+\eta\theta_{u+1}$, where
-$\eta=$ `teacher.update_rate` in $[0,1]$. Zero freezes the initial teacher; one
-copies the latest student; 0.01 moves 1% toward it per update. For LoRA, EMA
-tracks effective base-plus-adapter weights. `teacher.kind=frozen` is shorthand
-for `kind=ema` with `update_rate=0`: the teacher never moves, keeps no FP32
-accumulator, and its checkpoints hold no weights. `teacher.kind=self` instead
-uses the current student weights with detached scoring and extra teacher context.
-
-- `demonstration_source`: choose expert traces, successful siblings, fallback
-  combinations, or `feedback_only` (no demonstration).
-- `include_student_response`: include the previous sampled answer in the hint.
-- `include_environment_feedback`: include the judge/environment's feedback.
-- `remove_thinking`: strip thinking from copied answer demonstrations/hints.
-- `train_on_reasoning_tokens`: independently choose whether student thinking
-  positions receive loss. False masks those positions but preserves their tokens
-  as context for subsequent answer predictions.
-- `skip_correct_singletons`: skip already-successful G=1 responses when enabled.
-- `use_sample_routing`: FSDP SRPO routes rows between SDPO and GRPO; disabled in
-  the Megatron implementation. Entropy weighting is independent of routing.
-
-### Memory and execution controls
-
-`teacher.storage`, `teacher_first`, `megatron_teacher_cache_gib`, and
-`loss_chunk_size` control storage, execution order, cache windows, and loss
-computation chunking. They do not intentionally change the objective.
-The Megatron cache cap is per final-pipeline-stage TP rank; a batch may span
-multiple windows, and at least one microbatch is processed even if it exceeds
-the cap. With entropy weighting, multiple windows require a scalar-weight
-prepass to retain batch-wide normalization. Response-only projection saves
-vocabulary-logit memory while the transformer still reads the full context.
