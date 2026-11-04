@@ -16,8 +16,12 @@ set -x
 #   MODEL_PATH=$M bash examples/train/qwen3_8_flash_next/run_dapo_lora_262k_cp8_4node.sh
 #
 # Rows set env_class=search and max_turns=1: one answer per prompt, scored by exact match, no retrieval.
+# Rebuilding reproduces the pool and its pass rate, but not the exact filtered set: vLLM sampling is
+# not bitwise reproducible and the 0 < correct < 4 cut is noisy, so a rebuild keeps ~600 / ~100 prompts,
+# about 60% of them the same as the tested set.
 # Measured on 4 x 8 B200 with the defaults (623 train / 108 val prompts, 16 x 8 samples per step):
-# eval pass 0.68 -> 0.85 by step 2; 432-648 s per step, peak 68.4 GB allocated.
+# eval pass 0.68 -> 0.85 by step 2; 432-648 s per step, peak 68.4 GB allocated. A rebuild from scratch
+# (615 / 96 prompts) went 0.71 -> 0.80 at step 2 and 0.86 at step 4.
 #
 # The context-parallel configuration holds 262K-token sequences (CP8, 262K vLLM max_model_len, 262K
 # micro-batches): rebuild with a larger --tokens for longer prompts, and keep prompt + MAX_RESPONSE_LENGTH

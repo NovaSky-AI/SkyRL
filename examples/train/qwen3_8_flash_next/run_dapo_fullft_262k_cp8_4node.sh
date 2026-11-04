@@ -16,6 +16,9 @@ set -x
 #   MODEL_PATH=$M bash examples/train/qwen3_8_flash_next/run_dapo_fullft_262k_cp8_4node.sh
 #
 # Rows set env_class=search and max_turns=1: one answer per prompt, scored by exact match, no retrieval.
+# Rebuilding reproduces the pool and its pass rate, but not the exact filtered set: vLLM sampling is
+# not bitwise reproducible and the 0 < correct < 4 cut is noisy, so a rebuild keeps ~600 / ~100 prompts,
+# about 60% of them the same as the tested set.
 # Measured on 4 x 8 B200 with the defaults (623 train / 108 val prompts, 16 x 8 samples per step):
 # eval pass 0.68 -> 0.85 by step 2, then ~0.87-0.89 through step 10 (saturated); 543-674 s per
 # step, peak 92.6 GB allocated.
