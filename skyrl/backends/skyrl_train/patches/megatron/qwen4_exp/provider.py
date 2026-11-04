@@ -18,6 +18,9 @@ from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.layer_specs import (
     Qwen4ExpTransformerLayer,
     build_qwen4_exp_layer_spec,
 )
+from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+    cudnn_qsa_supported,
+)
 
 
 @dataclass
@@ -26,8 +29,8 @@ class Qwen4ExpModelProvider(GPTModelProvider):
 
     On top of the Qwen3.5 hybrid GDN / gated-attention MoE configuration (set by the bridge),
     the ``qwen4_*`` fields describe the gated hyper-connections, the PLE n-gram embedding and
-    the QSA indexer. Supported parallelism: any TP with sequence parallelism, any CP (packed
-    sequences; see ``context_parallel.py``), PP=1, any EP
+    the QSA indexer. Supported parallelism: any TP with sequence parallelism, any CP on
+    Blackwell with cuDNN QSA (packed sequences; see ``context_parallel.py``), PP=1, any EP
     (the PLE table is row-sharded over the expert-parallel group).
     """
 
@@ -58,6 +61,12 @@ class Qwen4ExpModelProvider(GPTModelProvider):
         if self.pipeline_model_parallel_size != 1:
             raise NotImplementedError("Qwen4Exp on Megatron does not support pipeline parallelism yet.")
         if self.context_parallel_size > 1:
+            if not cudnn_qsa_supported():
+                raise NotImplementedError(
+                    "Qwen4Exp context parallelism needs a Blackwell (SM10x) GPU and cudnn-frontend with the "
+                    "QSA kernels (cudnn.ops.qsa_forward, >= 1.32): QSA sparse attention under CP runs split-K "
+                    "cuDNN QSA. Use context_parallel_size=1 on other GPUs."
+                )
             # QSA pools 4-token key blocks per CP chunk: pad sequences so chunks hold whole blocks.
             set_cp_chunk_token_align(self.qwen4_indexer_compress_ratio)
         model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)

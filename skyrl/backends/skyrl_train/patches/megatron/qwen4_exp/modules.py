@@ -655,14 +655,14 @@ def _flex_sequence_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor
     return out[0, :, :length].transpose(0, 1)
 
 
-def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio: int) -> bool:
-    """Whether the cuDNN QSA kernels support these packed q / k / v ([T, heads, d]) on this device."""
+def cudnn_qsa_supported(device=None) -> bool:
+    """Whether ``device`` (default: the current CUDA device) can run cuDNN QSA: a Blackwell
+    (SM10x) GPU, cudnn-frontend with ``cudnn.ops.qsa_forward`` / ``qsa_backward``, and
+    SKYRL_QWEN4_QSA_CUDNN not set to 0. Context parallelism requires it."""
     global _cudnn_qsa_ops
-    if not (_QSA_CUDNN and query.is_cuda and query.dtype == torch.bfloat16 and compress_ratio == 4):
+    if not (_QSA_CUDNN and torch.cuda.is_available()):
         return False
-    if query.shape[-1] != 256 or value.shape[-1] != 256 or (query.shape[1], key.shape[1]) not in _CUDNN_QSA_HEADS:
-        return False
-    if torch.cuda.get_device_capability(query.device)[0] != 10:
+    if torch.cuda.get_device_capability(device)[0] != 10:
         return False
     if _cudnn_qsa_ops is None:
         try:
@@ -678,6 +678,15 @@ def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio:
                 "falling back to the FlexAttention path."
             )
     return bool(_cudnn_qsa_ops)
+
+
+def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio: int) -> bool:
+    """Whether the cuDNN QSA kernels support these packed q / k / v ([T, heads, d]) on this device."""
+    if not (query.is_cuda and query.dtype == torch.bfloat16 and compress_ratio == 4):
+        return False
+    if query.shape[-1] != 256 or value.shape[-1] != 256 or (query.shape[1], key.shape[1]) not in _CUDNN_QSA_HEADS:
+        return False
+    return cudnn_qsa_supported(query.device)
 
 
 def cudnn_qsa_metadata(selection: QSASelection, num_tokens: int, device) -> tuple:
