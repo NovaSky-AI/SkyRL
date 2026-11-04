@@ -4,23 +4,33 @@ set -x
 # 262,144-token sequences, with context parallelism (TP1 x CP8 x EP16, DP4). Four nodes of 8xB200.
 # Stops after MAX_TRAINING_STEPS.
 #
-#   bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+#   Data: KeyChain long-context multi-hop QA (keychain/make_keychain.py, after LoongRL), ~65.5K-token
+#   prompts, filtered to the ones the base model sometimes but not always answers (~20 min on 4 nodes):
+#   M=/path/to/Qwen3.8-Flash-Next; D=$HOME/data/keychain; K=examples/train/qwen3_8_flash_next/keychain
+#   uv run --isolated --extra megatron python $K/make_keychain.py --model-path $M --out-dir $D
+#   for s in train val; do  # one node; on N nodes run shard i of N per node (--shard i --num-shards N)
+#     uv run --isolated --extra megatron python $K/calibrate_keychain.py --model-path $M --pool $D/pool_$s.parquet --out $D/calib_$s.jsonl
+#     uv run --isolated --extra megatron python $K/filter_keychain.py $D/pool_$s.parquet $D/keychain_64k_${s}_filtered.parquet $D/calib_$s.jsonl
+#   done
 #   export WANDB_API_KEY=<key>
-#   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_dapo_lora_262k_cp8_4node.sh
+#   MODEL_PATH=$M bash examples/train/qwen3_8_flash_next/run_dapo_lora_262k_cp8_4node.sh
 #
-# The stock DAPO prompts are short, so with them this recipe runs the 262K configuration (CP8,
-# 262K vLLM max_model_len, 262K micro-batches) without filling it. To actually exercise 262K, point
-# TRAIN_FILE / TEST_FILE at a dataset of ~255K-token prompts (same schema, e.g. long-document
-# retrieval scored by env_class=aime as "Answer: N"). run_dapo_fullft_262k_cp8_4node.sh is the
-# full-FT variant.
+# Rows set env_class=search and max_turns=1: one answer per prompt, scored by exact match, no retrieval.
+# Measured on 4 x 8 B200 with the defaults (623 train / 108 val prompts, 16 x 8 samples per step):
+# eval pass 0.68 -> 0.85 by step 2; 432-648 s per step, peak 68.4 GB allocated.
+#
+# The context-parallel configuration holds 262K-token sequences (CP8, 262K vLLM max_model_len, 262K
+# micro-batches): rebuild with a larger --tokens for longer prompts, and keep prompt + MAX_RESPONSE_LENGTH
+# within 262,144. run_dapo_fullft_262k_cp8_4node.sh is the full-FT variant.
 #
 # Context parallelism for qwen4_exp covers the QSA attention (split-K cuDNN QSA over CP chunks with an
 # LSE merge), the PLE halo and the QSA indexer's pooled-key all-gather; GDN CP is megatron-core's.
 # If the image puts its own cuDNN on LD_LIBRARY_PATH (e.g. /opt/cudnn), the Ray workers load those
 # sublibraries instead of the pip cuDNN and QSA runs on that older version: drop that entry and set
 # SKYRL_LD_LIBRARY_PATH_EXPORT=1 so the workers get the driver's path.
-# Measured on 4 x 8 B200, ~255K-token prompts: warm RL step ~200 s (generate 46 / logprobs 35 /
-# train 104 / weight sync 10 s), peak 74.2 GB allocated.
+# Measured on 4 x 8 B200 at full length (4 prompts x 4 samples of ~255K tokens, 4,096-token
+# responses): warm RL step ~200 s (generate 46 / logprobs 35 / train 104 / weight sync 10 s),
+# peak 74.2 GB allocated.
 #
 # Everything else matches run_dapo_qwen3_8_flash_next_lora_sync_4node.sh (per-setting reasoning
 # there and in run_gsm8k_qwen3_8_flash_next_lora_4node.sh).
@@ -38,9 +48,9 @@ export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
 export FLA_TILELANG="${FLA_TILELANG:-0}"
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
-DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"
-TRAIN_FILE="${TRAIN_FILE:-$DATA_DIR/dapo-math-17k-cleaned.parquet}"
-TEST_FILE="${TEST_FILE:-$DATA_DIR/aime-2024-cleaned.parquet}"
+DATA_DIR="${DATA_DIR:-$HOME/data/keychain}"
+TRAIN_FILE="${TRAIN_FILE:-$DATA_DIR/keychain_64k_train_filtered.parquet}"
+TEST_FILE="${TEST_FILE:-$DATA_DIR/keychain_64k_val_filtered.parquet}"
 
 NUM_NODES=4
 NUM_GPUS_PER_NODE=8
@@ -48,7 +58,7 @@ NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="${LOGGER:-wandb}"
 
-MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-3}"
+MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-10}"
 
 # Trainer parallelism. CP8 holds one 262K sequence per 8 GPUs (CP chunks are 32K tokens; CP must
 # satisfy TP x CP <= 16, the GDN key-head count). TP is 1 or 2 (TP=2 runs with sequence parallelism). At TP=4 a rank has
@@ -64,20 +74,21 @@ if [ "$MEGATRON_CP" -gt 1 ] && [ -z "$QSA_CUDNN_WHEEL" ]; then
 fi
 
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-257024}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
+# The KeyChain filter was calibrated at 12,288-token responses.
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-12288}"
 INFERENCE_ENGINE_MAX_MODEL_LEN=262144        # prompt + response + chat-template headroom
-OVERLONG_BUFFER_LEN=1024                     # penalty starts at 3072
+OVERLONG_BUFFER_LEN=1024                     # penalty starts 1024 tokens before the cap
 # Half-strength soft overlong penalty. At 1.0, full FT learned to cut its reasoning short: by step 20,
 # held-out AIME accuracy on finished responses fell to 0.86 (0.99 at 0.5) with 33/240 finished-wrong.
 OVERLONG_BUFFER_PENALTY_FACTOR="${OVERLONG_BUFFER_PENALTY_FACTOR:-0.5}"
 
 # dp = 32 / (TP * PP * CP), and (mini_batch * n_samples) % dp == 0.
-# dp = 4 here: 4 prompts x 4 samples = 16 sequences per step, 4 per DP rank, one optimizer step.
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
-MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-4}"
-N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-4}"
-EVAL_N_SAMPLES_PER_PROMPT=1
-EVAL_INTERVAL="${EVAL_INTERVAL:-1000}"
+# dp = 4 here: 16 prompts x 8 samples = 128 sequences per step, 32 per DP rank, one optimizer step.
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
+MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-16}"
+N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
+EVAL_N_SAMPLES_PER_PROMPT=4
+EVAL_INTERVAL="${EVAL_INTERVAL:-2}"
 MAX_TOKENS_PER_MICROBATCH=262144  # must hold one full sequence
 
 # Rollout router replay (R3): vLLM returns the experts each token was routed to and Megatron
@@ -91,7 +102,8 @@ LOSS_REDUCTION="token_mean"
 APPLY_OVERLONG_FILTERING=true
 TEMPERATURE=1.0
 TOP_P=1.0
-EVAL_TOP_P=0.7
+# Eval samples like training: at top_p 0.7 the base model is already near its ceiling on finished answers.
+EVAL_TOP_P=1.0
 # LoRA needs a much larger LR than full FT: at 1e-5 / 3e-5 the per-step update was ~1e-4 nats/token
 # and runs stayed flat; 3e-4 with alpha 32 learns (held-out AIME 0.45 -> 0.85 in 10 steps).
 LR="${LR:-3e-4}"
@@ -160,7 +172,7 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.max_training_steps=$MAX_TRAINING_STEPS \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   trainer.eval_batch_size=128 \
-  trainer.eval_before_train=false \
+  trainer.eval_before_train=true \
   trainer.eval_interval=$EVAL_INTERVAL \
   trainer.ckpt_interval=0 \
   trainer.resume_mode=null \
@@ -171,7 +183,7 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   generator.inference_engine.distributed_executor_backend="mp" \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
-  generator.inference_engine.max_num_seqs=8 \
+  generator.inference_engine.max_num_seqs=32 \
   generator.inference_engine.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
   generator.inference_engine.engine_init_kwargs="$ENGINE_INIT_KWARGS" \
   generator.inference_engine.router_init_kwargs="$ROUTER_INIT_KWARGS" \
@@ -184,7 +196,7 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   generator.batched=true \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
-  environment.env_class=aime \
+  environment.env_class=search \
   trainer.logger="$LOGGER" \
   trainer.project_name="qwen3_8_flash_next_dapo" \
   trainer.run_name="$RUN_NAME" \
