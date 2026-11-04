@@ -240,10 +240,12 @@ class SFTConfig(BaseConfig):
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
     log_mfu: bool = True
-    """Log model FLOPs utilization each step (``train/mfu``, ``train/mfu_e2e``,
-    ``train/model_tflops_per_gpu``, ``train/flops_per_token``, and ``train/hfu_est`` under full
-    activation recompute). Megatron only; not logged for LoRA or with active MTP heads, and the
-    utilization ratios are not logged for FP8 training or on GPUs without a known peak."""
+    """Log model FLOPs utilization (MFU) metrics each step.
+
+    Logs ``train/mfu``, ``train/mfu_e2e``, ``train/model_tflops_per_gpu``, ``train/flops_per_token``
+    and, under full activation recompute, ``train/hfu_est``. Megatron only; not logged for LoRA or
+    with active MTP heads, and the utilization ratios are not logged for FP8 training or on GPUs
+    without a known peak."""
     max_ckpts_to_keep: int = -1
     """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir

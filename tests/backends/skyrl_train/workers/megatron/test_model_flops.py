@@ -337,14 +337,17 @@ def test_worker_skips_unsupported_models(extra_fields, unsupported):
     assert (result is None) == unsupported
 
 
-def test_drop_kda_layers_beyond_num_layers():
-    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-        _drop_kda_layers_beyond,
-    )
+def test_model_flops_ignores_kda_layers_past_num_layers():
+    # A num_layers override can leave the full 45-layer checkpoint's KDA layer numbers on a
+    # shortened provider; only the layers the model has are costed.
+    import copy
 
-    provider = SimpleNamespace(num_layers=4, kimi_kda_layers=(1, 2, 3, 5, 6, 7))
-    _drop_kda_layers_beyond(provider)
-    assert provider.kimi_kda_layers == (1, 2, 3)
+    layer_types, mlp_types = GLM_VARIANTS["mixed"]
+    provider = _glm_provider(layer_types, mlp_types)
+    shortened = copy.copy(provider)
+    shortened.kimi_kda_layers = provider.kimi_kda_layers + tuple(range(len(layer_types) + 1, 46))
+    stats = dict(num_seqs=1, seqlen_sum=32768, seqlen_squared_sum=32768**2)
+    assert model_flops(shortened, **stats) == model_flops(provider, **stats)
 
 
 def test_policy_train_calls_are_timed():

@@ -468,7 +468,6 @@ class MegatronWorker:
                 f"{provider.num_layers} entries to match the configured num_layers"
             )
             provider.linear_attention_freq = linear_attention_freq[: provider.num_layers]
-        _drop_kda_layers_beyond(provider)
 
         # Check the resolved provider because it may supply its own VPP default. Interleaved
         # chunks desynchronise each RouterReplay instance's backward FIFO.
@@ -1012,13 +1011,6 @@ class MegatronWorker:
         """
         if mpu.get_pipeline_model_parallel_rank() != 0 and data.get("pixel_values") is not None:
             data["pixel_values"] = None
-
-
-def _drop_kda_layers_beyond(provider: Any) -> None:
-    """Drops ``kimi_kda_layers`` entries past ``num_layers``, which the FLOPs formula rejects."""
-    kda_layers = getattr(provider, "kimi_kda_layers", None)
-    if kda_layers and provider.num_layers is not None:
-        provider.kimi_kda_layers = tuple(n for n in kda_layers if n <= provider.num_layers)
 
 
 def _counts_train_compute(method):

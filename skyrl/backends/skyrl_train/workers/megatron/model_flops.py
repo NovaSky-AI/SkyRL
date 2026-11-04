@@ -9,8 +9,14 @@ transformers. Two SkyRL-side adjustments on top:
 - HFU: under full activation recompute, every recomputed decoder layer runs its forward again.
 """
 
+import copy
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+
+def _kda_layers_within_num_layers(provider: Any) -> Tuple[int, ...]:
+    """Returns the ``kimi_kda_layers`` entries that are within ``provider.num_layers``."""
+    return tuple(n for n in (getattr(provider, "kimi_kda_layers", None) or ()) if n <= provider.num_layers)
 
 
 def _indexer_layer_count(provider: Any, layer_count: int) -> int:
@@ -40,7 +46,7 @@ def kpool_indexer_overcount(provider: Any, seqlen_sum: int, seqlen_squared_sum: 
     num_layers = provider.num_layers
     num_indexer_layers = _indexer_layer_count(provider, num_layers)
     # Bridge's KDA branch keeps only the DSA layers' share of the attention term.
-    kda_layers = getattr(provider, "kimi_kda_layers", None)
+    kda_layers = _kda_layers_within_num_layers(provider)
     share = (num_layers - len(set(kda_layers))) / num_layers if kda_layers else 1.0
 
     core_attn_seq_factor = seqlen_squared_sum / seqlen_sum
@@ -119,6 +125,12 @@ def model_flops(provider: Any, num_seqs: int, seqlen_sum: int, seqlen_squared_su
     """
     if num_seqs <= 0 or seqlen_sum <= 0:
         return None
+    # A ``num_layers`` override shortens the model but can leave the full checkpoint's KDA layer
+    # numbers in ``kimi_kda_layers``; cost only the layers the model has.
+    kda_layers = _kda_layers_within_num_layers(provider)
+    if kda_layers != tuple(getattr(provider, "kimi_kda_layers", None) or ()):
+        provider = copy.copy(provider)
+        provider.kimi_kda_layers = kda_layers
     from megatron.bridge.training.utils.flop_utils import (
         num_floating_point_operations,
     )
