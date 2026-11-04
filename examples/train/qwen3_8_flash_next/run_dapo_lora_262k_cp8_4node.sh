@@ -31,8 +31,8 @@ export FLA_TILELANG="${FLA_TILELANG:-0}"
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"
-TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
-TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
+TRAIN_FILE="${TRAIN_FILE:-$DATA_DIR/dapo-math-17k-cleaned.parquet}"
+TEST_FILE="${TEST_FILE:-$DATA_DIR/aime-2024-cleaned.parquet}"
 
 NUM_NODES=4
 NUM_GPUS_PER_NODE=8
@@ -50,6 +50,10 @@ MEGATRON_PP="${MEGATRON_PP:-1}"
 MEGATRON_CP="${MEGATRON_CP:-8}"
 MEGATRON_EP="${MEGATRON_EP:-16}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
+if [ "$MEGATRON_CP" -gt 1 ] && [ -z "$QSA_CUDNN_WHEEL" ]; then
+  echo "QSA_CUDNN_WHEEL must point at the cudnn-frontend wheel when MEGATRON_CP > 1 (split-K cuDNN QSA)." >&2
+  exit 1
+fi
 
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-257024}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
