@@ -746,15 +746,27 @@ class _CudnnQSA(torch.autograd.Function):
 
 
 class _CPPairs:
-    """The split-K schedule of ``qsa_sparse_attention`` under context parallelism.
+    """Which cuDNN QSA calls one CP rank makes, and the selection metadata of each.
 
-    CP rank ``r`` holds, of every packed sequence ``i`` (``h_i`` tokens per chunk), the query
-    chunks ``r`` and ``2 * cp - 1 - r`` ("halves" 0 and 1, rows stacked over sequences:
-    ``H = sum_i h_i`` rows each). Key chunk ``j`` of every sequence, stacked the same way, is
-    also ``H`` rows, so each (half, key chunk ``j <= `` the half's chunk) pair is one cuDNN QSA
-    call with equal q / k lengths (the kernels require it); the pairs are merged by log-sum-exp.
-    Chunks hold whole 4-token blocks, so a query's incomplete tail block only occurs on the
-    diagonal pair.
+    Under CP every packed sequence is cut into ``2 * cp`` equal chunks, and rank ``r`` owns chunks
+    ``r`` and ``2 * cp - 1 - r``: the zigzag split, which evens out causal work. A query in chunk
+    ``c`` can only see keys in chunks ``0..c``.
+
+    The cuDNN QSA kernels need as many key rows as query rows, so the rank's attention runs as
+    one call per (query chunk, key chunk) pair:
+
+    - Half 0 is the rank's first chunk (``r``) of every sequence, stacked into ``H`` rows
+      (``H`` = the sum of the sequences' chunk sizes). Half 1 is its second chunk
+      (``2 * cp - 1 - r``), stacked the same way.
+    - Key chunk ``j`` is chunk ``j`` of every sequence, also stacked into ``H`` rows.
+    - Each half runs against key chunks ``j = 0..c``, where ``c`` is the half's chunk index.
+      For ``j < c`` every key is causally visible and only the QSA block selection applies.
+      ``j == c`` is the diagonal call, the only one where the causal mask and a query's
+      incomplete tail block matter (chunks hold whole 4-token blocks).
+
+    Example, cp = 2 (chunks 0..3): rank 0 owns chunks 0 and 3 and makes 1 + 4 calls; rank 1
+    owns chunks 1 and 2 and makes 2 + 3. Every rank makes ``2 * cp + 1`` calls.
+    ``_CudnnQSAContextParallel`` merges the calls of each half by log-sum-exp.
     """
 
     def __init__(self, selection: "QSASelection", device):
