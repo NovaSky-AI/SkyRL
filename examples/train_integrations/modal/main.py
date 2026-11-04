@@ -5,7 +5,8 @@ from pathlib import Path
 # Read at import time both locally and inside the container. `create_modal_image` copies them into the image
 # env so the container rebuilds the same function definitions (`@modal.clustered` size, GPU, timeout).
 NUM_NODES = int(os.environ.get("MODAL_NUM_NODES", "1"))
-GPU = os.environ.get("MODAL_GPU", "L4:1")
+# MODAL_GPU=none runs CPU-only containers (e.g. checkpoint conversion).
+GPU = None if os.environ.get("MODAL_GPU", "L4:1").lower() in ("", "none") else os.environ.get("MODAL_GPU", "L4:1")
 TIMEOUT = int(os.environ.get("MODAL_TIMEOUT", "3600"))
 # Container memory request in MiB (Modal's default for a full GPU node can be too small for CPU optimizer offload).
 MEMORY = int(os.environ["MODAL_MEMORY"]) if os.environ.get("MODAL_MEMORY") else None
@@ -62,7 +63,7 @@ def create_modal_image() -> modal.Image:
     envs = {
         "SKYRL_REPO_ROOT": "/root/SkyRL",  # where to put SkyRL in container
         "MODAL_NUM_NODES": str(NUM_NODES),
-        "MODAL_GPU": GPU,
+        "MODAL_GPU": GPU or "none",
         "MODAL_TIMEOUT": str(TIMEOUT),
         "MODAL_MEMORY": str(MEMORY or ""),
         "MODAL_CPU": str(CPU or ""),
