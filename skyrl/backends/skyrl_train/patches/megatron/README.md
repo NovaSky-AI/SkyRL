@@ -398,21 +398,25 @@ Mean |logprob diff| over the response tokens, as the tests print them. Compare a
 newest column on the same GPU type and add a column for it. A column changes one pin at a time
 where possible, so a shift can be pinned on Megatron or on vLLM.
 
-| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump | bump rebased on 7d4b02fe |
-|---|---|---|---|---|
-| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b |
-| vLLM | not recorded | 0.32.0 | 0.32.0 | 0.32.0 |
-| GPU | not recorded | 4x B200 | 4x B200 | 4x B200 |
-| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 | 0.0654 |
-| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 | 0.1338 |
-| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 | 0.0583 |
-| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 | 0.2835 |
-| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 | 0.0650 |
-| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 | 0.1532 |
-| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 | 0.0661 |
+| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump | bump rebased on 7d4b02fe | vLLM 0.33 bump (#2604) |
+|---|---|---|---|---|---|
+| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b |
+| vLLM | not recorded | 0.32.0 | 0.32.0 | 0.32.0 | 0.33.0 |
+| GPU | not recorded | 4x B200 | 4x B200 | 4x B200 | 4x H100 |
+| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 | 0.0654 | 0.0650 |
+| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 | 0.1338 | 0.1295 |
+| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 | 0.0583 | 0.0541 |
+| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 | 0.2835 | 0.2897 |
+| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 | 0.0650 | 0.0659 |
+| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 | 0.1532 | 0.1583 |
+| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 | 0.0661 | 0.0651 |
 
 Two values in a cell are two runs. The megatron bump sits about 0.008 above main on `tp2_ep4`
 (reproduced, not investigated, well inside 0.1); the same pins with vLLM 0.31.0 gave 0.0630 there.
 Rebased onto main 7d4b02fe the same row gave 0.0654. That run also passed the rows that landed on main
 after the bump was cut: Qwen3.8-Flash-Next (Megatron vs vLLM 0.0487 / 0.0518, adapter rows 0.050-0.057)
 and `kimi-k2.5-2layer-int4-qat` (0.0264).
+
+The vLLM 0.33 column is the first on H100, so it has no same-GPU column to compare against yet; its
+values sit within 0.006 of the newest B200 column (`bump rebased on 7d4b02fe`) on every row. A B200 column for vLLM 0.33 is still to be
+recorded.
