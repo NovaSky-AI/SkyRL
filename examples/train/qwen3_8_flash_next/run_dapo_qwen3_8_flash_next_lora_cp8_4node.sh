@@ -40,8 +40,8 @@ export FLA_TILELANG="${FLA_TILELANG:-0}"
 
 MODEL_PATH="${MODEL_PATH:-/mnt/local_storage/Qwen3.8-Flash-Next}"
 DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"
-TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
-TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
+TRAIN_FILE="${TRAIN_FILE:-$DATA_DIR/dapo-math-17k-cleaned.parquet}"
+TEST_FILE="${TEST_FILE:-$DATA_DIR/aime-2024-cleaned.parquet}"
 
 NUM_NODES=4
 NUM_GPUS_PER_NODE=8
