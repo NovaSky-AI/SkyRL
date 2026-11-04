@@ -116,8 +116,6 @@ def apply_opd_to_advantages(
     signal = -reverse_kl
     divergence_clipped = torch.zeros_like(mask)
     if opd.divergence_clip is not None:
-        # OPSD's min(l, tau) on the pointwise reverse KL l = p log(p / q): past the ceiling a token has no
-        # gradient, so it carries no teacher signal.
         divergence_clipped = mask & (action_log_probs.exp() * reverse_kl > opd.divergence_clip)
         signal = torch.where(divergence_clipped, torch.zeros_like(signal), signal)
     advantage_clipped = torch.zeros_like(mask)
