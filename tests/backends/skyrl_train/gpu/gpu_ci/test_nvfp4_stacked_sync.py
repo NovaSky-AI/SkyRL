@@ -166,7 +166,7 @@ def test_stacked_sync_matches_per_expert_bitwise(tmp_path, tp, ep):
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"  # collective_rpc with a callable
     model_dir = str(tmp_path / "tiny_qwen3_moe")
     _write_tiny_qwen3_moe(model_dir)
-    overrides = get_nvfp4_vllm_engine_overrides(NUM_LAYERS, 0)
+    overrides = get_nvfp4_vllm_engine_overrides()
     llm = LLM(
         model=model_dir,
         skip_tokenizer_init=True,
