@@ -1,9 +1,9 @@
-"""GPU coverage for the support logit term (TT-OPD's top-K term) on the Megatron backend.
+"""GPU coverage for the support logprob term (TT-OPD's top-K term) on the Megatron backend.
 
 Run with::
 
     uv run --isolated --extra dev --extra megatron pytest -s -vvv \
-        tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_support_logit_term.py
+        tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_support_logprob_term.py
 """
 
 import math
@@ -14,7 +14,7 @@ import torch
 
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.packed_tensor import cu_seqlens_from_lengths
-from skyrl.backends.skyrl_train.utils.sample_support_replay import support_logit_term
+from skyrl.backends.skyrl_train.utils.sample_support_replay import support_logprob_term
 from skyrl.backends.skyrl_train.workers.megatron import (
     megatron_worker as megatron_worker_module,
 )
@@ -24,7 +24,7 @@ from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.score_centering_utils import MODEL_NAME
-from tests.backends.skyrl_train.gpu.support_logit_term_utils import (
+from tests.backends.skyrl_train.gpu.support_logprob_term_utils import (
     expected_support_loss,
     weighted_training_batch,
 )
@@ -77,7 +77,7 @@ def _train_step_metrics(cfg: SkyRLTrainConfig) -> dict:
 
 
 class _SupportTermTPProbeWorker(MegatronPolicyWorkerBase):
-    """Exposes a TP=2 support-logit-term probe without production instrumentation."""
+    """Exposes a TP=2 support-logprob-term probe without production instrumentation."""
 
     def probe_tp2_term_matches_unsharded(self) -> dict:
         """Compare the TP=2 term and its logit gradient with the unsharded calculation."""
@@ -100,8 +100,7 @@ class _SupportTermTPProbeWorker(MegatronPolicyWorkerBase):
         support_ids = torch.stack(
             (sampled_ids, (sampled_ids + total_vocab_size // 2) % total_vocab_size, sampled_ids), dim=-1
         )
-        candidate_weights = torch.randn(2, 3, 2, generator=generator).to(device)
-        weights = torch.cat([-candidate_weights.sum(-1, keepdim=True), candidate_weights], dim=-1)
+        weights = torch.randn(2, 3, 3, generator=generator).to(device)
         support = PackedRaggedTensor(
             [
                 support_ids.reshape(-1).to(torch.int32),
@@ -114,7 +113,7 @@ class _SupportTermTPProbeWorker(MegatronPolicyWorkerBase):
         row_ids = torch.arange(sampled_ids.numel(), device=device).reshape(sampled_ids.shape)
 
         def term(logits, *, vocab_start_index, vocab_end_index, group):
-            values = support_logit_term(
+            values = support_logprob_term(
                 logits,
                 sampled_ids,
                 support,
@@ -123,7 +122,7 @@ class _SupportTermTPProbeWorker(MegatronPolicyWorkerBase):
                 vocab_end_index=vocab_end_index,
                 tp_group=group,
             )
-            values.sum().backward()
+            values.anchored.sum().backward()
             return values
 
         vocab_start = tp_rank * local_vocab_size
@@ -138,12 +137,15 @@ class _SupportTermTPProbeWorker(MegatronPolicyWorkerBase):
         unsharded = term(unsharded_logits, vocab_start_index=0, vocab_end_index=total_vocab_size, group=None)
         return {
             "rank": tp_rank,
-            "term_diff": (sharded.detach() - unsharded.detach()).abs().max().item(),
+            "term_diff": max(
+                (sharded.anchored.detach() - unsharded.anchored.detach()).abs().max().item(),
+                (sharded.weight_sum - unsharded.weight_sum).abs().max().item(),
+            ),
             "grad_diff": (local_logits.grad - unsharded_logits.grad[..., vocab_start : vocab_start + local_vocab_size])
             .abs()
             .max()
             .item(),
-            "term_abs_max": unsharded.abs().max().item(),
+            "term_abs_max": unsharded.anchored.abs().max().item(),
         }
 
 
@@ -151,7 +153,7 @@ _SupportTermTPProbeWorkerRemote = ray.remote(num_gpus=1)(_SupportTermTPProbeWork
 
 
 @pytest.mark.megatron
-def test_support_logit_term_tp2_matches_unsharded(ray_init_fixture):
+def test_support_logprob_term_tp2_matches_unsharded(ray_init_fixture):
     cfg = _support_term_cfg(tensor_parallel_size=2, context_parallel_size=1, packed=False)
     original_worker = megatron_worker_module.PolicyWorker
     megatron_worker_module.PolicyWorker = _SupportTermTPProbeWorkerRemote
@@ -185,7 +187,7 @@ LAYOUTS = [
 
 @pytest.mark.megatron
 @pytest.mark.parametrize("layout", LAYOUTS)
-def test_support_logit_term_trains_identically_across_parallel_layouts(ray_init_fixture, layout):
+def test_support_logprob_term_trains_identically_across_parallel_layouts(ray_init_fixture, layout):
     reference = _train_step_metrics(_support_term_cfg(tensor_parallel_size=1, context_parallel_size=1, packed=False))
     # Release the reference actors' GPUs before placing the sharded layout.
     ray.shutdown()

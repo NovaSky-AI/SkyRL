@@ -77,7 +77,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
-    compute_support_logit_term,
+    compute_support_logprob_term,
     reject_unsupported_sample_support_packing,
     score_centering_loss_inputs,
     score_centering_metrics,
@@ -957,8 +957,9 @@ class MegatronModelWrapper:
             )
             weighted_support = data.get(SAMPLE_SUPPORT_FIELD)
             if packed_member_values(weighted_support) is not None:
-                # The member values are pre-scaled like the advantages, so this sums like the policy loss.
-                logit_term = compute_support_logit_term(
+                # The member values are pre-scaled like the advantages, so this sums like the policy loss. It
+                # takes the current logprob of each sampled token and no importance ratio.
+                support_term = compute_support_logprob_term(
                     logits,
                     sequences,
                     weighted_support,
@@ -971,7 +972,7 @@ class MegatronModelWrapper:
                     temperature=temperature,
                     chunk_size=self.cfg.logprobs_chunk_size,
                 )
-                support_loss = -(logit_term[:, action_positions] * loss_mask).sum()
+                support_loss = -(support_term.value(action_positions, action_log_probs) * loss_mask).sum()
                 policy_loss = policy_loss + support_loss
                 loss_metrics = {**loss_metrics, "topk_policy_loss": support_loss.item()}
 
@@ -1234,7 +1235,7 @@ class MegatronModelWrapper:
             sub_seq_lengths_field = batch.get("sub_seq_lengths")
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
-            # Support whose rows carry member values feeds the loss's logit term, which needs the same layout.
+            # Support whose rows carry member values feeds the loss's support term, which needs the same layout.
             sample_support = _microbatch_sample_support(
                 batch,
                 sub_seq_lengths,

@@ -1,8 +1,8 @@
-"""Training batches for the support-logit-term GPU tests, shared by the FSDP and Megatron suites.
+"""Training batches for the support-logprob-term GPU tests, shared by the FSDP and Megatron suites.
 
 The support rows are the score-centering rows (the selected token, its strongest competitor, and the strongest
-token in the other TP=2 vocabulary half) with a member-value column, as TT-OPD's trainer writes it: slot 0 gets
-minus the candidates' weights, so every row sums to 0.
+token in the other TP=2 vocabulary half) with a member-value column, as TT-OPD's trainer writes it: the selected
+token's slot gets 0 and the two candidates their weights.
 """
 
 import functools
@@ -25,11 +25,9 @@ from tests.backends.skyrl_train.gpu.score_centering_utils import (
 
 
 def _member_weights(num_rows: int, num_tokens: int) -> np.ndarray:
-    """``[rows, 3]`` weights ``[-(c_1 + c_2), c_1, c_2]``, pre-scaled by the batch's token count (token_mean)."""
+    """``[rows, 3]`` weights ``[0, c_1, c_2]``, pre-scaled by the batch's token count (token_mean)."""
     candidates = np.stack([np.linspace(0.4, -0.3, num_rows), np.linspace(-0.2, 0.5, num_rows)], axis=1)
-    return (np.concatenate([-candidates.sum(axis=1, keepdims=True), candidates], axis=1) / num_tokens).astype(
-        np.float32
-    )
+    return (np.concatenate([np.zeros((num_rows, 1)), candidates], axis=1) / num_tokens).astype(np.float32)
 
 
 def _weighted_rows():
@@ -41,16 +39,16 @@ def _weighted_rows():
 
 @functools.cache
 def expected_support_loss() -> float:
-    """``-sum_t sum_v w_v l_v`` over every response token, from a float32 forward of the model."""
+    """``-sum_t sum_v w_v log pi(v)`` over every response token, from a float32 forward of the model."""
     prompt_ids, responses, support_ids, _, weights = _weighted_rows()
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.float32).eval()
     total = 0.0
     for prompt, response, ids, values in zip(prompt_ids, responses, support_ids, weights):
         with torch.no_grad():
-            logits = model(torch.tensor([prompt + response])).logits[0, len(prompt) - 1 : -1]
-        total -= float(
-            (torch.from_numpy(values).double() * logits.double().gather(1, torch.from_numpy(ids).long())).sum()
-        )
+            log_probs = (
+                model(torch.tensor([prompt + response])).logits[0, len(prompt) - 1 : -1].double().log_softmax(-1)
+            )
+        total -= float((torch.from_numpy(values).double() * log_probs.gather(1, torch.from_numpy(ids).long())).sum())
     return total
 
 

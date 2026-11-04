@@ -51,7 +51,7 @@ from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
     SCORE_CENTERING_SCORES_KEY,
-    SUPPORT_LOGIT_TERM_KEY,
+    SUPPORT_LOGPROB_TERM_KEY,
     packed_member_values,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
@@ -1122,7 +1122,7 @@ class PolicyWorkerBase(Worker):
         response_mask = experience.response_mask
         rollout_action_logprobs = experience.rollout_logprobs
         sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
-        # Support whose rows carry member values adds sum_v w_v l_v per token to the loss.
+        # Support whose rows carry member values adds sum_v w_v log pi(v) per token to the loss.
         weighted_support = (
             experience.rollout_sample_support
             if packed_member_values(experience.rollout_sample_support) is not None
@@ -1195,8 +1195,10 @@ class PolicyWorkerBase(Worker):
                 **score_centering_kwargs,
             )
             if weighted_support is not None:
-                # The member values are pre-scaled like the advantages, so this sums like the policy loss.
-                support_loss = -(output[SUPPORT_LOGIT_TERM_KEY][:, action_positions] * loss_mask).sum()
+                # The member values are pre-scaled like the advantages, so this sums like the policy loss. It
+                # takes the current logprob of each sampled token and no importance ratio.
+                support_term = output[SUPPORT_LOGPROB_TERM_KEY].value(action_positions, action_log_probs)
+                support_loss = -(support_term * loss_mask).sum()
                 policy_loss = policy_loss + support_loss
                 loss_metrics = {**loss_metrics, "topk_policy_loss": support_loss.item()}
 

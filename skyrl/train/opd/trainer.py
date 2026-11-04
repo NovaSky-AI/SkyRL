@@ -11,9 +11,9 @@
   next to the correctness flags.
 - ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)`` on trainable
   tokens, after the configured advantage estimator and regulated by the ``opd`` stabilization settings, and logs
-  the teacher's informativeness. With ``opd.top_k > 0`` it adds TT-OPD's top-K term: each position's ``C`` on the
-  sampled token's advantage, and the candidates' logit weights in the support's member-value column.
-- ``_normalize_advantages`` gives those logit weights the per-token loss-reduction scale the advantages get.
+  the teacher's informativeness. With ``opd.top_k > 0`` it writes TT-OPD's top-K term into the support's
+  member-value column, as each candidate's weight, and leaves the sampled token only the tail of the estimator.
+- ``_normalize_advantages`` gives those weights the per-token loss-reduction scale the advantages get.
 """
 
 import asyncio
@@ -197,7 +197,6 @@ class OPDTrainer(RayPPOTrainer):
             loss_mask=data["loss_mask"],
             opd=opd,
             sampled_in_topk=None if topk is None else topk.sampled_in_topk,
-            topk_weight_sum=None if topk is None else topk.token_weights,
         )
         value = informativeness(
             teacher_logprobs - action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR),
@@ -208,7 +207,7 @@ class OPDTrainer(RayPPOTrainer):
             metrics["opd/informativeness"] = value
         data["advantages"] = advantages
         if topk is not None:
-            # From here on the member values are logit weights, not teacher logprobs.
+            # From here on the member values are the worker's weights, not teacher logprobs.
             data[SAMPLE_SUPPORT_FIELD] = with_member_values(data[SAMPLE_SUPPORT_FIELD], topk.member_weights)
             metrics.update(topk_metrics(topk, data["loss_mask"]))
         self.all_metrics.update(metrics)
@@ -221,9 +220,9 @@ class OPDTrainer(RayPPOTrainer):
         mini_batch_boundaries: List[Tuple[int, int]],
         prompt_boundaries: Optional[List[Tuple[int, int]]] = None,
     ) -> TrainingInputBatch:
-        """With ``opd.top_k > 0``, also scale each logit weight by its token's loss-reduction scale.
+        """With ``opd.top_k > 0``, also scale each member weight by its token's loss-reduction scale.
 
-        The worker sums the logit term like the policy loss, so the weights need the factor the reduction applies to
+        The worker sums the top-K term like the policy loss, so the weights need the factor the reduction applies to
         each token's advantage: the reduction of a tensor of ones. That factor is the advantages' whole normalization,
         since every reduction is linear and OPD refuses ``advantage_batch_normalize``.
         """

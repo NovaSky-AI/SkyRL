@@ -16,6 +16,7 @@ from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import (
     packed_ragged_padding_segments,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import SampleSupportColumn
+from skyrl.backends.skyrl_train.utils.sample_support_replay import support_logprob_term
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.opd.config import OPDConfig
 from skyrl.train.opd.utils import (
@@ -67,7 +68,6 @@ def _advantages(
         loss_mask,
         opd,
         sampled_in_topk=topk.sampled_in_topk,
-        topk_weight_sum=topk.token_weights,
     )
     return advantages, topk, metrics
 
@@ -81,6 +81,9 @@ EXAMPLE_P = np.log(np.array([0.5, 0.3, 0.15, 0.05], dtype=np.float32))
 EXAMPLE_Q = np.log(np.array([0.6, 0.2, 0.1, 0.1], dtype=np.float32))
 C_A = 0.5 * math.log(0.6 / 0.5)
 C_B = 0.3 * math.log(0.2 / 0.3)
+# Weights are float32, computed from float32 logprobs; float64 references agree to about this, and a relative bound
+# fails where a sum cancels (CPU math libraries round differently).
+FLOAT32_ATOL = 1e-6
 
 
 def test_worked_example_sampled_token_outside_the_top_k():
@@ -88,11 +91,12 @@ def test_worked_example_sampled_token_outside_the_top_k():
 
     advantages, topk, _ = _advantages(support, torch.tensor([[2]]), EXAMPLE_P, EXAMPLE_Q, OPDConfig())
 
-    np.testing.assert_allclose(topk.member_weights.numpy(), [-(C_A + C_B), C_A, C_B], rtol=1e-6)
+    # Rows are [c, a, b]: the sampled token's slot only anchors the worker's logits.
+    np.testing.assert_allclose(topk.member_weights.numpy(), [0.0, C_A, C_B], rtol=0, atol=FLOAT32_ATOL)
+    assert topk.token_weights.item() == pytest.approx(C_A + C_B, abs=FLOAT32_ATOL)
     assert topk.sampled_in_topk.tolist() == [[False]]
-    # A(c) + C = log(0.1 / 0.15) + C
-    assert advantages.item() == pytest.approx(math.log(0.1 / 0.15) + C_A + C_B, rel=1e-6)
-    assert advantages.item() == pytest.approx(-0.4359, abs=1e-4)
+    # Only the tail term reaches the advantage: A(c) = log(0.1 / 0.15).
+    assert advantages.item() == pytest.approx(math.log(0.1 / 0.15), abs=FLOAT32_ATOL)
 
 
 def test_worked_example_sampled_token_inside_the_top_k():
@@ -100,35 +104,55 @@ def test_worked_example_sampled_token_inside_the_top_k():
 
     advantages, topk, _ = _advantages(support, torch.tensor([[0]]), EXAMPLE_P, EXAMPLE_Q, OPDConfig())
 
-    # The row weights do not depend on which token was sampled; A(a) arrives through c_a, not the tail.
-    np.testing.assert_allclose(topk.member_weights.numpy(), [-(C_A + C_B), C_A, C_B], rtol=1e-6)
+    # Rows are [a, a, b]; A(a) arrives through c_a, so the sampled token has no tail term.
+    np.testing.assert_allclose(topk.member_weights.numpy(), [0.0, C_A, C_B], rtol=0, atol=FLOAT32_ATOL)
     assert topk.sampled_in_topk.tolist() == [[True]]
-    assert advantages.item() == pytest.approx(C_A + C_B, rel=1e-6)
+    assert advantages.item() == 0.0
 
 
 # ---------------------------------------------------------------------------
-# Unbiasedness, by exact enumeration of the sampled token
+# The estimator, through the worker's objective
 # ---------------------------------------------------------------------------
 
 
-def _split_gradient(
-    logits: torch.Tensor, y: int, advantage: float, support: Optional[PackedRaggedTensor] = None
+def _worker_gradient(
+    logits: torch.Tensor,
+    y: int,
+    advantage: float,
+    weighted: Optional[PackedRaggedTensor] = None,
+    ratio: float = 1.0,
 ) -> torch.Tensor:
-    """The gradient the policy loss plus the logit term ascend at one position: A·log p(y) + sum_v w_v l_v."""
+    """The gradient the worker ascends at one position: the importance-weighted advantage on y, plus
+    ``sum_v w_v log p(v)`` from ``support_logprob_term`` at the current logits, with no ratio."""
     logits = logits.detach().clone().requires_grad_(True)
-    objective = advantage * torch.log_softmax(logits, dim=-1)[y]
-    if support is not None:
-        ids = support.columns[SampleSupportColumn.TOKEN_IDS].long()
-        weights = support.columns[SampleSupportColumn.MEMBER_VALUES].to(logits.dtype)
-        objective = objective + (weights * logits[ids]).sum()
+    log_p = torch.log_softmax(logits, dim=-1)
+    objective = ratio * advantage * log_p[y]
+    if weighted is not None:
+        term = support_logprob_term(
+            logits.view(1, 1, -1),
+            torch.tensor([[y]]),
+            weighted,
+            torch.zeros(1, 1, dtype=torch.long),
+            vocab_start_index=0,
+            vocab_end_index=logits.shape[-1],
+            tp_group=None,
+        )
+        objective = objective + term.value(slice(None), log_p[y].view(1, 1)).sum()
     (gradient,) = torch.autograd.grad(objective, logits)
     return gradient
 
 
+def _weighted_position(y: int, top: list, log_p: np.ndarray, log_q: np.ndarray):
+    """One position's advantage and weighted support, as the trainer hands them to the worker."""
+    support = _scored_support([{"response": [y], "candidates": [top]}], log_p, log_q)
+    advantages, topk, _ = _advantages(support, torch.tensor([[y]]), log_p, log_q, OPDConfig())
+    return advantages.item(), with_member_values(support, topk.member_weights)
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2])
 @pytest.mark.parametrize("top_k", [0, 2, 4])
-def test_the_split_estimator_is_unbiased_for_the_reverse_kl_gradient(seed, top_k):
-    """Weighted by p(y) over every y, the split form's gradient is -grad KL(p || q) on the logits.
+def test_the_estimator_is_unbiased_for_the_reverse_kl_gradient(seed, top_k):
+    """Weighted by p(y) over every y, the worker's gradient is -grad KL(p || q) on the logits.
 
     Covers a sampled token inside and outside S; top_k=0 is sampled-token OPD.
     """
@@ -143,9 +167,7 @@ def test_the_split_estimator_is_unbiased_for_the_reverse_kl_gradient(seed, top_k
     expected_gradient = torch.zeros(vocab, dtype=torch.float64)
     for y in range(vocab):
         if top_k:
-            support = _scored_support([{"response": [y], "candidates": [top]}], log_p, log_q)
-            advantages, topk, _ = _advantages(support, torch.tensor([[y]]), log_p, log_q, OPDConfig())
-            weighted = with_member_values(support, topk.member_weights)
+            advantage, weighted = _weighted_position(y, top, log_p, log_q)
         else:
             advantages, _ = apply_opd_to_advantages(
                 torch.zeros(1, 1),
@@ -154,8 +176,8 @@ def test_the_split_estimator_is_unbiased_for_the_reverse_kl_gradient(seed, top_k
                 torch.ones(1, 1),
                 OPDConfig(),
             )
-            weighted = None
-        expected_gradient += math.exp(log_p[y]) * _split_gradient(logits, y, advantages.item(), weighted)
+            advantage, weighted = advantages.item(), None
+        expected_gradient += math.exp(log_p[y]) * _worker_gradient(logits, y, advantage, weighted)
 
     reference = logits.detach().clone().requires_grad_(True)
     log_p_reference = torch.log_softmax(reference, dim=-1)
@@ -164,9 +186,19 @@ def test_the_split_estimator_is_unbiased_for_the_reverse_kl_gradient(seed, top_k
     torch.testing.assert_close(expected_gradient, -kl_gradient, atol=2e-6, rtol=0)
 
 
-def test_the_split_form_equals_the_direct_gradient_of_eq_15():
-    """For every sampled y, A·log p(y) + sum_v w_v l_v has the gradient of
-    sum_{v in S} c_v log p(v) + 1{y not in S} A(y) log p(y)."""
+def _eq_15_gradient(logits, y, top, coefficients, tail, ratio=1.0):
+    """The gradient of Eq. 15 with frozen coefficients: sum_{v in S} c_v log p(v), plus the tail term with y's
+    importance ratio."""
+    logits = logits.detach().clone().requires_grad_(True)
+    log_probs = torch.log_softmax(logits, dim=-1)
+    objective = sum(coefficients[v] * log_probs[v] for v in top)
+    if y not in top:
+        objective = objective + ratio * tail[y] * log_probs[y]
+    (gradient,) = torch.autograd.grad(objective, logits)
+    return gradient
+
+
+def test_the_worker_objective_has_the_gradient_of_eq_15():
     generator = torch.Generator().manual_seed(3)
     vocab, top_k = 6, 3
     logits = torch.randn(vocab, dtype=torch.float64, generator=generator)
@@ -174,19 +206,45 @@ def test_the_split_form_equals_the_direct_gradient_of_eq_15():
     log_q = torch.log_softmax(torch.randn(vocab, generator=generator), dim=-1).numpy()
     top = np.argsort(-log_p)[:top_k].tolist()
     coefficients = {v: math.exp(log_p[v]) * (log_q[v] - log_p[v]) for v in top}
+    tail = log_q - log_p
 
     for y in range(vocab):
-        support = _scored_support([{"response": [y], "candidates": [top]}], log_p, log_q)
-        advantages, topk, _ = _advantages(support, torch.tensor([[y]]), log_p, log_q, OPDConfig())
-        split = _split_gradient(logits, y, advantages.item(), with_member_values(support, topk.member_weights))
+        advantage, weighted = _weighted_position(y, top, log_p, log_q)
+        torch.testing.assert_close(
+            _worker_gradient(logits, y, advantage, weighted),
+            _eq_15_gradient(logits, y, top, coefficients, tail),
+            atol=1e-6,
+            rtol=0,
+        )
 
-        direct_logits = logits.detach().clone().requires_grad_(True)
-        log_probs = torch.log_softmax(direct_logits, dim=-1)
-        objective = sum(coefficients[v] * log_probs[v] for v in top)
-        if y not in top:
-            objective = objective + (log_q[y] - log_p[y]) * log_probs[y]
-        (direct,) = torch.autograd.grad(objective, direct_logits)
-        torch.testing.assert_close(split, direct, atol=1e-6, rtol=0)
+
+def test_the_top_k_term_stays_exact_after_the_policy_moves():
+    """On a later update of the same batch, the sampled token's importance ratio scales only the tail term.
+
+    The top-K sum samples nothing at its position, so it must not carry the ratio. Before the weights carried the
+    whole sum, part of it rode on the sampled token's advantage and picked up the ratio.
+    """
+    generator = torch.Generator().manual_seed(4)
+    vocab, top_k = 6, 3
+    old_logits = torch.randn(vocab, dtype=torch.float64, generator=generator)
+    log_p = torch.log_softmax(old_logits, dim=-1).float().numpy()
+    log_q = torch.log_softmax(torch.randn(vocab, generator=generator), dim=-1).numpy()
+    top = np.argsort(-log_p)[:top_k].tolist()
+    coefficients = {v: math.exp(log_p[v]) * (log_q[v] - log_p[v]) for v in top}
+    tail = log_q - log_p
+    moved = old_logits + 0.3 * torch.randn(vocab, dtype=torch.float64, generator=generator)
+    ratios = (torch.log_softmax(moved, -1) - torch.log_softmax(old_logits, -1)).exp()
+    assert (ratios - 1).abs().max() > 0.05
+
+    for y in range(vocab):
+        advantage, weighted = _weighted_position(y, top, log_p, log_q)
+        ratio = ratios[y].item()
+        torch.testing.assert_close(
+            _worker_gradient(moved, y, advantage, weighted, ratio=ratio),
+            _eq_15_gradient(moved, y, top, coefficients, tail, ratio=ratio),
+            atol=1e-6,
+            rtol=0,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +323,7 @@ def test_a_divergence_clipped_candidate_drops_out_of_the_top_k_sum():
     _, topk, _ = _advantages(support, torch.tensor([[2]]), log_p, log_q, opd)
 
     c_0 = 0.3 * math.log(0.29 / 0.3)
-    np.testing.assert_allclose(topk.member_weights.numpy(), [-c_0, c_0, 0.0], rtol=1e-5)
+    np.testing.assert_allclose(topk.member_weights.numpy(), [0.0, c_0, 0.0], rtol=0, atol=FLOAT32_ATOL)
 
 
 def test_a_divergence_clipped_sampled_token_gets_no_tail_term():
@@ -273,10 +331,10 @@ def test_a_divergence_clipped_sampled_token_gets_no_tail_term():
     log_q = np.log(np.array([0.4, 0.4, 0.2], dtype=np.float32))
     support = _scored_support([{"response": [2], "candidates": [[0, 1]]}], log_p, log_q)
 
-    advantages, topk, metrics = _advantages(support, torch.tensor([[2]]), log_p, log_q, OPDConfig(divergence_clip=0.5))
+    advantages, _, metrics = _advantages(support, torch.tensor([[2]]), log_p, log_q, OPDConfig(divergence_clip=0.5))
 
-    # p(y) log(p/q) = 0.8 log 4 > 0.5: only C remains.
-    assert advantages.item() == pytest.approx(topk.token_weights.item())
+    # p(y) log(p/q) = 0.8 log 4 > 0.5, and the top-K term is the worker's, so nothing is left on y.
+    assert advantages.item() == 0.0
     assert metrics["opd/divergence_clip_fraction"] == 1.0
 
 
@@ -290,8 +348,8 @@ def test_the_advantage_bounds_act_on_both_terms_alike():
     advantages, topk, _ = _advantages(support, torch.tensor([[2]]), log_p, log_q, opd)
 
     c_0, c_1 = topk.member_weights[1].item(), topk.member_weights[2].item()
-    assert c_0 == pytest.approx(0.1 * 0.5) and c_1 == pytest.approx(0.4 * -0.2)
-    assert advantages.item() == pytest.approx(0.5 + c_0 + c_1)
+    assert c_0 == pytest.approx(0.1 * 0.5, abs=FLOAT32_ATOL) and c_1 == pytest.approx(0.4 * -0.2, abs=FLOAT32_ATOL)
+    assert advantages.item() == pytest.approx(0.5, abs=FLOAT32_ATOL)
 
 
 # ---------------------------------------------------------------------------
@@ -314,13 +372,16 @@ def _batch_support() -> PackedRaggedTensor:
     )
 
 
-def test_every_token_row_sums_to_zero():
+def test_the_sampled_slot_carries_no_weight():
     support = _batch_support()
     topk = topk_weights(support, torch.ones(2, 3), OPDConfig())
 
+    first_members = support.row_offsets[:-1].long()[support.row_lengths > 0]
+    assert topk.member_weights[first_members].tolist() == [0.0] * len(first_members)
     rows = torch.arange(support.num_rows).repeat_interleave(support.row_lengths.long())
     row_sums = torch.zeros(support.num_rows).index_add(0, rows, topk.member_weights)
-    torch.testing.assert_close(row_sums, torch.zeros(support.num_rows), atol=1e-7, rtol=0)
+    batch, column = row_cells(support, 3)
+    torch.testing.assert_close(row_sums, topk.token_weights[batch, column])
 
 
 def test_rows_land_right_aligned_and_empty_rows_get_plain_opd():
@@ -340,7 +401,8 @@ def test_rows_land_right_aligned_and_empty_rows_get_plain_opd():
     torch.testing.assert_close(topk.token_weights, torch.tensor(expected_c), atol=1e-6, rtol=0)
     # Token 5 is its own candidate; tokens without a row get plain sampled-token OPD.
     assert topk.sampled_in_topk.tolist() == [[True, False, False], [False, False, False]]
-    expected = [[c(5) + c(6), a(7) + c(1), a(9)], [0.0, a(3) + c(2) + c(8), a(4)]]
+    # Only the tail term reaches the advantages; token 5, a candidate, gets none.
+    expected = [[0.0, a(7), a(9)], [0.0, a(3), a(4)]]
     torch.testing.assert_close(advantages, torch.tensor(expected), atol=1e-6, rtol=0)
     # The rows cover their trajectory's last response columns.
     batch, column = row_cells(support, 3)
@@ -366,8 +428,10 @@ def test_topk_metrics_cover_trainable_tokens():
     metrics = topk_metrics(topk_weights(support, loss_mask, OPDConfig()), loss_mask)
 
     p, q = np.exp(BATCH_P), np.exp(BATCH_Q)
-    assert metrics["opd/topk_mass_mean"] == pytest.approx((p[5] + p[6] + p[1] + p[2] + p[8]) / 3, rel=1e-5)
-    assert metrics["opd/teacher_topk_mass_mean"] == pytest.approx((q[5] + q[6] + q[1] + q[2] + q[8]) / 3, rel=1e-5)
+    assert metrics["opd/topk_mass_mean"] == pytest.approx((p[5] + p[6] + p[1] + p[2] + p[8]) / 3, abs=FLOAT32_ATOL)
+    assert metrics["opd/teacher_topk_mass_mean"] == pytest.approx(
+        (q[5] + q[6] + q[1] + q[2] + q[8]) / 3, abs=FLOAT32_ATOL
+    )
     assert metrics["opd/sampled_in_topk_fraction"] == pytest.approx(1 / 3)
 
 

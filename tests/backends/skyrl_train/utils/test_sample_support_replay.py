@@ -36,11 +36,11 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     SampleSupportScores,
     compute_sample_support_scores,
-    compute_support_logit_term,
+    compute_support_logprob_term,
     reject_unsupported_sample_support_packing,
     sample_support_scores,
     score_centering_loss_inputs,
-    support_logit_term,
+    support_logprob_term,
 )
 from skyrl.train.config import AlgorithmConfig, CISPOConfig, DPPOConfig
 from tests.backends.skyrl_train.sample_support_helpers import ragged_support
@@ -1260,7 +1260,7 @@ def test_packed_and_unpacked_centering_land_in_the_same_canonical_positions(
 
 
 # ---------------------------------------------------------------------------
-# support_logit_term: sum_v w_v l_v per token row, from the support's member values
+# support_logprob_term: sum_v w_v log pi(v) per token row, from the support's member values
 # ---------------------------------------------------------------------------
 
 
@@ -1277,8 +1277,8 @@ def _weighted_support(grids, weights) -> PackedRaggedTensor:
     return PackedRaggedTensor.from_rows(rows)
 
 
-def _reference_logit_term(logits, support_ids, weights):
-    """Sum each row's weighted member logits; rows with fewer than two members contribute 0."""
+def _reference_logprob_term(logits, support_ids, weights):
+    """Sum each row's weighted member logprobs under a dense full-vocabulary softmax."""
     outputs = []
     for row_logits, ids, values in zip(
         logits.reshape(-1, logits.shape[-1]),
@@ -1287,15 +1287,18 @@ def _reference_logit_term(logits, support_ids, weights):
         strict=True,
     ):
         present = ids >= 0
-        if int(present.sum()) < 2:
-            outputs.append(row_logits.new_zeros(()))
-        else:
-            outputs.append((values[present].to(row_logits.dtype) * row_logits[ids[present].long()]).sum())
+        log_probs = torch.log_softmax(row_logits, dim=-1)
+        outputs.append((values[present].to(row_logits.dtype) * log_probs[ids[present].long()]).sum())
     return torch.stack(outputs).reshape(support_ids.shape[:-1])
 
 
-# Rows [sampled, candidates...]: a sampled token that is also a candidate appears twice, a short row is padded,
-# and a single-member or empty row has no term.
+def _sampled_logprobs(logits, sampled_ids):
+    return torch.log_softmax(logits, dim=-1).gather(-1, sampled_ids.unsqueeze(-1)).squeeze(-1)
+
+
+# Each row holds its position's sampled token (column 0). A sampled token can also appear again, as a TT-OPD row's
+# candidate does; a short row is padded; a single-member row is only the sampled token; one row is empty. The
+# weights need not sum to 0.
 TERM_SUPPORT_IDS = torch.tensor(
     [
         [[2, 2, 6, 9], [5, 1, -1, -1], [3, -1, -1, -1]],
@@ -1305,10 +1308,11 @@ TERM_SUPPORT_IDS = torch.tensor(
 )
 TERM_WEIGHTS = torch.tensor(
     [
-        [[-0.3, 0.5, -0.1, -0.1], [0.4, -0.4, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
-        [[0.2, -0.6, 0.3, 0.1], [0.0, 0.0, 0.0, 0.0], [-0.05, 0.25, -0.15, -0.05]],
+        [[0.1, 0.5, -0.1, -0.2], [0.2, -0.4, 0.0, 0.0], [0.3, 0.0, 0.0, 0.0]],
+        [[0.0, -0.6, 0.3, 0.1], [0.0, 0.0, 0.0, 0.0], [-0.05, 0.25, -0.15, 0.4]],
     ]
 )
+TERM_SAMPLED_IDS = TERM_SUPPORT_IDS[..., 0].clamp(min=0).long()
 
 
 def _term_support():
@@ -1318,47 +1322,45 @@ def _term_support():
     return support, torch.arange(support.num_rows).reshape(TERM_SUPPORT_IDS.shape[:-1])
 
 
-def test_support_logit_term_matches_a_dense_reference_in_value_and_gradient():
-    logits = torch.randn(2, 3, VOCAB, dtype=torch.float64, requires_grad=True)
-    sampled_ids = TERM_SUPPORT_IDS[..., 0].clamp(min=0).long()
+def _term(logits, **kwargs):
     support, row_ids = _term_support()
+    return support_logprob_term(logits, TERM_SAMPLED_IDS, support, row_ids, **kwargs)
 
-    term = support_logit_term(
-        logits, sampled_ids, support, row_ids, vocab_start_index=0, vocab_end_index=VOCAB, tp_group=None
-    )
+
+def test_support_logprob_term_matches_a_dense_reference_in_value_and_gradient():
+    logits = torch.randn(2, 3, VOCAB, dtype=torch.float64, requires_grad=True)
+
+    term = _term(logits, vocab_start_index=0, vocab_end_index=VOCAB, tp_group=None)
+    value = term.value(slice(None), _sampled_logprobs(logits, TERM_SAMPLED_IDS))
 
     reference_logits = logits.detach().clone().requires_grad_(True)
-    reference = _reference_logit_term(reference_logits, TERM_SUPPORT_IDS, TERM_WEIGHTS)
-    torch.testing.assert_close(term, reference)
-    assert term[0, 2] == 0 and term[1, 1] == 0
-    term.sum().backward()
+    reference = _reference_logprob_term(reference_logits, TERM_SUPPORT_IDS, TERM_WEIGHTS)
+    torch.testing.assert_close(value, reference)
+    torch.testing.assert_close(term.weight_sum, TERM_WEIGHTS.sum(-1).to(term.weight_sum.dtype))
+    assert term.anchored[1, 1] == 0 and term.weight_sum[1, 1] == 0  # the empty row
+    value.sum().backward()
     reference.sum().backward()
     torch.testing.assert_close(logits.grad, reference_logits.grad)
 
 
-def test_zero_sum_row_weights_ignore_a_shift_of_the_logits():
-    # A row's weights sum to 0 in TT-OPD, so the term needs no log-normalizer.
+def test_the_anchored_part_ignores_a_shift_of_the_logits():
+    # It is a difference of logits, so the term needs no log-normalizer, whatever the weights.
     generator = torch.Generator().manual_seed(0)
     logits = torch.randn(2, 3, VOCAB, dtype=torch.float64, generator=generator)
-    sampled_ids = TERM_SUPPORT_IDS[..., 0].clamp(min=0).long()
-    support, row_ids = _term_support()
-
-    def term(values):
-        return support_logit_term(
-            values, sampled_ids, support, row_ids, vocab_start_index=0, vocab_end_index=VOCAB, tp_group=None
-        )
-
     shift = torch.randn(2, 3, 1, dtype=torch.float64, generator=generator) * 10
-    # The weights are float32, so their row sums are 0 only to float32 precision.
-    torch.testing.assert_close(term(logits + shift), term(logits), atol=1e-5, rtol=0)
+
+    def anchored(values):
+        return _term(values, vocab_start_index=0, vocab_end_index=VOCAB, tp_group=None).anchored
+
+    torch.testing.assert_close(anchored(logits + shift), anchored(logits))
 
 
-def test_support_logit_term_requires_member_values():
+def test_support_logprob_term_requires_member_values():
     support = ragged_support([TERM_SUPPORT_IDS[0].numpy()])
     with pytest.raises(ValueError, match="needs member values"):
-        support_logit_term(
+        support_logprob_term(
             torch.zeros(1, 3, VOCAB),
-            torch.zeros(1, 3, dtype=torch.long),
+            TERM_SAMPLED_IDS[:1],
             support,
             torch.arange(3).reshape(1, 3),
             vocab_start_index=0,
@@ -1367,10 +1369,27 @@ def test_support_logit_term_requires_member_values():
         )
 
 
-def _tensor_parallel_terms(fake, logits, sampled_ids, support, row_ids):
+def test_support_logprob_term_requires_the_sampled_token_in_every_row():
+    support, row_ids = _term_support()
+    sampled_ids = TERM_SAMPLED_IDS.clone()
+    sampled_ids[0, 1] = 10  # row [5, 1] does not hold 10
+    with pytest.raises(ValueError, match="must contain its position's sampled token"):
+        support_logprob_term(
+            torch.zeros(2, 3, VOCAB),
+            sampled_ids,
+            support,
+            row_ids,
+            vocab_start_index=0,
+            vocab_end_index=VOCAB,
+            tp_group=None,
+        )
+
+
+def _tensor_parallel_terms(fake, logits):
     """Every rank's term over its vocabulary shard."""
+    support, row_ids = _term_support()
     width = VOCAB // fake.world_size
-    results: List[torch.Tensor | None] = [None] * fake.world_size
+    results: List[object] = [None] * fake.world_size
     errors: List[BaseException] = []
 
     def run(rank: int) -> None:
@@ -1378,9 +1397,9 @@ def _tensor_parallel_terms(fake, logits, sampled_ids, support, row_ids):
         start = rank * width
         end = VOCAB if rank == fake.world_size - 1 else start + width
         try:
-            results[rank] = support_logit_term(
+            results[rank] = support_logprob_term(
                 logits[..., start:end],
-                sampled_ids,
+                TERM_SAMPLED_IDS,
                 support,
                 row_ids,
                 vocab_start_index=start,
@@ -1401,37 +1420,29 @@ def _tensor_parallel_terms(fake, logits, sampled_ids, support, row_ids):
     return results
 
 
-def test_support_logit_term_shards_sum_to_the_whole_in_value_and_gradient(tensor_parallel):
+def test_support_logprob_term_shards_sum_to_the_whole_in_value_and_gradient(tensor_parallel):
     logits = torch.randn(2, 3, VOCAB, dtype=torch.float64, requires_grad=True)
-    sampled_ids = TERM_SUPPORT_IDS[..., 0].clamp(min=0).long()
-    support, row_ids = _term_support()
 
-    terms = _tensor_parallel_terms(tensor_parallel, logits, sampled_ids, support, row_ids)
+    terms = _tensor_parallel_terms(tensor_parallel, logits)
     for term in terms:
-        term.sum().backward()  # each rank's backward reaches only its own shard
+        term.anchored.sum().backward()  # each rank's backward reaches only its own shard
 
     whole_logits = logits.detach().clone().requires_grad_(True)
-    whole = support_logit_term(
-        whole_logits, sampled_ids, support, row_ids, vocab_start_index=0, vocab_end_index=VOCAB, tp_group=None
-    )
-    whole.sum().backward()
+    whole = _term(whole_logits, vocab_start_index=0, vocab_end_index=VOCAB, tp_group=None)
+    whole.anchored.sum().backward()
     for term in terms:
-        torch.testing.assert_close(term, whole)
+        torch.testing.assert_close(term.anchored, whole.anchored)
+        torch.testing.assert_close(term.weight_sum, whole.weight_sum)
     torch.testing.assert_close(logits.grad, whole_logits.grad)
 
 
-def test_support_logit_term_through_the_fused_lm_head_matches_the_logit_path():
+def test_support_logprob_term_through_the_fused_lm_head_matches_the_logit_path():
     temperature = 0.7
     hidden = torch.randn(2, 3, 5, dtype=torch.float64, requires_grad=True)
     weight = torch.randn(VOCAB, 5, dtype=torch.float64, requires_grad=True)
-    sampled_ids = TERM_SUPPORT_IDS[..., 0].clamp(min=0).long()
-    support, row_ids = _term_support()
 
-    fused = support_logit_term(
+    fused = _term(
         hidden,
-        sampled_ids,
-        support,
-        row_ids,
         vocab_start_index=0,
         vocab_end_index=VOCAB,
         tp_group=None,
@@ -1439,22 +1450,17 @@ def test_support_logit_term_through_the_fused_lm_head_matches_the_logit_path():
         temperature=temperature,
         chunk_size=4,
     )
-    fused.sum().backward()
+    fused.anchored.sum().backward()
 
     explicit_hidden = hidden.detach().clone().requires_grad_(True)
     explicit_weight = weight.detach().clone().requires_grad_(True)
-    explicit = support_logit_term(
-        (explicit_hidden @ explicit_weight.T) / temperature,
-        sampled_ids,
-        support,
-        row_ids,
-        vocab_start_index=0,
-        vocab_end_index=VOCAB,
-        tp_group=None,
+    explicit = _term(
+        (explicit_hidden @ explicit_weight.T) / temperature, vocab_start_index=0, vocab_end_index=VOCAB, tp_group=None
     )
-    explicit.sum().backward()
+    explicit.anchored.sum().backward()
 
-    torch.testing.assert_close(fused, explicit, check_dtype=False)
+    torch.testing.assert_close(fused.anchored, explicit.anchored, check_dtype=False)
+    torch.testing.assert_close(fused.weight_sum, explicit.weight_sum, check_dtype=False)
     torch.testing.assert_close(hidden.grad, explicit_hidden.grad, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(weight.grad, explicit_weight.grad, rtol=1e-5, atol=1e-6)
 
@@ -1466,15 +1472,13 @@ def _term_batch(lengths):
     grids, weights = [], []
     for row, (_, response) in enumerate(lengths):
         tokens = sequences[row, mask.shape[1] - response :]
-        grid = torch.stack([tokens, (tokens + 1) % VOCAB, (tokens + 2) % VOCAB], dim=1)
-        candidate_weights = torch.randn(response, 2, generator=generator)
-        grids.append(grid.numpy())
-        weights.append(torch.cat([-candidate_weights.sum(dim=1, keepdim=True), candidate_weights], dim=1).numpy())
+        grids.append(torch.stack([tokens, (tokens + 1) % VOCAB, (tokens + 2) % VOCAB], dim=1).numpy())
+        weights.append(torch.randn(response, 3, generator=generator).numpy())
     return sequences, mask, logits.requires_grad_(True), grids, weights
 
 
 def _canonical_reference_term(logits, lengths, grids, weights):
-    """The term of each response token at the canonical position whose logit predicts it."""
+    """``sum_v w_v log pi(v)`` of each response token at the canonical position whose logit predicts it."""
     expected = torch.zeros((logits.shape[0], logits.shape[1] - 1), dtype=logits.dtype)
     for row, (prompt, response) in enumerate(lengths):
         padding = logits.shape[1] - prompt - response
@@ -1482,11 +1486,11 @@ def _canonical_reference_term(logits, lengths, grids, weights):
             position = padding + prompt + offset - 1
             ids = torch.as_tensor(grids[row][offset]).long()
             values = torch.as_tensor(weights[row][offset]).to(logits.dtype)
-            expected[row, position] = (values * logits[row, position, ids]).sum()
+            expected[row, position] = (values * torch.log_softmax(logits[row, position], dim=-1)[ids]).sum()
     return expected
 
 
-def test_packed_and_unpacked_logit_terms_land_in_the_same_canonical_positions(megatron_parallel_state):
+def test_packed_and_unpacked_logprob_terms_land_in_the_same_canonical_positions(megatron_parallel_state):
     lengths = [(3, 3), (4, 2)]
 
     results = {}
@@ -1497,7 +1501,7 @@ def test_packed_and_unpacked_logit_terms_land_in_the_same_canonical_positions(me
             if packed
             else logits
         )
-        term = compute_support_logit_term(
+        term = compute_support_logprob_term(
             source,
             sequences,
             _weighted_support(grids, weights),
@@ -1505,10 +1509,14 @@ def test_packed_and_unpacked_logit_terms_land_in_the_same_canonical_positions(me
             metadata_layout=_layout(lengths, packed=packed),
             **DENSE_SCORER_KWARGS,
         )
-        term.sum().backward()
-        results[packed] = (term, logits.grad)
+        # The canonical logprob of each sampled token, as the trainer's loss has it.
+        value = term.value(slice(None), _sampled_logprobs(logits[:, :-1], sequences[:, 1:]))
+        value.sum().backward()
+        results[packed] = (term, value, logits.grad)
 
-    torch.testing.assert_close(results[True][0], results[False][0])
-    torch.testing.assert_close(results[True][1], results[False][1])
+    for field in ("anchored", "weight_sum"):
+        torch.testing.assert_close(getattr(results[True][0], field), getattr(results[False][0], field))
+    torch.testing.assert_close(results[True][2], results[False][2])
     _, _, logits, grids, weights = _term_batch(lengths)
-    torch.testing.assert_close(results[False][0], _canonical_reference_term(logits.detach(), lengths, grids, weights))
+    expected = _canonical_reference_term(logits.detach(), lengths, grids, weights)
+    torch.testing.assert_close(results[False][1].detach(), expected)

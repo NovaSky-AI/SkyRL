@@ -145,7 +145,6 @@ def apply_opd_to_advantages(
     loss_mask: torch.Tensor,
     opd: OPDConfig,
     sampled_in_topk: Optional[torch.Tensor] = None,
-    topk_weight_sum: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """``advantages + kl_coef * a`` on trainable tokens, with ``a = log pi_teacher - log pi_student``.
 
@@ -162,8 +161,8 @@ def apply_opd_to_advantages(
     ``STUDENT_LOGPROB_FLOOR``.
 
     With TT-OPD (``opd.top_k > 0``, see ``topk_weights``), ``sampled_in_topk`` turns the term off for a sampled
-    token that is one of its position's candidates, which then counts through its candidate slot, and
-    ``topk_weight_sum``, the position's ``C``, is added to every trainable token's advantage.
+    token that is one of its position's candidates, which then counts through its candidate weight. The rest of
+    the top-K term reaches the worker as weights, not advantages.
 
     Returns the new advantages and metrics under ``opd/``. The metrics describe the sampled token alone.
     """
@@ -178,8 +177,6 @@ def apply_opd_to_advantages(
     tail = mask if sampled_in_topk is None else mask & ~sampled_in_topk
     opd_term = torch.where(tail, opd.kl_coef * regulated.signal, torch.zeros_like(action_log_probs))
     new_advantages = advantages + opd_term
-    if topk_weight_sum is not None:
-        new_advantages = new_advantages + torch.where(mask, topk_weight_sum, torch.zeros_like(topk_weight_sum))
 
     mask_f = mask.to(dtype=advantages.dtype)
     reverse_kl = torch.where(
@@ -227,10 +224,10 @@ def with_member_values(support: PackedRaggedTensor, values: torch.Tensor) -> Pac
 @dataclass(frozen=True)
 class TopKWeights:
     member_weights: torch.Tensor
-    """float32 ``[members]``: each member's logit weight. Candidates get ``c_v`` and slot 0 ``-C``, so a row sums
-    to 0."""
+    """float32 ``[members]``: each member's weight in the worker's ``sum_v w_v log pi(v)``. Candidates get ``c_v``;
+    slot 0, which holds the sampled token so the worker can anchor its logits, gets 0."""
     token_weights: torch.Tensor
-    """``[batch, response]``: the position's ``C``, added to the sampled token's advantage."""
+    """``[batch, response]``: the position's ``C = sum_v c_v``, for metrics."""
     sampled_in_topk: torch.Tensor
     """bool ``[batch, response]``: the sampled token is one of its position's candidates."""
     student_mass: torch.Tensor
@@ -244,9 +241,9 @@ def topk_weights(support: PackedRaggedTensor, loss_mask: torch.Tensor, opd: OPDC
 
     ``support`` holds scored token rows ``[sampled, candidates...]``: the sampler's logprob in the logprob column
     (unused for slot 0) and the teacher's in the member-value column. Each candidate ``v`` gets
-    ``c_v = kl_coef * a(v) * p(v)``, with ``a`` regulated by ``teacher_signal`` and ``p(v)`` the sampler's. Its part
-    of the loss, ``-sum_v c_v log p(v)``, splits by ``log p(v) = (l_v - l_y) + log p(y)`` into ``C = sum_v c_v`` on the
-    sampled token's advantage and a logit sum whose weights add to 0 per row, which needs no normalizer.
+    ``c_v = kl_coef * a(v) * p(v)``, with ``a`` regulated by ``teacher_signal`` and ``p(v)`` the sampler's. The worker
+    adds ``-sum_v c_v log p(v)`` at the current policy, with no importance ratio: nothing in the sum was sampled at
+    this position, so the top-K term stays exact on every update of a batch.
     """
     ids = support.columns[SampleSupportColumn.TOKEN_IDS].long()
     student = support.columns[SampleSupportColumn.LOGPROBS]
@@ -262,7 +259,6 @@ def topk_weights(support: PackedRaggedTensor, loss_mask: torch.Tensor, opd: OPDC
         return values.new_zeros(support.num_rows).index_add(0, row_of_member, values)
 
     row_sums = row_sum(coefficients)
-    member_weights = torch.where(is_candidate, coefficients, -row_sums[row_of_member])
 
     batch, column = row_cells(support, loss_mask.shape[1])
 
@@ -275,7 +271,7 @@ def topk_weights(support: PackedRaggedTensor, loss_mask: torch.Tensor, opd: OPDC
     sampled_in_topk = torch.zeros(loss_mask.shape, dtype=torch.bool, device=support.device)
     sampled_in_topk[batch[hits], column[hits]] = True
     return TopKWeights(
-        member_weights=member_weights,
+        member_weights=coefficients,
         token_weights=on_tokens(row_sums),
         sampled_in_topk=sampled_in_topk,
         student_mass=on_tokens(row_sum(torch.where(is_candidate, student.exp(), torch.zeros_like(student)))),

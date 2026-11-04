@@ -1396,7 +1396,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
-                    # Replay scores the support; member values feed the loss's logit term.
+                    # Replay scores the support; member values feed the loss's support term.
                     SAMPLE_SUPPORT_FIELD: (
                         experience.rollout_sample_support
                         if self.enable_sample_support_replay

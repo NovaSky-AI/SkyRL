@@ -1,5 +1,6 @@
 """Sample-support replay through the FSDP forward."""
 
+import math
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,12 +22,13 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
     SAMPLE_SUPPORT_TORCH_DTYPE,
     SCORE_CENTERING_SCORES_KEY,
-    SUPPORT_LOGIT_TERM_KEY,
+    SUPPORT_LOGPROB_TERM_KEY,
     CompactSampleSupport,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     SampleSupportScores,
     ScoreCenteringMetric,
+    SupportLogprobTerm,
 )
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
     HFModelWrapper,
@@ -482,8 +484,9 @@ def _weighted(support: PackedTensor, weights: list[list[list[float]]]) -> Packed
     return PackedRaggedTensor.from_rows(rows)
 
 
-def _logit_term_forward(wrapper, sequences, attention_mask, weighted, response_lengths, num_actions):
-    _, output = wrapper(
+def _logprob_term_forward(wrapper, sequences, attention_mask, weighted, response_lengths, num_actions):
+    """``sum_v w_v log pi(v)`` at the action positions, combined as the worker combines it."""
+    action_log_probs, output = wrapper(
         sequences,
         num_actions,
         attention_mask=attention_mask,
@@ -491,19 +494,19 @@ def _logit_term_forward(wrapper, sequences, attention_mask, weighted, response_l
         weighted_support=weighted,
         return_output=True,
     )
-    return output[SUPPORT_LOGIT_TERM_KEY][:, -num_actions - 1 : -1]
+    return output[SUPPORT_LOGPROB_TERM_KEY].value(slice(-num_actions - 1, -1), action_log_probs)
 
 
-def test_the_logit_term_lands_on_the_logit_that_predicts_each_token_packed_or_not():
+def test_the_logprob_term_lands_on_the_logit_that_predicts_each_token_packed_or_not():
     sequences, attention_mask = _ragged_batch()
     support = _ragged_support(sequences)
-    weights = [[[-0.5, 0.5], [0.25, -0.25]], [[-1.0, 1.0]]]
+    weights = [[[0.3, 0.5], [-0.2, 0.25]], [[0.1, 1.0]]]
     model = _TokenIndexedLM()
     packed_model = _TokenIndexedLM()
     packed_model.table.data.copy_(model.table.data)
 
-    unpacked = _logit_term_forward(_wrapper(model), sequences, attention_mask, _weighted(support, weights), [2, 1], 2)
-    packed = _logit_term_forward(
+    unpacked = _logprob_term_forward(_wrapper(model), sequences, attention_mask, _weighted(support, weights), [2, 1], 2)
+    packed = _logprob_term_forward(
         _wrapper(packed_model, packed=True), sequences, attention_mask, _weighted(support, weights), [2, 1], 2
     )
     unpacked.sum().backward()
@@ -516,20 +519,21 @@ def test_the_logit_term_lands_on_the_logit_that_predicts_each_token_packed_or_no
             position = sequences.shape[1] - response + offset - 1
             members = support.segment(row)[offset].long()
             values = torch.tensor(weights[row][offset], dtype=table.dtype)
-            expected[row, 2 - response + offset] = (values * table[sequences[row, position]][members]).sum()
+            log_probs = torch.log_softmax(table[sequences[row, position]], dim=-1)
+            expected[row, 2 - response + offset] = (values * log_probs[members]).sum()
     torch.testing.assert_close(unpacked, expected)
     torch.testing.assert_close(packed, unpacked)
     torch.testing.assert_close(packed_model.table.grad, model.table.grad)
 
 
-def test_the_logit_term_needs_the_loss_mask():
+def test_the_logprob_term_needs_the_loss_mask():
     sequences, attention_mask = _ragged_batch()
     weighted = _weighted(_ragged_support(sequences), [[[-0.5, 0.5], [0.25, -0.25]], [[-1.0, 1.0]]])
     with pytest.raises(ValueError, match="needs the microbatch's loss mask"):
         _wrapper(_TokenIndexedLM())(sequences, 2, attention_mask=attention_mask, weighted_support=weighted)
 
 
-def test_the_worker_adds_the_logit_term_to_the_policy_loss():
+def test_the_worker_adds_the_logprob_term_without_the_importance_ratio():
     cfg = SkyRLTrainConfig()
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.remove_microbatch_padding = False
@@ -552,13 +556,13 @@ def test_the_worker_adds_the_logit_term_to_the_policy_loss():
     worker.optimizer = None
     worker.scheduler = MagicMock(get_last_lr=MagicMock(return_value=[0.0]))
     # Canonical logit positions: the two action logits are columns 0 and 1, the last column predicts nothing.
-    term = torch.tensor([[0.5, 1.0, 9.0], [-1.0, 2.0, 9.0]], requires_grad=True)
-    worker.model = MagicMock(
-        return_value=(
-            torch.zeros((2, 2), requires_grad=True),
-            {"entropy": torch.zeros((2, 3)), SUPPORT_LOGIT_TERM_KEY: term},
-        )
+    term = SupportLogprobTerm(
+        anchored=torch.tensor([[0.5, 1.0, 9.0], [-1.0, 2.0, 9.0]], requires_grad=True),
+        weight_sum=torch.tensor([[0.2, -0.4, 9.0], [0.3, 1.0, 9.0]]),
     )
+    # The policy has moved since the rollout, whose logprobs were 0, so every importance ratio differs from 1.
+    current = torch.tensor([[-0.5, -1.0], [-2.0, -0.2]], requires_grad=True)
+    worker.model = MagicMock(return_value=(current, {"entropy": torch.zeros((2, 3)), SUPPORT_LOGPROB_TERM_KEY: term}))
     weighted = _weighted(_support([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]), [[[-1.0, 1.0]] * 2, [[-1.0, 1.0]] * 2])
     experience = Experience(
         sequences=torch.zeros((2, 3), dtype=torch.long),
@@ -586,6 +590,8 @@ def test_the_worker_adds_the_logit_term_to_the_policy_loss():
     assert worker.model.call_args.kwargs["weighted_support"] == weighted
     assert worker.model.call_args.kwargs["sample_support"] is None
     assert torch.equal(worker.model.call_args.kwargs["loss_mask"], experience.loss_mask)
-    # importance_sampling: -sum(A * mask) = -3; the logit term: -(0.5 + 1.0 - 1.0) under the mask.
-    assert status["loss_metrics/topk_policy_loss"] == pytest.approx(-0.5)
-    assert status["policy_loss"] == pytest.approx(-3.0 - 0.5)
+    # The term is anchored + weight_sum * log pi(y) at the current logprobs, with no ratio:
+    # (0.5 + 0.2 * -0.5) + (1.0 - 0.4 * -1.0) + (-1.0 + 0.3 * -2.0) = 0.2 under the mask.
+    assert status["loss_metrics/topk_policy_loss"] == pytest.approx(-0.2, abs=1e-6)
+    # importance_sampling: -sum(exp(log pi - log pi_old) * A * mask).
+    assert status["policy_loss"] == pytest.approx(-(math.exp(-0.5) + math.exp(-1.0) + math.exp(-2.0)) - 0.2, abs=1e-6)

@@ -1190,21 +1190,21 @@ async def test_trainer_top_k_advantages_and_logit_weights(use_task_reward, token
     batch = trainer.compute_advantages_and_returns(batch)
 
     teacher = torch.tensor([[-0.10, -0.20, -0.04], [-0.10, -0.21, -0.04]])
-    expected = rl_advantages + 2.0 * (teacher - student) + 2.0 * torch.tensor([TOP_K_C, TOP_K_C])
-    torch.testing.assert_close(batch["advantages"], expected)
+    # No sampled token is a candidate, so each keeps its tail term; the top-K term is the worker's.
+    torch.testing.assert_close(batch["advantages"], rl_advantages + 2.0 * (teacher - student))
     if use_task_reward:
         assert rl_advantages.abs().sum() > 0
-    # The member values are now the logit weights: slot 0 gets -C, each candidate its c_v.
+    # The member values are now the worker's weights: slot 0, the sampled token, gets 0, each candidate its c_v.
     c_50, c_51, c_52 = 0.0, 2.0 * TOP_K_C[0], 2.0 * TOP_K_C[1]
-    weights = [-(c_50 + c_51), c_50, c_51, -c_52, c_52]
+    weights = [0.0, c_50, c_51, 0.0, c_52]
     np.testing.assert_allclose(
         batch[SAMPLE_SUPPORT_FIELD].columns[SampleSupportColumn.MEMBER_VALUES].numpy(), weights * 2, atol=1e-6
     )
     assert trainer.all_metrics["opd/sampled_in_topk_fraction"] == 0.0
     expected_mass = (math.exp(-0.5) + math.exp(-1.0) + math.exp(-0.25)) / 3
-    assert trainer.all_metrics["opd/topk_mass_mean"] == pytest.approx(expected_mass, rel=1e-6)
+    assert trainer.all_metrics["opd/topk_mass_mean"] == pytest.approx(expected_mass, abs=1e-6)
     assert trainer.all_metrics["opd/topk_weight_abs_mean"] == pytest.approx(
-        2.0 * (abs(TOP_K_C[0]) + abs(TOP_K_C[1])) / 3, rel=1e-6
+        2.0 * (abs(TOP_K_C[0]) + abs(TOP_K_C[1])) / 3, abs=1e-6
     )
 
 

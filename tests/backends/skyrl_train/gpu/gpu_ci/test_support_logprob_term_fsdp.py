@@ -1,9 +1,9 @@
-"""GPU coverage for the support logit term (TT-OPD's top-K term) on the FSDP backend.
+"""GPU coverage for the support logprob term (TT-OPD's top-K term) on the FSDP backend.
 
 Run with::
 
     uv run --isolated --extra dev --extra fsdp pytest -s -vvv \
-        tests/backends/skyrl_train/gpu/gpu_ci/test_support_logit_term_fsdp.py
+        tests/backends/skyrl_train/gpu/gpu_ci/test_support_logprob_term_fsdp.py
 """
 
 import math
@@ -14,7 +14,7 @@ import ray
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.score_centering_utils import MODEL_NAME
-from tests.backends.skyrl_train.gpu.support_logit_term_utils import (
+from tests.backends.skyrl_train.gpu.support_logprob_term_utils import (
     expected_support_loss,
     weighted_training_batch,
 )
@@ -68,7 +68,7 @@ LAYOUTS = [
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
-def test_support_logit_term_trains_identically_across_fsdp_layouts(ray_init_fixture, layout):
+def test_support_logprob_term_trains_identically_across_fsdp_layouts(ray_init_fixture, layout):
     """Also the GPU cover for the term sharing the logits with flash-attn's in-place cross-entropy backward."""
     reference = _train_step_metrics(_support_term_cfg(num_gpus=1, packed=False, ulysses=1))
     # Release the reference actors' GPUs before placing the other layout.

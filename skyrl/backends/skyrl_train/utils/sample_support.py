@@ -37,9 +37,8 @@ SAMPLE_SUPPORT_FIELD = "rollout_sample_support"
 SAMPLE_SUPPORT_NO_ROW = -1
 # Forward-output ``SampleSupportScores`` in canonical batch positions, when score centering is on.
 SCORE_CENTERING_SCORES_KEY = "score_centering_scores"
-# Forward-output ``[batch, seq]`` sum of member value times member logit per token row, when support carries
-# member values.
-SUPPORT_LOGIT_TERM_KEY = "support_logit_term"
+# Forward-output ``SupportLogprobTerm`` in canonical batch positions, when support carries member values.
+SUPPORT_LOGPROB_TERM_KEY = "support_logprob_term"
 
 
 class SampleSupportColumn(IntEnum):
