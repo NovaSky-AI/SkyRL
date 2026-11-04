@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from loguru import logger
@@ -21,6 +22,7 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.opd.config import (
+    OPDConfig,
     OPDExpConfig,
     TeacherEngineConfig,
     validate_opd_cfg,
@@ -120,7 +122,7 @@ def test_apply_opd_to_advantages_pure_and_mixed():
     mask = torch.tensor([[1.0, 1.0, 0.0]])
     zero_adv = torch.zeros(1, 3)
 
-    adv, metrics = apply_opd_to_advantages(zero_adv, student, teacher, mask, kl_coef=2.0)
+    adv, metrics = apply_opd_to_advantages(zero_adv, student, teacher, mask, OPDConfig(kl_coef=2.0))
     # -coef * (student - teacher) * mask
     assert adv.tolist() == [[-1.0, 2.0, 0.0]]
     assert metrics["opd/reverse_kl"] == pytest.approx((0.5 + -1.0) / 2)
@@ -128,13 +130,118 @@ def test_apply_opd_to_advantages_pure_and_mixed():
     assert metrics["opd/kl_coef"] == 2.0
 
     rl_adv = torch.tensor([[0.7, 0.7, 0.7]])
-    mixed, _ = apply_opd_to_advantages(rl_adv, student, teacher, mask, kl_coef=1.0)
+    mixed, _ = apply_opd_to_advantages(rl_adv, student, teacher, mask, OPDConfig(kl_coef=1.0))
     assert torch.allclose(mixed, torch.tensor([[0.7 - 0.5, 0.7 + 1.0, 0.7]]))
 
 
 def test_apply_opd_to_advantages_shape_mismatch():
     with pytest.raises(ValueError, match="shape mismatch"):
-        apply_opd_to_advantages(torch.zeros(1, 3), torch.zeros(1, 2), torch.zeros(1, 3), torch.ones(1, 3), 1.0)
+        apply_opd_to_advantages(torch.zeros(1, 3), torch.zeros(1, 2), torch.zeros(1, 3), torch.ones(1, 3), OPDConfig())
+
+
+def _logprobs(*probabilities: float) -> torch.Tensor:
+    return torch.tensor([probabilities]).log()
+
+
+def test_apply_opd_to_advantages_without_stabilization_is_unchanged():
+    # Bit for bit what the term was before the stabilization settings existed.
+    generator = torch.Generator().manual_seed(0)
+    student, teacher = -torch.rand(4, 7, generator=generator) * 5, -torch.rand(4, 7, generator=generator) * 5
+    advantages = torch.randn(4, 7, generator=generator)
+    mask = (torch.rand(4, 7, generator=generator) > 0.3).float()
+
+    new, metrics = apply_opd_to_advantages(advantages, student, teacher, mask, OPDConfig(kl_coef=0.7))
+
+    reverse_kl = torch.where(mask.bool(), student - teacher, torch.zeros_like(student))
+    assert torch.equal(new, advantages - 0.7 * reverse_kl)
+    assert metrics["opd/divergence_clip_fraction"] == 0.0
+    assert metrics["opd/advantage_clip_fraction"] == 0.0
+
+
+def test_divergence_clip_drops_only_confident_disagreements():
+    # p log(p / q) per token: 0.9 log 9 = 1.98 (clipped at tau=1), 0.5 log 1.25 = 0.11 (kept),
+    # 1e-4 log 1e4 = 9e-4 (a large log-ratio on an unlikely token, kept), and 0.1 log(1/9) < 0 (never clipped).
+    student, teacher = _logprobs(0.9, 0.5, 1e-4, 0.1), _logprobs(0.1, 0.4, 1e-8, 0.9)
+    mask = torch.ones(1, 4)
+    plain, _ = apply_opd_to_advantages(torch.zeros(1, 4), student, teacher, mask, OPDConfig())
+
+    clipped, metrics = apply_opd_to_advantages(
+        torch.zeros(1, 4), student, teacher, mask, OPDConfig(divergence_clip=1.0)
+    )
+
+    assert clipped[0, 0] == 0.0
+    assert torch.equal(clipped[0, 1:], plain[0, 1:])
+    assert metrics["opd/divergence_clip_fraction"] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "bounds, expected",
+    [
+        ({"advantage_clip_min": -1.0}, [-1.0, -0.5, 0.5, 3.0]),
+        ({"advantage_clip_max": 1.0}, [-3.0, -0.5, 0.5, 1.0]),
+        ({"advantage_clip_min": -1.0, "advantage_clip_max": 1.0}, [-1.0, -0.5, 0.5, 1.0]),
+    ],
+)
+def test_advantage_clip_bounds_the_log_ratio(bounds, expected):
+    log_ratio = torch.tensor([[-3.0, -0.5, 0.5, 3.0]])  # log q - log p per token
+    student = torch.full_like(log_ratio, -1.0)
+
+    new, metrics = apply_opd_to_advantages(
+        torch.zeros(1, 4), student, student + log_ratio, torch.ones(1, 4), OPDConfig(**bounds)
+    )
+
+    assert new[0].tolist() == pytest.approx(expected)
+    assert metrics["opd/advantage_clip_fraction"] == pytest.approx(
+        sum(a != e for a, e in zip([-3, -0.5, 0.5, 3], expected)) / 4
+    )
+
+
+def test_log_compression_keeps_kl_coef_outside():
+    log_ratio = torch.tensor([[-3.0, 0.0, 0.5, 3.0]])
+    student = torch.full_like(log_ratio, -1.0)
+
+    compressed, metrics = apply_opd_to_advantages(
+        torch.zeros(1, 4),
+        student,
+        student + log_ratio,
+        torch.ones(1, 4),
+        OPDConfig(kl_coef=2.0, advantage_log_compress=True),
+    )
+
+    assert compressed[0].tolist() == pytest.approx(
+        [-2.0 * np.log1p(3.0), 0.0, 2.0 * np.log1p(0.5), 2.0 * np.log1p(3.0)]
+    )
+    assert metrics["opd/advantage_clip_fraction"] == 0.0
+
+
+def test_stabilization_leaves_the_task_advantage_and_masked_tokens_alone():
+    student, teacher = _logprobs(0.9, 0.9), _logprobs(1e-3, 1e-3)  # log q - log p = -6.8 on both tokens
+    rl = torch.tensor([[5.0, 5.0]])
+    mask = torch.tensor([[1.0, 0.0]])
+
+    new, metrics = apply_opd_to_advantages(
+        rl, student, teacher, mask, OPDConfig(advantage_clip_min=-0.5, divergence_clip=10.0)
+    )
+
+    assert new.tolist() == [[4.5, 5.0]]  # the task advantage is not clipped; the masked token gets no term
+    assert metrics["opd/advantage_clip_fraction"] == 1.0  # over the one masked-in token
+
+
+def test_log_ratio_percentiles_cover_masked_tokens_only():
+    log_ratio = torch.arange(100.0).reshape(1, 100) / 10
+    student = torch.zeros(1, 100)
+    mask = torch.ones(1, 100)
+    mask[0, :50] = 0
+
+    _, metrics = apply_opd_to_advantages(torch.zeros(1, 100), student, student + log_ratio, mask, OPDConfig())
+    low, high = np.quantile(log_ratio[0, 50:].numpy(), [0.01, 0.99])
+    assert metrics["opd/log_ratio_p01"] == pytest.approx(low)
+    assert metrics["opd/log_ratio_p99"] == pytest.approx(high)
+
+    _, empty = apply_opd_to_advantages(
+        torch.zeros(1, 100), student, student + log_ratio, torch.zeros(1, 100), OPDConfig()
+    )
+    assert "opd/log_ratio_p01" not in empty and "opd/log_ratio_p99" not in empty
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +506,23 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
         ),
         (["trainer.teacher.model=m", "trainer.algorithm.advantage_estimator=gae"], "needs a task reward"),
         (["trainer.teacher.model=m", "trainer.algorithm.opd.kl_coef=-1"], "kl_coef"),
+        (["trainer.teacher.model=m", "trainer.algorithm.opd.divergence_clip=0"], "divergence_clip must be positive"),
+        (
+            ["trainer.teacher.model=m", "trainer.algorithm.opd.advantage_clip_min=0.5"],
+            "advantage_clip_min must be <= 0",
+        ),
+        (
+            ["trainer.teacher.model=m", "trainer.algorithm.opd.advantage_clip_max=-0.5"],
+            "advantage_clip_max must be >= 0",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.advantage_clip_max=1.0",
+                "trainer.algorithm.opd.advantage_log_compress=true",
+            ],
+            "are alternatives",
+        ),
         (["trainer.teacher.model=m", "generator.step_wise_trajectories=true"], "step_wise"),
     ],
 )
@@ -427,6 +551,29 @@ def test_validate_opd_cfg_warns_when_launched_teacher_max_model_len_is_unset(ove
     finally:
         logger.remove(handler_id)
     assert any("max_model_len is not set" in message for message in messages) == warns
+
+
+def test_validate_opd_cfg_accepts_zero_advantage_bounds():
+    validate_opd_cfg(
+        OPDExpConfig.from_cli_overrides(
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.advantage_clip_min=0",
+                "trainer.algorithm.opd.advantage_clip_max=0",
+                "trainer.algorithm.opd.divergence_clip=0.5",
+            ]
+        )
+    )
+    # The divergence clip combines with either advantage regulation.
+    validate_opd_cfg(
+        OPDExpConfig.from_cli_overrides(
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.divergence_clip=0.5",
+                "trainer.algorithm.opd.advantage_log_compress=true",
+            ]
+        )
+    )
 
 
 def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo():

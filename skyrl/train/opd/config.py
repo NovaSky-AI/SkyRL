@@ -59,6 +59,19 @@ class OPDConfig(BaseConfig):
     ``False`` zeroes the environment reward after its metrics are logged, so the advantage estimator
     contributes nothing. ``True`` sends the reward through the configured estimator and adds the
     teacher term on top."""
+    divergence_clip: Optional[float] = None
+    """Ceiling on each token's pointwise reverse KL, ``p log(p / q)``, in nats; ``None`` is off.
+    ``p`` is the student's and ``q`` the teacher's probability of the sampled token. OPSD's ``min(l, tau)``: a token
+    above the ceiling gets no teacher signal, so the clip is one-sided."""
+    advantage_clip_min: Optional[float] = None
+    """Lower bound on each token's ``log q - log p``, in nats, before ``kl_coef``; ``None`` is unbounded.
+    At most 0, so it limits a token's signal without forcing its sign. An alternative to ``advantage_log_compress``."""
+    advantage_clip_max: Optional[float] = None
+    """Upper bound on each token's ``log q - log p``, in nats, before ``kl_coef``; ``None`` is unbounded.
+    At least 0. An alternative to ``advantage_log_compress``."""
+    advantage_log_compress: bool = False
+    """Compress each token's ``log q - log p`` to ``sign(a) log(1 + |a|)``, before ``kl_coef``.
+    An alternative to the advantage clip bounds; setting both is a config error."""
 
 
 @dataclass
@@ -200,6 +213,17 @@ def validate_opd_cfg(cfg) -> None:
 
     if opd.kl_coef < 0:
         raise ValueError("trainer.algorithm.opd.kl_coef must be >= 0")
+    if opd.divergence_clip is not None and opd.divergence_clip <= 0:
+        raise ValueError("trainer.algorithm.opd.divergence_clip must be positive")
+    # A bound on the wrong side of 0 would force every token's sign, not limit its size.
+    if opd.advantage_clip_min is not None and opd.advantage_clip_min > 0:
+        raise ValueError("trainer.algorithm.opd.advantage_clip_min must be <= 0")
+    if opd.advantage_clip_max is not None and opd.advantage_clip_max < 0:
+        raise ValueError("trainer.algorithm.opd.advantage_clip_max must be >= 0")
+    if opd.advantage_log_compress and (opd.advantage_clip_min is not None or opd.advantage_clip_max is not None):
+        raise ValueError(
+            "trainer.algorithm.opd.advantage_log_compress and the advantage clip bounds are alternatives; set one"
+        )
 
     if algorithm.zero_variance_filter:
         raise ValueError(
