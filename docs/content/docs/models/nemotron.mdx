@@ -9,7 +9,7 @@ LoRA has not been tested yet.
 |---|---|---|---|---|
 | [Nemotron-3.5-Lightning-30B-A3B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) | ✅ | | 1x4 H100 | [`run_megatron_grpo_nemotron_3_5_lightning_30b.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_grpo_nemotron_3_5_lightning_30b.sh) |
 | [Nemotron-3-Nano-4B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16) | ✅ | | 1x8 H100 | [`run_nemotron_3_nano_4b_gsm8k.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/nemotron_3/run_nemotron_3_nano_4b_gsm8k.sh) |
-| Nemotron-3-Nano-30B-A3B | ✅ | | | Use the Lightning script |
+| Nemotron-3-Nano-30B-A3B | ✅ | | | Use the Lightning script after changing `MODEL_NAME` to the Nano-30B-A3B checkpoint |
 
 Both scripts train on GSM8K:
 
@@ -24,7 +24,7 @@ bash examples/train/megatron/run_megatron_grpo_nemotron_3_5_lightning_30b.sh
 
 - Lightning runs at TP=4 EP=4 on 4 GPUs. For 8 GPUs, keep TP=4 and raise EP to 8. TP=1 OOMs in the EP alltoall.
 - Lightning defaults to a 262k context, which leaves no room for the KV cache next to the trainer, so the script caps it at 4096.
-- Lightning's MTP head is not trained. Megatron drops it and vLLM skips the `mtp.*` weights.
+- Lightning's MTP head is dropped by default (`trainer.mtp.enabled=false`) and vLLM skips the `mtp.*` weights.
 - HF vs Megatron forward differences are higher on this hybrid architecture (~0.17 avg vs ~0.05 for pure transformers).
   vLLM vs Megatron logprobs differ by ~0.01, same as other models.
 

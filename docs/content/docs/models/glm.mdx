@@ -10,7 +10,7 @@ Supported on `main` with the Megatron backend.
 | GLM-5.3-Flash (313B-A17B) | ✅ | ✅ | | 1x8 B300 (LoRA), 8x8 B200 (full FT) |
 
 Before running, prepare the data (`bash examples/train/algorithms/dapo/prepare_dapo_data.sh`) and start a Ray cluster. Every node needs the same checkout, model and data at the same paths.
-All DAPO scripts use a 2k prompt / 8k response budget with R3 (rollout routing replay).
+All DAPO scripts use a 2k prompt / 8k response budget. R3 (rollout routing replay) is on by default in the GLM-5.3 LoRA and GLM-5.3-Flash full FT scripts. For the others, pass `ENABLE_ROUTING_REPLAY=true`.
 
 ## GLM-5.3
 

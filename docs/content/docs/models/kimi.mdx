@@ -20,7 +20,7 @@ It only works with the INT4 QAT checkpoints. Training is text-only and full fine
 - **The trainer holds BF16 masters** dequantized from the INT4 release. LoRA goes on `linear_proj` and `linear_fc1`/`linear_fc2`
   (dense MLP, shared expert and all routed experts, which are ~96% of the parameters).
 - **Fake-INT4 QAT** (`trainer.policy.model.fake_int4_qat`) quantizes the frozen expert GEMMs onto the same INT4 grid in the forward pass.
-  For Kimi's QAT checkpoints this makes the trainer's experts bit-exact with vLLM's. [TIS](../algorithms/off_policy_correction) corrects the
+  For Kimi's QAT checkpoints this makes the trainer's experts bit-exact with vLLM's. [TIS](/docs/algorithms/off_policy_correction) corrects the
   remaining mismatch from LoRA.
 - **Text-only** (`language_model_only=true` on trainer and vLLM). The vision tower stays frozen in vLLM and is never built in Megatron.
 - **Expert LoRA rank is scaled down** (`normalize_moe_lora=true`): routed experts get rank `rank // moe_router_topk`, so the adapter stays small

@@ -58,5 +58,5 @@ The JAX backend supports the following models:
 
 ## Known limitations
 - Vision-language checkpoints (Kimi K2.x, GLM-5.3) are trained text-only (`language_model_only=true`), the vision tower stays frozen in vLLM. Qwen-3.5 VL is the exception and can train the vision tower.
-- MTP heads are not trained, they are dropped on the Megatron side and vLLM skips the `mtp.*` weights.
+- MTP heads are dropped by default. Supported models can train them with `trainer.mtp.enabled=true`, see [MTP training and speculative decoding](/docs/examples/spec_decode).
 - For FP8/INT4 release checkpoints the Megatron trainer needs a BF16 copy. See the model page for which checkpoint to use.
