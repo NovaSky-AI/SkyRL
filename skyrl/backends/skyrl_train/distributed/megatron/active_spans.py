@@ -4,8 +4,7 @@ from typing import Any, Optional
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packing_align_size_sequence,
-    packed_segment_layout,
+    get_packed_seq_align_size,
 )
 
 ActiveSpans = tuple[tuple[int, int], ...]
@@ -141,10 +140,11 @@ def build_packed_active_metadata(
         )
 
     prediction_mask = build_active_mask(loss_mask, num_actions, sequence_length)
-    sequence_align_size = get_packing_align_size_sequence(tp_size, cp_size)
+    # Same alignment the collator and ``preprocess_packed_seqs`` pad every sub-sequence to;
+    # the spans must land on exactly the packed rows the worker builds.
+    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
 
-    # Collect each sub-sequence's raw length and the prediction columns it covers, so the
-    # padded layout comes from the one shared derivation rather than a second copy here.
+    # Collect each sub-sequence's raw length and the prediction columns it covers.
     raw_lengths: list[int] = []
     sources: list[tuple[int, Any]] = []
     if sub_seq_lengths is not None:
@@ -160,9 +160,8 @@ def build_packed_active_metadata(
                     raise ValueError("sub_seq_lengths extends beyond the packed batch row")
                 raw_lengths.append(seq_length)
                 sources.append((row_index, slice(row_offset, row_offset + seq_length - 1)))
-                # The collator advances the row by the SEQUENCE alignment only; the aggregate
-                # slab tail lands at the end of the batch, not inside each row.
-                row_offset += seq_length + (-seq_length % sequence_align_size)
+                # The collator advances the row by the aligned length of each sub-sequence.
+                row_offset += seq_length + (-seq_length % align_size)
     else:
         attention_mask = attention_mask.to(dtype=torch.bool)
         for row_index in range(attention_mask.shape[0]):
@@ -176,15 +175,9 @@ def build_packed_active_metadata(
     if not raw_lengths:
         return ActiveSpanMetadata(active_mask=torch.zeros((1, 0), dtype=torch.bool), active_spans=())
 
-    layout = packed_segment_layout(
-        raw_lengths,
-        tp_size=tp_size,
-        cp_size=cp_size,
-        fp8_enabled=fp8_enabled,
-        fp8_recipe=fp8_recipe,
-    )
+    padded_lengths = [raw_length + (-raw_length % align_size) for raw_length in raw_lengths]
     packed_segments = []
-    for (row_index, columns), raw_length, padded_length in zip(sources, raw_lengths, layout.padded_lengths):
+    for (row_index, columns), raw_length, padded_length in zip(sources, raw_lengths, padded_lengths):
         segment = torch.zeros(padded_length, dtype=torch.bool)
         if raw_length > 1:
             segment[: raw_length - 1] = prediction_mask[row_index, columns]
