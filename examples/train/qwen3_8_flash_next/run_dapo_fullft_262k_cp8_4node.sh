@@ -18,6 +18,8 @@ set -x
 # If the image puts its own cuDNN on LD_LIBRARY_PATH (e.g. /opt/cudnn), the Ray workers load those
 # sublibraries instead of the pip cuDNN and QSA runs on that older version: drop that entry and set
 # SKYRL_LD_LIBRARY_PATH_EXPORT=1 so the workers get the driver's path.
+# Measured on 4 x 8 B200, ~255K-token prompts: warm RL step ~288 s (generate 31 / logprobs 55 /
+# train 166 / weight sync 30 s), peak 94.5 GB allocated (98.4 reserved).
 #
 # This is run_dapo_lora_262k_cp8_4node.sh with full fine-tuning instead of LoRA: TP2 (with sequence
 # parallelism) and EP32 so the optimizer stays on the GPU, bf16 gradient reduction, and the full-FT
