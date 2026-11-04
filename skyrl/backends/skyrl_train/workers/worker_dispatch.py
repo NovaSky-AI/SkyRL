@@ -569,6 +569,59 @@ class WorkerDispatch:
             logger.warning(f"[profiler] dump_profiler_summary dispatch for {model} failed: {e}")
             return None
 
+    def get_device_name(self, model: str) -> str:
+        """Returns the CUDA device name of ``model``'s first worker, or ``""`` if the call fails."""
+        actor = self._actor_groups[model]._actor_handlers[0]
+        try:
+            return deadline.ray_get(actor.get_device_name.remote(), "get_device_name")
+        except deadline.StepTimeoutError:
+            raise
+        except Exception as e:
+            logger.warning(f"[mfu] get_device_name dispatch for {model} failed: {e}")
+            return ""
+
+    def pop_train_compute_seconds(self, model: str) -> Optional[float]:
+        """Returns the slowest worker's seconds in ``forward_backward`` and ``optim_step``.
+
+        Counts time since the previous call and resets every worker's count. Returns None when the
+        backend doesn't track it or the call fails; this is telemetry.
+        """
+        if model not in self._actor_groups:
+            return None
+        refs = self._actor_groups[model].async_run_ray_method("pass_through", "pop_train_compute_seconds")
+        try:
+            seconds = [s for s in deadline.ray_get(refs, "pop_train_compute_seconds") if s is not None]
+        except deadline.StepTimeoutError:
+            raise
+        except Exception as e:
+            logger.warning(f"[mfu] pop_train_compute_seconds dispatch for {model} failed: {e}")
+            return None
+        return max(seconds) if seconds else None
+
+    def model_flops(
+        self, model: str, num_seqs: int, seqlen_sum: int, seqlen_squared_sum: int
+    ) -> Optional[Dict[str, float]]:
+        """Returns the forward + backward model FLOPs of a batch with these per-document statistics.
+
+        Every rank holds the same model config, so only the first worker is asked. Returns None
+        when the backend can't estimate FLOPs or the call fails; this is telemetry.
+        """
+        if model not in self._actor_groups:
+            return None
+        actor = self._actor_groups[model]._actor_handlers[0]
+        try:
+            return deadline.ray_get(
+                actor.model_flops.remote(
+                    num_seqs=num_seqs, seqlen_sum=seqlen_sum, seqlen_squared_sum=seqlen_squared_sum
+                ),
+                "model_flops",
+            )
+        except deadline.StepTimeoutError:
+            raise
+        except Exception as e:
+            logger.warning(f"[mfu] model_flops dispatch for {model} failed: {e}")
+            return None
+
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""
         deadline.ray_get(

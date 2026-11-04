@@ -1812,6 +1812,13 @@ class TrainerConfig(BaseConfig):
     See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    log_mfu: bool = True
+    """Log model FLOPs utilization (MFU) metrics for policy training each step.
+
+    Logs ``trainer/mfu``, ``trainer/mfu_e2e``, ``trainer/model_tflops_per_gpu``,
+    ``trainer/flops_per_token`` and, under full activation recompute, ``trainer/hfu_est``. Megatron
+    only; not logged for LoRA or with active MTP heads, and the utilization ratios are not logged for
+    FP8 training or on GPUs without a known peak."""
     tags: Optional[List[str]] = None
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
