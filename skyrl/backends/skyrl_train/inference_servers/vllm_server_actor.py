@@ -642,6 +642,24 @@ class VLLMServerActor(ServerActorProtocol):
                             f"{top_k!r}. Sample-support capture is opt-in per request."
                         ),
                     )
+                if candidate_top_k is not None:
+                    # A truncated sampler masks candidates to -inf and renormalizes the rest, so the rows would
+                    # not be the policy's plain top-k. vLLM disables top_k at 0 or -1.
+                    sampler_top_k = sampling_params_dict.get("top_k")
+                    sampler_top_p = sampling_params_dict.get("top_p")
+                    sampler_min_p = sampling_params_dict.get("min_p")
+                    if (
+                        (sampler_top_k is not None and sampler_top_k not in (0, -1))
+                        or (sampler_top_p is not None and sampler_top_p < 1.0)
+                        or (sampler_min_p is not None and sampler_min_p > 0.0)
+                    ):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "candidate_top_k needs an untruncated sampler, got "
+                                f"top_k={sampler_top_k!r}, top_p={sampler_top_p!r}, min_p={sampler_min_p!r}"
+                            ),
+                        )
                 sampling_params_dict["flat_logprobs"] = True
                 sampling_params_dict["logprobs"] = top_k
                 # This endpoint returns token ids only, so the API-server process need not detokenize

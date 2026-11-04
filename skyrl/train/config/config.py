@@ -1463,11 +1463,11 @@ class InferenceEngineConfig(BaseConfig):
     enable_return_sample_support_set: bool = False
     """Return the bounded sampler support used to renormalize rollout logprobs."""
     candidate_top_k: Optional[int] = None
-    """Record the policy's top ``candidate_top_k`` tokens at each response position instead of the sampler's
-    support. Requires an untruncated sampler (``sampling_params.top_k=-1``, ``top_p=1.0``, ``min_p=0.0``). Rows
-    are the plain top-k, so the sampled token may be outside its row. Member logprobs are the sampler's processed
-    ones, which are the policy's own at temperature 1.
-    ``None`` records the sampler's own support, bounded by ``sampling_params.top_k``, for sample-support replay."""
+    """Capture each response position's top ``candidate_top_k`` tokens instead of the sampler's support.
+    Requires a width greater than 1 and an untruncated sampler (``sampling_params.top_k=-1``, ``top_p=1.0``,
+    ``min_p=0.0``). Rows are the plain top-k, so the sampled token may be outside its row. Member logprobs are
+    the sampler's processed ones, which are the policy's own at temperature 1. ``None`` records the sampler's
+    own support, bounded by ``sampling_params.top_k``, for sample-support replay."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -2171,6 +2171,10 @@ class SkyRLTrainConfig(BaseConfig):
             candidate_top_k = self.generator.inference_engine.candidate_top_k
             if sampling_params.top_k <= 1 and candidate_top_k is None:
                 raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            if candidate_top_k is not None and candidate_top_k <= 1:
+                raise ValueError(
+                    f"generator.inference_engine.candidate_top_k must be greater than 1, got {candidate_top_k}"
+                )
             if candidate_top_k is not None and self.trainer.algorithm.enable_sample_support_replay:
                 raise ValueError(
                     "sample-support replay renormalizes over the sampler's own support; unset candidate_top_k"

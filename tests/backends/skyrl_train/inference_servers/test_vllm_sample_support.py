@@ -323,6 +323,48 @@ def test_skyrl_generate_rejects_a_bad_candidate_width(body, message):
     assert engine.sampling_params is None
 
 
+@pytest.mark.parametrize("sampler", [{"top_k": 50}, {"top_p": 0.9}, {"min_p": 0.05}])
+def test_skyrl_generate_rejects_a_candidate_width_under_a_truncated_sampler(sampler):
+    app = FastAPI()
+    engine = FakeEngine()
+    VLLMServerActor._add_custom_endpoints(app, engine, SimpleNamespace(enable_lora=False))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={
+                "token_ids": [1, 2],
+                "sampling_params": {"temperature": 1.0, **sampler},
+                "return_sample_support": True,
+                "candidate_top_k": 2,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "candidate_top_k needs an untruncated sampler" in response.json()["detail"]
+    assert engine.sampling_params is None
+
+
+@pytest.mark.parametrize("sampler", [{}, {"top_k": 0}, {"top_k": -1, "top_p": 1.0, "min_p": 0.0}])
+def test_skyrl_generate_accepts_every_spelling_of_an_untruncated_sampler(sampler):
+    app = FastAPI()
+    engine = FakeEngine()
+    VLLMServerActor._add_custom_endpoints(app, engine, SimpleNamespace(enable_lora=False))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={
+                "token_ids": [1, 2],
+                "sampling_params": {"temperature": 1.0, **sampler},
+                "return_sample_support": True,
+                "candidate_top_k": 2,
+            },
+        )
+
+    assert response.status_code == 200
+
+
 def test_skyrl_generate_rejects_member_logprobs_without_sample_support():
     app = FastAPI()
     engine = FakeEngine()

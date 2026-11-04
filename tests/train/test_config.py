@@ -660,6 +660,17 @@ def test_candidate_capture_rejects_a_truncated_sampler(override):
         )
 
 
+@pytest.mark.parametrize("width", [1, 0, -4])
+def test_candidate_capture_rejects_a_width_of_one_or_less(width):
+    with pytest.raises(ValueError, match="candidate_top_k must be greater than 1"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                f"generator.inference_engine.candidate_top_k={width}",
+            ]
+        )
+
+
 def test_candidate_capture_rejects_sample_support_replay():
     with pytest.raises(ValueError, match="unset candidate_top_k"):
         SkyRLTrainConfig.from_cli_overrides(
