@@ -188,6 +188,12 @@ class StatefulLayerRecompute(torch.autograd.Function):
         pairs = [(o, g) for o, g in zip(outputs, grads) if torch.is_tensor(o) and o.requires_grad and g is not None]
         if pairs:
             torch.autograd.backward([o for o, _ in pairs], [g for _, g in pairs])
+        del outputs, pairs
+        clear_state = getattr(ctx.run, "clear_state", None)
+        if clear_state is not None:
+            # The replay wrote its outputs into the shared forward state; left there they pin this replay's graph
+            # (back to its input and the input's ``.grad``) until the next forward.
+            clear_state()
         ctx.run, ctx.inputs = None, None
         return (
             None,
@@ -227,6 +233,13 @@ def stateful_layer_forward(
         extras["context"] = context
         csa2 = local.csa2
         return (output, *(getattr(csa2, name) for name in STATE_FIELDS), local.pending_pre)
+
+    def clear_state():
+        local = state_getter()
+        local.csa2 = CSA2State()
+        local.pending_pre = None
+
+    run.clear_state = clear_state
 
     # ``config.num_layers`` counts hybrid layers (from ``hybrid_layer_pattern``), as ``layer_number`` does.
     num_layers = getattr(getattr(layer, "config", None), "num_layers", None) or 0
