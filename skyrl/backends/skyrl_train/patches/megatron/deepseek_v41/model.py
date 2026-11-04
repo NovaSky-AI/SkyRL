@@ -151,6 +151,12 @@ def apply_deepseek_v41_patches() -> bool:
             hashes = forward_state().engram_hashes
             assert hashes is not None, "DeepSeek-V4.1 engram needs the model's input_ids"
             hidden_states = self.engram(hidden_states, hashes[:, :, self.engram_hash_index])
+        if getattr(self.config, "dsv41_stateful_recompute", False) and self.training and torch.is_grad_enabled():
+            from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.recompute import (
+                stateful_layer_forward,
+            )
+
+            return stateful_layer_forward(layer_forward, self, hidden_states, args, kwargs, forward_state)
         return layer_forward(self, hidden_states, *args, **kwargs)
 
     layer_cls.forward = forward_layer
