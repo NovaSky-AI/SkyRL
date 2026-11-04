@@ -25,6 +25,7 @@ import torch
 import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.utils.packed_tensor import lengths_from_offsets
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 
 
 @torch.no_grad()
@@ -514,6 +515,7 @@ def _fused_lm_head_logprob_apply(
     chunk_size: int,
     tp_group: torch.distributed.ProcessGroup,
     inference_only: bool,
+    active_mask: Optional[torch.Tensor] = None,
     compute_entropy: bool = False,
     entropy_requires_grad: bool = False,
     softcap: Optional[float] = None,
@@ -521,21 +523,23 @@ def _fused_lm_head_logprob_apply(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Dispatch the fused LM-head token-logprob to the requested backend.
 
-    ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; ``"triton"``
-    uses ``FusedLinearLogprobTriton`` when CUDA + triton are available and
-    otherwise warns and falls back to torch. Both return TP-combined ``[B, S]``
+    ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; both Triton
+    backends use ``FusedLinearLogprobTriton`` when CUDA + triton are available
+    and otherwise warn and fall back to torch. Both return TP-combined ``[B, S]``
     log-probs and, when requested, entropy. Only the torch backend applies a final
-    logit ``softcap`` (and then ``temperature``); with a softcap, triton falls back to it.
+    logit ``softcap`` (and then ``temperature``); with a softcap, both Triton
+    backends fall back to it.
     """
     if entropy_requires_grad and not compute_entropy:
         raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
-    if backend == "triton" and softcap is not None:
+    triton_backends = (FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE)
+    if backend in triton_backends and softcap is not None:
         warnings.warn(
-            "fused_lm_head_logprob_backend='triton' has no final logit softcap; using the PyTorch backend.",
+            f"fused_lm_head_logprob_backend={backend!r} has no final logit softcap; using the PyTorch backend.",
             stacklevel=2,
         )
-        backend = "torch"
-    if backend == "triton":
+        backend = FusedLmHeadBackend.TORCH
+    if backend in triton_backends:
         try:
             from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
                 TRITON_AVAILABLE,
@@ -554,17 +558,18 @@ def _fused_lm_head_logprob_apply(
                 chunk_size,
                 tp_group,
                 inference_only,
+                active_mask,
                 compute_entropy,
                 entropy_requires_grad,
             )
         except (ImportError, RuntimeError) as e:
             warnings.warn(
-                f"fused_lm_head_logprob_backend='triton' unavailable ({e}); falling back to the "
+                f"fused_lm_head_logprob_backend={backend!r} unavailable ({e}); falling back to the "
                 "pure-PyTorch backend. Use a CUDA environment with Triton available to run the fused Triton kernel.",
                 stacklevel=2,
             )
 
-    return FusedLinearChunkedDistributedLogprob.apply(  # type: ignore[no-any-return]
+    result = FusedLinearChunkedDistributedLogprob.apply(
         hidden,
         weight,
         target,
@@ -578,6 +583,18 @@ def _fused_lm_head_logprob_apply(
         softcap,
         temperature,
     )
+    if compute_entropy:
+        logprobs, entropy = result
+    else:
+        logprobs = result
+    if active_mask is not None:
+        active_mask = active_mask.to(device=logprobs.device, dtype=torch.bool)
+        logprobs = logprobs.masked_fill(~active_mask, 0.0)
+    if not compute_entropy:
+        return logprobs  # type: ignore[no-any-return]
+    if active_mask is not None:
+        entropy = entropy.masked_fill(~active_mask, 0.0)
+    return logprobs, entropy
 
 
 def from_parallel_logits_to_logprobs(
@@ -818,6 +835,7 @@ def from_parallel_hidden_to_logprobs(
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
     fused_backend: str = "torch",
+    active_mask: Optional[torch.Tensor] = None,
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
     softcap: Optional[float] = None,
@@ -842,6 +860,12 @@ def from_parallel_hidden_to_logprobs(
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
     if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
+    if active_mask is not None:
+        expected_shape = (target.shape[0], target.shape[1] - 1)
+        if active_mask.shape != expected_shape:
+            raise ValueError(f"Expected active_mask shape {expected_shape}, got {tuple(active_mask.shape)}")
+        active_mask = torch.nn.functional.pad(active_mask.to(device=target.device, dtype=torch.bool), (0, 1))
+
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     pad_len = hidden.shape[1] * cp_size - target.shape[1]
@@ -850,6 +874,10 @@ def from_parallel_hidden_to_logprobs(
 
     cp_rank = torch.distributed.get_rank(cp_group)
     target = _get_tokens_on_this_cp_rank(target, cp_rank, cp_size, seq_dim=1)
+    if active_mask is not None:
+        if pad_len > 0:
+            active_mask = torch.nn.functional.pad(active_mask, (0, pad_len), value=False)
+        active_mask = _get_tokens_on_this_cp_rank(active_mask, cp_rank, cp_size, seq_dim=1)
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
@@ -863,6 +891,7 @@ def from_parallel_hidden_to_logprobs(
         eff_chunk,
         tp_group,
         inference_only,
+        active_mask,
         return_entropy,
         entropy_requires_grad,
         softcap=softcap,
@@ -947,6 +976,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     temperature: float = 1.0,
     fused_backend: str = "torch",
+    active_mask: Optional[torch.Tensor] = None,
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
     softcap: Optional[float] = None,
@@ -965,6 +995,10 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
     if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
+    if active_mask is not None:
+        if active_mask.shape != target.shape:
+            raise ValueError(f"Expected packed active_mask shape {tuple(target.shape)}, got {tuple(active_mask.shape)}")
+        active_mask = active_mask.to(device=target.device, dtype=torch.bool).squeeze(0)
     hidden = hidden.squeeze(0)
     target = target.squeeze(0)
 
@@ -989,7 +1023,15 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     else:
         rolled_targets = rolled_targets_full
 
-    # Add batch dimension back for the fused logprob op.
+    if active_mask is not None:
+        if cp_size > 1:
+            local_active_mask = torch.zeros_like(rolled_targets, dtype=torch.bool)
+            local_active_mask[local_indices[current_rank_mask]] = active_mask[current_rank_mask]
+            active_mask = local_active_mask
+        active_mask = active_mask.unsqueeze(0)
+
+    # Add batch dimension back for the fused logprob op after CP-local scatters,
+    # whose indices address the one-dimensional packed token layout.
     rolled_targets = rolled_targets.unsqueeze(0)
     hidden = hidden.unsqueeze(0)
 
@@ -1005,6 +1047,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         eff_chunk,
         group,
         inference_only,
+        active_mask,
         return_entropy,
         entropy_requires_grad,
         softcap=softcap,

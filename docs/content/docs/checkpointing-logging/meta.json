@@ -3,6 +3,7 @@
   "pages": [
     "checkpointing",
     "logging",
-    "vllm-metrics"
+    "vllm-metrics",
+    "mfu"
   ]
 }

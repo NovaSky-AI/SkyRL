@@ -436,6 +436,15 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     validate_step_timeouts(cfg.trainer.step_timeout_s, cfg.trainer.weight_sync_timeout_s)
 
+    if cfg.trainer.log_mfu and cfg.trainer.strategy == "megatron":
+        from skyrl.train.utils.mfu import mfu_support
+
+        mfu_warning = mfu_support(
+            cfg.trainer.strategy, cfg.trainer.policy.megatron_config, cfg.trainer.policy.model.lora.rank
+        ).warning
+        if mfu_warning:
+            logger.warning(mfu_warning)
+
     # Validate generation config separately
     validate_generator_cfg(cfg)
 
