@@ -121,15 +121,35 @@ def test_fused_logprob_matches_autograd(tp_group, softcap, temperature, chunk_si
     torch.testing.assert_close(w.grad, w_ref.grad, rtol=1e-4, atol=1e-5)
 
 
-def test_triton_backend_falls_back_to_torch_with_softcap(tp_group):
+@pytest.mark.parametrize("backend", ["triton", "triton_block_sparse"])
+def test_triton_backends_fall_back_to_torch_with_softcap(tp_group, backend):
+    """Neither Triton kernel applies a softcap, so a softcapped model must take the torch path. The
+    block-sparse backend also passes the loss-mask active rows; the fallback still honours them."""
     from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
         _fused_lm_head_logprob_apply,
     )
 
     hidden, weight, target = _inputs(seed=1)
+    active_mask = None
+    if backend == "triton_block_sparse":
+        active_mask = torch.ones(B, S, dtype=torch.bool)
+        active_mask[:, : S // 2] = False
     with pytest.warns(UserWarning, match="no final logit softcap"):
         got = _fused_lm_head_logprob_apply(
-            "triton", hidden, weight, target, 0, V, S, tp_group, True, softcap=3.0, temperature=0.7
+            backend,
+            hidden,
+            weight,
+            target,
+            0,
+            V,
+            S,
+            tp_group,
+            True,
+            active_mask,
+            softcap=3.0,
+            temperature=0.7,
         )
     expected, _ = _reference(hidden, weight, target, 3.0, 0.7)
+    if active_mask is not None:
+        expected = expected.masked_fill(~active_mask, 0.0)
     torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-5)
