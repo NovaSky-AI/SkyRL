@@ -21,6 +21,10 @@ writes ``pool_train.parquet`` (seeds from the train splits) and ``pool_val.parqu
 splits). The defaults (62,000-token documents, ~65.5K-token prompts) are what the 262K CP8 recipes
 were tested with. ``calibrate_keychain.py`` and ``filter_keychain.py`` then keep the prompts the
 base model sometimes, but not always, answers correctly.
+
+Padding paragraphs come from the other seeds of the same split, so a small run (e.g. a few seeds
+per source) cannot fill ``--tokens``: at 5 train / 2 val seeds per source, prompts reach only
+~23K / ~10K tokens. The defaults (420 / 70 per source) fill 62K.
 """
 
 import argparse
