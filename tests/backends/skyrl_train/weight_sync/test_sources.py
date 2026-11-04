@@ -345,3 +345,30 @@ class TestLoraAdapterWeightSource:
         source.set_lora_name("tenant")
         with pytest.raises(RuntimeError, match="dropped aliased keys"):
             source.prepare()
+
+
+def test_adapter_target_modules_uses_the_bridge_hook():
+    """The model bridge's ``_adapter_target_modules`` decides the PEFT ``target_modules`` (Beam returns
+    full paths, since its attention ``self_attn.gate_proj`` and MLP ``mlp.gate_proj`` share a leaf
+    name); ``base_layer`` is dropped and the result is sorted and deduplicated."""
+    calls = []
+
+    class _ModelBridge:
+        def _adapter_target_modules(self, names):
+            calls.append(names)
+            return ["model.layers.0.self_attn.gate_proj", "base_layer", "model.layers.0.mlp.down_proj"] * 2
+
+    class _AutoBridge:
+        _model_bridge = _ModelBridge()
+
+    names = (f"base_model.model.model.layers.0.self_attn.gate_proj.lora_{ab}.weight" for ab in "AB")
+    assert sources_mod.adapter_target_modules(_AutoBridge(), names) == [
+        "model.layers.0.mlp.down_proj",
+        "model.layers.0.self_attn.gate_proj",
+    ]
+    assert calls == [
+        [
+            "base_model.model.model.layers.0.self_attn.gate_proj.lora_A.weight",
+            "base_model.model.model.layers.0.self_attn.gate_proj.lora_B.weight",
+        ]
+    ]

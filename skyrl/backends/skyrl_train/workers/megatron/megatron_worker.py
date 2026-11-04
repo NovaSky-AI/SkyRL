@@ -208,6 +208,32 @@ def drop_unsupported_recompute_modules(provider) -> None:
     )
 
 
+def default_cp_comm_type_for_sliding_window(config) -> None:
+    """Default ``cp_comm_type`` to ``"a2a"`` under context parallelism with sliding-window attention.
+
+    Transformer Engine has no ``"p2p"`` (or ``"a2a+p2p"``) context-parallel path for sliding-window
+    attention, and megatron-core uses ``"p2p"`` when ``cp_comm_type`` is unset, so the sliding-window
+    layers would fail at the first forward. When nothing is set this picks ``"a2a"``, which needs the
+    per-TP-rank query and KV head counts divisible by the context-parallel size, and falls back to
+    ``"all_gather"`` when they are not. A ring-based choice is rejected up front. Used for Beam, whose
+    Megatron-Bridge provider leaves it unset.
+    """
+    cp = getattr(config, "context_parallel_size", 1) or 1
+    if cp <= 1 or getattr(config, "window_size", None) is None:
+        return
+    if config.cp_comm_type is None:
+        tp = getattr(config, "tensor_model_parallel_size", 1) or 1
+        heads = config.num_attention_heads
+        kv_heads = getattr(config, "num_query_groups", None) or heads
+        a2a_ok = heads % tp == 0 and kv_heads % tp == 0 and (heads // tp) % cp == 0 and (kv_heads // tp) % cp == 0
+        config.cp_comm_type = "a2a" if a2a_ok else "all_gather"
+    elif isinstance(config.cp_comm_type, str) and config.cp_comm_type in ("p2p", "a2a+p2p"):
+        raise ValueError(
+            f"cp_comm_type={config.cp_comm_type!r} does not support sliding-window attention under "
+            "context parallelism; use 'a2a' or 'all_gather'."
+        )
+
+
 class MegatronWorker:
     _mfu_warned = False
 
@@ -520,6 +546,9 @@ class MegatronWorker:
                 f"mtp_loss_topk={megatron_config.mtp_loss_topk} "
                 "(native process_mtp_loss disabled)"
             )
+
+        if getattr(hf_config, "model_type", None) == "beam":
+            default_cp_comm_type_for_sliding_window(provider)
 
         provider.finalize()
 
@@ -1926,9 +1955,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from megatron.bridge.models.conversion.peft_bridge import (
             build_adapter_config_dict,
-            infer_target_modules_from_adapter_weights,
         )
         from safetensors.torch import save_file
+
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            adapter_target_modules,
+        )
 
         # Every rank must participate in the bridge's collective export, but only
         # the writer ranks materialize the gathered tensors: with MoE expert
@@ -1987,9 +2019,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 adapter_state, num_moe_experts=getattr(self.provider, "num_moe_experts", None)
             )
 
-            target_modules = sorted(
-                set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}
-            )
+            target_modules = adapter_target_modules(self.bridge, adapter_state.keys())
             base_model_name_or_path = str(
                 getattr(self, "_logical_model_path", "")
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")

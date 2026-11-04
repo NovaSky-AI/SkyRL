@@ -356,6 +356,27 @@ class LoraAdapterWeightSource(WeightSource):
             self._drop_cached_metadata()
 
 
+def adapter_target_modules(bridge: Any, adapter_weight_names: Iterable[str]) -> List[str]:
+    """``target_modules`` for an exported PEFT adapter, from the model bridge.
+
+    Megatron-Bridge's ``_adapter_target_modules`` hook (what ``AutoBridge.save_hf_adapter`` uses)
+    defaults to PEFT's leaf-name selectors. Bridges whose leaf names are ambiguous override it with
+    full module paths: PEFT matches ``target_modules`` by suffix, so Beam's attention
+    ``self_attn.gate_proj`` would otherwise also wrap every MLP ``mlp.gate_proj``.
+    """
+    names = list(adapter_weight_names)
+    model_bridge = getattr(bridge, "_model_bridge", None)
+    if hasattr(model_bridge, "_adapter_target_modules"):
+        modules = model_bridge._adapter_target_modules(names)
+    else:
+        from megatron.bridge.models.conversion.peft_bridge import (
+            infer_target_modules_from_adapter_weights,
+        )
+
+        modules = infer_target_modules_from_adapter_weights(names)
+    return sorted(set(modules) - {"base_layer"})
+
+
 class MegatronLoraAdapterSource(LoraAdapterWeightSource):
     """LoRA adapter source for the Megatron backend.
 
@@ -398,7 +419,6 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         from megatron.bridge.models.conversion.peft_bridge import (
             build_adapter_config_dict,
-            infer_target_modules_from_adapter_weights,
         )
 
         from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
@@ -429,7 +449,7 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         # Fold that scale here and publish lora_alpha == r so vLLM's scale is 1.
         adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self._lora_cls.alpha)
         adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
-        target_modules = sorted(set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"})
+        target_modules = adapter_target_modules(self._bridge, adapter_state.keys())
         adapter_config = mark_alpha_folded(
             build_adapter_config_dict(
                 self._lora_cls,
