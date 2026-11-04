@@ -215,7 +215,6 @@ def validate_opd_cfg(cfg) -> None:
         raise ValueError("trainer.algorithm.opd.kl_coef must be >= 0")
     if opd.divergence_clip is not None and opd.divergence_clip <= 0:
         raise ValueError("trainer.algorithm.opd.divergence_clip must be positive")
-    # A bound on the wrong side of 0 would force every token's sign, not limit its size.
     if opd.advantage_clip_min is not None and opd.advantage_clip_min > 0:
         raise ValueError("trainer.algorithm.opd.advantage_clip_min must be <= 0")
     if opd.advantage_clip_max is not None and opd.advantage_clip_max < 0:
