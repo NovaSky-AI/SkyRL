@@ -67,3 +67,58 @@ def apply_deepseek_v41_prefill_workspace_patch() -> bool:
     _PATCHED = True
     logger.info("Installed DeepSeek-V4.1 FlashMLA prefill workspace zero-fill patch")
     return True
+
+
+# Modules that bind ``combine_topk_swa_indices`` by name; each needs the seeded version.
+_COMBINE_TOPK_SWA_INDICES_MODULES = (
+    "vllm.models.deepseek_v41.common.ops.cache_utils",
+    "vllm.models.deepseek_v41.common.ops",
+    "vllm.models.deepseek_v41.nvidia.flashmla",
+    "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn",
+)
+
+_COMBINE_PATCHED = False
+
+
+def apply_deepseek_v41_combine_indices_patch() -> bool:
+    """Seed ``-1`` into the reused prefill sparse-index workspace before ``combine_topk_swa_indices`` fills it.
+
+    The backport of vllm-project/vllm#60613. ``combine_topk_swa_indices`` writes only each row's
+    ``[0, combined_len)`` prefix, and callers pass a reused workspace slice as ``out``, so the rest of the row keeps a
+    previous batch's indices. The attention kernel loads the whole last 64-slot block; a stale in-range slot points
+    at an unwritten row of the gathered-KV buffer, and a NaN bit pattern there makes the request's logits NaN
+    (weight 0 times NaN). ``-1`` slots are skipped. This covers every V4.1 prefill backend, including
+    ``FLASHMLA_MEGA_ATTN_DSV41`` (the NVFP4 KV cache path the FP8/MXFP4 checkpoints take), which the zero-fill patch
+    above does not reach: it hit a non-finite sampled logprob after 10 steps of the async LoRA recipe on B300.
+
+    Returns True if installed; a no-op if the pinned vLLM already seeds the workspace.
+    """
+    global _COMBINE_PATCHED
+    if _COMBINE_PATCHED:
+        return False
+    import importlib
+    import inspect
+
+    try:
+        cache_utils = importlib.import_module(_COMBINE_TOPK_SWA_INDICES_MODULES[0])
+    except ImportError:
+        return False
+    original = cache_utils.combine_topk_swa_indices
+    if "combined_indices.fill_(-1)" in inspect.getsource(original):
+        return False
+
+    def combine_topk_swa_indices(*args, out=None, **kwargs):
+        if out is not None:
+            out[0].fill_(-1)
+        return original(*args, out=out, **kwargs)
+
+    for name in _COMBINE_TOPK_SWA_INDICES_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        if getattr(module, "combine_topk_swa_indices", None) is original:
+            module.combine_topk_swa_indices = combine_topk_swa_indices
+    _COMBINE_PATCHED = True
+    logger.info("Installed DeepSeek-V4.1 prefill sparse-index workspace -1 seed patch (vllm-project/vllm#60613)")
+    return True

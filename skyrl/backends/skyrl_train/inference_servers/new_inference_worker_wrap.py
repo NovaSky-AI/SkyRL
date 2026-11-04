@@ -201,10 +201,13 @@ apply_pp_kv_cache_projection_patch()
 # DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
 # NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#60613 is in the pinned vLLM.
 from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
+    apply_deepseek_v41_combine_indices_patch,
     apply_deepseek_v41_prefill_workspace_patch,
 )
 
 apply_deepseek_v41_prefill_workspace_patch()
+# The same stale prefill indices on every V4.1 backend (incl. the NVFP4 mega-attn one): seed them -1 (vllm#60613).
+apply_deepseek_v41_combine_indices_patch()
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
