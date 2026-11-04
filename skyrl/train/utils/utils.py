@@ -1184,6 +1184,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "SKYRL_DSA_HEAD_FULL",
         "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
         "SKYRL_DSA_HEAD_FULL_ZIGZAG",
+        # Megatron-Bridge checkpoint-read caches (reused safetensors handles keep every touched shard mmapped; small
+        # tensors are cloned per rank). Read in the Megatron workers during the model load.
+        "MBRIDGE_STATE_REUSE_HANDLES",
+        "MBRIDGE_STATE_CACHE_SMALL_TENSORS",
         # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
         "VLLM_ALLREDUCE_USE_FLASHINFER",
         "VLLM_ALLREDUCE_USE_SYMM_MEM",

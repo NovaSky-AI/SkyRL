@@ -62,6 +62,12 @@ export PATH="$CUDA_HOME/bin:$PATH"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=3600
 export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
+# Megatron-Bridge's checkpoint reader keeps a safetensors handle open for every shard it touched (each one mmaps the
+# whole file) and clones every tensor under 16M elements per rank, both to speed up repeated full-weight exports, which
+# LoRA never does. With the full model on 1 TB Modal B300 hosts that held ~900 GB after the Megatron load and ran the
+# trainer node out of memory at step 1. Off, each shard is opened, read and closed.
+export MBRIDGE_STATE_REUSE_HANDLES="${MBRIDGE_STATE_REUSE_HANDLES:-0}"
+export MBRIDGE_STATE_CACHE_SMALL_TENSORS="${MBRIDGE_STATE_CACHE_SMALL_TENSORS:-0}"
 # Fused cuDNN dense scoring for the V4.1 indexer (Megatron-LM#7285 backport).
 export SKYRL_DSV41_INDEXER_IMPL="${SKYRL_DSV41_INDEXER_IMPL:-fused}"
 
