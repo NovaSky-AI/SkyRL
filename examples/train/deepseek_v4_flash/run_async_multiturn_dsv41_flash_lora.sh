@@ -47,7 +47,11 @@ LORA_TARGET_MODULES='[linear_q_down_proj,linear_q_up_proj,linear_kv_proj,linear_
 VLLM_LORA_TARGET_MODULES='["fused_wqa_wkv", "wq_b", "wo_b", "gate_up_proj", "down_proj", "experts"]'
 MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
+# async_scheduling: false works around a vLLM 0.32 crash in this layout: with async scheduling on, the engine hits
+# "CUDA error: an illegal memory access" within ~1 s after a LoRA weight sync while generation is running (3rd-9th
+# sync; B200 and B300; in-memory and disk sync; with or without score centering or a keep-mode pause around the
+# swap). Off, 15 steps ran clean (step 35.6 s vs ~20-25 s on: generation sometimes falls behind training).
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
