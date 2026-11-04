@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from skyrl.train.opd.config import OPDConfig
 
 TEACHER_LOGPROBS_KEY = "teacher_logprobs"
+ROLLOUT_CORRECT_KEY = "rollout_correct"
 # Floor on the student's logprob in the OPD term. A -inf would make the term inf and the pointwise KL NaN.
 STUDENT_LOGPROB_FLOOR = -99999.0
 
