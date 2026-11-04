@@ -19,11 +19,10 @@ from concurrent.futures import ProcessPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import make_slice_v41 as ms  # noqa: E402
 import torch  # noqa: E402
 from safetensors import safe_open  # noqa: E402
 from safetensors.torch import save_file  # noqa: E402
-
-import make_slice_v41 as ms  # noqa: E402
 
 SHARD_BYTES = 4 << 30
 
