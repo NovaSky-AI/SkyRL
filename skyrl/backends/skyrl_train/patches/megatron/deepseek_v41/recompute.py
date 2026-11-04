@@ -29,7 +29,7 @@ OFFLOAD = os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD", "0").lower() in ("1", 
 # With offload on, the inputs of the stack's last N hybrid layers stay on the GPU: their backward runs first (no
 # copy back to wait for) and the host keeps N fewer layer inputs pinned.
 OFFLOAD_KEEP_LAST = int(os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD_KEEP_LAST", "0"))
-_BUCKET = 1 << 30  # pool capacity granularity
+_CHUNK = 1 << 30  # pinned arena chunk size
 # CSA2State tensor fields threaded through each layer checkpoint (``attention.CSA2State``).
 STATE_FIELDS = ("global_kv", "indexer_k", "global_indices", "candidate_blocks")
 
@@ -46,46 +46,55 @@ def _default_host_limit_bytes() -> int:
 
 
 class _PinnedPool:
-    """Pinned host buffers for offloaded layer inputs, under a hard per-process byte limit.
+    """Pinned host arena for offloaded layer inputs: fixed 1 GiB chunks under a hard per-process byte limit.
 
-    All buffers share one capacity -- the largest request so far, rounded up to 1 GiB -- so once the longest
-    sequence has been seen every later request reuses a pooled buffer and pinning (seconds per ~10 GB buffer) is
-    paid once. Every live buffer, pooled or in use, counts against ``limit`` (``SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB``,
-    default half the node's RAM over 8 local ranks); a request that would exceed it gets ``None`` and the caller
-    keeps that input on the GPU. When the capacity grows, smaller buffers are released as they come back and
-    PyTorch's host cache emptied, so old and new buffers never add up past the limit."""
+    A layer input is stored across as many chunks as it needs, so any size reuses chunks pinned for earlier
+    (longer or shorter) inputs. Chunks are pinned on demand and never freed, so pinning (cudaHostAlloc, ~2 GB/s:
+    2.5 s per 5 GB layer input at 128k tokens) is paid only when the step's total demand passes its previous peak,
+    i.e. once, however much RL batch lengths vary step to step. (A pool of whole-input buffers re-pinned every
+    buffer whenever the longest sequence grew, which in RL is most steps: ~40 s of a 48 s step.)
+
+    Every pinned chunk counts against ``limit`` (``SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB``, default half the
+    node's RAM over the local ranks: pinned pages can't be swapped, and a pool that outgrew this took a 2 TB node
+    down). A request that would pass it gets ``None`` and the caller keeps that input on the GPU. Chunks come back
+    with the CUDA event of the copy that last read them and are reused once it has completed, without blocking.
+    """
 
     def __init__(self):
-        self.free: list = []
-        self.capacity = 0
-        self.live_bytes = 0
+        self.free: list = []  # chunks ready for reuse
+        self.returning: list = []  # (event, chunks) whose device copy may still be reading them
+        self.live_bytes = 0  # pinned bytes, free or in use
         limit_gb = os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB")
         self.limit = int(float(limit_gb) * (1 << 30)) if limit_gb else _default_host_limit_bytes()
 
-    def _release(self, buf: torch.Tensor) -> None:
-        self.live_bytes -= buf.numel()
-        del buf
-        empty_host_cache = getattr(torch._C, "_host_emptyCache", None)
-        if empty_host_cache is not None:
-            empty_host_cache()
+    def _reclaim(self, block: bool = False) -> None:
+        still = []
+        for event, chunks in self.returning:
+            if event is None or event.query() or block:
+                if event is not None and block:
+                    event.synchronize()
+                self.free.extend(chunks)
+            else:
+                still.append((event, chunks))
+        self.returning = still
 
-    def get(self, nbytes: int) -> Optional[torch.Tensor]:
-        if nbytes > self.capacity:
-            self.capacity = -(-nbytes // _BUCKET) * _BUCKET
-            while self.free:
-                self._release(self.free.pop())
-        if self.free:
-            return self.free.pop()
-        if self.live_bytes + self.capacity > self.limit:
+    def get(self, nbytes: int) -> Optional[list]:
+        """``ceil(nbytes / 1 GiB)`` pinned chunks, or ``None`` if that would pass the limit."""
+        need = -(-nbytes // _CHUNK)
+        self._reclaim()
+        if len(self.free) < need and self.returning:
+            self._reclaim(block=len(self.free) + sum(len(c) for _, c in self.returning) >= need)
+        missing = need - len(self.free)
+        if missing > 0 and self.live_bytes + missing * _CHUNK > self.limit:
             return None
-        self.live_bytes += self.capacity
-        return torch.empty(self.capacity, dtype=torch.uint8, device="cpu", pin_memory=True)
+        while len(self.free) < need:
+            self.free.append(torch.empty(_CHUNK, dtype=torch.uint8, device="cpu", pin_memory=True))
+            self.live_bytes += _CHUNK
+        return [self.free.pop() for _ in range(need)]
 
-    def put(self, buf: torch.Tensor) -> None:
-        if buf.numel() == self.capacity:
-            self.free.append(buf)
-        else:
-            self._release(buf)
+    def put(self, chunks: list, event=None) -> None:
+        """Return chunks; with ``event``, they are reused only after it completes."""
+        self.returning.append((event, chunks))
 
 
 _POOL = _PinnedPool()
@@ -103,36 +112,44 @@ def _copy_stream():
 
 
 class _Offloaded:
-    """One layer input parked in pinned host memory: the device-to-host copy runs on a side stream (overlapping the
-    forward's compute; the source stays allocated until it finishes), and the copy back can start early."""
+    """One layer input parked in pinned host memory (a list of arena chunks): the device-to-host copy runs on a
+    side stream (overlapping the forward's compute; the source stays allocated until it finishes), and the copy
+    back can start early (prefetch) while the next layer's backward runs."""
 
     @classmethod
     def try_offload(cls, tensor: torch.Tensor):
         """The offloaded input, or the tensor itself (kept on the GPU) when the pinned budget is used up."""
-        buf = _POOL.get(tensor.numel() * tensor.element_size())
-        return tensor.detach() if buf is None else cls(tensor, buf)
+        chunks = _POOL.get(tensor.numel() * tensor.element_size()) if tensor.is_contiguous() else None
+        return tensor.detach() if chunks is None else cls(tensor, chunks)
 
-    def __init__(self, tensor: torch.Tensor, buf: torch.Tensor):
+    def __init__(self, tensor: torch.Tensor, chunks: list):
         self.shape, self.dtype, self.device = tensor.shape, tensor.dtype, tensor.device
-        nbytes = tensor.numel() * tensor.element_size()
-        self.buf = buf
-        host = self.buf[:nbytes].view(self.dtype).view(self.shape)
+        self.nbytes = tensor.numel() * tensor.element_size()
+        self.chunks = chunks
+        src = tensor.detach().reshape(-1).view(torch.uint8)
         stream = _copy_stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            host.copy_(tensor, non_blocking=True)
+            for i, chunk in enumerate(chunks):
+                lo = i * _CHUNK
+                n = min(_CHUNK, self.nbytes - lo)
+                chunk[:n].copy_(src[lo : lo + n], non_blocking=True)
         tensor.record_stream(stream)  # keep the source's storage until the copy is done
-        self.host = host
         self.device_copy = None
         self.ready = None
         _PENDING.append(self)
 
     def prefetch(self) -> None:
-        if self.device_copy is not None or self.host is None:
+        if self.device_copy is not None or self.chunks is None:
             return
         stream = _copy_stream()
         with torch.cuda.stream(stream):
-            self.device_copy = self.host.to(self.device, non_blocking=True)
+            flat = torch.empty(self.nbytes, dtype=torch.uint8, device=self.device)
+            for i, chunk in enumerate(self.chunks):
+                lo = i * _CHUNK
+                n = min(_CHUNK, self.nbytes - lo)
+                flat[lo : lo + n].copy_(chunk[:n], non_blocking=True)
+            self.device_copy = flat.view(self.dtype).view(self.shape)
             self.ready = torch.cuda.Event()
             self.ready.record(stream)
 
@@ -141,9 +158,8 @@ class _Offloaded:
         torch.cuda.current_stream().wait_event(self.ready)
         out = self.device_copy
         out.record_stream(torch.cuda.current_stream())
-        self.ready.synchronize()  # the host buffer is free for reuse once the copy back has landed
-        buf, self.buf, self.host, self.device_copy = self.buf, None, None, None
-        _POOL.put(buf)  # after dropping our views, so a released buffer is really unpinned
+        chunks, self.chunks, self.device_copy = self.chunks, None, None
+        _POOL.put(chunks, self.ready)  # reusable once the copy back has landed; no host sync here
         if self in _PENDING:
             index = _PENDING.index(self)
             if index > 0:

@@ -37,7 +37,7 @@ def toy_layer_forward(layer, hidden, scale, *, state_getter):
         state.csa2.global_kv = layer.kv(hidden)  # differentiable, consumed by later layers
         state.csa2.global_indices = (hidden.sum(-1) > 0).to(torch.int32)  # integer state
         state.csa2.compress_ratio = 2
-    pre = state.pending_pre if state.pending_pre is not None else hidden.new_ones(SEQ, 1)
+    pre = state.pending_pre if state.pending_pre is not None else hidden.new_ones(hidden.shape[0], 1)
     out = torch.tanh(layer.proj(hidden)) * pre * scale
     if state.csa2.global_kv is not None:
         out = out + 0.5 * state.csa2.global_kv * state.csa2.global_indices.unsqueeze(-1)
@@ -135,7 +135,33 @@ def test_stateful_recompute_with_offload_matches_on_cuda(monkeypatch):
         for got, want in zip(grads, ref_grads):
             torch.testing.assert_close(got, want)
     assert not recompute._PENDING
-    assert recompute._POOL.free  # buffers returned to the pool
+    assert recompute._POOL.free or recompute._POOL.returning  # chunks returned to the arena
+
+
+def test_offload_arena_splits_inputs_across_chunks_and_reuses_them(monkeypatch):
+    """Tiny chunks: inputs span several chunks with ragged tails and vary in size between iterations, as RL
+    batch lengths do; values round-trip exactly and the arena stops pinning once its peak demand is reached."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    monkeypatch.setattr(recompute, "OFFLOAD", True)
+    monkeypatch.setattr(recompute, "_CHUNK", 1000)  # bytes: a [SEQ, HIDDEN] fp64 input spans 2 chunks
+    monkeypatch.setattr(recompute, "_POOL", recompute._PinnedPool())
+    torch.manual_seed(0)
+    layers = torch.nn.ModuleList(ToyLayer(source) for source in (True, False, True)).double().cuda()
+    pinned = []
+    for seq in (SEQ, SEQ - 5, SEQ, SEQ - 3):
+        x = torch.randn(seq, HIDDEN, dtype=torch.float64, device="cuda", requires_grad=True)
+        grads = []
+        for stateful in (False, True):
+            x.grad = None
+            for p in layers.parameters():
+                p.grad = None
+            run_stack(layers, x, stateful).backward()
+            grads.append([x.grad.clone()] + [p.grad.clone() for p in layers.parameters() if p.grad is not None])
+        for got, want in zip(grads[1], grads[0]):
+            torch.testing.assert_close(got, want)
+        pinned.append(recompute._POOL.live_bytes)
+    assert pinned[2] == pinned[1] == pinned[0] and pinned[3] == pinned[0]  # peak reached at the first step
 
 
 def test_offload_respects_the_pinned_host_limit(monkeypatch):
