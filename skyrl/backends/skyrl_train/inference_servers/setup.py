@@ -273,7 +273,7 @@ def build_new_inference_client(
     """Build the new HTTP-based inference client and supporting state for the policy.
 
     :func:`build_new_inference_client_impl` with the policy's engine block, model path and vLLM args,
-    plus the policy-only client fields (tokenizer, capture, score centering, LoRA sync).
+    plus the policy-only client fields (tokenizer, capture and its width, score centering, LoRA sync).
 
     Args:
         cfg: SkyRL train config.
@@ -293,6 +293,7 @@ def build_new_inference_client(
         tokenizer=tokenizer,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
+        candidate_top_k=ie_cfg.candidate_top_k,
         enable_return_sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
     )

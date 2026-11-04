@@ -365,15 +365,19 @@ class RemoteGenerateClient:
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
         return_sample_support_logprobs: bool = False,
+        candidate_top_k: Optional[int] = None,
         mm_features: Optional[MultiModalFeatures] = None,
         cache_salt: Optional[str] = None,
     ) -> RemoteGenerateResult:
         """Generate one raw-token completion with optional per-token replay metadata.
 
         ``return_sample_support_logprobs`` also returns each support member's sampler logprob.
+        ``candidate_top_k`` captures the plain top ``candidate_top_k`` instead of the sampler's own support.
         """
         if return_sample_support_logprobs and not return_sample_support:
             raise ValueError("return_sample_support_logprobs requires return_sample_support=True")
+        if candidate_top_k is not None and not return_sample_support:
+            raise ValueError("candidate_top_k requires return_sample_support=True")
         if routed_experts_prompt_start is not None:
             if not return_routed_experts:
                 raise ValueError("routed_experts_prompt_start requires return_routed_experts=True")
@@ -398,6 +402,8 @@ class RemoteGenerateClient:
             payload["return_sample_support"] = True
         if return_sample_support_logprobs:
             payload["return_sample_support_logprobs"] = True
+        if candidate_top_k is not None:
+            payload["candidate_top_k"] = candidate_top_k
         if mm_features:
             payload["features"] = mm_features
         # `cache_salt` is a top-level request field (forwarded to vLLM's TokensPrompt), not a sampling
@@ -531,6 +537,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
     enable_return_sample_support_logprobs: bool = False
     """Whether captured support also carries each member's sampler logprob (score centering).
     Requires ``enable_return_sample_support_set``."""
+
+    candidate_top_k: Optional[int] = None
+    """Capture the policy's plain top ``candidate_top_k`` tokens per position instead of the sampler's own
+    support, for an untruncated sampler (``generator.inference_engine.candidate_top_k``). Requires
+    ``enable_return_sample_support_set``."""
 
     uses_lora_weight_sync: bool = False
     """True when the trainer syncs LoRA adapters (rather than full/merged weights). When True,
@@ -683,6 +694,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "return_sample_support", False
         )
         return_sample_support_logprobs = return_sample_support and self.enable_return_sample_support_logprobs
+        candidate_top_k = self.candidate_top_k if return_sample_support else None
         get_logprobs = sampling_params.get("logprobs") is not None
 
         # Two semaphores decouple the generate and detokenize stages:
@@ -699,35 +711,27 @@ class RemoteInferenceClient(InferenceEngineInterface):
         gen_sem, detok_sem = self._get_semaphores()
         batch_size = len(prompt_token_ids)
 
+        async def _generate_one(idx: int) -> Dict[str, Any]:
+            return await self._generate_single(
+                prompt_token_ids=prompt_token_ids[idx],
+                sampling_params=sampling_params,
+                session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
+                mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
+                routed_experts_prompt_start=(
+                    routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
+                ),
+                return_sample_support=return_sample_support,
+                return_sample_support_logprobs=return_sample_support_logprobs,
+                candidate_top_k=candidate_top_k,
+                model=model,
+                cache_salt=cache_salt,
+            )
+
         async def _throttled_generate(idx: int) -> Dict[str, Any]:
             if gen_sem is None:
-                return await self._generate_single(
-                    prompt_token_ids=prompt_token_ids[idx],
-                    sampling_params=sampling_params,
-                    session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
-                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
-                    routed_experts_prompt_start=(
-                        routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
-                    ),
-                    return_sample_support=return_sample_support,
-                    return_sample_support_logprobs=return_sample_support_logprobs,
-                    model=model,
-                    cache_salt=cache_salt,
-                )
+                return await _generate_one(idx)
             async with gen_sem:
-                return await self._generate_single(
-                    prompt_token_ids=prompt_token_ids[idx],
-                    sampling_params=sampling_params,
-                    session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
-                    mm_features=mm_features[idx] if mm_features and idx < len(mm_features) else None,
-                    routed_experts_prompt_start=(
-                        routed_experts_prompt_starts[idx] if routed_experts_prompt_starts is not None else None
-                    ),
-                    return_sample_support=return_sample_support,
-                    return_sample_support_logprobs=return_sample_support_logprobs,
-                    model=model,
-                    cache_salt=cache_salt,
-                )
+                return await _generate_one(idx)
 
         async def _throttled_detokenize(token_ids: List[int]) -> str:
             if detok_sem is None:
@@ -765,6 +769,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         routed_experts_prompt_start: Optional[int] = None,
         return_sample_support: bool = False,
         return_sample_support_logprobs: bool = False,
+        candidate_top_k: Optional[int] = None,
     ) -> Dict[str, Any]:
         result = await self._get_generate_client().generate(
             prompt_token_ids=prompt_token_ids,
@@ -775,6 +780,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
             routed_experts_prompt_start=routed_experts_prompt_start,
             return_sample_support=return_sample_support,
             return_sample_support_logprobs=return_sample_support_logprobs,
+            candidate_top_k=candidate_top_k,
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
@@ -981,6 +987,22 @@ class RemoteInferenceClient(InferenceEngineInterface):
             "prompt_logprobs": result_prompt_logprobs,
             "topk_prompt_logprobs": result_topk_prompt_logprobs,
         }
+
+    async def score_tokens(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """POST a prefill-scoring request to ``/inference/v1/generate`` and return vLLM's response.
+
+        Same router, retries and generate cap as ``sample()``, but the caller owns the body, such as
+        ``sampling_params.prompt_logprob_token_ids``, which the Tinker-shaped ``sample()`` cannot carry.
+        The request is scored by the client's ``model_name`` (see ``_resolve_model``).
+        """
+        body = {**request, "model": self._resolve_model(None, "score_tokens")}
+        url = f"{self.proxy_url}/inference/v1/generate"
+        headers = {"Content-Type": "application/json"}
+        gen_sem, _ = self._get_semaphores()
+        if gen_sem is None:
+            return await self._post(url, json=body, headers=headers)
+        async with gen_sem:
+            return await self._post(url, json=body, headers=headers)
 
     async def chat_completion(
         self,

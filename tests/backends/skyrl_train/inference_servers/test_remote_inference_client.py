@@ -753,6 +753,70 @@ class TestDataPlane:
         assert np.array_equal(dense(result["rollout_sample_support"][0]), [[7, 8]])
 
     @pytest.mark.asyncio
+    async def test_candidate_capture_sends_its_width_only_with_the_opt_in(self, monkeypatch):
+        client = RemoteInferenceClient(
+            proxy_url="http://unused",
+            server_urls=["http://unused"],
+            data_parallel_size=1,
+            enable_return_sample_support_set=True,
+            candidate_top_k=4,
+        )
+        bodies = []
+
+        async def fake_post(url, json, headers, *, packed_side_channels=False):
+            bodies.append(json)
+            return {
+                "choices": [
+                    {
+                        "token_ids": [7],
+                        "finish_reason": "stop",
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: pack_sample_support(csr([[7, 8]])),
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(client._get_generate_client(), "_post", fake_post)
+        monkeypatch.setattr(client, "detokenize", _fake_detokenize)
+
+        await client.generate({"prompt_token_ids": [[1, 2]], "return_sample_support": True})
+        await client.generate({"prompt_token_ids": [[1, 2]]})  # e.g. an eval batch
+
+        assert bodies[0]["return_sample_support"] is True and bodies[0]["candidate_top_k"] == 4
+        assert "return_sample_support" not in bodies[1] and "candidate_top_k" not in bodies[1]
+
+    @pytest.mark.asyncio
+    async def test_generate_client_rejects_a_candidate_width_without_capture(self):
+        generate_client = RemoteGenerateClient(proxy_url="http://unused")
+        with pytest.raises(ValueError, match="candidate_top_k requires return_sample_support=True"):
+            await generate_client.generate(
+                prompt_token_ids=[1], sampling_params={}, session_id=None, model="m", candidate_top_k=4
+            )
+
+    @pytest.mark.asyncio
+    async def test_score_tokens_posts_the_callers_body_under_the_clients_model(self, monkeypatch):
+        client = RemoteInferenceClient(
+            proxy_url="http://router", server_urls=["http://s0"], data_parallel_size=1, model_name="teacher"
+        )
+        posts = []
+
+        async def fake_post(url, json, headers=None, **kwargs):
+            posts.append((url, json))
+            return {"prompt_token_id_logprobs": "encoded"}
+
+        monkeypatch.setattr(client._get_generate_client(), "_post", fake_post)
+        body = {"token_ids": [1, 2], "sampling_params": {"prompt_logprob_token_ids": [[2]], "prompt_logprob_start": 0}}
+
+        assert await client.score_tokens(body) == {"prompt_token_id_logprobs": "encoded"}
+        assert posts == [("http://router/inference/v1/generate", {**body, "model": "teacher"})]
+
+        # Under LoRA sync the base name would silently bypass the adapter, so the client refuses.
+        lora_client = RemoteInferenceClient(
+            proxy_url="http://router", server_urls=["http://s0"], data_parallel_size=1, uses_lora_weight_sync=True
+        )
+        with pytest.raises(ValueError, match="score_tokens: `model` is required"):
+            await lora_client.score_tokens(body)
+
+    @pytest.mark.asyncio
     async def test_generate_rejects_list_routed_experts(self, monkeypatch):
         client = RemoteInferenceClient(
             proxy_url="http://unused",

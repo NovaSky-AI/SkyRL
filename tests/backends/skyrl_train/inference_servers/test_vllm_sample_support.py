@@ -12,6 +12,7 @@ pytest.importorskip("vllm")
 from vllm.lora.request import LoRARequest
 
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
+    CLAMPED_LOGPROB,
     PackedField,
     decode_packed_sample_support,
 )
@@ -140,6 +141,33 @@ def test_flat_logprobs_omit_member_logprobs_unless_asked():
     assert support.logprobs is None
 
 
+def test_flat_logprobs_plain_top_k_leaves_a_sampled_token_outside_its_row():
+    # Untruncated sampling drew 9, which is outside the plain top-2 of row 0.
+    flat_logprobs = SimpleNamespace(token_ids=[9, 7, 8, 7, 7, 8], logprobs=[-3.0, -0.1, -0.2, -0.1, -0.1, -0.2])
+
+    sampled, support = _sample_support_from_flat_logprobs(
+        flat_logprobs, top_k=2, with_member_logprobs=True, plain_top_k=True
+    )
+
+    assert sampled == [{"logprob": -3.0}, {"logprob": -0.1}]
+    np.testing.assert_array_equal(dense(support), [[7, 8], [7, 8]])
+    np.testing.assert_array_equal(support.logprobs, np.float32([-0.1, -0.2, -0.1, -0.2]))
+    # The replay path writes the sampled token over the weakest member instead.
+    _, repaired = _sample_support_from_flat_logprobs(flat_logprobs, top_k=2)
+    np.testing.assert_array_equal(dense(repaired), [[7, 9], [7, 8]])
+
+
+def test_flat_logprobs_plain_top_k_floors_a_non_finite_sampled_logprob():
+    flat_logprobs = SimpleNamespace(token_ids=[9, 7, 8], logprobs=[float("-inf"), -0.1, -0.2])
+
+    sampled, support = _sample_support_from_flat_logprobs(flat_logprobs, top_k=2, plain_top_k=True)
+
+    assert sampled == [{"logprob": CLAMPED_LOGPROB}]
+    np.testing.assert_array_equal(dense(support), [[7, 8]])
+    with pytest.raises(ValueError, match="non-finite sampled logprob"):
+        _sample_support_from_flat_logprobs(flat_logprobs, top_k=2)
+
+
 class FakeEngine:
     sampling_params = None
     lora_request = None
@@ -246,6 +274,53 @@ def test_skyrl_generate_returns_packed_sample_support_logprobs():
         choice[PackedField.ROLLOUT_SAMPLE_SUPPORT], choice[PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS]
     )
     np.testing.assert_array_equal(decoded.logprobs, np.float32([-0.1, -0.2]))
+
+
+def test_skyrl_generate_captures_a_candidate_width_under_untruncated_sampling():
+    app = FastAPI()
+    engine = FakeEngine()
+    VLLMServerActor._add_custom_endpoints(app, engine, SimpleNamespace(enable_lora=False))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={
+                "token_ids": [1, 2],
+                "sampling_params": {"temperature": 1.0, "top_k": -1},
+                "return_sample_support": True,
+                "candidate_top_k": 2,
+            },
+        )
+
+    assert response.status_code == 200
+    assert engine.sampling_params.logprobs == 2
+    assert engine.sampling_params.top_k == -1  # sampling itself stays untruncated
+    support = decode_packed_sample_support(response.json()["choices"][0][PackedField.ROLLOUT_SAMPLE_SUPPORT])
+    assert support.top_k == 2
+    np.testing.assert_array_equal(dense(support), [[7, 8]])
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        ({"candidate_top_k": 2}, "candidate_top_k requires return_sample_support"),
+        ({"candidate_top_k": 1, "return_sample_support": True}, "candidate_top_k > 1"),
+    ],
+)
+def test_skyrl_generate_rejects_a_bad_candidate_width(body, message):
+    app = FastAPI()
+    engine = FakeEngine()
+    VLLMServerActor._add_custom_endpoints(app, engine, SimpleNamespace(enable_lora=False))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/skyrl/v1/generate",
+            json={"token_ids": [1, 2], "sampling_params": {"temperature": 1.0, "top_k": -1}, **body},
+        )
+
+    assert response.status_code == 400
+    assert message in response.json()["detail"]
+    assert engine.sampling_params is None
 
 
 def test_skyrl_generate_rejects_member_logprobs_without_sample_support():
