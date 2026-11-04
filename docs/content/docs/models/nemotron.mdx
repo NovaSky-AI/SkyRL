@@ -1,0 +1,34 @@
+---
+title: "Nemotron 3 / Nemotron 3.5"
+---
+
+Supported on `main` with the Megatron backend. Both are NemotronH hybrids: 52 layers interleaving Mamba2, attention and MoE blocks (128 experts).
+LoRA has not been tested yet.
+
+| Model | Full FT | LoRA | Min. hardware | Script |
+|---|---|---|---|---|
+| [Nemotron-3.5-Lightning-30B-A3B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) | ✅ | | 1x4 H100 | [`run_megatron_grpo_nemotron_3_5_lightning_30b.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_grpo_nemotron_3_5_lightning_30b.sh) |
+| [Nemotron-3-Nano-4B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16) | ✅ | | 1x8 H100 | [`run_nemotron_3_nano_4b_gsm8k.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/nemotron_3/run_nemotron_3_nano_4b_gsm8k.sh) |
+| Nemotron-3-Nano-30B-A3B | ✅ | | | Use the Lightning script |
+
+Both scripts train on GSM8K:
+
+```bash
+uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+bash examples/train/megatron/run_megatron_grpo_nemotron_3_5_lightning_30b.sh
+```
+
+**Results:** Nemotron-3-Nano-4B reaches ~96% pass@1 on GSM8K within 20 epochs, at ~60-80s per step on 8xH100.
+
+## Notes
+
+- Lightning runs at TP=4 EP=4 on 4 GPUs. For 8 GPUs, keep TP=4 and raise EP to 8. TP=1 OOMs in the EP alltoall.
+- Lightning defaults to a 262k context, which leaves no room for the KV cache next to the trainer, so the script caps it at 4096.
+- Lightning's MTP head is not trained. Megatron drops it and vLLM skips the `mtp.*` weights.
+- HF vs Megatron forward differences are higher on this hybrid architecture (~0.17 avg vs ~0.05 for pure transformers).
+  vLLM vs Megatron logprobs differ by ~0.01, same as other models.
+
+## Nemotron-Mini-4B-Instruct
+
+Also supported, see [`run_megatron_nemotron_mini_4b.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_nemotron_mini_4b.sh).
+The HF checkpoint only ships pytorch_model.bin, so convert it to safetensors first (the script shows how).

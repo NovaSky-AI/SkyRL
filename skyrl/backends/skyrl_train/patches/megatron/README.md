@@ -173,7 +173,7 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
 - **Remove:**
   - `workers/megatron/model_bridges.py`: drop the `glm5_next` import that registers the bridge.
   - Tests that import from `glm5_next`: repoint them at Megatron-Bridge.
-  - `.agents/docs/backends/megatron.md` and `docs/content/docs/.../supported_models.mdx`: update
+  - `.agents/docs/backends/megatron.md` and `docs/content/docs/models/` (support matrix in `index.mdx` + the family page): update
     the model entry.
   - The `kimi_*` fields in `glm5_next/provider.py` and their assignments in `glm5_next/bridge.py`:
     check that the upstream provider sets the fields megatron-bridge's FLOPs formula
