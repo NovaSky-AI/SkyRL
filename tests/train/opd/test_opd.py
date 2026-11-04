@@ -5,6 +5,7 @@ uv run --isolated --extra dev pytest tests/train/opd/test_opd.py
 """
 
 import asyncio
+import random
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -748,20 +749,14 @@ def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _fake_tokenizer(texts: Optional[List[str]] = None) -> MagicMock:
-    """Decodes every rollout to "decoded", or ``batch_decode`` returns ``texts``."""
+@pytest.fixture
+def tokenizer():
     tok = MagicMock()
     tok.decode.side_effect = lambda ids, **kwargs: "decoded"
-    tok.batch_decode.side_effect = lambda batch, **kwargs: texts if texts is not None else ["decoded"] * len(batch)
     tok.eos_token_id = 4
     tok.eos_token = "<eos>"
     tok.pad_token_id = 0
     return tok
-
-
-@pytest.fixture
-def tokenizer():
-    return _fake_tokenizer()
 
 
 class DummyDataset:
@@ -841,7 +836,7 @@ def _trainer(
     trainer = OPDTrainer(
         cfg=cfg,
         tracker=None,
-        tokenizer=tokenizer or _fake_tokenizer(),
+        tokenizer=tokenizer,
         train_dataset=DummyDataset(),
         eval_dataset=None,
         inference_engine_client=None,
@@ -978,11 +973,10 @@ def test_trainer_end_to_end_advantages_pure(tokenizer):
     assert "opd/reverse_kl" in trainer.all_metrics
 
 
-def test_trainer_logs_the_rollout_metrics_from_the_real_rewards():
+def test_trainer_logs_the_rollout_metrics_from_the_real_rewards(tokenizer):
     out = _generator_output()
     out["stop_reasons"] = ["length", "stop"]
-    looping = "the same line\n" * 1_000
-    trainer = _trainer(use_task_reward=False, kl_coef=2.0, tokenizer=_fake_tokenizer(["short answer", looping]))
+    trainer = _trainer(use_task_reward=False, kl_coef=2.0, tokenizer=tokenizer)
 
     out, uids = trainer.postprocess_generator_output(out, ["u", "u"])
     batch = trainer.convert_to_training_input(out, uids)
@@ -991,15 +985,27 @@ def test_trainer_logs_the_rollout_metrics_from_the_real_rewards():
     trainer.compute_advantages_and_returns(batch)
 
     assert trainer.all_metrics["opd/truncation_rate"] == 0.5
-    assert trainer.all_metrics["opd/repetition_rate"] == 0.5
+    assert trainer.all_metrics["opd/repetition_rate"] == 0.0  # both rollouts are too short to check
     # Pure mode zeroed the rewards, but row 0 (reward 1.0) still counts as correct: log q - log p averages
     # 0.6 on it and 1.35 on row 1's two trained tokens.
     assert trainer.all_metrics["opd/informativeness"] == pytest.approx(0.6 - 1.35)
     assert ROLLOUT_CORRECT_KEY not in batch  # popped, never shipped to workers
 
 
-def test_trainer_padding_rows_do_not_count_toward_informativeness():
-    trainer = _trainer(use_task_reward=False)
+def test_trainer_repetition_rate_counts_looping_token_ids():
+    out = _generator_output()
+    rng = random.Random(0)
+    out["response_ids"] = [[17, 42, 99] * 1_000, [rng.randrange(150_000) for _ in range(3_000)]]
+    out["loss_masks"] = [[1] * 3_000, [1] * 3_000]
+    trainer = _trainer(use_task_reward=True)
+
+    trainer.postprocess_generator_output(out, ["u", "u"])
+
+    assert trainer.all_metrics["opd/repetition_rate"] == 0.5  # the loop, not the varied rollout
+
+
+def test_trainer_padding_rows_do_not_count_toward_informativeness(tokenizer):
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer)
     trainer.dispatch.get_lcm_dp_size.return_value = 4  # two rows padded to four
 
     out, uids = trainer.postprocess_generator_output(_generator_output(), ["u", "u"])

@@ -1,27 +1,27 @@
 """Rollout diagnostics for on-policy distillation, kept free of trainer state so they can be tested."""
 
+import array
 import zlib
 from typing import List, Optional
 
 import torch
 
-REPETITION_TAIL_CHARS = 10_000
+REPETITION_TAIL_TOKENS = 2_500
 REPETITION_RATIO = 10.0
 
 
 def truncation_rate(stop_reasons: List[str]) -> float:
     """Fraction of rollouts stopped by the length budget rather than EOS."""
+    if not stop_reasons:
+        return 0.0
     return sum(reason == "length" for reason in stop_reasons) / len(stop_reasons)
 
 
-def is_repetitive(text: str) -> bool:
-    """Whether the last ``REPETITION_TAIL_CHARS`` characters compress by more than ``REPETITION_RATIO``.
-
-    A shorter text is never repetitive.
-    """
-    if len(text) < REPETITION_TAIL_CHARS:
+def is_repetitive(token_ids: List[int]) -> bool:
+    """Whether the last ``REPETITION_TAIL_TOKENS`` ids, as int32 bytes, compress by more than ``REPETITION_RATIO``."""
+    if len(token_ids) < REPETITION_TAIL_TOKENS:
         return False
-    tail = text[-REPETITION_TAIL_CHARS:].encode("utf-8")
+    tail = array.array("i", token_ids[-REPETITION_TAIL_TOKENS:]).tobytes()
     return len(tail) / len(zlib.compress(tail)) > REPETITION_RATIO
 
 

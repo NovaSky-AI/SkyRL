@@ -5,14 +5,13 @@ uv run --isolated --extra dev pytest tests/train/opd/test_opd_metrics.py
 """
 
 import random
-import string
 
 import numpy as np
 import pytest
 import torch
 
 from skyrl.train.opd.metrics import (
-    REPETITION_TAIL_CHARS,
+    REPETITION_TAIL_TOKENS,
     informativeness,
     is_repetitive,
     rollout_correct,
@@ -23,17 +22,18 @@ from skyrl.train.opd.metrics import (
 def test_truncation_rate_counts_length_stops():
     assert truncation_rate(["stop", "length", "length", "abort"]) == 0.5
     assert truncation_rate(["stop"]) == 0.0
+    assert truncation_rate([]) == 0.0
 
 
 def test_is_repetitive_needs_a_long_compressible_tail():
     rng = random.Random(0)
-    varied = "".join(rng.choice(string.ascii_letters + string.digits + " ") for _ in range(2 * REPETITION_TAIL_CHARS))
+    varied = [rng.randrange(150_000) for _ in range(2 * REPETITION_TAIL_TOKENS)]
 
-    assert not is_repetitive("ab" * (REPETITION_TAIL_CHARS // 2 - 1))  # one character short of eligible
-    assert is_repetitive("ab" * REPETITION_TAIL_CHARS)
+    assert not is_repetitive([7, 8] * (REPETITION_TAIL_TOKENS // 2 - 1))  # two tokens short of eligible
+    assert is_repetitive([7, 8] * (REPETITION_TAIL_TOKENS // 2))
     assert not is_repetitive(varied)
     # Only the tail counts: a varied rollout that ends in a loop is repetitive.
-    assert is_repetitive(varied + "the same line\n" * 1_000)
+    assert is_repetitive(varied + [11, 12, 13, 14] * 1_000)
 
 
 @pytest.mark.parametrize(

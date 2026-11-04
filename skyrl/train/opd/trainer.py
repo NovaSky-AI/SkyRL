@@ -24,7 +24,6 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.utils import concatenate_generator_outputs
 from skyrl.train.opd.metrics import (
-    REPETITION_TAIL_CHARS,
     informativeness,
     is_repetitive,
     rollout_correct,
@@ -115,9 +114,8 @@ class OPDTrainer(RayPPOTrainer):
         generator_output, uids = super().postprocess_generator_output(generator_output, uids)
         generator_output[ROLLOUT_CORRECT_KEY] = [rollout_correct(reward) for reward in generator_output["rewards"]]
         # Metrics: Repetition Rate and Truncation Rate
-        tails = [response[-REPETITION_TAIL_CHARS:] for response in generator_output["response_ids"]]
-        texts = self.tokenizer.batch_decode(tails, skip_special_tokens=True)
-        self.all_metrics["opd/repetition_rate"] = sum(map(is_repetitive, texts)) / len(texts)
+        responses = generator_output["response_ids"]
+        self.all_metrics["opd/repetition_rate"] = sum(map(is_repetitive, responses)) / len(responses)
         if generator_output.get("stop_reasons") is not None:
             self.all_metrics["opd/truncation_rate"] = truncation_rate(generator_output["stop_reasons"])
         # Pure OPD: advantage is from the teacher alone. Rewards are set to 0.
