@@ -2,25 +2,34 @@
 
 - ``generate_on_input_batch`` runs one ``generator.generate`` call per prompt group concurrently and scores
   each group under the teacher as soon as its rollouts are back, so only the last groups to finish wait on the
-  teacher. The base ``generate`` then logs the rollout metrics and validates the output, as for any trainer.
+  teacher. With ``opd.top_k > 0`` the teacher also scores the student's captured candidates, which then ride on
+  ``rollout_sample_support``. The base ``generate`` then logs the rollout metrics and validates the output, as for
+  any trainer.
 - ``postprocess_generator_output`` logs the truncation and repetition rates, records which rollouts are correct,
   and zeroes the rewards in pure mode, after their metrics are logged.
 - ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like ``rollout_logprobs``,
   next to the correctness flags.
 - ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)`` on trainable
   tokens, after the configured advantage estimator and regulated by the ``opd`` stabilization settings, and logs
-  the teacher's informativeness.
+  the teacher's informativeness. With ``opd.top_k > 0`` it adds TT-OPD's top-K term: each position's ``C`` on the
+  sampled token's advantage, and the candidates' logit weights in the support's member-value column.
+- ``_normalize_advantages`` gives those logit weights the per-token loss-reduction scale the advantages get.
 """
 
 import asyncio
 import inspect
 import time
+from itertools import repeat
 from typing import List, Optional, Tuple
 
 import torch
 from tqdm.asyncio import tqdm
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SampleSupportColumn,
+)
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.utils import concatenate_generator_outputs
 from skyrl.train.opd.metrics import (
@@ -35,8 +44,14 @@ from skyrl.train.opd.utils import (
     STUDENT_LOGPROB_FLOOR,
     TEACHER_LOGPROBS_KEY,
     apply_opd_to_advantages,
+    candidate_matrix,
+    member_rows,
     pad_teacher_logprobs,
+    row_cells,
     split_generator_input,
+    topk_metrics,
+    topk_weights,
+    with_member_values,
 )
 from skyrl.train.trainer import RayPPOTrainer
 
@@ -71,20 +86,36 @@ class OPDTrainer(RayPPOTrainer):
             return await super().generate_on_input_batch(input_batch)
 
         groups = split_generator_input(input_batch, self.cfg.generator.n_samples_per_prompt)
+        top_k = self.cfg.trainer.algorithm.opd.top_k
         rollout_done_times: List[float] = []
         teacher_times: List[float] = []
 
         async def generate_and_score(group: GeneratorInput) -> GeneratorOutput:
             output: GeneratorOutput = await self.generator.generate(group, **self._generate_kwargs)
             rollout_done = time.monotonic()
-            output[TEACHER_LOGPROBS_KEY] = list(
-                await asyncio.gather(
-                    *(
-                        self.teacher_client.compute_logprobs(prompt_ids, response_ids)
-                        for prompt_ids, response_ids in zip(output["prompt_token_ids"], output["response_ids"])
-                    )
+            # Only top_k > 0 captures candidates; any other support (e.g. replay's) is left alone.
+            supports = output.get(SAMPLE_SUPPORT_FIELD) if top_k else None
+            if top_k and supports is None:
+                raise RuntimeError(
+                    f"opd.top_k > 0 needs {SAMPLE_SUPPORT_FIELD!r} from the generator, which returned none"
+                )
+            candidates = [
+                candidate_matrix(response_ids, support)
+                for response_ids, support in zip(output["response_ids"], supports or repeat(None))
+            ]
+            scores = await asyncio.gather(
+                *(
+                    self.teacher_client.compute_logprobs(prompt_ids, row)
+                    for prompt_ids, row in zip(output["prompt_token_ids"], candidates)
                 )
             )
+            output[TEACHER_LOGPROBS_KEY] = [score.logprobs[:, 0].tolist() for score in scores]
+            if supports is not None:
+                # Rows [sampled, candidates...] with the teacher's logprobs as the member values.
+                output[SAMPLE_SUPPORT_FIELD] = [
+                    support.with_teacher_scores(row, score.logprobs)
+                    for support, row, score in zip(supports, candidates, scores)
+                ]
             rollout_done_times.append(rollout_done)
             teacher_times.append(time.monotonic() - rollout_done)
             return output
@@ -155,12 +186,16 @@ class OPDTrainer(RayPPOTrainer):
                 "old-policy logprobs (see validate_opd_cfg)"
             )
         teacher_logprobs = teacher_logprobs.to(action_log_probs.device)
+        opd = self.cfg.trainer.algorithm.opd
+        topk = topk_weights(data[SAMPLE_SUPPORT_FIELD], data["loss_mask"], opd) if opd.top_k else None
         advantages, metrics = apply_opd_to_advantages(
             advantages=data["advantages"],
             action_log_probs=action_log_probs,
             teacher_logprobs=teacher_logprobs,
             loss_mask=data["loss_mask"],
-            opd=self.cfg.trainer.algorithm.opd,
+            opd=opd,
+            sampled_in_topk=None if topk is None else topk.sampled_in_topk,
+            topk_weight_sum=None if topk is None else topk.token_weights,
         )
         value = informativeness(
             teacher_logprobs - action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR),
@@ -170,5 +205,34 @@ class OPDTrainer(RayPPOTrainer):
         if value is not None:
             metrics["opd/informativeness"] = value
         data["advantages"] = advantages
+        if topk is not None:
+            # From here on the member values are logit weights, not teacher logprobs.
+            data[SAMPLE_SUPPORT_FIELD] = with_member_values(data[SAMPLE_SUPPORT_FIELD], topk.member_weights)
+            metrics.update(topk_metrics(topk, data["loss_mask"]))
         self.all_metrics.update(metrics)
+        return data
+
+    @torch.no_grad()
+    def _normalize_advantages(
+        self,
+        data: TrainingInputBatch,
+        mini_batch_boundaries: List[Tuple[int, int]],
+        prompt_boundaries: Optional[List[Tuple[int, int]]] = None,
+    ) -> TrainingInputBatch:
+        """With ``opd.top_k > 0``, also scale each logit weight by its token's loss-reduction scale.
+
+        The worker sums the logit term like the policy loss, so the weights need the factor the reduction applies to
+        each token's advantage: the reduction of a tensor of ones. That factor is the advantages' whole normalization,
+        since every reduction is linear and OPD refuses ``advantage_batch_normalize``.
+        """
+        data = super()._normalize_advantages(data, mini_batch_boundaries, prompt_boundaries)
+        if not self.cfg.trainer.algorithm.opd.top_k:
+            return data
+        support, loss_mask = data[SAMPLE_SUPPORT_FIELD], data["loss_mask"]
+        scale = self._apply_loss_reduction(
+            torch.ones_like(data["advantages"]), loss_mask, mini_batch_boundaries, prompt_boundaries
+        )
+        batch, column = row_cells(support, loss_mask.shape[1])
+        weights = support.columns[SampleSupportColumn.MEMBER_VALUES] * scale[batch, column][member_rows(support)]
+        data[SAMPLE_SUPPORT_FIELD] = with_member_values(support, weights)
         return data

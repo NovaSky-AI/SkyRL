@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    CompactSampleSupport,
+    SampleSupportColumn,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.generators.base import GeneratorInput
 
@@ -48,6 +54,20 @@ def split_generator_input(input_batch: GeneratorInput, group_size: int) -> List[
     ]
 
 
+def candidate_matrix(response_ids: List[int], support: Optional[CompactSampleSupport] = None) -> np.ndarray:
+    """``[tokens, 1 + k]`` int32 ids for the teacher to score: each response token, then its row's candidates.
+
+    The sampled token is always column 0, so with no ``support`` this is ``[tokens, 1]``, sampled-token OPD.
+    ``-1`` pads a row with fewer than ``support.top_k`` candidates, including a token with none.
+    """
+    sampled = np.asarray(response_ids, dtype=np.int32).reshape(-1, 1)
+    if support is None:
+        return sampled
+    if len(support) != len(response_ids):
+        raise ValueError(f"{len(support)} candidate rows for {len(response_ids)} response tokens")
+    return np.concatenate([sampled, support.candidate_grid()], axis=1)
+
+
 def pad_teacher_logprobs(
     teacher_logprobs: List[List[float]],
     response_mask: torch.Tensor,
@@ -85,12 +105,47 @@ def pad_teacher_logprobs(
     return out
 
 
+@dataclass(frozen=True)
+class TeacherSignal:
+    signal: torch.Tensor
+    """The regulated ``log pi_teacher - log pi_student``, before ``kl_coef``."""
+    divergence_clipped: torch.Tensor
+    """bool: the divergence clip zeroed the token's signal."""
+    advantage_clipped: torch.Tensor
+    """bool: the advantage bounds changed the token's signal."""
+
+
+def teacher_signal(student_logprobs: torch.Tensor, teacher_logprobs: torch.Tensor, opd: OPDConfig) -> TeacherSignal:
+    """``opd``'s regulation of ``a = log pi_teacher - log pi_student``, elementwise. Callers apply their own mask.
+
+    The student's logprob is floored at ``STUDENT_LOGPROB_FLOOR``. Then the divergence clip, then either the
+    advantage bounds or log compression (alternatives, see ``validate_opd_cfg``). A zero signal stays zero, since
+    the bounds straddle it, so masking before or after regulating gives the same values.
+    """
+    student_logprobs = student_logprobs.clamp(min=STUDENT_LOGPROB_FLOOR)
+    signal = teacher_logprobs - student_logprobs
+    divergence_clipped = torch.zeros_like(signal, dtype=torch.bool)
+    if opd.divergence_clip is not None:
+        divergence_clipped = student_logprobs.exp() * -signal > opd.divergence_clip
+        signal = torch.where(divergence_clipped, torch.zeros_like(signal), signal)
+    advantage_clipped = torch.zeros_like(signal, dtype=torch.bool)
+    if opd.advantage_clip_min is not None or opd.advantage_clip_max is not None:
+        clamped = signal.clamp(min=opd.advantage_clip_min, max=opd.advantage_clip_max)
+        advantage_clipped = clamped != signal
+        signal = clamped
+    if opd.advantage_log_compress:
+        signal = signal.sign() * signal.abs().log1p()
+    return TeacherSignal(signal, divergence_clipped, advantage_clipped)
+
+
 def apply_opd_to_advantages(
     advantages: torch.Tensor,
     action_log_probs: torch.Tensor,
     teacher_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
     opd: OPDConfig,
+    sampled_in_topk: Optional[torch.Tensor] = None,
+    topk_weight_sum: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """``advantages + kl_coef * a`` on trainable tokens, with ``a = log pi_teacher - log pi_student``.
 
@@ -101,13 +156,16 @@ def apply_opd_to_advantages(
     estimator emits zeros and this is pure on-policy distillation; with task rewards it is the
     additive recipe.
 
-    ``opd``'s stabilization settings act on ``a`` alone, before ``kl_coef``, so their bounds are in nats and a
-    task-reward advantage passes through untouched: the divergence clip, then either the advantage bounds or log
-    compression (alternatives, see ``validate_opd_cfg``). With none set this is
+    ``opd``'s stabilization settings act on ``a`` alone, before ``kl_coef`` (``teacher_signal``), so a task-reward
+    advantage passes through untouched. With none set this is
     ``advantages - kl_coef * (log pi_student - log pi_teacher)`` exactly, with ``log pi_student`` floored at
     ``STUDENT_LOGPROB_FLOOR``.
 
-    Returns the new advantages and metrics under ``opd/``.
+    With TT-OPD (``opd.top_k > 0``, see ``topk_weights``), ``sampled_in_topk`` turns the term off for a sampled
+    token that is one of its position's candidates, which then counts through its candidate slot, and
+    ``topk_weight_sum``, the position's ``C``, is added to every trainable token's advantage.
+
+    Returns the new advantages and metrics under ``opd/``. The metrics describe the sampled token alone.
     """
     if not (advantages.shape == action_log_probs.shape == teacher_logprobs.shape == loss_mask.shape):
         raise ValueError(
@@ -116,32 +174,25 @@ def apply_opd_to_advantages(
             f"teacher_logprobs={tuple(teacher_logprobs.shape)} loss_mask={tuple(loss_mask.shape)}"
         )
     mask = loss_mask.to(dtype=torch.bool)
-    action_log_probs = action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR)
-    reverse_kl = torch.where(mask, action_log_probs - teacher_logprobs, torch.zeros_like(action_log_probs))
-    signal = -reverse_kl
-    divergence_clipped = torch.zeros_like(mask)
-    if opd.divergence_clip is not None:
-        divergence_clipped = mask & (action_log_probs.exp() * reverse_kl > opd.divergence_clip)
-        signal = torch.where(divergence_clipped, torch.zeros_like(signal), signal)
-    advantage_clipped = torch.zeros_like(mask)
-    if opd.advantage_clip_min is not None or opd.advantage_clip_max is not None:
-        clamped = signal.clamp(min=opd.advantage_clip_min, max=opd.advantage_clip_max)
-        advantage_clipped = clamped != signal
-        signal = clamped
-    if opd.advantage_log_compress:
-        signal = signal.sign() * signal.abs().log1p()
-    opd_term = opd.kl_coef * signal
+    regulated = teacher_signal(action_log_probs, teacher_logprobs, opd)
+    tail = mask if sampled_in_topk is None else mask & ~sampled_in_topk
+    opd_term = torch.where(tail, opd.kl_coef * regulated.signal, torch.zeros_like(action_log_probs))
     new_advantages = advantages + opd_term
+    if topk_weight_sum is not None:
+        new_advantages = new_advantages + torch.where(mask, topk_weight_sum, torch.zeros_like(topk_weight_sum))
 
     mask_f = mask.to(dtype=advantages.dtype)
+    reverse_kl = torch.where(
+        mask, action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR) - teacher_logprobs, torch.zeros_like(action_log_probs)
+    )
     metrics = {
         "opd/reverse_kl": masked_mean(reverse_kl, mask_f).item(),
         "opd/reverse_kl_abs_max": reverse_kl.abs().max().item() if reverse_kl.numel() else 0.0,
         "opd/adv_rl_abs_mean": masked_mean(advantages.abs(), mask_f).item(),
         "opd/adv_opd_abs_mean": masked_mean(opd_term.abs(), mask_f).item(),
         "opd/kl_coef": float(opd.kl_coef),
-        "opd/divergence_clip_fraction": masked_mean(divergence_clipped.to(mask_f.dtype), mask_f).item(),
-        "opd/advantage_clip_fraction": masked_mean(advantage_clipped.to(mask_f.dtype), mask_f).item(),
+        "opd/divergence_clip_fraction": masked_mean(regulated.divergence_clipped.to(mask_f.dtype), mask_f).item(),
+        "opd/advantage_clip_fraction": masked_mean(regulated.advantage_clipped.to(mask_f.dtype), mask_f).item(),
     }
     log_ratio = -reverse_kl[mask]
     if log_ratio.numel():
@@ -150,3 +201,94 @@ def apply_opd_to_advantages(
         low, high = np.quantile(log_ratio.float().cpu().numpy(), [0.01, 0.99])
         metrics["opd/log_ratio_p01"], metrics["opd/log_ratio_p99"] = float(low), float(high)
     return new_advantages, metrics
+
+
+def row_cells(support: PackedRaggedTensor, response_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The (batch row, response column) of every token row. Trajectory ``b``'s ``n_b`` token rows sit in its last
+    ``n_b`` response columns, right-aligned like ``rollout_logprobs``."""
+    segment_lengths = support.sequence_lengths.long()
+    batch = torch.arange(len(segment_lengths), device=support.device).repeat_interleave(segment_lengths)
+    columns = torch.arange(support.num_rows, device=support.device) - support.cu_seqlens[:-1].long()[batch]
+    return batch, columns + response_len - segment_lengths[batch]
+
+
+def member_rows(support: PackedRaggedTensor) -> torch.Tensor:
+    """The token row of every member."""
+    return torch.arange(support.num_rows, device=support.device).repeat_interleave(support.row_lengths.long())
+
+
+def with_member_values(support: PackedRaggedTensor, values: torch.Tensor) -> PackedRaggedTensor:
+    """``support`` with its member-value column replaced by ``values``."""
+    columns = list(support.columns)
+    columns[SampleSupportColumn.MEMBER_VALUES] = values.to(columns[SampleSupportColumn.MEMBER_VALUES].dtype)
+    return PackedRaggedTensor(columns, support.row_offsets, support.cu_seqlens)
+
+
+@dataclass(frozen=True)
+class TopKWeights:
+    member_weights: torch.Tensor
+    """float32 ``[members]``: each member's logit weight. Candidates get ``c_v`` and slot 0 ``-C``, so a row sums
+    to 0."""
+    token_weights: torch.Tensor
+    """``[batch, response]``: the position's ``C``, added to the sampled token's advantage."""
+    sampled_in_topk: torch.Tensor
+    """bool ``[batch, response]``: the sampled token is one of its position's candidates."""
+    student_mass: torch.Tensor
+    """``[batch, response]``: the student's probability mass on the candidates."""
+    teacher_mass: torch.Tensor
+    """``[batch, response]``: the teacher's probability mass on the candidates."""
+
+
+def topk_weights(support: PackedRaggedTensor, loss_mask: torch.Tensor, opd: OPDConfig) -> TopKWeights:
+    """TT-OPD's top-K term, split for the trainer and the worker.
+
+    ``support`` holds scored token rows ``[sampled, candidates...]``: the sampler's logprob in the logprob column
+    (unused for slot 0) and the teacher's in the member-value column. Each candidate ``v`` gets
+    ``c_v = kl_coef * a(v) * p(v)``, with ``a`` regulated by ``teacher_signal`` and ``p(v)`` the sampler's. Its part
+    of the loss, ``-sum_v c_v log p(v)``, splits by ``log p(v) = (l_v - l_y) + log p(y)`` into ``C = sum_v c_v`` on the
+    sampled token's advantage and a logit sum whose weights add to 0 per row, which needs no normalizer.
+    """
+    ids = support.columns[SampleSupportColumn.TOKEN_IDS].long()
+    student = support.columns[SampleSupportColumn.LOGPROBS]
+    teacher = support.columns[SampleSupportColumn.MEMBER_VALUES]
+    row_of_member = member_rows(support)
+    first_member = support.row_offsets[:-1].long()[row_of_member]
+    is_candidate = torch.arange(support.num_members, device=support.device) != first_member
+
+    signal = teacher_signal(student, teacher, opd).signal
+    coefficients = torch.where(is_candidate, opd.kl_coef * signal * student.exp(), torch.zeros_like(signal))
+
+    def row_sum(values: torch.Tensor) -> torch.Tensor:
+        return values.new_zeros(support.num_rows).index_add(0, row_of_member, values)
+
+    row_sums = row_sum(coefficients)
+    member_weights = torch.where(is_candidate, coefficients, -row_sums[row_of_member])
+
+    batch, column = row_cells(support, loss_mask.shape[1])
+
+    def on_tokens(row_values: torch.Tensor) -> torch.Tensor:
+        grid = torch.zeros(loss_mask.shape, dtype=row_values.dtype, device=row_values.device)
+        grid[batch, column] = row_values
+        return grid
+
+    hits = row_of_member[is_candidate & (ids == ids[first_member])]
+    sampled_in_topk = torch.zeros(loss_mask.shape, dtype=torch.bool, device=support.device)
+    sampled_in_topk[batch[hits], column[hits]] = True
+    return TopKWeights(
+        member_weights=member_weights,
+        token_weights=on_tokens(row_sums),
+        sampled_in_topk=sampled_in_topk,
+        student_mass=on_tokens(row_sum(torch.where(is_candidate, student.exp(), torch.zeros_like(student)))),
+        teacher_mass=on_tokens(row_sum(torch.where(is_candidate, teacher.exp(), torch.zeros_like(teacher)))),
+    )
+
+
+def topk_metrics(topk: TopKWeights, loss_mask: torch.Tensor) -> Dict[str, float]:
+    """Coverage of the top-K term over trainable tokens."""
+    mask = loss_mask.to(dtype=topk.token_weights.dtype)
+    return {
+        "opd/topk_mass_mean": masked_mean(topk.student_mass, mask).item(),
+        "opd/teacher_topk_mass_mean": masked_mean(topk.teacher_mass, mask).item(),
+        "opd/sampled_in_topk_fraction": masked_mean(topk.sampled_in_topk.to(mask.dtype), mask).item(),
+        "opd/topk_weight_abs_mean": masked_mean(topk.token_weights.abs(), mask).item(),
+    }

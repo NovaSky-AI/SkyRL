@@ -73,9 +73,11 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
     PackedSampleSupport,
+    packed_member_values,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
+    compute_support_logit_term,
     reject_unsupported_sample_support_packing,
     score_centering_loss_inputs,
     score_centering_metrics,
@@ -953,6 +955,25 @@ class MegatronModelWrapper:
                 rollout_logprobs=loss_rollout_logprobs,
                 **score_centering_kwargs,
             )
+            weighted_support = data.get(SAMPLE_SUPPORT_FIELD)
+            if packed_member_values(weighted_support) is not None:
+                # The member values are pre-scaled like the advantages, so this sums like the policy loss.
+                logit_term = compute_support_logit_term(
+                    logits,
+                    sequences,
+                    weighted_support,
+                    packed=packed_seq_params is not None,
+                    metadata_layout=metadata_layout,
+                    vocab_start_index=tp_rank * shard_vocab_size,
+                    vocab_end_index=(tp_rank + 1) * shard_vocab_size,
+                    tp_group=tp_grp,
+                    lm_head_weight=lm_head_weight if fused_lm_head else None,
+                    temperature=temperature,
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                )
+                support_loss = -(logit_term[:, action_positions] * loss_mask).sum()
+                policy_loss = policy_loss + support_loss
+                loss_metrics = {**loss_metrics, "topk_policy_loss": support_loss.item()}
 
             # Decoupled MTP / draft loss: soft-CE distillation of the detached-input MTP head against
             # the policy's own next-token distribution (full-vocab, or top-k when mtp_loss_topk is
@@ -1213,8 +1234,12 @@ class MegatronModelWrapper:
             sub_seq_lengths_field = batch.get("sub_seq_lengths")
             sub_seq_lengths = [t.tolist() for t in sub_seq_lengths_field] if sub_seq_lengths_field is not None else None
             batch["sub_seq_lengths_list"] = sub_seq_lengths
+            # Support whose rows carry member values feeds the loss's logit term, which needs the same layout.
             sample_support = _microbatch_sample_support(
-                batch, sub_seq_lengths, enabled=self.cfg.algorithm.enable_sample_support_replay
+                batch,
+                sub_seq_lengths,
+                enabled=self.cfg.algorithm.enable_sample_support_replay
+                or packed_member_values(batch.get(SAMPLE_SUPPORT_FIELD)) is not None,
             )
 
             vlm_inputs = {}

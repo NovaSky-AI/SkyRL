@@ -19,6 +19,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     PackedSampleSupport,
     SampleSupportColumn,
     align_sample_support_row_ids,
+    packed_member_values,
     packed_support_logprobs,
 )
 
@@ -569,6 +570,55 @@ def sample_support_scores(
     return _with_score_centering(scores, rows, normalizers, member_logprobs, centering_weight, tp_group)
 
 
+def support_logit_term(
+    logits_or_hidden: torch.Tensor,
+    sampled_ids: torch.Tensor,
+    support: PackedRaggedTensor,
+    row_ids: torch.Tensor,
+    *,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    tp_group: torch.distributed.ProcessGroup | None,
+    lm_head_weight: torch.Tensor | None = None,
+    temperature: float = 1.0,
+    chunk_size: int | None = None,
+) -> torch.Tensor:
+    """Per model position, ``sum_v w_v l_v`` over its row's members, with ``w_v`` the support's member values.
+
+    ``l`` are the raw logits, gathered from ``logits_or_hidden`` or projected from hidden states with
+    ``lm_head_weight``. Weights that sum to 0 in a row make the term a difference of logits, so it needs no
+    normalizer. Positions without a row of at least two members get 0.
+    """
+    if logits_or_hidden.shape[:-1] != sampled_ids.shape or row_ids.shape != sampled_ids.shape:
+        raise ValueError(
+            "logits, sampled_ids, and row_ids must have matching prefix shapes, got "
+            f"{logits_or_hidden.shape[:-1]}, {sampled_ids.shape}, and {row_ids.shape}"
+        )
+    member_values = packed_member_values(support)
+    if member_values is None:
+        raise ValueError("the support logit term needs member values, but the support carries none")
+    rows = _SupportRows.build(
+        support,
+        support.columns[SampleSupportColumn.TOKEN_IDS],
+        row_ids,
+        sampled_ids,
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+    )
+    local_values = _member_logits(
+        logits_or_hidden,
+        rows,
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+        lm_head_weight=lm_head_weight,
+        temperature=temperature,
+        chunk_size=chunk_size,
+    )
+    weights = member_values[rows.local_members].to(local_values.dtype)
+    term = _tp_sum(rows.row_sum(weights * local_values), tp_group)
+    return rows.at_positions(torch.where(rows.projected_rows, term, 0.0))
+
+
 def sample_support_row_ids_in_batch_positions(
     sample_support: PackedSampleSupport,
     layout: TokenMetadataLayout,
@@ -693,3 +743,47 @@ def compute_sample_support_scores(
         support_tv=to_batch(scores.support_tv),
         sampler_mass=to_batch(scores.sampler_mass),
     )
+
+
+def compute_support_logit_term(
+    logits_or_hidden: torch.Tensor,
+    sequences: torch.Tensor,
+    support: PackedSampleSupport,
+    *,
+    packed: bool,
+    metadata_layout: TokenMetadataLayout | None,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    tp_group: torch.distributed.ProcessGroup | None,
+    lm_head_weight: torch.Tensor | None,
+    temperature: float,
+    chunk_size: int | None,
+) -> torch.Tensor:
+    """``support_logit_term`` in canonical ``[batch, seq_len - 1]`` trainer positions, for Megatron's padded and
+    packed layouts, aligned like ``compute_sample_support_scores``: position ``t`` predicts token ``t + 1``."""
+    if metadata_layout is None:
+        raise ValueError("the support logit term requires the shared token metadata layout")
+    if packed:
+        row_ids = align_sample_support_row_ids(support, metadata_layout)
+        aligned_sampled_ids = align_token_metadata(sequences, metadata_layout, 0, next_token=True)
+        aligned_source = logits_or_hidden
+    else:
+        # The domain ends at real token L_i - 2, so dropping the last column loses no row.
+        row_ids = sample_support_row_ids_in_batch_positions(support, metadata_layout)[:, :-1]
+        aligned_sampled_ids = sequences[:, 1:]
+        aligned_source = logits_or_hidden[:, :-1]
+    term = support_logit_term(
+        aligned_source,
+        aligned_sampled_ids,
+        support,
+        row_ids,
+        vocab_start_index=vocab_start_index,
+        vocab_end_index=vocab_end_index,
+        tp_group=tp_group,
+        lm_head_weight=lm_head_weight,
+        temperature=temperature if lm_head_weight is not None else 1.0,
+        chunk_size=chunk_size,
+    )
+    if not packed:
+        return term
+    return scatter_packed_token_values_to_batch(term, metadata_layout, 0)

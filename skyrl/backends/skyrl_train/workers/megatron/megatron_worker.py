@@ -108,7 +108,10 @@ from skyrl.backends.skyrl_train.utils.lora_targets import (
     megatron_all_linear_target_modules,
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    packed_member_values,
+)
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     get_transfer_strategy,
@@ -1393,8 +1396,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "response_mask": experience.response_mask,
                     "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
                     "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
+                    # Replay scores the support; member values feed the loss's logit term.
                     SAMPLE_SUPPORT_FIELD: (
-                        experience.rollout_sample_support if self.enable_sample_support_replay else None
+                        experience.rollout_sample_support
+                        if self.enable_sample_support_replay
+                        or packed_member_values(experience.rollout_sample_support) is not None
+                        else None
                     ),
                     # used with global sequence packing (None when token-based batching is active)
                     "sub_seq_lengths": experience.sub_seq_lengths,

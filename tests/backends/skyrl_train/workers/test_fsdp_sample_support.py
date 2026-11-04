@@ -11,6 +11,7 @@ from torch import nn
 
 from skyrl.backends.skyrl_train.distributed.ulysses import utils as ulysses_utils
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import RatioBand
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
     cu_seqlens_from_lengths,
@@ -20,6 +21,8 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
     SAMPLE_SUPPORT_TORCH_DTYPE,
     SCORE_CENTERING_SCORES_KEY,
+    SUPPORT_LOGIT_TERM_KEY,
+    CompactSampleSupport,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     SampleSupportScores,
@@ -461,3 +464,128 @@ def test_the_worker_centers_rollout_is_with_the_post_override_band():
     # log π = 0 and log q̃ = -0.5 put every ratio at e^0.5 ≈ 1.65, outside the band, so only A·T remains.
     assert status["policy_loss"] == pytest.approx(0.5 + 1.0 - 1.0 + 2.0)
     assert status[ScoreCenteringMetric.TERM_ABS_MEAN.value] == pytest.approx(1.125)
+
+
+def _weighted(support: PackedTensor, weights: list[list[list[float]]]) -> PackedRaggedTensor:
+    """CSR support with a member-value column, one weight grid per trajectory matching ``support``'s grid."""
+    rows = []
+    for index in range(len(support)):
+        grid = support.segment(index).numpy()
+        rows.append(
+            CompactSampleSupport.from_masked_rows(
+                grid,
+                grid >= 0,
+                np.zeros(grid.shape, dtype=np.float32),
+                member_values=np.asarray(weights[index], dtype=np.float32),
+            )
+        )
+    return PackedRaggedTensor.from_rows(rows)
+
+
+def _logit_term_forward(wrapper, sequences, attention_mask, weighted, response_lengths, num_actions):
+    _, output = wrapper(
+        sequences,
+        num_actions,
+        attention_mask=attention_mask,
+        loss_mask=_loss_mask(response_lengths, num_actions),
+        weighted_support=weighted,
+        return_output=True,
+    )
+    return output[SUPPORT_LOGIT_TERM_KEY][:, -num_actions - 1 : -1]
+
+
+def test_the_logit_term_lands_on_the_logit_that_predicts_each_token_packed_or_not():
+    sequences, attention_mask = _ragged_batch()
+    support = _ragged_support(sequences)
+    weights = [[[-0.5, 0.5], [0.25, -0.25]], [[-1.0, 1.0]]]
+    model = _TokenIndexedLM()
+    packed_model = _TokenIndexedLM()
+    packed_model.table.data.copy_(model.table.data)
+
+    unpacked = _logit_term_forward(_wrapper(model), sequences, attention_mask, _weighted(support, weights), [2, 1], 2)
+    packed = _logit_term_forward(
+        _wrapper(packed_model, packed=True), sequences, attention_mask, _weighted(support, weights), [2, 1], 2
+    )
+    unpacked.sum().backward()
+    packed.sum().backward()
+
+    table = model.table.detach()
+    expected = torch.zeros((2, 2), dtype=table.dtype)
+    for row, (_prompt, response) in enumerate(RAGGED):
+        for offset in range(response):
+            position = sequences.shape[1] - response + offset - 1
+            members = support.segment(row)[offset].long()
+            values = torch.tensor(weights[row][offset], dtype=table.dtype)
+            expected[row, 2 - response + offset] = (values * table[sequences[row, position]][members]).sum()
+    torch.testing.assert_close(unpacked, expected)
+    torch.testing.assert_close(packed, unpacked)
+    torch.testing.assert_close(packed_model.table.grad, model.table.grad)
+
+
+def test_the_logit_term_needs_the_loss_mask():
+    sequences, attention_mask = _ragged_batch()
+    weighted = _weighted(_ragged_support(sequences), [[[-0.5, 0.5], [0.25, -0.25]], [[-1.0, 1.0]]])
+    with pytest.raises(ValueError, match="needs the microbatch's loss mask"):
+        _wrapper(_TokenIndexedLM())(sequences, 2, attention_mask=attention_mask, weighted_support=weighted)
+
+
+def test_the_worker_adds_the_logit_term_to_the_policy_loss():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.remove_microbatch_padding = False
+    cfg.trainer.algorithm.policy_loss_type = "importance_sampling"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_entropy_loss = False
+
+    worker = PolicyWorkerBase(
+        cfg=cfg.trainer,
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
+    worker.strategy = MagicMock()
+    worker.device_mesh = MagicMock()
+    worker.mesh_rank = SimpleNamespace(dp_size=1)
+    worker.optimizer = None
+    worker.scheduler = MagicMock(get_last_lr=MagicMock(return_value=[0.0]))
+    # Canonical logit positions: the two action logits are columns 0 and 1, the last column predicts nothing.
+    term = torch.tensor([[0.5, 1.0, 9.0], [-1.0, 2.0, 9.0]], requires_grad=True)
+    worker.model = MagicMock(
+        return_value=(
+            torch.zeros((2, 2), requires_grad=True),
+            {"entropy": torch.zeros((2, 3)), SUPPORT_LOGIT_TERM_KEY: term},
+        )
+    )
+    weighted = _weighted(_support([[[1, 2], [3, 4]], [[5, 6], [7, 8]]]), [[[-1.0, 1.0]] * 2, [[-1.0, 1.0]] * 2])
+    experience = Experience(
+        sequences=torch.zeros((2, 3), dtype=torch.long),
+        action_log_probs=torch.zeros((2, 2)),
+        base_action_log_probs=None,
+        values=None,
+        returns=None,
+        advantages=torch.ones((2, 2)),
+        attention_mask=torch.ones((2, 3), dtype=torch.long),
+        loss_mask=torch.tensor([[1.0, 1.0], [1.0, 0.0]]),
+        response_mask=torch.ones((2, 2)),
+        rollout_logprobs=None,
+        rollout_expert_indices=None,
+        num_actions=2,
+        info=None,
+        rollout_sample_support=weighted,
+    )
+
+    with (
+        patch("torch.cuda.current_device", return_value=torch.device("cpu")),
+        patch("torch.autocast", side_effect=lambda *args, **kwargs: nullcontext()),
+    ):
+        status = worker._forward_backward_micro(experience, microbatch_weight=1.0)
+
+    assert worker.model.call_args.kwargs["weighted_support"] == weighted
+    assert worker.model.call_args.kwargs["sample_support"] is None
+    assert torch.equal(worker.model.call_args.kwargs["loss_mask"], experience.loss_mask)
+    # importance_sampling: -sum(A * mask) = -3; the logit term: -(0.5 + 1.0 - 1.0) under the mask.
+    assert status["loss_metrics/topk_policy_loss"] == pytest.approx(-0.5)
+    assert status["policy_loss"] == pytest.approx(-3.0 - 0.5)

@@ -7,13 +7,14 @@ The teacher model has no weight transfer, no sleep mode, no LoRA. It gets its ow
 ``RemoteInferenceClient``.
 """
 
+from argparse import Namespace
 from typing import TYPE_CHECKING, Tuple
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     SERVER_PORT_STRIDE,
     VLLM_START_PORT,
 )
-from skyrl.train.opd.config import TeacherConfig
+from skyrl.train.opd.config import TeacherConfig, teacher_logprob_width
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -60,10 +61,19 @@ def launch_teacher(cfg: "SkyRLTrainConfig") -> Tuple["RemoteInferenceClient", "I
     )
 
     teacher: TeacherConfig = cfg.trainer.teacher
+
+    def make_cli_args() -> Namespace:
+        args = build_frozen_vllm_cli_args(teacher.model, teacher.inference_engine, cfg.trainer.seed)
+        # Each scoring request asks for this many ids per position, which vLLM refuses above --max-logprobs
+        # (-1 is no cap). Raised on the args, so engine_init_kwargs is never mutated.
+        if args.max_logprobs != -1:
+            args.max_logprobs = max(args.max_logprobs, teacher_logprob_width(cfg))
+        return args
+
     return build_new_inference_client_impl(
         teacher.inference_engine,
         model_path=teacher.model,
         log_path=cfg.trainer.log_path,
-        make_cli_args=lambda: build_frozen_vllm_cli_args(teacher.model, teacher.inference_engine, cfg.trainer.seed),
+        make_cli_args=make_cli_args,
         start_port=_teacher_start_port(cfg),
     )

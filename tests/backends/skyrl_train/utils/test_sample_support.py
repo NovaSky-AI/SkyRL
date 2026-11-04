@@ -1,10 +1,14 @@
 import numpy as np
 import pytest
+import torch
 
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
     CompactSampleSupport,
+    SampleSupportColumn,
     SampleSupportTrace,
+    packed_member_values,
 )
 from tests.backends.skyrl_train.sample_support_helpers import csr, dense
 
@@ -174,3 +178,78 @@ def test_compact_support_rejects_malformed_logprobs(logprobs, message):
         CompactSampleSupport.from_token_ids(
             np.array([1, 2, 3], dtype=SAMPLE_SUPPORT_DTYPE), [2, 1], top_k=2, logprobs=logprobs
         )
+
+
+def test_candidate_grid_pads_short_and_empty_rows():
+    support = csr([[5, 6, -1], [-1, -1, -1], [7, 8, 9]])
+
+    np.testing.assert_array_equal(support.candidate_grid(), [[5, 6, -1], [-1, -1, -1], [7, 8, 9]])
+
+
+def test_with_teacher_scores_builds_sampled_then_candidate_rows():
+    # Row 0 holds its sampled token 6 as a candidate too, row 1 has no captured members, row 2 is short.
+    support = csr([[5, 6], [-1, -1], [7, -1]], logprobs=[[-0.5, -1.0], [0.0, 0.0], [-0.25, 0.0]])
+    sampled = np.array([6, 3, 4], dtype=SAMPLE_SUPPORT_DTYPE)
+    candidates = np.concatenate([sampled[:, None], support.candidate_grid()], axis=1)
+    scores = np.array([[-2.0, -1.5, -2.0], [-3.0, -np.inf, -np.inf], [-0.5, -0.75, -np.inf]], dtype=np.float32)
+
+    rows = support.with_teacher_scores(candidates, scores)
+
+    assert rows.top_k == 3
+    np.testing.assert_array_equal(dense(rows), [[6, 5, 6], [-1, -1, -1], [4, 7, -1]])
+    # The sampled slot's sampler logprob is unused (0); the members keep their own.
+    np.testing.assert_array_equal(rows.logprobs, [0.0, -0.5, -1.0, 0.0, -0.25])
+    np.testing.assert_array_equal(rows.member_values, [-2.0, -1.5, -2.0, -0.5, -0.75])
+
+
+def test_member_values_follow_slices_padding_and_concatenation():
+    support = csr([[5, 6], [7, -1]], logprobs=[[-0.5, -1.0], [-0.25, 0.0]])
+    candidates = np.array([[1, 5, 6], [2, 7, -1]], dtype=SAMPLE_SUPPORT_DTYPE)
+    rows = support.with_teacher_scores(candidates, -candidates.astype(np.float32))
+
+    for block in (rows[1:], rows[:1], CompactSampleSupport.concat([rows[1:], rows.empty_like(1), rows[:1]])):
+        np.testing.assert_array_equal(block.member_values, -block.token_ids.astype(np.float32))
+
+
+def test_with_teacher_scores_needs_member_logprobs_and_a_matching_grid():
+    with pytest.raises(ValueError, match="sampler's member logprobs"):
+        csr([[5, 6]]).with_teacher_scores(np.array([[1, 5, 6]]), np.zeros((1, 3), dtype=np.float32))
+    support = csr([[5, 6]], logprobs=[[-0.5, -1.0]])
+    with pytest.raises(ValueError, match=r"expected \[1, 3\] candidates"):
+        support.with_teacher_scores(np.array([[1, 5]]), np.zeros((1, 2), dtype=np.float32))
+
+
+@pytest.mark.parametrize(
+    "logprobs, member_values, message",
+    [
+        (None, np.zeros(3, dtype=np.float32), "need logprobs"),
+        (np.zeros(3, dtype=np.float32), np.array([0.0, np.inf, 1.0], dtype=np.float32), "values must be finite"),
+    ],
+)
+def test_compact_support_rejects_malformed_member_values(logprobs, member_values, message):
+    with pytest.raises(ValueError, match=message):
+        CompactSampleSupport.from_token_ids(
+            np.array([1, 2, 3], dtype=SAMPLE_SUPPORT_DTYPE),
+            [2, 1],
+            top_k=2,
+            logprobs=logprobs,
+            member_values=member_values,
+        )
+
+
+def test_member_values_ride_the_packed_batch():
+    support = csr([[5, 6], [7, -1]], logprobs=[[-0.5, -1.0], [-0.25, 0.0]])
+    candidates = np.array([[1, 5, 6], [2, 7, -1]], dtype=SAMPLE_SUPPORT_DTYPE)
+    rows = support.with_teacher_scores(candidates, -candidates.astype(np.float32))
+
+    packed = PackedRaggedTensor.from_rows([rows, rows[1:], rows.empty_like(2)])
+
+    values = packed_member_values(packed)
+    assert values is not None and values.dtype == torch.float32
+    np.testing.assert_array_equal(values, -packed.columns[SampleSupportColumn.TOKEN_IDS].float())
+    gathered = packed[[1, 0]]
+    np.testing.assert_array_equal(
+        packed_member_values(gathered), -gathered.columns[SampleSupportColumn.TOKEN_IDS].float()
+    )
+    assert packed_member_values(PackedRaggedTensor.from_rows([support])) is None
+    assert packed_member_values(None) is None

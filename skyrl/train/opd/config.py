@@ -42,7 +42,7 @@ class TeacherEngineConfig(InferenceEngineConfig):
     """
 
     enable_prefix_caching: bool = False
-    """Off: vLLM never reads the prefix cache for ``prompt_logprobs`` requests, so caching would only cost block hashing on write."""
+    """Off: vLLM never reads the prefix cache for prompt-scoring requests, so caching would only cost block hashing on write."""
     gpu_memory_utilization: float = 0.9
     """Higher than the student's 0.8: nothing else lives on the teacher's GPUs."""
     enable_ray_prometheus_stats: bool = False
@@ -72,6 +72,11 @@ class OPDConfig(BaseConfig):
     advantage_log_compress: bool = False
     """Compress each token's ``log q - log p`` to ``sign(a) log(1 + |a|)``, before ``kl_coef``.
     An alternative to the advantage clip bounds; setting both is a config error."""
+    top_k: int = 0
+    """TT-OPD: also reinforce the student's top ``top_k`` tokens at each response position, scored by the teacher;
+    ``0`` is sampled-token OPD. The sampled token is always scored. Needs a generator that forwards
+    ``rollout_sample_support`` (``SkyRLGymGenerator`` does), untruncated sampling at temperature 1, and
+    ``policy_loss_type="importance_sampling"``."""
 
 
 @dataclass
@@ -82,7 +87,7 @@ class TeacherConfig(BaseConfig):
     """Which service scores the teacher: ``"skyrl"`` or ``"vllm"``.
     ``"skyrl"`` (default): this job launches a vLLM deployment from ``inference_engine`` on its own GPUs and
     drives it through a ``RemoteInferenceClient``, as it does the student's engines. ``"vllm"``:
-    one OpenAI-compatible vLLM endpoint you run for the teacher model, at ``server_url``. Each backend reads only its own fields; setting the other's is a config error."""
+    one vLLM endpoint you run for the teacher model, at ``server_url``. Each backend reads only its own fields; setting the other's is a config error."""
     model: str = ""
     """The teacher model; what it names depends on the backend.
     ``skyrl``: an HF id or local path the job loads, e.g. ``Qwen/Qwen3-32B``. ``vllm``: the served model
@@ -97,7 +102,8 @@ class TeacherConfig(BaseConfig):
     """Root URL of the one vLLM endpoint serving the teacher for ``backend="vllm"``, e.g. ``"http://host:8000"``.
     A single server, a data-parallel one, or a router in front of several (SkyRL's ``serve`` entrypoint
     starts one and logs it as ``proxy_url``); spreading requests over replicas is the endpoint's job. The
-    client appends ``/v1/completions``, so leave off a trailing ``/v1``."""
+    client appends ``/inference/v1/generate``, so leave off a trailing ``/v1``. The server must run vLLM >= 0.32
+    with the V2 model runner and ``--max-logprobs`` of at least ``1 + opd.top_k``; the job checks this at startup."""
     max_concurrency: int = 32
     """Maximum teacher requests in flight, for every backend.
     A launched teacher is also capped by its ``RemoteInferenceClient``'s per-engine limit
@@ -138,11 +144,14 @@ _FROZEN_ENGINE_FIELDS_MUST_BE_OFF = (
     "enable_pd",
     "enable_return_routed_experts",
     "enable_return_sample_support_set",
+    "enable_return_sample_support_logprobs",
     "offload_kv_for_weight_sync",
 )
 _FROZEN_ENGINE_FIELDS_MUST_BE_NONE = (
     "speculative_config",
     "fp8_weight_sync_mode",
+    "fp8_weight_sync_exclude_modules",
+    "candidate_top_k",
     "external_server_urls",
     "external_proxy_url",
 )
@@ -191,8 +200,16 @@ def _reject_launch_settings(teacher: TeacherConfig) -> None:
         )
 
 
+def teacher_logprob_width(cfg) -> int:
+    """Ids the teacher scores per response position: the sampled token plus ``opd.top_k`` candidates."""
+    return 1 + cfg.trainer.algorithm.opd.top_k
+
+
 def validate_opd_cfg(cfg) -> None:
-    """Rules the standard ``validate_cfg`` does not know about. Call it after ``validate_cfg``."""
+    """Rules the standard ``validate_cfg`` does not know about. Call it after ``validate_cfg``.
+
+    With ``opd.top_k > 0`` it also turns on the student's candidate capture, so the user sets one field.
+    """
     teacher: TeacherConfig = cfg.trainer.teacher
     algorithm = cfg.trainer.algorithm
     opd: OPDConfig = algorithm.opd
@@ -261,7 +278,32 @@ def validate_opd_cfg(cfg) -> None:
         raise ValueError("step_wise_trajectories are not yet supported with OPD")
 
     sampling = cfg.generator.sampling_params
-    if sampling.temperature != 1.0 or sampling.top_p != 1.0 or sampling.top_k != -1:
+    if opd.top_k:
+        if opd.top_k < 2:
+            raise ValueError("trainer.algorithm.opd.top_k must be 0 or at least 2")
+        if algorithm.enable_sample_support_replay:
+            raise ValueError("opd.top_k needs the raw policy, but sample-support replay renormalizes it")
+        if algorithm.policy_loss_type != PolicyLossType.IMPORTANCE_SAMPLING:
+            raise ValueError(
+                "opd.top_k > 0 needs policy_loss_type='importance_sampling': the top-k term has no clip band"
+            )
+        untruncated = sampling.temperature == 1.0 and sampling.top_p == 1.0 and sampling.top_k == -1
+        if not untruncated or sampling.min_p > 0.0 or sampling.repetition_penalty != 1.0:
+            raise ValueError(
+                "opd.top_k needs the sampling distribution to be the policy: temperature=1, top_p=1, top_k=-1, "
+                "min_p=0 and repetition_penalty=1"
+            )
+        # Capture is turned on here, after the config's own capture checks ran, so repeat the two that apply.
+        if sampling.additional_kwargs or cfg.generator.vision_language_generator:
+            raise ValueError(
+                "opd.top_k captures the student's top-K, which supports neither sampling_params.additional_kwargs "
+                "nor vision_language_generator"
+            )
+        ie_cfg = cfg.generator.inference_engine
+        ie_cfg.enable_return_sample_support_set = True
+        ie_cfg.candidate_top_k = opd.top_k
+        ie_cfg.enable_return_sample_support_logprobs = True
+    elif sampling.temperature != 1.0 or sampling.top_p != 1.0 or sampling.top_k != -1:
         logger.warning(
             "OPD expects untruncated sampling (temperature=1.0, top_p=1.0, top_k=-1): the sampled-token "
             f"reverse-KL estimate is biased otherwise. Got temperature={sampling.temperature}, "

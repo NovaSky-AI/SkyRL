@@ -39,6 +39,7 @@ from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberW
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
     SCORE_CENTERING_SCORES_KEY,
+    SUPPORT_LOGIT_TERM_KEY,
     PackedSampleSupport,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
@@ -46,6 +47,7 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     missing_sample_support_message,
     sample_support_row_ids_in_batch_positions,
     score_aligned_sample_support,
+    support_logit_term,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
@@ -329,11 +331,14 @@ class HFModelWrapper(nn.Module):
         loss_mask: Optional[torch.Tensor] = None,
         enable_sample_support_replay: bool = False,
         centering_weight: Optional[MemberWeight] = None,
+        weighted_support: Optional[PackedSampleSupport] = None,
     ) -> torch.Tensor:
         """Returns action log probs.
 
         With ``centering_weight`` (sample-support replay only), ``output`` also holds the
-        canonical-position ``SampleSupportScores`` under ``SCORE_CENTERING_SCORES_KEY``.
+        canonical-position ``SampleSupportScores`` under ``SCORE_CENTERING_SCORES_KEY``. With
+        ``weighted_support``, support whose rows carry member values, ``output`` also holds each logit
+        position's ``sum_v w_v l_v`` (``support_logit_term``) under ``SUPPORT_LOGIT_TERM_KEY``.
         """
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
         support_channels = None
@@ -345,6 +350,11 @@ class HFModelWrapper(nn.Module):
             if loss_mask is None:
                 raise ValueError("sample-support replay is enabled but the microbatch has no loss mask")
             support_channels = _SampleSupportChannels.build(sequences, attention_mask, sample_support, loss_mask)
+        term_channels = None
+        if weighted_support is not None:
+            if loss_mask is None:
+                raise ValueError("the support logit term needs the microbatch's loss mask")
+            term_channels = _SampleSupportChannels.build(sequences, attention_mask, weighted_support, loss_mask)
         if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
             # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
@@ -380,11 +390,15 @@ class HFModelWrapper(nn.Module):
                 position_ids_fwd = position_ids_fwd.transpose(0, 1)
                 if support_channels is not None:
                     support_channels = support_channels.unpad(nnz_indices)
+                if term_channels is not None:
+                    term_channels = term_channels.unpad(nnz_indices)
                 attention_mask_fwd = None  # no attention mask with FA 2
 
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
         if support_channels is not None:
             support_channels = support_channels.roll_to_logit_positions()
+        if term_channels is not None:
+            term_channels = term_channels.roll_to_logit_positions()
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
             attention_mask_fwd = None if self.remove_microbatch_padding else attention_mask_fwd
@@ -399,6 +413,8 @@ class HFModelWrapper(nn.Module):
             )
             if support_channels is not None:
                 support_channels = support_channels.slice_for_sequence_parallel(self.sequence_parallel_size)
+            if term_channels is not None:
+                term_channels = term_channels.slice_for_sequence_parallel(self.sequence_parallel_size)
 
         if self.is_vlm:
             # NOTE: transformers v5 introduced `mm_token_type_ids` to distinguish text
@@ -430,6 +446,18 @@ class HFModelWrapper(nn.Module):
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
+
+        support_term = None
+        if term_channels is not None:
+            support_term = support_logit_term(
+                logits_BSV,
+                sequences_rolled,
+                weighted_support,
+                term_channels.row_ids,
+                vocab_start_index=0,
+                vocab_end_index=logits_BSV.shape[-1],
+                tp_group=None,
+            )
 
         support_entropy = None
         if support_channels is not None:
@@ -471,6 +499,8 @@ class HFModelWrapper(nn.Module):
             return values
 
         log_probs = to_canonical_batch_positions(log_probs)
+        if support_term is not None:
+            output[SUPPORT_LOGIT_TERM_KEY] = to_canonical_batch_positions(support_term)
         if centering_weight is not None:
             output[SCORE_CENTERING_SCORES_KEY] = SampleSupportScores(
                 logprobs=log_probs,

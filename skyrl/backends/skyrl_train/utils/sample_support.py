@@ -3,7 +3,8 @@
 Support travels as CSR rows from the inference engine to the trainer: one row of
 vocabulary IDs per token, and an empty row for a token without captured support.
 An optional second member column holds the sampler's processed logprob of each member,
-as score centering needs.
+as score centering needs, and an optional third one a caller-defined value per member
+(on-policy distillation stores the teacher's logprob there).
 """
 
 from collections.abc import Sequence
@@ -36,6 +37,9 @@ SAMPLE_SUPPORT_FIELD = "rollout_sample_support"
 SAMPLE_SUPPORT_NO_ROW = -1
 # Forward-output ``SampleSupportScores`` in canonical batch positions, when score centering is on.
 SCORE_CENTERING_SCORES_KEY = "score_centering_scores"
+# Forward-output ``[batch, seq]`` sum of member value times member logit per token row, when support carries
+# member values.
+SUPPORT_LOGIT_TERM_KEY = "support_logit_term"
 
 
 class SampleSupportColumn(IntEnum):
@@ -44,32 +48,38 @@ class SampleSupportColumn(IntEnum):
     TOKEN_IDS = 0
     # Optional: the sampler's processed logprob of each member.
     LOGPROBS = 1
+    # Optional, after LOGPROBS: a caller-defined value per member. OPD stores the teacher's logprob here.
+    MEMBER_VALUES = 2
 
 
 _TOKEN_IDS_ONLY = (SAMPLE_SUPPORT_DTYPE,)
 _WITH_LOGPROBS = (SAMPLE_SUPPORT_DTYPE, SAMPLE_SUPPORT_LOGPROBS_DTYPE)
+_WITH_MEMBER_VALUES = (*_WITH_LOGPROBS, SAMPLE_SUPPORT_LOGPROBS_DTYPE)
 
 
 @dataclass(frozen=True)
 class CompactSampleSupport(RaggedRows):
     """CSR support rows for a span of tokens.
 
-    One int32 token-ID column plus int32 offsets, and an optional finite float32 logprob
-    column. ``top_k`` bounds every row's length.
+    One int32 token-ID column plus int32 offsets, an optional finite float32 logprob column,
+    and after it an optional finite float32 member-value column. ``top_k`` bounds every row's length.
     """
 
     top_k: int
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.column_dtypes not in (_TOKEN_IDS_ONLY, _WITH_LOGPROBS):
+        if self.column_dtypes not in (_TOKEN_IDS_ONLY, _WITH_LOGPROBS, _WITH_MEMBER_VALUES):
             raise ValueError(
-                f"compact support holds int32 token IDs and optional float32 logprobs, got {self.column_dtypes}"
+                "compact support holds int32 token IDs, then optional float32 logprobs and member values, "
+                f"got {self.column_dtypes}"
             )
         if self.top_k < 1 or np.any(self.row_lengths > self.top_k) or np.any(self.token_ids < 0):
             raise ValueError("compact support rows must hold at most a positive top_k nonnegative IDs")
         if self.logprobs is not None and not np.isfinite(self.logprobs).all():
             raise ValueError("compact support member logprobs must be finite")
+        if self.member_values is not None and not np.isfinite(self.member_values).all():
+            raise ValueError("compact support member values must be finite")
 
     @property
     def token_ids(self) -> np.ndarray:
@@ -80,6 +90,15 @@ class CompactSampleSupport(RaggedRows):
         """Each member's sampler logprob, or None when only token IDs were captured."""
         return self.columns[SampleSupportColumn.LOGPROBS] if len(self.columns) > SampleSupportColumn.LOGPROBS else None
 
+    @property
+    def member_values(self) -> np.ndarray | None:
+        """Each member's caller-defined value, or None when the support carries none."""
+        return (
+            self.columns[SampleSupportColumn.MEMBER_VALUES]
+            if len(self.columns) > SampleSupportColumn.MEMBER_VALUES
+            else None
+        )
+
     @classmethod
     def from_token_ids(
         cls,
@@ -88,9 +107,13 @@ class CompactSampleSupport(RaggedRows):
         *,
         top_k: int,
         logprobs: np.ndarray | None = None,
+        member_values: np.ndarray | None = None,
     ) -> "CompactSampleSupport":
-        """Build rows from consecutive ``row_lengths`` runs of ``token_ids`` and, if given, ``logprobs``."""
-        columns = (token_ids,) if logprobs is None else (token_ids, logprobs)
+        """Build rows from consecutive ``row_lengths`` runs of ``token_ids`` and, if given, ``logprobs``
+        and ``member_values``."""
+        if member_values is not None and logprobs is None:
+            raise ValueError("member values follow the logprob column, so they need logprobs")
+        columns = tuple(column for column in (token_ids, logprobs, member_values) if column is not None)
         return cls.from_lengths(columns, row_lengths, top_k=top_k)
 
     @classmethod
@@ -99,25 +122,28 @@ class CompactSampleSupport(RaggedRows):
         ids: np.ndarray,
         present: np.ndarray,
         logprobs: np.ndarray | None = None,
+        member_values: np.ndarray | None = None,
     ) -> "CompactSampleSupport":
         """Keep ``ids[present]`` row by row from ``[tokens, top_k]`` candidate grids.
 
-        ``logprobs``, a matching grid, keeps the same cells.
+        ``logprobs`` and ``member_values``, matching grids, keep the same cells.
         """
         if ids.ndim != 2 or present.shape != ids.shape:
             raise ValueError(f"support candidates must be matching [tokens, top_k] grids, got {ids.shape}")
-        if logprobs is not None and logprobs.shape != ids.shape:
-            raise ValueError(f"member logprobs must match the {ids.shape} candidate grid, got {logprobs.shape}")
+        for name, grid in (("member logprobs", logprobs), ("member values", member_values)):
+            if grid is not None and grid.shape != ids.shape:
+                raise ValueError(f"{name} must match the {ids.shape} candidate grid, got {grid.shape}")
+
+        def kept(grid: np.ndarray | None) -> np.ndarray | None:
+            return None if grid is None else np.ascontiguousarray(grid[present], dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE)
+
         # Boolean indexing is row-major, so each row keeps its candidate order.
         return cls.from_token_ids(
             np.ascontiguousarray(ids[present], dtype=SAMPLE_SUPPORT_DTYPE),
             present.sum(axis=1),
             top_k=ids.shape[1],
-            logprobs=(
-                None
-                if logprobs is None
-                else np.ascontiguousarray(logprobs[present], dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE)
-            ),
+            logprobs=kept(logprobs),
+            member_values=kept(member_values),
         )
 
     @classmethod
@@ -141,12 +167,47 @@ class CompactSampleSupport(RaggedRows):
         hits = rows[self.token_ids == token_ids[rows]]
         return np.bincount(hits, minlength=self.num_rows) > 0
 
+    def _grid(self, column: np.ndarray, fill) -> np.ndarray:
+        """A ``[rows, top_k]`` view of a member column, in member order, ``fill`` past each row's end."""
+        rows = np.repeat(np.arange(self.num_rows), self.row_lengths)
+        grid = np.full((self.num_rows, self.top_k), fill, dtype=column.dtype)
+        grid[rows, np.arange(self.num_members) - self.offsets[rows]] = column
+        return grid
+
+    def candidate_grid(self) -> np.ndarray:
+        """``[rows, top_k]`` member token IDs, ``-1`` past each row's end."""
+        return self._grid(self.token_ids, -1)
+
+    def with_teacher_scores(self, candidates: np.ndarray, scores: np.ndarray) -> "CompactSampleSupport":
+        """Rows ``[sampled, candidates...]`` carrying the sampler's and a teacher's logprobs.
+
+        ``candidates`` is ``[rows, 1 + top_k]``: the sampled token, then ``candidate_grid()``. ``scores`` is
+        the teacher's logprob of each cell. The sampled slot's sampler logprob is unused (0), and a token
+        with no captured members stays an empty row. A sampled token that is also a member appears twice.
+        """
+        if self.logprobs is None:
+            raise ValueError("teacher scores sit next to the sampler's member logprobs, which this support lacks")
+        if candidates.shape != (self.num_rows, 1 + self.top_k):
+            raise ValueError(f"expected [{self.num_rows}, {1 + self.top_k}] candidates, got {candidates.shape}")
+        sampler = np.concatenate(
+            [np.zeros((self.num_rows, 1), dtype=SAMPLE_SUPPORT_LOGPROBS_DTYPE), self._grid(self.logprobs, 0.0)], axis=1
+        )
+        present = (candidates >= 0) & (self.row_lengths[:, None] > 0)
+        return type(self).from_masked_rows(candidates, present, sampler, member_values=scores)
+
 
 def packed_support_logprobs(support: PackedSampleSupport) -> torch.Tensor | None:
     """The packed members' sampler logprobs, or None when the support carries only token IDs."""
     return (
         support.columns[SampleSupportColumn.LOGPROBS] if len(support.columns) > SampleSupportColumn.LOGPROBS else None
     )
+
+
+def packed_member_values(support: PackedSampleSupport | None) -> torch.Tensor | None:
+    """The packed members' caller-defined values, or None when the support is absent or carries none."""
+    if support is None or len(support.columns) <= SampleSupportColumn.MEMBER_VALUES:
+        return None
+    return support.columns[SampleSupportColumn.MEMBER_VALUES]
 
 
 def align_sample_support_row_ids(

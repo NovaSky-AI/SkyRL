@@ -1405,8 +1405,11 @@ class RayPPOTrainer:
             fwd_keys.append("rollout_expert_indices")
         if training_input.get("router_padding_mask") is not None:
             fwd_keys.append("router_padding_mask")
-        if training_input.get(SAMPLE_SUPPORT_FIELD) is not None:
-            # The scorer validates that captured support backs every loss-active target.
+        if (
+            training_input.get(SAMPLE_SUPPORT_FIELD) is not None
+            and self.cfg.trainer.algorithm.enable_sample_support_replay
+        ):
+            # The scorer validates that captured support backs every loss-active target. Only replay reads it here.
             fwd_keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
         if training_input.get("pixel_values") is not None:
             fwd_keys.append("pixel_values")
@@ -1562,9 +1565,22 @@ class RayPPOTrainer:
             data["advantages"] = (advantages - mean) * rstd
 
         # Step 2: Loss reduction normalization per mini-batch
-        normalized_advantages = torch.zeros_like(advantages)
+        data["advantages"] = self._apply_loss_reduction(
+            data["advantages"], data["loss_mask"], mini_batch_boundaries, prompt_boundaries
+        )
+        return data
+
+    def _apply_loss_reduction(
+        self,
+        values: torch.Tensor,
+        loss_mask: torch.Tensor,
+        mini_batch_boundaries: List[Tuple[int, int]],
+        prompt_boundaries: Optional[List[Tuple[int, int]]] = None,
+    ) -> torch.Tensor:
+        """Scale ``[batch, response]`` per-token values, mini-batch by mini-batch, so that summing them gives the
+        configured loss reduction (``apply_loss_reduction_to_advantages_minibatch``)."""
+        reduced = torch.zeros_like(values)
         for start_idx, end_idx in mini_batch_boundaries:
-            mini_batch = data[start_idx:end_idx]
             # For prompt_mean, select the prompt boundaries falling within this mini-batch
             # and rebase them to mini-batch-relative indices.
             mb_prompt_boundaries = None
@@ -1574,17 +1590,15 @@ class RayPPOTrainer:
                     for p_start, p_end in prompt_boundaries
                     if start_idx <= p_start < end_idx
                 ]
-            normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
-                advantages=mini_batch["advantages"],
-                loss_mask=mini_batch["loss_mask"],
+            reduced[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
+                advantages=values[start_idx:end_idx],
+                loss_mask=loss_mask[start_idx:end_idx],
                 loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
                 micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
                 max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
                 prompt_boundaries=mb_prompt_boundaries,
             )
-
-        data["advantages"] = normalized_advantages
-        return data
+        return reduced
 
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """

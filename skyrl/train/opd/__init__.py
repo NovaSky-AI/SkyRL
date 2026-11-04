@@ -3,14 +3,16 @@
 Entry point: ``skyrl.train.entrypoints.main_opd``; read run scripts and documentation under
 ``examples/train/on_policy_distillation``.
 
-- ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the launched (``SkyRLTeacherClient``
-  over a ``RemoteInferenceClient``) and vLLM-URL backends.
+- ``teacher_client``: ``TeacherLogprobClient`` (abstract base), which scores a ``[tokens, width]`` id matrix
+  in one prefill, with the launched (``SkyRLTeacherClient`` over a ``RemoteInferenceClient``) and vLLM-URL
+  backends.
 - ``teacher_launch``: launching the teacher's vLLM deployment inside the job (``backend="skyrl"``).
 - ``trainer``: ``OPDTrainer``. Its ``generate_on_input_batch`` runs one ``generator.generate`` call per prompt group
-  concurrently and scores each group under the teacher as it finishes (any generator works); three
+  concurrently and scores each group under the teacher as it finishes (any generator works); four
   more ``RayPPOTrainer`` overrides consume the teacher logprobs.
 - ``config``: ``trainer.teacher`` and ``trainer.algorithm.opd`` blocks, ``OPDExpConfig``, ``validate_opd_cfg``.
-- ``utils``: the pure helpers (batch splitting, padding, the advantage term).
+- ``utils``: the pure helpers (batch splitting, the candidate matrix, padding, the advantage term and TT-OPD's
+  top-K weights).
 """
 
 from skyrl.train.opd.config import (
@@ -20,9 +22,11 @@ from skyrl.train.opd.config import (
     OPDExpConfig,
     OPDTrainerConfig,
     TeacherConfig,
+    teacher_logprob_width,
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
+    CandidateScores,
     SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
@@ -32,6 +36,7 @@ from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
     TEACHER_LOGPROBS_KEY,
     apply_opd_to_advantages,
+    candidate_matrix,
     pad_teacher_logprobs,
     split_generator_input,
 )
@@ -43,14 +48,17 @@ __all__ = [
     "OPDExpConfig",
     "OPDTrainerConfig",
     "TeacherConfig",
+    "teacher_logprob_width",
     "validate_opd_cfg",
     "TEACHER_LOGPROBS_KEY",
+    "CandidateScores",
     "SkyRLTeacherClient",
     "TeacherLogprobClient",
     "VLLMTeacherClient",
     "launch_teacher",
     "OPDTrainer",
     "apply_opd_to_advantages",
+    "candidate_matrix",
     "pad_teacher_logprobs",
     "split_generator_input",
 ]

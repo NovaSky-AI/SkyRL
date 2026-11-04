@@ -51,6 +51,8 @@ from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
     SCORE_CENTERING_SCORES_KEY,
+    SUPPORT_LOGIT_TERM_KEY,
+    packed_member_values,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     score_centering_loss_inputs,
@@ -1120,6 +1122,12 @@ class PolicyWorkerBase(Worker):
         response_mask = experience.response_mask
         rollout_action_logprobs = experience.rollout_logprobs
         sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
+        # Support whose rows carry member values adds sum_v w_v l_v per token to the loss.
+        weighted_support = (
+            experience.rollout_sample_support
+            if packed_member_values(experience.rollout_sample_support) is not None
+            else None
+        )
 
         # Determine which loss function to use
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
@@ -1162,9 +1170,10 @@ class PolicyWorkerBase(Worker):
                 pixel_values=experience.pixel_values,
                 image_grid_thw=experience.image_grid_thw,
                 sample_support=experience.rollout_sample_support if sample_support_replay else None,
-                loss_mask=loss_mask if sample_support_replay else None,
+                loss_mask=loss_mask if sample_support_replay or weighted_support is not None else None,
                 enable_sample_support_replay=sample_support_replay,
                 centering_weight=centering_weight,
+                weighted_support=weighted_support,
             )
             # loss function
             # TODO: recompute advantages
@@ -1185,6 +1194,11 @@ class PolicyWorkerBase(Worker):
                 rollout_logprobs=loss_rollout_logprobs,
                 **score_centering_kwargs,
             )
+            if weighted_support is not None:
+                # The member values are pre-scaled like the advantages, so this sums like the policy loss.
+                support_loss = -(output[SUPPORT_LOGIT_TERM_KEY][:, action_positions] * loss_mask).sum()
+                policy_loss = policy_loss + support_loss
+                loss_metrics = {**loss_metrics, "topk_policy_loss": support_loss.item()}
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
