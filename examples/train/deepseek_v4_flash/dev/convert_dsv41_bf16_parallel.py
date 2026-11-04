@@ -4,8 +4,10 @@ Same output as make_slice_v41.py (dequantized FP8 / MXFP4 -> BF16, Engram tables
 dropped), but each layer is converted by its own worker process, so the full 40-layer model takes minutes
 instead of hours. The tokenizer gets the chat-mode template (thinking off), as the 2-node LoRA recipe expects.
 
-    DSV41_LOCAL_DIR=/shared/models/DeepSeek-V4.1-Flash-1017 \
-      python convert_dsv41_bf16_parallel.py <out_dir> [layer ids, default all] [workers, default 24]
+    DSV41_LOCAL_DIR=<released checkpoint dir> \
+      python convert_dsv41_bf16_parallel.py <out_dir> [comma-separated layer ids, default all] [workers, default 24]
+
+The output is already the chat-template copy the recipes ask for (no symlink dir needed).
 """
 
 import json
@@ -132,7 +134,7 @@ def main():
     shutil.copy(os.path.join(ms.LOCAL, "tokenizer.json"), os.path.join(out, "tokenizer.json"))
     with open(os.path.join(ms.LOCAL, "tokenizer_config.json")) as f:
         tok_config = json.load(f)
-    with open(os.path.join(HERE, "chat_template_v41_chat.jinja")) as f:
+    with open(os.path.join(HERE, "..", "chat_template_v41_chat.jinja")) as f:
         tok_config["chat_template"] = f.read()
     with open(os.path.join(out, "tokenizer_config.json"), "w") as f:
         json.dump(tok_config, f, indent=2, ensure_ascii=False)

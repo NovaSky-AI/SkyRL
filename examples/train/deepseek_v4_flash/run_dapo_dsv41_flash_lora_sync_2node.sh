@@ -10,7 +10,8 @@ set -x
 #
 # run_dapo_dsv4_flash_lora_sync_4node.sh (DAPO knobs as in the GLM-5.3 recipe) on the 2-node V4.1 layout of
 # run_gsm8k_dsv41_flash_lora_2node.sh (Megatron EP=16, one vLLM engine TP8 x PP2; see its header for memory).
-# MODEL_PATH is the full text-only BF16 copy built by dev/make_slice_v41.py.
+# MODEL_PATH is the full text-only BF16 copy built by dev/convert_dsv41_bf16_parallel.py (all layers; parallel
+# version of dev/make_slice_v41.py, same tensors, chat-mode template already in tokenizer_config.json).
 
 # V4.1's official template defaults to thinking mode ("Reasoning Effort: 75", <think>), which a 2K budget truncates.
 # R3 needs token-in-token-out generation, which a `generator.chat_template` override breaks (SkyRL retokenizes the
@@ -83,7 +84,12 @@ INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION="${INFERENCE_ENGINE_GPU_MEMORY_UTILIZATI
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 # Prefix caching stays on: R3 returns routed experts through vLLM's AuxOutput connector, which requires it.
 # BF16 V4.1 needs vLLM's FlashMLA sparse backend (the SM100 default is FP8-only).
-ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "attention_backend": "FLASHMLA_SPARSE_DSV41", "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
+# swa_bounded_replay: vLLM 0.32's V4.1 decoder SWA bounded replay asserts at engine start (`_run_layers`:
+# `residual is not None`) on a pipeline stage that begins at the last KV source layer (20), which is where the
+# even TP8 x PP2 split puts stage 1. PP splits must sit on a KV-sharing group boundary (layers 2/8/14/20), so 20/20
+# is the only balanced split; turn replay off instead (it only trims eager prefill). For a layer slice, set
+# VLLM_PP_LAYER_PARTITION (forwarded to the engine workers) so the split lands on a group boundary.
+ENGINE_INIT_KWARGS='{"max_model_len": '"$INFERENCE_ENGINE_MAX_MODEL_LEN"', "attention_backend": "FLASHMLA_SPARSE_DSV41", "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$PATH"
@@ -96,7 +102,7 @@ export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:
 RUN_NAME="${RUN_NAME:-dsv41_flash_dapo_sync_lora_r${LORA_RANK}_resp${MAX_RESPONSE_LENGTH}_ep${MEGATRON_EP}}"
 CKPT_PATH="${CKPT_PATH:-$HOME/ckpts/$RUN_NAME}"
 
-uv run --no-sync --extra megatron python -m examples.train.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.strategy=megatron \
