@@ -1131,6 +1131,22 @@ async def test_trainer_top_k_needs_a_generator_that_forwards_support(tokenizer):
         await trainer.generate(_batch(1, 2, "train"))
 
 
+class ShortSupportFakeGenerator(SupportFakeGenerator):
+    """Returns one support entry fewer than it returns responses."""
+
+    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        output = await super().generate(input_batch)
+        output[SAMPLE_SUPPORT_FIELD] = output[SAMPLE_SUPPORT_FIELD][:-1]
+        return output
+
+
+@pytest.mark.asyncio
+async def test_trainer_top_k_refuses_support_that_does_not_cover_every_trajectory(tokenizer):
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, generator=ShortSupportFakeGenerator(), top_k=2)
+    with pytest.raises(ValueError, match="zip"):
+        await trainer.generate(_batch(1, 2, "train"))
+
+
 @pytest.mark.asyncio
 async def test_trainer_top_k_zero_leaves_a_generators_support_alone(tokenizer):
     # Support captured for another purpose, such as replay, keeps its rows and scores only the sampled token.

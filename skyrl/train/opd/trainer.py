@@ -19,7 +19,6 @@
 import asyncio
 import inspect
 import time
-from itertools import repeat
 from typing import List, Optional, Tuple
 
 import torch
@@ -99,14 +98,17 @@ class OPDTrainer(RayPPOTrainer):
                 raise RuntimeError(
                     f"opd.top_k > 0 needs {SAMPLE_SUPPORT_FIELD!r} from the generator, which returned none"
                 )
+            responses = output["response_ids"]
             candidates = [
                 candidate_matrix(response_ids, support)
-                for response_ids, support in zip(output["response_ids"], supports or repeat(None))
+                for response_ids, support in zip(
+                    responses, supports if supports is not None else [None] * len(responses), strict=True
+                )
             ]
             scores = await asyncio.gather(
                 *(
                     self.teacher_client.compute_logprobs(prompt_ids, row)
-                    for prompt_ids, row in zip(output["prompt_token_ids"], candidates)
+                    for prompt_ids, row in zip(output["prompt_token_ids"], candidates, strict=True)
                 )
             )
             output[TEACHER_LOGPROBS_KEY] = [score.logprobs[:, 0].tolist() for score in scores]
@@ -114,7 +116,7 @@ class OPDTrainer(RayPPOTrainer):
                 # Rows [sampled, candidates...] with the teacher's logprobs as the member values.
                 output[SAMPLE_SUPPORT_FIELD] = [
                     support.with_teacher_scores(row, score.logprobs)
-                    for support, row, score in zip(supports, candidates, scores)
+                    for support, row, score in zip(supports, candidates, scores, strict=True)
                 ]
             rollout_done_times.append(rollout_done)
             teacher_times.append(time.monotonic() - rollout_done)
