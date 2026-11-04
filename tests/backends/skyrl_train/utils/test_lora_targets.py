@@ -2,7 +2,9 @@
 
 Uses a synthetic module tree rather than a real checkpoint: the names below
 mirror what `Qwen3ForCausalLM` exposes, so the test stays offline and fast while
-still covering the paths `resolve_lora_target_modules` classifies on.
+still covering the paths `resolve_lora_target_modules` classifies on. The Megatron
+backend's `"all-linear"` expansion and its model checks need no model and are
+tested directly.
 """
 
 import pytest
@@ -10,7 +12,9 @@ import torch.nn as nn
 
 from skyrl.backends.skyrl_train.utils.lora_targets import (
     check_lora_group_flags,
+    check_megatron_lora_group_support,
     lora_module_group,
+    megatron_all_linear_target_modules,
     resolve_critic_lora_target_modules,
     resolve_lora_target_modules,
 )
@@ -167,8 +171,15 @@ def test_both_flags_false_is_rejected() -> None:
 
 def test_narrowing_an_explicit_module_list_is_rejected() -> None:
     """Narrowing applies only to the all-linear default, not to an explicit module list."""
-    with pytest.raises(ValueError, match="narrow `target_modules='all-linear'`"):
+    with pytest.raises(ValueError, match='narrow `trainer.policy.model.lora.target_modules="all-linear"`'):
         resolve_lora_target_modules(_CausalLM(), ["q_proj"], train_attn=True, train_mlp=False)
+
+
+def test_narrowing_an_adapter_to_initialize_from_is_rejected() -> None:
+    """The adapter at init_adapter_path decides which modules are adapted, so it cannot be narrowed."""
+    check_lora_group_flags("all-linear", True, True, init_adapter_path="/tmp/adapter")
+    with pytest.raises(ValueError, match="init_adapter_path"):
+        check_lora_group_flags("all-linear", True, False, init_adapter_path="/tmp/adapter")
 
 
 def test_model_without_the_requested_group_is_rejected() -> None:
@@ -239,17 +250,96 @@ def test_fused_moe_experts_cannot_be_adapted() -> None:
         resolve_lora_target_modules(model, "all-linear", train_attn=False, train_mlp=True)
 
 
+# Megatron-Core names written out rather than imported from lora_targets, so a wrong
+# entry in MEGATRON_ALL_LINEAR_TARGETS cannot pass by being compared with itself.
 @pytest.mark.parametrize(
-    ("train_attn", "train_mlp", "error"),
-    [(True, True, None), (True, False, NotImplementedError), (False, False, ValueError)],
+    ("lora_type", "include_gdn_in_proj", "expected"),
+    [
+        ("lora", True, ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]),
+        ("lora", False, ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "out_proj"]),
+        (
+            "canonical_lora",
+            True,
+            [
+                "linear_q",
+                "linear_k",
+                "linear_v",
+                "linear_proj",
+                "linear_fc1_up",
+                "linear_fc1_gate",
+                "linear_fc2",
+                "in_proj",
+                "out_proj",
+            ],
+        ),
+    ],
 )
-def test_megatron_rejects_narrowing(train_attn: bool, train_mlp: bool, error) -> None:
-    """Megatron accepts the default flags, rejects narrowing, and still rejects both groups off."""
+def test_megatron_all_linear_with_both_groups_is_unchanged(
+    lora_type: str, include_gdn_in_proj: bool, expected: list[str]
+) -> None:
+    """Both flags give the list Megatron used before the flags existed, in the same order."""
+    assert megatron_all_linear_target_modules(lora_type, True, True, include_gdn_in_proj) == expected
+
+
+@pytest.mark.parametrize(
+    ("lora_type", "train_attn", "include_gdn_in_proj", "expected"),
+    [
+        ("lora", True, True, ["linear_qkv", "linear_proj", "in_proj", "out_proj"]),
+        ("lora", True, False, ["linear_qkv", "linear_proj", "out_proj"]),
+        ("lora", False, True, ["linear_fc1", "linear_fc2"]),
+        ("lora", False, False, ["linear_fc1", "linear_fc2"]),
+        ("canonical_lora", True, True, ["linear_q", "linear_k", "linear_v", "linear_proj", "in_proj", "out_proj"]),
+        ("canonical_lora", False, True, ["linear_fc1_up", "linear_fc1_gate", "linear_fc2"]),
+    ],
+)
+def test_megatron_narrowing_keeps_one_group(
+    lora_type: str, train_attn: bool, include_gdn_in_proj: bool, expected: list[str]
+) -> None:
+    """Each narrowing keeps exactly its group's names; the GDN `in_proj` exclusion still applies."""
+    names = megatron_all_linear_target_modules(lora_type, train_attn, not train_attn, include_gdn_in_proj)
+    assert names == expected
+
+
+def test_megatron_unknown_lora_type_is_rejected() -> None:
+    """A lora_type with no name list raises instead of returning an empty target list."""
+    with pytest.raises(ValueError, match="Unknown Megatron lora_type"):
+        megatron_all_linear_target_modules("artur", True, True, True)
+
+
+@pytest.mark.parametrize(
+    ("has_vision_tower", "multi_latent_attention", "train_attn", "train_mlp", "error"),
+    [
+        (False, False, True, False, None),
+        (False, False, False, True, None),
+        (True, False, True, True, None),
+        (True, False, True, False, "vision-language"),
+        (True, False, False, True, "vision-language"),
+        (False, True, True, True, None),
+        (False, True, False, True, None),
+        (False, True, True, False, "multi-latent attention"),
+    ],
+    ids=[
+        "dense_attn_only",
+        "dense_mlp_only",
+        "vlm_both",
+        "vlm_attn_only",
+        "vlm_mlp_only",
+        "mla_both",
+        "mla_mlp_only",
+        "mla_attn_only",
+    ],
+)
+def test_megatron_group_support(
+    has_vision_tower: bool, multi_latent_attention: bool, train_attn: bool, train_mlp: bool, error: str | None
+) -> None:
+    """Narrowing is rejected on a vision tower, and attention-only on MLA; everything else passes."""
+    kwargs = dict(has_vision_tower=has_vision_tower, multi_latent_attention=multi_latent_attention)
     if error is None:
-        check_lora_group_flags("all-linear", train_attn, train_mlp, strategy="megatron")
+        check_megatron_lora_group_support(train_attn, train_mlp, **kwargs)
         return
-    with pytest.raises(error):
-        check_lora_group_flags("all-linear", train_attn, train_mlp, strategy="megatron")
+    with pytest.raises(ValueError, match=error) as exc:
+        check_megatron_lora_group_support(train_attn, train_mlp, **kwargs)
+    assert "target_modules" in str(exc.value)
 
 
 def test_a_name_shared_across_groups_is_rejected() -> None:

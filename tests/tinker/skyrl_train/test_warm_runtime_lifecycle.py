@@ -166,12 +166,25 @@ def test_create_model_signature_mismatch_rejected_against_warm_runtime():
         backend.create_model("model-b", types.LoraConfig(rank=16, alpha=32, seed=0))
 
 
-def test_second_tenant_narrowing_on_megatron_reports_the_capability():
-    """Not a signature mismatch: Megatron cannot narrow, whatever the first adapter used."""
+def test_second_tenant_with_other_groups_is_a_signature_mismatch():
+    """Every tenant is cloned from the first one's template, so it must ask for the same groups."""
     backend = _backend(keep_runtime_warm=True)
-    with pytest.raises(NotImplementedError, match="only supported on the FSDP backend"):
+    backend._cfg.trainer.policy.model.lora.target_modules = "all-linear"
+    backend._cfg.trainer.policy.model.lora.init_adapter_path = None
+    with pytest.raises(ValueError, match="LoRA signature mismatch"):
         backend.create_model("model-b", types.LoraConfig(rank=8, alpha=16, seed=0, train_mlp=False))
     backend._dispatch.register_adapter.assert_not_called()
+
+
+def test_second_tenant_with_the_same_narrowing_registers_on_megatron():
+    """A tenant matching a narrowed first adapter shares its runtime."""
+    narrowed = types.LoraConfig(rank=8, alpha=16, seed=0, train_mlp=False)
+    backend = _backend(keep_runtime_warm=True)
+    backend._cfg.trainer.policy.model.lora.target_modules = "all-linear"
+    backend._cfg.trainer.policy.model.lora.init_adapter_path = None
+    backend._base_lora_signature = SkyRLTrainBackend._lora_signature_from(backend, narrowed)
+    backend.create_model("model-b", narrowed)
+    backend._dispatch.register_adapter.assert_called_once_with("policy", "model-b")
 
 
 def test_second_adapter_on_fsdp_reports_single_tenancy():

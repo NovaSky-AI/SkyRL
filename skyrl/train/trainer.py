@@ -1048,6 +1048,12 @@ class RayPPOTrainer:
 
         return training_input
 
+    async def generate_on_input_batch(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        """Run the generator on the input batch.
+
+        Note: put any generator output post processing in `generate` instead of this function."""
+        return await self.generator.generate(input_batch)
+
     @torch.no_grad()
     async def generate(
         self,
@@ -1062,7 +1068,7 @@ class RayPPOTrainer:
         - after calling this method, the same model placement still holds.
         """
         # NOTE: we assume that .generate returns samples in the same order as passed in
-        generator_output: GeneratorOutput = await self.generator.generate(input_batch)
+        generator_output: GeneratorOutput = await self.generate_on_input_batch(input_batch)
 
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:

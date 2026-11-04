@@ -106,6 +106,11 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    include_images: bool = False
+    """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
+    with the model's processor and its default settings (so the engine takes no ``mm_processor_kwargs``),
+    sends them to the engine with each prompt (needs #2501's multimodal ``/skyrl/v1/generate``), and each row
+    carries its path's ``pixel_values`` and ``image_grid_thw`` to training."""
     require_api_key: Optional[bool] = None
     """Whether a trajectory's harness routes answer only its own key, which the generator hands its agent. ``None``
     (default): whenever ``skycap.exposure`` is set, so routes reachable from outside the cluster can't be written to
@@ -200,6 +205,7 @@ class HarborSkycapExp(HarborExp):
             inference_engine_client=inference_engine_client,
             train_paths=cfg.skycap.train_paths,
             records=self.records,
+            include_images=cfg.skycap.include_images,
         )
         return self.generator
 

@@ -16,6 +16,7 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.quantization.quant_config import RecipeConfig
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
@@ -51,22 +52,25 @@ from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
     is_fp8_enabled,
+    reject_stage_local_layer_patterns,
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
+    validate_fp8_exclude_modules_matched,
     validate_mxfp8_gdn_tp_alignment,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
-)
-from skyrl.backends.skyrl_train.patches.megatron.patch_checkpoint_without_output_frozen_inputs import (
-    apply_checkpoint_without_output_frozen_inputs_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype import (
     apply_clip_grads_mixed_dtype_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
     apply_distopt_mixed_dtype_group_index_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_head_full import (
+    apply_dsa_head_full_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
@@ -98,7 +102,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     append_tensor_list_padding,
     packed_dummy_row_segments,
 )
-from skyrl.backends.skyrl_train.utils.lora_targets import check_lora_group_flags
+from skyrl.backends.skyrl_train.utils.lora_targets import (
+    check_lora_group_flags,
+    check_megatron_lora_group_support,
+    megatron_all_linear_target_modules,
+)
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -151,8 +159,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
-# Output-discarding selective recompute (mhc/layernorm) on frozen inputs, e.g. under LoRA.
-apply_checkpoint_without_output_frozen_inputs_patch()
+apply_dsa_head_full_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()
@@ -276,6 +283,13 @@ class MegatronWorker:
                 "generator.inference_engine.language_model_only=true "
                 "(the vision tower stays frozen in the inference engine)."
             )
+        if self.is_vlm and getattr(hf_config_original, "model_type", None) == "qwen4_exp":
+            # Qwen4ExpBridge only builds the language model (see patches/megatron/qwen4_exp).
+            raise ValueError(
+                "Qwen3.8-Flash-Next (qwen4_exp) is supported text-only on the Megatron backend: "
+                "set trainer.policy.language_model_only=true and "
+                "generator.inference_engine.language_model_only=true."
+            )
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -393,6 +407,19 @@ class MegatronWorker:
             provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
         provider.moe_enable_routing_replay = megatron_config.moe_enable_routing_replay
 
+        # Supply a quant recipe via either user-provided config file or derived config file
+        # from user-provided exclude list.
+        if megatron_config.te_precision_config_file:
+            provider.quant_recipe = RecipeConfig.from_yaml_file(megatron_config.te_precision_config_file)
+            if megatron_config.pipeline_model_parallel_size > 1:
+                reject_stage_local_layer_patterns(
+                    [m.pattern for m in provider.quant_recipe.matchers], "te_precision_config_file"
+                )
+        elif megatron_config.fp8_exclude_modules:
+            provider.quant_recipe = RecipeConfig.from_config_dict(
+                fp8_exclude_recipe(list(megatron_config.fp8_exclude_modules))
+            )
+
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
@@ -497,10 +524,19 @@ class MegatronWorker:
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
-        # Megatron builds its target list from fixed module names (see the
-        # "all-linear" expansion below), so the FSDP group narrowing does not apply.
         check_lora_group_flags(
-            lora_config.target_modules, lora_config.train_attn, lora_config.train_mlp, strategy="megatron"
+            lora_config.target_modules,
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            init_adapter_path=lora_config.init_adapter_path,
+        )
+        # `language_model_only` swaps in a text-only bridge only for some architectures
+        # (Qwen3.5, Kimi K2.5), so also ask the provider whether it builds a vision tower.
+        check_megatron_lora_group_support(
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            has_vision_tower=self.is_vlm or getattr(self.provider, "vision_config", None) is not None,
+            multi_latent_attention=bool(getattr(self.provider, "multi_latent_attention", False)),
         )
         if experts_shared_outer_loras:
             apply_packed_per_expert_sharded_state_dict_patch()
@@ -526,30 +562,22 @@ class MegatronWorker:
             )
 
         self._lora_import_plan = None
+        target_modules = lora_config.target_modules
         if lora_config.init_adapter_path:
             # The adapter decides which modules are adapted and at what rank; the LoRA
             # module built below must match it exactly for the import to be lossless.
             self._lora_import_plan = self._plan_lora_import(lora_config, lora_type)
             target_modules = self._lora_import_plan.target_modules
-        elif lora_config.target_modules == "all-linear":
-            if lora_type == "lora":
-                target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-            else:
-                target_modules = [
-                    "linear_q",
-                    "linear_k",
-                    "linear_v",
-                    "linear_proj",
-                    "linear_fc1_up",
-                    "linear_fc1_gate",
-                    "linear_fc2",
-                    "in_proj",
-                    "out_proj",
-                ]
-            if not gdn_in_proj_lora_is_safe(self.bridge):
-                target_modules.remove("in_proj")
-        else:
-            target_modules = lora_config.target_modules
+        elif isinstance(target_modules, str) and target_modules.lower() == "all-linear":
+            target_modules = megatron_all_linear_target_modules(
+                lora_type,
+                lora_config.train_attn,
+                lora_config.train_mlp,
+                include_gdn_in_proj=gdn_in_proj_lora_is_safe(self.bridge),
+            )
+            if not (lora_config.train_attn and lora_config.train_mlp) and self._rank == 0:
+                group = "attn" if lora_config.train_attn else "mlp"
+                logger.info(f"LoRA restricted to {group} modules: {target_modules}")
 
         if lora_type == "lora":
             from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
@@ -727,6 +755,8 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        if self.megatron_config.fp8_exclude_modules:
+            validate_fp8_exclude_modules_matched(model, list(self.megatron_config.fp8_exclude_modules))
         if lora_config is not None and getattr(self, "_lora_import_plan", None) is not None:
             self._load_lora_init_adapter(model)
         return model
@@ -1132,8 +1162,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         megatron_config = self.cfg.policy.megatron_config
-        self.empty_cuda_cache = megatron_config.empty_cuda_cache is not False
-        self.empty_cuda_cache_after_backward = megatron_config.empty_cuda_cache_after_backward()
+        expandable_segments = self.cfg.use_expandable_segments
+        self.empty_cuda_cache = megatron_config.empty_cuda_cache_after_forward(expandable_segments)
+        self.empty_cuda_cache_after_backward = megatron_config.empty_cuda_cache_after_backward(expandable_segments)
 
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.
@@ -1596,7 +1627,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
                     f"got {resolved_backend!r}."
                 )
-            self._serialized_fp8_config = resolve_serialized_fp8_config(mode, self.strategy.hf_config)
+            self._serialized_fp8_config = resolve_serialized_fp8_config(
+                mode,
+                self.strategy.hf_config,
+                inference_engine_cfg.fp8_weight_sync_exclude_modules,
+            )
 
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 

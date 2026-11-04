@@ -46,6 +46,9 @@ from skyrl.backends.skyrl_train.inference_servers.vllm_compat import (
     patch_vllm_dummy_weight_boot_detection,
     patch_vllm_fp8_kv_scale_boot_normalization,
     patch_vllm_fp8_kv_scale_completion,
+    patch_vllm_sleep_model_state,
+    restore_model_state_tensors,
+    save_model_state_tensors,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
@@ -96,6 +99,7 @@ except ModuleNotFoundError:
 patch_vllm_dummy_weight_boot_detection()
 patch_vllm_fp8_kv_scale_boot_normalization()
 patch_vllm_fp8_kv_scale_completion()
+patch_vllm_sleep_model_state()
 
 try:
     from skyrl.backends.skyrl_train.weight_sync.register import (
@@ -206,7 +210,7 @@ apply_deepseek_v41_prefill_workspace_patch()
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
 # Checkpoint-name suffix -> (fused vLLM parameter suffix, FusedMoE shard id).
-# The model specs own this mapping so sender and receiver cannot drift.
+# Fixed by vLLM's FusedMoE, so it is the same for every model.
 _BATCHED_MOE_TARGETS = batched_moe_wire_targets()
 
 
@@ -402,6 +406,7 @@ class NewInferenceWorkerWrap:
         self._skyrl_saved_draft_buffers = (
             {name: buf.cpu().clone() for name, buf in draft.named_buffers()} if draft is not None else {}
         )
+        self._skyrl_saved_model_state = save_model_state_tensors(self.model_runner)
         offload_tags = ("runtime", "cudagraph", "kv_cache") if offload_kv else ("runtime", "cudagraph")
         get_mem_allocator_instance().sleep(offload_tags=offload_tags)
 
@@ -424,6 +429,8 @@ class NewInferenceWorkerWrap:
             draft = self._skyrl_draft_model()
             if draft is not None:
                 self._skyrl_restore_buffers(draft, "_skyrl_saved_draft_buffers")
+            restore_model_state_tensors(self.model_runner, getattr(self, "_skyrl_saved_model_state", {}))
+            self._skyrl_saved_model_state = {}
         # Re-assert the serialized-FP8 KV scales after the KV pool remaps (no-op
         # without fp8 KV cache or on a real-checkpoint boot). This path skips
         # Worker.wake_up, so the vllm_compat wake patch never sees it.
