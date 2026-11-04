@@ -102,18 +102,28 @@ def _run_round(engine, update_info=None):
     engine.finish_weight_update()
 
 
-class _NcclCachingEngine(_Engine):
-    """vLLM 0.33's NCCL receiver caches each round's update info keyed by ``self.model``."""
+class _FakeNcclCachingVllmEngine(_FakeVllmEngine):
+    """vLLM 0.33's NCCL receiver caches each round's update info keyed by ``self.model``.
 
-    def __init__(self, weights):
-        super().__init__(weights)
-        self._last_update_info = {}
-        self.proxies = []
+    It sits below SkyRL's mixin in the MRO, as the real vLLM engine does, so it sees the
+    per-round proxy the mixin installs rather than the base model.
+    """
 
     def receive_weights(self, update_info):
         self._last_update_info[self.model] = update_info
         self.proxies.append(weakref.ref(self.model))
         super().receive_weights(update_info)
+
+
+class _NcclCachingEngine(SkyrlReceiveLifecycleMixin, _FakeNcclCachingVllmEngine):
+    def __init__(self, weights):
+        super().__init__(weights)
+        self.device = "cpu"
+        self.loaded = []
+        self.model = _FakeModel(self.loaded)
+        self.vllm_config = SimpleNamespace(lora_config=object())
+        self._last_update_info = {}
+        self.proxies = []
 
 
 @pytest.mark.parametrize("armed", [True, False], ids=["lora_round", "base_round"])
