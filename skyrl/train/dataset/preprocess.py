@@ -496,15 +496,21 @@ def balance_dp_token_permutation(
     mini_batch_boundaries: List[Tuple[int, int]],
     dp_size: int,
 ) -> Optional[List[int]]:
-    """Row order under which each mini-batch's contiguous DP chunks carry about equal token counts.
+    """Row order under which each mini-batch's DP chunks are balanced micro-batch by micro-batch.
 
     Mini-batches are staged by cutting each ``(start, end)`` slice into ``dp_size`` contiguous,
-    equal-sized chunks, one per data-parallel rank (``MeshDispatch.stage_chunks``). Rows are in
-    prompt order there, so the samples of a few long-response prompts can land on one rank and
-    every other rank waits on it. This reorders rows inside each mini-batch (never across
-    mini-batches) so the chunks keep their sample counts and get balanced token counts: rows are
-    taken longest first and each goes to the chunk with the fewest tokens that still has room. A
-    mini-batch keeps its order unless this lowers its largest chunk.
+    equal-sized chunks, one per data-parallel rank (``MeshDispatch.stage_chunks``), and each rank
+    runs its chunk's micro-batches in order. Ranks step through micro-batches in lockstep whenever a
+    layer communicates across them (MoE expert-parallel all-to-all, the gradient reduction), so a step
+    costs about the sum over micro-batch slots of the slowest rank's micro-batch in that slot -- not
+    the largest per-rank total. In prompt order a few long-response prompts land together and every
+    other rank waits at each of their slots.
+
+    This reorders rows inside each mini-batch (never across mini-batches), keeping every chunk's
+    sample count: rows sorted longest first are dealt to the ranks in rounds, alternating direction
+    each round ("snake"), and each rank keeps the dealt order. Slot ``k`` then holds similar lengths on
+    every rank, and the alternation keeps per-rank totals even. A mini-batch keeps its order unless
+    this lowers its lockstep cost (sum over slots of the largest row in the slot).
 
     Args:
         token_counts: Tokens per row (e.g. ``attention_mask.sum(-1)``).
@@ -518,6 +524,10 @@ def balance_dp_token_permutation(
     """
     if dp_size <= 1 or any((end - start) % dp_size for start, end in mini_batch_boundaries):
         return None
+
+    def lockstep_cost(chunks: List[List[int]]) -> int:
+        return sum(max(token_counts[chunk[k]] for chunk in chunks) for k in range(len(chunks[0])))
+
     perm = list(range(len(token_counts)))
     changed = False
     for start, end in mini_batch_boundaries:
@@ -526,19 +536,13 @@ def balance_dp_token_permutation(
             continue
         per_rank = size // dp_size
         rows = sorted(range(start, end), key=lambda r: (-token_counts[r], r))
-        loads = [0] * dp_size
-        assigned: List[List[int]] = [[] for _ in range(dp_size)]
-        for row in rows:
-            rank = min(
-                (r for r in range(dp_size) if len(assigned[r]) < per_rank),
-                key=lambda r: (loads[r], r),
-            )
-            assigned[rank].append(row)
-            loads[rank] += token_counts[row]
-        contiguous_max = max(
-            sum(token_counts[start + i * per_rank : start + (i + 1) * per_rank]) for i in range(dp_size)
-        )
-        if max(loads) < contiguous_max:
-            perm[start:end] = [row for rank_rows in assigned for row in sorted(rank_rows)]
+        dealt: List[List[int]] = [[] for _ in range(dp_size)]
+        for k in range(per_rank):
+            order = range(dp_size) if k % 2 == 0 else range(dp_size - 1, -1, -1)
+            for rank, row in zip(order, rows[k * dp_size : (k + 1) * dp_size]):
+                dealt[rank].append(row)
+        contiguous = [list(range(start + i * per_rank, start + (i + 1) * per_rank)) for i in range(dp_size)]
+        if lockstep_cost(dealt) < lockstep_cost(contiguous):
+            perm[start:end] = [row for rank_rows in dealt for row in rank_rows]
             changed = True
     return perm if changed else None

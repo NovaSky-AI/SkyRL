@@ -41,6 +41,18 @@ def test_permutation_balances_within_each_minibatch():
     assert max(after[0]) == 8500  # 8000+500 / 8000+500 / 7000+600 / 7000+600
 
 
+def test_permutation_aligns_micro_batch_slots_across_ranks():
+    # Per-rank totals are already equal (202 each), but in every micro-batch slot one rank holds a 100-token
+    # row and the other a 1-token row: in lockstep each slot costs 100. Slot-aligned, the long rows share slots.
+    token_counts = [100, 1, 100, 1] + [1, 100, 1, 100]
+    perm = balance_dp_token_permutation(token_counts, [(0, 8)], dp_size=2)
+    assert perm is not None and sorted(perm) == list(range(8))
+    chunks = [perm[0:4], perm[4:8]]
+    slot_cost = sum(max(token_counts[c[k]] for c in chunks) for k in range(4))
+    assert slot_cost == 202  # 100 + 100 + 1 + 1, down from 400
+    assert [sum(token_counts[r] for r in c) for c in chunks] == [202, 202]
+
+
 @pytest.mark.parametrize(
     "token_counts, boundaries, dp_size",
     [
