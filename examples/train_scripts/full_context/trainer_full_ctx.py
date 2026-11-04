@@ -160,9 +160,12 @@ class FullCtxTrainer(RayPPOTrainer):
         all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
         fwd_bwd_s = optim_s = 0.0
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            for chunk_refs in all_chunk_refs:
+            for mini_batch_idx, chunk_refs in enumerate(all_chunk_refs):
+                worker_kwargs = {}
+                if model == "policy" and mini_batch_idx == 0 and self.cfg.trainer.old_logprobs_from_first_minibatch:
+                    worker_kwargs["old_logprobs_from_current"] = True
                 t0 = time.perf_counter()
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs, **worker_kwargs)
                 t1 = time.perf_counter()
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
