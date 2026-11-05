@@ -25,7 +25,7 @@ R3="${R3:-true}"
 MTPM="${MTPM:--1}"  # trainer.max_tokens_per_microbatch (-1: off; token batching needs packing)
 PACK="${PACK:-false}"  # trainer.remove_microbatch_padding (THD packing; DSv4 attention rejects it)
 MAX_LEN=$(( 512 + RESP ))
-export SKYRL_MEGATRON_RANDOM_INIT=1 SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
+export SKYRL_MEGATRON_RANDOM_INIT="${SKYRL_MEGATRON_RANDOM_INIT:-1}" SKYRL_WORKER_NCCL_TIMEOUT_IN_S=5400
 export UV_CACHE_DIR=/shared/hackskyrl/uv_cache UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/shared/hackskyrl/uv_venvs/tput_dsv4}"
 uv run --no-sync --extra megatron python -m examples.train_scripts.full_context.main_full_ctx \
   data.train_data="['$DATA_DIR/train.parquet']" data.val_data="['$DATA_DIR/validation.parquet']" \

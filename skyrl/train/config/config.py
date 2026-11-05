@@ -1791,6 +1791,26 @@ class TrainerConfig(BaseConfig):
     This makes the microbatch packing — and therefore the resulting logprobs/values — identical to
     what forward_backward recomputes, so the PPO ratio (and critic value clipping) is exact at the
     first inner step."""
+    balance_dp_tokens: bool = False
+    """Reorder rows within each mini-batch so data-parallel ranks stay balanced micro-batch by micro-batch.
+
+    Mini-batches are split into equal-sized contiguous chunks per DP rank in prompt order, so the
+    samples of long-response prompts can pile up on one rank while the others wait for it. Ranks run
+    their micro-batches in lockstep wherever a layer communicates across them (MoE expert-parallel
+    all-to-all), so what matters is each micro-batch slot's slowest rank. With this on, the
+    policy/critic forward and training steps stage each mini-batch with rows sorted by length and dealt
+    across ranks (same sample count per rank; slot ``k`` holds similar lengths everywhere, totals even);
+    forward outputs are returned in the original order. Applies to the per-mini-batch staged paths
+    (``recompute_old_logprobs_per_minibatch``, training)."""
+    old_logprobs_from_first_minibatch: bool = False
+    """Take the first policy mini-batch's "old" logprobs from its own training forward instead of a separate forward pass.
+
+    No optimizer step has run when the first mini-batch trains, so the detached training-forward
+    logprobs are exactly the old logprobs and the PPO ratio is 1 at that step. The policy forward
+    pass then runs only over the remaining mini-batches; with one mini-batch per step
+    (``train_batch_size == policy_mini_batch_size``) it is skipped entirely. Megatron only. Requires
+    ``update_epochs_per_batch=1`` and ``algorithm.use_kl_in_reward=false``, which read the old
+    logprobs outside the first training forward."""
     update_ref_every_epoch: bool = False
     """Re-sync the reference model from the policy model at every epoch boundary."""
     remove_microbatch_padding: bool = True

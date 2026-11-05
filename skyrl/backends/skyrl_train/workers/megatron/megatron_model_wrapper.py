@@ -690,6 +690,7 @@ class MegatronModelWrapper:
         loss_fn_config: Optional[Dict[str, Any]] = None,
         forward_only: bool = False,
         return_per_token_outputs: bool = True,
+        old_logprobs_from_current: bool = False,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -708,6 +709,8 @@ class MegatronModelWrapper:
             forward_only: If True, run the forward pass without backward (no gradients).
                           Useful for evaluation / loss-only inference paths (e.g., SFT
                           ``forward(loss_fn=...)`` codepath).
+            old_logprobs_from_current: Use the detached logprobs of this forward as the old
+                logprobs (the micro-batches' ``old_action_log_probs`` are ignored).
             return_per_token_outputs: When False, skip building per-token
                 ``loss_fn_outputs`` when callers read only ``metrics``.
 
@@ -932,6 +935,8 @@ class MegatronModelWrapper:
                 )
 
             action_log_probs = token_logprobs[:, -num_actions:]
+            if old_logprobs_from_current:
+                old_action_log_probs = action_log_probs.detach()
 
             # Megatron's canonical positions are next-token predictions, so actions are the last columns.
             action_positions = slice(-num_actions, None)

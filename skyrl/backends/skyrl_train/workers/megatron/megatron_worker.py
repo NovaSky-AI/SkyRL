@@ -425,6 +425,14 @@ class MegatronWorker:
                 fp8_exclude_recipe(list(megatron_config.fp8_exclude_modules))
             )
 
+        # DeepSeek-V4 / V4.1 experts use a clamped SwiGLU (``swiglu_limit``). Megatron-Bridge's DSv4 bridge turns on
+        # the other fusions but leaves ``bias_activation_fusion`` off, so the experts ran the unfused path (clamp,
+        # SiLU, multiply, probs multiply as separate kernels, each intermediate saved for backward). The fused
+        # ``weighted_bias_swiglu_impl`` takes the same clamp: on a V4.1 slice at 128k tokens/GPU, -5% fwd+bwd and
+        # -15 GB peak GPU memory, identical grad norms. Overridable via ``transformer_config_kwargs``.
+        if getattr(provider, "dsv4_version", None) is not None and getattr(provider, "gated_linear_unit", False):
+            provider.bias_activation_fusion = True
+
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
@@ -728,6 +736,14 @@ class MegatronWorker:
         )
 
         patch_moe_release_dispatcher_probs()
+
+        # Same for hybrid mHC attention layers (DeepSeek-V4 / V4.1): the fast path leaves the input-layernorm
+        # offload interface, and with it the layer's input and graph, on the layer until its next forward.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_hybrid_mhc_release_attn_norm_manager import (
+            patch_hybrid_mhc_release_attn_norm_manager,
+        )
+
+        patch_hybrid_mhc_release_attn_norm_manager()
 
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a
@@ -1119,6 +1135,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             snapshot_download(model_path)  # will be no-op if already downloaded
         torch.distributed.barrier()
 
+        if self._is_lora:
+            from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.frozen_weights import (
+                compress_frozen_weights,
+            )
+
+            compress_frozen_weights(self.actor_module)
+
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
@@ -1332,6 +1355,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
         return_per_token_outputs: bool = True,
+        old_logprobs_from_current: bool = False,
     ) -> WorkerOutput:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
@@ -1349,6 +1373,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn_config: Optional config overrides for the loss function.
             return_per_token_outputs: When False, skip building per-token
                 ``loss_fn_outputs`` when callers read only ``metrics``.
+            old_logprobs_from_current: Use this forward's detached logprobs as the old
+                logprobs instead of ``data["action_log_probs"]``. Valid only before the
+                first optimizer step on this batch (see
+                ``trainer.old_logprobs_from_first_minibatch``).
 
         Returns:
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
@@ -1474,6 +1502,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             loss_fn=loss_fn,
             loss_fn_config=loss_fn_config,
             return_per_token_outputs=return_per_token_outputs,
+            old_logprobs_from_current=old_logprobs_from_current,
         )
 
         if self.empty_cuda_cache_after_backward:

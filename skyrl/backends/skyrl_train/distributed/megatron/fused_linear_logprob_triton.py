@@ -156,7 +156,11 @@ elif SUPPORT_CUDA_TMA:
 _AUTOTUNE_MIN_TOKEN_BUCKET = 128
 # This saturates only the autotune cache key. Kernels still receive and launch
 # over the exact num_tokens, so larger batches are neither truncated nor padded.
-_AUTOTUNE_MAX_TOKEN_BUCKET = 1048576
+# From 64k tokens the grid is thousands of CTAs on any GPU and the tile choice no
+# longer depends on the token count, while each re-tune benchmarks every config
+# at full size: at 256k tokens x a 129k vocab that is ~1 min per new power-of-two
+# bucket, paid again whenever RL batch lengths cross into a new one.
+_AUTOTUNE_MAX_TOKEN_BUCKET = 65536
 
 # Matmul specs adapt Triton 3.6's CUDA matmul set (tile sizes, stages, warps):
 # https://github.com/triton-lang/triton/blob/v3.6.0/python/tutorials/03-matrix-multiplication.py#L164-L199
@@ -212,7 +216,7 @@ _BACKWARD_CONFIG_SPECS = (
 
 
 def _autotune_token_bucket(num_tokens: int) -> int:
-    """Bucket dynamic counts; shapes above 1M share a tuning decision."""
+    """Bucket dynamic counts; shapes above 64k share a tuning decision."""
     if num_tokens <= 0:
         raise ValueError(f"num_tokens must be positive, got {num_tokens}")
     power_of_two = 1 << (num_tokens - 1).bit_length()

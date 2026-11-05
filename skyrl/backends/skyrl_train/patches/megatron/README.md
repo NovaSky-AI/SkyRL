@@ -30,6 +30,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
+| `patches/megatron/test_hybrid_mhc_release_attn_norm_manager.py` (CPU) | `patch_hybrid_mhc_release_attn_norm_manager.py`, fake layer state |
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
@@ -267,6 +268,20 @@ patches that replace dispatcher methods can't drop it. Applied unconditionally i
 - **Landed?** megatron-core's dispatcher clears `self.probs` after the combine (or stops storing it).
 - **Remove:** the module, its call in `make_megatron_module`, and
   `patches/megatron/test_moe_release_dispatcher_probs.py`.
+
+### `patch_hybrid_mhc_release_attn_norm_manager.py`: no upstream PR yet
+
+`HyperConnectionHybridLayer._call_inner_transformer_layer_without_local_bda` (the hybrid mHC fast path
+for attention-only sublayers, e.g. DeepSeek-V4 / V4.1) uses the inner layer's `attn_norm_manager` and
+never clears it (its MLP branch clears `mlp_norm_manager`; `TransformerLayer.forward` clears both). The
+interface holds the layer's input even with offloading off, so each attention sublayer pins its last
+forward's input and graph until its next forward; under full recompute that is the recomputed graph
+back to the checkpoint's input and its `.grad` (~60 GiB/GPU at 256k on an 8-layer V4.1 slice). Applied
+unconditionally in `make_megatron_module`.
+- **Landed?** megatron-core's fast path sets `layer.attn_norm_manager = None` after the attention
+  branch's `_group_offload_output_with_bias` (not on main or dev as of 2026-11-04).
+- **Remove:** the module, its call in `make_megatron_module`, and
+  `patches/megatron/test_hybrid_mhc_release_attn_norm_manager.py`.
 
 ### `patch_shared_expert_lora_tp.py`: Megatron-Bridge#6089
 

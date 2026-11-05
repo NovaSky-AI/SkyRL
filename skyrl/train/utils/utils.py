@@ -466,6 +466,19 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
+    if cfg.trainer.old_logprobs_from_first_minibatch:
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("trainer.old_logprobs_from_first_minibatch is only supported by the Megatron backend.")
+        if cfg.trainer.update_epochs_per_batch != 1:
+            raise ValueError(
+                "trainer.old_logprobs_from_first_minibatch requires trainer.update_epochs_per_batch=1, "
+                f"got {cfg.trainer.update_epochs_per_batch}."
+            )
+        if cfg.trainer.algorithm.use_kl_in_reward:
+            raise ValueError(
+                "trainer.old_logprobs_from_first_minibatch requires trainer.algorithm.use_kl_in_reward=false."
+            )
+
     if cfg.trainer.policy.language_model_only:
         assert (
             cfg.generator.inference_engine.language_model_only
@@ -1171,6 +1184,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "SKYRL_DSA_HEAD_FULL",
         "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
         "SKYRL_DSA_HEAD_FULL_ZIGZAG",
+        # Megatron-Bridge checkpoint-read caches (reused safetensors handles keep every touched shard mmapped; small
+        # tensors are cloned per rank). Read in the Megatron workers during the model load.
+        "MBRIDGE_STATE_REUSE_HANDLES",
+        "MBRIDGE_STATE_CACHE_SMALL_TENSORS",
         # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
         "VLLM_ALLREDUCE_USE_FLASHINFER",
         "VLLM_ALLREDUCE_USE_SYMM_MEM",
