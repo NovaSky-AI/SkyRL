@@ -22,6 +22,9 @@ set -x
 # If the image puts its own cuDNN on LD_LIBRARY_PATH (e.g. /opt/cudnn), the Ray workers load those
 # sublibraries instead of the pip cuDNN and QSA runs on that older version: drop that entry and set
 # SKYRL_LD_LIBRARY_PATH_EXPORT=1 so the workers get the driver's path.
+# Measured on 4 x 8 B200 with the defaults (2-step smoke): 562-1,015 s per step, most of it generation
+# once responses reach the 64K cap; weight sync 11 s; peak 36.8 GB allocated; rollout/trainer |dlogp|
+# 0.013-0.014. The base model already scores ~0.95 on AIME-2024 here, so DAPO-math gives little signal.
 
 # On B200, the sparse-regime attention runs on cuDNN frontend's QSA kernels (1.7-3.5x FlexAttention)
 # when a cudnn-frontend with cudnn.ops.qsa_forward is installed: >= 1.32, until then the
