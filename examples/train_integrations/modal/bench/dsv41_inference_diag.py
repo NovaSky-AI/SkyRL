@@ -17,7 +17,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dsv41_inference_bench import Stats, cudagraph_capture_sizes, session  # noqa: E402
+from dsv41_inference_bench import WORKER_EXTENSION_CLS, Stats, cudagraph_capture_sizes, session  # noqa: E402
 from vllm.engine.arg_utils import AsyncEngineArgs  # noqa: E402
 from vllm.v1.engine.async_llm import AsyncLLM  # noqa: E402
 
@@ -59,7 +59,9 @@ async def phase(engine, base, name, concurrency, obs, warmup, measure, profile_s
     await asyncio.sleep(20)
 
 
-async def logprob_probe(engine, path: str, n: int = 8, length: int = 512, lora_request=None) -> None:
+async def logprob_probe(
+    engine, path: str, n: int = 8, length: int = 512, lora_request=None, text_ids=None
+) -> None:
     """Score N fixed (seeded) random sequences with prompt_logprobs and save every token's logprob, so two engine
     configs (e.g. MoE backends) can be compared token by token on identical inputs."""
     from vllm import SamplingParams
@@ -69,7 +71,10 @@ async def logprob_probe(engine, path: str, n: int = 8, length: int = 512, lora_r
     params = SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=0)
     out = []
     for i in range(n):
-        ids = [rng.randrange(1000, 100000) for _ in range(length)]
+        if text_ids is not None:  # natural text: per-token logprobs far less sensitive to kernel noise
+            ids = text_ids[i * length : (i + 1) * length]
+        else:
+            ids = [rng.randrange(1000, 100000) for _ in range(length)]
         final = None
         async for o in engine.generate(
             TokensPrompt(prompt_token_ids=ids), params, f"probe-{i}-{time.time()}", lora_request=lora_request
@@ -104,6 +109,7 @@ async def main(a):
         disable_log_stats=False,
         max_num_batched_tokens=32768,  # the recipe's value; --engine-kwargs overrides
         compilation_config={"cudagraph_capture_sizes": cudagraph_capture_sizes()},  # the recipe's sizes
+        worker_extension_cls=WORKER_EXTENSION_CLS,  # SkyRL's vLLM patches, as the RL engines
         **lora,
     )
     if a.r3:
@@ -121,7 +127,14 @@ async def main(a):
 
         lora_request = LoRARequest("bench", 1, a.lora_adapter)
     if a.logprob_probe:
-        await logprob_probe(engine, a.logprob_probe, lora_request=lora_request)
+        text_ids = None
+        if a.probe_text:
+            from transformers import AutoTokenizer
+
+            tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=True)
+            text_ids = tok(open(a.probe_text).read(), add_special_tokens=False)["input_ids"]
+            assert len(text_ids) >= 8 * 512, "probe text too short"
+        await logprob_probe(engine, a.logprob_probe, lora_request=lora_request, text_ids=text_ids)
     asyncio.create_task(stats_loop(engine))
     base = argparse.Namespace(
         tp=a.tp, gen=1065, obs=1870, max_context=262144, max_turns=69, top_k=20, prompt_len=2048, stagger=a.stagger, r3=a.r3, lora_request=lora_request
@@ -146,6 +159,7 @@ if __name__ == "__main__":
     p.add_argument("--measure", type=int, default=120)
     p.add_argument("--lora-adapter", default="", help="PEFT adapter dir: route every request through it")
     p.add_argument("--r3", type=int, default=0, help="1: return routed experts per request (the recipe's R3)")
+    p.add_argument("--probe-text", default="", help="text file: probe natural-text sequences instead of random ids")
     p.add_argument("--logprob-probe", default="", help="JSON path: save prompt logprobs of fixed sequences first")
     p.add_argument("--stagger", type=int, default=0, help="1: desync turn boundaries (see bench --stagger)")
     p.add_argument("--phases", default="", help="comma-separated subset of c640,c640_noobs,c64,c256")
