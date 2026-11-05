@@ -24,6 +24,7 @@ import time
 import uuid
 
 from vllm import SamplingParams
+from vllm.sampling_params import RequestOutputKind
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -51,8 +52,14 @@ async def session(
     engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int, turn_cap: int = 0
 ) -> None:
     context = [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(depth)]
+    extra = {}
+    if args.final_only:
+        # One output per request (as a non-streaming RL client gets) and no detokenization: per-token streaming
+        # of 640 concurrent requests is front-end work the RL path does not pay.
+        extra = {"output_kind": RequestOutputKind.FINAL_ONLY, "detokenize": False}
     params = SamplingParams(
-        max_tokens=args.gen, min_tokens=args.gen, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0
+        max_tokens=args.gen, min_tokens=args.gen, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0,
+        **extra,
     )
     turns = 0
     while turns < (turn_cap or args.max_turns) and len(context) + args.gen + args.obs < args.max_context:
@@ -169,6 +176,7 @@ def parse_args():
     p.add_argument("--warmup-s", type=int, default=600)
     p.add_argument("--measure-s", type=int, default=900)
     p.add_argument("--num-gpus", type=int, default=0, help="GPUs for per-GPU rates (default: --tp)")
+    p.add_argument("--final-only", type=int, default=0, help="non-streaming outputs, no detokenization")
     p.add_argument("--desync", type=int, default=0, help="stagger slots: first session ends after a random turn")
     p.add_argument("--engine-kwargs", default="{}", help="JSON merged over the AsyncEngineArgs above")
     return p.parse_args()
