@@ -17,17 +17,39 @@ After WARMUP_S the script counts generated and prompt tokens over MEASURE_S and 
 
 import argparse
 import asyncio
+import json
 import os
 import random
 import time
 import uuid
 
 from vllm import SamplingParams
+from vllm.sampling_params import RequestOutputKind
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 VOCAB_LO, VOCAB_HI = 1000, 100000
+# CUDA-graph sizes above vLLM's default ceiling (1024 tokens on Blackwell), as the recipe sets them: with multi-turn
+# RL most steps mix a prefill chunk into the running decodes, and without a graph those steps run eagerly.
+# The recipe's tuned fused MoE-LoRA block sizes (read by the engine workers; inherited through the environment).
+os.environ.setdefault(
+    "VLLM_TUNED_CONFIG_FOLDER",
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "../../../train/deepseek_v4_flash/vllm_tuned_configs"
+    ),
+)
+# As the recipe: LoRA MoE on the TRT-LLM MXFP4 kernel (SkyRL vLLM patch, applied through WORKER_EXTENSION_CLS).
+os.environ.setdefault("SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE", "1")
+# SkyRL's vLLM worker extension: loads SkyRL's vLLM patches in every engine worker, as the RL engines do.
+WORKER_EXTENSION_CLS = "skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap"
+EXTRA_CUDAGRAPH_SIZES = [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192]
+
+
+def cudagraph_capture_sizes(extra: bool = True) -> list:
+    """vLLM's default Blackwell capture grid (1, 2, 4, 8..248 step 8, 256..1024 step 16) plus EXTRA_CUDAGRAPH_SIZES."""
+    sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16))
+    return sizes + (EXTRA_CUDAGRAPH_SIZES if extra else [])
 
 
 class Stats:
@@ -46,19 +68,42 @@ class Stats:
             self.turns += 1
 
 
-async def session(engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int) -> None:
+async def session(
+    engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int, first_gen: int = 0,
+    turn_cap: int = 0,
+) -> None:
+    """One rollout. ``first_gen`` (1..gen) shortens its first turn: used once per slot with ``--stagger`` so
+    turn boundaries spread out as in real RL, instead of every session decoding and prefilling in lockstep.
+    ``turn_cap`` (``--desync``) ends the slot's first rollout after a random number of turns instead."""
     context = [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(depth)]
-    params = SamplingParams(
-        max_tokens=args.gen, min_tokens=args.gen, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0
-    )
+
+    def params_for(n: int, routes_from: int = 0) -> SamplingParams:
+        # --r3: the engine returns routed experts; like SkyRL's multi-turn client, each turn asks only for the
+        # tokens after what the previous turn already returned.
+        extra = {"routed_experts_prompt_start": routes_from} if getattr(args, "r3", 0) else {}
+        if getattr(args, "final_only", 0):
+            # One output per request (as a non-streaming RL client gets) and no detokenization.
+            extra.update(output_kind=RequestOutputKind.FINAL_ONLY, detokenize=False)
+        return SamplingParams(
+            max_tokens=n, min_tokens=n, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0, **extra
+        )
+
     turns = 0
-    while turns < args.max_turns and len(context) + args.gen + args.obs < args.max_context:
+    routes_from = 0
+    while turns < (turn_cap or args.max_turns) and len(context) + args.gen + args.obs < args.max_context:
         stats.depth[wid] = len(context)
         final = None
-        async for out in engine.generate(TokensPrompt(prompt_token_ids=context), params, str(uuid.uuid4())):
+        turn_params = params_for(first_gen if (turns == 0 and first_gen) else args.gen, routes_from)
+        async for out in engine.generate(
+            TokensPrompt(prompt_token_ids=context),
+            turn_params,
+            str(uuid.uuid4()),
+            lora_request=getattr(args, "lora_request", None),
+        ):
             final = out
         generated = list(final.outputs[0].token_ids)
         stats.add(len(generated), len(context))
+        routes_from = len(context) + len(generated)
         context = context + generated + [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(args.obs)]
         turns += 1
     stats.sessions += 1
@@ -70,14 +115,16 @@ async def worker(engine, args, stats, seed, stop: asyncio.Event) -> None:
     # from a fresh prompt and grow turn by turn, so in steady state depths spread over [0, MAX_DEPTH] with the
     # history served from the prefix cache, as in real rollouts.
     depth = rng.randrange(args.min_depth, args.max_depth + 1)
+    first_gen = rng.randint(1, args.gen) if args.stagger else 0
+    turn_cap = rng.randint(1, args.max_turns) if getattr(args, "desync", 0) else 0
     while not stop.is_set():
-        await session(engine, args, stats, rng, depth, seed)
-        depth = args.prompt_len
+        await session(engine, args, stats, rng, depth, seed, first_gen, turn_cap)
+        depth, first_gen, turn_cap = args.prompt_len, 0, 0
 
 
 async def main(args) -> None:
     lora = {"enable_lora": True, "max_lora_rank": 32, "max_loras": 1} if args.lora else {}
-    engine_args = AsyncEngineArgs(
+    kwargs = dict(
         model=args.model,
         tensor_parallel_size=args.tp,
         trust_remote_code=True,
@@ -89,10 +136,15 @@ async def main(args) -> None:
         async_scheduling=True,
         distributed_executor_backend="mp",
         disable_log_stats=False,
-        **({"max_num_batched_tokens": args.max_num_batched_tokens} if args.max_num_batched_tokens else {}),
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        compilation_config={"cudagraph_capture_sizes": cudagraph_capture_sizes(bool(args.mixed_cudagraphs))},
+        worker_extension_cls=WORKER_EXTENSION_CLS,
+        enable_return_routed_experts=bool(args.r3),
         **lora,
     )
-    engine = AsyncLLM.from_engine_args(engine_args)
+    kwargs.update(json.loads(args.engine_kwargs))
+    print(f"[bench] engine kwargs: { {k: v for k, v in kwargs.items() if k != 'model'} }", flush=True)
+    engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kwargs))
 
     async def log_engine_stats():  # vLLM's running / waiting / KV usage / prefix-cache hit rate
         while True:
@@ -100,6 +152,12 @@ async def main(args) -> None:
             await engine.do_log_stats()
 
     asyncio.create_task(log_engine_stats())
+    args.lora_request = None
+    if args.lora_adapter:
+        from vllm.lora.request import LoRARequest
+
+        # An active adapter makes the engine run the LoRA kernels (with --lora 1 alone none is selected).
+        args.lora_request = LoRARequest("bench", 1, args.lora_adapter)
     stats = Stats()
     stop = asyncio.Event()
     tasks = [asyncio.create_task(worker(engine, args, stats, i, stop)) for i in range(args.concurrency)]
@@ -107,11 +165,16 @@ async def main(args) -> None:
     await asyncio.sleep(args.warmup_s)
     stats.counting = True
     t0 = time.time()
+    last_gen, last_t = 0, t0
     for _ in range(args.measure_s // 60):
         await asyncio.sleep(60)
-        dt = time.time() - t0
+        now = time.time()
+        dt = now - t0
+        window = (stats.gen - last_gen) / (now - last_t) / args.num_gpus
+        last_gen, last_t = stats.gen, now
         print(
-            f"[bench] {dt:.0f}s gen {stats.gen / dt:.0f} tok/s ({stats.gen / dt / args.tp:.0f}/GPU) "
+            f"[bench] {dt:.0f}s gen {stats.gen / dt:.0f} tok/s ({stats.gen / dt / args.num_gpus:.0f}/GPU, last min "
+            f"{window:.0f}/GPU) "
             f"prompt {stats.prompt / dt:.0f} tok/s turns {stats.turns} "
             f"mean in-flight context {sum(stats.depth.values()) / max(len(stats.depth), 1):.0f}",
             flush=True,
@@ -120,7 +183,7 @@ async def main(args) -> None:
     print(
         f"[bench] RESULT tp={args.tp} concurrency={args.concurrency} gen={args.gen} obs={args.obs} "
         f"depth=[{args.min_depth},{args.max_depth}] lora={args.lora}: gen {stats.gen / dt:.0f} tok/s "
-        f"= {stats.gen / dt / args.tp:.0f} tok/s/GPU; prompt (incl. cached) {stats.prompt / dt:.0f} tok/s; "
+        f"= {stats.gen / dt / args.num_gpus:.0f} tok/s/GPU; prompt (incl. cached) {stats.prompt / dt:.0f} tok/s; "
         f"{stats.turns} turns in {dt:.0f}s",
         flush=True,
     )
@@ -139,6 +202,12 @@ def parse_args():
     p.add_argument("--tp", type=int, default=8)
     p.add_argument("--concurrency", type=int, default=640)
     p.add_argument("--max-num-seqs", type=int, default=1024)
+    p.add_argument(
+        "--max-num-batched-tokens", type=int, default=32768, help="chunked-prefill budget (the recipe's value)"
+    )
+    p.add_argument(
+        "--mixed-cudagraphs", type=int, default=1, help="1: capture graphs up to 8192 tokens (the recipe's sizes)"
+    )
     p.add_argument("--gen", type=int, default=1065)
     p.add_argument("--obs", type=int, default=1870)
     p.add_argument("--min-depth", type=int, default=0)
@@ -146,16 +215,24 @@ def parse_args():
     p.add_argument("--max-depth", type=int, default=200000)
     p.add_argument("--max-context", type=int, default=262144)
     p.add_argument("--max-turns", type=int, default=69)
-    # Per-step token budget (decode + chunked prefill). vLLM's default here is 2048, which starves the observation
-    # prefills at 640 running sessions; 0 keeps the default.
-    p.add_argument("--max-num-batched-tokens", type=int, default=0)
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--lora", type=int, default=1)
+    p.add_argument("--lora-adapter", default="", help="PEFT adapter dir: route every request through it")
+    p.add_argument("--r3", type=int, default=0, help="1: return routed experts per request (the recipe's R3)")
+    p.add_argument(
+        "--stagger", type=int, default=0, help="1: each slot's first turn generates 1..gen tokens (desync turns)"
+    )
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     p.add_argument("--warmup-s", type=int, default=600)
     p.add_argument("--measure-s", type=int, default=900)
+    p.add_argument("--num-gpus", type=int, default=0, help="GPUs for per-GPU rates (default: --tp)")
+    p.add_argument("--final-only", type=int, default=0, help="non-streaming outputs, no detokenization")
+    p.add_argument("--desync", type=int, default=0, help="stagger slots: first session ends after a random turn")
+    p.add_argument("--engine-kwargs", default="{}", help="JSON merged over the AsyncEngineArgs above")
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    asyncio.run(main(parse_args()))
+    _args = parse_args()
+    _args.num_gpus = _args.num_gpus or _args.tp
+    asyncio.run(main(_args))
