@@ -6,6 +6,7 @@ V4's load hook assumes 128x128 blocks; on V4.1's scales it does not raise, it ap
 import pytest
 import torch
 
+pytestmark = pytest.mark.megatron
 pytest.importorskip("megatron.bridge")
 
 from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.bridge import (  # noqa: E402
