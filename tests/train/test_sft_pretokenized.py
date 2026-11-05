@@ -418,8 +418,8 @@ def test_trainer_concatenates_multiple_pretokenized_stores(tmp_path):
         disable_cache=True,
     )
     validate_sft_cfg(cfg)
-    # Equal mixing weights are defaulted for the random sampler.
-    assert cfg.train_dataset_weights == [0.5, 0.5]
+    # Unset weights stay None: multiple stores sample as their union.
+    assert cfg.train_dataset_weights is None
 
     trainer = SFTTrainer(cfg)
     tokenized = trainer.load_dataset()
@@ -427,7 +427,12 @@ def test_trainer_concatenates_multiple_pretokenized_stores(tmp_path):
     assert tokenized.dataset_lengths == [2, 1]
     assert list(tokenized.sequence_lengths) == [5, 3, 5]
 
-    # Multiple sources -> DataMixingSampler configured from the store lengths.
+    # No weights -> union sampling: the built-in shuffle (sampler=None) covers
+    # every row of every store exactly once per epoch.
+    assert trainer.build_train_sampler(tokenized) is None
+
+    # Explicit weights -> weighted mixing over the same stores.
+    cfg.train_dataset_weights = [0.5, 0.5]
     sampler = trainer.build_train_sampler(tokenized)
     assert sampler is not None
     assert len(list(iter(sampler))) > 0
