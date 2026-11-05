@@ -7,6 +7,10 @@
 #
 # UV_RUN overrides the launcher (e.g. "uv run --no-sync" with UV_PROJECT_ENVIRONMENT set).
 #   MODEL_PATH=<dir> OUT=<dir> bash dsv41_train_bench.sh <name> <max response tokens> [extra overrides]
+#
+# Per-GPU tokens, not sequence length, set the memory: without context parallelism (V4.1 attention has none yet) a
+# whole sequence sits on one GPU, so a CP4 setup's ~200k-token rollouts are modelled as ~50k-token sequences
+# (RESP=50000 MIN_RESP=46000 TURNS=17: the same 1065 generated / 1870 observation tokens per turn).
 set -x
 NAME=$1
 RESP=$2
@@ -14,7 +18,9 @@ shift 2
 SKYRL_DIR="$(cd "$(dirname "$0")/../../../.." && pwd)"
 cd "$SKYRL_DIR"
 export SKYRL_MEGATRON_RANDOM_INIT=0 SKYRL_DSV41_INDEXER_IMPL=fused
-export SKYRL_DSV41_RECOMPUTE_OFFLOAD=1 SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB="${OFFLOAD_HOST_GB:-320}"
+# OFFLOAD_HOST_GB is a per-process (per-GPU) limit on pinned host memory for offloaded layer inputs: 8 x 32 GB plus
+# the ~25 GB/rank pinned Engram shards keeps pinned memory under half of a 1 TB B300 node (320 per rank took one down).
+export SKYRL_DSV41_RECOMPUTE_OFFLOAD=1 SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB="${OFFLOAD_HOST_GB:-32}"
 export MBRIDGE_STATE_REUSE_HANDLES=0 MBRIDGE_STATE_CACHE_SMALL_TENSORS=0
 MAX_LEN=$(( 512 + RESP ))
 ${UV_RUN:-uv run --isolated} --extra megatron python -m examples.train_scripts.full_context.main_full_ctx \
