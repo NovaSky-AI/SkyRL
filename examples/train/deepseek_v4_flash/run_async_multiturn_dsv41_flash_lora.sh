@@ -60,6 +60,8 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # (bench dsv41_inference_diag.py), gen tok/s/GPU: 2048 -> 479, 16384 -> 743, 32768 -> 898 (pure decode 576 -> 1257 /
 # 1197). Costs KV cache: 78.9 -> 73.6 -> 68.0 GiB/GPU.
 : "${MAX_NUM_BATCHED_TOKENS:=32768}"
+# Entrypoint module: examples.train.algorithms.dapo.main_dapo_fully_async for DAPO (overlong buffer penalty).
+: "${ENTRYPOINT:=examples.train.fully_async.main_fully_async}"
 ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"'}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
@@ -77,7 +79,7 @@ export MBRIDGE_STATE_CACHE_SMALL_TENSORS="${MBRIDGE_STATE_CACHE_SMALL_TENSORS:-0
 # Fused cuDNN dense scoring for the V4.1 indexer (Megatron-LM#7285 backport).
 export SKYRL_DSV41_INDEXER_IMPL="${SKYRL_DSV41_INDEXER_IMPL:-fused}"
 
-uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_async \
+uv run --isolated --extra megatron -m "$ENTRYPOINT" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=$ENV_CLASS \
