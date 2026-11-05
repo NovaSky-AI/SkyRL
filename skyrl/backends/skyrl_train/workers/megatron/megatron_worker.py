@@ -425,6 +425,14 @@ class MegatronWorker:
                 fp8_exclude_recipe(list(megatron_config.fp8_exclude_modules))
             )
 
+        # DeepSeek-V4 / V4.1 experts use a clamped SwiGLU (``swiglu_limit``). Megatron-Bridge's DSv4 bridge turns on
+        # the other fusions but leaves ``bias_activation_fusion`` off, so the experts ran the unfused path (clamp,
+        # SiLU, multiply, probs multiply as separate kernels, each intermediate saved for backward). The fused
+        # ``weighted_bias_swiglu_impl`` takes the same clamp: on a V4.1 slice at 128k tokens/GPU, -5% fwd+bwd and
+        # -15 GB peak GPU memory, identical grad norms. Overridable via ``transformer_config_kwargs``.
+        if getattr(provider, "dsv4_version", None) is not None and getattr(provider, "gated_linear_unit", False):
+            provider.bias_activation_fusion = True
+
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
