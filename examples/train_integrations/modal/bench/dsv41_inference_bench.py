@@ -133,7 +133,7 @@ def parse_args():
     p.add_argument("--concurrency", type=int, default=640)
     p.add_argument("--max-num-seqs", type=int, default=1024)
     p.add_argument(
-        "--max-num-batched-tokens", type=int, default=16384, help="chunked-prefill budget (the recipe's value)"
+        "--max-num-batched-tokens", type=int, default=32768, help="chunked-prefill budget (the recipe's value)"
     )
     p.add_argument("--gen", type=int, default=1065)
     p.add_argument("--obs", type=int, default=1870)

@@ -77,7 +77,7 @@ async def main(a):
         async_scheduling=True,
         distributed_executor_backend="mp",
         disable_log_stats=False,
-        max_num_batched_tokens=16384,  # the recipe's value; --engine-kwargs overrides
+        max_num_batched_tokens=32768,  # the recipe's value; --engine-kwargs overrides
         **lora,
     )
     if a.profile:
