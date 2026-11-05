@@ -5,7 +5,7 @@ Adds two blocks to the standard config and changes two algorithm defaults:
 - ``trainer.teacher``: the frozen teacher, a sibling of ``trainer.ref`` (which stays independent:
   a reference-KL penalty can still be turned on alongside the teacher). ``backend`` picks one of two
   exclusive homes: launched by this job (``skyrl``, the default) or vLLM servers you run (``vllm``).
-- ``trainer.algorithm.opd``: the distillation knobs.
+- ``trainer.algorithm.opd``: the distillation knobs, and ``opd.topk_metrics``, the top-K overlap metrics.
 - ``trainer.algorithm.use_kl_loss`` defaults to ``False`` and
   ``policy_loss_type`` to ``"importance_sampling"``.
 """
@@ -42,11 +42,27 @@ class TeacherEngineConfig(InferenceEngineConfig):
     """
 
     enable_prefix_caching: bool = False
-    """Off: vLLM never reads the prefix cache for ``prompt_logprobs`` requests, so caching would only cost block hashing on write."""
+    """Off: vLLM never reads the prefix cache for prompt-scoring requests, so caching would only cost block hashing on write."""
     gpu_memory_utilization: float = 0.9
     """Higher than the student's 0.8: nothing else lives on the teacher's GPUs."""
     enable_ray_prometheus_stats: bool = False
     """Off: the trainer's metrics scraper would fold the teacher's servers into the ``vllm/train/*`` metrics."""
+
+
+@dataclass
+class OPDTopKMetricsConfig(BaseConfig):
+    """The overlap ratio and overlap-token advantage metrics, which compare the
+    student's and the teacher's top ``top_k`` tokens at each response position.
+
+    The student's top-K comes from its sampler, so turning them on requires untruncated sampling at temperature 1.
+    Nothing here changes the loss.
+    """
+
+    num_rows: int = 0
+    """Rows per step, evenly spaced over the batch, on which the overlap metrics are measured; ``0`` is off. Each
+    asks the teacher for its own top ``top_k``, which vLLM returns as JSON over the whole sequence."""
+    top_k: int = 16
+    """K, the number of top tokens of each distribution compared; at least 8. 16 is the paper's."""
 
 
 @dataclass
@@ -72,6 +88,8 @@ class OPDConfig(BaseConfig):
     advantage_log_compress: bool = False
     """Compress each token's ``log q - log p`` to ``sign(a) log(1 + |a|)``, before ``kl_coef``.
     An alternative to the advantage clip bounds; setting both is a config error."""
+    topk_metrics: OPDTopKMetricsConfig = field(default_factory=OPDTopKMetricsConfig)
+    """Top-K overlap metrics: overlap ratio and overlap-token advantage. Off by default."""
 
 
 @dataclass
@@ -82,7 +100,7 @@ class TeacherConfig(BaseConfig):
     """Which service scores the teacher: ``"skyrl"`` or ``"vllm"``.
     ``"skyrl"`` (default): this job launches a vLLM deployment from ``inference_engine`` on its own GPUs and
     drives it through a ``RemoteInferenceClient``, as it does the student's engines. ``"vllm"``:
-    one OpenAI-compatible vLLM endpoint you run for the teacher model, at ``server_url``. Each backend reads only its own fields; setting the other's is a config error."""
+    one vLLM endpoint you run for the teacher model, at ``server_url``. Each backend reads only its own fields; setting the other's is a config error."""
     model: str = ""
     """The teacher model; what it names depends on the backend.
     ``skyrl``: an HF id or local path the job loads, e.g. ``Qwen/Qwen3-32B``. ``vllm``: the served model
@@ -97,7 +115,9 @@ class TeacherConfig(BaseConfig):
     """Root URL of the one vLLM endpoint serving the teacher for ``backend="vllm"``, e.g. ``"http://host:8000"``.
     A single server, a data-parallel one, or a router in front of several (SkyRL's ``serve`` entrypoint
     starts one and logs it as ``proxy_url``); spreading requests over replicas is the endpoint's job. The
-    client appends ``/v1/completions``, so leave off a trailing ``/v1``."""
+    client appends ``/inference/v1/generate``, so leave off a trailing ``/v1``. The server must run vLLM >= 0.32
+    with the V2 model runner, and ``--max-logprobs`` of at least ``opd.topk_metrics.top_k`` when the overlap
+    metrics are on; the job checks this at startup."""
     max_concurrency: int = 32
     """Maximum teacher requests in flight, for every backend.
     A launched teacher is also capped by its ``RemoteInferenceClient``'s per-engine limit
@@ -138,11 +158,13 @@ _FROZEN_ENGINE_FIELDS_MUST_BE_OFF = (
     "enable_pd",
     "enable_return_routed_experts",
     "enable_return_sample_support_set",
+    "enable_return_sample_support_logprobs",
     "offload_kv_for_weight_sync",
 )
 _FROZEN_ENGINE_FIELDS_MUST_BE_NONE = (
     "speculative_config",
     "fp8_weight_sync_mode",
+    "candidate_top_k",
     "external_server_urls",
     "external_proxy_url",
 )
@@ -191,8 +213,54 @@ def _reject_launch_settings(teacher: TeacherConfig) -> None:
         )
 
 
+def teacher_logprob_width(cfg) -> int:
+    """Ids the teacher scores per response position: the sampled token."""
+    return 1
+
+
+def teacher_topk(cfg) -> int:
+    """How many of its own top tokens the teacher returns on the rows the overlap metrics measure; ``0`` is none."""
+    topk_metrics = cfg.trainer.algorithm.opd.topk_metrics
+    return topk_metrics.top_k if topk_metrics.num_rows else 0
+
+
+def _enable_topk_capture(cfg) -> None:
+    """Turn on the student's top-K capture for the overlap metrics, after checking what capture needs.
+
+    The standard config's own capture checks have already run, so the ones that apply are repeated here.
+    """
+    algorithm = cfg.trainer.algorithm
+    topk_metrics: OPDTopKMetricsConfig = algorithm.opd.topk_metrics
+    if topk_metrics.top_k < 8:
+        raise ValueError("trainer.algorithm.opd.topk_metrics.top_k must be at least 8")
+    if algorithm.enable_sample_support_replay:
+        raise ValueError(
+            "trainer.algorithm.opd.topk_metrics captures the student's plain top-K, which sample-support replay "
+            "cannot use: replay needs the sampler's own support"
+        )
+    sampling = cfg.generator.sampling_params
+    untruncated = sampling.temperature == 1.0 and sampling.top_p == 1.0 and sampling.top_k == -1
+    if not untruncated or sampling.min_p > 0.0 or sampling.repetition_penalty != 1.0:
+        raise ValueError(
+            "trainer.algorithm.opd.topk_metrics reads the student's distribution from its sampler, so the sampler "
+            "must be the policy: temperature=1, top_p=1, top_k=-1, min_p=0 and repetition_penalty=1"
+        )
+    if sampling.additional_kwargs or cfg.generator.vision_language_generator:
+        raise ValueError(
+            "trainer.algorithm.opd.topk_metrics captures the student's top-K, which supports neither "
+            "sampling_params.additional_kwargs nor vision_language_generator"
+        )
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_return_sample_support_set = True
+    ie_cfg.candidate_top_k = topk_metrics.top_k
+    ie_cfg.enable_return_sample_support_logprobs = True
+
+
 def validate_opd_cfg(cfg) -> None:
-    """Rules the standard ``validate_cfg`` does not know about. Call it after ``validate_cfg``."""
+    """Rules the standard ``validate_cfg`` does not know about. Call it after ``validate_cfg``.
+
+    With ``opd.topk_metrics.num_rows > 0`` it also turns on the student's top-K capture, so the user sets one field.
+    """
     teacher: TeacherConfig = cfg.trainer.teacher
     algorithm = cfg.trainer.algorithm
     opd: OPDConfig = algorithm.opd
@@ -261,7 +329,11 @@ def validate_opd_cfg(cfg) -> None:
         raise ValueError("step_wise_trajectories are not yet supported with OPD")
 
     sampling = cfg.generator.sampling_params
-    if sampling.temperature != 1.0 or sampling.top_p != 1.0 or sampling.top_k != -1:
+    if opd.topk_metrics.num_rows < 0:
+        raise ValueError("trainer.algorithm.opd.topk_metrics.num_rows must be >= 0")
+    if opd.topk_metrics.num_rows:
+        _enable_topk_capture(cfg)
+    elif sampling.temperature != 1.0 or sampling.top_p != 1.0 or sampling.top_k != -1:
         logger.warning(
             "OPD expects untruncated sampling (temperature=1.0, top_p=1.0, top_k=-1): the sampled-token "
             f"reverse-KL estimate is biased otherwise. Got temperature={sampling.temperature}, "

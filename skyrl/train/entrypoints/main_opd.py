@@ -14,13 +14,19 @@ For more usecases and example scripts, look at
 ``examples/train/on_policy_distillation/``.
 """
 
+import asyncio
 import sys
 from typing import Optional
 
 import ray
 
 from skyrl.train.entrypoints.main_base import BasePPOExp
-from skyrl.train.opd.config import OPDExpConfig, validate_opd_cfg
+from skyrl.train.opd.config import (
+    OPDExpConfig,
+    teacher_logprob_width,
+    teacher_topk,
+    validate_opd_cfg,
+)
 from skyrl.train.opd.teacher_client import (
     SkyRLTeacherClient,
     TeacherLogprobClient,
@@ -58,8 +64,19 @@ class OPDExp(BasePPOExp):
 
     def _setup_trainer(self) -> RayPPOTrainer:
         self._teacher_client = self.get_teacher_client()
-        # TODO (kyuds): It might be good to consider whether we want to have
-        # preflight checks on the teacher before any model is loaded.
+        teacher_client = self._teacher_client
+
+        async def preflight() -> None:
+            # TODO (kyuds): consider checking the teacher's tokenizer against the student's here.
+            # The probe currently does not catch a teacher with a different vocabulary.
+            try:
+                # One scoring request before the student and the trainer load, so a teacher
+                # server that cannot run OPD's request fails here with what it needs.
+                await teacher_client.preflight(teacher_logprob_width(self.cfg), teacher_topk(self.cfg))
+            finally:
+                await teacher_client.aclose()  # its sessions are bound to this short-lived loop
+
+        asyncio.run(preflight())
         return super()._setup_trainer()
 
 
