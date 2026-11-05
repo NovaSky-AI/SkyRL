@@ -376,10 +376,6 @@ class _ChunkedRouterReplay:
 
 def _checkpoint(mlp, fn, chunk, mask):
     """Checkpoint ``fn(chunk, mask)`` the way ``MoELayer.forward`` checkpoints its call."""
-    from megatron.core import tensor_parallel
+    from megatron.core.transformer.utils import precision_aware_checkpoint
 
-    if mlp.config.fp8 or mlp.config.fp4:
-        from megatron.core.extensions.transformer_engine import te_checkpoint
-
-        return te_checkpoint(fn, False, tensor_parallel.random.get_cuda_rng_tracker, mlp.tp_group, chunk, mask)
-    return tensor_parallel.checkpoint(fn, False, chunk, mask)
+    return precision_aware_checkpoint(fn, mlp.config, mlp.tp_group, chunk, mask)

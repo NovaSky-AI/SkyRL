@@ -327,3 +327,19 @@ def test_quantile_balancing_rejects_padded_chunks():
     # A sequence of at least num_chunks tokens needs no padding and runs as before.
     chunked_mlp(mlp, torch.randn(8, 2, H), None, 4)
     assert len(mlp.calls) == 4
+
+
+def test_checkpoint_uses_the_moe_layers_precision_aware_checkpoint(monkeypatch):
+    """The chunk's checkpoint is the one ``MoELayer.forward`` would use: same config, same TP group."""
+    from megatron.core.transformer import utils
+
+    from skyrl.backends.skyrl_train.patches.megatron.mcore_ext.mhc_transformer_layer import (
+        _checkpoint,
+    )
+
+    seen = []
+    monkeypatch.setattr(utils, "precision_aware_checkpoint", lambda *args: seen.append(args) or "out")
+    mlp = type("MLP", (), {"config": object(), "tp_group": object()})()
+    fn, chunk, mask = object(), torch.zeros(1), None
+    assert _checkpoint(mlp, fn, chunk, mask) == "out"
+    assert seen == [(fn, mlp.config, mlp.tp_group, chunk, mask)]
