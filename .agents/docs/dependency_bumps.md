@@ -10,6 +10,15 @@ What to check and which tests to run when bumping a pinned dependency.
   so check each patch against the new source.
 - Rebase onto `main` before you run GPU CI. A stale base causes failures unrelated to the bump.
 
+## torch
+
+- Every CUDA extension wheel (flash-attn, mamba-ssm, causal-conv1d, transformer-engine-torch,
+  fast-hadamard-transform, flash-mla) is built for one torch version, so repin them all together.
+- torch pins an exact `nvidia-cudnn-cu13`. When the image puts an older cuDNN on `LD_LIBRARY_PATH`,
+  cuDNN's sublibraries resolve to it and the first cuDNN op fails with
+  `CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED`. `patches/cudnn/preload.py` loads them from the wheel instead;
+  `gpu_ci/megatron/test_megatron_vlm_init.py::test_vlm_sft_hf_parity` (a `Conv3d` through cuDNN) exercises it.
+
 ## Megatron-related bumps
 
 For megatron-core and megatron-bridge, follow `skyrl/backends/skyrl_train/patches/megatron/README.md`.
