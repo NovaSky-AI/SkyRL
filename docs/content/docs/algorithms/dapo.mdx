@@ -46,7 +46,7 @@ trainer:
 
 ### Token-Level Policy Gradient Loss
 
-DAPO uses token-level policy gradient loss, which can be enabled by setting `trainer.algorithm.loss_reduction` to `token_mean`. This is the default setting in SkyRL.
+DAPO uses token-level policy gradient loss, which can be enabled by setting `trainer.algorithm.loss_reduction` to `token_mean`. SkyRL's default is `prompt_mean`.
 
 ```yaml
 trainer:
