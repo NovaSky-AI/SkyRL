@@ -96,6 +96,29 @@ generator stops the run instead of taking zero-gradient steps. Each trial's
 `harbor_trial_config.trials_dir` say why. `skycap.check_first_batch=false`
 skips the check, e.g. for an agent that never calls the model.
 
+## Codex
+
+Harbor's `codex` agent runs Codex with its defaults, which skycap can't serve
+(the WebSocket transport, tools that aren't functions, unmarked retries), so the
+generator refuses it. [`SkycapCodex`](codex.py) runs Codex through a provider of
+its own at the trajectory's URL: function tools only, no retries, no WebSocket.
+skycap answers its Responses calls with parsed replies whatever
+`skycap.use_raw_content` says, since that API carries reasoning as items of its
+own. Codex calls the model from its sandbox, so it needs an exposure (above).
+Select it by import path, with the name cleared, since Harbor runs a known agent
+name before an import path:
+
+```bash
+  harbor_trial_config.agent.name=null \
+  harbor_trial_config.agent.import_path=examples.train_integrations.harbor_skycap.codex:SkycapCodex \
+  harbor_trial_config.agent.kwargs.context_window=<the engine's max_model_len> \
+  skycap.exposure.type=cloudflare
+```
+
+`SkycapCodex` installs the Codex release its settings were validated with
+(`CODEX_VERSION`); `harbor_trial_config.agent.kwargs.version` names another.
+Codex's config keys aren't a stable API, so check a new release before bumping it.
+
 ## Sharing a sandbox provider
 
 A remote sandbox counts against the provider account's quota, which other runs
