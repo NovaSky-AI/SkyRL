@@ -1193,6 +1193,8 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "VLLM_ALLREDUCE_USE_SYMM_MEM",
         # Layers per pipeline stage of a PP engine (e.g. "19,21"); vLLM splits evenly without it.
         "VLLM_PP_LAYER_PARTITION",
+        # Tuned LoRA kernel configs (e.g. the DeepSeek-V4.1 recipe's fused MoE-LoRA block sizes), read by the engines.
+        "VLLM_TUNED_CONFIG_FOLDER",
         # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
         # which leaves the CPU-offloaded optimizer step single-threaded.
         "OMP_NUM_THREADS",
