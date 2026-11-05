@@ -89,9 +89,17 @@ async def main(args) -> None:
         async_scheduling=True,
         distributed_executor_backend="mp",
         disable_log_stats=False,
+        **({"max_num_batched_tokens": args.max_num_batched_tokens} if args.max_num_batched_tokens else {}),
         **lora,
     )
     engine = AsyncLLM.from_engine_args(engine_args)
+
+    async def log_engine_stats():  # vLLM's running / waiting / KV usage / prefix-cache hit rate
+        while True:
+            await asyncio.sleep(60)
+            await engine.do_log_stats()
+
+    asyncio.create_task(log_engine_stats())
     stats = Stats()
     stop = asyncio.Event()
     tasks = [asyncio.create_task(worker(engine, args, stats, i, stop)) for i in range(args.concurrency)]
@@ -138,6 +146,9 @@ def parse_args():
     p.add_argument("--max-depth", type=int, default=200000)
     p.add_argument("--max-context", type=int, default=262144)
     p.add_argument("--max-turns", type=int, default=69)
+    # Per-step token budget (decode + chunked prefill). vLLM's default here is 2048, which starves the observation
+    # prefills at 640 running sessions; 0 keeps the default.
+    p.add_argument("--max-num-batched-tokens", type=int, default=0)
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--lora", type=int, default=1)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
