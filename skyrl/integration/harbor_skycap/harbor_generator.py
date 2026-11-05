@@ -116,7 +116,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
             include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
-            check_first_batch: raise when not one trajectory of the first ``generate`` call has anything to train
+            check_first_batch: raise when not one trajectory of the first training ``generate`` call has anything to train
                 (``skycap.check_first_batch``).
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
@@ -213,7 +213,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             routed_experts=self._routed_experts,
             include_images=self.include_images,
         )
-        if self._check_first_batch and not self._first_batch_done:
+        # Eval batches don't count: an eval before training would otherwise use up the check.
+        if self._check_first_batch and not self._first_batch_done and phase == "train":
             self._first_batch_done = True
             # The composed loss masks, not the captured samples: compose masks whole instances that timed out or
             # failed, and overlong rows, so a batch can have samples and still train nothing.
@@ -221,7 +222,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 # Where Harbor writes them when the template names no directory.
                 trials_dir = self._template.get("trials_dir") or TrialConfig.model_fields["trials_dir"].default
                 raise RuntimeError(
-                    f"No trajectory in the first batch ({len(outcomes)}) has anything to train; each trial's "
+                    f"No trajectory in the first training batch ({len(outcomes)}) has anything to train; each trial's "
                     f"exception.txt and agent logs are under {trials_dir}. "
                     "skycap.check_first_batch=false skips this check."
                 )
