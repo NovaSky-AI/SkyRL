@@ -209,6 +209,13 @@ apply_deepseek_v41_prefill_workspace_patch()
 # The same stale prefill indices on every V4.1 backend (incl. the NVFP4 mega-attn one): seed them -1 (vllm#60613).
 apply_deepseek_v41_combine_indices_patch()
 
+# Opt-in (SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE=1): MXFP4 MoE + LoRA on FlashInfer's TRT-LLM kernel instead of Marlin.
+from skyrl.backends.skyrl_train.patches.vllm.patch_mxfp4_trtllm_lora_moe import (  # noqa: E402
+    apply_mxfp4_trtllm_lora_moe_patch,
+)
+
+apply_mxfp4_trtllm_lora_moe_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
