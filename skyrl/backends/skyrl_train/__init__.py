@@ -10,3 +10,11 @@ from skyrl.backends.skyrl_train.patches.flash_mla.preload import (  # noqa: E402
 )
 
 preload_flash_mla()
+
+# The pinned transformers has no Beam config; register SkyRL's so `AutoConfig` resolves
+# `model_type="beam"` in every SkyRL process (see the module docstring).
+from skyrl.backends.skyrl_train.patches.transformers.configuration_beam import (  # noqa: E402
+    register_beam_config,
+)
+
+register_beam_config()

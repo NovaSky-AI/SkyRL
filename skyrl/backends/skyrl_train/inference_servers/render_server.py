@@ -76,7 +76,7 @@ def _run_render_server(model_path: str, port: int, log_file: Optional[str]) -> N
     from vllm import envs
     from vllm.config import DeviceConfig, VllmConfig
     from vllm.engine.arg_utils import AsyncEngineArgs
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.common.cli_args import make_arg_parser
     from vllm.entrypoints.openai.api_server import (
         build_and_serve_renderer,
         setup_server,
