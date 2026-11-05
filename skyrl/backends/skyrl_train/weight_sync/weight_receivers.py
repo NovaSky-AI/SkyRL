@@ -77,9 +77,16 @@ class SkyrlCheckpointLoadMixin:
         )
 
         model = self.model
-        # Stacked NVFP4 expert layers (``expert_nvfp4_stacked_sync``) may span receive batches; the receiver
-        # holds a partial layer until it is complete. Its fallback is the ordinary per-expert path.
-        stacked = Nvfp4StackedReceiver(model, fallback_load=lambda w: model.load_weights(weights=w))
+        # Stacked NVFP4 expert layers (``expert_nvfp4_stacked_sync``) may span receive batches and, under
+        # vLLM 0.33's packed IPC, separate ``receive_weights`` calls (one per packed chunk). So the receiver
+        # lives for the whole update round: it holds a partial layer until it is complete, and
+        # ``finish_weight_update`` checks that nothing is left over. Its fallback is the per-expert path.
+        stacked = getattr(self, "_skyrl_nvfp4_stacked", None)
+        if stacked is None or stacked.model is not model:
+            if stacked is not None:
+                stacked.finish()
+            stacked = Nvfp4StackedReceiver(model, fallback_load=lambda w: model.load_weights(weights=w))
+            self._skyrl_nvfp4_stacked = stacked
 
         def load_weights(weights: Any, **kwargs: Any) -> Any:
             return _load_checkpoint_weights(model, weights, nvfp4_stacked_receiver=stacked, **kwargs)
@@ -89,7 +96,6 @@ class SkyrlCheckpointLoadMixin:
         self.model = _LoadWeightsProxy(model, load_weights)
         try:
             yield
-            stacked.finish()
         finally:
             # Restore the exact object we found, so this composes with the
             # worker's set_weight_update_target / reset_weight_update_target.
@@ -268,6 +274,8 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
             self.skyrl_begin_lora_update()
             return
         skyrl_before_weight_update()
+        # A round that failed part-way must not leak its partial stacked NVFP4 layers into this one.
+        self._skyrl_nvfp4_stacked = None
         with torch.device(self.device):
             super().start_weight_update()
 
@@ -310,6 +318,10 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
             restore_moe_kernel_constants,
         )
 
+        stacked = getattr(self, "_skyrl_nvfp4_stacked", None)
+        self._skyrl_nvfp4_stacked = None
+        if stacked is not None:
+            stacked.finish()  # raises on a stacked layer that never completed
         with torch.device(self.device):
             super().finish_weight_update()
             # A level-2 sleep zeroes MoE kernel constants that no reload rebuilds.
