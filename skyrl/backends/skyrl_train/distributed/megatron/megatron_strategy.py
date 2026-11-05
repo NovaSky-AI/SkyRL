@@ -36,6 +36,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_grads_to_cpu,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
+    release_megatron_model_cpu_copy,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
     CHECKPOINT_SUBDIR as OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR,
@@ -297,6 +298,8 @@ class MegatronStrategy(DistributedStrategy):
             if optimizer is not None:
                 load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
+        if backload_model:
+            release_megatron_model_cpu_copy(model)
 
     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs) -> None:
         raise NotImplementedError()
