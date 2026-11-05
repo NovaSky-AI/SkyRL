@@ -1771,7 +1771,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return SerializedNvfp4WeightSource(
                 source,
                 Nvfp4WeightQuantSettings.from_te_recipe(),
-                num_layers=self.strategy.hf_config.num_hidden_layers,
                 bf16_layers=nvfp4_bf16_layers(self.strategy.hf_config.num_hidden_layers, megatron_config),
                 stacked_num_experts=stacked_num_experts,
                 min_packed_buffer_bytes=min_packed_bytes,
