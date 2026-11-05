@@ -3,6 +3,8 @@ the fake renderer and the mock engine."""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import openai
@@ -10,7 +12,9 @@ import orjson
 import pytest
 
 from skycap import hashing
+from skycap import server as server_module
 from skycap.hashing import MatchKey
+from skycap.server import KEEPALIVE
 from tests.conftest import openai_client
 from tests.fake_renderer import END, decode, encode
 from tests.test_tokens import TokenStack, client, token_stack, user
@@ -246,6 +250,89 @@ async def test_a_marked_retry_gets_the_original_reply_without_sampling_again() -
         _, retried, _ = await post(stack, created, body, **{"x-stainless-retry-count": "1"})
 
     assert retried == first and len(stack.engine.requests) == 1
+
+
+# -- answering a stream before its turn is sampled ------------------------------------------------------------
+STREAMED = {"model": "policy", "input": "hi", "stream": True}
+
+
+@pytest.fixture
+def fast_keepalive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server_module, "KEEPALIVE_SECONDS", 0.05)
+
+
+async def test_a_stream_starts_before_its_turn_is_sampled_and_keeps_alive_until_it_is(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        stack.engine.delay = 0.5
+        created = await stack.create()
+        started = time.monotonic()
+        async with stack.http.post(f"{created['base_url']}/responses", json=STREAMED) as response:
+            first = await response.content.readany()
+            first_at = time.monotonic() - started
+            body = first + await response.content.read()
+
+    assert response.status == 200 and response.content_type == "text/event-stream"
+    assert first.startswith(KEEPALIVE) and first_at < stack.engine.delay
+    assert body.count(KEEPALIVE) >= 3
+    assert event_types(body)[0] == "response.created" and event_types(body)[-1] == "response.completed"
+
+
+async def test_the_sdk_reads_an_early_answered_stream(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        stack.engine.delay = 0.2
+        created = await stack.create()
+        stream = await client(created["base_url"]).responses.create(model="policy", input="hi", stream=True)
+        events = [event async for event in stream]
+
+    assert events[0].type == "response.created" and events[-1].type == "response.completed"
+    assert events[-1].response.output_text
+
+
+async def test_a_failure_after_the_stream_started_is_a_failed_response(fast_keepalive) -> None:
+    async with token_stack(completion=lambda prompt, sampling: None) as stack:
+        created = await stack.create()
+        status, body, _ = await post(stack, created, STREAMED)
+
+    assert status == 200 and body.startswith(KEEPALIVE)
+    assert event_types(body) == ["response.created", "response.failed"]
+    assert b"engine returned HTTP 500" in body
+
+
+async def test_a_retry_while_the_turn_samples_gets_its_reply_without_sampling_again(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        stack.engine.delay = 0.3
+        created = await stack.create()
+        original = asyncio.ensure_future(post(stack, created, STREAMED))
+        await asyncio.sleep(0.1)
+        _, retried, _ = await post(stack, created, STREAMED, **{"x-stainless-retry-count": "1"})
+        _, first, _ = await original
+
+    assert len(stack.engine.requests) == 1
+    assert event_types(retried) == event_types(first) and first.split(b"event: ")[1:] == retried.split(b"event: ")[1:]
+
+
+async def test_a_client_that_leaves_mid_stream_leaves_the_reply_for_its_retry(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        stack.engine.delay = 0.3
+        created = await stack.create()
+        async with stack.http.post(f"{created['base_url']}/responses", json=STREAMED) as response:
+            assert (await response.content.readany()).startswith(KEEPALIVE)
+            response.close()
+        await asyncio.sleep(0.4)
+        _, retried, _ = await post(stack, created, STREAMED, **{"x-stainless-retry-count": "1"})
+
+    assert event_types(retried)[-1] == "response.completed" and len(stack.engine.requests) == 1
+
+
+async def test_chat_streams_are_still_one_body_sent_when_the_turn_is_sampled(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        stack.engine.delay = 0.2
+        created = await stack.create()
+        streamed = {"model": "policy", "messages": [user("hi")], "stream": True}
+        async with stack.http.post(f"{created['base_url']}/chat/completions", json=streamed) as response:
+            body = await response.read()
+
+    assert body.startswith(b"data: ") and KEEPALIVE not in body
 
 
 # -- the record and the developer role ------------------------------------------------------------------------

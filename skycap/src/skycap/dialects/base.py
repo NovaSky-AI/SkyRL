@@ -164,6 +164,10 @@ class Dialect(ABC):
     path: ClassVar[str]
     #: Whether a raw-content reply (``use_raw_content``) means anything in this API.
     raw_content: ClassVar[bool] = False
+    #: Whether a streamed call may be answered before its turn is sampled: its headers at once, SSE
+    #: comments while it samples. Only for an API whose streams report errors in the stream
+    #: (``failed_stream``), since the HTTP status is sent before the call has an outcome.
+    streams_early: ClassVar[bool] = False
 
     @abstractmethod
     def parse_request(self, body: Any) -> CallRequest:
@@ -191,6 +195,10 @@ class Dialect(ABC):
         )
 
     # -- token mode: answer with a sampled turn ---------------------------------
+    def failed_stream(self, call: CallRequest, message: str, *, code: str | None = None) -> bytes:
+        """A failure as the events of a stream already answered with 200 (``streams_early``)."""
+        raise NotImplementedError(f"{type(self).__name__} does not report failures in its streams")
+
     def unsupported_in_token_mode(self, call: CallRequest) -> str | None:
         """Why skycap can't serve ``call`` when it samples itself, or None. Text mode's upstream may serve it."""
         return None
