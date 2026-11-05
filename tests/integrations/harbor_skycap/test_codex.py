@@ -15,8 +15,13 @@ from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa
     HarborSkycapGenerator,
     agent_class,
 )
-from tests.integrations.harbor_skycap.test_exposure import SKYCAP_CODEX, agent_cfg  # noqa: E402
-from tests.integrations.harbor_skycap.test_harbor_skycap import generator_cfg  # noqa: E402
+from tests.integrations.harbor_skycap.test_exposure import (  # noqa: E402
+    SKYCAP_CODEX,
+    agent_cfg,
+)
+from tests.integrations.harbor_skycap.test_harbor_skycap import (
+    generator_cfg,  # noqa: E402
+)
 
 pytestmark = pytest.mark.integrations
 

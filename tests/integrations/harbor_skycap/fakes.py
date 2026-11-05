@@ -197,7 +197,9 @@ class FakeTrial:
         env = self.config["agent"].get("env") or {}
         from harbor.agents.installed.codex import Codex
 
-        from examples.train_integrations.harbor_skycap.harbor_generator import agent_class
+        from examples.train_integrations.harbor_skycap.harbor_generator import (
+            agent_class,
+        )
 
         if issubclass(agent_class(self.config["agent"]) or object, Codex):
             base_url = env.get("OPENAI_BASE_URL")
