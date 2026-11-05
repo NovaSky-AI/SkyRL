@@ -30,6 +30,13 @@ from vllm.v1.engine.async_llm import AsyncLLM
 VOCAB_LO, VOCAB_HI = 1000, 100000
 # CUDA-graph sizes above vLLM's default ceiling (1024 tokens on Blackwell), as the recipe sets them: with multi-turn
 # RL most steps mix a prefill chunk into the running decodes, and without a graph those steps run eagerly.
+# The recipe's tuned fused MoE-LoRA block sizes (read by the engine workers; inherited through the environment).
+os.environ.setdefault(
+    "VLLM_TUNED_CONFIG_FOLDER",
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "../../../train/deepseek_v4_flash/vllm_tuned_configs"
+    ),
+)
 EXTRA_CUDAGRAPH_SIZES = [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192]
 
 

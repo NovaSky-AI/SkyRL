@@ -65,6 +65,10 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # steps run fully eagerly. vLLM's default grid plus 1152..8192. 8x B200, TP8, LoRA on with an active rank-32 adapter,
 # 640 staggered sessions: 386 -> 462 gen tok/s/GPU; pure decode 607 -> 831; eager steps 61 -> 2 per 30 s; KV cache
 # 68.0 -> 62.3 GiB/GPU.
+# Tuned block sizes for vLLM's fused MoE-LoRA kernels (vllm_tuned_configs/, see make_moe_lora_configs.py). Without
+# them a 640-token decode step pads each of 384 experts' ~10 rows to a 128-row block. 8x B200, TP8, active rank-32
+# adapter, 640 staggered sessions: 462 -> 570 gen tok/s/GPU. Relative path: Ray workers run from the repo root.
+export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-examples/train/deepseek_v4_flash/vllm_tuned_configs}"
 CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
 ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES"'}}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
