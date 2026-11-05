@@ -1127,6 +1127,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             snapshot_download(model_path)  # will be no-op if already downloaded
         torch.distributed.barrier()
 
+        if self._is_lora:
+            from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.frozen_weights import (
+                compress_frozen_weights,
+            )
+
+            compress_frozen_weights(self.actor_module)
+
         if self._rank == 0:
             print_model_size(self.actor_module[0])
 
