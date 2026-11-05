@@ -1100,8 +1100,9 @@ class AlgorithmConfig(BaseConfig):
     """Normalize advantages by the (global) training-batch mean and standard deviation."""
     value_head_prefix: str = "value_head"
     """Name used to identify the value head in the critic model."""
-    policy_loss_type: str = "regular"
-    """Type of policy loss to use, or custom via ``PolicyLossRegistry``:
+    policy_loss_type: str = "dppo"
+    """Policy loss, defaulting to ``"dppo"``; register a custom one via ``PolicyLossRegistry``.
+    Available losses:
 
     - ``"regular"``: vanilla PPO loss with token-level importance sampling.
     - ``"dual_clip"``: dual-clip PPO loss (https://arxiv.org/pdf/1912.09729).
@@ -1125,8 +1126,9 @@ class AlgorithmConfig(BaseConfig):
     - ``"reinforce"``: plain policy gradient ``-A log π`` with no importance ratio, the objective
       score centering builds on (https://arxiv.org/abs/2609.20807).
     """
-    loss_reduction: str = "token_mean"
-    """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
+    loss_reduction: str = "prompt_mean"
+    """Loss reduction defaults to ``"prompt_mean"`` and rescales advantages per mini-batch.
+    Available modes:
 
     - ``"token_mean"``: average loss over all valid tokens in the batch, as in DAPO
       (https://dapo-sia.github.io/).
@@ -1141,9 +1143,10 @@ class AlgorithmConfig(BaseConfig):
       tokens its responses contain.
     - ``"token_mean_legacy"``: also accepted, retaining the previous ``"token_mean"`` behavior.
     """
-    grpo_norm_by_std: bool = True
-    """Normalize advantages by the standard deviation in GRPO.
-    Set to False for Dr. GRPO (https://arxiv.org/abs/2503.20783)."""
+    grpo_norm_by_std: bool = False
+    """Normalize advantages by the per-prompt reward standard deviation in GRPO.
+    ``False`` (the default) follows Dr. GRPO (https://arxiv.org/abs/2503.20783); set ``True`` for
+    the original GRPO normalization."""
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
     zero_variance_filter_tol: float = 1e-6

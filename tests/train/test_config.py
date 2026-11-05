@@ -143,6 +143,15 @@ def test_cli_overrides():
     assert cfg.trainer.algorithm.temperature == 0.7
 
 
+def test_algorithm_loss_defaults():
+    """The default objective is DPPO with per-prompt loss reduction and Dr. GRPO advantages."""
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    algorithm = cfg.trainer.algorithm
+    assert algorithm.policy_loss_type == "dppo"
+    assert algorithm.loss_reduction == "prompt_mean"
+    assert algorithm.grpo_norm_by_std is False
+
+
 def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
