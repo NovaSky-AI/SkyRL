@@ -64,8 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     tokens.add_argument(
         "--use-raw-content",
         action="store_true",
-        help="answer with the completion's text as content, reasoning inline and tool calls unparsed, "
-        "as vLLM does with no parsers",
+        help="answer chat completions with the completion's text as content, reasoning inline and tool calls "
+        "unparsed, as vLLM does with no parsers (Responses calls always get parsed replies)",
     )
     tokens.add_argument("--renderer-pool-size", type=int, default=8)
     tokens.add_argument(

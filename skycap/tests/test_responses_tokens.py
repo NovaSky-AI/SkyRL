@@ -214,15 +214,23 @@ async def test_fields_chat_ignores_are_ignored_and_echoed(fields: dict) -> None:
             assert reply[name] == fields[name]
 
 
-async def test_a_raw_content_server_refuses_responses_and_still_serves_chat() -> None:
-    async with token_stack(use_raw_content=True) as stack:
+async def test_a_raw_content_server_answers_responses_parsed_and_chat_raw() -> None:
+    """One server serves both kinds of harness: a Responses client acts on parsed items and replays its
+    reasoning as an item, so it gets parsed replies whatever ``use_raw_content`` says, and stays one path."""
+    async with token_stack(completion=thinking_then_tool, use_raw_content=True) as stack:
         created = await stack.create()
-        llm = client(created["base_url"])
-        with pytest.raises(openai.BadRequestError, match="raw content"):
-            await llm.responses.create(model="policy", input="hi")
-        reply = await llm.chat.completions.create(model="policy", messages=[user("hi")])
+        replies = await tool_loop(stack, created)
+        finished = await stack.finish(created["id"])
+        chatted = await stack.create()
+        chat = await client(chatted["base_url"]).chat.completions.create(
+            model="policy", messages=[user("use a TOOL")], tools=CHAT_TOOLS
+        )
 
-    assert reply.choices[0].message.content
+    assert [item.type for item in replies[0].output] == ["reasoning", "function_call"]
+    assert finished["unbridged_calls"] == 0 and len(finished["samples"]) == 1
+    # The chat route keeps the raw completion: thinking inline, the call unparsed.
+    assert chat.choices[0].message.content == "THINK:plan|CALL:search:{}"
+    assert not chat.choices[0].message.tool_calls
 
 
 async def test_the_responses_route_takes_the_trajectorys_own_key() -> None:
