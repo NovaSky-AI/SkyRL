@@ -485,11 +485,13 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
     "batches, check, stops",
     [
         ([("silent",)], True, True),
+        # Captured, then timed out: compose masks the instance, so it has samples but trains nothing.
+        ([("timeout",)], True, True),
         ([("silent",)], False, False),
         ([("silent", "linear")], True, False),
         ([("linear",), ("silent",)], True, False),
     ],
-    ids=["nothing trains", "check off", "one trajectory trains", "a later batch"],
+    ids=["nothing trains", "everything masked", "check off", "one trajectory trains", "a later batch"],
 )
 async def test_a_first_batch_with_nothing_to_train_stops_the_run(skycap, trials, generator, batches, check, stops):
     gen = generator(check_first_batch=check)

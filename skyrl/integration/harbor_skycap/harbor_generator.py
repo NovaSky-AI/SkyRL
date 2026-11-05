@@ -205,17 +205,6 @@ class HarborSkycapGenerator(GeneratorInterface):
         finally:
             progress.close()
 
-        if self._check_first_batch and not self._first_batch_done:
-            self._first_batch_done = True
-            if not any(outcome is not None and outcome.samples for outcome in outcomes):
-                # Where Harbor writes them when the template names no directory.
-                trials_dir = self._template.get("trials_dir") or TrialConfig.model_fields["trials_dir"].default
-                raise RuntimeError(
-                    f"No trajectory in the first batch ({len(outcomes)}) has anything to train; each trial's "
-                    f"exception.txt and agent logs are under {trials_dir}. "
-                    "skycap.check_first_batch=false skips this check."
-                )
-
         output = compose(
             outcomes,
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
@@ -224,6 +213,18 @@ class HarborSkycapGenerator(GeneratorInterface):
             routed_experts=self._routed_experts,
             include_images=self.include_images,
         )
+        if self._check_first_batch and not self._first_batch_done:
+            self._first_batch_done = True
+            # The composed loss masks, not the captured samples: compose masks whole instances that timed out or
+            # failed, and overlong rows, so a batch can have samples and still train nothing.
+            if not any(any(mask) for mask in output["loss_masks"]):
+                # Where Harbor writes them when the template names no directory.
+                trials_dir = self._template.get("trials_dir") or TrialConfig.model_fields["trials_dir"].default
+                raise RuntimeError(
+                    f"No trajectory in the first batch ({len(outcomes)}) has anything to train; each trial's "
+                    f"exception.txt and agent logs are under {trials_dir}. "
+                    "skycap.check_first_batch=false skips this check."
+                )
         output["rollout_metrics"].update(trial_metrics(attempts))
         return output
 
