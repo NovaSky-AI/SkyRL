@@ -1062,6 +1062,15 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
         # Engram table placement, faulthandler).
         env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
+        # NCCL buffer / channel sizing (each communicator's buffers are GPU memory outside PyTorch's allocator; CP
+        # adds communicators): NCCL_BUFFSIZE, NCCL_NCHANNELS_PER_NET_PEER, NCCL_{MIN,MAX}_NCHANNELS.
+        env_vars.update(
+            {
+                k: v
+                for k, v in os.environ.items()
+                if k in ("NCCL_BUFFSIZE", "NCCL_NCHANNELS_PER_NET_PEER", "NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS")
+            }
+        )
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
