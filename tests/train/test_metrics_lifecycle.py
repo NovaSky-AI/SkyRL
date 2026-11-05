@@ -5,12 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-import torch
 
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import ResumeMode
+from tests.train.test_checkpoint_publication import _trainer as _checkpoint_trainer
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -155,19 +155,11 @@ def test_pd_preserves_step_metrics_collection(enable_pd):
 
 @pytest.mark.parametrize("checkpoint_exists", [False, True])
 def test_resume_guard_distinguishes_missing_latest_from_loaded_step_zero(tmp_path, checkpoint_exists):
-    from skyrl.train.config import SkyRLTrainConfig
-
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = SkyRLTrainConfig()
-    trainer.cfg.trainer.ckpt_path = str(tmp_path)
-    trainer.cfg.trainer.critic.model.path = ""
+    trainer = _checkpoint_trainer(tmp_path)
+    trainer.global_step = 0
     trainer._resumed_from_checkpoint = False
-    trainer.dispatch = Mock()
     if checkpoint_exists:
-        checkpoint = tmp_path / "global_step_0"
-        checkpoint.mkdir()
-        torch.save({"global_step": 0}, checkpoint / "trainer_state.pt")
-        trainer.cfg.trainer.resume_path = str(checkpoint)
+        trainer.cfg.trainer.resume_path = trainer.save_checkpoints()
         trainer.resume_mode = ResumeMode.FROM_PATH
     else:
         trainer.resume_mode = ResumeMode.LATEST
