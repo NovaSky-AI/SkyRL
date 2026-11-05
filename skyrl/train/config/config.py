@@ -18,6 +18,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Type, TypeVar,
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl.train.fused_lm_head import FUSED_LM_HEAD_BACKENDS, FusedLmHeadBackend
 from skyrl_gym.envs.search.env import SearchEnvConfig
 from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
 
@@ -1099,8 +1100,9 @@ class AlgorithmConfig(BaseConfig):
     """Normalize advantages by the (global) training-batch mean and standard deviation."""
     value_head_prefix: str = "value_head"
     """Name used to identify the value head in the critic model."""
-    policy_loss_type: str = "regular"
-    """Type of policy loss to use, or custom via ``PolicyLossRegistry``:
+    policy_loss_type: str = "dppo"
+    """Policy loss, defaulting to ``"dppo"``; register a custom one via ``PolicyLossRegistry``.
+    Available losses:
 
     - ``"regular"``: vanilla PPO loss with token-level importance sampling.
     - ``"dual_clip"``: dual-clip PPO loss (https://arxiv.org/pdf/1912.09729).
@@ -1124,8 +1126,9 @@ class AlgorithmConfig(BaseConfig):
     - ``"reinforce"``: plain policy gradient ``-A log π`` with no importance ratio, the objective
       score centering builds on (https://arxiv.org/abs/2609.20807).
     """
-    loss_reduction: str = "token_mean"
-    """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
+    loss_reduction: str = "prompt_mean"
+    """Loss reduction defaults to ``"prompt_mean"`` and rescales advantages per mini-batch.
+    Available modes:
 
     - ``"token_mean"``: average loss over all valid tokens in the batch, as in DAPO
       (https://dapo-sia.github.io/).
@@ -1140,9 +1143,10 @@ class AlgorithmConfig(BaseConfig):
       tokens its responses contain.
     - ``"token_mean_legacy"``: also accepted, retaining the previous ``"token_mean"`` behavior.
     """
-    grpo_norm_by_std: bool = True
-    """Normalize advantages by the standard deviation in GRPO.
-    Set to False for Dr. GRPO (https://arxiv.org/abs/2503.20783)."""
+    grpo_norm_by_std: bool = False
+    """Normalize advantages by the per-prompt reward standard deviation in GRPO.
+    ``False`` (the default) follows Dr. GRPO (https://arxiv.org/abs/2503.20783); set ``True`` for
+    the original GRPO normalization."""
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
     zero_variance_filter_tol: float = 1e-6
@@ -1816,6 +1820,13 @@ class TrainerConfig(BaseConfig):
     See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    log_mfu: bool = True
+    """Log model FLOPs utilization (MFU) metrics for policy training each step.
+
+    Logs ``trainer/mfu``, ``trainer/mfu_e2e``, ``trainer/model_tflops_per_gpu``,
+    ``trainer/flops_per_token`` and, under full activation recompute, ``trainer/hfu_est``. Megatron
+    only; not logged for LoRA or with active MTP heads, and the utilization ratios are not logged for
+    FP8 training or on GPUs without a known peak."""
     tags: Optional[List[str]] = None
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
@@ -1860,9 +1871,13 @@ class TrainerConfig(BaseConfig):
     materialized. Metric-only entropy and ``use_entropy_loss`` share the same
     projection. Uses ``logprobs_chunk_size`` to bound peak memory."""
     fused_lm_head_logprob_backend: str = "torch"
-    """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
-    The Triton backend requires CUDA + triton and falls back to ``"torch"``
-    when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
+    """Fused LM-head backend: ``"torch"``, ``"triton"``, or
+    ``"triton_block_sparse"``. The block-sparse backend preserves token order
+    and skips wholly inactive loss-mask row tiles for SFT or RL. It can regress
+    near a fully active mask; select it only after benchmarking representative
+    masks and sharding. Sample-support replay is not supported. Triton backends
+    require CUDA + triton and fall back to ``"torch"`` when unavailable.
+    Ignored unless ``fused_lm_head_logprob`` is true."""
 
     grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
     """Optional Grafana run annotation publishing, disabled by default."""
@@ -1916,11 +1931,16 @@ class TrainerConfig(BaseConfig):
                 "adapter on output_layer; remove output_layer from trainer.policy.model.lora.target_modules "
                 "or disable fused_lm_head_logprob."
             )
-        if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
+        if self.fused_lm_head_logprob_backend not in FUSED_LM_HEAD_BACKENDS:
             raise ValueError(
-                "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
+                f"fused_lm_head_logprob_backend must be one of {FUSED_LM_HEAD_BACKENDS}, "
                 f"got {self.fused_lm_head_logprob_backend!r}."
             )
+        if (
+            self.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+            and not self.fused_lm_head_logprob
+        ):
+            raise ValueError("fused_lm_head_logprob_backend='triton_block_sparse' requires fused_lm_head_logprob=True.")
         if self.vocab_entropy_chunk_size is not None and (
             isinstance(self.vocab_entropy_chunk_size, bool)
             or not isinstance(self.vocab_entropy_chunk_size, int)

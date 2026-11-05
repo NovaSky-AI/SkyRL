@@ -143,6 +143,15 @@ def test_cli_overrides():
     assert cfg.trainer.algorithm.temperature == 0.7
 
 
+def test_algorithm_loss_defaults():
+    """The default objective is DPPO with per-prompt loss reduction and Dr. GRPO advantages."""
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    algorithm = cfg.trainer.algorithm
+    assert algorithm.policy_loss_type == "dppo"
+    assert algorithm.loss_reduction == "prompt_mean"
+    assert algorithm.grpo_norm_by_std is False
+
+
 def test_cli_overrides_empty_args():
     cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
@@ -603,6 +612,20 @@ def test_serialized_fp8_fp32_scales_reject_vllm_e8m0(monkeypatch):
 
     with pytest.raises(ValueError, match="VLLM_USE_DEEP_GEMM_E8M0=0"):
         prepare_runtime_environment(cfg)
+
+
+def test_block_sparse_fused_lm_head_requires_fused_path():
+    with pytest.raises(ValueError, match="requires fused_lm_head_logprob=True"):
+        TrainerConfig(strategy="megatron", fused_lm_head_logprob_backend="triton_block_sparse")
+
+
+def test_block_sparse_fused_lm_head_accepts_backend_selection():
+    cfg = TrainerConfig(
+        strategy="megatron",
+        fused_lm_head_logprob=True,
+        fused_lm_head_logprob_backend="triton_block_sparse",
+    )
+    assert cfg.fused_lm_head_logprob_backend == "triton_block_sparse"
 
 
 @pytest.mark.parametrize(

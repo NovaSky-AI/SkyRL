@@ -12,7 +12,8 @@ Megatron-Bridge (``megatron/bridge/models/qwen/``):
 - ``provider``: ``Qwen4ExpModelProvider``.
 - ``bridge``: ``Qwen4ExpBridge``; importing it registers the bridge.
 
-Limits: CP=PP=1, and TP > 1 needs sequence parallelism; no MTP training; text only; PLE table
+Limits: PP=1; TP > 1 needs sequence parallelism; CP > 1 needs Blackwell and cuDNN QSA (see
+``context_parallel.py``); no MTP training; text only; PLE table
 frozen. Up to ``indexer_budget + indexer_compress_ratio - 1`` tokens attention is exactly dense
 and stays on the fused TE kernel. Longer sequences (where the QSA indexer drops keys) need packed
 (THD) input and run ``qsa_sparse_attention``: cuDNN frontend's QSA kernels on Blackwell when the

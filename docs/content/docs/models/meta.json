@@ -1,0 +1,12 @@
+{
+  "title": "Model Support",
+  "pages": [
+    "index",
+    "beam",
+    "glm",
+    "kimi",
+    "nemotron",
+    "qwen3_8_flash_next",
+    "qwen"
+  ]
+}

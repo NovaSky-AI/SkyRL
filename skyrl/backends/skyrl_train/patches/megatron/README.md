@@ -25,6 +25,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py` | `mcore_ext/kda.py`, `mcore_ext/hyper_connection.py` vs HF |
 | `gpu_ci/patches/megatron/test_dsa_index_share_recompute.py` | `patch_dsa_index_share.py` |
 | `gpu_ci/patches/megatron/test_shared_expert_lora_tp.py` | `patch_shared_expert_lora_tp.py` |
+| `gpu_ci/patches/megatron/test_dsa_head_full.py` | `patch_dsa_head_full.py` all-to-alls vs megatron-core's and an all-gather reference (TP 2 and 4) |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
@@ -34,6 +35,9 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
+| `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
+| `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
+| `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -169,8 +173,12 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
 - **Remove:**
   - `workers/megatron/model_bridges.py`: drop the `glm5_next` import that registers the bridge.
   - Tests that import from `glm5_next`: repoint them at Megatron-Bridge.
-  - `.agents/docs/backends/megatron.md` and `docs/content/docs/.../supported_models.mdx`: update
+  - `.agents/docs/backends/megatron.md` and `docs/content/docs/models/` (support matrix in `index.mdx` + the family page): update
     the model entry.
+  - The `kimi_*` fields in `glm5_next/provider.py` and their assignments in `glm5_next/bridge.py`:
+    check that the upstream provider sets the fields megatron-bridge's FLOPs formula
+    (`flop_utils.num_floating_point_operations`) reads for KDA layers, then delete them with
+    `test_glm5_next_flops_fields.py`.
   - Before deleting the local bridge, compare its behaviour with upstream's:
     - `language_model_only=True` handling;
     - the `head_dim=0` NoPE RoPE skip;
@@ -229,6 +237,31 @@ switch to it and delete `qwen4_exp/` as a whole; don't port pieces between imple
   `gpu_ci/megatron/test_megatron_{,lora_}models.py`, `gpu_ci/megatron/test_qwen38_qsa_long_context.py`
   (~8K tokens, sparse regime) and the `megatron_qwen3_8_flash_next_lora` row of
   `gpu_ci/test_trainer_full_checkpointing.py`; then a few steps of the DAPO recipe.
+
+## Beam (`beam`)
+
+Beam (`BeamForCausalLM`) comes from the pinned Megatron-Bridge (`megatron.bridge.models.beam`,
+`BeamBridge` -> `HybridModel`, registered when `megatron.bridge` is imported). Its fp32 router
+runs through the bridge's own `_BeamRouterGatingLinear`, so no megatron-core router-GEMM patch is
+needed. SkyRL still carries:
+
+- `../transformers/configuration_beam.py` (`BeamConfig` + `register_beam_config()`, called from
+  `skyrl/backends/skyrl_train/__init__.py`): transformers ships `BeamConfig` from 5.22, past the
+  `transformers<=5.16.1` pin. It keeps `rope_parameters` keyed by layer type, which `BeamBridge`
+  requires (vLLM's own `BeamConfig` flattens it). **Remove** once transformers >= 5.22 is pinned.
+- `default_cp_comm_type_for_sliding_window` in `workers/megatron/megatron_worker.py` (Beam only):
+  defaults `cp_comm_type="a2a"` under context parallelism, or `"all_gather"` when the per-TP-rank
+  head counts do not divide by CP, since TE has no `p2p` CP path for sliding-window attention.
+  **Remove** once the Bridge's Beam config sets it.
+- Not a patch, and not Beam-only: the fused LM-head log-prob path applies the provider's
+  `final_logit_softcapping` (`model_utils._capped_chunk_logits`) for any model that sets it,
+  because it bypasses the model's output layer (`BeamOutputLayer`, Megatron-Bridge's
+  `Gemma4OutputLayer`). Such models use the torch fused backend; the Triton one has no softcap.
+- On the vLLM side, `../vllm/patch_beam_lora.py` serves Beam with LoRA (vLLM 0.33's class has no `SupportsLoRA`);
+  its docstring has the removal plan.
+- **Verify:** the `beam-tiny_*` rows of `gpu_ci/megatron/test_megatron_{,lora_}models.py`,
+  `tests/backends/skyrl_train/patches/transformers/` and
+  `tests/backends/skyrl_train/distributed/test_fused_lm_head_softcap.py` (CPU).
 
 ## Standalone patches
 
@@ -326,6 +359,35 @@ bypasses the hook.
   `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
   the module, and its CPU test.
 
+### `patch_dist_ckpt_exchange_wait.py`: megatron-core fully-parallel checkpoint load
+
+`exchange_loaded_tensors_broadcast` never waits on the async broadcasts of shards a rank only discards,
+so their receive buffers stay allocated after the load. The patch waits on them.
+- **Landed?** Self-checking: a no-op with a warning once upstream's source contains `.wait()`.
+- **Remove:** the `apply_dist_ckpt_exchange_wait_patch()` call and import in `megatron_worker.py`, the
+  module, and its CPU test.
+
+### `patch_dist_optim_te_load_state_dict.py`: megatron-core distributed optimizer + TE FusedAdam
+
+`DistributedOptimizer.load_state_dict` calls the inner `state_dict()`, which for TE's `FusedAdam` makes
+fp32 copies of all optimizer state. With allocated FusedAdam state the patch restores only the param groups.
+- **Landed?** `DistributedOptimizer.load_state_dict` no longer calls `self.optimizer.state_dict()`.
+- **Remove:** the `apply_dist_optim_te_load_state_dict_patch()` call and import in `megatron_worker.py`,
+  the module, and its CPU test.
+
+### `patch_dsa_head_full.py` (+ `_block_copy_kernel.py`): SkyRL-only, no upstream counterpart
+
+Opt-in (`SKYRL_DSA_HEAD_FULL=1`, with `SKYRL_DSA_HEAD_FULL_FAST_PERMUTE=1` and
+`SKYRL_DSA_HEAD_FULL_ZIGZAG=1`): wraps the `run_fused_absorbed_sparse_attention` DSA hook in a
+Ulysses-style all-to-all so each TP rank runs all heads on 1/TP of the query rows, instead of
+`heads / TP` heads (padded to the kernel's 16- or 64/128-head tile) on every row. The fast-permute
+flag does the all-to-all's layout moves with one Triton block copy; zigzag balances rows whose cost
+grows with position. Applies to absorbed-MLA DSA (GLM-5 / GLM-5.3, DeepSeek-V3.2) under TP > 1.
+- **Landed?** Not an upstream fix: obsolete once megatron-core's DSA kernels run efficiently at
+  `heads / TP` heads per rank, or megatron-core shards absorbed sparse attention by query rows itself.
+- **Remove:** the `apply_dsa_head_full_patch()` call and import in `megatron_worker.py`, the
+  `SKYRL_DSA_HEAD_FULL*` entries in `prepare_runtime_environment`, and both modules.
+
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 
 Qwen3-VL ViT attention-backend propagation.
@@ -384,21 +446,25 @@ Mean |logprob diff| over the response tokens, as the tests print them. Compare a
 newest column on the same GPU type and add a column for it. A column changes one pin at a time
 where possible, so a shift can be pinned on Megatron or on vLLM.
 
-| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump | bump rebased on 7d4b02fe |
-|---|---|---|---|---|
-| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b |
-| vLLM | not recorded | 0.32.0 | 0.32.0 | 0.32.0 |
-| GPU | not recorded | 4x B200 | 4x B200 | 4x B200 |
-| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 | 0.0654 |
-| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 | 0.1338 |
-| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 | 0.0583 |
-| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 | 0.2835 |
-| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 | 0.0650 |
-| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 | 0.1532 |
-| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 | 0.0661 |
+| row / metric (threshold) | before 2026-10 | main 86c0bd69 | megatron bump | bump rebased on 7d4b02fe | vLLM 0.33 bump (#2604) |
+|---|---|---|---|---|---|
+| megatron-core / Megatron-Bridge | not recorded | 07147d69 / c4067f50 | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b | ed9c2c8c / 7171584b |
+| vLLM | not recorded | 0.32.0 | 0.32.0 | 0.32.0 | 0.33.0 |
+| GPU | not recorded | 4x B200 | 4x B200 | 4x B200 | 4x H100 |
+| `glm-5.3-flash-4layer_h100_tp2_ep4`: Megatron vs vLLM (< 0.1) | 0.0651 | 0.0634 | 0.0702, 0.0731 | 0.0654 | 0.0650 |
+| ... vLLM before vs after weight sync (< 0.3) | - | 0.1321 | 0.1459, 0.1257 | 0.1338 | 0.1295 |
+| `..._kpool_beyond_topk`: Megatron vs vLLM (< 0.1) | 0.0527 | 0.0553 | 0.0536 | 0.0583 | 0.0541 |
+| ... vLLM before vs after weight sync (< 0.5) | 0.351 | 0.2867 | 0.2906 | 0.2835 | 0.2897 |
+| `..._adapter` (`test_megatron_lora_models.py`): zero adapter (< 0.1) | 0.0620 | 0.0656 | 0.0632 | 0.0650 | 0.0659 |
+| ... stale sampler vs perturbed Megatron (> 0.1) | - | 0.1532 | 0.1561 | 0.1532 | 0.1583 |
+| ... updated adapter (< 0.1) | - | 0.0653 | 0.0618 | 0.0661 | 0.0651 |
 
 Two values in a cell are two runs. The megatron bump sits about 0.008 above main on `tp2_ep4`
 (reproduced, not investigated, well inside 0.1); the same pins with vLLM 0.31.0 gave 0.0630 there.
 Rebased onto main 7d4b02fe the same row gave 0.0654. That run also passed the rows that landed on main
 after the bump was cut: Qwen3.8-Flash-Next (Megatron vs vLLM 0.0487 / 0.0518, adapter rows 0.050-0.057)
 and `kimi-k2.5-2layer-int4-qat` (0.0264).
+
+The vLLM 0.33 column is the first on H100, so it has no same-GPU column to compare against yet; its
+values sit within 0.006 of the newest B200 column (`bump rebased on 7d4b02fe`) on every row. A B200 column for vLLM 0.33 is still to be
+recorded.

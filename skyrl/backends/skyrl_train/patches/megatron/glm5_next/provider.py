@@ -1,7 +1,7 @@
 """Model provider for GLM-5.3-Flash (``glm5_next``)."""
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Tuple, Union
 
 from megatron.bridge.models.mla_provider import MLAModelProvider
 from megatron.core.transformer.spec_utils import ModuleSpec
@@ -46,3 +46,11 @@ class Glm5NextModelProvider(MLAModelProvider):
     # KDA forget gate: ``lower_bound * sigmoid(exp(A_log) * (f + dt_bias))``; ``None`` selects
     # the unbounded ``-exp(A_log) * softplus(f + dt_bias)`` gate.
     kda_gate_lower_bound: Optional[float] = -5.0
+
+    # The KDA layout under megatron-bridge's Kimi names, read only by its FLOPs formula
+    # (``flop_utils.num_floating_point_operations``) to cost KDA layers as KDA: the 1-indexed KDA
+    # layer numbers, and the KDA head dim, head count and short-conv kernel size.
+    kimi_kda_layers: Tuple[int, ...] = ()
+    kimi_linear_head_dim: Optional[int] = None
+    kimi_linear_num_heads: Optional[int] = None
+    kimi_linear_conv_kernel_size: Optional[int] = None
