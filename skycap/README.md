@@ -87,8 +87,8 @@ Chat Completions (`/chat/completions`) and Responses (`/responses`), the API
 Codex speaks. Text mode forwards a call to the same path on the upstream. In
 token mode, Responses items are regrouped into chat-template turns by vLLM's
 rule and the reply goes back as items (`skycap.dialects.openai_responses`);
-`--use-raw-content` is refused there, since a Responses client acts only on
-parsed items. A `developer` message is folded into the leading `system` message
+`--use-raw-content` doesn't apply there: a Responses client acts only on parsed
+items and replays reasoning as its own item, so it always gets parsed replies. A `developer` message is folded into the leading `system` message
 when the tokenizer's chat template has no such role, as vLLM does, for either
 API. Each call records its API as `calls[].dialect`.
 
