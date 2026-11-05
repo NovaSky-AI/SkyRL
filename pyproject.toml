@@ -134,7 +134,7 @@ fsdp = [
     # 0.6.0+: with 0.5.2 + Triton 3.7.1, fla autotunes the GDN chunk_fwd_kernel_o to 8 warps on B200 (sm_100),
     # which hits a Triton race (triton-lang/triton#10590) and corrupts GDN outputs in ~40% of calls.
     "flash-linear-attention==0.6.0; sys_platform == 'linux'",
-    "causal-conv1d==1.7.0+cu.13.0.torch.2.14; sys_platform == 'linux'",
+    "causal-conv1d==1.7.0; sys_platform == 'linux'",
     "flash-attn==2.8.3.post1; sys_platform == 'linux'",
     "torch==2.14.0; sys_platform == 'linux'",
     "flashinfer-python==0.7.2.post1; sys_platform == 'linux'",
@@ -174,7 +174,7 @@ megatron = [
     # 0.6.0+: with 0.5.2 + Triton 3.7.1, fla autotunes the GDN chunk_fwd_kernel_o to 8 warps on B200 (sm_100),
     # which hits a Triton race (triton-lang/triton#10590) and corrupts GDN outputs in ~40% of calls.
     "flash-linear-attention==0.6.0; sys_platform == 'linux'",
-    "causal-conv1d==1.7.0+cu.13.0.torch.2.14; sys_platform == 'linux'",
+    "causal-conv1d==1.7.0; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+cu.13.0.torch.2.14; sys_platform == 'linux'",
     # FlashMLA sparse-attention forward for megatron-core's `dsa_kernel_backend="cudnn"` DSA path
     # (imported lazily as `flash_mla.flash_mla_sparse_fwd`). Not on PyPI: our own build of the
@@ -225,7 +225,7 @@ megatron = [
 #
 # Markers: `< '3.15'` matches the companion's own `Requires-Python`, and the
 # `platform_machine` bound keeps it off Linux arches with no combined wheel
-# (there `flash-attn` resolves to plain PyPI 2.8.3, which cannot satisfy the
+# (there `flash-attn` resolves to plain PyPI 2.8.3.post1, which cannot satisfy the
 # companion's hard dep on ==2.8.3.post1+cu.13.0.torch.2.14.fa4b28.skyrl1). Dropping
 # either bound makes resolution fail outright.
 #
@@ -460,8 +460,9 @@ flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 # CUDA extension wheels for torch 2.14.0 + CUDA 13.
 #
 # mamba-ssm, causal-conv1d and transformer-engine-torch come from Astral's cu130 index, which
-# publishes builds per (CUDA, torch) pair for cp310-cp315 on x86_64 and aarch64; the requirement
-# strings in the extras pin the `+cu.13.0.torch.2.14` local segment. causal-conv1d is 1.7.0 there
+# publishes builds per (CUDA, torch) pair for cp310-cp314 on x86_64 and aarch64. Their wheels
+# require the matching torch, so `causal-conv1d==1.7.0` resolves to the torch-2.14 build without
+# naming its local segment, which keeps the `fsdp` extra installable from PyPI. causal-conv1d is 1.7.0 there
 # (Astral builds no 1.6.x for torch >= 2.13). Check for a newer torch with:
 #   curl -sL https://wheels.astral.sh/simple/cu130/mamba-ssm/ | grep -o 'torch\.2\.[0-9]*' | sort -uV
 #

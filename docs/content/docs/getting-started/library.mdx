@@ -4,7 +4,7 @@ title: Using SkyRL as a Library
 
 To use SkyRL as a dependency in your project, configure your `pyproject.toml` with `uv`. You can install from either PyPI (stable releases) or Git (latest development version).
 
-Some additional dependencies that depend on custom indexes/wheels, such as flash-attn and flashinfer-jit-cache. Below is an example configuration using uv:
+Some dependencies come from custom indexes: flash-attn, causal-conv1d and flashinfer-jit-cache. Below is an example configuration using uv:
 
 ```toml
 [project]
@@ -14,13 +14,14 @@ dependencies = [
     # Option B: Install from Git (latest)
     # "skyrl[fsdp]",
 
-    "flashinfer-jit-cache==0.6.13",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11"
+    "flashinfer-jit-cache==0.7.2.post1",
+    "flash-attn==2.8.3.post1+cu.13.0.torch.2.14",
 ]
 
 [tool.uv.sources]
 flashinfer-jit-cache = { index = "flashinfer-cu130" }
 flash-attn = { index = "astral-cu130" }
+causal-conv1d = { index = "astral-cu130" }
 # Only needed for Option B (Git install):
 # skyrl-gym = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-gym" }
 # skyrl = { git = "https://github.com/NovaSky-AI/SkyRL" }
@@ -36,12 +37,12 @@ url = "https://wheels.astral.sh/simple/cu130/"
 explicit = true
 ```
 
-**Option A (PyPI)**: Use `skyrl[fsdp]`. No additional sources needed.
+**Option A (PyPI)**: Use `skyrl[fsdp]` with the sources above.
 
 **Option B (Git)**: Uncomment the `skyrl-gym` and `skyrl` sources to install from the latest commit.
 
-SkyRL is built against CUDA 13 and torch 2.11, so both indexes above are the cu130
-variants. `flash-attn` comes from Astral's prebuilt GPU wheel index, which stamps
-each wheel with the (CUDA, torch) pair it was built against as a PEP 440 local
-version — the pin has to name that build exactly. Keep it at `2.8.3`, not
-`2.8.3.post1`: Transformer Engine only accepts flash-attn up to `2.8.3`.
+SkyRL is built against CUDA 13 and torch 2.14, so both indexes above are the cu130
+variants. `flash-attn` and `causal-conv1d` come from Astral's prebuilt GPU wheel index, which
+stamps each wheel with the (CUDA, torch) pair it was built against as a PEP 440 local
+version. The `flash-attn` pin names that build exactly; for `causal-conv1d` the index source
+is enough, since its wheels require the matching torch.
