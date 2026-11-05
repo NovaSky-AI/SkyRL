@@ -60,7 +60,13 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # (bench dsv41_inference_diag.py), gen tok/s/GPU: 2048 -> 479, 16384 -> 743, 32768 -> 898 (pure decode 576 -> 1257 /
 # 1197). Costs KV cache: 78.9 -> 73.6 -> 68.0 GiB/GPU.
 : "${MAX_NUM_BATCHED_TOKENS:=32768}"
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"'}'
+# CUDA-graph capture sizes: vLLM's default grid stops at 1024 tokens (Blackwell), but multi-turn steps mix an
+# observation prefill into the running decodes (640 decodes + a chunk is ~1.7-8k tokens), and without a graph those
+# steps run fully eagerly. vLLM's default grid plus 1152..8192. 8x B200, TP8, LoRA on with an active rank-32 adapter,
+# 640 staggered sessions: 386 -> 462 gen tok/s/GPU; pure decode 607 -> 831; eager steps 61 -> 2 per 30 s; KV cache
+# 68.0 -> 62.3 GiB/GPU.
+CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES"'}}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"

@@ -28,6 +28,15 @@ from vllm.inputs import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 VOCAB_LO, VOCAB_HI = 1000, 100000
+# CUDA-graph sizes above vLLM's default ceiling (1024 tokens on Blackwell), as the recipe sets them: with multi-turn
+# RL most steps mix a prefill chunk into the running decodes, and without a graph those steps run eagerly.
+EXTRA_CUDAGRAPH_SIZES = [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192]
+
+
+def cudagraph_capture_sizes(extra: bool = True) -> list:
+    """vLLM's default Blackwell capture grid (1, 2, 4, 8..248 step 8, 256..1024 step 16) plus EXTRA_CUDAGRAPH_SIZES."""
+    sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16))
+    return sizes + (EXTRA_CUDAGRAPH_SIZES if extra else [])
 
 
 class Stats:
@@ -109,6 +118,7 @@ async def main(args) -> None:
         distributed_executor_backend="mp",
         disable_log_stats=False,
         max_num_batched_tokens=args.max_num_batched_tokens,
+        compilation_config={"cudagraph_capture_sizes": cudagraph_capture_sizes(bool(args.mixed_cudagraphs))},
         enable_return_routed_experts=bool(args.r3),
         **lora,
     )
@@ -167,6 +177,9 @@ def parse_args():
     p.add_argument("--max-num-seqs", type=int, default=1024)
     p.add_argument(
         "--max-num-batched-tokens", type=int, default=32768, help="chunked-prefill budget (the recipe's value)"
+    )
+    p.add_argument(
+        "--mixed-cudagraphs", type=int, default=1, help="1: capture graphs up to 8192 tokens (the recipe's sizes)"
     )
     p.add_argument("--gen", type=int, default=1065)
     p.add_argument("--obs", type=int, default=1870)

@@ -17,7 +17,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dsv41_inference_bench import Stats, session  # noqa: E402
+from dsv41_inference_bench import Stats, cudagraph_capture_sizes, session  # noqa: E402
 from vllm.engine.arg_utils import AsyncEngineArgs  # noqa: E402
 from vllm.v1.engine.async_llm import AsyncLLM  # noqa: E402
 
@@ -103,6 +103,7 @@ async def main(a):
         distributed_executor_backend="mp",
         disable_log_stats=False,
         max_num_batched_tokens=32768,  # the recipe's value; --engine-kwargs overrides
+        compilation_config={"cudagraph_capture_sizes": cudagraph_capture_sizes()},  # the recipe's sizes
         **lora,
     )
     if a.r3:
