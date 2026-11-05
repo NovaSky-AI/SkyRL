@@ -2124,11 +2124,12 @@ def _score_centering_incompatibility(algorithm: AlgorithmConfig) -> Optional[str
     except ValueError as e:
         return str(e)
     off_policy = algorithm.off_policy_correction
-    if off_policy.tis_ratio_type is not None:
+    # The deprecated use_tis becomes tis_ratio_type="token" only later, in validate_cfg.
+    if off_policy.tis_ratio_type is not None or algorithm.use_tis:
         return (
-            "score centering does not compose with off_policy_correction.tis_ratio_type, which weights "
-            "only the sampled token by pi_old / pi_rollout; the loss's own weight is the importance "
-            "correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
+            "score centering does not compose with off_policy_correction.tis_ratio_type (or the deprecated "
+            "use_tis), which weights only the sampled token by pi_old / pi_rollout; the loss's own weight is "
+            "the importance correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
         )
     if off_policy.token_mask_is_threshold_low is not None or off_policy.token_mask_is_threshold_high is not None:
         return (
