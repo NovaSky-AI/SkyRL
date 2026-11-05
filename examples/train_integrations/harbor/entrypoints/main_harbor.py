@@ -97,6 +97,19 @@ def skyrl_entrypoint(cfg):
 
 
 def main() -> None:
+    # Same override pattern as ``skyrl.train.entrypoints.main_base``: peek at
+    # ``trainer.override_entrypoint=`` before parsing so an integration (e.g.
+    # ``integrations.arctic_rl.harbor_entrypoint``) can add its own config
+    # fields and take over dispatch. Users toggle a Harbor recipe to Arctic
+    # RL by appending exactly one CLI flag to any Harbor launcher; no other
+    # changes required.
+    for arg in sys.argv[1:]:
+        if arg.startswith("trainer.override_entrypoint="):
+            override = arg.split("=", 1)[1]
+            from importlib import import_module
+
+            return import_module(override).main()
+
     cfg = HarborSkyRLConfig.from_cli_overrides(sys.argv[1:])
 
     # Load harbor defaults and merge CLI overrides on top

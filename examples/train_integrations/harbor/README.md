@@ -14,7 +14,8 @@ examples/train_integrations/harbor/
   entrypoints/
     main_harbor.py                 # Full training entrypoint
     main_harbor_generate.py        # Generation-only debug entrypoint
-  run_codecontest.sh               # Code contest training (Qwen3-8B)
+  run_codecontest.sh               # Code contest training (Qwen3-8B, FSDP baseline)
+  run_codecontest_arctic.sh        # Same recipe, routed through the Arctic RL backend
   run_harbor_gen.sh                # Debug generation-only
 ```
 
@@ -39,3 +40,23 @@ uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
 # 3. Launch training
 bash examples/train_integrations/harbor/run_codecontest.sh
 ```
+
+### Arctic RL backend
+
+Any Harbor recipe can be routed through the Arctic RL server (ZoRRo / FCA / Arctic speculative decoding) by adding one CLI flag to `main_harbor`:
+
+```
+trainer.override_entrypoint=integrations.arctic_rl.harbor_entrypoint
+```
+
+`run_codecontest_arctic.sh` next to `run_codecontest.sh` is that flag applied to the CodeContests recipe:
+
+```bash
+export WANDB_API_KEY=... DAYTONA_API_KEY=...
+bash examples/train_integrations/harbor/run_codecontest_arctic.sh
+# smaller smoke:
+NUM_POLICY_GPUS=4 MODEL=Qwen/Qwen3-0.6B MAX_MODEL_LEN=8192 \
+    bash examples/train_integrations/harbor/run_codecontest_arctic.sh
+```
+
+Setup, `trainer.arctic_rl.*` knobs, and design notes: [`integrations/arctic_rl/README.md`](../../../integrations/arctic_rl/README.md) and [`integrations/arctic_rl/docs/HARBOR_DESIGN.md`](../../../integrations/arctic_rl/docs/HARBOR_DESIGN.md).
