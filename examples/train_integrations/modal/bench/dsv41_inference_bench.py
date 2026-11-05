@@ -2,7 +2,7 @@
 
 Each slot's first session is one agent rollout already DEPTH tokens into its context (synthetic history, depth
 uniform in [0, MAX_DEPTH]; later sessions start from a PROMPT_LEN prompt) and then runs turns of exactly GEN generated tokens (EOS ignored) followed by OBS fresh
-observation tokens, until the context passes MAX_CONTEXT; a finished session is replaced by a new one, so
+observation tokens, for MAX_TURNS turns or until the context passes MAX_CONTEXT; a finished session is replaced by a new one, so
 CONCURRENCY sessions are always in flight. Each turn resends the whole context, so prefix caching serves the
 history as it does for a real multi-turn rollout.
 
@@ -37,6 +37,7 @@ class Stats:
         self.turns = 0
         self.sessions = 0
         self.counting = False
+        self.depth = {}  # worker id -> current context length of its in-flight session
 
     def add(self, gen: int, prompt: int) -> None:
         if self.counting:
@@ -45,18 +46,21 @@ class Stats:
             self.turns += 1
 
 
-async def session(engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int) -> None:
+async def session(engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int) -> None:
     context = [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(depth)]
     params = SamplingParams(
         max_tokens=args.gen, min_tokens=args.gen, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0
     )
-    while len(context) + args.gen + args.obs < args.max_context:
+    turns = 0
+    while turns < args.max_turns and len(context) + args.gen + args.obs < args.max_context:
+        stats.depth[wid] = len(context)
         final = None
         async for out in engine.generate(TokensPrompt(prompt_token_ids=context), params, str(uuid.uuid4())):
             final = out
         generated = list(final.outputs[0].token_ids)
         stats.add(len(generated), len(context))
         context = context + generated + [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(args.obs)]
+        turns += 1
     stats.sessions += 1
 
 
@@ -67,7 +71,7 @@ async def worker(engine, args, stats, seed, stop: asyncio.Event) -> None:
     # history served from the prefix cache, as in real rollouts.
     depth = rng.randrange(args.min_depth, args.max_depth + 1)
     while not stop.is_set():
-        await session(engine, args, stats, rng, depth)
+        await session(engine, args, stats, rng, depth, seed)
         depth = args.prompt_len
 
 
@@ -100,7 +104,8 @@ async def main(args) -> None:
         dt = time.time() - t0
         print(
             f"[bench] {dt:.0f}s gen {stats.gen / dt:.0f} tok/s ({stats.gen / dt / args.tp:.0f}/GPU) "
-            f"prompt {stats.prompt / dt:.0f} tok/s turns {stats.turns}",
+            f"prompt {stats.prompt / dt:.0f} tok/s turns {stats.turns} "
+            f"mean in-flight context {sum(stats.depth.values()) / max(len(stats.depth), 1):.0f}",
             flush=True,
         )
     dt = time.time() - t0
@@ -114,6 +119,9 @@ async def main(args) -> None:
     stop.set()
     for t in tasks:
         t.cancel()
+    # Shut the engine down before the hard exit: os._exit alone leaves the EngineCore / TP worker processes
+    # alive, holding the GPUs.
+    engine.shutdown()
     os._exit(0)
 
 
@@ -129,6 +137,7 @@ def parse_args():
     p.add_argument("--prompt-len", type=int, default=2048)
     p.add_argument("--max-depth", type=int, default=200000)
     p.add_argument("--max-context", type=int, default=262144)
+    p.add_argument("--max-turns", type=int, default=69)
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--lora", type=int, default=1)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
