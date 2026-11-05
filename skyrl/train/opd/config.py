@@ -59,8 +59,8 @@ class OPDTopKMetricsConfig(BaseConfig):
     """
 
     num_rows: int = 0
-    """Rows per step, evenly spaced over the batch, on which the overlap metrics are measured; ``0`` is off. Each
-    asks the teacher for its own top ``top_k``, which vLLM returns as JSON over the whole sequence."""
+    """Rows per step, evenly spaced over the batch, on which the overlap metrics are measured; ``0`` is off.
+    Each asks the teacher for its own top ``top_k``, which vLLM returns as JSON over the whole sequence."""
     top_k: int = 16
     """K, the number of top tokens of each distribution compared; at least 8. 16 is the paper's."""
 

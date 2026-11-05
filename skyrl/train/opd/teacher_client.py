@@ -308,6 +308,11 @@ class SkyRLTeacherClient(TeacherLogprobClient):
     setup's server groups hold the only handles to the teacher's server actors.
     """
 
+    # TODO (kyuds): consider gracefully shutting down the deployment in server_setup (router, server
+    # groups, placement group) when the run ends, in a method of its own. Today it goes down with the
+    # Ray job, like the student's engines; an explicit stop would matter for a long-lived driver that
+    # runs several experiments in one job, where placement groups outlive the run.
+
     def __init__(
         self,
         client: "RemoteInferenceClient",
@@ -333,8 +338,5 @@ class SkyRLTeacherClient(TeacherLogprobClient):
         return await self._client.score_tokens(request)
 
     async def aclose(self) -> None:
-        # TODO (kyuds): consider gracefully shutting down the deployment in server_setup here (router,
-        # server groups, placement group) when the run ends. Today it goes down with the Ray job, like
-        # the student's engines; an explicit stop would matter for a long-lived driver that runs several
-        # experiments in one job, where placement groups outlive the run.
-        await self._client.teardown()
+        # Sessions only: aclose also runs after the preflight, when the deployment must stay up.
+        await self._client.close_http_session()

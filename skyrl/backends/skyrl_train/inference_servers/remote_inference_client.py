@@ -1631,10 +1631,18 @@ class RemoteInferenceClient(InferenceEngineInterface):
     # Lifecycle
     # ---------------------------
 
-    async def teardown(self) -> None:
-        """Close HTTP session."""
+    async def close_http_session(self) -> None:
+        """Close the HTTP session bound to the running event loop, and nothing else.
+
+        The servers keep running and the client stays usable: its next request opens a new session. For callers
+        that must not stop anything, such as a frozen teacher closing a short-lived loop's session before training.
+        """
         if self._generate_client is not None:
             await self._generate_client.aclose()
+
+    async def teardown(self) -> None:
+        """Close HTTP session."""
+        await self.close_http_session()
 
     async def __aenter__(self) -> "RemoteInferenceClient":
         """Async context manager entry."""

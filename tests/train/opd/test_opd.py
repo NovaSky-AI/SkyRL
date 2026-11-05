@@ -965,14 +965,17 @@ class FakeRemoteInferenceClient:
 
     def __init__(self):
         self.requests: List[Dict[str, Any]] = []
-        self.torn_down = False
+        self.session_closed = False
 
     async def score_tokens(self, request):
         self.requests.append(request)
         return _answer(request)
 
+    async def close_http_session(self):
+        self.session_closed = True
+
     async def teardown(self):
-        self.torn_down = True
+        raise AssertionError("the teacher closes only its HTTP session; teardown may one day stop more")
 
 
 @pytest.mark.asyncio
@@ -989,8 +992,9 @@ async def test_skyrl_teacher_client_scores_through_score_tokens():
     # score_tokens names the model the servers were launched under.
     assert client.requests == [scoring_request([1, 2], candidates)]
 
+    # aclose also runs after the preflight, so it must leave the deployment up.
     await teacher.aclose()
-    assert client.torn_down
+    assert client.session_closed
 
 
 def test_opd_exp_launches_the_teacher_for_the_skyrl_backend(monkeypatch):
