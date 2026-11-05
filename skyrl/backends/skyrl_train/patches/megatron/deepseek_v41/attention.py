@@ -39,6 +39,7 @@ fake-quant below.
 """
 
 import copy
+import functools
 import os
 import threading
 from contextlib import contextmanager
@@ -65,6 +66,7 @@ from megatron.core.transformer.experimental_attention_variant.csa_utils.fused_sp
 from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
     use_fused_dsa_kernels,
 )
+from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer.module import MegatronModule, mark_keep_in_fp32
 from megatron.core.transformer.spec_utils import build_module
 from torch import nn
@@ -387,6 +389,85 @@ class CSA2Indexer(MegatronModule):
                 param.requires_grad_(False)
 
 
+_NANCHECK = os.environ.get("SKYRL_DSV41_CP_NANCHECK", "")  # a directory: per-rank diagnostics file
+
+
+def _nanlog(msg: str) -> None:
+    import torch.distributed as dist
+
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    with open(os.path.join(_NANCHECK, f"nancheck_rank{rank}.txt"), "a") as f:
+        f.write(msg + "\n")
+
+
+def _nancheck(layer_id, cp_rank, kv_full_rows, **tensors):
+    """Debug: per-tensor NaN counts and index ranges in a compressed layer under CP (printed once per layer/rank)."""
+    key = (layer_id, cp_rank)
+    if key in _NANCHECK_SEEN:
+        return
+    _NANCHECK_SEEN.add(key)
+    parts = []
+    for name, t in tensors.items():
+        if t is None:
+            continue
+        if t.is_floating_point():
+            parts.append(f"{name}{list(t.shape)} nan={int(torch.isnan(t).sum())} inf={int(torch.isinf(t).sum())}")
+        else:
+            valid = t[t >= 0]
+            parts.append(f"{name}{list(t.shape)} valid={valid.numel()} min={int(valid.min()) if valid.numel() else -1} "
+                         f"max={int(valid.max()) if valid.numel() else -1}")
+    _nanlog(f"[cp_nancheck] layer {layer_id} cp_rank {cp_rank} kv_full_rows={kv_full_rows} " + " | ".join(parts))
+
+
+_NANCHECK_SEEN: set = set()
+
+
+# Debug (SKYRL_DSV41_SELDUMP=<dir>): logical layer 2's top-k selections and attention output for global positions
+# [0, 256) and [L/2, L/2 + 256) (L = the whole sequence), first microbatch of data-parallel rank 0.
+_SELDUMP = os.environ.get("SKYRL_DSV41_SELDUMP", "")
+_SELDUMP_DONE: set = set()
+
+
+def _dump_selection(attn, cp, global_start, sq, global_indices, out):
+    import megatron.core.parallel_state as mpu
+
+    if mpu.get_data_parallel_rank() != 0:
+        return
+    total = sq * cp.size()
+    for g0 in (0, total // 2):
+        if global_start <= g0 < global_start + sq and g0 not in _SELDUMP_DONE:
+            _SELDUMP_DONE.add(g0)
+            l0 = g0 - global_start
+            torch.save(
+                {"idx": global_indices[0, l0 : l0 + 256].cpu(), "out": out[l0 : l0 + 256].float().cpu()},
+                os.path.join(_SELDUMP, f"sel_g{g0}.pt"),
+            )
+
+
+class _NoCPGroup:
+    """Stand-in CP group of size 1 for RoPE on tensors that already hold every position (no CP slicing)."""
+
+    def rank(self) -> int:
+        return 0
+
+    def size(self) -> int:
+        return 1
+
+
+_NO_CP = _NoCPGroup()
+
+
+@functools.lru_cache(maxsize=16)
+def _window_idxs_cached(window_size: int, seqlen: int, global_start: int, boundary_rows: int, device_str: str):
+    """Sliding-window indices ``[seqlen, window_size]`` for queries at global positions ``global_start + i``, into a
+    KV buffer whose first ``boundary_rows`` rows are the positions just before ``global_start`` (-1 = none). With
+    ``global_start == boundary_rows == 0`` this is megatron-core's ``get_window_topk_idxs`` (same order)."""
+    pos = torch.arange(global_start, global_start + seqlen, device=device_str).unsqueeze(1)
+    first = (pos - window_size + 1).clamp(min=0)
+    idx = first + torch.arange(window_size, device=device_str)
+    return torch.where(idx > pos, -1, idx - global_start + boundary_rows)
+
+
 class CompressedSparseAttention2(MegatronModule):
     """Sliding-window attention plus, on compressed layers, ``index_topk`` positions of the shared
     compressed KV. Constructor signature matches megatron-core's ``CompressedSparseAttention`` so the V4
@@ -414,7 +495,6 @@ class CompressedSparseAttention2(MegatronModule):
         super().__init__(config=config)
         assert not is_mtp_layer, "DeepSeek-V4.1 DSpark MTP layers are not supported"
         assert pg_collection is not None and pg_collection.tp.size() == 1, "DeepSeek-V4.1 attention is TP=1 only"
-        assert pg_collection.cp.size() == 1, "DeepSeek-V4.1 attention does not support context parallelism"
         self.pg_collection = pg_collection
         assert is_v41(config), "CompressedSparseAttention2 requires config.dsv4_version == 'v4.1'"
         # Cross-layer sharing goes through one per-forward state (forward_state), which full / block recompute
@@ -460,8 +540,43 @@ class CompressedSparseAttention2(MegatronModule):
             cp_group=self.pg_collection.cp,
         )
 
+    def _rope_at(self, x, start, n, ratio):
+        """RoPE for (compressed) positions ``start .. start + n - 1`` in units of ``ratio`` tokens: CP's local queries
+        at their global positions, and the gathered compressed KV at every position.
+
+        The rotary module is CP-aware: asked normally it returns cos/sin for this rank's zigzag share of positions.
+        Ask it for the whole table (``packed_seq=True``, as megatron-core's packed path does) and pick the rows."""
+        from megatron.core.fusions.fused_mla_yarn_rope_apply import fused_mla_rope_inplace
+        from megatron.core.models.common.embeddings.rope_utils import (
+            apply_rotary_pos_emb,
+        )
+
+        pos_dim = self.config.qk_pos_emb_head_dim
+        nope_dim = x.size(-1) - pos_dim
+        total = (start + n) * ratio
+        rows = torch.arange(start, start + n, device=x.device) * ratio
+        squeeze_head = x.dim() == 3
+        if squeeze_head:
+            x = x.unsqueeze(-2)
+        if self.config.apply_rope_fusion:
+            cos, sin = self.rotary_pos_emb.get_cached_cos_sin(total, dtype=x.dtype, packed_seq=True, mscale=1.0)
+            out = fused_mla_rope_inplace(
+                x, cos.index_select(0, rows), sin.index_select(0, rows), nope_dim, pos_dim, None, 0, 1,
+                remove_interleaving=True,
+            )
+        else:
+            emb = self.rotary_pos_emb(total, packed_seq=True)
+            emb = emb[0] if isinstance(emb, tuple) else emb
+            x_nope, x_pe = torch.split(x, [nope_dim, pos_dim], dim=-1)
+            x_pe = apply_rotary_pos_emb(
+                x_pe, emb.index_select(0, rows), config=self.config, cu_seqlens=None, mscale=1.0, cp_group=_NO_CP,
+                mla_rotary_interleaved=True, mla_output_remove_interleaving=True,
+            )
+            out = torch.cat([x_nope, x_pe], dim=-1)
+        return out.squeeze(-2) if squeeze_head else out
+
     @torch.no_grad()
-    def _select_topk(self, x, qr, state, sq, n_c):
+    def _select_topk(self, x, qr, state, sq, n_c, global_start=0):
         """Indexer top-k over the shared compressed positions: ``[b, sq, topk]`` int32, -1 = none.
 
         The candidate source publishes its candidate blocks as ids (``[sq, b, <= candidate_topk_blocks]``
@@ -474,7 +589,7 @@ class CompressedSparseAttention2(MegatronModule):
         ratio = self.compress_ratio
         q, _ = indexer.linear_wq_b(qr.detach())
         q = q.view(sq, q.size(1), indexer.n_heads, indexer.head_dim)
-        q = self._rope(q, sq, 1)
+        q = self._rope(q, sq, 1) if self.pg_collection.cp.size() == 1 else self._rope_at(q, global_start, sq, 1)
         raw_weights, _ = indexer.linear_weights_proj(x.detach())
         head_weight_scale = indexer.softmax_scale * indexer.n_heads**-0.5
         topk = min(indexer.index_topk, n_c)
@@ -486,7 +601,7 @@ class CompressedSparseAttention2(MegatronModule):
                 indexer.n_heads, indexer.head_dim, block_size, state.candidate_blocks.size(-1)
             )
         ):
-            return self._select_topk_candidates(q, raw_weights, head_weight_scale, state, sq, topk)
+            return self._select_topk_candidates(q, raw_weights, head_weight_scale, state, sq, topk, global_start)
         positions = torch.arange(n_c, device=x.device)
         candidate_blocks = [] if self.is_candidate_source else None
         out = []
@@ -505,7 +620,8 @@ class CompressedSparseAttention2(MegatronModule):
                 scores = torch.stack(
                     [
                         fused_indexer_scores_rows(
-                            q_lp[s0:s1, i], k_lp[:, i], raw_weights[s0:s1, i], head_weight_scale, ratio, s0
+                            q_lp[s0:s1, i], k_lp[:, i], raw_weights[s0:s1, i], head_weight_scale, ratio,
+                            global_start + s0,
                         )
                         for i in range(batch)
                     ],
@@ -514,7 +630,9 @@ class CompressedSparseAttention2(MegatronModule):
             else:
                 scores = torch.einsum("sbhd,tbd->sbht", q[s0:s1], k).relu_()
                 scores = (scores * weights[s0:s1].unsqueeze(-1)).sum(dim=2)  # [c, b, n_c]
-            compress_lens = (torch.arange(s0 + 1, s1 + 1, device=x.device) // ratio).view(-1, 1, 1)
+            compress_lens = (
+                torch.arange(global_start + s0 + 1, global_start + s1 + 1, device=x.device) // ratio
+            ).view(-1, 1, 1)
             scores.masked_fill_(positions >= compress_lens, -torch.inf)
             if self.is_candidate_source:
                 candidate_blocks.append(
@@ -529,7 +647,7 @@ class CompressedSparseAttention2(MegatronModule):
             state.candidate_blocks = torch.cat(candidate_blocks, dim=0)
         return torch.cat(out, dim=0).permute(1, 0, 2).to(torch.int32).contiguous()
 
-    def _select_topk_candidates(self, q, raw_weights, head_weight_scale, state, sq, topk):
+    def _select_topk_candidates(self, q, raw_weights, head_weight_scale, state, sq, topk, global_start=0):
         """Top-k inside the published candidate blocks (NVIDIA/Megatron-LM#7285 ``candidate_scores`` +
         ``candidate_topk_ids``): ``[b, sq, topk]`` int32, ids ascending, -1 = none."""
         ratio, block_size = self.compress_ratio, self.candidate_block_size
@@ -540,7 +658,7 @@ class CompressedSparseAttention2(MegatronModule):
         chunk = _rows_within_budget(width * q.size(1))
         for s0 in range(0, sq, chunk):
             s1 = min(s0 + chunk, sq)
-            visible = torch.arange(s0 + 1, s1 + 1, device=q.device) // ratio
+            visible = torch.arange(global_start + s0 + 1, global_start + s1 + 1, device=q.device) // ratio
             per_batch = []
             for i in range(q.size(1)):
                 scores = candidate_scores(
@@ -573,17 +691,47 @@ class CompressedSparseAttention2(MegatronModule):
         boundary_kv=None,
     ):
         assert attention_mask is None, "DeepSeek-V4.1 attention uses an implicit causal mask"
-        assert packed_seq_params is None, "packed sequences are not supported for DeepSeek-V4.1 attention"
-        # megatron-core's DSv4 attention passes the left-boundary rows of its THD context-parallel path
-        # (``exchange_cp_boundary_hidden``) to every core attention; ``None`` without CP, which V4.1 lacks here.
-        assert boundary_hidden is None and boundary_kv is None, "context parallelism is not supported here"
+        cp = self.pg_collection.cp
+        cp_size = cp.size()
+        packed = packed_seq_params is not None
+        if packed:
+            # Packed THD (the only input megatron-core's DSv4 attention accepts under CP): q [t, h, d], k [t, 1, d],
+            # hidden [t, 1, H], qr [t, r]. One sequence per microbatch (its padded length is the pack).
+            cu = packed_seq_params.cu_seqlens_q_padded
+            cu = packed_seq_params.cu_seqlens_q if cu is None else cu
+            assert cu.numel() == 2, "DeepSeek-V4.1 packed attention supports one sequence per microbatch"
+            query = query.unsqueeze(1) if query.dim() == 3 else query
+            key = key.unsqueeze(1) if key.dim() == 3 else key
+            qr = qr.unsqueeze(1) if qr is not None and qr.dim() == 2 else qr
+        elif cp_size > 1:
+            raise ValueError("DeepSeek-V4.1 context parallelism requires packed THD input")
         sq, b, _, _ = query.size()
+        # Contiguous CP layout: this rank owns global positions [global_start, global_start + sq).
+        global_start = cp.rank() * sq if cp_size > 1 else 0
         kv = key.squeeze(-2)
         if FAKE_QUANT_KV == "vllm":
             kv = fake_quant_fp8_ds_mla(kv, kv.size(-1) - self.config.qk_pos_emb_head_dim)
         elif FAKE_QUANT_KV == "reference":
             kv = fake_quant_fp8_block(kv)
-        window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
+        boundary_rows = 0
+        if cp_size > 1:
+            # The left neighbour's last rows (projected + RoPE'd by DSv4HybridSelfAttention) extend the window.
+            assert boundary_kv is not None, "DeepSeek-V4.1 CP needs the left-boundary KV"
+            bkv = boundary_kv.reshape(boundary_kv.size(0), b, kv.size(-1))
+            if FAKE_QUANT_KV == "vllm":
+                bkv = fake_quant_fp8_ds_mla(bkv, bkv.size(-1) - self.config.qk_pos_emb_head_dim)
+            elif FAKE_QUANT_KV == "reference":
+                bkv = fake_quant_fp8_block(bkv)
+            boundary_rows = bkv.size(0)
+            assert boundary_rows >= self.window_size, "CP boundary narrower than the sliding window"
+            kv = torch.cat([bkv, kv], dim=0)
+            window_idxs = (
+                _window_idxs_cached(self.window_size, sq, global_start, boundary_rows, str(query.device))
+                .unsqueeze(0)
+                .expand(b, -1, -1)
+            )
+        else:
+            window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
         compressed_idxs = None
         kv_full = kv
         if self.compress_ratio:
@@ -592,16 +740,24 @@ class CompressedSparseAttention2(MegatronModule):
             ratio = self.compress_ratio
             if self.is_kv_source:
                 latent = self.compressor(x)
+                if cp_size > 1:
+                    # Each rank compresses its own rows (its chunk starts on a group boundary); every rank attends
+                    # to all compressed positions, so gather them (backward: reduce-scatter to the owners).
+                    assert latent is not None and sq % ratio == 0, "CP chunk must be a whole number of groups"
+                    latent = gather_from_sequence_parallel_region(latent, tensor_parallel_output_grad=True, group=cp)
                 state.compress_ratio = ratio
                 if latent is None:
                     state.global_kv = state.indexer_k = None
                 else:
                     n_c = latent.size(0)
+                    rope = (lambda t: self._rope(t, n_c, ratio)) if cp_size == 1 else (
+                        lambda t: self._rope_at(t, 0, n_c, ratio)
+                    )
                     if self.indexer is not None:
                         with torch.no_grad():
                             k, _ = self.indexer.linear_wk(latent.detach())
-                            state.indexer_k = self._rope(self.indexer.k_norm(k), n_c, ratio)
-                    state.global_kv = self._rope(latent, n_c, ratio)
+                            state.indexer_k = rope(self.indexer.k_norm(k))
+                    state.global_kv = rope(latent)
                     if FAKE_QUANT_KV == "vllm":
                         state.global_kv = fake_quant_fp8_ds_mla(
                             state.global_kv, state.global_kv.size(-1) - self.config.qk_pos_emb_head_dim
@@ -620,16 +776,30 @@ class CompressedSparseAttention2(MegatronModule):
                         if self.is_candidate_source:
                             state.candidate_blocks = replayed[1]
                     else:
-                        state.global_indices = self._select_topk(x, qr, state, sq, n_c)
-                compressed_idxs = torch.where(state.global_indices >= 0, state.global_indices + sq, -1)
+                        state.global_indices = self._select_topk(x, qr, state, sq, n_c, global_start)
+                offset = kv.size(0)  # compressed rows follow the (boundary +) local rows
+                compressed_idxs = torch.where(state.global_indices >= 0, state.global_indices + offset, -1)
                 kv_full = torch.cat([kv, state.global_kv], dim=0)
 
+        if _NANCHECK and self.compress_ratio and cp_size > 1:
+            _nancheck(self.layer_id, cp.rank(), query=query, kv_ext=kv, global_kv=state.global_kv,
+                      indexer_k=state.indexer_k, global_indices=state.global_indices, compressed_idxs=compressed_idxs,
+                      window_idxs=window_idxs, kv_full_rows=kv_full.size(0))
         groups = (window_idxs,) if compressed_idxs is None else (window_idxs, compressed_idxs)
         if self.use_fused_kernels:
             flat_idxs, topk_length = build_flat_topk_idxs(*groups, batch_size=b, compact=True)
-            return csa_sparse_attn(
+            out = csa_sparse_attn(
                 query, kv_full, self.attn_sink.float(), flat_idxs, self.softmax_scale, topk_length=topk_length
             )
+            if _SELDUMP and self.layer_id == 2 and self.compress_ratio:
+                _dump_selection(self, cp, global_start, sq, state.global_indices, out)
+            if _NANCHECK and self.compress_ratio and cp_size > 1 and (self.layer_id, cp.rank(), "out") not in _NANCHECK_SEEN:
+                _NANCHECK_SEEN.add((self.layer_id, cp.rank(), "out"))
+                rows = torch.isnan(out.float().flatten(1)).any(dim=1)
+                _nanlog(f"[cp_nancheck] layer {self.layer_id} cp_rank {cp.rank()} attn_out nan_rows={int(rows.sum())} "
+                        f"flat_idxs {list(flat_idxs.shape)} max={int(flat_idxs.max())} topk_length "
+                        f"min={int(topk_length.min())} max={int(topk_length.max())}")
+            return out
         topk_idxs = torch.cat(groups, dim=-1).int()
         return unfused_compressed_sparse_attn(query, kv_full, self.attn_sink.float(), topk_idxs, self.softmax_scale)
 
