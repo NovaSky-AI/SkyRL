@@ -30,6 +30,101 @@ OFFLOAD = os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD", "0").lower() in ("1", 
 # With offload on, the inputs of the stack's last N hybrid layers stay on the GPU: their backward runs first (no
 # copy back to wait for) and the host keeps N fewer layer inputs pinned.
 OFFLOAD_KEEP_LAST = int(os.environ.get("SKYRL_DSV41_RECOMPUTE_OFFLOAD_KEEP_LAST", "0"))
+# Debug: directory for a per-layer forward memory log (rank 0): allocated after the layer, the layer's own peak, and
+# the bytes of the hidden state and each piece of CSA2 / mHC state saved as checkpoint inputs.
+MEMLOG = os.environ.get("SKYRL_DSV41_MEMLOG", "")
+# Keep only the attention sublayers' inputs: an MLP/MoE sublayer's input is the preceding attention sublayer's output,
+# rebuilt in backward by re-running that attention forward (no grad) from its own saved input. Halves the stored
+# layer inputs (80 hybrid sublayers -> 40 inputs) for one extra attention forward per pair.
+DERIVE_MLP_INPUT = os.environ.get("SKYRL_DSV41_RECOMPUTE_DERIVE_MLP_INPUT", "0").lower() in ("1", "true")
+_LAST_ATTENTION_CTX: list = [None]  # the latest attention sublayer's Function ctx (forward order)
+
+
+class _SavedBreakdown:
+    """MEMLOG: bytes autograd saves for backward during one layer's replay, by top-level submodule (unique storages),
+    and the replay's peak over the allocation it started from."""
+
+    def __init__(self, layer):
+        self.layer = layer
+        self.by_module: dict = {}
+        self.seen: set = set()
+        self.stack: list = []
+        self.handles: list = []
+
+    def __enter__(self):
+        if self.layer is None:
+            return self
+        names = {id(m): n for n, m in self.layer.named_modules()}
+
+        def pre(module, args):
+            name = names.get(id(module))
+            if name is not None:
+                self.stack.append(".".join(name.split(".")[:3]) or "<layer>")
+
+        def post(module, args, out):
+            if id(module) in names and self.stack:
+                self.stack.pop()
+
+        self.handles = [
+            torch.nn.modules.module.register_module_forward_pre_hook(pre),
+            torch.nn.modules.module.register_module_forward_hook(post),
+        ]
+
+        def pack(t):
+            if t.is_cuda:
+                key = t.untyped_storage().data_ptr()
+                if key not in self.seen:
+                    self.seen.add(key)
+                    where = self.stack[-1] if self.stack else "<outside>"
+                    self.by_module[where] = self.by_module.get(where, 0) + t.untyped_storage().nbytes()
+            return t
+
+        self.saved = torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t)
+        self.saved.__enter__()
+        self.start = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        return self
+
+    def __exit__(self, *exc):
+        if self.layer is not None:
+            self.saved.__exit__(*exc)
+            for h in self.handles:
+                h.remove()
+        return False
+
+    def report(self) -> None:
+        import torch.distributed as dist
+
+        if self.layer is None or (dist.is_initialized() and dist.get_rank() != 0):
+            return
+        top = sorted(self.by_module.items(), key=lambda kv: -kv[1])[:8]
+        parts = " ".join(f"{k}={v / 2**30:.2f}" for k, v in top)
+        with open(os.path.join(MEMLOG, "memlog_rank0.txt"), "a") as f:
+            f.write(
+                f"replay layer {getattr(self.layer, 'layer_number', '?')}: start {self.start / 2**30:.1f} GiB, peak "
+                f"{torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, saved {sum(self.by_module.values()) / 2**30:.2f} "
+                f"GiB | {parts}\n"
+            )
+
+
+def _memlog(layer_number, hidden, state: dict) -> None:
+    import torch.distributed as dist
+
+    if dist.is_initialized() and dist.get_rank() != 0:
+        return
+
+    def gib(t):
+        return t.numel() * t.element_size() / 2**30 if torch.is_tensor(t) else 0.0
+
+    parts = " ".join(
+        f"{k}={gib(v):.2f}{list(v.shape) if torch.is_tensor(v) else ''}" for k, v in state.items() if v is not None
+    )
+    with open(os.path.join(MEMLOG, "memlog_rank0.txt"), "a") as f:
+        f.write(
+            f"layer {layer_number}: alloc {torch.cuda.memory_allocated() / 2**30:.1f} GiB, layer peak "
+            f"{torch.cuda.max_memory_allocated() / 2**30:.1f} GiB, offload pool {_POOL.live_bytes / 2**30:.0f} GiB, "
+            f"hidden {gib(hidden):.2f} {list(hidden.shape)} | {parts}\n"
+        )
 _CHUNK = 1 << 30  # pinned arena chunk size
 # CSA2State tensor fields threaded through each layer checkpoint (``attention.CSA2State``).
 STATE_FIELDS = ("global_kv", "indexer_k", "global_indices", "candidate_blocks")
@@ -169,6 +264,29 @@ class _Offloaded:
         return out
 
 
+class _Derived:
+    """An MLP sublayer's input, not stored: rebuilt from the preceding attention sublayer (``DERIVE_MLP_INPUT``)."""
+
+    def __init__(self, source_ctx):
+        self.source = source_ctx
+
+    def fetch(self) -> torch.Tensor:
+        src, self.source = self.source, None
+        inputs = []
+        for i, (t, meta) in enumerate(zip(src.inputs, src.meta)):
+            if meta is not None and isinstance(t, _Offloaded):
+                t = t.fetch()
+                src.inputs[i] = t  # keep it on the GPU for the attention's own backward, which runs right after
+            inputs.append(t)
+        reuse = getattr(src.run, "reuse_selection", None)
+        with torch.no_grad(), (reuse(*src.selection) if reuse is not None and src.selection else nullcontext()):
+            outputs = src.run(*inputs)
+        clear_state = getattr(src.run, "clear_state", None)
+        if clear_state is not None:
+            clear_state()
+        return outputs[0].detach()
+
+
 class StatefulLayerRecompute(torch.autograd.Function):
     """Run ``run(*inputs)`` without saving activations; replay it in backward from the saved inputs.
 
@@ -180,11 +298,22 @@ class StatefulLayerRecompute(torch.autograd.Function):
     def forward(ctx, run: Callable, offload_first: bool, *inputs: Any):
         ctx.run = run
         ctx.meta = [(t.requires_grad, t.device) if torch.is_tensor(t) else None for t in inputs]
-        ctx.offload_first = offload_first and torch.is_tensor(inputs[0]) and inputs[0].is_cuda
+        ctx.layer_number = getattr(run, "layer_number", None)
+        source = _LAST_ATTENTION_CTX[0]
+        derive = (
+            getattr(run, "derive_input", False)
+            and source is not None
+            and ctx.layer_number is not None
+            and source.layer_number == ctx.layer_number - 1
+        )
+        _LAST_ATTENTION_CTX[0] = ctx if getattr(run, "is_attention", False) else None
+        ctx.offload_first = offload_first and not derive and torch.is_tensor(inputs[0]) and inputs[0].is_cuda
         ctx.inputs = [
             (_Offloaded.try_offload(t) if i == 0 and ctx.offload_first else t.detach()) if torch.is_tensor(t) else t
             for i, t in enumerate(inputs)
         ]
+        if derive:
+            ctx.inputs[0] = _Derived(source)
         with torch.no_grad():
             outputs = run(*inputs)
         ctx.mark_non_differentiable(*[o for o in outputs if torch.is_tensor(o) and not o.is_floating_point()])
@@ -202,16 +331,21 @@ class StatefulLayerRecompute(torch.autograd.Function):
                 inputs.append(t)
                 continue
             requires_grad, device = meta
-            x = t.fetch() if isinstance(t, _Offloaded) else t
+            x = t.fetch() if isinstance(t, (_Offloaded, _Derived)) else t
             inputs.append(x.detach().requires_grad_(requires_grad))
         reuse = getattr(ctx.run, "reuse_selection", None)
-        with torch.enable_grad(), (reuse(*ctx.selection) if reuse is not None and ctx.selection else nullcontext()):
+        breakdown = _SavedBreakdown(getattr(ctx.run, "layer", None)) if MEMLOG else nullcontext()
+        with torch.enable_grad(), (
+            reuse(*ctx.selection) if reuse is not None and ctx.selection else nullcontext()
+        ), breakdown:
             outputs = ctx.run(*inputs)
         ctx.selection = None
         pairs = [(o, g) for o, g in zip(outputs, grads) if torch.is_tensor(o) and o.requires_grad and g is not None]
         if pairs:
             torch.autograd.backward([o for o, _ in pairs], [g for _, g in pairs])
         del outputs, pairs
+        if MEMLOG:
+            breakdown.report()
         clear_state = getattr(ctx.run, "clear_state", None)
         if clear_state is not None:
             # The replay wrote its outputs into the shared forward state; left there they pin this replay's graph
@@ -274,6 +408,16 @@ def stateful_layer_forward(
         local.pending_pre = None
 
     run.clear_state = clear_state
+    run.layer = layer
+    run.layer_number = getattr(layer, "layer_number", None)
+    if DERIVE_MLP_INPUT:
+        is_attention = getattr(layer, "_skyrl_is_attention", None)
+        if is_attention is None:
+            # A real attention module has children; MoE sublayers carry an empty IdentityOp ``self_attention``.
+            is_attention = any(".self_attention." in f".{n}" for n, _ in layer.named_modules())
+            layer._skyrl_is_attention = is_attention
+        run.is_attention = is_attention
+        run.derive_input = not is_attention
 
     # ``config.num_layers`` counts hybrid layers (from ``hybrid_layer_pattern``), as ``layer_number`` does.
     num_layers = getattr(getattr(layer, "config", None), "num_layers", None) or 0
@@ -284,14 +428,18 @@ def stateful_layer_forward(
         # does. With a frozen embedding (LoRA) nothing upstream requires grad: without this the whole stack would be
         # cut out of backward and the adapters would get no gradient (as HF ``enable_input_require_grads``).
         hidden_states = hidden_states.detach().requires_grad_(True)
+    if MEMLOG:
+        torch.cuda.reset_peak_memory_stats()
+    state_inputs = (*(getattr(state.csa2, name) for name in STATE_FIELDS), state.pending_pre)
     outputs = StatefulLayerRecompute.apply(
         run,
         OFFLOAD and not keep_on_gpu,
         hidden_states,
-        *(getattr(state.csa2, name) for name in STATE_FIELDS),
-        state.pending_pre,
+        *state_inputs,
     )
     output, *new_state, pending_pre = outputs
+    if MEMLOG:
+        _memlog(layer_number, hidden_states, dict(zip([*STATE_FIELDS, "pending_pre"], state_inputs)))
     state.csa2 = CSA2State(compress_ratio=extras["compress_ratio"], **dict(zip(STATE_FIELDS, new_state)))
     state.pending_pre = pending_pre
     return output, extras["context"]
