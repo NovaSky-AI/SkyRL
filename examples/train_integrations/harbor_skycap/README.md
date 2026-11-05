@@ -90,6 +90,12 @@ Terminus-2 keeps the server's own URL. A quick tunnel takes at most 200 calls in
 flight, and a call whose reply hasn't started after about 125 s fails, so use
 `external_host` for many agents or long replies.
 
+If not one trajectory of the run's first batch has anything to train, the
+generator stops the run instead of taking zero-gradient steps. Each trial's
+`exception.txt` and agent logs under
+`harbor_trial_config.trials_dir` say why. `skycap.check_first_batch=false`
+skips the check, e.g. for an agent that never calls the model.
+
 ## Sharing a sandbox provider
 
 A remote sandbox counts against the provider account's quota, which other runs
