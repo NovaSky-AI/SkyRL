@@ -29,8 +29,10 @@ async def phase(engine, base, name, concurrency, obs, warmup, measure, profile_s
 
     async def worker(i):
         rng = random.Random(1000 + i)
+        first_gen = rng.randint(1, args.gen) if base.stagger else 0
         while not stop.is_set():
-            await session(engine, args, stats, rng, args.prompt_len, i)
+            await session(engine, args, stats, rng, args.prompt_len, i, first_gen)
+            first_gen = 0
 
     tasks = [asyncio.create_task(worker(i)) for i in range(concurrency)]
     await asyncio.sleep(warmup)
@@ -57,6 +59,29 @@ async def phase(engine, base, name, concurrency, obs, warmup, measure, profile_s
     await asyncio.sleep(20)
 
 
+async def logprob_probe(engine, path: str, n: int = 8, length: int = 512, lora_request=None) -> None:
+    """Score N fixed (seeded) random sequences with prompt_logprobs and save every token's logprob, so two engine
+    configs (e.g. MoE backends) can be compared token by token on identical inputs."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    rng = random.Random(1234)
+    params = SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=0)
+    out = []
+    for i in range(n):
+        ids = [rng.randrange(1000, 100000) for _ in range(length)]
+        final = None
+        async for o in engine.generate(
+            TokensPrompt(prompt_token_ids=ids), params, f"probe-{i}-{time.time()}", lora_request=lora_request
+        ):
+            final = o
+        lps = [None if d is None else d[t].logprob for t, d in zip(ids, final.prompt_logprobs)]
+        out.append({"ids": ids, "logprobs": lps})
+    with open(path, "w") as f:
+        json.dump(out, f)
+    print(f"[diag] logprob probe: {n} x {length} tokens -> {path}", flush=True)
+
+
 async def stats_loop(engine):
     while True:
         await asyncio.sleep(30)
@@ -80,6 +105,8 @@ async def main(a):
         max_num_batched_tokens=32768,  # the recipe's value; --engine-kwargs overrides
         **lora,
     )
+    if a.r3:
+        kwargs["enable_return_routed_experts"] = True
     if a.profile:
         kwargs["profiler_config"] = {"profiler": "torch", "torch_profiler_dir": a.profile_dir}
     kwargs.update(json.loads(a.engine_kwargs))
@@ -87,9 +114,16 @@ async def main(a):
     engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kwargs))
     t_ready = time.time()
     print(f"[diag] engine ready", flush=True)
+    lora_request = None
+    if a.lora_adapter:
+        from vllm.lora.request import LoRARequest
+
+        lora_request = LoRARequest("bench", 1, a.lora_adapter)
+    if a.logprob_probe:
+        await logprob_probe(engine, a.logprob_probe, lora_request=lora_request)
     asyncio.create_task(stats_loop(engine))
     base = argparse.Namespace(
-        tp=a.tp, gen=1065, obs=1870, max_context=262144, max_turns=69, top_k=20, prompt_len=2048
+        tp=a.tp, gen=1065, obs=1870, max_context=262144, max_turns=69, top_k=20, prompt_len=2048, stagger=a.stagger, r3=a.r3, lora_request=lora_request
     )
     profile_phase, _, profile_s = (a.profile or "").partition(":")
     wanted = a.phases.split(",") if a.phases else None
@@ -109,6 +143,10 @@ if __name__ == "__main__":
     p.add_argument("--lora", type=int, default=0)
     p.add_argument("--warmup", type=int, default=120)
     p.add_argument("--measure", type=int, default=120)
+    p.add_argument("--lora-adapter", default="", help="PEFT adapter dir: route every request through it")
+    p.add_argument("--r3", type=int, default=0, help="1: return routed experts per request (the recipe's R3)")
+    p.add_argument("--logprob-probe", default="", help="JSON path: save prompt logprobs of fixed sequences first")
+    p.add_argument("--stagger", type=int, default=0, help="1: desync turn boundaries (see bench --stagger)")
     p.add_argument("--phases", default="", help="comma-separated subset of c640,c640_noobs,c64,c256")
     p.add_argument("--engine-kwargs", default="{}", help="JSON merged over the default AsyncEngineArgs")
     p.add_argument("--profile", default="", help="PHASE:SECONDS to torch-profile after that phase's warmup")

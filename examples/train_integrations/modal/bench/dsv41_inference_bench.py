@@ -46,19 +46,37 @@ class Stats:
             self.turns += 1
 
 
-async def session(engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int) -> None:
+async def session(
+    engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int, first_gen: int = 0
+) -> None:
+    """One rollout. ``first_gen`` (1..gen) shortens its first turn: used once per slot with ``--stagger`` so
+    turn boundaries spread out as in real RL, instead of every session decoding and prefilling in lockstep."""
     context = [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(depth)]
-    params = SamplingParams(
-        max_tokens=args.gen, min_tokens=args.gen, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0
-    )
+
+    def params_for(n: int, routes_from: int = 0) -> SamplingParams:
+        # --r3: the engine returns routed experts; like SkyRL's multi-turn client, each turn asks only for the
+        # tokens after what the previous turn already returned.
+        extra = {"routed_experts_prompt_start": routes_from} if getattr(args, "r3", 0) else {}
+        return SamplingParams(
+            max_tokens=n, min_tokens=n, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0, **extra
+        )
+
     turns = 0
+    routes_from = 0
     while turns < args.max_turns and len(context) + args.gen + args.obs < args.max_context:
         stats.depth[wid] = len(context)
         final = None
-        async for out in engine.generate(TokensPrompt(prompt_token_ids=context), params, str(uuid.uuid4())):
+        turn_params = params_for(first_gen if (turns == 0 and first_gen) else args.gen, routes_from)
+        async for out in engine.generate(
+            TokensPrompt(prompt_token_ids=context),
+            turn_params,
+            str(uuid.uuid4()),
+            lora_request=getattr(args, "lora_request", None),
+        ):
             final = out
         generated = list(final.outputs[0].token_ids)
         stats.add(len(generated), len(context))
+        routes_from = len(context) + len(generated)
         context = context + generated + [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(args.obs)]
         turns += 1
     stats.sessions += 1
@@ -70,9 +88,10 @@ async def worker(engine, args, stats, seed, stop: asyncio.Event) -> None:
     # from a fresh prompt and grow turn by turn, so in steady state depths spread over [0, MAX_DEPTH] with the
     # history served from the prefix cache, as in real rollouts.
     depth = rng.randrange(args.min_depth, args.max_depth + 1)
+    first_gen = rng.randint(1, args.gen) if args.stagger else 0
     while not stop.is_set():
-        await session(engine, args, stats, rng, depth, seed)
-        depth = args.prompt_len
+        await session(engine, args, stats, rng, depth, seed, first_gen)
+        depth, first_gen = args.prompt_len, 0
 
 
 async def main(args) -> None:
@@ -90,6 +109,7 @@ async def main(args) -> None:
         distributed_executor_backend="mp",
         disable_log_stats=False,
         max_num_batched_tokens=args.max_num_batched_tokens,
+        enable_return_routed_experts=bool(args.r3),
         **lora,
     )
     engine = AsyncLLM.from_engine_args(engine_args)
@@ -100,6 +120,12 @@ async def main(args) -> None:
             await engine.do_log_stats()
 
     asyncio.create_task(log_engine_stats())
+    args.lora_request = None
+    if args.lora_adapter:
+        from vllm.lora.request import LoRARequest
+
+        # An active adapter makes the engine run the LoRA kernels (with --lora 1 alone none is selected).
+        args.lora_request = LoRARequest("bench", 1, args.lora_adapter)
     stats = Stats()
     stop = asyncio.Event()
     tasks = [asyncio.create_task(worker(engine, args, stats, i, stop)) for i in range(args.concurrency)]
@@ -151,6 +177,11 @@ def parse_args():
     p.add_argument("--max-turns", type=int, default=69)
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--lora", type=int, default=1)
+    p.add_argument("--lora-adapter", default="", help="PEFT adapter dir: route every request through it")
+    p.add_argument("--r3", type=int, default=0, help="1: return routed experts per request (the recipe's R3)")
+    p.add_argument(
+        "--stagger", type=int, default=0, help="1: each slot's first turn generates 1..gen tokens (desync turns)"
+    )
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     p.add_argument("--warmup-s", type=int, default=600)
     p.add_argument("--measure-s", type=int, default=900)
