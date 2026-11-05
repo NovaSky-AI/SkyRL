@@ -39,7 +39,7 @@ from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberW
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_NO_ROW,
     SCORE_CENTERING_SCORES_KEY,
-    SUPPORT_LOGPROB_TERM_KEY,
+    SUPPORT_PROB_TERM_KEY,
     PackedSampleSupport,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
@@ -47,7 +47,7 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     missing_sample_support_message,
     sample_support_row_ids_in_batch_positions,
     score_aligned_sample_support,
-    support_logprob_term,
+    support_prob_term,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
@@ -338,7 +338,7 @@ class HFModelWrapper(nn.Module):
         With ``centering_weight`` (sample-support replay only), ``output`` also holds the
         canonical-position ``SampleSupportScores`` under ``SCORE_CENTERING_SCORES_KEY``. With
         ``weighted_support``, support whose rows carry member values, ``output`` also holds each logit
-        position's ``sum_v w_v log pi(v)`` as a ``SupportLogprobTerm`` under ``SUPPORT_LOGPROB_TERM_KEY``.
+        position's ``sum_v w_v pi(v)`` as a ``SupportProbTerm`` under ``SUPPORT_PROB_TERM_KEY``.
         """
         has_image_inputs = pixel_values is not None or image_grid_thw is not None
         support_channels = None
@@ -353,7 +353,7 @@ class HFModelWrapper(nn.Module):
         term_channels = None
         if weighted_support is not None:
             if loss_mask is None:
-                raise ValueError("the support logprob term needs the microbatch's loss mask")
+                raise ValueError("the support prob term needs the microbatch's loss mask")
             term_channels = _SampleSupportChannels.build(sequences, attention_mask, weighted_support, loss_mask)
         if self.is_vlm:
             # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
@@ -449,7 +449,7 @@ class HFModelWrapper(nn.Module):
 
         support_term = None
         if term_channels is not None:
-            support_term = support_logprob_term(
+            support_term = support_prob_term(
                 logits_BSV,
                 sequences_rolled,
                 weighted_support,
@@ -500,7 +500,7 @@ class HFModelWrapper(nn.Module):
 
         log_probs = to_canonical_batch_positions(log_probs)
         if support_term is not None:
-            output[SUPPORT_LOGPROB_TERM_KEY] = support_term.map(to_canonical_batch_positions)
+            output[SUPPORT_PROB_TERM_KEY] = support_term.map(to_canonical_batch_positions)
         if centering_weight is not None:
             output[SCORE_CENTERING_SCORES_KEY] = SampleSupportScores(
                 logprobs=log_probs,

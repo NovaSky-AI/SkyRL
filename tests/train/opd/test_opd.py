@@ -1163,6 +1163,8 @@ async def test_trainer_top_k_zero_leaves_a_generators_support_alone(tokenizer):
 # SupportFakeGenerator's rows under FakeTeacher (log q(t) = -t/100): every row is [sampled, 50, 51] then
 # [sampled, 52]; the EOS has none. No sampled token is a candidate.
 TOP_K_C = [0.0 + math.exp(-1.0) * (-0.51 + 1.0), math.exp(-0.25) * (-0.52 + 0.25), 0.0]
+# The candidates' a(v) = log q - log p: 50 and 51 in the first rows, 52 in the second.
+TOP_K_A = [-0.50 + 0.5, -0.51 + 1.0, -0.52 + 0.25]
 
 
 async def _top_k_batch(trainer):
@@ -1194,9 +1196,10 @@ async def test_trainer_top_k_advantages_and_logit_weights(use_task_reward, token
     torch.testing.assert_close(batch["advantages"], rl_advantages + 2.0 * (teacher - student))
     if use_task_reward:
         assert rl_advantages.abs().sum() > 0
-    # The member values are now the worker's weights: slot 0, the sampled token, gets 0, each candidate its c_v.
-    c_50, c_51, c_52 = 0.0, 2.0 * TOP_K_C[0], 2.0 * TOP_K_C[1]
-    weights = [0.0, c_50, c_51, 0.0, c_52]
+    # The member values are now the worker's weights: slot 0, the sampled token, gets 0, each candidate
+    # kl_coef * a(v). The worker multiplies by the current pi(v); C (the metric) uses the sampler's p(v).
+    w_50, w_51, w_52 = (2.0 * a for a in TOP_K_A)
+    weights = [0.0, w_50, w_51, 0.0, w_52]
     np.testing.assert_allclose(
         batch[SAMPLE_SUPPORT_FIELD].columns[SampleSupportColumn.MEMBER_VALUES].numpy(), weights * 2, atol=1e-6
     )

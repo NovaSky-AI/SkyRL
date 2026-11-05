@@ -571,26 +571,27 @@ def sample_support_scores(
 
 
 @dataclass(frozen=True)
-class SupportLogprobTerm:
-    """Per model position, ``sum_v w_v log pi(v)`` over the row's members, split at the position's sampled token y.
+class SupportProbTerm:
+    """Per model position, ``sum_v w_v pi(v)`` over the row's members, factored around the position's sampled token y.
 
-    ``log pi(v) = (l_v - l_y) + log pi(y)``, so the sum is ``anchored + weight_sum * log pi(y)``. ``anchored``,
-    ``sum_v w_v (l_v - l_y)``, needs only raw logits; ``weight_sum``, ``sum_v w_v``, multiplies the policy's own
-    logprob of y, which the loss already has. Positions without a row are 0 in both.
+    ``pi(v) = exp(l_v - l_y) * pi(y)``. With ``m`` the row's largest member logit, held constant, the sum is
+    ``scaled_sum * exp(log_scale + log pi(y))``: ``scaled_sum``, ``sum_v w_v exp(l_v - m)``, and ``log_scale``,
+    ``m - l_y``, need only raw logits, and the policy's own logprob of y, which the loss already has, supplies the
+    normalizer. Every exponent is at most 0. Positions without a row are 0 in both.
     """
 
-    anchored: torch.Tensor
-    weight_sum: torch.Tensor
+    scaled_sum: torch.Tensor
+    log_scale: torch.Tensor
 
-    def map(self, fn) -> "SupportLogprobTerm":
-        return SupportLogprobTerm(anchored=fn(self.anchored), weight_sum=fn(self.weight_sum))
+    def map(self, fn) -> "SupportProbTerm":
+        return SupportProbTerm(scaled_sum=fn(self.scaled_sum), log_scale=fn(self.log_scale))
 
     def value(self, positions: slice, sampled_logprobs: torch.Tensor) -> torch.Tensor:
-        """``sum_v w_v log pi(v)`` at ``positions``, given the policy's logprob of each sampled token there."""
-        return self.anchored[:, positions] + self.weight_sum[:, positions] * sampled_logprobs
+        """``sum_v w_v pi(v)`` at ``positions``, given the policy's logprob of each sampled token there."""
+        return self.scaled_sum[:, positions] * torch.exp(self.log_scale[:, positions] + sampled_logprobs)
 
 
-def support_logprob_term(
+def support_prob_term(
     logits_or_hidden: torch.Tensor,
     sampled_ids: torch.Tensor,
     support: PackedRaggedTensor,
@@ -602,11 +603,11 @@ def support_logprob_term(
     lm_head_weight: torch.Tensor | None = None,
     temperature: float = 1.0,
     chunk_size: int | None = None,
-) -> SupportLogprobTerm:
-    """``sum_v w_v log pi(v)`` per model position over its row's members, with ``w_v`` the support's member values.
+) -> SupportProbTerm:
+    """``sum_v w_v pi(v)`` per model position over its row's members, with ``w_v`` the support's member values.
 
     Every row with members must contain the position's sampled token, which anchors the logits so that no
-    normalizer is needed (``SupportLogprobTerm``). ``l`` are the raw logits, gathered from ``logits_or_hidden`` or
+    normalizer is needed (``SupportProbTerm``). ``l`` are the raw logits, gathered from ``logits_or_hidden`` or
     projected from hidden states with ``lm_head_weight``.
     """
     if logits_or_hidden.shape[:-1] != sampled_ids.shape or row_ids.shape != sampled_ids.shape:
@@ -616,7 +617,7 @@ def support_logprob_term(
         )
     member_values = packed_member_values(support)
     if member_values is None:
-        raise ValueError("the support logprob term needs member values, but the support carries none")
+        raise ValueError("the support prob term needs member values, but the support carries none")
     rows = _SupportRows.build(
         support,
         support.columns[SampleSupportColumn.TOKEN_IDS],
@@ -639,24 +640,31 @@ def support_logprob_term(
         temperature=temperature,
         chunk_size=chunk_size,
     )
-    weights = member_values.to(local_values.dtype)
-    local_weights = weights[rows.local_members]
-    weighted_logits, sampled_logits = _tp_sum(
+    local_weights = member_values.to(local_values.dtype)[rows.local_members]
+    # The shift m enters scaled_sum and log_scale with opposite signs, so it is a constant and needs no gradient.
+    local_max = torch.full((rows.num_rows,), float("-inf"), dtype=local_values.dtype, device=local_values.device)
+    local_max.scatter_reduce_(0, rows.local_rows, local_values.detach(), reduce="amax", include_self=True)
+    shift = torch.where(rows.projected_rows, _tp_max(local_max, tp_group), 0.0)
+    # Each rank's share of both sums depends only on its own logits, so _tp_sum keeps every gradient on its owner.
+    # l_y then enters only log_scale, linearly, so its owner's gradient covers the members on every rank.
+    scaled_sum, sampled_logits = _tp_sum(
         torch.stack(
             [
-                rows.row_sum(local_weights * local_values),
+                rows.row_sum(local_weights * torch.exp(local_values - shift[rows.local_rows])),
                 rows.row_sum(torch.where(is_sampled[rows.local_members], local_values, 0.0)),
             ]
         ),
         tp_group,
     )
-    weight_sum = weights.new_zeros(rows.num_rows).index_add(0, rows.member_rows, weights)
     # A duplicated sampled token reads the same logit twice, so the anchor is their mean.
     anchor = sampled_logits / sampled_count.clamp(min=1).to(sampled_logits.dtype)
-    anchored = torch.where(rows.projected_rows, weighted_logits - weight_sum * anchor, 0.0)
-    return SupportLogprobTerm(
-        anchored=rows.at_positions(anchored),
-        weight_sum=rows.at_positions(torch.where(rows.valid_rows, weight_sum, 0.0)),
+    # A row whose only member is the sampled token is not projected: its sum is w_y pi(y), so m = l_y.
+    row_weight = scaled_sum.new_zeros(rows.num_rows).index_add(0, rows.member_rows, member_values.to(scaled_sum.dtype))
+    return SupportProbTerm(
+        scaled_sum=rows.at_positions(
+            torch.where(rows.projected_rows, scaled_sum, torch.where(rows.valid_rows, row_weight, 0.0))
+        ),
+        log_scale=rows.at_positions(torch.where(rows.projected_rows, shift - anchor, 0.0)),
     )
 
 
@@ -786,7 +794,7 @@ def compute_sample_support_scores(
     )
 
 
-def compute_support_logprob_term(
+def compute_support_prob_term(
     logits_or_hidden: torch.Tensor,
     sequences: torch.Tensor,
     support: PackedSampleSupport,
@@ -799,11 +807,11 @@ def compute_support_logprob_term(
     lm_head_weight: torch.Tensor | None,
     temperature: float,
     chunk_size: int | None,
-) -> SupportLogprobTerm:
-    """``support_logprob_term`` in canonical ``[batch, seq_len - 1]`` trainer positions, for Megatron's padded and
+) -> SupportProbTerm:
+    """``support_prob_term`` in canonical ``[batch, seq_len - 1]`` trainer positions, for Megatron's padded and
     packed layouts, aligned like ``compute_sample_support_scores``: position ``t`` predicts token ``t + 1``."""
     if metadata_layout is None:
-        raise ValueError("the support logprob term requires the shared token metadata layout")
+        raise ValueError("the support prob term requires the shared token metadata layout")
     if packed:
         row_ids = align_sample_support_row_ids(support, metadata_layout)
         aligned_sampled_ids = align_token_metadata(sequences, metadata_layout, 0, next_token=True)
@@ -813,7 +821,7 @@ def compute_support_logprob_term(
         row_ids = sample_support_row_ids_in_batch_positions(support, metadata_layout)[:, :-1]
         aligned_sampled_ids = sequences[:, 1:]
         aligned_source = logits_or_hidden[:, :-1]
-    term = support_logprob_term(
+    term = support_prob_term(
         aligned_source,
         aligned_sampled_ids,
         support,

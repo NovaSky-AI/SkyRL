@@ -224,10 +224,10 @@ def with_member_values(support: PackedRaggedTensor, values: torch.Tensor) -> Pac
 @dataclass(frozen=True)
 class TopKWeights:
     member_weights: torch.Tensor
-    """float32 ``[members]``: each member's weight in the worker's ``sum_v w_v log pi(v)``. Candidates get ``c_v``;
-    slot 0, which holds the sampled token so the worker can anchor its logits, gets 0."""
+    """float32 ``[members]``: each member's weight in the worker's ``sum_v w_v pi(v)``. Candidates get
+    ``kl_coef * a(v)``; slot 0, which holds the sampled token so the worker can anchor its logits, gets 0."""
     token_weights: torch.Tensor
-    """``[batch, response]``: the position's ``C = sum_v c_v``, for metrics."""
+    """``[batch, response]``: the position's ``C = sum_v c_v`` with ``c_v = kl_coef * a(v) * p(v)``, for metrics."""
     sampled_in_topk: torch.Tensor
     """bool ``[batch, response]``: the sampled token is one of its position's candidates."""
     student_mass: torch.Tensor
@@ -240,10 +240,10 @@ def topk_weights(support: PackedRaggedTensor, loss_mask: torch.Tensor, opd: OPDC
     """TT-OPD's top-K term, split for the trainer and the worker.
 
     ``support`` holds scored token rows ``[sampled, candidates...]``: the sampler's logprob in the logprob column
-    (unused for slot 0) and the teacher's in the member-value column. Each candidate ``v`` gets
-    ``c_v = kl_coef * a(v) * p(v)``, with ``a`` regulated by ``teacher_signal`` and ``p(v)`` the sampler's. The worker
-    adds ``-sum_v c_v log p(v)`` at the current policy, with no importance ratio: nothing in the sum was sampled at
-    this position, so the top-K term stays exact on every update of a batch.
+    (unused for slot 0) and the teacher's in the member-value column. Each candidate ``v`` gets the weight
+    ``kl_coef * a(v)``, with ``a`` regulated by ``teacher_signal``. The worker adds ``-sum_v w_v pi(v)`` with no
+    importance ratio, since nothing in it was sampled at this position. ``pi(v)`` is the current policy's, as the
+    importance-weighted tail's is for the other tokens, so the two stay one estimator on every update of a batch.
     """
     ids = support.columns[SampleSupportColumn.TOKEN_IDS].long()
     student = support.columns[SampleSupportColumn.LOGPROBS]
@@ -253,7 +253,8 @@ def topk_weights(support: PackedRaggedTensor, loss_mask: torch.Tensor, opd: OPDC
     is_candidate = torch.arange(support.num_members, device=support.device) != first_member
 
     signal = teacher_signal(student, teacher, opd).signal
-    coefficients = torch.where(is_candidate, opd.kl_coef * signal * student.exp(), torch.zeros_like(signal))
+    weights = torch.where(is_candidate, opd.kl_coef * signal, torch.zeros_like(signal))
+    coefficients = weights * student.exp()
 
     def row_sum(values: torch.Tensor) -> torch.Tensor:
         return values.new_zeros(support.num_rows).index_add(0, row_of_member, values)
@@ -271,7 +272,7 @@ def topk_weights(support: PackedRaggedTensor, loss_mask: torch.Tensor, opd: OPDC
     sampled_in_topk = torch.zeros(loss_mask.shape, dtype=torch.bool, device=support.device)
     sampled_in_topk[batch[hits], column[hits]] = True
     return TopKWeights(
-        member_weights=coefficients,
+        member_weights=weights,
         token_weights=on_tokens(row_sums),
         sampled_in_topk=sampled_in_topk,
         student_mass=on_tokens(row_sum(torch.where(is_candidate, student.exp(), torch.zeros_like(student)))),

@@ -77,7 +77,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     compute_sample_support_scores,
-    compute_support_logprob_term,
+    compute_support_prob_term,
     reject_unsupported_sample_support_packing,
     score_centering_loss_inputs,
     score_centering_metrics,
@@ -958,8 +958,8 @@ class MegatronModelWrapper:
             weighted_support = data.get(SAMPLE_SUPPORT_FIELD)
             if packed_member_values(weighted_support) is not None:
                 # The member values are pre-scaled like the advantages, so this sums like the policy loss. It
-                # takes the current logprob of each sampled token and no importance ratio.
-                support_term = compute_support_logprob_term(
+                # takes the current policy at every member and no importance ratio.
+                support_term = compute_support_prob_term(
                     logits,
                     sequences,
                     weighted_support,
