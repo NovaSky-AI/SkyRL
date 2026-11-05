@@ -116,6 +116,13 @@ class SkycapConfig:
     (default): whenever ``skycap.exposure`` is set, so routes reachable from outside the cluster can't be written to
     by whoever learns a URL."""
     """How agents inside remote sandboxes reach the servers."""
+    check_first_batch: bool = True
+    """Stop the run when not one trajectory of the generator's first batch has anything to train: the agents
+    never got a usable reply from skycap (no ``skycap.exposure`` for a remote sandbox, a tunnel that didn't come
+    up, a task without network, an agent that failed before its first call, every call rejected), or the path
+    rule kept no rows. Only the first batch is checked; a later batch that trains nothing is more likely an
+    outage the run recovers from. ``false`` trains on anyway, e.g. for an agent that never calls the model
+    (Harbor's ``oracle``, to debug a verifier)."""
 
 
 @dataclass
@@ -206,6 +213,7 @@ class HarborSkycapExp(HarborExp):
             train_paths=cfg.skycap.train_paths,
             records=self.records,
             include_images=cfg.skycap.include_images,
+            check_first_batch=cfg.skycap.check_first_batch,
         )
         return self.generator
 
