@@ -2190,8 +2190,13 @@ class SkyRLTrainConfig(BaseConfig):
                 raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
             if sampling_params.repetition_penalty != 1.0:
                 raise ValueError("sample-support capture requires repetition_penalty=1.0")
-            if sampling_params.additional_kwargs:
-                raise ValueError("sample-support capture does not support sampling_params.additional_kwargs")
+            # ignore_eos only changes when generation stops, not the sampling distribution, so the captured
+            # support stays exact; every other extra kwarg (min_tokens, logit biases, ...) may reshape it.
+            unsupported = set(sampling_params.additional_kwargs or {}) - {"ignore_eos"}
+            if unsupported:
+                raise ValueError(
+                    f"sample-support capture does not support sampling_params.additional_kwargs {sorted(unsupported)}"
+                )
             if self.generator.vision_language_generator:
                 raise ValueError("sample-support capture does not support vision_language_generator")
 
