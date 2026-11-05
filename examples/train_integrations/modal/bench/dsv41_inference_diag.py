@@ -4,10 +4,13 @@ Phases (name, concurrency, obs tokens per turn): 640 sessions (the bench's 80/GP
 prefill (pure decode), 64, 256. Each phase: WARMUP s, then MEASURE s of generated tok/s, per GPU and per sequence.
 
     python dsv41_inference_diag.py --model <dir> [--lora 0|1] [--warmup 120] [--measure 120]
+        [--phases c640,c640_noobs] [--engine-kwargs '{"max_num_batched_tokens": 4096}']
+        [--profile c640:8 --profile-dir <dir>]   # torch-profile 8 s of phase c640 after its warmup
 """
 
 import argparse
 import asyncio
+import json
 import os
 import random
 import sys
@@ -19,7 +22,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs  # noqa: E402
 from vllm.v1.engine.async_llm import AsyncLLM  # noqa: E402
 
 
-async def phase(engine, base, name, concurrency, obs, warmup, measure):
+async def phase(engine, base, name, concurrency, obs, warmup, measure, profile_s=0):
     args = argparse.Namespace(**{**vars(base), "obs": obs})
     stats = Stats()
     stop = asyncio.Event()
@@ -31,6 +34,11 @@ async def phase(engine, base, name, concurrency, obs, warmup, measure):
 
     tasks = [asyncio.create_task(worker(i)) for i in range(concurrency)]
     await asyncio.sleep(warmup)
+    if profile_s:
+        await engine.start_profile()
+        await asyncio.sleep(profile_s)
+        await engine.stop_profile()
+        print(f"[diag] {name}: profiled {profile_s}s", flush=True)
     stats.counting = True
     t0 = time.time()
     await asyncio.sleep(measure)
@@ -57,28 +65,38 @@ async def stats_loop(engine):
 
 async def main(a):
     lora = {"enable_lora": True, "max_lora_rank": 32, "max_loras": 1} if a.lora else {}
-    engine = AsyncLLM.from_engine_args(
-        AsyncEngineArgs(
-            model=a.model,
-            tensor_parallel_size=a.tp,
-            trust_remote_code=True,
-            max_model_len=262144,
-            max_num_seqs=1024,
-            gpu_memory_utilization=0.85,
-            enable_prefix_caching=True,
-            swa_bounded_replay=False,
-            async_scheduling=True,
-            distributed_executor_backend="mp",
-            disable_log_stats=False,
-            **lora,
-        )
+    kwargs = dict(
+        model=a.model,
+        tensor_parallel_size=a.tp,
+        trust_remote_code=True,
+        max_model_len=262144,
+        max_num_seqs=1024,
+        gpu_memory_utilization=0.85,
+        enable_prefix_caching=True,
+        swa_bounded_replay=False,
+        async_scheduling=True,
+        distributed_executor_backend="mp",
+        disable_log_stats=False,
+        **lora,
     )
+    if a.profile:
+        kwargs["profiler_config"] = {"profiler": "torch", "torch_profiler_dir": a.profile_dir}
+    kwargs.update(json.loads(a.engine_kwargs))
+    print(f"[diag] engine kwargs: {kwargs}", flush=True)
+    engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kwargs))
+    t_ready = time.time()
+    print(f"[diag] engine ready", flush=True)
     asyncio.create_task(stats_loop(engine))
     base = argparse.Namespace(
         tp=a.tp, gen=1065, obs=1870, max_context=262144, max_turns=69, top_k=20, prompt_len=2048
     )
+    profile_phase, _, profile_s = (a.profile or "").partition(":")
+    wanted = a.phases.split(",") if a.phases else None
     for name, conc, obs in [("c640", 640, 1870), ("c640_noobs", 640, 0), ("c64", 64, 1870), ("c256", 256, 1870)]:
-        await phase(engine, base, name, conc, obs, a.warmup, a.measure)
+        if wanted is None or name in wanted:
+            prof = int(profile_s) if name == profile_phase else 0
+            await phase(engine, base, name, conc, obs, a.warmup, a.measure, prof)
+    print(f"[diag] all phases done {time.time() - t_ready:.0f}s after engine ready", flush=True)
     engine.shutdown()
     os._exit(0)
 
@@ -90,4 +108,8 @@ if __name__ == "__main__":
     p.add_argument("--lora", type=int, default=0)
     p.add_argument("--warmup", type=int, default=120)
     p.add_argument("--measure", type=int, default=120)
+    p.add_argument("--phases", default="", help="comma-separated subset of c640,c640_noobs,c64,c256")
+    p.add_argument("--engine-kwargs", default="{}", help="JSON merged over the default AsyncEngineArgs")
+    p.add_argument("--profile", default="", help="PHASE:SECONDS to torch-profile after that phase's warmup")
+    p.add_argument("--profile-dir", default="/tmp/dsv41_vllm_profile")
     asyncio.run(main(p.parse_args()))
