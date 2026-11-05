@@ -54,7 +54,13 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # high concurrency, first seen ~1 min into step 1 at 32x8 rollouts. Off, the sliding-window cache joins prefix caching.
 # The colocated recipe sets it off too. ASYNC_SCHEDULING=false is no longer needed (it only lowered concurrency).
 : "${ASYNC_SCHEDULING:=true}"
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"'}'
+# Chunked-prefill token budget per engine step. vLLM's default (2048) leaves ~1,400 tokens next to 640 running decodes
+# while each multi-turn observation is ~1,870 tokens, so requests queue for admission and steps mix a little prefill
+# into every decode (the mixed steps run piecewise CUDA graphs, launch-bound). 8x B200, TP8, LoRA on, 640 sessions
+# (bench dsv41_inference_diag.py), gen tok/s/GPU: 2048 -> 479, 16384 -> 743, 32768 -> 898 (pure decode 576 -> 1257 /
+# 1197). Costs KV cache: 78.9 -> 73.6 -> 68.0 GiB/GPU.
+: "${MAX_NUM_BATCHED_TOKENS:=32768}"
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"'}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
