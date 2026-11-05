@@ -42,13 +42,25 @@ class MockEngine:
         self.delay = 0.0
         #: The finish reason every completion reports, e.g. ``"length"`` for a cut-off.
         self.finish_reason = "stop"
+        #: ``chat_tokens(messages) -> prompt tokens`` answers ``/v1/chat/completions`` (unset: 404).
+        self.chat_tokens: Any = None
+        self.chat_requests: list[dict[str, Any]] = []
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=1024**3)
         app.router.add_post("/inference/v1/generate", self.vllm)
         app.router.add_post("/finish_session", self.finish_session)
         app.router.add_get("/v1/models", self.models)
+        app.router.add_post("/v1/chat/completions", self.chat)
         return app
+
+    async def chat(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        self.chat_requests.append(body)
+        if self.chat_tokens is None:
+            return web.json_response({"error": "not found"}, status=404)
+        usage = {"prompt_tokens": self.chat_tokens(body["messages"]), "completion_tokens": 1}
+        return web.json_response({"choices": [{"message": {"role": "assistant", "content": "x"}}], "usage": usage})
 
     def _generate(self, body: dict[str, Any]) -> tuple[list[int], list[float]] | None:
         prompt = body["token_ids"]

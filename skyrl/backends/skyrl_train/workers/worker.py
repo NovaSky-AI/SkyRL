@@ -43,6 +43,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    PolicyLossType,
     compute_approx_kl,
     ppo_critic_loss,
     score_centering_weight,
@@ -425,6 +426,10 @@ class Worker(DistributedTorchRayActor):
         """Return this rank's last-window kernel summary, or None."""
         return self.profiler.get_kernel_summary() if self.profiler is not None else None
 
+    def get_device_name(self) -> str:
+        """Returns this worker's CUDA device name, e.g. ``"NVIDIA B200"``, or ``""`` without a GPU."""
+        return torch.cuda.get_device_name() if torch.cuda.is_available() else ""
+
     def _get_module_for_offload(self):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
         return self.model
@@ -700,6 +705,12 @@ class Worker(DistributedTorchRayActor):
         finalize = getattr(self.strategy, "finalize_pending_saves", None)
         if finalize is not None:
             finalize()
+
+    def release_optimizer_state_files(self):
+        """Delete optimizer state kept in files (Megatron ``optimizer_offload_to_disk``) at the end of training."""
+        release = getattr(self.strategy, "release_optimizer_state_files", None)
+        if release is not None and getattr(self, "optimizer", None) is not None:
+            release(self.optimizer)
 
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(
@@ -1180,8 +1191,8 @@ class PolicyWorkerBase(Worker):
                 **score_centering_kwargs,
             )
 
-        # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
-        if resolved_loss_name == "cross_entropy":
+        # SFT objectives contain their complete loss and need no RL KL/entropy terms.
+        if resolved_loss_name == PolicyLossType.CROSS_ENTROPY:
             # Policy loss masks are pre-scaled to achieve the correct reduction
             # when summing across the entire minibatch (see `DefaultCollator`).
             # FSDP averages loss value over DP ranks by default,

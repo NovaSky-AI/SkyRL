@@ -16,7 +16,12 @@ import pytest_asyncio
 import ray
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 
 from skyrl.backends.skyrl_train.inference_servers import (
     remote_inference_client as remote_client_module,
@@ -119,6 +124,18 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     @app.post("/test/bad_request_text")
     async def bad_request_text():
         return PlainTextResponse("prompt too long", status_code=400)
+
+    @app.post("/test/control_body")
+    async def control_body(kind: str, chunked: bool, status: int = 200):
+        body = {
+            "json": b'{"success": true}',
+            "empty": b"",
+            "invalid": b"not-json",
+            "error": b'{"error": {"message": "reset unavailable"}}',
+        }[kind]
+        if chunked:
+            return StreamingResponse(iter([body]), media_type="application/json", status_code=status)
+        return Response(body, media_type="application/json", status_code=status)
 
     @app.post("/test/control_hang")
     async def control_hang():
@@ -351,8 +368,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
         return {"status": "awake", "server_id": server_id, "tags": tags}
 
     @app.post("/reset_prefix_cache")
-    async def reset_prefix_cache(request: Request):
-        return {"status": "cache_reset", "server_id": server_id, "body": await request.json()}
+    async def reset_prefix_cache(reset_running_requests: bool = Query(False)):
+        return {"success": True, "reset_running_requests": reset_running_requests}
 
     @app.post("/init_weight_transfer_engine")
     async def init_weight_transfer_engine(request: Request):
@@ -908,6 +925,43 @@ class TestControlPlane:
     """Test control plane methods (fan-out to all servers)."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize("kind,expected", [("json", {"success": True}), ("empty", None)])
+    async def test_control_response_body(self, client, chunked, kind, expected):
+        url = client.server_urls[0]
+
+        result = await client._call_server(
+            url, "/test/control_body", params={"kind": kind, "chunked": str(chunked).lower()}
+        )
+
+        assert result == (url, {"status": 200, "body": expected})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    async def test_control_response_invalid_json(self, client, chunked):
+        with pytest.raises(json.JSONDecodeError):
+            await client._call_server(
+                client.server_urls[0],
+                "/test/control_body",
+                params={"kind": "invalid", "chunked": str(chunked).lower()},
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize("kind", ["error", "empty"])
+    async def test_control_response_http_error(self, client, chunked, kind):
+        with pytest.raises(aiohttp.ClientResponseError) as error:
+            await client._call_server(
+                client.server_urls[0],
+                "/test/control_body",
+                params={"kind": kind, "chunked": str(chunked).lower(), "status": 503},
+            )
+
+        assert error.value.status == 503
+        if kind == "error":
+            assert error.value.message == "reset unavailable"
+
+    @pytest.mark.asyncio
     async def test_pause_keep_mode(self, client):
         """Test pause with KEEP mode (default) sends mode=keep and clear_cache=false."""
         result = await client.pause(mode=PauseMode.KEEP)
@@ -1000,13 +1054,13 @@ class TestControlPlane:
             assert response["body"]["tags"] == ["weights"]
 
     @pytest.mark.asyncio
-    async def test_reset_prefix_cache(self, client):
-        """Test reset_prefix_cache fans out to all servers with the request body."""
-        result = await client.reset_prefix_cache(reset_running_requests=True)
+    @pytest.mark.parametrize("reset_running_requests", [False, True])
+    async def test_reset_prefix_cache(self, client, reset_running_requests):
+        """Reset uses vLLM's query parameter on every server."""
+        result = await client.reset_prefix_cache(reset_running_requests=reset_running_requests)
         assert set(result) == set(client.server_urls)
         for response in result.values():
-            assert response["body"]["status"] == "cache_reset"
-            assert response["body"]["body"] == {"reset_running_requests": True}
+            assert response["body"] == {"success": True, "reset_running_requests": reset_running_requests}
 
 
 class TestWeightSync:
