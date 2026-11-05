@@ -11,10 +11,28 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
 - GLM-5.3-Flash (`glm5_next`): `skyrl/backends/skyrl_train/patches/megatron/glm5_next/` (provider, block
   spec, bridge; Megatron-Bridge-shaped) on top of `skyrl/backends/skyrl_train/patches/megatron/mcore_ext/`
   (Megatron-Core-shaped: `hyper_connection.py` backport of Megatron-LM main's mHC module,
-  `mhc_transformer_layer.py` mHC layer with MoE support, `kda.py` KDA linear attention, `dsa_kpool.py` k-pool
-  DSA indexer kernels). The DSA layers are megatron-core's `DSAttention` (NoPE MLA) with the k-pool top-k
-  swapped in by `glm5_next/dsa.py`. Removal plan when bumping megatron: `patches/megatron/README.md`. Requires
+  `mhc_transformer_layer.py` mHC layer with MoE support, `kda.py` KDA linear attention). The DSA layers are
+  megatron-core's `DSAttention` (NoPE MLA, k-pool indexer); `glm5_next/dsa.py` adds a long-sequence guard and
+  the opt-in `SKYRL_DSA_INDEXER_TP_SHARD`. Removal plan when bumping megatron: `patches/megatron/README.md`. Requires
   `language_model_only=True` (VL checkpoint) and packed sequences (`remove_microbatch_padding=True`).
+- Beam (`beam`): upstream Megatron-Bridge `BeamBridge` (`HybridModel`, attention + MLP hybrid layer per decoder
+  layer) and vLLM 0.33's `BeamForCausalLM`, served with LoRA through `patches/vllm/patch_beam_lora.py` (a
+  `vllm.general_plugins` entry point registering a `SupportsLoRA` subclass). SkyRL also carries the transformers
+  config (`patches/transformers/configuration_beam.py`), the CP comm-type default, the fused LM-head softcap and the
+  FP8 spec (`weight_sync/fp8/models/beam.py`); see `patches/megatron/README.md`. Tiny-model GPU rows: `beam-tiny_*` in
+  `gpu_ci/megatron/test_megatron_{,lora_}models.py` (`megatron_tiny_models/create_beam_tiny.py`).
+
+## Optimizer state on disk
+
+`megatron_config.optimizer_offload_to_disk` (`skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py`):
+`OffloadedDistributedOptimizer` subclasses megatron-core's `DistributedOptimizer`, keeps fp32 mains + Adam moments
+for each rank's contiguous DDP-bucket shards in one file per rank and optimizer, and streams them through the GPU in
+chunks during `step_with_ready_grads`. Its `_build_model_and_main_param_groups` is generated from the installed
+megatron-core source by replacing one line (`shard_main_param = shard_model_param.clone().float()`); a megatron-core
+bump that moves that line fails `tests/backends/skyrl_train/distributed/test_optimizer_offload_to_disk.py` (run with
+`--extra megatron`) and the GPU test. Correctness test (bit-identity vs the regular optimizer, 2 GPUs):
+`tests/backends/skyrl_train/gpu/gpu_ci/test_optimizer_offload_to_disk.py`. See also
+`skyrl/backends/skyrl_train/patches/megatron/README.md`.
 
 ## Parallelism Strategies
 

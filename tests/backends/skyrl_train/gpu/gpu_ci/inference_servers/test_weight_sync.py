@@ -138,12 +138,18 @@ async def _completion(http_client, router_url, model):
     return resp.json()["choices"][0]["text"]
 
 
-async def _assert_sync_replaces_dummy_weights(env, timeout_s: float = 120.0):
-    """Dummy weights -> sync -> real weights.
+async def _assert_sync_replaces_dummy_weights(
+    env, timeout_s: float = 120.0, num_syncs: int = 2, sync_timeout_s: float = 600.0
+):
+    """Dummy weights -> sync -> real weights, then sync again.
 
     ``load_format="dummy"`` starts the server with garbage, so "Paris" appearing
     proves the transfer landed *and* that ``process_weights_after_loading`` ran
     (an unfinalized layerwise reload produces garbage too).
+
+    The repeat syncs cover the steady state: from vLLM 0.33 the NCCL engine
+    sends an empty update info when a round's metadata matches the previous
+    one, and a receiver that cannot resolve it hangs in the broadcast.
     """
     router_url = env["router_url"]
     trainer = env["trainer"]
@@ -154,12 +160,14 @@ async def _assert_sync_replaces_dummy_weights(env, timeout_s: float = 120.0):
         print(f"[step 1] dummy weights output: {text_before!r}")
         assert "Paris" not in text_before, "Dummy weights unexpectedly produced the correct answer"
 
-        print("[step 2] trainer.sync_once() -- rendezvous + one full send_weights()")
-        await asyncio.to_thread(lambda: ray.get(trainer.sync_once.remote()))
+        for sync in range(num_syncs):
+            print(f"[step 2.{sync}] trainer.sync_once() -- rendezvous on the first, then send_weights()")
+            # A timeout here is a hang in the transfer, not flake.
+            await asyncio.to_thread(lambda: ray.get(trainer.sync_once.remote(), timeout=sync_timeout_s))
 
-        text_after = await _completion(http_client, router_url, model)
-        print(f"[step 3] synced weights output: {text_after!r}")
-        assert "Paris" in text_after, f"Weight sync failed - expected 'Paris' but got: {text_after!r}"
+            text_after = await _completion(http_client, router_url, model)
+            print(f"[step 3.{sync}] synced weights output: {text_after!r}")
+            assert "Paris" in text_after, f"Weight sync {sync} failed - expected 'Paris' but got: {text_after!r}"
 
 
 async def _make_env(cfg, create_kwargs, trainer_cls, weight_sync_backend, *, colocate_with_engine=False):
@@ -325,7 +333,8 @@ class TestColocatedIpcWeightUpdateFlow:
         pytest.param((MODEL, {}), id="dense"),
         # Native config: the checkpoint's remote config has no head_dim, so under
         # trust_remote_code vLLM builds 96-dim attention heads instead of 128.
-        pytest.param((NEMOTRON_H, {"trust_remote_code": False}), id="mamba2_nemotron_h"),
+        # This GPU has fewer Mamba cache blocks than vLLM's 1024-sequence default.
+        pytest.param((NEMOTRON_H, {"trust_remote_code": False, "max_num_seqs": 32}), id="mamba2_nemotron_h"),
     ],
 )
 async def rdt_weight_update_env(class_scoped_ray_init_fixture, request):

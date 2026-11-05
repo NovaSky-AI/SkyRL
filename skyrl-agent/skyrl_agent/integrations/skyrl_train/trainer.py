@@ -379,6 +379,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     # Policy model is backloaded to GPU during training
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
+                    self.all_metrics.update(self.policy_mfu_metrics(training_input))
 
                     # 5. conditionally save checkpoints and hf model
                     if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:

@@ -71,10 +71,15 @@ class TokensBackend:
         self.sampling_mask = sampling_mask
         self.logprobs_mode = logprobs_mode
         self.use_raw_content = use_raw_content
+        #: Why the renderer's images can't be sent to the engine, found by the first call with images (``_check_media``).
+        self.media_error: str | None = None
         #: The chat template ``developer`` messages are folded for, if the renderer exposes one.
         self.chat_template: str | None = getattr(renderer, "chat_template", None)
         self._locks: dict[str, asyncio.Lock] = {}
         self._session: aiohttp.ClientSession | None = None
+        #: Whether the first call with images has checked that images can be sent to the engine (``_check_media``).
+        self._media_checked = False
+        self._media_check_lock = asyncio.Lock()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -91,6 +96,87 @@ class TokensBackend:
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=30),
             connector=aiohttp.TCPConnector(limit=0),
         )
+
+    async def _check_media(self) -> None:
+        """Once, before the first call with images: refuse images the engine can't take as rendered here.
+
+        Two checks, both of which would otherwise fail per call or not at all: that the renderer can encode
+        images for vLLM (``validate_media_encoding``; not every family can, e.g. Kimi K2.5), and that the
+        engine processes images as the renderer does (``_compare_engine_processor``). A failure sets
+        ``media_error``, so calls with images get a 400 and text-only calls still work. Not at ``start``, when
+        the engine may not answer yet (SkyRL's colocated engines are asleep then). Concurrent first calls wait
+        for it, and the flag is set only once it's done, so none sends images unchecked.
+        """
+        async with self._media_check_lock:
+            if self._media_checked:
+                return
+            try:
+                check = getattr(self.renderer, "validate_media_encoding", None)
+                error = await asyncio.to_thread(check) if check is not None else None
+                if error is None:
+                    error = await self._compare_engine_processor()
+                if error is not None:
+                    logger.error("%s: refusing calls with images: %s", self.renderer.name, error)
+                    self.media_error = error
+            finally:
+                self._media_checked = True
+
+    async def _compare_engine_processor(self) -> str | None:
+        """Whether the engine processes images as the renderer does: why not, or None.
+
+        Each of the renderer's ``processor_probes`` is rendered here and sent to the engine's
+        ``/v1/chat/completions`` (one token), and the prompt token counts must agree, or the model would see
+        images at another resolution than the engine is configured for. A text-only difference is the chat
+        template's, and an engine that doesn't answer can't be compared: both only warn. Equal counts don't
+        prove equal pixels, but catch different min/max pixels.
+        """
+        probes = getattr(self.renderer, "processor_probes", None)
+        if probes is None or self.media_error:
+            return None
+        name = self.renderer.name
+        try:
+            probes = await asyncio.to_thread(probes)
+        except Exception as error:  # noqa: BLE001 - e.g. Pillow missing; images then fail per request, text works
+            logger.warning("%s: couldn't build the probes to check image processing: %s", name, error)
+            return None
+        if not probes:
+            return None
+        if not self.model:
+            logger.warning("%s: no model name, so image processing isn't checked against the engine", name)
+            return None
+        for label, messages in probes:
+            try:
+                ours = len((await asyncio.to_thread(self.renderer.render, messages, None)).token_ids)
+                async with self.session.post(
+                    f"{self.engine_url}/v1/chat/completions",
+                    json={"model": self.model, "messages": messages, "max_tokens": 1},
+                    headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as up:
+                    body = await up.json(content_type=None)
+                    if up.status != 200:
+                        raise RuntimeError(f"HTTP {up.status}: {str(body)[:300]}")
+                theirs = int(body["usage"]["prompt_tokens"])
+            except Exception as error:  # noqa: BLE001 - whatever the engine or the request raises
+                logger.warning("%s: couldn't check image processing against the engine (%s): %r", name, label, error)
+                return None
+            if ours == theirs:
+                continue
+            if label == "text":
+                logger.warning(
+                    "%s: a text-only prompt is %d tokens here and %d in the engine (the chat templates differ), "
+                    "so image processing isn't checked against the engine",
+                    name,
+                    ours,
+                    theirs,
+                )
+                return None
+            return (
+                f"a {label} prompt is {ours} tokens in skycap and {theirs} in the engine, so the image "
+                "processor settings differ. Give skycap the engine's mm_processor_kwargs (processor_kwargs, "
+                "--processor-kwargs)."
+            )
+        return None
 
     async def close(self) -> None:
         if self._session is not None:
@@ -207,6 +293,17 @@ class TokensBackend:
         sampling.setdefault("stop_token_ids", self.renderer.stop_token_ids())
 
         routes_from = turn.routes_from(graph, planned)
+        features = None
+        if planned.media and not self._media_checked:
+            await self._check_media()
+        if planned.media and self.media_error:
+            return _error(f"{self.renderer.name}'s images can't be sent to the engine: {self.media_error}", 400)
+        if planned.media:
+            try:
+                features = await asyncio.to_thread(self.renderer.features, planned.media)
+            except Exception as error:  # noqa: BLE001 - the renderer's encoder, whatever it raises
+                logger.exception("trajectory %s: encoding the prompt's media failed", trajectory.id)
+                return _error(f"encoding the prompt's media: {error}", 500, kind="api_error")
         body = self.engine.request(
             prompt_ids=planned.prompt_ids,
             sampling=sampling,
@@ -214,6 +311,7 @@ class TokensBackend:
             cache_salt=chat.body.get("cache_salt"),
             sampling_mask=self.sampling_mask,
             routes_from=routes_from,
+            features=features,
         )
         try:
             async with self.session.post(

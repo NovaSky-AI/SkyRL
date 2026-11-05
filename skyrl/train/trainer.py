@@ -79,9 +79,11 @@ from skyrl.train.utils import (
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
+    ReleaseOptimizerStateFilesCallback,
     TrainingCallback,
     TrainingControl,
 )
+from skyrl.train.utils.mfu import MFUTracker, mfu_support
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
@@ -164,12 +166,40 @@ class RayPPOTrainer:
 
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
+        if cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is not None:
+            self.add_callback(ReleaseOptimizerStateFilesCallback())
         self._current_epoch: int = 0
 
         configure_ray_worker_logging()
 
         self._num_training_gpus = (
             cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        )
+        self._mfu_tracker: Optional[MFUTracker] = None
+        if cfg.trainer.log_mfu:
+            self._mfu_tracker = MFUTracker(
+                mfu_support(
+                    cfg.trainer.strategy, cfg.trainer.policy.megatron_config, cfg.trainer.policy.model.lora.rank
+                ),
+                num_gpus=self._num_training_gpus,
+                prefix="trainer",
+            )
+
+    def policy_mfu_metrics(self, training_input: TrainingInputBatch) -> Dict[str, float]:
+        """Returns FLOPs/MFU metrics for the policy training of the step just run.
+
+        Covers forward + backward over every mini-batch and ``update_epochs_per_batch`` epochs.
+        ``mfu`` divides by the policy workers' time in ``forward_backward`` and ``optim_step``, and
+        ``mfu_e2e`` by the driver's ``policy_train`` timing; critic training, the logprob/ref
+        forwards and generation are excluded from both.
+        """
+        if self._mfu_tracker is None:
+            return {}
+        return self._mfu_tracker.step_metrics(
+            self.dispatch,
+            training_input,
+            self.all_timings.get("policy_train", 0.0),
+            passes=self.cfg.trainer.update_epochs_per_batch,
         )
 
     def add_callback(self, callback: TrainingCallback) -> None:
@@ -522,6 +552,7 @@ class RayPPOTrainer:
                         self.all_metrics["trainer/tokens_per_second_per_gpu"] = total_tokens / (
                             train_time * self._num_training_gpus
                         )
+                    self.all_metrics.update(self.policy_mfu_metrics(training_input))
                     # log epoch info
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                     interval_eval = self.cfg.trainer.eval_interval > 0 and (
@@ -1045,6 +1076,12 @@ class RayPPOTrainer:
 
         return training_input
 
+    async def generate_on_input_batch(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        """Run the generator on the input batch.
+
+        Note: put any generator output post processing in `generate` instead of this function."""
+        return await self.generator.generate(input_batch)
+
     @torch.no_grad()
     async def generate(
         self,
@@ -1059,7 +1096,7 @@ class RayPPOTrainer:
         - after calling this method, the same model placement still holds.
         """
         # NOTE: we assume that .generate returns samples in the same order as passed in
-        generator_output: GeneratorOutput = await self.generator.generate(input_batch)
+        generator_output: GeneratorOutput = await self.generate_on_input_batch(input_batch)
 
         # add rollout metrics to self.all_metrics
         if generator_output["rollout_metrics"] is not None:

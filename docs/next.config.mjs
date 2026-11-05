@@ -23,6 +23,21 @@ const config = {
         destination: '/docs/tutorials/placement',
         permanent: true,
       },
+      {
+        source: '/docs/getting-started/supported_models',
+        destination: '/docs/models',
+        permanent: true,
+      },
+      {
+        source: '/docs/examples/beam',
+        destination: '/docs/models/beam',
+        permanent: true,
+      },
+      {
+        source: '/docs/examples/kimi_k2_int4_lora',
+        destination: '/docs/models/kimi',
+        permanent: true,
+      },
     ];
   },
 };

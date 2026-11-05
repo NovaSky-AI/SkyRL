@@ -152,7 +152,7 @@ class VLLMServerActor(ServerActorProtocol):
     called from anywhere (other actors, driver, external processes).
 
     Custom endpoints added for SkyRL:
-    - /reset_prefix_cache: Reset prefix cache
+    - /fetch_weights: Apply checkpoint-delta payloads before reload
 
     Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
     /update_weights, /get_world_size) from the RLHF router when VLLM_SERVER_DEV_MODE=1.
@@ -277,14 +277,6 @@ class VLLMServerActor(ServerActorProtocol):
             from skyrl.backends.skyrl_train.inference_servers.utils import (
                 get_pd_p2p_connector_name,
             )
-            from skyrl.backends.skyrl_train.patches.vllm.patch_multi_connector_stats import (
-                apply_multi_connector_stats_patch,
-            )
-
-            # MultiConnector stacks (e.g. Mooncake P2P + store) crash the
-            # AsyncLLM output handler when a child has stats but no prom
-            # metrics; patch before the engine is built in this process.
-            apply_multi_connector_stats_patch()
 
             # Handle both dict and JSON string formats for kv_transfer_config
             kv_config = getattr(self._cli_args, "kv_transfer_config", None)
@@ -510,17 +502,6 @@ class VLLMServerActor(ServerActorProtocol):
             async def _metrics_worker_info():
                 """Identify the Ray frontend exporting this server's engine metrics."""
                 return Response(content=orjson.dumps(metrics_info), media_type="application/json")
-
-        @app.post("/reset_prefix_cache")
-        async def _reset_prefix_cache(request: Request):
-            """Reset the prefix cache, optionally resetting in-flight requests too."""
-            try:
-                data = await request.json()
-            except Exception:
-                data = {}
-            reset_running_requests = data.get("reset_running_requests", False)
-            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
-            return {"status": "ok"}
 
         @app.post("/fetch_weights")
         async def _fetch_weights(request: Request):
@@ -846,7 +827,7 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     ``--worker-extension-cls``, ...).
     """
     from vllm import AsyncEngineArgs as _AsyncEngineArgs
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.entrypoints.common.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 

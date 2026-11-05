@@ -109,12 +109,12 @@ def test_nonpacked_checkpointed_forwards_keep_index_share_holders_isolated(patch
     )
     checkpoint_calls = []
 
-    def fake_checkpoint(function, _distribute_saved_activations, *args):
+    def fake_checkpoint(function, _config, _tp_group, *args, distribute_saved_activations=False):
         checkpoint_calls.append((function, args))
         with torch.no_grad():
             return function(*args)
 
-    monkeypatch.setattr("megatron.core.recompute.tensor_parallel.checkpoint", fake_checkpoint)
+    monkeypatch.setattr("megatron.core.recompute.precision_aware_checkpoint", fake_checkpoint)
     shared_attention_mask = torch.empty(1)
 
     # F1 then F2: both stage their top-k support before either is recomputed.
