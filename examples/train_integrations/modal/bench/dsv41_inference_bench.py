@@ -17,6 +17,7 @@ After WARMUP_S the script counts generated and prompt tokens over MEASURE_S and 
 
 import argparse
 import asyncio
+import json
 import os
 import random
 import time
@@ -46,13 +47,15 @@ class Stats:
             self.turns += 1
 
 
-async def session(engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int) -> None:
+async def session(
+    engine: AsyncLLM, args, stats: Stats, rng: random.Random, depth: int, wid: int, turn_cap: int = 0
+) -> None:
     context = [rng.randrange(VOCAB_LO, VOCAB_HI) for _ in range(depth)]
     params = SamplingParams(
         max_tokens=args.gen, min_tokens=args.gen, ignore_eos=True, temperature=1.0, top_k=args.top_k, logprobs=0
     )
     turns = 0
-    while turns < args.max_turns and len(context) + args.gen + args.obs < args.max_context:
+    while turns < (turn_cap or args.max_turns) and len(context) + args.gen + args.obs < args.max_context:
         stats.depth[wid] = len(context)
         final = None
         async for out in engine.generate(TokensPrompt(prompt_token_ids=context), params, str(uuid.uuid4())):
@@ -70,14 +73,18 @@ async def worker(engine, args, stats, seed, stop: asyncio.Event) -> None:
     # from a fresh prompt and grow turn by turn, so in steady state depths spread over [0, MAX_DEPTH] with the
     # history served from the prefix cache, as in real rollouts.
     depth = rng.randrange(args.min_depth, args.max_depth + 1)
+    # --desync: the first session of each slot stops after a random number of turns, so slots fall out of step
+    # and turns arrive staggered (as rollouts at different depths do in RL) instead of in one synchronized wave.
+    turn_cap = rng.randint(1, args.max_turns) if args.desync else 0
     while not stop.is_set():
-        await session(engine, args, stats, rng, depth, seed)
+        await session(engine, args, stats, rng, depth, seed, turn_cap)
         depth = args.prompt_len
+        turn_cap = 0
 
 
 async def main(args) -> None:
     lora = {"enable_lora": True, "max_lora_rank": 32, "max_loras": 1} if args.lora else {}
-    engine_args = AsyncEngineArgs(
+    kwargs = dict(
         model=args.model,
         tensor_parallel_size=args.tp,
         trust_remote_code=True,
@@ -92,7 +99,9 @@ async def main(args) -> None:
         max_num_batched_tokens=args.max_num_batched_tokens,
         **lora,
     )
-    engine = AsyncLLM.from_engine_args(engine_args)
+    kwargs.update(json.loads(args.engine_kwargs))
+    print(f"[bench] engine kwargs: { {k: v for k, v in kwargs.items() if k != 'model'} }", flush=True)
+    engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kwargs))
 
     async def log_engine_stats():  # vLLM's running / waiting / KV usage / prefix-cache hit rate
         while True:
@@ -107,11 +116,16 @@ async def main(args) -> None:
     await asyncio.sleep(args.warmup_s)
     stats.counting = True
     t0 = time.time()
+    last_gen, last_t = 0, t0
     for _ in range(args.measure_s // 60):
         await asyncio.sleep(60)
-        dt = time.time() - t0
+        now = time.time()
+        dt = now - t0
+        window = (stats.gen - last_gen) / (now - last_t) / args.num_gpus
+        last_gen, last_t = stats.gen, now
         print(
-            f"[bench] {dt:.0f}s gen {stats.gen / dt:.0f} tok/s ({stats.gen / dt / args.tp:.0f}/GPU) "
+            f"[bench] {dt:.0f}s gen {stats.gen / dt:.0f} tok/s ({stats.gen / dt / args.num_gpus:.0f}/GPU, last min "
+            f"{window:.0f}/GPU) "
             f"prompt {stats.prompt / dt:.0f} tok/s turns {stats.turns} "
             f"mean in-flight context {sum(stats.depth.values()) / max(len(stats.depth), 1):.0f}",
             flush=True,
@@ -120,7 +134,7 @@ async def main(args) -> None:
     print(
         f"[bench] RESULT tp={args.tp} concurrency={args.concurrency} gen={args.gen} obs={args.obs} "
         f"depth=[{args.min_depth},{args.max_depth}] lora={args.lora}: gen {stats.gen / dt:.0f} tok/s "
-        f"= {stats.gen / dt / args.tp:.0f} tok/s/GPU; prompt (incl. cached) {stats.prompt / dt:.0f} tok/s; "
+        f"= {stats.gen / dt / args.num_gpus:.0f} tok/s/GPU; prompt (incl. cached) {stats.prompt / dt:.0f} tok/s; "
         f"{stats.turns} turns in {dt:.0f}s",
         flush=True,
     )
@@ -154,8 +168,13 @@ def parse_args():
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     p.add_argument("--warmup-s", type=int, default=600)
     p.add_argument("--measure-s", type=int, default=900)
+    p.add_argument("--num-gpus", type=int, default=0, help="GPUs for per-GPU rates (default: --tp)")
+    p.add_argument("--desync", type=int, default=0, help="stagger slots: first session ends after a random turn")
+    p.add_argument("--engine-kwargs", default="{}", help="JSON merged over the AsyncEngineArgs above")
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    asyncio.run(main(parse_args()))
+    _args = parse_args()
+    _args.num_gpus = _args.num_gpus or _args.tp
+    asyncio.run(main(_args))
