@@ -66,3 +66,27 @@ GLM-5.3-Flash LoRA 2-node work (agent-A, same branch): `mlp_chunks_for_training=
   on **both** GPU nodes, built by `sim/convert_dsv41_bf16_parallel.py` (parallel version of #2573's `make_slice_v41.py`;
   runner `/shared/hackskyrl/tput_dsv4/run_convert_nodes.py`).
 - venv `/shared/hackskyrl/uv_venvs/tput_dsv4` (`uv sync --extra megatron` of this branch).
+
+## 2026-11-05 overnight: vLLM inference throughput (8xB200, dsv41_inference_bench.py, 640 sessions, 1,065 gen + 1,870 obs/turn, TP8, LoRA r32 enabled)
+
+Harness: /shared/hackskyrl/tput_dsv4/infx (queue_runner.py with a watchdog, results.tsv). 10-min windows unless noted (contexts ~5k-30k); noise ~+-2-3% (baseline 903 / 919).
+
+| config | tok/s/GPU |
+|---|---|
+| budget 32768, lockstep / desync | 919 / 903 (16384: 866) |
+| + final-only (no per-token streaming) | 930 (front-end overhead small) |
+| + max_cudagraph_capture_size 2048 / 4096 / 8192 (x2) | 932 / 958 / 975, 973 (>8192: capture takes ~1h, impractical) |
+| DP8+EP (no LoRA) | 935; DP8+EP+LoRA fails (deep_gemm TMA panic) |
+| forced moe_backend triton / flashinfer_cutlass with LoRA | refuse (SiLU / LoRA unsupported) |
+| **LoRA off** | **1,170** (cap 1024) / **1,408** (cap 4096, final-only) |
+| **LoRA on, routed experts not a LoRA target + FusedMoEConfig.is_lora_enabled=False** | **1,414** (cap 4096) / 1,348 (cap 8192) |
+| 50-min, contexts to ~95k: recipe (Marlin) + cap 8192 | 790 (Modal B300 recipe @16k budget: 819) |
+| 50-min, contexts to ~95k: experts-excluded fast MoE + cap 4096 | **1,208** (prefix hit 96.8%; depthfirst ~1,460/B300) |
+
+Finding: vLLM sets FusedMoEConfig.is_lora_enabled = (lora_config is not None) for every MoE layer, so any LoRA forces the MXFP4
+MoE onto MARLIN (BF16 activations, slow prefill) instead of FLASHINFER_TRTLLM_MXFP4_MXFP8: ~35% of throughput. LoRA on attention /
+shared / dense MLP costs nothing. Adopting the fast path = (1) vLLM: is_lora_enabled False when "experts" is not a LoRA target
+(tested via experiment-only sitecustomize, /shared/hackskyrl/tput_dsv4/infx/sitepatch), (2) trainer: no LoRA on routed experts.
+Logprob gap on the fast path (MXFP8 MoE activations; 64 GSM8K rollouts, R3): mean|d| 0.0195 / k3 KL 0.00175 baseline, 0.0186 /
+0.00167 with SKYRL_DSV41_FAKE_QUANT=reference (Marlin path: 0.0183/0.00145 and 0.0164/0.00114) — ~+10%, still ~6x under KLD 0.01.
+Not adopted: needs a recipe decision (routed-expert LoRA capacity).
