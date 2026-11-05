@@ -208,9 +208,11 @@ class HarborSkycapGenerator(GeneratorInterface):
         if self._check_first_batch and not self._first_batch_done:
             self._first_batch_done = True
             if not any(outcome is not None and outcome.samples for outcome in outcomes):
+                # Where Harbor writes them when the template names no directory.
+                trials_dir = self._template.get("trials_dir") or TrialConfig.model_fields["trials_dir"].default
                 raise RuntimeError(
                     f"No trajectory in the first batch ({len(outcomes)}) has anything to train; each trial's "
-                    f"exception.txt and agent logs are under {self._template.get('trials_dir')}. "
+                    f"exception.txt and agent logs are under {trials_dir}. "
                     "skycap.check_first_batch=false skips this check."
                 )
 
