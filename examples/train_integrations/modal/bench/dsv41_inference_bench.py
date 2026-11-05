@@ -89,7 +89,7 @@ async def main(args) -> None:
         async_scheduling=True,
         distributed_executor_backend="mp",
         disable_log_stats=False,
-        **({"max_num_batched_tokens": args.max_num_batched_tokens} if args.max_num_batched_tokens else {}),
+        max_num_batched_tokens=args.max_num_batched_tokens,
         **lora,
     )
     engine = AsyncLLM.from_engine_args(engine_args)
@@ -139,6 +139,9 @@ def parse_args():
     p.add_argument("--tp", type=int, default=8)
     p.add_argument("--concurrency", type=int, default=640)
     p.add_argument("--max-num-seqs", type=int, default=1024)
+    p.add_argument(
+        "--max-num-batched-tokens", type=int, default=32768, help="chunked-prefill budget (the recipe's value)"
+    )
     p.add_argument("--gen", type=int, default=1065)
     p.add_argument("--obs", type=int, default=1870)
     p.add_argument("--min-depth", type=int, default=0)
@@ -146,9 +149,6 @@ def parse_args():
     p.add_argument("--max-depth", type=int, default=200000)
     p.add_argument("--max-context", type=int, default=262144)
     p.add_argument("--max-turns", type=int, default=69)
-    # Per-step token budget (decode + chunked prefill). vLLM's default here is 2048, which starves the observation
-    # prefills at 640 running sessions; 0 keeps the default.
-    p.add_argument("--max-num-batched-tokens", type=int, default=0)
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--lora", type=int, default=1)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
