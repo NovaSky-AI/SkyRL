@@ -11,6 +11,12 @@ from examples.train_integrations.harbor_skycap.codex import (  # noqa: E402
     CODEX_VERSION,
     SkycapCodex,
 )
+from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa: E402
+    HarborSkycapGenerator,
+    agent_class,
+)
+from tests.integrations.harbor_skycap.test_exposure import SKYCAP_CODEX, agent_cfg  # noqa: E402
+from tests.integrations.harbor_skycap.test_harbor_skycap import generator_cfg  # noqa: E402
 
 pytestmark = pytest.mark.integrations
 
@@ -70,3 +76,19 @@ def test_without_a_trajectory_url_codex_is_refused(tmp_path) -> None:
     bare = SkycapCodex(logs_dir=tmp_path, model_name="hosted_vllm/Qwen3-1.7B")
     with pytest.raises(ValueError, match="OPENAI_BASE_URL"):
         bare.build_cli_flags()
+
+
+# -- selecting it --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name, import_path",
+    [("codex", None), ("codex", SKYCAP_CODEX)],
+    ids=["harbor codex", "a known name wins over the import path"],
+)
+def test_harbors_plain_codex_is_refused_before_any_trial(name, import_path) -> None:
+    with pytest.raises(ValueError, match="use SkycapCodex"):
+        HarborSkycapGenerator(generator_cfg(), agent_cfg(name, import_path), ["http://x"])
+
+
+def test_skycap_codex_is_selected_by_its_import_path() -> None:
+    assert agent_class({"name": None, "import_path": SKYCAP_CODEX}) is SkycapCodex
+    HarborSkycapGenerator(generator_cfg(), agent_cfg(None, SKYCAP_CODEX), ["http://x"])

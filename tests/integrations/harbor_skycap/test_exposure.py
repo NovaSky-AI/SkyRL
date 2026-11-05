@@ -71,9 +71,14 @@ def exposed(router, tmp_path):
     service.stop()
 
 
-def agent_cfg(name: str) -> dict:
+SKYCAP_CODEX = "examples.train_integrations.harbor_skycap.codex:SkycapCodex"
+
+
+def agent_cfg(name: str | None, import_path: str | None = None) -> dict:
     cfg = harbor_cfg()
     cfg["agent"]["name"] = name
+    if import_path:
+        cfg["agent"]["import_path"] = import_path
     return cfg
 
 
@@ -140,10 +145,10 @@ def test_installed_agents_run_in_the_sandbox_and_terminus_does_not() -> None:
 
 # -- the URL each agent gets ----------------------------------------------------------------
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent", ["mini-swe-agent", "codex"])
+@pytest.mark.parametrize("agent", [("mini-swe-agent", None), (None, SKYCAP_CODEX)], ids=["mini-swe-agent", "codex"])
 async def test_an_agent_in_the_sandbox_calls_skycap_on_its_exposed_url(agent, exposed, trials, monkeypatch) -> None:
     monkeypatch.delenv("MSWEA_API_KEY", raising=False)
-    gen = HarborSkycapGenerator(generator_cfg(), agent_cfg(agent), [exposed.url], SimpleNamespace(weight_version=7))
+    gen = HarborSkycapGenerator(generator_cfg(), agent_cfg(*agent), [exposed.url], SimpleNamespace(weight_version=7))
     try:
         out = await gen.generate(batch("linear", "summarize"), disable_tqdm=True)
     finally:
