@@ -119,6 +119,9 @@ async def main(args) -> None:
     stop.set()
     for t in tasks:
         t.cancel()
+    # Shut the engine down before the hard exit: os._exit alone leaves the EngineCore / TP worker processes
+    # alive, holding the GPUs.
+    engine.shutdown()
     os._exit(0)
 
 
