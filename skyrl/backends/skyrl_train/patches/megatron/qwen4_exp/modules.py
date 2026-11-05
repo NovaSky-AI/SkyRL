@@ -26,6 +26,10 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from safetensors import safe_open
 from torch import Tensor, nn
 
+from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import (
+    CPLayout,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,6 +194,7 @@ class Qwen4ExpPLE(nn.Module):
         _mark_sequence_parallel(self, config)
 
         self._tokens: Optional[Tensor] = None
+        self._cp_layout: Optional[CPLayout] = None
         self._cu_seqlens: Optional[Tensor] = None
         self._table: Optional[Tensor] = None
         self._group = None
@@ -259,8 +264,12 @@ class Qwen4ExpPLE(nn.Module):
         self._table = table  # deliberately not an nn.Parameter: frozen, never trained or synced
 
     # -- per-micro-batch context ------------------------------------------------------------------
-    def set_tokens(self, tokens: Tensor, cu_seqlens: Optional[Tensor]) -> None:
-        self._tokens = tokens.reshape(-1).long()
+    def set_tokens(self, tokens: Tensor, cu_seqlens: Optional[Tensor], cp_layout: Optional[CPLayout] = None) -> None:
+        """``tokens`` are this rank's input ids; under CP, ``cp_layout`` maps them to global positions
+        and the whole stream is gathered (the n-gram ids look a few tokens back across the split)."""
+        tokens = tokens.reshape(-1).long()
+        self._cp_layout = cp_layout if cp_layout is not None and cp_layout.size > 1 else None
+        self._tokens = tokens if self._cp_layout is None else self._cp_layout.gather_no_grad(tokens)
         self._cu_seqlens = cu_seqlens
 
     def _segment_starts(self, tokens: Tensor) -> Tensor:
@@ -316,17 +325,30 @@ class Qwen4ExpPLE(nn.Module):
         out[order] = sorted_rows
         return out.view(ids.shape[0], -1)
 
-    def _short_conv(self, x: Tensor, seg_start_seq: Tensor) -> Tensor:
-        """Causal dilated depthwise conv per packed sequence; x is [T, n*C]."""
-        t = x.shape[0]
-        positions = torch.arange(t, device=x.device)
+    def _short_conv(self, x: Tensor, positions: Tensor, seg_start_seq: Tensor) -> Tensor:
+        """Causal dilated depthwise conv per packed sequence; x is [T_local, n*C] at global ``positions``.
+
+        Under CP the lookback reaches into chunks of other ranks: their last rows are gathered
+        (``CPLayout.halo``) and looked up by global position.
+        """
+        lookback = (self.kernel - 1) * self.dilation
+        if self._cp_layout is None:
+            pool, row_of = x, None
+        else:
+            halo, halo_positions = self._cp_layout.halo(x, lookback)
+            pool = torch.cat([halo, x])
+            row_of = torch.full((self._cp_layout.num_tokens,), -1, dtype=torch.long, device=x.device)
+            row_of[halo_positions] = torch.arange(halo.shape[0], device=x.device)
+            row_of[positions] = halo.shape[0] + torch.arange(x.shape[0], device=x.device)  # own rows win
         w = self.conv1d.weight.squeeze(1)  # [n*C, K]
         out = x * w[:, -1]
         for k in range(self.kernel - 1):
             shift = (self.kernel - 1 - k) * self.dilation
             src = (positions - shift).clamp_min(0)
+            if row_of is not None:
+                src = row_of[src].clamp_min(0)  # -1 only where the shift leaves the sequence (masked)
             valid = (positions - seg_start_seq >= shift).unsqueeze(-1)
-            out = out + torch.where(valid, x[src], 0) * w[:, k]
+            out = out + torch.where(valid, pool[src], 0) * w[:, k]
         return F.silu(out)
 
     def forward(self, hidden_states: Tensor) -> Tensor:
@@ -334,15 +356,19 @@ class Qwen4ExpPLE(nn.Module):
         if self._tokens is None:
             raise RuntimeError("Qwen4ExpPLE.forward called without set_tokens().")
         s, b, nc = hidden_states.shape
-        if b != 1 or self._tokens.shape[0] != s:
+        layout = self._cp_layout
+        if layout is None:
+            positions = torch.arange(s, device=hidden_states.device)
+        else:
+            positions = layout.positions
+        if b != 1 or positions.shape[0] != s or self._tokens.shape[0] != (s if layout is None else layout.num_tokens):
             raise NotImplementedError(
-                "Qwen4Exp PLE needs packed sequences (remove_microbatch_padding=true), the TP-gathered "
-                "sequence and CP=1; "
-                f"got hidden {tuple(hidden_states.shape)} for {self._tokens.shape[0]} tokens."
+                "Qwen4Exp PLE needs packed sequences (remove_microbatch_padding=true) and the TP-gathered "
+                f"sequence; got hidden {tuple(hidden_states.shape)} for {self._tokens.shape[0]} tokens."
             )
         x = hidden_states.view(s, nc)
-        tokens = self._tokens
-        emb = self._lookup(self._ngram_ids(tokens)).to(x.dtype)
+        ids = self._ngram_ids(self._tokens)
+        emb = self._lookup(ids if layout is None else ids[positions]).to(x.dtype)
 
         key = self.norm_key(self.key_proj(emb)).unflatten(-1, (self.hc_count, self.hidden_size))
         value = self.value_proj(emb)
@@ -352,13 +378,12 @@ class Qwen4ExpPLE(nn.Module):
         gated = (torch.sigmoid(gate) * value.unsqueeze(-2)).flatten(-2)
         normed = self.norm_conv(gated)
 
-        positions = torch.arange(s, device=x.device)
         if self._cu_seqlens is not None:
             starts = self._cu_seqlens[:-1].long()
             seq_start = starts[torch.searchsorted(starts, positions, right=True) - 1]
         else:
             seq_start = torch.zeros_like(positions)
-        out = gated + self._short_conv(normed, seq_start)
+        out = gated + self._short_conv(normed, positions, seq_start)
         return out.view(s, b, nc)
 
 
@@ -416,6 +441,9 @@ class QSASequenceSelection:
 class QSASelection:
     sequences: List[QSASequenceSelection]
     compress_ratio: int
+    # Set under context parallelism: ``sequences`` then index this rank's rows (see
+    # ``Qwen4ExpQSAIndexer.select``) and the attention runs against the gathered keys.
+    cp_layout: Optional[CPLayout] = None
 
 
 class Qwen4ExpQSAIndexer(nn.Module):
@@ -452,20 +480,35 @@ class Qwen4ExpQSAIndexer(nn.Module):
     @torch.no_grad()
     def select_sequence(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
         """Block mask ([L, L // r] bool) of one sequence; ``x`` is [L, C], cos/sin [L, rot] in x's dtype."""
-        length, r, d = x.shape[0], self.compress_ratio, self.head_dim
-        q, k = F.linear(x, self.index_qk_proj.weight).split([self.n_heads * d, d], dim=-1)
-        q = _rope(self.q_layernorm(q.reshape(length, self.n_heads, d)), cos.unsqueeze(1), sin.unsqueeze(1))
-        nb = length // r
-        pooled = k[: nb * r].reshape(nb, r, d).float().mean(dim=1).to(k.dtype)
-        keys = _rope(self.k_layernorm(pooled), cos[: nb * r : r], sin[: nb * r : r]).float()
+        q, k = self._project(x, cos, sin)
+        return self._select_rows(q, torch.arange(x.shape[0], device=x.device), self._pool_keys(k, cos, sin))
 
-        blocks = torch.arange(nb, device=x.device)
-        block_mask = torch.empty(length, nb, dtype=torch.bool, device=x.device)
-        for c0 in range(0, length, QSA_INDEXER_CHUNK):
-            c1 = min(length, c0 + QSA_INDEXER_CHUNK)
-            visible = (torch.arange(c0, c1, device=x.device) + 1) // r  # complete blocks per query
+    def _project(self, x: Tensor, cos: Tensor, sin: Tensor):
+        """Roped, normed indexer queries ([L, heads, d]) and raw keys ([L, d]) of rows at cos / sin."""
+        d = self.head_dim
+        q, k = F.linear(x, self.index_qk_proj.weight).split([self.n_heads * d, d], dim=-1)
+        q = _rope(self.q_layernorm(q.reshape(x.shape[0], self.n_heads, d)), cos.unsqueeze(1), sin.unsqueeze(1))
+        return q, k
+
+    def _pool_keys(self, k: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+        """Pooled block keys ([L // r, d] fp32) of the complete blocks of the rows ``k`` ([L, d])."""
+        r, d = self.compress_ratio, self.head_dim
+        nb = k.shape[0] // r
+        pooled = k[: nb * r].reshape(nb, r, d).float().mean(dim=1).to(k.dtype)
+        return _rope(self.k_layernorm(pooled), cos[: nb * r : r], sin[: nb * r : r]).float()
+
+    def _select_rows(self, q: Tensor, positions: Tensor, keys: Tensor) -> Tensor:
+        """Block mask ([n, nb] bool) of queries ``q`` ([n, heads, d]) at sequence ``positions`` over
+        the sequence's pooled ``keys`` ([nb, d])."""
+        r, d, n = self.compress_ratio, self.head_dim, q.shape[0]
+        blocks = torch.arange(keys.shape[0], device=q.device)
+        block_mask = torch.empty(n, keys.shape[0], dtype=torch.bool, device=q.device)
+        visible_all = (positions + 1) // r  # complete blocks per query
+        for c0 in range(0, n, QSA_INDEXER_CHUNK):
+            c1 = min(n, c0 + QSA_INDEXER_CHUNK)
+            visible = visible_all[c0:c1]
             complete = blocks < visible.unsqueeze(-1)
-            if c1 // r > self.block_topk:  # some query in the chunk sees more blocks than the budget
+            if int(visible.max()) > self.block_topk:  # some query in the chunk sees more blocks than the budget
                 scores = torch.matmul(q[c0:c1].float(), keys.T).relu_().sum(dim=1) / math.sqrt(d)
                 # Incomplete blocks score -inf; every relu score is >= 0, so they are never picked.
                 top = scores.masked_fill_(~complete, float("-inf")).topk(self.block_topk, dim=-1).indices
@@ -475,19 +518,33 @@ class Qwen4ExpQSAIndexer(nn.Module):
         return block_mask
 
     @torch.no_grad()
-    def select(self, hidden_states: Tensor, rotary_pos_emb, packed_seq_params) -> Optional[QSASelection]:
+    def select(
+        self, hidden_states: Tensor, rotary_pos_emb, packed_seq_params, cp_layout: Optional[CPLayout] = None
+    ) -> Optional[QSASelection]:
         """Selection for the attention input ``hidden_states`` ([T, 1, C] packed), or None if dense.
 
         ``rotary_pos_emb`` is megatron-core's RoPE angle table ([>=L, 1, 1, rot], or a (q, k) pair
         of them); positions restart at 0 in every packed sequence, as in the main attention.
+
+        Under CP (``cp_layout``) ``hidden_states`` holds this rank's two chunks of every sequence
+        (padded lengths, chunks of whole blocks): the blocks are pooled locally and gathered, and
+        only the local query rows are scored. Each ``QSASequenceSelection`` then covers the local
+        rows of its sequence (``start`` / ``length`` local, ``block_mask`` over the whole sequence's
+        blocks), and the selection carries the layout.
         """
         s, b, _ = hidden_states.shape
+        if cp_layout is not None and cp_layout.size == 1:
+            cp_layout = None
         if packed_seq_params is not None:
             cu = packed_seq_params.cu_seqlens_q
             cu_padded = packed_seq_params.cu_seqlens_q_padded
             cu_padded = cu if cu_padded is None else cu_padded
+            if cp_layout is not None:
+                cu = cu_padded  # the CP split is over padded lengths
             starts, lengths = cu_padded[:-1].tolist(), (cu[1:] - cu[:-1]).tolist()
         else:
+            if cp_layout is not None:
+                raise NotImplementedError("Qwen4Exp QSA under context parallelism needs packed sequences.")
             starts, lengths = [0], [s]
         if max(lengths) <= self.max_dense_length:
             return None
@@ -503,6 +560,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
         if freqs.shape[0] < max(lengths):
             raise ValueError(f"RoPE table of {freqs.shape[0]} positions for a {max(lengths)}-token sequence.")
         x = hidden_states.reshape(s, -1)
+        if cp_layout is not None:
+            return self._select_cp(x, freqs, starts, lengths, cp_layout)
         sequences = []
         for start, length in zip(starts, lengths):
             block_mask = None
@@ -512,6 +571,31 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 block_mask = self.select_sequence(x[start : start + length], f.cos().to(x.dtype), f.sin().to(x.dtype))
             sequences.append(QSASequenceSelection(start, length, block_mask))
         return QSASelection(sequences, self.compress_ratio)
+
+    def _select_cp(self, x: Tensor, freqs: Tensor, starts, lengths, layout: CPLayout) -> QSASelection:
+        r, size = self.compress_ratio, layout.size
+        if any(length % (2 * size * r) for length in lengths):
+            raise ValueError(
+                f"Qwen4Exp QSA under CP={size} needs packed sequences padded to a multiple of 2 * CP * "
+                f"{r} tokens (whole {r}-token blocks per CP chunk); got lengths {lengths}."
+            )
+        cu = layout.cu_seqlens_padded.long()
+        seq_of_row = torch.searchsorted(cu, layout.positions, right=True) - 1
+        pos = layout.positions - cu[seq_of_row]  # position within the sequence
+        f = freqs[pos].float()
+        cos, sin = f.cos().to(x.dtype), f.sin().to(x.dtype)
+        q, k = self._project(x, cos, sin)
+        keys = layout.gather_blocks_no_grad(self._pool_keys(k, cos, sin), r)  # [T / r, d] global block order
+        sequences = []
+        for start, length in zip(starts, lengths):
+            lo, n = start // size, length // size
+            block_mask = None
+            if length > self.max_dense_length:
+                block_mask = self._select_rows(
+                    q[lo : lo + n], pos[lo : lo + n], keys[start // r : (start + length) // r]
+                )
+            sequences.append(QSASequenceSelection(lo, n, block_mask))
+        return QSASelection(sequences, self.compress_ratio, cp_layout=layout)
 
 
 def _qsa_token_mask(block_mask: Optional[Tensor], c0: int, c1: int, r: int, device) -> Tensor:
@@ -571,14 +655,14 @@ def _flex_sequence_attention(q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor
     return out[0, :, :length].transpose(0, 1)
 
 
-def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio: int) -> bool:
-    """Whether the cuDNN QSA kernels support these packed q / k / v ([T, heads, d]) on this device."""
+def cudnn_qsa_supported(device=None) -> bool:
+    """Whether ``device`` (default: the current CUDA device) can run cuDNN QSA: a Blackwell
+    (SM10x) GPU, cudnn-frontend with ``cudnn.ops.qsa_forward`` / ``qsa_backward``, and
+    SKYRL_QWEN4_QSA_CUDNN not set to 0. Context parallelism requires it."""
     global _cudnn_qsa_ops
-    if not (_QSA_CUDNN and query.is_cuda and query.dtype == torch.bfloat16 and compress_ratio == 4):
+    if not (_QSA_CUDNN and torch.cuda.is_available()):
         return False
-    if query.shape[-1] != 256 or value.shape[-1] != 256 or (query.shape[1], key.shape[1]) not in _CUDNN_QSA_HEADS:
-        return False
-    if torch.cuda.get_device_capability(query.device)[0] != 10:
+    if torch.cuda.get_device_capability(device)[0] != 10:
         return False
     if _cudnn_qsa_ops is None:
         try:
@@ -594,6 +678,15 @@ def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio:
                 "falling back to the FlexAttention path."
             )
     return bool(_cudnn_qsa_ops)
+
+
+def _cudnn_qsa_usable(query: Tensor, key: Tensor, value: Tensor, compress_ratio: int) -> bool:
+    """Whether the cuDNN QSA kernels support these packed q / k / v ([T, heads, d]) on this device."""
+    if not (query.is_cuda and query.dtype == torch.bfloat16 and compress_ratio == 4):
+        return False
+    if query.shape[-1] != 256 or value.shape[-1] != 256 or (query.shape[1], key.shape[1]) not in _CUDNN_QSA_HEADS:
+        return False
+    return cudnn_qsa_supported(query.device)
 
 
 def cudnn_qsa_metadata(selection: QSASelection, num_tokens: int, device) -> tuple:
@@ -661,6 +754,182 @@ class _CudnnQSA(torch.autograd.Function):
         return (dq, dk, dv, None) + (None,) * len(metadata)
 
 
+class _CPPairs:
+    """Which cuDNN QSA calls one CP rank makes, and the selection metadata of each.
+
+    Under CP every packed sequence is cut into ``2 * cp`` equal chunks, and rank ``r`` owns chunks
+    ``r`` and ``2 * cp - 1 - r``: the zigzag split, which evens out causal work. A query in chunk
+    ``c`` can only see keys in chunks ``0..c``.
+
+    The cuDNN QSA kernels need as many key rows as query rows, so the rank's attention runs as
+    one call per (query chunk, key chunk) pair:
+
+    - Half 0 is the rank's first chunk (``r``) of every sequence, stacked into ``H`` rows
+      (``H`` = the sum of the sequences' chunk sizes). Half 1 is its second chunk
+      (``2 * cp - 1 - r``), stacked the same way.
+    - Key chunk ``j`` is chunk ``j`` of every sequence, also stacked into ``H`` rows.
+    - Each half runs against key chunks ``j = 0..c``, where ``c`` is the half's chunk index.
+      For ``j < c`` every key is causally visible and only the QSA block selection applies.
+      ``j == c`` is the diagonal call, the only one where the causal mask and a query's
+      incomplete tail block matter (chunks hold whole 4-token blocks).
+
+    Example, cp = 2 (chunks 0..3): rank 0 owns chunks 0 and 3 and makes 1 + 4 calls; rank 1
+    owns chunks 1 and 2 and makes 2 + 3. Every rank makes ``2 * cp + 1`` calls.
+    ``_CudnnQSAContextParallel`` merges the calls of each half by log-sum-exp.
+    """
+
+    def __init__(self, selection: "QSASelection", device):
+        layout, r = selection.cp_layout, selection.compress_ratio
+        self.selection, self.r, self.size, self.rank = selection, r, layout.size, layout.rank
+        cu = layout.cu_seqlens_padded.long().tolist()
+        self.h = [(b - a) // (2 * layout.size) for a, b in zip(cu[:-1], cu[1:])]
+        self.cu = cu
+        self.off = [0]
+        for h in self.h:
+            self.off.append(self.off[-1] + h)
+        self.total = self.off[-1]
+        i64 = dict(dtype=torch.long, device=device)
+        # Local rows of each half, and the global rows of each key chunk.
+        self.half_rows = [
+            torch.cat(
+                [
+                    torch.arange(a // layout.size + k * h, a // layout.size + (k + 1) * h, **i64)
+                    for a, h in zip(cu[:-1], self.h)
+                ]
+            )
+            for k in range(2)
+        ]
+        self.device = device
+
+    def chunk_index(self, half: int) -> int:
+        return self.rank if half == 0 else 2 * self.size - 1 - self.rank
+
+    def key_rows(self, j: int) -> Tensor:
+        return torch.cat(
+            [
+                torch.arange(a + j * h, a + (j + 1) * h, dtype=torch.long, device=self.device)
+                for a, h in zip(self.cu[:-1], self.h)
+            ]
+        )
+
+    def metadata(self, half: int, j: int):
+        """cuDNN QSA metadata of query half ``half`` against key chunk ``j`` (both ``H`` rows), or
+        None when no query selects anything in that chunk. Returns ``(metadata, empty_rows)``."""
+        c, r, dev = self.chunk_index(half), self.r, self.device
+        i32 = dict(dtype=torch.int32, device=dev)
+        nb_total = self.total // r
+        sel = torch.zeros(self.total, nb_total, dtype=torch.uint8, device=dev)
+        lo, hi = torch.empty(self.total, **i32), torch.empty(self.total, **i32)
+        blk_base, tok_base = torch.empty(self.total, **i32), torch.empty(self.total, **i32)
+        blocks = torch.arange(nb_total, device=dev)
+        block_first = (blocks * r).to(torch.int32)
+        block_last = block_first + (r - 1)
+        for seq, h, off in zip(self.selection.sequences, self.h, self.off[:-1]):
+            if h == 0:
+                continue
+            u = torch.arange(h, device=dev)
+            nb = h // r
+            lo[off : off + h] = off
+            hi[off : off + h] = off + h - 1 if j < c else off + u
+            blk_base[off : off + h] = off // r
+            tok_base[off : off + h] = off
+            if seq.block_mask is None:  # dense: every block up to the query's own
+                own = (c * h + u) // r - j * nb  # own block index within chunk j
+                sel[off : off + h, off // r : off // r + nb] = (torch.arange(nb, device=dev) <= own[:, None]).to(
+                    torch.uint8
+                )
+            else:
+                rows = seq.block_mask[half * h : (half + 1) * h]
+                sel[off : off + h, off // r : off // r + nb] = rows[:, j * nb : (j + 1) * nb].to(torch.uint8)
+                if j == c:
+                    tail = u[(c * h + u + 1) % r != 0]  # queries whose own block is still incomplete
+                    sel[off + tail, off // r + tail // r] = 1
+        empty = ~sel.bool().any(dim=1)
+        if bool(empty.all()):
+            return None, empty
+        # Rows without any selected key in this chunk see no keys (lo > hi: zero output).
+        lo = torch.where(empty, lo + 1, lo)
+        hi = torch.where(empty, lo - 1, hi)
+        return (sel, lo, hi, blk_base, tok_base, block_first, block_last), empty
+
+
+class _CudnnQSAContextParallel(torch.autograd.Function):
+    """cuDNN QSA of this rank's queries against the CP-gathered keys (``_CPPairs`` split-K).
+
+    Forward merges the per-pair outputs by log-sum-exp; backward replays every pair's
+    ``qsa_backward`` with the merged fp32 output and LSE (the kernel derives P and
+    ``rowsum(dO * O)`` from them), summing dq over pairs and accumulating dk / dv in fp32 into the
+    gathered keys' gradient (reduce-scattered to their owners by ``CPLayout.gather``).
+    """
+
+    @staticmethod
+    def forward(ctx, query, key, value, scale, selection):
+        qsa_forward, _ = _cudnn_qsa_ops
+        pairs = _CPPairs(selection, query.device)
+        num_heads = query.shape[1]
+        out = torch.zeros(query.shape, dtype=torch.float32, device=query.device)
+        lse_all = torch.full((num_heads, query.shape[0]), float("-inf"), dtype=torch.float32, device=query.device)
+        for half in range(2):
+            rows = pairs.half_rows[half]
+            q = query[rows].contiguous()
+            acc = torch.zeros(q.shape, dtype=torch.float32, device=q.device)
+            lse = torch.full((num_heads, q.shape[0]), float("-inf"), dtype=torch.float32, device=q.device)
+            for j in range(pairs.chunk_index(half) + 1):
+                metadata, empty = pairs.metadata(half, j)
+                if metadata is None:
+                    continue
+                kr = pairs.key_rows(j)
+                res = qsa_forward(q, key[kr].contiguous(), value[kr].contiguous(), *metadata, scale)
+                lse_j = res["lse"].masked_fill(empty[None], float("-inf"))
+                new = torch.logaddexp(lse, lse_j)
+                # Rows still at -inf on both sides keep 0 (avoid exp(-inf - -inf) = nan).
+                w_old = torch.where(torch.isinf(new), 0.0, torch.exp(lse - new)).T[..., None]
+                w_new = torch.where(torch.isinf(new), 0.0, torch.exp(lse_j - new)).T[..., None]
+                acc = acc * w_old + res["out_fp32"].masked_fill(empty[:, None, None], 0.0) * w_new
+                lse = new
+            out[rows] = acc
+            lse_all[:, rows] = lse
+        ctx.save_for_backward(query, key, value, out, lse_all)
+        ctx.scale, ctx.selection = scale, selection
+        return out.to(query.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        _, qsa_backward = _cudnn_qsa_ops
+        query, key, value, out, lse_all = ctx.saved_tensors
+        pairs = _CPPairs(ctx.selection, query.device)
+        grad_out = grad_out.contiguous()
+        dq = torch.zeros(query.shape, dtype=torch.float32, device=query.device)
+        dk = torch.zeros(key.shape, dtype=torch.float32, device=key.device)
+        dv = torch.zeros(value.shape, dtype=torch.float32, device=value.device)
+        for half in range(2):
+            rows = pairs.half_rows[half]
+            q, g = query[rows].contiguous(), grad_out[rows].contiguous()
+            o, lse = out[rows].contiguous(), lse_all[:, rows].contiguous()
+            for j in range(pairs.chunk_index(half) + 1):
+                metadata, _ = pairs.metadata(half, j)
+                if metadata is None:
+                    continue
+                kr = pairs.key_rows(j)
+                res = qsa_backward(g, q, key[kr].contiguous(), value[kr].contiguous(), o, lse, *metadata, ctx.scale)
+                dq[rows] += res["dq"].float()
+                dk[kr] += res["dk"].float()
+                dv[kr] += res["dv"].float()
+        return dq.to(query.dtype), dk.to(key.dtype), dv.to(value.dtype), None, None
+
+
+def _cp_qsa_attention(query: Tensor, key: Tensor, value: Tensor, selection: "QSASelection", scale: float) -> Tensor:
+    """``qsa_sparse_attention`` under context parallelism: local queries against gathered keys."""
+    if not _cudnn_qsa_usable(query, key, value, selection.compress_ratio):
+        raise NotImplementedError(
+            "Qwen4Exp QSA sparse attention under context parallelism needs the cuDNN QSA kernels "
+            "(Blackwell, cudnn-frontend >= 1.32)."
+        )
+    layout = selection.cp_layout
+    key_all, value_all = layout.gather(key), layout.gather(value)
+    return _CudnnQSAContextParallel.apply(query.contiguous(), key_all, value_all, scale, selection)
+
+
 def qsa_sparse_attention(query: Tensor, key: Tensor, value: Tensor, selection: QSASelection, scale: float) -> Tensor:
     """Causal attention restricted to the QSA selection, for packed (THD) q / k / v.
 
@@ -677,6 +946,9 @@ def qsa_sparse_attention(query: Tensor, key: Tensor, value: Tensor, selection: Q
     if batched:
         query, key, value = (t.squeeze(1) for t in (query, key, value))
     num_tokens, num_heads, _ = query.shape
+    if selection.cp_layout is not None:
+        out = _cp_qsa_attention(query, key, value, selection, scale).reshape(num_tokens, -1)
+        return out.unsqueeze(1) if batched else out
     if _cudnn_qsa_usable(query, key, value, selection.compress_ratio):
         metadata = cudnn_qsa_metadata(selection, num_tokens, query.device)
         q, k, v = (t.contiguous() for t in (query, key, value))
