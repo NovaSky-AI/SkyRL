@@ -12,8 +12,8 @@ Loading every ``libcudnn*.so.9`` from the wheel's directory up front, with ``RTL
 later ``dlopen`` calls resolve by soname to the already-loaded copies. ``skyrl.backends.skyrl_train``
 calls this on package import, before any cuDNN op in trainer workers and vLLM's worker processes.
 
-Delete this when cuDNN resolves its sublibraries relative to ``libcudnn.so.9`` ahead of
-``LD_LIBRARY_PATH``, or the images stop shipping a system cuDNN on ``LD_LIBRARY_PATH``.
+TEMPORARY: delete this module (and its call in ``skyrl.backends.skyrl_train``) once the Megatron images
+are rebuilt without the system cuDNN (NovaSky-AI/SkyRL#2636).
 """
 
 import ctypes
