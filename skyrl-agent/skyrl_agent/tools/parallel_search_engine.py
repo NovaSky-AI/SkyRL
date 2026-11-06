@@ -5,7 +5,7 @@ import logging
 
 import requests
 
-from skyrl_agent.tools.base import BaseTool, register_tool
+from skyrl_agent.tools.base import BaseTool, register_tool, normalize_search_params
 from skyrl_agent.tools.youcom_search_engine import YouComSearchEngine, _SKYRL_AGENT_VERSION
 
 
@@ -30,21 +30,24 @@ class _ParallelSession:
         line = bytearray()
         data = []
         after_cr = False
-        for chunk in response.iter_content(chunk_size=1):
-            byte = chunk[0]
-            if after_cr and byte == 10:
-                after_cr = False
-                continue
-            after_cr = byte == 13
-            if byte not in (10, 13):
-                line.append(byte)
-                continue
-            if not line and data:
-                yield json.loads(b"\n".join(data))
-                data = []
-            elif line.startswith(b"data:"):
-                data.append(bytes(line[5:]).removeprefix(b" "))
-            line.clear()
+        # read1 returns available data without waiting to fill a buffer on non-chunked SSE.
+        read1 = getattr(response.raw, "read1", None)
+        chunks = iter(lambda: read1(4096, decode_content=True), b"") if read1 else response.iter_content(chunk_size=1)
+        for chunk in chunks:
+            for byte in chunk:
+                if after_cr and byte == 10:
+                    after_cr = False
+                    continue
+                after_cr = byte == 13
+                if byte not in (10, 13):
+                    line.append(byte)
+                    continue
+                if not line and data:
+                    yield json.loads(b"\n".join(data))
+                    data = []
+                elif line.startswith(b"data:"):
+                    data.append(bytes(line[5:]).removeprefix(b" "))
+                line.clear()
 
     def rpc(self, method, params=None, notify=False):
         self.request_id += 1
@@ -130,7 +133,7 @@ class ParallelSearchEngine(BaseTool):
 
     def call(self, params, **kwargs):
         try:
-            params = self._verify_json_format_args(params)
+            params = self._verify_json_format_args(normalize_search_params(params))
             queries = params["query"]
             if any(not query.strip() for query in queries):
                 raise ValueError("Queries must not be blank")

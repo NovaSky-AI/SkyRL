@@ -16,9 +16,10 @@ from skyrl_agent.tools.parallel_search_engine import ParallelSearchEngine, _Para
 PASSAGE = "alpha\u0085beta\u2028gamma\u2029delta"
 
 
+@pytest.mark.parametrize("chunked", [True, False])
 @pytest.mark.parametrize("failure", [None, "rpc", "http", "connection"])
 @pytest.mark.parametrize("teardown_failure", [None, "http", "connection"])
-def test_held_open_transport(monkeypatch, caplog, failure, teardown_failure):
+def test_held_open_transport(monkeypatch, caplog, failure, teardown_failure, chunked):
     requests_seen = []
     local_closes = []
     release = threading.Event()
@@ -87,11 +88,16 @@ def test_held_open_transport(monkeypatch, caplog, failure, teardown_failure):
                 self.wfile.write(body)
                 return
             self.send_header("Content-Type", "Text/Event-Stream; charset=utf-8")
-            self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
             notice = b'data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\r\n\r\n'
-            for event in (notice, b"data: " + body + b"\r\n\r\n"):
-                self.wfile.write(f"{len(event):x}\r\n".encode() + event + b"\r\n")
+            events = (notice, b"data: " + body + b"\r\n\r\n")
+            if chunked:
+                self.send_header("Transfer-Encoding", "chunked")
+            else:
+                # More body bytes are promised but withheld until the client closes.
+                self.send_header("Content-Length", str(sum(map(len, events)) + 8192))
+            self.end_headers()
+            for event in events:
+                self.wfile.write(f"{len(event):x}\r\n".encode() + event + b"\r\n" if chunked else event)
                 self.wfile.flush()
             self.close_connection = True
             self.connection.settimeout(3)
@@ -104,8 +110,12 @@ def test_held_open_transport(monkeypatch, caplog, failure, teardown_failure):
     serving.start()
     monkeypatch.setattr(_ParallelSession, "endpoint", f"http://127.0.0.1:{server.server_port}/mcp")
     try:
+        tool = TOOL_REGISTRY["parallel_search_engine"]()
+        tool.blocklist_domains = set()
+        tool.blocklist_keywords = set()
+        tool._use_negative_filters = False
         with ThreadPoolExecutor() as executor:
-            result = executor.submit(TOOL_REGISTRY["parallel_search_engine"]().call, {"query": ["test"]}).result(2)
+            result = executor.submit(tool.call, {"query": ["test"]}).result(2)
         if failure == "rpc":
             assert "MCP error -32042: synthetic failure" in result["error"]
         elif failure == "http":
@@ -159,7 +169,7 @@ def test_opt_in_and_credentials(monkeypatch):
     assert TOOL_REGISTRY["youcom_search_engine"]().you_search_key == "explicit-you-key"
 
 
-@pytest.mark.parametrize("params", [{}, {"query": []}, {"query": [""]}, {"query": [" "]}, {"query": "test"}])
+@pytest.mark.parametrize("params", [{}, {"query": []}, {"query": [""]}, {"query": [" "]}])
 def test_invalid_query_does_not_connect(monkeypatch, params):
     monkeypatch.setattr(_ParallelSession, "search", lambda *args: pytest.fail("Unexpected network call"))
     assert "error" in ParallelSearchEngine().call(params)
@@ -187,6 +197,9 @@ def test_leakage_filters(monkeypatch, structured):
 
     monkeypatch.setattr(_ParallelSession, "search", synthetic_search)
     tool = ParallelSearchEngine()
+    tool.blocklist_domains = {"github.com"}
+    tool.blocklist_keywords = {"gpqa"}
+    tool._use_negative_filters = True
     result = tool.call('{"query": ["test"]}')
     assert "Passage" in result["results"]
     assert "Blocked domain" not in result["results"]
@@ -244,3 +257,96 @@ def test_agent_tool_selection_is_unchanged(monkeypatch):
     assert agent.tool_params[-1]["function"]["name"] == "parallel_search_engine"
     with pytest.raises(ValueError, match="Unknown tool"):
         ReActAgent._register_tools(agent, ["unregistered_search"])
+
+
+@pytest.mark.parametrize(
+    "provider,method",
+    [("search_engine", "google_search"), ("youcom_search_engine", "you_search"), ("parallel_search_engine", None)],
+)
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        ({"query": "NASA Webb"}, ["NASA Webb"]),
+        ("NASA Webb", ["NASA Webb"]),
+        ('{query: "NASA Webb"}', ["NASA Webb"]),
+        ('```json\n{"query": "NASA Webb"}\n```', ["NASA Webb"]),
+        ({"query": '["NASA", "Webb"]'}, ["NASA", "Webb"]),
+        ({"query": [["NASA", "Webb"], 42]}, ["NASA", "Webb", "42"]),
+        (["NASA", "Webb"], ["NASA", "Webb"]),
+    ],
+)
+def test_search_normalization_contract(monkeypatch, provider, method, params, expected):
+    monkeypatch.setenv("GOOGLE_SEARCH_KEY", "synthetic-serper-key")
+    monkeypatch.setenv("YDC_API_KEY", "synthetic-you-key")
+    seen = []
+    tool = TOOL_REGISTRY[provider]()
+    tool._use_negative_filters = False
+    if method:
+
+        def synthetic_search(query):
+            seen.append(query)
+            return "synthetic result"
+
+        monkeypatch.setattr(tool, method, synthetic_search)
+    else:
+
+        def synthetic_search(self, queries):
+            seen.extend(queries)
+            return {"structuredContent": {"results": []}}
+
+        monkeypatch.setattr(_ParallelSession, "search", synthetic_search)
+    result = tool.call(params)
+    assert "error" not in result
+    assert sorted(seen) == sorted(expected)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"structuredContent": {}},
+        {"structuredContent": []},
+        {"content": []},
+        {"structuredContent": {"results": [{}]}},
+        None,
+    ],
+)
+def test_malformed_response_returns_error(monkeypatch, response):
+    monkeypatch.setattr(_ParallelSession, "search", lambda *args: response)
+    assert "error" in ParallelSearchEngine().call({"query": ["test"]})
+
+
+def test_filter_environment_is_shared_with_sibling():
+    import os
+    from skyrl_agent.tools.youcom_search_engine import YouComSearchEngine
+
+    tool = ParallelSearchEngine()
+    assert tool.blocklist_domains == YouComSearchEngine.blocklist_domains
+    assert tool.blocklist_keywords == YouComSearchEngine.blocklist_keywords
+    assert tool._use_negative_filters == (os.getenv("SEARCH_NEGATIVE_FILTERS", "true").lower() == "true")
+    if "SEARCH_BLOCKLIST_DOMAINS" in os.environ:
+        assert tool.blocklist_domains == {
+            d.strip().lower() for d in os.environ["SEARCH_BLOCKLIST_DOMAINS"].split(",") if d.strip()
+        }
+    if "SEARCH_BLOCKLIST_KEYWORDS" in os.environ:
+        assert tool.blocklist_keywords == {
+            k.strip().lower() for k in os.environ["SEARCH_BLOCKLIST_KEYWORDS"].split(",") if k.strip()
+        }
+    tool._use_negative_filters = False
+    pages = [{"url": f"https://{domain}/data", "title": "", "snippets": []} for domain in tool.blocklist_domains] + [
+        {"url": "https://example.org", "title": "", "snippets": [keyword]} for keyword in tool.blocklist_keywords
+    ]
+    assert tool._process_results(pages) == []
+
+
+@pytest.mark.parametrize("newline", [b"\r", b"\n", b"\r\n"])
+@pytest.mark.parametrize("read1_available", [False, True])
+def test_sse_chunk_boundaries(newline, read1_available):
+    from types import SimpleNamespace
+
+    message = {"jsonrpc": "2.0", "id": 1, "result": {"passage": PASSAGE}}
+    body = b"data: " + json.dumps(message, ensure_ascii=False).encode() + newline + newline
+    chunks = iter(body[i : i + 3] for i in range(0, len(body), 3))
+    raw = SimpleNamespace(read1=lambda *args, **kwargs: next(chunks, b"")) if read1_available else object()
+    response = SimpleNamespace(raw=raw, iter_content=lambda **kwargs: chunks)
+    assert list(_ParallelSession._events(response)) == [message]
