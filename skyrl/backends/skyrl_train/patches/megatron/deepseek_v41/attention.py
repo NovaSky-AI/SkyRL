@@ -72,6 +72,75 @@ from torch import nn
 # Queries scored per indexer chunk: [chunk, b, n_heads, n_compressed] fp32 stays ~0.3 GB at 10K tokens.
 _INDEXER_CHUNK = 256
 
+# Indexer scoring: "reference" (fp32 einsum over all heads, chunks of ``_INDEXER_CHUNK`` queries) or
+# "fused" (cuDNN DSA dense indexer kernel, as upstream's ``--csa2-indexer-impl fused``; falls back to
+# the reference when cudnn-frontend's DSA namespace is unavailable).
+_INDEXER_IMPL = os.environ.get("SKYRL_DSV41_INDEXER_IMPL", "reference").lower()
+# Per-chunk budget for the fused path's fp32 score matrix (scores, masked copy and top-k workspace,
+# about three [rows, n_c] buffers), as upstream's ``INDEXER_SCORE_BUDGET_BYTES``.
+INDEXER_SCORE_BUDGET_BYTES = 1 << 30
+_FUSED_INDEXER_SCORE = None
+
+
+def _rows_within_budget(n_keys: int, budget_bytes: int = INDEXER_SCORE_BUDGET_BYTES) -> int:
+    """Query rows whose dense fp32 scores (three buffers) fit the budget; at least one."""
+    return max(1, budget_bytes // (3 * 4 * max(1, n_keys)))
+
+
+def _fused_indexer_score_fn():
+    """cudnn-frontend's DSA dense indexer score kernel, or ``None`` when unavailable."""
+    global _FUSED_INDEXER_SCORE
+    if _FUSED_INDEXER_SCORE is None:
+        try:
+            from cudnn import DSA
+
+            _FUSED_INDEXER_SCORE = DSA.dense_indexer_score_recompute_wrapper
+        except Exception:  # noqa: BLE001 - missing cudnn-frontend DSA namespace
+            _FUSED_INDEXER_SCORE = False
+    return _FUSED_INDEXER_SCORE or None
+
+
+def fused_indexer_scores_rows(q_rows, keys, head_weights, head_weight_scale, ratio, first_position):
+    """``sum_h relu(q_h . k) * w_h`` for consecutive query positions through the cuDNN DSA dense indexer
+    kernel (one THD segment, all keys). Backport of ``fused_indexer_scores_rows`` from
+    NVIDIA/Megatron-LM#7285 (open; DeepSeek-V4.1-Flash training), which reaches the same kernel through
+    a newer ``_compute_dense_indexer_score``; the pinned megatron-core's wrapper is BSHD-only, so this
+    calls cudnn-frontend directly.
+
+    Args:
+        q_rows: ``[rows, h_i, d_i]`` rotated indexer queries (bf16).
+        keys: ``[n, d_i]`` rotated index keys (bf16).
+        head_weights: ``[rows, h_i]`` raw head weights (the scale goes to the kernel, which applies it
+            in fp32 before the ReLU -- equivalent for a positive scale).
+        head_weight_scale: ``(d_i * h_i) ** -0.5``.
+        ratio: compress ratio (causal limit ``(position + 1) // ratio`` inside the kernel).
+        first_position: sequence position of ``rows[0]``; rows are consecutive positions.
+
+    Returns:
+        ``[rows, n]`` fp32 scores (entries beyond the causal limit are not meaningful; the caller
+        masks them), or ``None`` when the kernel is unavailable.
+    """
+    fn = _fused_indexer_score_fn()
+    if fn is None or not q_rows.is_cuda:
+        return None
+    rows, n_keys = q_rows.size(0), keys.size(0)
+    device = q_rows.device
+    scores, _ = fn(
+        q_rows.contiguous(),
+        keys.unsqueeze(1).contiguous(),
+        head_weights.to(q_rows.dtype).contiguous(),
+        qhead_per_kv_head=q_rows.size(1),
+        sm_scale=float(head_weight_scale),
+        ratio=int(ratio),
+        cu_seqlens_q=torch.tensor([0, rows], dtype=torch.int32, device=device),
+        cu_seqlens_k=torch.tensor([0, n_keys], dtype=torch.int32, device=device),
+        max_seqlen_q=rows,
+        max_seqlen_k=n_keys,
+        q_causal_offsets=torch.tensor([first_position], dtype=torch.int32, device=device),
+    )
+    return scores[:, :n_keys].float()
+
+
 # Optional KV fake-quant, straight-through for gradients (SKYRL_DSV41_FAKE_QUANT):
 # - "vllm": vLLM's fp8_ds_mla KV cache -- the 448 NoPE dims in FP8 e4m3 per 64 with power-of-2 scales, the
 #   64 RoPE dims kept in BF16 -- for window and compressed KV alike. Matches the rollout engine.
@@ -344,18 +413,37 @@ class CompressedSparseAttention2(MegatronModule):
         ratio = self.compress_ratio
         q, _ = indexer.linear_wq_b(qr.detach())
         q = q.view(sq, q.size(1), indexer.n_heads, indexer.head_dim)
-        q = self._rope(q, sq, 1).float()
-        weights, _ = indexer.linear_weights_proj(x.detach())
-        weights = weights.float() * (indexer.softmax_scale * indexer.n_heads**-0.5)
-        k = state.indexer_k.float()  # [n_c, b, d]
+        q = self._rope(q, sq, 1)
+        raw_weights, _ = indexer.linear_weights_proj(x.detach())
+        head_weight_scale = indexer.softmax_scale * indexer.n_heads**-0.5
         topk = min(indexer.index_topk, n_c)
         positions = torch.arange(n_c, device=x.device)
         candidates = [] if self.is_candidate_source else None
         out = []
-        for s0 in range(0, sq, _INDEXER_CHUNK):
-            s1 = min(s0 + _INDEXER_CHUNK, sq)
-            scores = torch.einsum("sbhd,tbd->sbht", q[s0:s1], k).relu_()
-            scores = (scores * weights[s0:s1].unsqueeze(-1)).sum(dim=2)  # [c, b, n_c]
+        fused = _INDEXER_IMPL == "fused" and _fused_indexer_score_fn() is not None and q.is_cuda
+        if fused:
+            q_lp, k_lp = q.to(torch.bfloat16), state.indexer_k.to(torch.bfloat16)  # [sq, b, h, d], [n_c, b, d]
+            chunk = _rows_within_budget(n_c * q.size(1))
+        else:
+            q = q.float()
+            weights = raw_weights.float() * head_weight_scale
+            k = state.indexer_k.float()  # [n_c, b, d]
+            chunk = _INDEXER_CHUNK
+        for s0 in range(0, sq, chunk):
+            s1 = min(s0 + chunk, sq)
+            if fused:
+                scores = torch.stack(
+                    [
+                        fused_indexer_scores_rows(
+                            q_lp[s0:s1, i], k_lp[:, i], raw_weights[s0:s1, i], head_weight_scale, ratio, s0
+                        )
+                        for i in range(q.size(1))
+                    ],
+                    dim=1,
+                )  # [c, b, n_c]
+            else:
+                scores = torch.einsum("sbhd,tbd->sbht", q[s0:s1], k).relu_()
+                scores = (scores * weights[s0:s1].unsqueeze(-1)).sum(dim=2)  # [c, b, n_c]
             compress_lens = (torch.arange(s0 + 1, s1 + 1, device=x.device) // ratio).view(-1, 1, 1)
             scores.masked_fill_(positions >= compress_lens, -torch.inf)
             if self.is_candidate_source:
