@@ -9,20 +9,22 @@ import pytest
 pytest.importorskip("skycap")
 pytest.importorskip("harbor")
 
-from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
 from examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap import (  # noqa: E402
     HarborSkycapConfig,
-    _exposure,
-    _require_api_key,
 )
 from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa: E402
     PLACEHOLDER_API_KEY,
     HarborSkycapGenerator,
     runs_in_sandbox,
 )
-from examples.train_integrations.harbor_skycap.servers import exposure_for  # noqa: E402
 from skycap import CaptureService  # noqa: E402
 from skycap.exposure import Exposure  # noqa: E402
+from skyrl.integration.skycap.config import (  # noqa: E402
+    api_key_required,
+    exposure_type,
+)
+from skyrl.integration.skycap.engine import SkyRLEngine  # noqa: E402
+from skyrl.integration.skycap.servers import exposure_for  # noqa: E402
 from tests.integrations.harbor_skycap import test_harbor_skycap  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import TOP_K, FakeRenderer  # noqa: E402
 from tests.integrations.harbor_skycap.test_harbor_skycap import (  # noqa: E402
@@ -80,14 +82,14 @@ def agent_cfg(name: str) -> dict:
 # -- config ------------------------------------------------------------------------
 def test_nothing_is_exposed_by_default() -> None:
     cfg = HarborSkycapConfig.from_cli_overrides([])
-    assert cfg.skycap.exposure.type == "none" and _exposure(cfg) is None
+    assert cfg.skycap.exposure.type == "none" and exposure_type(cfg) is None
 
 
 def test_the_exposure_is_configured_by_name_and_kwargs() -> None:
     cfg = HarborSkycapConfig.from_cli_overrides(
         ["skycap.exposure.type=external_host", "skycap.exposure.kwargs.host=203.0.113.7"]
     )
-    assert _exposure(cfg) == "external_host"
+    assert exposure_type(cfg) == "external_host"
     assert cfg.skycap.exposure.kwargs == {"host": "203.0.113.7"}
 
 
@@ -102,12 +104,12 @@ def test_the_exposure_is_configured_by_name_and_kwargs() -> None:
 )
 def test_a_bad_exposure_is_refused_before_anything_starts(overrides, match) -> None:
     with pytest.raises(ValueError, match=match):
-        _exposure(HarborSkycapConfig.from_cli_overrides(overrides))
+        exposure_type(HarborSkycapConfig.from_cli_overrides(overrides))
 
 
 def test_keys_are_required_whenever_the_servers_are_exposed() -> None:
     def required(*overrides: str) -> bool:
-        return _require_api_key(HarborSkycapConfig.from_cli_overrides(list(overrides)))
+        return api_key_required(HarborSkycapConfig.from_cli_overrides(list(overrides)))
 
     assert not required()
     assert required("skycap.exposure.type=cloudflare")
@@ -115,7 +117,7 @@ def test_keys_are_required_whenever_the_servers_are_exposed() -> None:
     assert required("skycap.require_api_key=true")
 
 
-def test_each_server_gets_its_own_exposure() -> None:
+def test_each_server_gets_its_ownexposure_type() -> None:
     assert exposure_for(None, None, 2) is None
     assert exposure_for("cloudflare", {"timeout": 30.0}, 2) == ("cloudflare", {"timeout": 30.0})
     # external_host: server i listens on port + i, from 11500 unless a port is given.

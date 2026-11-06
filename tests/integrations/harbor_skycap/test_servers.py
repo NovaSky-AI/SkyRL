@@ -11,7 +11,7 @@ pytest.importorskip("harbor")
 import ray  # noqa: E402
 from aiohttp.test_utils import TestServer  # noqa: E402
 
-from examples.train_integrations.harbor_skycap.servers import (
+from skyrl.integration.skycap.servers import (
     start_servers,  # noqa: E402
 )
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402

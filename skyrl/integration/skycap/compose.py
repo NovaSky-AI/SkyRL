@@ -7,17 +7,17 @@ already made each sampled message a training target in at most one path, so
 the paths' loss masks never count a token twice. With ``skycap.train_paths``
 set to ``final`` or a custom rule, the samples are the rows that rule picks.
 
-One Harbor trial is one rollout with one reward, however many paths it has.
-SkyRL's step-wise shape already says "several rows, one rollout": a trial's
+One rollout (a Harbor trial, say) has one reward, however many paths it has.
+SkyRL's step-wise shape already says "several rows, one rollout": a rollout's
 paths are emitted contiguously under its ``TrajectoryID``, the last marked
-``is_last_step``. Every row carries the trial's reward, since every sampled
-token in the trial earned it. The trainer computes the advantage once per
-trial, from the last row, and applies it to all of the trial's rows. Each row is a complete multi-turn sample, split at its first
+``is_last_step``. Every row carries the rollout's reward, since every sampled
+token in the rollout earned it. The trainer computes the advantage once per
+rollout, from the last row, and applies it to all of the rollout's rows. Each row is a complete multi-turn sample, split at its first
 trained token: everything before is prompt, and the loss mask says which of the
 rest the model sampled.
 
-The masking policy is the sibling's: an instance with any rollout that timed
-out or failed is masked whole, and a trial that hit the context limit trains
+The masking policy is the Harbor generator's: an instance with any rollout that timed
+out or failed is masked whole, and a rollout that hit the context limit trains
 with its reward unless overlong filtering is on.
 
 With ``include_images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
@@ -37,8 +37,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from skycap import Sample
 
+from skycap import Sample
 from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertIndices,
     compact_routed_expert_indices,
@@ -57,8 +57,8 @@ VISION_KEYS = frozenset({"pixel_values", "image_grid_thw"})
 
 
 @dataclass
-class TrialOutcome:
-    """One trial: skycap's samples, plus what only Harbor knows."""
+class RolloutOutcome:
+    """One rollout: skycap's samples, plus what only the harness knows."""
 
     trajectory_id: TrajectoryID
     samples: List[Sample] = field(default_factory=list)
@@ -69,7 +69,7 @@ class TrialOutcome:
     # Model calls whose prompt skycap had to render instead of extending the previous tokens:
     # expected for a harness that edits or compacts its history, a surprise for an append-only one.
     unbridged_calls: int = 0
-    # R3: the trial finished, but a trained path lacked routed experts.
+    # R3: the rollout finished, but a trained path lacked routed experts.
     missing_routes: bool = False
 
 
@@ -123,7 +123,7 @@ def _placeholder() -> _Row:
 
 
 def compose(
-    outcomes: List[TrialOutcome],
+    outcomes: List[RolloutOutcome],
     *,
     overlong_filtering: bool,
     top_k: int = -1,
@@ -140,7 +140,7 @@ def compose(
     masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
 
     groups: List[List[_Row]] = []
-    trained: List[TrialOutcome] = []
+    trained: List[RolloutOutcome] = []
     for outcome in outcomes:
         rows: List[_Row] = []
         if outcome.trajectory_id.instance_id not in masked_instances:
@@ -265,7 +265,7 @@ def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List
     # cleared trains nothing, so it may go without.
     missing = sum(row.routes is None and any(row.loss_mask) for row in real)
     if missing:
-        # The generator turns a trial without routes into an error, so this is a bug, not a rollout.
+        # The generator turns a rollout without routes into an error, so this is a bug, not a rollout.
         raise ValueError(f"{missing} of {len(real)} trained paths have no routed experts")
     shaped = next((row.routes for row in real if row.routes is not None), None)
     if shaped is None:
@@ -278,7 +278,7 @@ def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List
     return [dummy if row.routes is None else row.routes for rows in groups for row in rows]
 
 
-def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_instances: set) -> Dict[str, Any]:
+def _metrics(outcomes: List[RolloutOutcome], trained: List[RolloutOutcome], masked_instances: set) -> Dict[str, Any]:
     metrics: Dict[str, Any] = {}
     if trained:
         # One entry per rollout: its longest path, which holds the most of what it generated.
