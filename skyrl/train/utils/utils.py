@@ -98,14 +98,7 @@ def _megatron_dp_size(role: str, world_size: int, megatron_config: MegatronConfi
         f"{role}_world_size {world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
         "This ensures that the data parallel size is an integer."
     )
-    ep = megatron_config.expert_model_parallel_size
-    # Megatron's own fallback: an unset expert_tensor_parallel_size is the tensor parallel size.
-    etp = tp if megatron_config.expert_tensor_parallel_size is None else megatron_config.expert_tensor_parallel_size
-    assert world_size % (pp * ep * etp) == 0, (
-        f"{role}_world_size {world_size} should be divisible by (pp * ep * etp) {pp * ep * etp}. "
-        f"trainer.{role}.megatron_config.expert_model_parallel_size and expert_tensor_parallel_size lay out "
-        "Megatron's expert grid, which it builds even for a dense model."
-    )
+    megatron_config.check_expert_grid(world_size, f"trainer.{role}.megatron_config")
     return world_size // (pp * cp * tp)
 
 

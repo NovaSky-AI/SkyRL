@@ -763,8 +763,8 @@ def test_validate_batch_sizes_megatron_expert_grid(role, tp, ep, etp, expert_gri
         validate_batch_sizes(cfg)
     else:
         with pytest.raises(
-            AssertionError,
-            match=rf"{role}_world_size 2 should be divisible by \(pp \* ep \* etp\) {expert_grid}\. "
+            ValueError,
+            match=rf"world_size 2 should be divisible by Megatron's expert grid \(pp \* ep \* etp\) {expert_grid}\. "
             rf"trainer\.{role}\.megatron_config\.expert_model_parallel_size",
         ):
             validate_batch_sizes(cfg)

@@ -610,6 +610,7 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
                 f"total_world_size={total_world_size} "
                 f"(num_nodes={cfg.placement.num_nodes} * num_gpus_per_node={cfg.placement.num_gpus_per_node})."
             )
+        cfg.megatron_config.check_expert_grid(total_world_size, "megatron_config")
         # context parallel are not yet supported for megatron
         if cfg.megatron_config.context_parallel_size > 1:
             assert cfg.remove_microbatch_padding, "context parallel is only supported with remove_microbatch_padding"
