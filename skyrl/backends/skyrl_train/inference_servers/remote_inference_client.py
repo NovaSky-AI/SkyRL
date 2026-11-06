@@ -50,6 +50,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
@@ -1270,8 +1271,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return await self._call_all_servers("/resume")
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
-        """Pause using keep mode."""
-        return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
+        """Pause for a weight sync: keep mode, or wait mode under data-parallel serving.
+
+        With ``data_parallel_size > 1`` vLLM's DP ranks step in lockstep (each step all-reduces across ranks, and idle
+        ranks run dummy batches while any rank has unfinished requests). Keep mode freezes in-flight requests, so they
+        stay unfinished and the ranks keep stepping; a paused rank that then runs the weight-update collective_rpc stops
+        stepping and the others block in the DP all-reduce forever. Wait mode lets in-flight requests finish so every
+        rank is idle before the update. Override with ``SKYRL_DP_PAUSE_MODE`` (keep / wait / abort)."""
+        mode = PauseMode.KEEP
+        if self.data_parallel_size > 1:
+            mode = PauseMode(os.environ.get("SKYRL_DP_PAUSE_MODE", "wait").lower())
+        return await self.pause(mode=mode, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
         """Resume after pause."""
