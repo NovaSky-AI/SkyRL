@@ -78,6 +78,9 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # LoRA MoE on FlashInfer's TRT-LLM MXFP4 kernel instead of Marlin (patches/vllm/patch_mxfp4_trtllm_lora_moe.py):
 # same MXFP4 weights and BF16 activations, different FP4 GEMM. 640 staggered sessions, active adapter: 570 -> 797.
 export SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE="${SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE:-1}"
+# Fused MoE-LoRA through vLLM's two-kernel (shrink + expand) path with tuned tiles instead of the one-shot kernel
+# (patches/vllm/patch_moe_lora_two_kernel.py): 640 staggered sessions, active adapter, 8x B200: 756 -> 945.
+export SKYRL_VLLM_MOE_LORA_TWO_KERNEL="${SKYRL_VLLM_MOE_LORA_TWO_KERNEL:-1}"
 export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-examples/train/deepseek_v4_flash/vllm_tuned_configs}"
 CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
 ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES"'}}'

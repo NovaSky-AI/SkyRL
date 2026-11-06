@@ -41,6 +41,7 @@ os.environ.setdefault(
 )
 # As the recipe: LoRA MoE on the TRT-LLM MXFP4 kernel (SkyRL vLLM patch, applied through WORKER_EXTENSION_CLS).
 os.environ.setdefault("SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE", "1")
+os.environ.setdefault("SKYRL_VLLM_MOE_LORA_TWO_KERNEL", "1")
 # SkyRL's vLLM worker extension: loads SkyRL's vLLM patches in every engine worker, as the RL engines do.
 WORKER_EXTENSION_CLS = "skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap.NewInferenceWorkerWrap"
 EXTRA_CUDAGRAPH_SIZES = [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192]
