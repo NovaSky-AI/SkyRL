@@ -37,7 +37,7 @@ def make_capturer(relay, monkeypatch):
     import vllm.model_executor.layers.fused_moe.routed_experts_capturer as rec
 
     monkeypatch.setattr(rec, "current_platform", SimpleNamespace(device_type="cpu"))
-    monkeypatch.setattr(rec, "get_forward_context", lambda: SimpleNamespace(dp_metadata=None))
+    monkeypatch.setattr(rec, "get_forward_context", lambda: SimpleNamespace(dp_metadata=None, batch_descriptor=None))
 
     def make(pp_rank, pp_size):
         monkeypatch.setattr(

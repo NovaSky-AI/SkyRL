@@ -42,6 +42,7 @@ from megatron.core.transformer.moe.moe_utils import (
 from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_cp_chunk_token_align,
     get_packed_seq_align_size,
     get_unpacked_seq_align_size,
 )
@@ -387,6 +388,20 @@ def load_megatron_grads_to_gpu(models):
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
 
 
+def megatron_grad_buffers_resident(models) -> bool:
+    """Whether the grad buffers are on the GPU (not released by :func:`offload_megatron_grads_to_cpu`)."""
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                if buffer.grad_data is not None and buffer.grad_data.untyped_storage().size() == 0:
+                    return False
+        else:
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None and not param.grad.is_cuda:
+                    return False
+    return True
+
+
 # Frozen (requires_grad=False, non-adapter) weights are immutable for the
 # whole run, so their CPU offload copies can live in file-backed mmap storage
 # instead of RAM: the pages are then *clean page cache* the kernel can evict
@@ -724,6 +739,12 @@ def preprocess_packed_seqs(
     batch_size = input_ids.shape[0]
 
     if sub_seq_lengths is not None:
+        if cp_size > 1 and get_cp_chunk_token_align() != 1:
+            # The controller's collator lays sub-sequences out without the model's chunk alignment.
+            raise NotImplementedError(
+                "Mini-batch packing (sub_seq_lengths) under context parallelism does not support models "
+                "that align CP chunks to token blocks (e.g. Qwen4Exp)."
+            )
         if len(sub_seq_lengths) != batch_size:
             raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
 

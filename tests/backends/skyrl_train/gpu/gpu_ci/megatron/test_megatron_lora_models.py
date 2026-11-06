@@ -42,11 +42,16 @@ from skyrl.train.config import SamplingParams, SkyRLLoraConfig, SkyRLTrainConfig
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
+from tests.backends.skyrl_train.gpu.gpu_ci.megatron.megatron_tiny_models.create_beam_tiny import (
+    create_beam_tiny,
+)
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_models import (
+    BEAM_TINY,
     MAX_GENERATE_LENGTH,
     QWEN38_4LAYER,
     _engine_overrides_for_model,
     _extra_env_vars_for_model,
+    _is_beam,
     generate_with_vllm,
     get_test_actor_config,
 )
@@ -97,6 +102,18 @@ GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES = [
     "in_proj_qkvbfg_a",
     "experts",
 ]
+# vLLM-side names for Beam's adapted modules (patches/vllm/patch_beam_lora.py): q/k/v/output gate pack
+# into qkv_gate_proj when the KV heads cover the TP size, else into qkv_proj + output_gate_proj, so both
+# are listed. The fp32 router (mlp.gate) is left out, as the trainer never adapts it.
+BEAM_VLLM_LORA_TARGET_MODULES = [
+    "qkv_gate_proj",
+    "qkv_proj",
+    "output_gate_proj",
+    "o_proj",
+    "gate_up_proj",
+    "down_proj",
+    "experts",
+]
 # The 4-layer GLM-5.3-Flash slice is far more sensitive to its adapter than the default rows. At a
 # LoRA-B std of 0.008 the stale-sampler diff is about 0.155 (phase 2) and the updated adapter
 # still matches at about 0.062 (phase 3, same as the zero adapter).
@@ -124,11 +141,18 @@ class LoRAPerturbPolicyWorkerBase(MegatronPolicyWorkerBase):
 LoRAPerturbPolicyWorker = ray.remote(num_gpus=1)(LoRAPerturbPolicyWorkerBase)
 
 
-def get_test_lora_actor_config(model_name: str, merge_lora: bool, lora_sync_path: str) -> SkyRLTrainConfig:
+def get_test_lora_actor_config(
+    model_name: str, merge_lora: bool, lora_sync_path: str, lora_sync_mode: str = "disk"
+) -> SkyRLTrainConfig:
     cfg = get_test_actor_config(model_name=model_name)
     cfg.trainer.strategy = "megatron"
     cfg.trainer.policy.model.lora = SkyRLLoraConfig(
-        rank=8, alpha=16, dropout=0.0, target_modules="all-linear", lora_sync_path=lora_sync_path
+        rank=8,
+        alpha=16,
+        dropout=0.0,
+        target_modules="all-linear",
+        lora_sync_path=lora_sync_path,
+        sync_mode=lora_sync_mode,
     )
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     if "glm-5.3-flash" in model_name.lower():
@@ -169,10 +193,21 @@ async def _sync_weights(policy, client, cfg, label: str):
 @pytest.mark.asyncio
 @pytest.mark.megatron_models
 @pytest.mark.parametrize(
-    "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,threshold,merge_lora",
+    "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,threshold,merge_lora,lora_sync_mode",
     [
-        pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, False, id="qwen3.5-0.8b-dense_tp2_adapter"),
-        pytest.param(2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, True, id="qwen3.5-0.8b-dense_tp2_merged"),
+        pytest.param(
+            2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, False, "disk", id="qwen3.5-0.8b-dense_tp2_adapter"
+        ),
+        pytest.param(
+            2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3.5-0.8B", 5e-2, True, "disk", id="qwen3.5-0.8b-dense_tp2_merged"
+        ),
+        # Tiny random Beam, same mesh as its row in test_megatron_models.py. The adapter rows serve the
+        # adapter through patches/vllm/patch_beam_lora.py (vLLM 0.33's BeamForCausalLM has no LoRA):
+        # q/k/v/output gate packed into qkv_gate_proj (2 KV heads at TP2), the dense MLP's gate_up_proj,
+        # and per-expert MoE adapters through FusedMoE LoRA, synced as files or in memory.
+        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, True, "disk", id="beam-tiny_tp2_ep2_merged"),
+        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, False, "disk", id="beam-tiny_tp2_ep2_adapter_disk"),
+        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, False, "memory", id="beam-tiny_tp2_ep2_adapter_memory"),
         # Large MoE row on 4xH100-80G, same mesh and engine overrides as the
         # bf16 row in test_megatron_models.py.
         pytest.param(
@@ -186,6 +221,7 @@ async def _sync_weights(policy, client, cfg, label: str):
             "Qwen/Qwen3.5-35B-A3B",
             5e-2,
             False,
+            "disk",
             id="qwen3.5-35b-a3b_h100_tp4_ep4_adapter",
             marks=pytest.mark.h100,
         ),
@@ -206,6 +242,7 @@ async def _sync_weights(policy, client, cfg, label: str):
             "eatang/GLM-5.3-Flash-4layer",
             1e-1,
             False,
+            "disk",
             id="glm-5.3-flash-4layer_h100_tp2_ep4_adapter",
             marks=pytest.mark.h100,
         ),
@@ -225,6 +262,7 @@ async def _sync_weights(policy, client, cfg, label: str):
             QWEN38_4LAYER,
             1e-1,
             False,
+            "disk",
             id="qwen3.8-flash-next-4layer_h100_ep4_adapter",
             marks=pytest.mark.h100,
         ),
@@ -239,21 +277,27 @@ async def _sync_weights(policy, client, cfg, label: str):
             QWEN38_4LAYER,
             1e-1,
             False,
+            "disk",
             id="qwen3.8-flash-next-4layer_h100_tp2_ep4_adapter",
             marks=pytest.mark.h100,
         ),
     ],
 )
 async def test_lora_logprobs_matching_roundtrip(
-    tp, pp, cp, ep, etp, inference_tp, num_gpus, model_name, threshold, merge_lora, tmp_path
+    tp, pp, cp, ep, etp, inference_tp, num_gpus, model_name, threshold, merge_lora, lora_sync_mode, tmp_path
 ):
     """
     Check that logprob diff matches across vllm and megatron with a zero LoRA adapter and
     again after publishing a perturbed one.
     """
+    if _is_beam(model_name):
+        create_beam_tiny(model_name)
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
         cfg = get_test_lora_actor_config(
-            model_name=model_name, merge_lora=merge_lora, lora_sync_path=str(tmp_path / "adapter")
+            model_name=model_name,
+            merge_lora=merge_lora,
+            lora_sync_path=str(tmp_path / "adapter"),
+            lora_sync_mode=lora_sync_mode,
         )
         # With merge_lora=False the policy is served under the adapter name, which
         # only exists after a sync -- so sync first.
@@ -274,6 +318,8 @@ async def test_lora_logprobs_matching_roundtrip(
         engine_overrides = _engine_overrides_for_model(model_name)
         if lora_sync and "glm-5.3-flash" in model_name.lower():
             engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(GLM5_3_FLASH_VLLM_LORA_TARGET_MODULES)
+        if lora_sync and _is_beam(model_name):
+            engine_overrides["engine_init_kwargs"]["lora_target_modules"] = list(BEAM_VLLM_LORA_TARGET_MODULES)
         async with InferenceEngineState.create(
             cfg=cfg,
             model=model_name,

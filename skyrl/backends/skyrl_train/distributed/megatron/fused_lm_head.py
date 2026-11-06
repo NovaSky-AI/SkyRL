@@ -43,13 +43,17 @@ def _takes_output_processor(unwrapped_model: Any) -> bool:
     ``**kwargs`` and pass them to a GPT-style language model that takes it; a wrapper without
     ``**kwargs`` would reject the hook.
     """
-    wrapper_params = inspect.signature(unwrapped_model.forward).parameters
-    language_model = getattr(unwrapped_model, "language_model", None)
-    return "output_processor" in wrapper_params or (
-        language_model is not None
-        and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in wrapper_params.values())
-        and "output_processor" in inspect.signature(language_model.forward).parameters
-    )
+    try:
+        wrapper_params = inspect.signature(unwrapped_model.forward).parameters
+        language_model = getattr(unwrapped_model, "language_model", None)
+        return "output_processor" in wrapper_params or (
+            language_model is not None
+            and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in wrapper_params.values())
+            and "output_processor" in inspect.signature(language_model.forward).parameters
+        )
+    except (TypeError, ValueError):
+        # No inspectable signature (e.g. a C extension); treat it as not taking the hook.
+        return False
 
 
 def fused_lm_head_unsupported_reason(model: Any) -> str | None:

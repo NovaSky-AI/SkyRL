@@ -17,12 +17,14 @@ and every consumer:
   per-expert MoE model.
 
 They stay here rather than in ``weight_sync/sources.py``, which is vLLM's
-contract verbatim, so a future upstream chunking change costs nothing. If vLLM
-grows ownership or group channels, :class:`GroupedWeightSource` collapses into
-them.
+contract verbatim, so a future upstream chunking change costs nothing.
+
+vLLM 0.33 added an ownership channel of its own (``ParamMeta.owners`` /
+``WeightSource.owned_names``) and ships its own sharded RDT engines. The vendored
+engines here still use ``held_names()``; moving them onto upstream's is a
+separate change, after which :class:`GroupedWeightSource` collapses into it.
 """
 
-from abc import abstractmethod
 from collections.abc import Collection, Iterator
 
 import torch
@@ -120,22 +122,14 @@ def layerwise_groups(names: list[str]) -> list[list[str]]:
 class GroupedWeightSource(WeightSource):
     """A ``WeightSource`` with the ownership and group channels sharded RDT pulls over.
 
-    Adds two channels to vLLM's ``metadata()`` + ``__iter__`` contract:
+    Adds two channels to vLLM's ``metadata`` + ``iter_full()`` contract:
 
     * `held_names()` — which parameters this rank holds, for producers that are
       split so each rank holds only part of the model. Defaults to all.
     * `iter_groups()` — the same stream batched per gather group (see
-      `layerwise_groups`). Defaults to batching `__iter__`; override to
+      `layerwise_groups`). Defaults to batching `iter_full()`; override to
       materialize a whole group in one step.
     """
-
-    @abstractmethod
-    def metadata(self) -> list[ParamMeta]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        raise NotImplementedError
 
     def held_names(self) -> "Collection[str] | None":
         """The parameters this rank holds, or None for all of them.
@@ -149,7 +143,7 @@ class GroupedWeightSource(WeightSource):
 
         Three requirements come with overriding it:
 
-        * `metadata()` must still describe the WHOLE model on every rank. The
+        * `metadata` must still describe the WHOLE model on every rank. The
           group partition, the iteration checks and the consumers' pull plans are
           all built from one rank's metadata, so a rank reporting only its own
           share would leave the rest silently un-transferred. The engine
@@ -168,12 +162,12 @@ class GroupedWeightSource(WeightSource):
 
     def groups(self) -> list[list[str]]:
         """This rank's gather groups, in metadata order: `layerwise_groups` over
-        `metadata()`, restricted to the groups holding at least one held name.
+        `metadata`, restricted to the groups holding at least one held name.
 
         A group with nothing held here is not iterated at all — its gather is a
         collective among the ranks that do hold part of it.
         """
-        groups = layerwise_groups([m.name for m in self.metadata()])
+        groups = layerwise_groups([m.name for m in self.metadata])
         held = self.held_names()
         if held is None:
             return groups
@@ -183,7 +177,7 @@ class GroupedWeightSource(WeightSource):
     def iter_groups(self) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
         """Yield one `(names, tensors)` batch per group from `groups()`.
 
-        The default drives `__iter__` and batches its output, checking as it goes
+        The default drives `iter_full()` and batches its output, checking as it goes
         that the names arrive in metadata order — ranks sharing a parameter
         materialize it with a collective, so a rank that iterates out of order
         deadlocks its peers rather than returning wrong data.
@@ -191,7 +185,7 @@ class GroupedWeightSource(WeightSource):
         Override when a backend can produce a whole group at once; it must yield
         the same batches in the same order as this default.
         """
-        it = iter(self)
+        it = self.iter_full()
         for group in self.groups():
             names: list[str] = []
             tensors: list[torch.Tensor] = []
@@ -200,7 +194,7 @@ class GroupedWeightSource(WeightSource):
                 if name != expected:
                     raise RuntimeError(
                         f"WeightSource yielded {name!r} but expected "
-                        f"{expected!r}; iteration order must match metadata()."
+                        f"{expected!r}; iteration order must match metadata."
                     )
                 names.append(name)
                 tensors.append(tensor)

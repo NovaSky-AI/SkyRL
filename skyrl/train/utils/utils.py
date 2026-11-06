@@ -436,6 +436,15 @@ def validate_cfg(cfg: SkyRLTrainConfig):
 
     validate_step_timeouts(cfg.trainer.step_timeout_s, cfg.trainer.weight_sync_timeout_s)
 
+    if cfg.trainer.log_mfu and cfg.trainer.strategy == "megatron":
+        from skyrl.train.utils.mfu import mfu_support
+
+        mfu_warning = mfu_support(
+            cfg.trainer.strategy, cfg.trainer.policy.megatron_config, cfg.trainer.policy.model.lora.rank
+        ).warning
+        if mfu_warning:
+            logger.warning(mfu_warning)
+
     # Validate generation config separately
     validate_generator_cfg(cfg)
 
@@ -731,8 +740,8 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             raise ValueError("FP8 weight sync requires trainer.strategy='megatron'")
         if ie_cfg.weight_sync_backend in {"sharded_rdt", "delta"}:
             # Neither backend can carry the quantized payload + scale pairs that
-            # FP8 weight sync is made of: the RDT weight sources export bridge
-            # tensors cast to the inference dtype, and the delta checkpoint format
+            # FP8 weight sync is made of: the RDT weight sources export plain bridge
+            # tensors (inference dtype, fp32 / integer params kept), and the delta checkpoint format
             # cannot represent the marker names and scale tensors. Both senders
             # refuse at send time too, but vLLM is built with quantization="fp8"
             # and load_format="dummy" long before the first sync, so the model is
@@ -1165,6 +1174,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Selects the DSA indexer top-k backend under dsa_kernel_backend=cudnn
         # (patches/megatron/patch_dsa_hybrid_indexer.py); read in the Megatron workers.
         "SKYRL_DSA_INDEXER_BACKEND",
+        # GLM-5.3-Flash k-pool indexer query sharding (glm5_next/dsa.py) and head-full sparse
+        # attention (patches/megatron/patch_dsa_head_full.py); read in the Megatron workers.
+        "SKYRL_DSA_INDEXER_TP_SHARD",
+        "SKYRL_DSA_HEAD_FULL",
+        "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
+        "SKYRL_DSA_HEAD_FULL_ZIGZAG",
         # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
         "VLLM_ALLREDUCE_USE_FLASHINFER",
         "VLLM_ALLREDUCE_USE_SYMM_MEM",

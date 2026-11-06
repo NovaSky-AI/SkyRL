@@ -1,0 +1,62 @@
+---
+title: "Supported Models"
+---
+
+SkyRL provides support for end-to-end training with the FSDP and Megatron training backends (both using vLLM for inference),
+as well as support for a JAX backend (for both training and inference) via the [Tinker API server](/docs/tinker/overview).
+
+The table below lists the model families we have tested on SkyRL. Each family has its own page with example scripts, hardware requirements and known issues.
+
+| Model | Sizes | Full FT | LoRA | Low precision | Min. hardware | Status |
+|---|---|---|---|---|---|---|
+| [Beam](/docs/models/beam) | 501B-A23B | ✅ | ✅ | MXFP8 | 2x8 B200 | ✅ |
+| [GLM-5.3](/docs/models/glm) | 753B | ✅ | ✅ | MXFP8, FP8 rollouts | 4x8 B300 | ✅ |
+| [GLM-5.3-Flash](/docs/models/glm) | 313B-A17B | ✅ | ✅ | | 1x8 B300 | ✅ |
+| [Kimi K2.7](/docs/models/kimi) | 1T | ❌ | ✅ | INT4 QAT only | 2x8 B300 | ✅ |
+| [Kimi K2.5/K2.6](/docs/models/kimi) | 1T | ❌ | ✅ | INT4 QAT only | 2x8 B300 | Same arch as K2.7, should work |
+| [Nemotron-3.5](/docs/models/nemotron) | Lightning-30B-A3B | ✅ | | | 1x4 H100 | ✅ |
+| [Nemotron-3](/docs/models/nemotron) | Nano-4B, Nano-30B-A3B | ✅ | | | 1x8 H100 | ✅ |
+| [Qwen3.8-Flash-Next](/docs/models/qwen3_8_flash_next) | ~180B MoE, up to 262K context (CP8) | ✅ | ✅ | | 4x8 B200 | ✅ |
+| [Qwen3.6](/docs/models/qwen) | 27B, 35B-A3B | ✅ | ✅ | INT4 QAT | 1x8 H200 | ✅ |
+| [Qwen-3.5](/docs/models/qwen) | 0.8B-27B, 35B-A3B/122B-A10B/397B-A17B | ✅ | ✅ | FP8, MXFP8 | 1x4 GPUs | ✅ |
+| [Qwen3](/docs/models/qwen) | 0.6B-32B, 30B-A3B/235B-A22B | ✅ | ✅ | | 1x4 GPUs | ✅ |
+
+Blank means we haven't tested it yet. ❌ means it is known not to work.
+
+### Other models with example scripts
+
+| Model | Backend | Full FT | LoRA | Min. hardware | Example scripts |
+|---|---|---|---|---|---|
+| GLM-4.7-Flash | Megatron | ✅ | | 1x8 GPUs | [`run_megatron_grpo_glm4_7_30b.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_grpo_glm4_7_30b.sh) |
+| GLM-4.5-Air | Megatron | | ✅ | 2x8 H100 | [`run_megatron_rdt_dpep_glm45_air_lora.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/sharded_rdt/run_megatron_rdt_dpep_glm45_air_lora.sh) |
+| Moonlight-16B-A3B | Megatron | ✅ | | 1x8 H100 | [`run_megatron_moonlight.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_moonlight.sh), [`router_replay/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/router_replay) |
+| MiMo-7B-RL | Megatron | ✅ | | 1x8 H100 | [`run_megatron_dapo_mimo_7b_rl.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_dapo_mimo_7b_rl.sh), MTP spec decoding in [`spec_decode/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/spec_decode) |
+| Nemotron-Mini-4B-Instruct | Megatron | ✅ | | 1x8 GPUs | [`run_megatron_nemotron_mini_4b.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_nemotron_mini_4b.sh) |
+| gpt-oss-20b | FSDP | ✅ | | 1x4 GPUs | [`run_gsm8k_gptoss.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/gptoss/run_gsm8k_gptoss.sh) |
+| Qwen3-VL-2B/8B | FSDP, Megatron (SFT) | ✅ | ✅ | 1x8 GPUs | [`geometry3k/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/geometry3k), [`visgym/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/visgym), [`run_sft_megatron_vlm.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/sft/run_sft_megatron_vlm.sh) |
+| Qwen3-Coder-30B-A3B | FSDP | ✅ | | 2x8 GPUs | [`run_mini_swe_30B.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/mini_swe_agent/run_mini_swe_30B.sh) |
+| Qwen2.5 (0.5B-32B, Coder, Math) | FSDP | ✅ | ✅ | 1x4 GPUs | Most of the [`examples/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train) (GSM8K, DAPO, search, text-to-SQL, ...) |
+| Qwen1.5-MoE-A2.7B | FSDP | ✅ | | 1x8 GPUs | [`run_qwen1_5_MoE_A2_7B.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/moe/run_qwen1_5_MoE_A2_7B.sh) |
+
+## FSDP
+Any model that is supported via HuggingFace transformers + vLLM is supported via the FSDP backend. The FSDP backend also comes with support for Ulysses-style sequence parallelism,
+making it a viable option for training on dense models with up to 32B parameters and 32K/64K context lengths.
+
+## Megatron
+The [Megatron backend](/docs/examples/megatron) comes with support for 5D parallelism (DP/TP/CP/PP/EP) and allows for efficient scaling of large MoE models (100B+).
+Support for mapping from HuggingFace model definitions to Megatron GPTModels is provided by NVIDIA's [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) library.
+All of the models in the table above are supported via Megatron-Bridge + vLLM.
+
+Other models supported via [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge#supported-models) and vLLM should run on SkyRL as well. Contributions and bug fixes for additional model families are welcome!
+
+## JAX
+The JAX backend supports the following models:
+- Qwen-3.5 Dense
+- Deepseek-V3
+- Llama-3
+- Qwen3 Dense/MoE
+
+## Known limitations
+- Vision-language checkpoints (Kimi K2.x, GLM-5.3) are trained text-only (`language_model_only=true`), the vision tower stays frozen in vLLM. Qwen-3.5 VL is the exception and can train the vision tower.
+- MTP heads are dropped by default. Supported models can train them with `trainer.mtp.enabled=true`, see [MTP training and speculative decoding](/docs/examples/spec_decode).
+- For FP8/INT4 release checkpoints the Megatron trainer needs a BF16 copy. See the model page for which checkpoint to use.
