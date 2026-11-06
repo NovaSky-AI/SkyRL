@@ -188,7 +188,6 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.remove_microbatch_padding=true \
   trainer.use_expandable_segments=true \
-  trainer.fused_lm_head_logprob=true \
   trainer.logprobs_chunk_size=1024 \
   trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
   trainer.micro_forward_batch_size_per_gpu=1 \

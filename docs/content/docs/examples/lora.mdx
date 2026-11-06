@@ -207,7 +207,8 @@ and schedule.
 
 Not supported yet: the FSDP backend, MoE expert adapters (dense models and attention/MLP adapters only), DoRA,
 `modules_to_save`, `lora_type=canonical_lora`, and `trainer.fused_lm_head_logprob=true` together with an
-adapter on `lm_head` (the fused head reads the base `output_layer.weight` directly).
+adapter on `lm_head` (the fused head reads the base `output_layer.weight` directly; the default
+`fused_lm_head_logprob=None` uses the unfused head for such an adapter).
 
 `tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_lora_init_adapter.py` checks the import: a policy initialized from a Tinker-shaped adapter (separate q/k/v, `in_proj_q/k/v`, `lm_head`)
 scores fixed sequences within bf16 tolerance of HuggingFace + `peft` on the same adapter.

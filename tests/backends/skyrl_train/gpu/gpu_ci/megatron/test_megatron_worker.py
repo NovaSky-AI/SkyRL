@@ -516,9 +516,9 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         ("policy", 2, 2, 1, 1, 1, 4, True, False, None, False, None),
         ("policy", 2, 2, 1, 1, 1, 4, True, True, None, False, None),
         ("policy", 2, 2, 1, 1, 1, 4, True, False, None, True, None),
-        ("policy", 2, 2, 1, 1, 1, 4, False, False, None, False, None),
+        ("policy", 2, 2, 1, 1, 1, 4, False, False, "off", False, None),
         ("policy", 2, 1, 2, 1, 1, 4, True, False, None, False, None),
-        ("policy", 2, 1, 2, 1, 1, 4, True, True, None, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, True, "off", False, None),
         ("policy", 2, 1, 2, 1, 1, 4, True, True, "torch", False, None),
         ("policy", 2, 1, 2, 1, 1, 4, True, True, "triton", False, None),
         ("policy", 2, 1, 2, 1, 1, 4, True, True, FusedLmHeadBackend.TRITON_BLOCK_SPARSE, False, None),
@@ -530,9 +530,9 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         "tp2_pp2_policy_seq_packing",
         "tp2_pp2_policy_seq_packing_with_entropy_loss",
         "tp2_pp2_policy_lora",
-        "tp2_pp2_policy_unpacked",
+        "tp2_pp2_policy_unpacked_unfused",
         "tp2_cp2_policy_seq_packing_no_entropy_loss",
-        "tp2_cp2_policy_seq_packing_with_entropy_loss",
+        "tp2_cp2_policy_seq_packing_unfused_entropy_loss",
         "tp2_cp2_policy_seq_packing_fused_torch_entropy_loss",
         "tp2_cp2_policy_seq_packing_fused_triton_entropy_loss",
         "tp2_cp2_policy_seq_packing_fused_triton_block_sparse_entropy_loss",
@@ -578,7 +578,10 @@ async def test_megatron_train(
     if use_entropy_loss:
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
-    if fused_lm_head_backend is not None:
+    # None keeps the default (fused wherever supported); "off" runs the unfused LM head.
+    if fused_lm_head_backend == "off":
+        cfg.trainer.fused_lm_head_logprob = False
+    elif fused_lm_head_backend is not None:
         cfg.trainer.fused_lm_head_logprob = True
         cfg.trainer.fused_lm_head_logprob_backend = fused_lm_head_backend
         if fused_lm_head_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE:
