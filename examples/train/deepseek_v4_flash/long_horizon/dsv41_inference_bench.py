@@ -36,7 +36,7 @@ VOCAB_LO, VOCAB_HI = 1000, 100000
 os.environ.setdefault(
     "VLLM_TUNED_CONFIG_FOLDER",
     os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "../../../train/deepseek_v4_flash/vllm_tuned_configs"
+        os.path.dirname(os.path.abspath(__file__)), "../vllm_tuned_configs"
     ),
 )
 # As the recipe: LoRA MoE on the TRT-LLM MXFP4 kernel (SkyRL vLLM patch, applied through WORKER_EXTENSION_CLS).
