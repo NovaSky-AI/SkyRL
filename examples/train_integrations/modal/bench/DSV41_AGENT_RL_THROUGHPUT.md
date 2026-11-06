@@ -38,11 +38,18 @@ Knobs (env): `MAX_TURNS`, `MAX_MODEL_LEN`, `TRAIN_BATCH_SIZE`, `N_SAMPLES_PER_PR
 
 ## Measured
 
-| | per GPU |
-|---|---|
-| sampler, B300 | TBD |
-| trainer fwd+bwd, B300 | TBD |
-| trainer fwd+bwd, B200 (validation run) | ~1,960 tok/s (5.77M tokens / 368 s), peak 102 GB |
+Steady state (steps 2+), 128 rollouts x ~45.1k tokens = 5.77M tokens per step:
+
+| | B300 (Modal, 640 rollouts in flight) | B200 (384 in flight) |
+|---|---|---|
+| trainer, forward + backward | **~2,470 tok/s/GPU** (~292 s / step) | ~2,130 tok/s/GPU (~339 s) |
+| trainer, incl. the old-logprob forward pass | ~1,700 tok/s/GPU (~422 s) | ~1,450 tok/s/GPU (~498 s) |
+| step time | ~7.5 min | ~8.7 min |
+| sampler, generated tokens (e2e, per-minute avg) | ~730-1,000 tok/s/GPU (~1,100 in pure decode) | ~650-690 tok/s/GPU (~1,070 in pure decode) |
+| trainer peak memory | 105 GB | 103 GB |
+| trainer vs. sampler logprob gap (mean abs) | 0.012 | 0.012 |
+
+For B200: `GPU=B200:8 MAX_STALENESS_STEPS=2 GEN_STAGGER_S=60` (384 rollouts fit its smaller KV cache).
 
 ## Caveats
 
