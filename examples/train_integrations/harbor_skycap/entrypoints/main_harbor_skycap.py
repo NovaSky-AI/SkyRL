@@ -75,6 +75,9 @@ class SkycapConfig:
     """CPUs reserved per server, for rendering and HTTP."""
     placement_strategy: str = "SPREAD"
     """Ray placement-group strategy for the servers: SPREAD (default, for availability), STRICT_SPREAD, PACK."""
+    host: Optional[str] = None
+    """Address each skycap server binds to and advertises to clients.
+    Defaults to a wildcard listener that advertises its node's address."""
     record_dir: Optional[str] = None
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""
@@ -133,6 +136,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     load_rule(train_paths)
     settings = {
         "upstream_url": engine_url,
+        "host": cfg.skycap.host,
         "tokenizer": cfg.trainer.policy.model.path,
         "renderer_pool_size": cfg.skycap.renderer_pool_size,
         "model": ie.served_model_name,
