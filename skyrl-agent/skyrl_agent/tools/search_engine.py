@@ -27,9 +27,12 @@ class SearchEngine(BaseTool):
         },
         "required": ["query"],
     }
-    google_search_key = os.getenv("GOOGLE_SEARCH_KEY")
-    if not google_search_key:
-        raise ValueError("GOOGLE_SEARCH_KEY environment variable is required")
+
+    def __init__(self):
+        super().__init__()
+        self.google_search_key = os.getenv("GOOGLE_SEARCH_KEY")
+        if not self.google_search_key:
+            raise ValueError("GOOGLE_SEARCH_KEY environment variable is required")
 
     # Optional blocklists to prevent data leakage (e.g., excluding benchmark/dataset sites)
     # Configure via env vars:
