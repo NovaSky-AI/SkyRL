@@ -41,13 +41,13 @@ set -x
 : "${TOP_K:=20}"
 : "${TOP_P:=1.0}"
 
-# vLLM layout per 8-GPU engine: TP8 (default) replicates the attention KV cache on every GPU (~10M tokens per B200
-# node); VLLM_DP=8 runs data-parallel attention + expert-parallel MoE (TP1 x DP8 x EP8), so each GPU caches only its
-# own sessions (~13M tokens per B200 GPU, ~106M per node: 640 sessions at ~100k tokens fit). DP needs the
-# SKYRL_VLLM_MOE_LORA_* EP patches below and runs only decode steps in CUDA graphs: under DP the piecewise
-# (mixed prefill + decode) graphs hit an illegal memory access in vLLM 0.32 even without LoRA, so those steps run
-# eagerly. 8x B200, active rank-32 adapter, 640 sessions, depth up to 200k: 99 gen tok/s/GPU at DP8.
-: "${VLLM_DP:=1}"
+# vLLM layout per 8-GPU engine. VLLM_DP=8 (default) runs data-parallel attention + expert-parallel MoE
+# (TP1 x DP8 x EP8): each GPU caches only its own sessions' KV (~93M tokens per B200 node vs ~10M for TP8, where
+# every GPU replicates the whole cache), which is what keeps decode fast at 100k-200k contexts. DP needs the
+# SKYRL_VLLM_MOE_LORA_* EP patches below, runs only decode steps in CUDA graphs (FULL_DECODE_ONLY), and pauses in
+# "wait" mode for weight syncs (RemoteInferenceClient.pause_generation). 8x B200, active rank-32 adapter on attention
+# + experts, 640 sessions, 69-turn rollouts: ~1,420 gen tok/s/GPU at 20k-108k context. VLLM_DP=1 for TP8.
+: "${VLLM_DP:=8}"
 VLLM_TP=$(( 8 / VLLM_DP ))
 : "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo 8 || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention + TP MoE
 CUDAGRAPH_MODE_KWARG=""; [ "$VLLM_DP" -gt 1 ] && CUDAGRAPH_MODE_KWARG=', "cudagraph_mode": "FULL_DECODE_ONLY"'
@@ -95,6 +95,8 @@ ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"
 # history in that server's prefix cache. round_robin spreads a rollout's turns over the servers: with VLLM_DP=8 (one
 # server per DP rank) only 1 turn in 8 hits the cache and the rest re-prefill the whole context (~100k tokens at
 # depthfirst's length; measured prefix-cache hit rate ~5%).
+# With VLLM_DP>1 the client also sends each session straight to its server (no router hop, same stickiness).
+export SKYRL_SESSION_STICKY_DIRECT="${SKYRL_SESSION_STICKY_DIRECT:-1}"
 ROUTER_INIT_KWARGS='{"policy": "consistent_hash", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
@@ -161,6 +163,9 @@ uv run --isolated --extra megatron -m "$ENTRYPOINT" \
   trainer.algorithm.enable_score_centering=true \
   trainer.algorithm.enable_sample_support_replay=true \
   generator.inference_engine.enable_return_sample_support_set=true \
+  `# One mini-batch per step: take the old logprobs from the training forward itself (no separate forward pass,` \
+  `# ~25-35% of a 200k-token step).` \
+  trainer.old_logprobs_from_first_minibatch=true \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.loss_reduction="token_mean" \
   trainer.policy.optimizer_config.lr=1e-5 \

@@ -24,8 +24,8 @@ export SKYRL_DSV41_RECOMPUTE_OFFLOAD=1 SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB="${
 export MBRIDGE_STATE_REUSE_HANDLES=0 MBRIDGE_STATE_CACHE_SMALL_TENSORS=0
 MAX_LEN=$(( 512 + RESP ))
 ${UV_RUN:-uv run --isolated} --extra megatron python -m examples.train_scripts.full_context.main_full_ctx \
-  data.train_data="['${DATA_DIR:-/root/data/gsm8k_multi_turn}/train.parquet']" \
-  data.val_data="['${DATA_DIR:-/root/data/gsm8k_multi_turn}/validation.parquet']" \
+  data.train_data="['${DATA_DIR:-$HOME/data/gsm8k_multi_turn}/train.parquet']" \
+  data.val_data="['${DATA_DIR:-$HOME/data/gsm8k_multi_turn}/validation.parquet']" \
   trainer.num_dummy_steps="${STEPS:-3}" trainer.skip_inference_engines=true \
   trainer.dummy_length_distribution=mixture trainer.dummy_min_prompt_length=128 trainer.dummy_max_prompt_length=512 \
   trainer.dummy_min_response_length="${MIN_RESP:-$(( RESP / 2 ))}" trainer.dummy_truncated_fraction=0.25 \
