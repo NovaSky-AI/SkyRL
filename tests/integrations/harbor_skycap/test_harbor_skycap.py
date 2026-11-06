@@ -22,11 +22,6 @@ from examples.train_integrations.harbor.entrypoints.main_harbor import (
     HARBOR_DEFAULT_CONFIG,  # noqa: E402
 )
 from examples.train_integrations.harbor_skycap import harbor_generator  # noqa: E402
-from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
-    TrialOutcome,
-    compose,
-)
-from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
 from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
@@ -39,6 +34,11 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
     pack_sample_support_logprobs,  # noqa: E402
 )
+from skyrl.integration.skycap.compose import (  # noqa: E402
+    RolloutOutcome,
+    compose,
+)
+from skyrl.integration.skycap.engine import SkyRLEngine  # noqa: E402
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
 from skyrl.train.utils.rate_limiter import RateLimiterConfig  # noqa: E402
@@ -481,7 +481,7 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
 
 
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
-    outcome = TrialOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
+    outcome = RolloutOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
 
     support = compose([outcome], overlong_filtering=False, top_k=TOP_K, sample_support=True)["rollout_sample_support"]
     assert [(len(rows), rows.top_k) for rows in support] == [(1, TOP_K)]
@@ -551,20 +551,21 @@ def test_the_generator_refuses_configs_it_cannot_serve() -> None:
 
 def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(monkeypatch) -> None:
     from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+    from skyrl.integration.skycap import config
 
     started = []
-    monkeypatch.setattr(main_harbor_skycap, "start_servers", lambda settings, **_: started.append(settings))
+    monkeypatch.setattr(config, "start_servers", lambda settings, **_: started.append(settings))
     cfg = main_harbor_skycap.HarborSkycapConfig()
     cfg.trainer.algorithm.max_seq_len = 1024
     for train_paths in ("final", SHORT_DISCARDS):
         cfg.skycap.train_paths = train_paths
-        main_harbor_skycap.start_skycap(cfg, "http://router")
+        config.start_skycap(cfg, "http://router")
     assert [settings["path_rules"] for settings in started] == [{}, {SHORT_DISCARDS: SHORT_DISCARDS}]
     # A rule that won't load fails before any server starts.
     for train_paths, error in (("longest", ValueError), ("nowhere_skycap_test:rule", ModuleNotFoundError)):
         cfg.skycap.train_paths = train_paths
         with pytest.raises(error):
-            main_harbor_skycap.start_skycap(cfg, "http://router")
+            config.start_skycap(cfg, "http://router")
     assert len(started) == 2
 
 
@@ -652,8 +653,8 @@ def test_with_r3_an_overlong_filtered_trial_needs_no_routes() -> None:
     routed.routed_experts = np.zeros((3, LAYERS, EXPERTS_PER_TOKEN), dtype=np.uint8)
     unrouted = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[4, 5, 6], loss_mask=[0, 1, 1])
     outcomes = [
-        TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[routed], reward=1.0),
-        TrialOutcome(trajectory_id=TrajectoryID("a", 1), samples=[unrouted], stop_reason="context_length"),
+        RolloutOutcome(trajectory_id=TrajectoryID("a", 0), samples=[routed], reward=1.0),
+        RolloutOutcome(trajectory_id=TrajectoryID("a", 1), samples=[unrouted], stop_reason="context_length"),
     ]
 
     out = compose(outcomes, overlong_filtering=True, routed_experts=True)
@@ -667,7 +668,7 @@ def test_with_r3_an_overlong_filtered_trial_needs_no_routes() -> None:
 def test_overlong_filtering_masks_a_context_length_trial_but_keeps_it() -> None:
     sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
     sample.logprobs = [0.0, -1.0, -1.0]
-    outcome = TrialOutcome(
+    outcome = RolloutOutcome(
         trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=0.0, stop_reason="context_length"
     )
 
@@ -746,8 +747,8 @@ def test_with_images_each_row_carries_its_paths_vision_features_and_a_masked_row
         logprobs=[0.0] * 8,
         media=[first, second],
     )
-    trained = TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
-    masked = TrialOutcome(trajectory_id=TrajectoryID("b", 0), stop_reason="error")
+    trained = RolloutOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
+    masked = RolloutOutcome(trajectory_id=TrajectoryID("b", 0), stop_reason="error")
 
     out = compose([trained, masked], overlong_filtering=False, include_images=True)
 
@@ -759,12 +760,12 @@ def test_with_images_each_row_carries_its_paths_vision_features_and_a_masked_row
 
 
 def test_images_fail_the_step_unless_the_trainer_can_take_them() -> None:
-    def outcome(image: Media) -> TrialOutcome:
+    def outcome(image: Media) -> RolloutOutcome:
         sample = Sample(
             leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=list(range(8)),
             loss_mask=[0] * 6 + [1, 1], logprobs=[0.0] * 8, media=[image],
         )  # fmt: skip
-        return TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
+        return RolloutOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
 
     image = _image(1, 8, [1, 2, 4])
     # The servers send the images whatever the flag says: off, the rows would train on bare placeholders.

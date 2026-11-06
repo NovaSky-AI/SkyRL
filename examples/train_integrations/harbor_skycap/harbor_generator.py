@@ -22,7 +22,6 @@ sandbox environment that LiteLLM- and OpenAI-based agents read.
 import asyncio
 import importlib
 import os
-import re
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -53,8 +52,9 @@ from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
-from .compose import TrialOutcome, compose, split
-from .record_index import RecordLog
+from skyrl.integration.skycap.compose import RolloutOutcome, compose, split
+from skyrl.integration.skycap.errors import is_context_length_message
+from skyrl.integration.skycap.record_index import RecordLog
 
 litellm.suppress_debug_info = True
 
@@ -65,9 +65,8 @@ MAX_NUM_RETRIES_PER_TRIAL = 2
 #: classifies; an installed agent that exits on skycap's 400 (code ``context_length_exceeded``, which LiteLLM
 #: may raise as a plain ``BadRequestError``) is only a ``NonZeroAgentExitCodeError``. Its message keeps just the
 #: first 1000 characters of the agent's output, which end before the error, so the end of the agent's own log in
-#: the trial directory is searched too. Rich wraps that log, possibly inside the code.
+#: the trial directory is searched too (``is_context_length_message``).
 CONTEXT_LENGTH_EXCEPTIONS = {"ContextLengthExceededError", "ContextWindowExceededError"}
-CONTEXT_LENGTH_OUTPUT = re.compile(r"context\s*_length\s*_exceeded|ContextWindowExceededError")
 #: How much of the end of each agent log is searched.
 AGENT_LOG_TAIL_BYTES = 64 * 1024
 
@@ -79,7 +78,7 @@ def _ran_out_of_context(results: Any) -> bool:
         return True
     if exception != "NonZeroAgentExitCodeError":
         return False
-    if CONTEXT_LENGTH_OUTPUT.search(results.exception_info.exception_message or ""):
+    if is_context_length_message(results.exception_info.exception_message or ""):
         return True
     uri = urlparse(getattr(results, "trial_uri", None) or "")
     if uri.scheme != "file":
@@ -87,7 +86,7 @@ def _ran_out_of_context(results: Any) -> bool:
     for log in sorted(Path(url2pathname(uri.path), "agent").glob("*.txt")):
         with open(log, "rb") as f:
             f.seek(max(0, log.stat().st_size - AGENT_LOG_TAIL_BYTES))
-            if CONTEXT_LENGTH_OUTPUT.search(f.read().decode(errors="replace")):
+            if is_context_length_message(f.read().decode(errors="replace")):
                 return True
     return False
 
@@ -186,7 +185,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         phase = getattr(metadata, "training_phase", "train")
         cache_salt = self._cache_salt()
 
-        outcomes: List[Optional[TrialOutcome]] = [None] * len(prompts)
+        outcomes: List[Optional[RolloutOutcome]] = [None] * len(prompts)
         attempts = [TrialAttempts() for _ in prompts]
         progress = tqdm(
             disable=disable_tqdm,
@@ -226,7 +225,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         step: Optional[int],
         phase: str,
         attempts: TrialAttempts,
-    ) -> TrialOutcome:
+    ) -> RolloutOutcome:
         """One rollout, retried on unknown errors. Never raises: one failure must not cancel the batch.
 
         A path rule that raises is not retried: the rule runs on what the trial captured, so another run of the
@@ -252,7 +251,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 return outcome
             missing_routes = missing_routes or outcome.missing_routes
             logger.warning(f"{prefix} produced nothing to train on")
-        return TrialOutcome(
+        return RolloutOutcome(
             trajectory_id=trajectory_id,
             stop_reason="error",
             e2e_time=time.monotonic() - started,
@@ -268,7 +267,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         phase: str,
         attempt: int,
         attempts: TrialAttempts,
-    ) -> TrialOutcome:
+    ) -> RolloutOutcome:
         """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces."""
         meta = {
             "task": str(prompt),
@@ -307,12 +306,12 @@ class HarborSkycapGenerator(GeneratorInterface):
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
-            return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
+            return RolloutOutcome(trajectory_id=trajectory_id, stop_reason="error")
         if not any(split(sample) is not None for sample in finished.samples):
             # Nothing generated (e.g. the harness failed before its first call): retried, then masked,
             # so the trial's reward doesn't enter the group without tokens behind it.
             logger.warning(f"Trajectory {trajectory_id}: skycap captured no trainable tokens")
-            return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
+            return RolloutOutcome(trajectory_id=trajectory_id, stop_reason="error")
         # Overlong filtering clears a context-length trial's loss mask, so it trains nothing and needs no routes.
         filtered = stop_reason == "context_length" and self.generator_cfg.apply_overlong_filtering
         if (
@@ -323,8 +322,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             # skycap drops a path's routes when any node on it lacks them; replaying the rest would
             # train those tokens on routes the rollout never took. Retried, then masked.
             logger.warning(f"Trajectory {trajectory_id}: a trained path has no routed experts")
-            return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error", missing_routes=True)
-        return TrialOutcome(
+            return RolloutOutcome(trajectory_id=trajectory_id, stop_reason="error", missing_routes=True)
+        return RolloutOutcome(
             trajectory_id=trajectory_id,
             samples=finished.samples,
             reward=reward,
