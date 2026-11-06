@@ -151,12 +151,30 @@ def apply_deepseek_v41_patches() -> bool:
             hashes = forward_state().engram_hashes
             assert hashes is not None, "DeepSeek-V4.1 engram needs the model's input_ids"
             hidden_states = self.engram(hidden_states, hashes[:, :, self.engram_hash_index])
+        compressed = getattr(self, "_skyrl_frozen_store", None) is not None
         if getattr(self.config, "dsv41_stateful_recompute", False) and self.training and torch.is_grad_enabled():
             from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.recompute import (
                 stateful_layer_forward,
             )
 
-            return stateful_layer_forward(layer_forward, self, hidden_states, args, kwargs, forward_state)
+            run_layer = layer_forward
+            if compressed:
+                from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.frozen_weights import (
+                    materialize,
+                )
+
+                def run_layer(layer, *a, **k):
+                    # Both the forward and its replay in backward decompress this layer's weights first.
+                    materialize(layer)
+                    return layer_forward(layer, *a, **k)
+
+            return stateful_layer_forward(run_layer, self, hidden_states, args, kwargs, forward_state)
+        if compressed:
+            from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.frozen_weights import (
+                materialize,
+            )
+
+            materialize(self, grad_forward=torch.is_grad_enabled())
         return layer_forward(self, hidden_states, *args, **kwargs)
 
     layer_cls.forward = forward_layer
