@@ -81,18 +81,8 @@ class HarborFullyAsyncExp(HarborExp):
         )
 
 
-class HarborGenerateExp(BasePPOExp):
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
-        """
-        Initializes the HarborGenerator.
-        """
-        return HarborGenerator(
-            generator_cfg=cfg.generator,
-            harbor_cfg=cfg.harbor_trial_config,  # Pass harbor config to the generator
-            inference_engine_client=inference_engine_client,
-            tokenizer=tokenizer,
-            max_seq_len=cfg.trainer.algorithm.max_seq_len,
-        )
+class HarborGenerateExp(HarborExp):
+    """``HarborExp`` that only generates ``NUM_SAMPLES_TO_TEST`` rollouts, for debugging."""
 
     def _setup_generator(self):
         logger.info(self.get_cfg_as_str(self.cfg))
@@ -101,33 +91,6 @@ class HarborGenerateExp(BasePPOExp):
         asyncio.run(inference_engine_client.wake_up())
 
         return self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
-
-    def get_train_dataset(self):
-        """Initializes the training dataset.
-
-        Returns:
-            HarborTaskDataset: The training dataset.
-        """
-        prompts_dataset = HarborTaskDataset(
-            data_files=self.cfg.data.train_data,
-        )
-        assert (
-            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
-        ), f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
-        return prompts_dataset
-
-    def get_eval_dataset(self):
-        """Initializes the evaluation dataset.
-
-        Returns:
-            HarborTaskDataset: The evaluation dataset.
-        """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
-            prompts_dataset = HarborTaskDataset(
-                data_files=self.cfg.data.val_data,
-            )
-            return prompts_dataset
-        return None
 
     def run(self):
         generator = self._setup_generator()

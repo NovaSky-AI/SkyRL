@@ -27,7 +27,7 @@ def deep_merge(base: dict, overrides: dict) -> dict:
 def load_trial_config(overrides: Dict[str, Any]) -> Dict[str, Any]:
     """Harbor's defaults (``HARBOR_DEFAULT_CONFIG``) with ``overrides`` (``harbor_trial_config`` from the CLI) on top."""
     with open(HARBOR_DEFAULT_CONFIG) as f:
-        defaults = yaml.safe_load(f)
+        defaults = yaml.safe_load(f) or {}
     return deep_merge(defaults, overrides)
 
 
