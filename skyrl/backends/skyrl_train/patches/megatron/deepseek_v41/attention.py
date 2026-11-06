@@ -69,6 +69,12 @@ from megatron.core.transformer.module import MegatronModule, mark_keep_in_fp32
 from megatron.core.transformer.spec_utils import build_module
 from torch import nn
 
+from skyrl.backends.skyrl_train.patches.megatron.deepseek_v41.candidate_kernels import (
+    candidate_kernel_supported,
+    candidate_scores,
+    candidate_topk_ids,
+)
+
 # Queries scored per indexer chunk: [chunk, b, n_heads, n_compressed] fp32 stays ~0.3 GB at 10K tokens.
 _INDEXER_CHUNK = 256
 
@@ -195,7 +201,9 @@ class CSA2State:
     compress_ratio: Optional[int] = None
     indexer_k: Optional[torch.Tensor] = None  # [n_c, b, index_head_dim], RoPE'd, detached
     global_indices: Optional[torch.Tensor] = None  # [b, sq, topk] int32 compressed positions, -1 = none
-    candidates: Optional[torch.Tensor] = None  # [sq, b, n_c] bool
+    # Candidate blocks of the candidate-source layer: [sq, b, <= candidate_topk_blocks] int32 block ids, -1 = none
+    # (block ids, as NVIDIA/Megatron-LM#7285; a dense [sq, b, n_c] position mask is quadratic in the sequence).
+    candidate_blocks: Optional[torch.Tensor] = None
 
 
 class ForwardState:
@@ -229,6 +237,32 @@ def logical_layer_id(layer_number: int) -> int:
 
 
 @torch.no_grad()
+def select_candidate_block_ids(
+    logits: torch.Tensor, compress_lens: torch.Tensor, topk_blocks: int, block_size: int
+) -> torch.Tensor:
+    """Level one of the two-level top-k as block ids: ``[..., min(topk_blocks, n_blocks)]`` int32, -1 = none.
+
+    Same selection as :func:`select_candidate_blocks` (best blocks by max position score, the query's
+    newest, partly filled block pinned in), returned compactly (``block_size`` x fewer entries than the
+    position mask, which is ``[sq, n_c]`` -- quadratic in the sequence)."""
+    width = logits.size(-1)
+    scores = nn.functional.pad(logits, (0, -width % block_size), value=-torch.inf)
+    scores = scores.unflatten(-1, (-1, block_size)).amax(dim=-1)
+    num_blocks = scores.size(-1)
+    last = (compress_lens - 1) // block_size
+    scores = scores.masked_fill(torch.arange(num_blocks, device=logits.device) == last, torch.inf)
+    top = scores.topk(min(topk_blocks, num_blocks), dim=-1)
+    return torch.where(top.values > -torch.inf, top.indices, -1).to(torch.int32)
+
+
+def candidate_blocks_to_mask(block_ids: torch.Tensor, block_size: int, width: int) -> torch.Tensor:
+    """Position mask ``[..., width]`` bool of the candidate blocks in ``block_ids`` (-1 ignored)."""
+    num_blocks = -(-width // block_size)
+    keep = torch.zeros(*block_ids.shape[:-1], num_blocks + 1, dtype=torch.bool, device=block_ids.device)
+    keep.scatter_(-1, torch.where(block_ids >= 0, block_ids, num_blocks).long(), True)
+    return keep[..., :num_blocks].repeat_interleave(block_size, dim=-1)[..., :width]
+
+
 def select_candidate_blocks(logits: torch.Tensor, compress_lens: torch.Tensor, topk_blocks: int, block_size: int):
     """Level one of the two-level top-k (reference ``select_candidate_blocks``).
 
@@ -408,7 +442,14 @@ class CompressedSparseAttention2(MegatronModule):
 
     @torch.no_grad()
     def _select_topk(self, x, qr, state, sq, n_c):
-        """Indexer top-k over the shared compressed positions: ``[b, sq, topk]`` int32, -1 = none."""
+        """Indexer top-k over the shared compressed positions: ``[b, sq, topk]`` int32, -1 = none.
+
+        The candidate source publishes its candidate blocks as ids (``[sq, b, <= candidate_topk_blocks]``
+        int32, -1 = none) rather than a dense ``[sq, b, n_c]`` position mask, which is quadratic in the
+        sequence (64 GiB at 256k). Layers that use them score only the candidate positions with
+        NVIDIA/Megatron-LM#7285's Triton candidate kernel when it supports the geometry, else densely with a
+        per-chunk mask rebuilt from the ids.
+        """
         indexer = self.indexer
         ratio = self.compress_ratio
         q, _ = indexer.linear_wq_b(qr.detach())
@@ -417,13 +458,22 @@ class CompressedSparseAttention2(MegatronModule):
         raw_weights, _ = indexer.linear_weights_proj(x.detach())
         head_weight_scale = indexer.softmax_scale * indexer.n_heads**-0.5
         topk = min(indexer.index_topk, n_c)
+        batch, block_size = q.size(1), self.candidate_block_size
+        if (
+            self.uses_candidates
+            and q.is_cuda
+            and candidate_kernel_supported(
+                indexer.n_heads, indexer.head_dim, block_size, state.candidate_blocks.size(-1)
+            )
+        ):
+            return self._select_topk_candidates(q, raw_weights, head_weight_scale, state, sq, topk)
         positions = torch.arange(n_c, device=x.device)
-        candidates = [] if self.is_candidate_source else None
+        candidate_blocks = [] if self.is_candidate_source else None
         out = []
         fused = _INDEXER_IMPL == "fused" and _fused_indexer_score_fn() is not None and q.is_cuda
         if fused:
             q_lp, k_lp = q.to(torch.bfloat16), state.indexer_k.to(torch.bfloat16)  # [sq, b, h, d], [n_c, b, d]
-            chunk = _rows_within_budget(n_c * q.size(1))
+            chunk = _rows_within_budget(n_c * batch)
         else:
             q = q.float()
             weights = raw_weights.float() * head_weight_scale
@@ -437,7 +487,7 @@ class CompressedSparseAttention2(MegatronModule):
                         fused_indexer_scores_rows(
                             q_lp[s0:s1, i], k_lp[:, i], raw_weights[s0:s1, i], head_weight_scale, ratio, s0
                         )
-                        for i in range(q.size(1))
+                        for i in range(batch)
                     ],
                     dim=1,
                 )  # [c, b, n_c]
@@ -447,18 +497,45 @@ class CompressedSparseAttention2(MegatronModule):
             compress_lens = (torch.arange(s0 + 1, s1 + 1, device=x.device) // ratio).view(-1, 1, 1)
             scores.masked_fill_(positions >= compress_lens, -torch.inf)
             if self.is_candidate_source:
-                candidates.append(
-                    select_candidate_blocks(
-                        scores, compress_lens, self.candidate_topk_blocks, self.candidate_block_size
-                    )
+                candidate_blocks.append(
+                    select_candidate_block_ids(scores, compress_lens, self.candidate_topk_blocks, block_size)
                 )
             elif self.uses_candidates:
-                scores.masked_fill_(~state.candidates[s0:s1], -torch.inf)
+                keep = candidate_blocks_to_mask(state.candidate_blocks[s0:s1], block_size, n_c)
+                scores.masked_fill_(~keep, -torch.inf)
             vals, idxs = scores.topk(topk, dim=-1)
             out.append(torch.where(torch.isfinite(vals) & (idxs < compress_lens), idxs, -1))
         if self.is_candidate_source:
-            state.candidates = torch.cat(candidates, dim=0)
+            state.candidate_blocks = torch.cat(candidate_blocks, dim=0)
         return torch.cat(out, dim=0).permute(1, 0, 2).to(torch.int32).contiguous()
+
+    def _select_topk_candidates(self, q, raw_weights, head_weight_scale, state, sq, topk):
+        """Top-k inside the published candidate blocks (NVIDIA/Megatron-LM#7285 ``candidate_scores`` +
+        ``candidate_topk_ids``): ``[b, sq, topk]`` int32, ids ascending, -1 = none."""
+        ratio, block_size = self.compress_ratio, self.candidate_block_size
+        blocks = state.candidate_blocks  # [sq, b, n_blocks] int32
+        q_lp, k_lp = q.to(torch.bfloat16), state.indexer_k.to(torch.bfloat16)
+        width = blocks.size(-1) * block_size
+        out = []
+        chunk = _rows_within_budget(width * q.size(1))
+        for s0 in range(0, sq, chunk):
+            s1 = min(s0 + chunk, sq)
+            visible = torch.arange(s0 + 1, s1 + 1, device=q.device) // ratio
+            per_batch = []
+            for i in range(q.size(1)):
+                scores = candidate_scores(
+                    q_lp[s0:s1, i],
+                    k_lp[:, i],
+                    raw_weights[s0:s1, i],
+                    head_weight_scale,
+                    blocks[s0:s1, i],
+                    block_size,
+                    visible,
+                )
+                ids = candidate_topk_ids(scores, blocks[s0:s1, i], block_size, topk)
+                per_batch.append(nn.functional.pad(ids, (0, topk - ids.size(-1)), value=-1))
+            out.append(torch.stack(per_batch, dim=1))  # [c, b, topk]
+        return torch.cat(out, dim=0).permute(1, 0, 2).contiguous()
 
     def forward(
         self,
@@ -472,9 +549,14 @@ class CompressedSparseAttention2(MegatronModule):
         attention_bias=None,
         packed_seq_params=None,
         csa2_state: Optional[CSA2State] = None,
+        boundary_hidden=None,
+        boundary_kv=None,
     ):
         assert attention_mask is None, "DeepSeek-V4.1 attention uses an implicit causal mask"
         assert packed_seq_params is None, "packed sequences are not supported for DeepSeek-V4.1 attention"
+        # megatron-core's DSv4 attention passes the left-boundary rows of its THD context-parallel path
+        # (``exchange_cp_boundary_hidden``) to every core attention; ``None`` without CP, which V4.1 lacks here.
+        assert boundary_hidden is None and boundary_kv is None, "context parallelism is not supported here"
         sq, b, _, _ = query.size()
         kv = key.squeeze(-2)
         if FAKE_QUANT_KV == "vllm":
