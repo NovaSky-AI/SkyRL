@@ -8,9 +8,18 @@ from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.core import parallel_state
 from megatron.core.transformer.spec_utils import ModuleSpec
 
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    set_cp_chunk_token_align,
+)
+from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.context_parallel import (
+    CPLayout,
+)
 from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.layer_specs import (
     Qwen4ExpTransformerLayer,
     build_qwen4_exp_layer_spec,
+)
+from skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.modules import (
+    cudnn_qsa_supported,
 )
 
 
@@ -20,7 +29,8 @@ class Qwen4ExpModelProvider(GPTModelProvider):
 
     On top of the Qwen3.5 hybrid GDN / gated-attention MoE configuration (set by the bridge),
     the ``qwen4_*`` fields describe the gated hyper-connections, the PLE n-gram embedding and
-    the QSA indexer. Supported parallelism: any TP with sequence parallelism, CP=1, PP=1, any EP
+    the QSA indexer. Supported parallelism: any TP with sequence parallelism, any CP on
+    Blackwell with cuDNN QSA (packed sequences; see ``context_parallel.py``), PP=1, any EP
     (the PLE table is row-sharded over the expert-parallel group).
     """
 
@@ -45,16 +55,20 @@ class Qwen4ExpModelProvider(GPTModelProvider):
     qwen4_ple_hf_prefix: Optional[str] = None
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None):
-        if self.context_parallel_size != 1:
-            raise NotImplementedError(
-                "Qwen4Exp on Megatron does not support context parallelism yet (PLE and the QSA indexer "
-                "need each packed sequence whole on one rank)."
-            )
         if self.tensor_model_parallel_size > 1 and not self.sequence_parallel:
             # Without SP every TP rank would run the hyper-connections and PLE on all tokens.
             raise NotImplementedError("Qwen4Exp on Megatron needs sequence_parallel=True with TP > 1.")
         if self.pipeline_model_parallel_size != 1:
             raise NotImplementedError("Qwen4Exp on Megatron does not support pipeline parallelism yet.")
+        if self.context_parallel_size > 1:
+            if not cudnn_qsa_supported():
+                raise NotImplementedError(
+                    "Qwen4Exp context parallelism needs a Blackwell (SM10x) GPU and cudnn-frontend with the "
+                    "QSA kernels (cudnn.ops.qsa_forward, >= 1.32): QSA sparse attention under CP runs split-K "
+                    "cuDNN QSA. Use context_parallel_size=1 on other GPUs."
+                )
+            # QSA pools 4-token key blocks per CP chunk: pad sequences so chunks hold whole blocks.
+            set_cp_chunk_token_align(self.qwen4_indexer_compress_ratio)
         model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
 
         ples = [m.ple for m in model.modules() if isinstance(m, Qwen4ExpTransformerLayer) and m.ple is not None]
@@ -62,14 +76,24 @@ class Qwen4ExpModelProvider(GPTModelProvider):
         for ple in ples:
             ple.load_table(group)
 
+        layers = [m for m in model.modules() if isinstance(m, Qwen4ExpTransformerLayer)]
+        cp_group = parallel_state.get_context_parallel_group() if self.context_parallel_size > 1 else None
+
         def _stash_tokens(module, args, kwargs):
             input_ids = args[0] if args else kwargs.get("input_ids")
             packed = kwargs.get("packed_seq_params")
             cu = None
             if packed is not None:
                 cu = packed.cu_seqlens_q_padded if packed.cu_seqlens_q_padded is not None else packed.cu_seqlens_q
+            layout = None
+            if cp_group is not None:
+                if cu is None:
+                    raise NotImplementedError("Qwen4Exp under context parallelism needs packed sequences.")
+                layout = CPLayout.build(cu, cp_group)
+            for layer in layers:
+                layer.cp_layout = layout
             for ple in ples:
-                ple.set_tokens(input_ids, cu)
+                ple.set_tokens(input_ids, cu, layout)
 
         model.register_forward_pre_hook(_stash_tokens, with_kwargs=True)
         return model

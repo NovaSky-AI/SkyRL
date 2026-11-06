@@ -232,6 +232,7 @@ class FullCtxTrainer(RayPPOTrainer):
                     # 4. train policy/critic model
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
+                    self.all_metrics.update(self.policy_mfu_metrics(training_input))
 
                     # One profiler step per global step.
                     self._profiler_step()

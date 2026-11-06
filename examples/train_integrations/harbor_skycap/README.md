@@ -84,7 +84,8 @@ skycap's exposure ([skycap's README](../../../skycap/README.md#expose-a-server-t
 
 Only the harness routes are reachable that way, never the control plane. An
 installed agent gets its trajectory's route on the exposed URL in its sandbox's
-environment (`OPENAI_API_BASE`, `HOSTED_VLLM_API_BASE`, and placeholder keys);
+environment (`OPENAI_API_BASE` and `HOSTED_VLLM_API_BASE` for LiteLLM agents such
+as mini-swe-agent, `OPENAI_BASE_URL` for Codex, and placeholder keys);
 Terminus-2 keeps the server's own URL. A quick tunnel takes at most 200 calls in
 flight, and a call whose reply hasn't started after about 125 s fails, so use
 `external_host` for many agents or long replies.

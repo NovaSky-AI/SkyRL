@@ -950,6 +950,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # train policy/critic model
         with Timer("train_critic_and_policy", self.all_timings):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+        self.all_metrics.update(await asyncio.to_thread(self.policy_mfu_metrics, training_input))
 
         return status
 

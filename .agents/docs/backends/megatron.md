@@ -15,6 +15,12 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
   megatron-core's `DSAttention` (NoPE MLA, k-pool indexer); `glm5_next/dsa.py` adds a long-sequence guard and
   the opt-in `SKYRL_DSA_INDEXER_TP_SHARD`. Removal plan when bumping megatron: `patches/megatron/README.md`. Requires
   `language_model_only=True` (VL checkpoint) and packed sequences (`remove_microbatch_padding=True`).
+- Beam (`beam`): upstream Megatron-Bridge `BeamBridge` (`HybridModel`, attention + MLP hybrid layer per decoder
+  layer) and vLLM 0.33's `BeamForCausalLM`, served with LoRA through `patches/vllm/patch_beam_lora.py` (a
+  `vllm.general_plugins` entry point registering a `SupportsLoRA` subclass). SkyRL also carries the transformers
+  config (`patches/transformers/configuration_beam.py`), the CP comm-type default, the fused LM-head softcap and the
+  FP8 spec (`weight_sync/fp8/models/beam.py`); see `patches/megatron/README.md`. Tiny-model GPU rows: `beam-tiny_*` in
+  `gpu_ci/megatron/test_megatron_{,lora_}models.py` (`megatron_tiny_models/create_beam_tiny.py`).
 
 ## Optimizer state on disk
 

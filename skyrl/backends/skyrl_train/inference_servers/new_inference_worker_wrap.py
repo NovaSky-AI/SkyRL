@@ -181,9 +181,8 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay impor
 
 apply_pp_relay_worker_patch()
 
-# DeepSeek-V4 under layerwise reload (weight sync): load attention sinks through a weight loader and run the
-# model-level finalize once per reload, as vllm-project/vllm#57797 (merged) and #64357 (open) do upstream.
-# TODO: remove once the pinned vLLM includes both (see the module docstring).
+# DeepSeek-V4 under layerwise reload (weight sync): run the model-level finalize once per reload, as
+# vllm-project/vllm#64357 (open) does upstream. TODO: remove once the pinned vLLM includes it.
 from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (  # noqa: E402
     apply_deepseek_v4_reload_patch,
 )
@@ -191,23 +190,12 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (  
 apply_deepseek_v4_reload_patch()
 
 # A PP stage with no layers of some KV cache group gets cache tensors for layers it does not own (DeepSeek-V4.1 at PP=2).
-# TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.32.0).
+# TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.33.0).
 from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import (  # noqa: E402
     apply_pp_kv_cache_projection_patch,
 )
 
 apply_pp_kv_cache_projection_patch()
-
-# DeepSeek-V4.1 BF16 prefill reads unwritten rows of a reused KV workspace; NaN leftovers make a request's logits
-# NaN. Zero the workspace before each gather. TODO: remove once vllm-project/vllm#60613 is in the pinned vLLM.
-from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41_prefill_workspace import (  # noqa: E402
-    apply_deepseek_v41_combine_indices_patch,
-    apply_deepseek_v41_prefill_workspace_patch,
-)
-
-apply_deepseek_v41_prefill_workspace_patch()
-# The same stale prefill indices on every V4.1 backend (incl. the NVFP4 mega-attn one): seed them -1 (vllm#60613).
-apply_deepseek_v41_combine_indices_patch()
 
 # Opt-in (SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE=1): MXFP4 MoE + LoRA on FlashInfer's TRT-LLM kernel instead of Marlin.
 from skyrl.backends.skyrl_train.patches.vllm.patch_mxfp4_trtllm_lora_moe import (  # noqa: E402

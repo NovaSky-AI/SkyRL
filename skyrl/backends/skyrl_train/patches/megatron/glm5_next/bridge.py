@@ -157,6 +157,10 @@ class Glm5NextBridge(MegatronModelBridge):
         provider.linear_key_head_dim = text_config.linear_head_dim
         provider.linear_value_head_dim = text_config.linear_head_dim
         provider.linear_conv_kernel_dim = text_config.linear_conv_kernel_dim
+        provider.kimi_kda_layers = tuple(i + 1 for i, t in enumerate(layer_types) if t == "linear_attention")
+        provider.kimi_linear_head_dim = text_config.linear_head_dim
+        provider.kimi_linear_num_heads = text_config.linear_num_heads
+        provider.kimi_linear_conv_kernel_size = text_config.linear_conv_kernel_dim
         provider.kda_gate_lower_bound = text_config.linear_lower_bound
 
         # NoPE MLA + DSA on the full-attention layers.

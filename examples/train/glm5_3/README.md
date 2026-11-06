@@ -9,7 +9,7 @@ Handoff notes for this branch (2026-09-30). Everything here ran on the 8-node B2
 |---|---|---|
 | `run_gsm8k_glm5p3_lora_fp8_rollout_8node.sh` | GSM8K GRPO, LoRA r64 (`share_expert_adapters=true`, `merge_lora=true`), TP8/EP64, 32×8 | 5-step smoke test passed: GSM8K eval 0.82 → 0.93 (run `eywye3sd`, project `glm5p3_gsm8k`) |
 | `run_dapo_glm5p3_fullft_fp8_rollout_8node.sh` | DAPO full fine-tuning, 2k prompt / 8k response, 128×12, LR 1e-6, TP8/EP64, 20 steps | Stage 1 (no R3) ran 10 steps; stage 2 (R3) running, see below |
-| `run_dapo_glm5p3_lora.sh` | Upstream BF16 DAPO LoRA reference recipe, 4×8 B300 (see [below](#upstream-bf16-lora-reference-recipe-b300)) | configuration-checked upstream, not rerun here |
+| `run_dapo_glm5p3_lora.sh` | Upstream BF16 DAPO LoRA reference recipe, 4×8 B300 (see [below](#upstream-bf16-lora-reference-recipe-b300)) | Works |
 
 Both serve GLM-5.3 from 8 vLLM engines at TP8 with online FP8 (`load_format=dummy`; the trainer
 syncs bf16 weights and vLLM's layerwise reload re-quantizes them). bf16 would need ~176 GiB/GPU
@@ -158,12 +158,6 @@ the learning rate warms up over the first 40 updates. AIME evaluation runs befor
 training and every five steps, with 32 responses per problem. Responses are capped
 at 8,192 tokens, with DAPO's soft length penalty above 4,096 tokens and loss masking
 for unfinished responses. Dynamic sampling is disabled.
-
-This is a current-main adaptation of the full-model learning run, not its exact
-historical configuration: it uses current main and in-memory synchronization,
-and evaluates the base policy in the same run. The historical run used file-based
-synchronization. This updated recipe has been configuration-checked but has not yet
-been rerun end to end on GPUs; memory headroom must include adapter loading.
 
 For GLM-5.3 Flash, use the existing [two-node DAPO LoRA recipe](../glm5_3_flash/run_dapo_glm5p3_flash_lora_sync_2node.sh).
 It has separate topology, LoRA, and optimization settings; it is not the exact
