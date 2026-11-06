@@ -10,7 +10,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from flash_attn.bert_padding import pad_input, unpad_input
+
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input
+except ImportError:  # no flash-attn wheel off CUDA (e.g. TPU); the pure-PyTorch versions
+    from skyrl.backends.skyrl_train.utils.bert_padding import pad_input, unpad_input
 from loguru import logger
 from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
