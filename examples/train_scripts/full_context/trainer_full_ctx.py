@@ -1,13 +1,16 @@
+import json
+import os
 import random
 import time
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import ray
 from loguru import logger
 
-from skyrl.train.trainer import RayPPOTrainer
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import Timer
 
 
@@ -84,6 +87,39 @@ class FullCtxTrainer(RayPPOTrainer):
             out.extend(pool[start : start + n - len(out)])
         return out
 
+    def _dummy_loss_mask(self, response_len: int) -> List[int]:
+        """Assistant turns trained, the observations between them masked (``dummy_num_turns`` > 1)."""
+        cfg = self.cfg.trainer
+        turns, obs = max(1, cfg.dummy_num_turns), cfg.dummy_observation_length
+        assistant = response_len - (turns - 1) * obs
+        if turns == 1 or obs == 0 or assistant < turns:
+            return [1] * response_len
+        per_turn, extra = divmod(assistant, turns)
+        mask: List[int] = []
+        for turn in range(turns):
+            mask += [1] * (per_turn + (1 if turn < extra else 0))
+            if turn < turns - 1:
+                mask += [0] * obs
+        return mask
+
+    def _route_shape(self) -> Tuple[int, int, int]:
+        """(captured layers, experts, top-k) from the HF config, as the inference engine reports routes."""
+        with open(os.path.join(self.cfg.trainer.policy.model.path, "config.json")) as f:
+            config = json.load(f)
+        config = config.get("text_config", config)
+        experts = config.get("n_routed_experts") or config.get("num_experts")
+        return int(config["num_hidden_layers"]), int(experts), int(config["num_experts_per_tok"])
+
+    def _dummy_routes(self, rng: np.random.Generator, num_tokens: int) -> Optional[np.ndarray]:
+        if not self.cfg.trainer.dummy_routes:
+            return None
+        layers, experts, topk = self._route_shape()
+        rows = max(1, num_tokens - 1)
+        # Distinct experts per row: the top-k of uniform noise.
+        noise = rng.random((rows, layers, experts), dtype=np.float32)
+        routes = np.argpartition(noise, -topk, axis=-1)[..., -topk:]
+        return routes.astype(np.uint8 if experts <= 256 else np.int16)
+
     def _make_dummy_batch(self, step: int):
         cfg = self.cfg
         n_prompts = cfg.trainer.train_batch_size
@@ -91,7 +127,8 @@ class FullCtxTrainer(RayPPOTrainer):
         rng = random.Random(cfg.trainer.dummy_seed * 1_000_003 + step)
         shared_token = rng.randint(0, self.tokenizer.vocab_size - 1)
         lengths = self._dummy_lengths(rng, n_prompts * n_samples)
-        prompt_token_ids, response_ids, rewards, loss_masks, uids = [], [], [], [], []
+        route_rng = np.random.default_rng(cfg.trainer.dummy_seed * 1_000_003 + step)
+        prompt_token_ids, response_ids, rewards, loss_masks, uids, routes = [], [], [], [], [], []
         for p in range(n_prompts):
             # Samples of one prompt share the prompt, as in GRPO.
             prompt = self._dummy_tokens(rng, lengths[p * n_samples][0], shared_token)
@@ -100,8 +137,9 @@ class FullCtxTrainer(RayPPOTrainer):
                 prompt_token_ids.append(prompt)
                 response_ids.append(self._dummy_tokens(rng, response_len, shared_token))
                 rewards.append([0] * (response_len - 1) + [rng.randint(0, 1)])
-                loss_masks.append([1] * response_len)
+                loss_masks.append(self._dummy_loss_mask(response_len))
                 uids.append(str(p))
+                routes.append(self._dummy_routes(route_rng, len(prompt) + response_len))
         num_tokens = sum(len(p) + len(r) for p, r in zip(prompt_token_ids, response_ids))
         dummy_generator_output = {
             "prompt_token_ids": prompt_token_ids,
@@ -109,6 +147,8 @@ class FullCtxTrainer(RayPPOTrainer):
             "rewards": rewards,
             "loss_masks": loss_masks,
         }
+        if cfg.trainer.dummy_routes:
+            dummy_generator_output["rollout_expert_indices"] = routes
         return dummy_generator_output, uids, num_tokens, sum(len(r) for r in response_ids)
 
     def _execute_training_step(self, model: str, data) -> Dict[str, float]:
@@ -117,12 +157,16 @@ class FullCtxTrainer(RayPPOTrainer):
         if model == "policy":
             data = self._normalize_advantages(data, boundaries, data.metadata.get("policy_prompt_boundaries"))
         all_metrics: Dict[str, List[float]] = defaultdict(list)
-        all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
+        perm = self._dp_balance_permutation(model, data, boundaries)  # trainer.balance_dp_tokens
+        all_chunk_refs = self.dispatch.stage_data(model, data.index_select(perm) if perm is not None else data, boundaries)
         fwd_bwd_s = optim_s = 0.0
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            for chunk_refs in all_chunk_refs:
+            for mini_batch_idx, chunk_refs in enumerate(all_chunk_refs):
+                worker_kwargs = {}
+                if model == "policy" and mini_batch_idx == 0 and self.cfg.trainer.old_logprobs_from_first_minibatch:
+                    worker_kwargs["old_logprobs_from_current"] = True
                 t0 = time.perf_counter()
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                status = self.dispatch.forward_backward_from_staged(model, chunk_refs, **worker_kwargs)
                 t1 = time.perf_counter()
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
