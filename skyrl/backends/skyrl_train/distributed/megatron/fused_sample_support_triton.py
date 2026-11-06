@@ -47,10 +47,11 @@ def _candidate_projection_kernel(
     output_ptr,
     PAIR_REGIME: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
-    stride_hidden_row,
-    stride_hidden_h,
-    stride_weight_row,
-    stride_weight_h,
+    # int64 so stride products cannot wrap; e.g. a transposed weight's hidden stride is the vocab size.
+    stride_hidden_row: tl.int64,
+    stride_hidden_h: tl.int64,
+    stride_weight_row: tl.int64,
+    stride_weight_h: tl.int64,
     rcp_temperature,
     BLOCK_H: tl.constexpr,
 ):
