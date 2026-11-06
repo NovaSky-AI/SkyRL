@@ -37,15 +37,20 @@ set -x
 : "${CKPT_PATH:=$HOME/ckpts/$RUN_NAME}"
 : "${ENABLE_ROUTING_REPLAY:=true}"
 : "${INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION:=0.85}"
-# vLLM layout per 8-GPU engine: TP8 (default) replicates the attention KV cache on every GPU; VLLM_DP=8 runs
-# data-parallel attention + expert-parallel MoE (TP1 x DP8 x EP8), so each GPU caches only its own sessions (~8x the
-# KV capacity: long rollouts at high concurrency).
-: "${VLLM_DP:=1}"
-VLLM_TP=$(( 8 / VLLM_DP ))
-: "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo 8 || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention, TP MoE
 # Score centering needs a bounded sampler support (top_k > 1); 20 as examples/train/top_p_replay.
 : "${TOP_K:=20}"
 : "${TOP_P:=1.0}"
+
+# vLLM layout per 8-GPU engine: TP8 (default) replicates the attention KV cache on every GPU (~10M tokens per B200
+# node); VLLM_DP=8 runs data-parallel attention + expert-parallel MoE (TP1 x DP8 x EP8), so each GPU caches only its
+# own sessions (~13M tokens per B200 GPU, ~106M per node: 640 sessions at ~100k tokens fit). DP needs the
+# SKYRL_VLLM_MOE_LORA_* EP patches below and runs only decode steps in CUDA graphs: under DP the piecewise
+# (mixed prefill + decode) graphs hit an illegal memory access in vLLM 0.32 even without LoRA, so those steps run
+# eagerly. 8x B200, active rank-32 adapter, 640 sessions, depth up to 200k: 99 gen tok/s/GPU at DP8.
+: "${VLLM_DP:=1}"
+VLLM_TP=$(( 8 / VLLM_DP ))
+: "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo 8 || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention + TP MoE
+CUDAGRAPH_MODE_KWARG=""; [ "$VLLM_DP" -gt 1 ] && CUDAGRAPH_MODE_KWARG=', "cudagraph_mode": "FULL_DECODE_ONLY"'
 
 LORA_RANK=32
 LORA_ALPHA=32
@@ -85,16 +90,12 @@ export SKYRL_VLLM_MOE_LORA_INT64_OFFSETS="${SKYRL_VLLM_MOE_LORA_INT64_OFFSETS:-1
 export SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META="${SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META:-1}"
 export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-examples/train/deepseek_v4_flash/vllm_tuned_configs}"
 CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
-# DP attention + EP: MoE-LoRA fixes for the all-gathered token batch (int64 offsets, all ranks' LoRA metadata) and
-# decode-only full CUDA graphs (the DP8+EP LoRA configuration validated on B200).
-CUDAGRAPH_MODE_KW=""
-if [ "$VLLM_DP" -gt 1 ] && [ "$VLLM_EP" -gt 1 ]; then
-  export SKYRL_VLLM_MOE_LORA_INT64_OFFSETS="${SKYRL_VLLM_MOE_LORA_INT64_OFFSETS:-1}"
-  export SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META="${SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META:-1}"
-  CUDAGRAPH_MODE_KW=', "cudagraph_mode": "FULL_DECODE_ONLY"'
-fi
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES$CUDAGRAPH_MODE_KW"'}}'
-ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES""$CUDAGRAPH_MODE_KWARG"'}}'
+# consistent_hash (SkyRL's default) pins each rollout to one server via its X-Session-ID, so every turn finds its
+# history in that server's prefix cache. round_robin spreads a rollout's turns over the servers: with VLLM_DP=8 (one
+# server per DP rank) only 1 turn in 8 hits the cache and the rest re-prefill the whole context (~100k tokens at
+# depthfirst's length; measured prefix-cache hit rate ~5%).
+ROUTER_INIT_KWARGS='{"policy": "consistent_hash", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$PATH"
