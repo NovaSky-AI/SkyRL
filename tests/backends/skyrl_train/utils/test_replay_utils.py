@@ -329,3 +329,14 @@ def test_hybrid_router_layers_map_to_decoder_layers(pattern, num_layers, hybrid,
     assert replay_utils._hybrid_to_decoder_layer_indices(config, num_layers, hybrid) == expected
     # GPTModel configs have no hybrid pattern.
     assert replay_utils._hybrid_to_decoder_layer_indices(SimpleNamespace(), num_layers, hybrid) == hybrid
+
+
+def test_check_replay_expert_ids_names_the_bad_entry():
+    """Expert ids >= num_experts are rejected with the sample, token and layer, before reaching the router."""
+    values = torch.zeros(5, 2, 3, dtype=torch.int32)  # 5 tokens, 2 captured layers, top-3
+    packed = PackedTensor(values=values, cu_seqlens=torch.tensor([0, 2, 5], dtype=torch.int32))
+    replay_utils._check_replay_expert_ids(packed, num_experts=8)  # all valid
+    replay_utils._check_replay_expert_ids(packed, num_experts=None)  # unknown expert count: skipped
+    values[3, 1, 2] = 255
+    with pytest.raises(ValueError, match=r"first at sample 1, token 1 of 3, captured layer 1"):
+        replay_utils._check_replay_expert_ids(packed, num_experts=8)
