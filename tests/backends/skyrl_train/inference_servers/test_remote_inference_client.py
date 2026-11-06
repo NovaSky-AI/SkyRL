@@ -980,6 +980,24 @@ class TestControlPlane:
             assert response["body"]["clear_cache"] == "false"
 
     @pytest.mark.asyncio
+    async def test_pause_generation_waits_under_data_parallel(self, mock_servers, monkeypatch):
+        """Under data-parallel serving pause_generation() uses WAIT (KEEP can deadlock the DP ranks' weight
+        update); SKYRL_DP_PAUSE_MODE overrides it."""
+        client = RemoteInferenceClient(
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
+            data_parallel_size=2,
+        )
+        try:
+            result = await client.pause_generation()
+            assert {response["body"]["mode"] for response in result.values()} == {"wait"}
+            monkeypatch.setenv("SKYRL_DP_PAUSE_MODE", "keep")
+            result = await client.pause_generation()
+            assert {response["body"]["mode"] for response in result.values()} == {"keep"}
+        finally:
+            await client.teardown()
+
+    @pytest.mark.asyncio
     async def test_resume(self, client):
         """Test resume fans out to all servers."""
         await client.pause()
