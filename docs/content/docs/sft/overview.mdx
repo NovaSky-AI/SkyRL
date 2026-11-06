@@ -190,8 +190,9 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
 ```
 
 When enabled, the trainer bin-packs the mini-batch into bins of capacity
-`max_length` (padding the bin count to a multiple of the data-parallel size);
-each bin becomes one row of the dispatched batch and one worker micro-batch.
+`max_tokens_per_microbatch` (padding the bin count to a multiple of the
+data-parallel size); each bin becomes one row of the dispatched batch and one
+worker micro-batch.
 `use_sequence_packing` requires `remove_microbatch_padding=true` and
 `max_length` to be set, and `max_tokens_per_microbatch` (if given) must be
 `>= max_length`.
