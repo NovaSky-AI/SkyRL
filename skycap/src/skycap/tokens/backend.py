@@ -367,6 +367,7 @@ class TokensBackend:
             tools=tools_key or None,
             bridged=planned.bridged if follows_a_call else None,
             dialect=chat.dialect.value,
+            raw_content=raw_content,
         )
         status = "ok"
         recorded = False
