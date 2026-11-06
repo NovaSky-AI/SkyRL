@@ -10,7 +10,8 @@
 #
 # Env (defaults in brackets): MODEL_PATH, DATA_DIR (from long_horizon_dataset.py), OUT [/root/data/skyrl-logs/<run>],
 # MAX_TURNS [16], MAX_MODEL_LEN [65536], TRAIN_BATCH_SIZE [16], N_SAMPLES_PER_PROMPT [8], MAX_STALENESS_STEPS [4],
-# MAX_TRAINING_STEPS [8], OFFLOAD_GB [24], RUN_NAME, CKPT_PATH. For ~200k-token rollouts: MAX_TURNS=69
+# MAX_TRAINING_STEPS [8], OFFLOAD_GB [24], GEN_STAGGER_S [90: spread rollout starts over ~one turn so the
+# sessions' turn boundaries (observation prefills) do not line up], RUN_NAME, CKPT_PATH. For ~200k-token rollouts: MAX_TURNS=69
 # MAX_MODEL_LEN=262144 (fewer concurrent rollouts then fit the TP8 KV cache: e.g. MAX_STALENESS_STEPS=1).
 set -o pipefail
 cd "$(dirname "$0")/../../../.."
@@ -28,6 +29,7 @@ export MAX_STALENESS_STEPS="$STALENESS"
 RECIPE="${RECIPE:-examples/train/deepseek_v4_flash/run_async_multiturn_dsv41_flash_lora.sh}"
 bash "$RECIPE" "${LONG_ARGS[@]}" \
   "generator.sampling_params.additional_kwargs={ignore_eos: true}" \
+  trainer.fully_async.generation_worker_start_stagger_s="${GEN_STAGGER_S:-90}" \
   trainer.log_path="$OUT" "$@" > "$OUT/run.log" 2>&1
 rc=$?
 echo "rc=$rc" >> "$OUT/run.log"

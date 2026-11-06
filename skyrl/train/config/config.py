@@ -1222,6 +1222,11 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    generation_worker_start_stagger_s: float = 0.0
+    """Spread the generation workers' first rollouts evenly over this many seconds (worker ``i`` starts after
+    ``i / num_parallel_generation_workers * value``). Multi-turn rollouts that all start together reach every turn
+    boundary together, so the sampler alternates between a fleet-wide prefill burst and decode; staggering by about
+    one turn's duration keeps prefill and decode overlapped, as in a long-running agent fleet. 0 starts all at once."""
     sample_full_batch: bool = False
     """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
     mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).

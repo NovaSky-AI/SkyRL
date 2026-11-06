@@ -519,11 +519,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 generation_failure = BackgroundFailure()
 
                 # Maintain self.num_parallel_generation_workers concurrent group-generation workers
+                stagger_s = self.cfg.trainer.fully_async.generation_worker_start_stagger_s
                 generator_tasks = [
                     asyncio.create_task(
-                        self._run_generate_for_a_group_loop(generation_output_group_buffer, generation_failure)
+                        self._run_generate_for_a_group_loop_after(
+                            stagger_s * i / self.num_parallel_generation_workers,
+                            generation_output_group_buffer,
+                            generation_failure,
+                        )
                     )
-                    for _ in range(self.num_parallel_generation_workers)
+                    for i in range(self.num_parallel_generation_workers)
                 ]
 
                 # Lets the consumer detect epoch exhaustion (all generators done + buffer empty) instead of
@@ -947,6 +952,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
+
+    async def _run_generate_for_a_group_loop_after(
+        self, delay_s: float, generation_output_group_buffer: asyncio.Queue, failure: BackgroundFailure
+    ):
+        """``_run_generate_for_a_group_loop`` after ``delay_s`` (see ``generation_worker_start_stagger_s``)."""
+        if delay_s > 0:
+            await asyncio.sleep(delay_s)
+        await self._run_generate_for_a_group_loop(generation_output_group_buffer, failure)
 
     async def _run_generate_for_a_group_loop(
         self, generation_output_group_buffer: asyncio.Queue, failure: BackgroundFailure
