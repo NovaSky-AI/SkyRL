@@ -33,6 +33,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     FusedLinearChunkedDistributedLogprob,
     _compute_distributed_log_softmax,
 )
+from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
+from skyrl.backends.skyrl_train.utils.packed_tensor import cu_seqlens_from_lengths
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_TORCH_DTYPE
+from skyrl.backends.skyrl_train.utils.sample_support_replay import sample_support_scores
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 from skyrl.train.utils.utils import get_free_port
 
 # Run as part of the Megatron GPU CI suite (`-m megatron`, --extra megatron).
@@ -235,6 +240,96 @@ def test_fused_entropy_loss_matches_materialized_logits(tp_group):
     torch.testing.assert_close(actual[1], expected[1], atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(actual[2], expected[2], atol=2e-3, rtol=2e-3)
     torch.testing.assert_close(actual[3].float(), expected[3].float(), atol=4e-2, rtol=4e-2)
+
+
+@pytest.mark.parametrize("backend", (FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE))
+@pytest.mark.parametrize("entropy_requires_grad", (False, True))
+@pytest.mark.parametrize("temperature", (1.0, 0.7))
+@pytest.mark.parametrize(
+    "hidden_dtype,weight_dtype",
+    (
+        (torch.bfloat16, torch.bfloat16),
+        (torch.bfloat16, torch.float32),
+        (torch.float32, torch.bfloat16),
+    ),
+)
+def test_fused_sample_support_matches_torch_candidate_projection(
+    backend, entropy_requires_grad, temperature, hidden_dtype, weight_dtype
+):
+    """Exercise irregular support rows through each fused-LM-head backend."""
+    device = torch.device("cuda")
+    torch.manual_seed(124)
+    batch, sequence, vocab, width = 2, 17, 2048, 7
+    hidden = torch.randn(batch, sequence, H, device=device, dtype=hidden_dtype)
+    weight = torch.randn(vocab, H, device=device, dtype=weight_dtype) * H**-0.5
+    lengths = torch.tensor(([0, 1, 2, 3, 7] * 7)[: batch * sequence], device=device)
+    rows = torch.arange(batch * sequence, device=device).unsqueeze(1)
+    slots = torch.arange(width, device=device).unsqueeze(0)
+    members = (rows * 37 + slots * 101) % vocab
+    # One CSR support row per position, holding that row's first ``length`` members.
+    support = PackedRaggedTensor(
+        [members[slots < lengths.unsqueeze(1)].to(SAMPLE_SUPPORT_TORCH_DTYPE)],
+        cu_seqlens_from_lengths(lengths, device=device),
+        cu_seqlens_from_lengths([batch * sequence], device=device),
+    )
+    row_ids = torch.arange(batch * sequence, device=device).reshape(batch, sequence)
+    sampled = torch.where(lengths > 0, members[:, 0], 0).reshape(batch, sequence)
+    logprob_seed = torch.linspace(0.5, 1.5, batch * sequence, device=device).reshape(batch, sequence)
+    entropy_seed = torch.linspace(-0.25, 0.75, batch * sequence, device=device).reshape(batch, sequence)
+
+    def run(selected_backend):
+        run_hidden = hidden.detach().clone().requires_grad_(True)
+        run_weight = weight.detach().clone().requires_grad_(True)
+        scores = sample_support_scores(
+            run_hidden,
+            sampled,
+            support,
+            row_ids,
+            vocab_start_index=0,
+            vocab_end_index=vocab,
+            tp_group=None,
+            compute_entropy=True,
+            entropy_requires_grad=entropy_requires_grad,
+            lm_head_weight=run_weight,
+            temperature=temperature,
+            fused_backend=selected_backend,
+        )
+        loss = (scores.logprobs * logprob_seed).sum()
+        if entropy_requires_grad:
+            loss = loss + (scores.entropy * entropy_seed).sum()
+        loss.backward()
+        return scores, run_hidden.grad, run_weight.grad
+
+    actual = run(backend)
+    expected = run(FusedLmHeadBackend.TORCH)
+    # For low-precision weights, Torch casts each reduced dot back to bf16 while
+    # Triton retains fp32 accumulation.
+    torch.testing.assert_close(actual[0].logprobs, expected[0].logprobs, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(actual[0].entropy, expected[0].entropy, atol=1e-2, rtol=1e-2)
+    assert torch.all(actual[0].logprobs[lengths.reshape(batch, sequence) <= 1] == 0.0)
+    assert torch.all(actual[0].entropy[lengths.reshape(batch, sequence) <= 1] == 0.0)
+    torch.testing.assert_close(actual[1], expected[1], atol=4e-3, rtol=2e-2)
+    torch.testing.assert_close(actual[2].float(), expected[2].float(), atol=4e-2, rtol=4e-2)
+
+
+def test_fused_sample_support_projection_accepts_strided_operands():
+    """A transposed LM-head weight and a strided hidden view project without a copy."""
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_sample_support_triton import (
+        candidate_projection,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(125)
+    vocab, num_rows, num_pairs = 1024, 9, 300
+    hidden = torch.randn(num_rows, 2 * H, device=device)[:, ::2]
+    weight = torch.randn(H, vocab, device=device).t()
+    assert not hidden.is_contiguous() and not weight.is_contiguous()
+    row_ids = torch.randint(0, num_rows, (num_pairs,), device=device)
+    token_ids = torch.randint(0, vocab, (num_pairs,), device=device)
+
+    actual = candidate_projection(hidden, weight, row_ids, token_ids, temperature=0.7)
+    expected = (hidden[row_ids] * weight[token_ids]).sum(-1) / 0.7
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
 
 
 # ---------------------------------------------------------------------------
