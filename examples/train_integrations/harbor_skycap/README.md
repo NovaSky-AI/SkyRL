@@ -25,7 +25,7 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
 ```
 
 The rest of the configuration is the sibling's: `harbor_trial_config` holds
-Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/default.yaml`.
+Harbor's `TrialConfig`, with defaults from `skyrl/integration/harbor/default_trial_config.yaml`.
 `skycap.*` sets the record directory (default `{trainer.export_path}/skycap`),
 the idle TTL, the renderer pool size, which paths train and how agents inside
 remote sandboxes reach skycap ([below](#agents-inside-remote-sandboxes)).
@@ -170,11 +170,11 @@ non-zero only when it pulled nothing.
 
 | Piece | What it does |
 | --- | --- |
-| `entrypoints/main_harbor_skycap.py` | Starts the skycap servers in token mode, in front of the router, from the run's config. Stops them at the end, which writes every trajectory still in memory. |
+| `skyrl/integration/harbor/skycap_exp.py` | `HarborSkycapExp`, run by `entrypoints/main_harbor_skycap.py`: starts the skycap servers in token mode, in front of the router, from the run's config. Stops them at the end, which writes every trajectory still in memory. |
 | `skyrl/integration/skycap/config.py` | `SkycapConfig`, the run config's `skycap` section, and `start_skycap`, which starts the server pool from it. |
 | `skyrl/integration/skycap/servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
 | `skyrl/integration/skycap/engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
-| `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
+| `skyrl/integration/harbor/skycap_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
 | `skyrl/integration/skycap/record_index.py` | `SkycapRecordIndex`, a trainer callback: the per-step W&B index of the trajectories the generator logged in a `RecordLog`; and `pull`, which brings a run's records and index back from W&B. Nothing in it is Harbor's. |
 | `skyrl/integration/skycap/compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
 
@@ -205,7 +205,7 @@ counted in `generate/skycap/num_missing_route_trajectories`.
 ## Tests
 
 ```bash
-uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations/harbor_skycap
+uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations/harbor tests/integrations/harbor_skycap
 ```
 
 A fake Harbor trial talks HTTP to a real skycap server, which calls a mock of

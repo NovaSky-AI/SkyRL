@@ -18,13 +18,6 @@ import aiohttp  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from aiohttp.test_utils import TestServer  # noqa: E402
 
-from examples.train_integrations.harbor.entrypoints.main_harbor import (
-    HARBOR_DEFAULT_CONFIG,  # noqa: E402
-)
-from examples.train_integrations.harbor_skycap import harbor_generator  # noqa: E402
-from examples.train_integrations.harbor_skycap.harbor_generator import (
-    HarborSkycapGenerator,  # noqa: E402
-)
 from skycap import CaptureService, Sample, record  # noqa: E402
 from skycap.graph import MessageGraph  # noqa: E402
 from skycap.paths import Row, final_path  # noqa: E402
@@ -33,6 +26,13 @@ from skycap.tokens.renderer import Media  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
     pack_sample_support_logprobs,  # noqa: E402
+)
+from skyrl.integration.harbor import skycap_generator as harbor_generator  # noqa: E402
+from skyrl.integration.harbor.config import (
+    HARBOR_DEFAULT_CONFIG,  # noqa: E402
+)
+from skyrl.integration.harbor.skycap_generator import (
+    HarborSkycapGenerator,  # noqa: E402
 )
 from skyrl.integration.skycap.compose import (  # noqa: E402
     RolloutOutcome,
@@ -44,7 +44,7 @@ from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: 
 from skyrl.train.utils.rate_limiter import RateLimiterConfig  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
 from tests.backends.skyrl_train.sample_support_helpers import csr, dense  # noqa: E402
-from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
+from tests.integrations.harbor.fakes import (  # noqa: E402
     AGENT,
     EXPERTS_PER_TOKEN,
     LAYERS,
@@ -63,9 +63,9 @@ from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
 pytestmark = pytest.mark.integrations
 
 #: A custom path rule, as ``skycap.train_paths`` names it.
-SHORT_DISCARDS = "tests.integrations.harbor_skycap.test_harbor_skycap:final_and_short_discards"
+SHORT_DISCARDS = "tests.integrations.harbor.test_harbor_skycap:final_and_short_discards"
 #: A custom path rule that always raises.
-BROKEN = "tests.integrations.harbor_skycap.test_harbor_skycap:broken_rule"
+BROKEN = "tests.integrations.harbor.test_harbor_skycap:broken_rule"
 
 
 def final_and_short_discards(graph: MessageGraph) -> list[Row]:
@@ -550,12 +550,12 @@ def test_the_generator_refuses_configs_it_cannot_serve() -> None:
 
 
 def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(monkeypatch) -> None:
-    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+    from skyrl.integration.harbor import skycap_exp
     from skyrl.integration.skycap import config
 
     started = []
     monkeypatch.setattr(config, "start_servers", lambda settings, **_: started.append(settings))
-    cfg = main_harbor_skycap.HarborSkycapConfig()
+    cfg = skycap_exp.HarborSkycapConfig()
     cfg.trainer.algorithm.max_seq_len = 1024
     for train_paths in ("final", SHORT_DISCARDS):
         cfg.skycap.train_paths = train_paths

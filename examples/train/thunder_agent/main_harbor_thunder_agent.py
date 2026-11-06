@@ -69,7 +69,7 @@ class HarborThunderAgentFullyAsyncExp(FullyAsyncThunderAgentExp):
 
     @staticmethod
     def _build_harbor_task_dataset(data_files, max_tasks=None):
-        from examples.train_integrations.harbor.dataset import HarborTaskDataset
+        from skyrl.integration.harbor.dataset import HarborTaskDataset
 
         dataset = HarborTaskDataset(data_files=data_files)
         if len(dataset) == 0:
