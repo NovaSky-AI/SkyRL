@@ -1174,7 +1174,7 @@ class AlgorithmConfig(BaseConfig):
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
-    enable_score_centering: bool = False
+    enable_score_centering: Optional[bool] = None
     """Score centering (https://arxiv.org/abs/2609.20807): subtract each token's expected weighted
     score under the sampler, cancelling the drift a training-inference mismatch adds to the policy
     gradient.
@@ -1187,7 +1187,11 @@ class AlgorithmConfig(BaseConfig):
     ``cispo_anchor="rollout"`` (its clamp) or ``"dppo"`` (its trust region). Incompatible with
     ``off_policy_correction.tis_ratio_type`` and the token-mask IS thresholds, which weight only the
     sampled token by ``π_old / π_rollout``; sequence and outlier masks apply to both terms but are
-    approximate, because each depends on the sampled token's own ratio."""
+    approximate, because each depends on the sampled token's own ratio.
+
+    ``None`` (the default) resolves at config construction: ``True`` when
+    ``enable_sample_support_replay`` is on and the loss and off-policy correction settings above
+    allow it, otherwise ``False``. ``True`` raises if they do not."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -2108,6 +2112,34 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
 # ---------------------------------------------------------------------------
 
 
+def _score_centering_incompatibility(algorithm: AlgorithmConfig) -> Optional[str]:
+    """Why score centering cannot run with ``algorithm``, or ``None`` if it can."""
+    if not algorithm.enable_sample_support_replay:
+        return "trainer.algorithm.enable_score_centering requires enable_sample_support_replay"
+    from skyrl.backends.skyrl_train.utils.ppo_utils import score_centering_weight
+
+    try:
+        # Raises for a loss whose weight is not relative to the sampler.
+        score_centering_weight(algorithm.policy_loss_type, algorithm)
+    except ValueError as e:
+        return str(e)
+    off_policy = algorithm.off_policy_correction
+    # The deprecated use_tis becomes tis_ratio_type="token" only later, in validate_cfg.
+    if off_policy.tis_ratio_type is not None or algorithm.use_tis:
+        return (
+            "score centering does not compose with off_policy_correction.tis_ratio_type (or the deprecated "
+            "use_tis), which weights only the sampled token by pi_old / pi_rollout; the loss's own weight is "
+            "the importance correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
+        )
+    if off_policy.token_mask_is_threshold_low is not None or off_policy.token_mask_is_threshold_high is not None:
+        return (
+            "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
+            "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
+            "importance weight that score centering applies to every support member"
+        )
+    return None
+
+
 @dataclass
 class SkyRLTrainConfig(BaseConfig):
     """Root configuration object for SkyRL training with the ``fsdp`` and ``megatron`` backends.
@@ -2150,31 +2182,11 @@ class SkyRLTrainConfig(BaseConfig):
                 )
 
         algorithm = self.trainer.algorithm
-        if algorithm.enable_score_centering:
-            from skyrl.backends.skyrl_train.utils.ppo_utils import (
-                score_centering_weight,
-            )
-
-            if not algorithm.enable_sample_support_replay:
-                raise ValueError("trainer.algorithm.enable_score_centering requires enable_sample_support_replay")
-            # Raises for a loss whose weight is not relative to the sampler.
-            score_centering_weight(algorithm.policy_loss_type, algorithm)
-            off_policy = algorithm.off_policy_correction
-            if off_policy.tis_ratio_type is not None:
-                raise ValueError(
-                    "score centering does not compose with off_policy_correction.tis_ratio_type, which weights "
-                    "only the sampled token by pi_old / pi_rollout; the loss's own weight is the importance "
-                    "correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
-                )
-            if (
-                off_policy.token_mask_is_threshold_low is not None
-                or off_policy.token_mask_is_threshold_high is not None
-            ):
-                raise ValueError(
-                    "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
-                    "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
-                    "importance weight that score centering applies to every support member"
-                )
+        if algorithm.enable_score_centering is not False:
+            reason = _score_centering_incompatibility(algorithm)
+            if algorithm.enable_score_centering and reason is not None:
+                raise ValueError(reason)
+            algorithm.enable_score_centering = reason is None
 
         # Eval requests opt out of capture and do not use these constraints.
         if self.generator.inference_engine.enable_return_sample_support_set:

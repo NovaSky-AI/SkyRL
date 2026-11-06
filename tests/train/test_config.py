@@ -1822,6 +1822,78 @@ def test_score_centering_rejects_what_breaks_its_drift_cancellation(override, me
         SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, override])
 
 
+_SCORE_CENTERING_AUTO_BASE = [o for o in _SCORE_CENTERING_BASE if not o.startswith("trainer.algorithm.enable_score_")]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        [],
+        ["trainer.algorithm.policy_loss_type=reinforce"],
+        ["trainer.algorithm.policy_loss_type=cispo", "trainer.algorithm.cispo.cispo_anchor=rollout"],
+        ["trainer.algorithm.policy_loss_type=dppo"],
+        ["trainer.algorithm.off_policy_correction.sequence_mask_metric=geometric"],
+    ],
+)
+def test_score_centering_default_enables_with_replay_and_a_sampler_anchored_loss(overrides):
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [*_SCORE_CENTERING_AUTO_BASE, "trainer.algorithm.enable_sample_support_replay=true", *overrides]
+    )
+
+    assert cfg.trainer.algorithm.enable_score_centering is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["trainer.algorithm.enable_sample_support_replay=false"],
+        ["trainer.algorithm.enable_sample_support_replay=true", "trainer.algorithm.policy_loss_type=regular"],
+        ["trainer.algorithm.enable_sample_support_replay=true", "trainer.algorithm.policy_loss_type=cispo"],
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "trainer.algorithm.off_policy_correction.tis_ratio_type=token",
+        ],
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5",
+        ],
+        # An explicit false wins over a configuration that would otherwise enable it.
+        ["trainer.algorithm.enable_sample_support_replay=true", "trainer.algorithm.enable_score_centering=false"],
+    ],
+)
+def test_score_centering_default_stays_off_where_it_does_not_apply(overrides):
+    cfg = SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_AUTO_BASE, *overrides])
+
+    assert cfg.trainer.algorithm.enable_score_centering is False
+
+
+def test_score_centering_rejects_legacy_use_tis():
+    """use_tis becomes tis_ratio_type="token" only in validate_cfg, after the default resolves."""
+    auto = [*_SCORE_CENTERING_AUTO_BASE, "trainer.algorithm.enable_sample_support_replay=true"]
+    cfg = SkyRLTrainConfig.from_cli_overrides([*auto, "trainer.algorithm.use_tis=true"])
+    assert cfg.trainer.algorithm.enable_score_centering is False
+
+    with pytest.raises(ValueError, match="use_tis"):
+        SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, "trainer.algorithm.use_tis=true"])
+
+
+def test_score_centering_default_enables_with_replay_on_the_default_loss():
+    """policy_loss_type defaults to dppo, so turning on replay alone turns on score centering."""
+    overrides = [
+        o
+        for o in _SCORE_CENTERING_AUTO_BASE
+        if not o.startswith("trainer.algorithm.policy_loss_type") and not o.startswith("trainer.algorithm.enable_")
+    ]
+    cfg = SkyRLTrainConfig.from_cli_overrides([*overrides, "trainer.algorithm.enable_sample_support_replay=true"])
+
+    assert cfg.trainer.algorithm.policy_loss_type == "dppo"
+    assert cfg.trainer.algorithm.enable_score_centering is True
+
+
+def test_score_centering_default_is_off_for_the_default_config():
+    assert SkyRLTrainConfig().trainer.algorithm.enable_score_centering is False
+
+
 @pytest.mark.parametrize(
     "overrides, match",
     [
