@@ -1,0 +1,140 @@
+"""megatron-core Triton kernels with int32 row offsets: 64-bit offsets for long sequences.
+
+Several megatron-core fusions compute a row's base offset as ``tl.program_id(0) * row_stride`` in int32. Once
+``rows * row_stride`` passes 2**31 that wraps and the kernel reads or writes out of bounds (``Triton Error
+[CUDA]: an illegal memory access``). Both show up for DeepSeek-V4 / V4.1 at long context and carry over to any
+model with the same shapes:
+
+- ``fused_mhc_kernels`` (hyper-connection aggregate and H_post BDA, forward and backward): row stride
+  ``n_streams * hidden`` -> wraps past 2**31 / (4 * 5120) = ~104.9k tokens per micro-batch;
+- ``fused_mla_yarn_rope_apply`` (MLA RoPE, in place and KV split, forward and backward): row stride
+  ``heads * head_dim`` -> wraps past 2**31 / (64 * 512) = 65,536 tokens (the in-place query RoPE).
+
+The upstream fix is one line per kernel, ``tl.program_id(0).to(tl.int64)`` -- the shape NVIDIA/Megatron-LM#8487
+uses for the CSA THD indexer kernels; nothing upstream yet for these. Rather than vendoring the kernels, this
+reads each listed kernel definition from the installed module's source, applies exactly that line, rebuilds any
+module-level autotune wrapper around it, and loads them in a generated module that shares the original module's
+globals; the original module's names are then rebound (its launchers look them up at call time). A module whose
+source no longer has the int32 line in every listed kernel (fixed upstream, or changed) is left alone.
+
+Remove when the pinned megatron-core computes these offsets in int64.
+"""
+
+import ast
+import hashlib
+import importlib
+import importlib.util
+import os
+import tempfile
+from dataclasses import dataclass
+from typing import Dict, Tuple
+
+from loguru import logger
+
+
+@dataclass(frozen=True)
+class KernelPatch:
+    module: str
+    kernels: Tuple[str, ...]  # @triton.jit (optionally @triton.autotune-decorated) kernel definitions
+    int32_line: str  # exact statement computing the row id, one per kernel
+    int64_line: str
+    wrappers: Tuple[str, ...] = ()  # module-level ``name = triton.autotune(...)(kernel)`` assignments to rebuild
+
+
+PATCHES = (
+    KernelPatch(
+        module="megatron.core.fusions.fused_mhc_kernels",
+        kernels=(
+            "_triton_h_agg_fwd_kernel",
+            "_triton_hpb_fwd_kernel",
+            "_triton_hpb_bwd_g_x_orig_kernel",
+            "_triton_hpb_bwd_g_hp_hr_kernel",
+        ),
+        int32_line="pid_s = tl.program_id(0)\n",
+        int64_line="pid_s = tl.program_id(0).to(tl.int64)\n",
+    ),
+    KernelPatch(
+        module="megatron.core.fusions.fused_mla_yarn_rope_apply",
+        kernels=(
+            "_mla_rope_fwd_inplace_kernel",
+            "_mla_rope_bwd_inplace_kernel",
+            "_mla_rope_fwd_kv_split_kernel",
+            "_mla_rope_bwd_kv_split_kernel",
+        ),
+        int32_line="pid_m = tl.program_id(axis=0)\n",
+        int64_line="pid_m = tl.program_id(axis=0).to(tl.int64)\n",
+        wrappers=("_autotuned_mla_rope_fwd_inplace_kernel", "_autotuned_mla_rope_bwd_inplace_kernel"),
+    ),
+)
+
+_APPLIED: Dict[str, bool] = {}
+
+
+def _dedent(lines) -> str:
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    return "".join(line[indent:] if line.strip() else line for line in lines)
+
+
+def _patched_sources(source: str, patch: KernelPatch) -> Dict[str, str]:
+    """Source of each listed kernel (with the int64 row id) and wrapper; empty if anything does not match."""
+    lines = source.splitlines(keepends=True)
+    out: Dict[str, str] = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name in patch.kernels:
+            start = min([d.lineno for d in node.decorator_list] + [node.lineno]) - 1
+            text = _dedent(lines[start : node.end_lineno])
+            if text.count(patch.int32_line.strip()) != 1:
+                return {}
+            out[node.name] = text.replace(patch.int32_line, patch.int64_line)
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id in patch.wrappers:
+                out[target.id] = _dedent(lines[node.lineno - 1 : node.end_lineno])
+    expected = set(patch.kernels) | set(patch.wrappers)
+    return out if set(out) == expected else {}
+
+
+def _apply_one(patch: KernelPatch) -> bool:
+    if _APPLIED.get(patch.module):
+        return True
+    try:
+        module = importlib.import_module(patch.module)
+    except ImportError:
+        return False
+    if not all(hasattr(module, name) for name in patch.kernels + patch.wrappers):
+        return False
+    with open(module.__file__) as f:
+        sources = _patched_sources(f.read(), patch)
+    if not sources:
+        logger.info(f"{patch.module}: int32 row offsets not found in the pinned source; int64 patch not applied")
+        return False
+    body = "\n\n".join(sources[name] for name in patch.kernels + patch.wrappers)
+    text = (
+        f'"""Generated by SkyRL patch_triton_kernels_int64_offsets.py from {patch.module}."""\n'
+        f"import {patch.module} as _source\n\n"
+        "globals().update({k: v for k, v in vars(_source).items() if not k.startswith('__')})\n\n\n" + body
+    )
+    digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+    # Triton reads a kernel's source from its file, so the module lives on disk (one per source version).
+    directory = os.path.join(tempfile.gettempdir(), "skyrl_generated_kernels")
+    os.makedirs(directory, exist_ok=True)
+    stem = patch.module.rsplit(".", 1)[-1]
+    path = os.path.join(directory, f"{stem}_int64_{digest}.py")
+    if not os.path.exists(path):
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    spec = importlib.util.spec_from_file_location(f"skyrl_{stem}_int64_{digest}", path)
+    generated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generated)
+    for name in patch.kernels + patch.wrappers:
+        setattr(module, name, getattr(generated, name))
+    _APPLIED[patch.module] = True
+    logger.info(f"{patch.module}: int64 row offsets in {', '.join(patch.kernels)}")
+    return True
+
+
+def apply_triton_kernels_int64_offsets_patch() -> Dict[str, bool]:
+    """Apply every entry of ``PATCHES``. Idempotent; returns ``{module: applied}``."""
+    return {patch.module: _apply_one(patch) for patch in PATCHES}
