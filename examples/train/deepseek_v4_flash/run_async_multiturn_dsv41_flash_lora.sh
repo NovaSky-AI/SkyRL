@@ -85,6 +85,11 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # (vLLM inference bench), gen tok/s/GPU: 2048 -> 479, 16384 -> 743, 32768 -> 898 (pure decode 576 -> 1257 /
 # 1197). Costs KV cache: 78.9 -> 73.6 -> 68.0 GiB/GPU.
 : "${MAX_NUM_BATCHED_TOKENS:=32768}"
+# DP: admit new prefills only every N engine steps, aligned across DP ranks (vLLM prefill_schedule_interval), so most
+# steps are pure decode (FULL CUDA graphs) instead of mixed eager steps when the rollouts' turns are out of sync.
+# Depthfirst sim (8x B200, DP8 x EP8, active r32 adapter, 640 rollouts, starts staggered over 90 s), gen tok/s/GPU over
+# turns 17-56 (~50k-165k context): 1 -> 1,074, 64 -> 1,161 (+8%; +12-25% at shorter contexts). Scheduling only.
+: "${PREFILL_SCHEDULE_INTERVAL:=$( [ "${VLLM_DP:-1}" -gt 1 ] && echo 64 || echo 1 )}"
 : "${ENTRYPOINT:=examples.train.fully_async.main_fully_async}"
 # CUDA-graph capture sizes: vLLM's default grid stops at 1024 tokens (Blackwell), but multi-turn steps mix an
 # observation prefill into the running decodes (640 decodes + a chunk is ~1.7-8k tokens), and without a graph those
@@ -104,7 +109,7 @@ export SKYRL_VLLM_MOE_LORA_INT64_OFFSETS="${SKYRL_VLLM_MOE_LORA_INT64_OFFSETS:-1
 export SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META="${SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META:-1}"
 export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-examples/train/deepseek_v4_flash/vllm_tuned_configs}"
 CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES""$CUDAGRAPH_MODE_KWARG"'}}'
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "prefill_schedule_interval": '"$PREFILL_SCHEDULE_INTERVAL"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES""$CUDAGRAPH_MODE_KWARG"'}}'
 # consistent_hash (SkyRL's default) pins each rollout to one server via its X-Session-ID, so every turn finds its
 # history in that server's prefix cache. round_robin spreads a rollout's turns over the servers: with VLLM_DP=8 (one
 # server per DP rank) only 1 turn in 8 hits the cache and the rest re-prefill the whole context (~100k tokens at
