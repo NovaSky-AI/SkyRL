@@ -41,6 +41,17 @@ set -x
 : "${TOP_K:=20}"
 : "${TOP_P:=1.0}"
 
+# vLLM layout per 8-GPU engine: TP8 (default) replicates the attention KV cache on every GPU (~10M tokens per B200
+# node); VLLM_DP=8 runs data-parallel attention + expert-parallel MoE (TP1 x DP8 x EP8), so each GPU caches only its
+# own sessions (~13M tokens per B200 GPU, ~106M per node: 640 sessions at ~100k tokens fit). DP needs the
+# SKYRL_VLLM_MOE_LORA_* EP patches below and runs only decode steps in CUDA graphs: under DP the piecewise
+# (mixed prefill + decode) graphs hit an illegal memory access in vLLM 0.32 even without LoRA, so those steps run
+# eagerly. 8x B200, active rank-32 adapter, 640 sessions, depth up to 200k: 99 gen tok/s/GPU at DP8.
+: "${VLLM_DP:=1}"
+VLLM_TP=$(( 8 / VLLM_DP ))
+VLLM_EP=1; [ "$VLLM_DP" -gt 1 ] && VLLM_EP=8
+CUDAGRAPH_MODE_KWARG=""; [ "$VLLM_DP" -gt 1 ] && CUDAGRAPH_MODE_KWARG=', "cudagraph_mode": "FULL_DECODE_ONLY"'
+
 LORA_RANK=32
 LORA_ALPHA=32
 LORA_TARGET_MODULES='[linear_q_down_proj,linear_q_up_proj,linear_kv_proj,linear_proj,linear_fc1,linear_fc2]'
@@ -79,7 +90,7 @@ export SKYRL_VLLM_MOE_LORA_INT64_OFFSETS="${SKYRL_VLLM_MOE_LORA_INT64_OFFSETS:-1
 export SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META="${SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META:-1}"
 export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-examples/train/deepseek_v4_flash/vllm_tuned_configs}"
 CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES"'}}'
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES""$CUDAGRAPH_MODE_KWARG"'}}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
@@ -173,7 +184,9 @@ uv run --isolated --extra megatron -m "$ENTRYPOINT" \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.num_engines=$NUM_ENGINES \
-  generator.inference_engine.tensor_parallel_size=8 \
+  generator.inference_engine.tensor_parallel_size=$VLLM_TP \
+  generator.inference_engine.data_parallel_size=$VLLM_DP \
+  generator.inference_engine.expert_parallel_size=$VLLM_EP \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.gpu_memory_utilization=$INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION \
   generator.inference_engine.enforce_eager=false \
