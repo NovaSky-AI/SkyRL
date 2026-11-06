@@ -44,6 +44,7 @@ from skyrl.env_vars import (
 )
 from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
+    MegatronConfig,
     SkyRLTrainConfig,
     get_config_as_dict,
 )
@@ -84,6 +85,30 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
+def _megatron_dp_size(role: str, world_size: int, megatron_config: MegatronConfig) -> int:
+    """The data parallel size of a Megatron model (``role``: policy or ref) on ``world_size`` GPUs.
+
+    Megatron lays the GPUs out twice: a dense grid (tp * cp * pp) and an expert grid (etp * ep * pp), and
+    builds the expert grid even for a dense model. Both must divide the world size (see MegatronConfig).
+    """
+    pp = megatron_config.pipeline_model_parallel_size
+    cp = megatron_config.context_parallel_size
+    tp = megatron_config.tensor_model_parallel_size
+    assert world_size % (pp * cp * tp) == 0, (
+        f"{role}_world_size {world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+        "This ensures that the data parallel size is an integer."
+    )
+    ep = megatron_config.expert_model_parallel_size
+    # Megatron's own fallback: an unset expert_tensor_parallel_size is the tensor parallel size.
+    etp = tp if megatron_config.expert_tensor_parallel_size is None else megatron_config.expert_tensor_parallel_size
+    assert world_size % (pp * ep * etp) == 0, (
+        f"{role}_world_size {world_size} should be divisible by (pp * ep * etp) {pp * ep * etp}. "
+        f"trainer.{role}.megatron_config.expert_model_parallel_size and expert_tensor_parallel_size lay out "
+        "Megatron's expert grid, which it builds even for a dense model."
+    )
+    return world_size // (pp * cp * tp)
+
+
 def validate_batch_sizes(cfg: SkyRLTrainConfig):
     """
     Validate configured batch sizes.
@@ -111,14 +136,7 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
 
     if cfg.trainer.strategy == "megatron":
-        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
-        cp = cfg.trainer.policy.megatron_config.context_parallel_size
-        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        assert policy_world_size % (pp * cp * tp) == 0, (
-            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-            "This ensures that the data parallel size is an integer."
-        )
-        policy_dp_size = policy_world_size // (pp * cp * tp)
+        policy_dp_size = _megatron_dp_size("policy", policy_world_size, cfg.trainer.policy.megatron_config)
     else:
         policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
 
@@ -199,14 +217,7 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         if cfg.trainer.strategy == "megatron":
-            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
-            cp = cfg.trainer.ref.megatron_config.context_parallel_size
-            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
-            assert ref_world_size % (pp * cp * tp) == 0, (
-                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-                "This ensures that the data parallel size is an integer."
-            )
-            ref_dp_size = ref_world_size // (pp * cp * tp)
+            ref_dp_size = _megatron_dp_size("ref", ref_world_size, cfg.trainer.ref.megatron_config)
         else:
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
