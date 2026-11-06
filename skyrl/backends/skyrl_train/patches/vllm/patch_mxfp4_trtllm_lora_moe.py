@@ -22,6 +22,10 @@ MoE-LoRA block sizes, mixed-step CUDA graphs): 570 -> 797 gen tok/s/GPU; pure de
 text with the adapter scaled 5x: |dlogp| vs Marlin 0.204 mean / 1.75 p99, against a Marlin-vs-Marlin run-to-run
 floor of 0.187 / 1.53; mean NLL 2.201 vs Marlin 2.202 and 2.189.
 
+DP attention + expert parallelism: the MoE layer runs on every DP rank's tokens, so this class maps global expert
+ids to local LoRA slots, never takes vLLM's local no-LoRA shortcut, and splits calls above
+``SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE_CHUNK`` tokens (default 32768) to bound the LoRA buffers.
+
 Opt-in: ``SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE=1`` (applied in every vLLM worker by ``new_inference_worker_wrap``; the
 DeepSeek-V4.1 recipe sets it).
 Remove when vLLM ships an MXFP4 TRT-LLM LoRA experts class.
@@ -33,6 +37,12 @@ from loguru import logger
 
 ENV = "SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE"
 _APPLIED = False
+CHUNK_ENV = "SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE_CHUNK"
+
+
+def _chunk_tokens() -> int:
+    """Max tokens per LoRA MoE call (default 32768: one TP rank's whole step, so TP runs are never chunked)."""
+    return int(os.environ.get(CHUNK_ENV, "32768"))
 
 
 def _build_class():
@@ -67,6 +77,75 @@ def _build_class():
         @staticmethod
         def _supports_routing_method(routing_method, weight_key, activation_key) -> bool:
             return True  # routing is done outside the modular kernel
+
+        def _ep_expert_map(self, global_num_experts, device):
+            # Expert parallelism: the TRT-LLM kernel takes the local expert range (local_expert_offset) and no
+            # expert_map, but the LoRA kernels index this rank's stacked LoRA weights by expert id, so global
+            # topk_ids (0..E-1) must be mapped to local slots (other ranks' experts -> -1, skipped) or they read past
+            # the local_num_experts LoRA buffers (illegal memory access). Same contiguous placement as the kernel.
+            cached = getattr(self, "_ep_map", None)
+            if cached is None or cached.device != device or cached.numel() != global_num_experts:
+                start = self.ep_rank * self.local_num_experts
+                cached = torch.full((global_num_experts,), -1, dtype=torch.int32, device=device)
+                cached[start : start + self.local_num_experts] = torch.arange(
+                    self.local_num_experts, dtype=torch.int32, device=device
+                )
+                self._ep_map = cached
+            return cached
+
+        def apply(self, output, hidden_states, w1, w2, topk_weights, topk_ids, activation, global_num_experts,
+                  expert_map=None, *args, **kwargs):
+            if expert_map is None and self.local_num_experts < global_num_experts:
+                expert_map = self._ep_expert_map(global_num_experts, topk_ids.device)
+            # MoE layers that are never LoRA-wrapped (e.g. a speculative-decoding draft model's experts) still get
+            # this class, since LoRA is on engine-wide, but no LoRA context is ever set on them: run the base MoE,
+            # as the base class does for a batch with no adapter.
+            if getattr(self, "_lora_context", None) is None:
+                self.invoke_routed_moe(
+                    hidden_states=hidden_states,
+                    w1=w1,
+                    w2=w2,
+                    topk_ids_and_weights=(topk_ids, topk_weights),
+                    gemm1_lora_delta=None,
+                    global_num_experts=global_num_experts,
+                    a1q_scale=None,
+                    output=output,
+                )
+                return
+            ctx = self._lora_context
+            num_tokens = hidden_states.size(0)
+            chunk = _chunk_tokens()
+            if num_tokens <= chunk:
+                return super().apply(
+                    output, hidden_states, w1, w2, topk_weights, topk_ids, activation, global_num_experts,
+                    expert_map, *args, **kwargs
+                )
+            # DP attention + EP: the naive all-gather hands every rank all DP ranks' tokens (8 x 32768 = 262144 in
+            # the startup dummy run). The LoRA path allocates [T, top_k, 2I] and [T, top_k, H] bf16 buffers
+            # (~15 GB each there, which also eats the KV cache budget) and the kernels index them with int32, so run
+            # it over token chunks. Chunks are whole tokens: routing, LoRA mapping and finalize stay per-token.
+            mapping, orig = ctx.local_token_lora_mapping, ctx.original_hidden_states
+            try:
+                for s in range(0, num_tokens, chunk):
+                    e = min(s + chunk, num_tokens)
+                    if mapping is not None:
+                        ctx.local_token_lora_mapping = mapping[s:e]
+                    if orig is not None:
+                        ctx.original_hidden_states = orig[s:e]
+                    super().apply(
+                        output[s:e], hidden_states[s:e], w1, w2, topk_weights[s:e], topk_ids[s:e], activation,
+                        global_num_experts, expert_map, *args, **kwargs
+                    )
+            finally:
+                ctx.local_token_lora_mapping, ctx.original_hidden_states = mapping, orig
+
+        @staticmethod
+        def _batch_has_no_lora(lora_context) -> bool:
+            # vLLM reads the local batch's no-LoRA flag, but under EP this rank's experts also serve the other DP
+            # ranks' tokens (their dispatched LoRA ids are in local_token_lora_mapping): never skip LoRA there.
+            if lora_context.local_token_lora_mapping is not None:
+                return False
+            return _TrtLlmLoRAExpertsBase._batch_has_no_lora(lora_context)
 
         def invoke_routed_moe(
             self,
