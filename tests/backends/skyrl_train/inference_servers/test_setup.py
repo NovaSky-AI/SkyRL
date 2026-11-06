@@ -181,3 +181,29 @@ def test_build_new_inference_client_launched_and_external_clients_get_the_same_p
         "data_parallel_size",
     ):
         assert getattr(launched, name) == getattr(external, name), name
+
+
+def test_build_new_inference_client_neuron_uses_real_model_path_not_served_name(monkeypatch):
+    # ``served_model_name`` is an HTTP-endpoint alias, not a load path: the in-process
+    # neuron engine calls ``from_pretrained`` directly, so it must receive the real
+    # policy checkpoint path, never the alias.
+    import skyrl.backends.skyrl_train.inference_servers.neuron_engine as neuron_engine_module
+
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.backend = "neuron"
+    cfg.generator.inference_engine.served_model_name = "teacher-alias"
+    cfg.trainer.policy.model.path = "/checkpoints/qwen3-32b"
+
+    calls = []
+
+    class FakeNeuronEngine:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(neuron_engine_module, "NeuronInferenceEngine", FakeNeuronEngine)
+
+    engine, server_setup = build_new_inference_client(cfg, tokenizer="tok")
+
+    assert calls == [{"model_path": "/checkpoints/qwen3-32b", "tokenizer": "tok"}]
+    assert server_setup.proxy_url == ""
+    assert server_setup.server_urls == []
