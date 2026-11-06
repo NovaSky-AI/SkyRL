@@ -10,8 +10,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../../../.."
 : "${MODELS_DIR:=/models}"
 : "${MODEL_DIR:=$MODELS_DIR/DeepSeek-V4.1-Flash-fp8}"
-: "${DATA_DIR:=/root/data/gsm8k_df_t16}"
-: "${MAX_TURNS:=16}"
+: "${MAX_TURNS:=69}"
+: "${DATA_DIR:=/root/data/gsm8k_df_t${MAX_TURNS}}"
 : "${OBS_TOKENS:=1870}"
 export MODEL_DIR DATA_DIR MAX_TURNS OBS_TOKENS MODELS_DIR
 uv run --isolated --extra megatron bash -c '

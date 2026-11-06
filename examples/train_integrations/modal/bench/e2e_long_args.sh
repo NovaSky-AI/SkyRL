@@ -10,7 +10,7 @@ export SKYRL_DSV41_RECOMPUTE_OFFLOAD_HOST_GB="${OFFLOAD_GB:-24}" SKYRL_DSV41_FAK
 export MBRIDGE_STATE_REUSE_HANDLES=0 MBRIDGE_STATE_CACHE_SMALL_TENSORS=0 SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
 LONG_ARGS=(
   # trainer: context parallelism (packed THD, contiguous layout inside the V4.1 stack)
-  trainer.policy.megatron_config.context_parallel_size=4
+  "trainer.policy.megatron_config.context_parallel_size=${CP:-4}"
   trainer.remove_microbatch_padding=true
   trainer.policy.megatron_config.transformer_config_kwargs.attention_cp_layout=contiguous
   trainer.policy.megatron_config.transformer_config_kwargs.linear_cp_layout=contiguous
