@@ -97,7 +97,9 @@ class SkycapConfig:
     """Answer with the completion's own text as ``content``, a thinking model's reasoning inline, as
     SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
     ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
-    replies every replayed turn would lose its reasoning, edit history and fork the graph."""
+    replies every replayed turn would lose its reasoning, edit history and fork the graph. Chat Completions
+    calls only: Responses calls (Codex's) always get parsed replies, since that API carries reasoning as items
+    of its own."""
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the

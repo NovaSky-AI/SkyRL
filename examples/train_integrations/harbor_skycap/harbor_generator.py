@@ -33,6 +33,7 @@ from urllib.request import url2pathname
 import litellm
 from harbor.agents.factory import AgentFactory
 from harbor.agents.installed.base import BaseInstalledAgent
+from harbor.agents.installed.codex import Codex
 from harbor.models.agent.name import AgentName
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
@@ -143,6 +144,8 @@ class HarborSkycapGenerator(GeneratorInterface):
 
         self._template = deepcopy(harbor_cfg)
         agent = self._template.setdefault("agent", {})
+        if agent_class(agent) is Codex:
+            raise ValueError("harbor_trial_config.agent.name=codex can't sample through skycap: use SkycapCodex.")
         self._in_sandbox = runs_in_sandbox(agent)
         self._warned_unexposed = False
         if self._in_sandbox:
@@ -382,18 +385,22 @@ class HarborSkycapGenerator(GeneratorInterface):
         return config
 
 
-def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
-    """Whether Harbor's agent ``agent`` (a ``TrialConfig.agent``) is installed in the sandbox and calls the model
-    from there, as mini-swe-agent and Claude Code do, rather than from this process, as Terminus-2 does."""
+def agent_class(agent: Dict[str, Any]) -> Optional[type]:
+    """The class Harbor runs for ``agent`` (a ``TrialConfig.agent``), or None when it names none (Harbor's default)."""
     # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
     name, import_path = agent.get("name"), agent.get("import_path")
     if name is not None and name in AgentName.values():
-        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
-    elif import_path:
+        return AgentFactory._AGENT_MAP.get(AgentName(name))
+    if import_path:
         module, _, attribute = import_path.partition(":")
-        cls = getattr(importlib.import_module(module), attribute)
-    else:
-        return False
+        return getattr(importlib.import_module(module), attribute)
+    return None
+
+
+def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
+    """Whether Harbor's agent ``agent`` (a ``TrialConfig.agent``) is installed in the sandbox and calls the model
+    from there, as mini-swe-agent and Claude Code do, rather than from this process, as Terminus-2 does."""
+    cls = agent_class(agent)
     return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)
 
 

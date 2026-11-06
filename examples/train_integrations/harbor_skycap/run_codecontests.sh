@@ -14,6 +14,9 @@
 # their own /tmp/harbor/runs/<name>.
 #
 #   GENERATOR=skycap|baseline  which integration generates the rollouts (default skycap)
+#   AGENT=terminus-2|codex     the harness (default terminus-2); codex runs SkycapCodex in its sandbox,
+#                              reaching skycap through a Cloudflare quick tunnel (development scale:
+#                              override skycap.exposure.* for more); needs GENERATOR=skycap
 #   NUM_PROMPTS, GROUP_SIZE    prompts per step and samples per prompt (default 32 x 8)
 #   TASKS=a,b                  task names to run instead of the first NUM_PROMPTS
 #   EPOCHS, LR                 passes over the tasks, learning rate (default 1, 1e-6)
@@ -47,6 +50,7 @@ DAYTONA_KEY_FILE="${DAYTONA_KEY_FILE:-$HOME/default/daytona.key}"
 MODAL_KEY_FILE="${MODAL_KEY_FILE:-$HOME/default/model_key.key}"
 WANDB_KEY_FILE="${WANDB_KEY_FILE:-$HOME/default/wandb_key.key}"
 GENERATOR="${GENERATOR:-skycap}"
+AGENT="${AGENT:-terminus-2}"
 MODEL="${MODEL:-Qwen/Qwen3-8B}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "$MODEL")}"
 # Keeps thinking in history, so a multi-turn rollout stays append-only (the sibling recipe's choice).
@@ -88,7 +92,7 @@ case "$GENERATOR" in
     EXTRAS=(--extra harbor --extra skycap)
     # Each row is already a complete path; merging could fuse two paths. Thinking stays in
     # history the way it does for the baseline because skycap answers with raw content
-    # (skycap.use_raw_content, on by default): see SkycapConfig.
+    # (skycap.use_raw_content, on by default; Codex's Responses calls get parsed replies): see SkycapConfig.
     ARM_ARGS=(
       skycap.record_dir="$RUN_DIR/skycap"
       skycap.num_servers="$SKYCAP_SERVERS"
@@ -103,6 +107,22 @@ case "$GENERATOR" in
     ;;
   *)
     echo "GENERATOR must be skycap or baseline, got $GENERATOR" >&2
+    exit 1
+    ;;
+esac
+case "$AGENT" in
+  terminus-2) ;;
+  codex)
+    [[ "$GENERATOR" == skycap ]] || { echo "AGENT=codex needs GENERATOR=skycap" >&2; exit 1; }
+    ARM_ARGS+=(
+      harbor_trial_config.agent.name=null
+      harbor_trial_config.agent.import_path=examples.train_integrations.harbor_skycap.codex:SkycapCodex
+      harbor_trial_config.agent.kwargs.context_window="$MAX_MODEL_LEN"
+      skycap.exposure.type=cloudflare
+    )
+    ;;
+  *)
+    echo "AGENT must be terminus-2 or codex, got $AGENT" >&2
     exit 1
     ;;
 esac
