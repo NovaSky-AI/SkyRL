@@ -50,6 +50,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import zlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
@@ -269,6 +271,8 @@ class RemoteGenerateClient:
     """Reusable HTTP client for one raw-token generation request."""
 
     proxy_url: str
+    # Data-parallel servers behind the router; used only for session-sticky direct routing (SKYRL_SESSION_STICKY_DIRECT).
+    server_urls: List[str] = field(default_factory=list)
     # aiohttp.ClientSession is bound to the event loop that created it, so one session is kept per loop.
     _sessions: Dict[asyncio.AbstractEventLoop, aiohttp.ClientSession] = field(
         default_factory=dict, init=False, repr=False
@@ -305,6 +309,14 @@ class RemoteGenerateClient:
             session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
             self._sessions[current_loop] = session
         return session
+
+    def _data_url_for_session(self, session_id: Optional[str]) -> str:
+        """Base URL for a data-plane request. Default: the router (proxy_url). With SKYRL_SESSION_STICKY_DIRECT=1 and
+        several servers, a request carrying a session id goes straight to ``server_urls[crc32(session) % n]``, so every
+        turn of a multi-turn rollout reaches the same server (and its prefix cache) even under data-parallel serving."""
+        if session_id and len(self.server_urls) > 1 and os.environ.get("SKYRL_SESSION_STICKY_DIRECT") == "1":
+            return self.server_urls[zlib.crc32(str(session_id).encode()) % len(self.server_urls)]
+        return self.proxy_url
 
     async def _post(
         self,
@@ -410,7 +422,7 @@ class RemoteGenerateClient:
             headers["X-Session-ID"] = str(session_id)
 
         response = await self._post(
-            f"{self.proxy_url}{path}",
+            f"{self._data_url_for_session(session_id)}{path}",
             json=payload,
             headers=headers,
             packed_side_channels=packed_side_channels,
@@ -601,7 +613,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
     def _get_generate_client(self) -> RemoteGenerateClient:
         if self._generate_client is None:
-            self._generate_client = RemoteGenerateClient(proxy_url=self.proxy_url)
+            self._generate_client = RemoteGenerateClient(proxy_url=self.proxy_url, server_urls=list(self.server_urls))
         return self._generate_client
 
     async def _get_session(self) -> aiohttp.ClientSession:

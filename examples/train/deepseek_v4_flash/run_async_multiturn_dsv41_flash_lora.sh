@@ -42,7 +42,7 @@ set -x
 # KV capacity: long rollouts at high concurrency).
 : "${VLLM_DP:=1}"
 VLLM_TP=$(( 8 / VLLM_DP ))
-VLLM_EP=1; [ "$VLLM_DP" -gt 1 ] && VLLM_EP=8
+: "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo 8 || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention, TP MoE
 # Score centering needs a bounded sampler support (top_k > 1); 20 as examples/train/top_p_replay.
 : "${TOP_K:=20}"
 : "${TOP_P:=1.0}"
@@ -83,7 +83,15 @@ export SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE="${SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE:-1}"
 export SKYRL_VLLM_MOE_LORA_TWO_KERNEL="${SKYRL_VLLM_MOE_LORA_TWO_KERNEL:-1}"
 export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-examples/train/deepseek_v4_flash/vllm_tuned_configs}"
 CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
-ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES"'}}'
+# DP attention + EP: MoE-LoRA fixes for the all-gathered token batch (int64 offsets, all ranks' LoRA metadata) and
+# decode-only full CUDA graphs (the DP8+EP LoRA configuration validated on B200).
+CUDAGRAPH_MODE_KW=""
+if [ "$VLLM_DP" -gt 1 ] && [ "$VLLM_EP" -gt 1 ]; then
+  export SKYRL_VLLM_MOE_LORA_INT64_OFFSETS="${SKYRL_VLLM_MOE_LORA_INT64_OFFSETS:-1}"
+  export SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META="${SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META:-1}"
+  CUDAGRAPH_MODE_KW=', "cudagraph_mode": "FULL_DECODE_ONLY"'
+fi
+ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES$CUDAGRAPH_MODE_KW"'}}'
 ROUTER_INIT_KWARGS='{"policy": "round_robin", "queue_size": 8192, "queue_timeout_secs": 1800}'
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
