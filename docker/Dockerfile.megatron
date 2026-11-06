@@ -38,9 +38,6 @@ RUN sudo apt-get update && sudo apt-get install -y --allow-change-held-packages 
     && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
 # ---------- Build helpers for source-built CUDA extensions ----------
-# No system cuDNN: torch and Transformer Engine load cuDNN from the `nvidia-cudnn-cu13` wheel in the
-# project env. A cuDNN on CUDNN_PATH or LD_LIBRARY_PATH would be loaded first (TE checks CUDNN_PATH before
-# the wheel, and cuDNN resolves its sublibraries through LD_LIBRARY_PATH), next to the wheel's version.
 RUN uv pip install  --system --no-cache-dir \
     nvidia-mathdx \
     pybind11 \
