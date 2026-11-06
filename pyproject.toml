@@ -287,6 +287,8 @@ include-package-data = true
 # alone does not cover them
 [tool.setuptools.package-data]
 "*" = ["*.patch"]
+# The Harbor TrialConfig template, read at runtime.
+"skyrl.integration.harbor" = ["*.yaml"]
 
 [tool.setuptools.dynamic]
 version = {attr = "skyrl.__version__"}

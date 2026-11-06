@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestServer  # noqa: E402
 from skyrl.integration.skycap.servers import (
     start_servers,  # noqa: E402
 )
-from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
+from tests.integrations.harbor.fakes import (  # noqa: E402
     FakeRenderer,
     MockRouter,
 )
@@ -39,9 +39,9 @@ def local_ray():
 
 @pytest.mark.asyncio
 async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_path, monkeypatch) -> None:
-    from examples.train_integrations.harbor_skycap import harbor_generator
-    from tests.integrations.harbor_skycap.fakes import FakeTrial
-    from tests.integrations.harbor_skycap.test_harbor_skycap import (
+    from skyrl.integration.harbor import skycap_generator as harbor_generator
+    from tests.integrations.harbor.fakes import FakeTrial
+    from tests.integrations.harbor.test_harbor_skycap import (
         batch,
         generator_cfg,
         harbor_cfg,
@@ -81,14 +81,14 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
     assert len(list(tmp_path.glob("*.json.zst"))) == 4
 
 
-EXPOSURES = "tests.integrations.harbor_skycap.test_exposure"
+EXPOSURES = "tests.integrations.harbor.test_exposure"
 
 
 @pytest.mark.asyncio
 async def test_each_server_exposes_its_harness_routes_to_agents_in_sandboxes(local_ray, tmp_path, monkeypatch) -> None:
-    from examples.train_integrations.harbor_skycap import harbor_generator
-    from tests.integrations.harbor_skycap.fakes import FakeTrial
-    from tests.integrations.harbor_skycap.test_harbor_skycap import (
+    from skyrl.integration.harbor import skycap_generator as harbor_generator
+    from tests.integrations.harbor.fakes import FakeTrial
+    from tests.integrations.harbor.test_harbor_skycap import (
         batch,
         generator_cfg,
         harbor_cfg,
