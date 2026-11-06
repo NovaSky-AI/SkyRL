@@ -50,7 +50,21 @@ set -x
 : "${VLLM_DP:=1}"
 VLLM_TP=$(( 8 / VLLM_DP ))
 : "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo 8 || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention + TP MoE
-CUDAGRAPH_MODE_KWARG=""; [ "$VLLM_DP" -gt 1 ] && CUDAGRAPH_MODE_KWARG=', "cudagraph_mode": "FULL_DECODE_ONLY"'
+# DP: decode steps run FULL CUDA graphs; mixed prefill + decode steps run eagerly. Under DP every rank pads to the
+# largest rank's token count in graph mode (one rank's 8k prefill chunk makes all 8 ranks run 8k tokens), while eager
+# steps run each rank's own tokens, so PIECEWISE graphs measured slower with desynced turns (depthfirst sim, staggered
+# starts: ~735 vs ~1,100 gen tok/s/GPU). VLLM_DP_PIECEWISE_GRAPHS=1 enables them anyway; it also sets
+# VLLM_USE_BREAKABLE_CUDAGRAPH=1, without which vLLM 0.32 captures DeepSeek-V4.1's attention inside the PIECEWISE
+# graphs on the DP launch path (it reads the variable when the attention module is imported, before vLLM's config sets
+# it) and replaying them hits an illegal memory access.
+CUDAGRAPH_MODE_KWARG=""
+if [ "$VLLM_DP" -gt 1 ]; then
+  if [ "${VLLM_DP_PIECEWISE_GRAPHS:-0}" = 1 ]; then
+    export VLLM_USE_BREAKABLE_CUDAGRAPH=1
+  else
+    CUDAGRAPH_MODE_KWARG=', "cudagraph_mode": "FULL_DECODE_ONLY"'
+  fi
+fi
 
 LORA_RANK=32
 LORA_ALPHA=32
