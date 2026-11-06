@@ -204,6 +204,13 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_mxfp4_trtllm_lora_moe import 
 
 apply_mxfp4_trtllm_lora_moe_patch()
 
+# Opt-in (SKYRL_VLLM_MOE_LORA_TWO_KERNEL=1): fused MoE-LoRA via the two-kernel path (faster at DSv4.1 shapes).
+from skyrl.backends.skyrl_train.patches.vllm.patch_moe_lora_two_kernel import (  # noqa: E402
+    apply_moe_lora_two_kernel_patch,
+)
+
+apply_moe_lora_two_kernel_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
