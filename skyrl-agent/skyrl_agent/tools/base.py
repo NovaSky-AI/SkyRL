@@ -25,6 +25,49 @@ def json_loads(text: str) -> dict:
             raise json_err
 
 
+def normalize_search_params(params) -> dict:
+    """Normalize batched search inputs using the Serper/You.com calling convention."""
+    raw: dict
+    if isinstance(params, dict):
+        raw = dict(params)
+    else:
+        try:
+            raw = json_loads(params) if isinstance(params, str) else {"query": params}
+        except Exception:
+            raw = {"query": params}
+
+    # Normalize "query" into a flat list[str]
+    def _normalize_query(q):
+        if q is None:
+            return None
+        # If it's a JSON-like string representing an array, try to parse
+        if isinstance(q, str):
+            s = q.strip()
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    parsed = json.loads(s)
+                    q = parsed
+                except Exception:
+                    # fall back to single string query
+                    return [q]
+            else:
+                return [q]
+        # If it's a list, flatten nested lists and stringify items
+        if isinstance(q, list):
+            flat = []
+            for item in q:
+                if isinstance(item, list):
+                    flat.extend([str(x) for x in item])
+                else:
+                    flat.append(str(item))
+            return flat
+        # Any other type → cast to single string element
+        return [str(q)]
+
+    raw["query"] = _normalize_query(raw.get("query"))
+    return raw
+
+
 class ToolServiceError(Exception):
 
     def __init__(
