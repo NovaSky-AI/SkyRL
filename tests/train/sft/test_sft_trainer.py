@@ -109,6 +109,8 @@ def test_sft_logs_actual_example_count(mock_dispatch, monkeypatch, packing, alig
     cfg.align_packing_bins_to_dp = alignment
     cfg.packing_batch_size_allowed_variation = 0.10
     cfg.async_batch_collation = async_collation
+    # The mocked dispatch has no FLOP model for the Megatron MFU tracker.
+    cfg.log_mfu = False
     cfg.eval_datasets = None
     cfg.eval_dataset_splits = None
     cfg.eval_dataset_names = None
@@ -146,6 +148,8 @@ def test_sft_logs_real_counts_for_short_packed_tail(mock_dispatch, monkeypatch, 
     cfg.remove_microbatch_padding = True
     cfg.use_sequence_packing = True
     cfg.async_batch_collation = async_collation
+    # The mocked dispatch has no FLOP model for the Megatron MFU tracker.
+    cfg.log_mfu = False
     cfg.eval_datasets = None
     cfg.eval_dataset_splits = None
     cfg.eval_dataset_names = None
