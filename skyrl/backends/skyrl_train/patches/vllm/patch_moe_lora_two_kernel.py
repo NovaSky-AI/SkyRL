@@ -5,7 +5,7 @@ shapes (384 experts, top-6, rank 32, TP8 intermediate 384) it launches ~one prog
 loops serially over K=5120 or N=5120, so it is latency-bound: with tuned tiles the two-kernel path (split shrink and
 expand, both Triton) is 1.2-3.7x faster per call on B200 (CUDA-graph timing; 640 tokens: W13 153 -> 62 us, W2 171 ->
 46 us). The tiles come from the recipe's VLLM_TUNED_CONFIG_FOLDER files (vllm_tuned_configs/, tuned by
-tune_moe_lora_two_kernel.py); the one-shot kernel ignores everything but block_m.
+a tuning sweep); the one-shot kernel ignores everything but block_m.
 
 Opt-in: ``SKYRL_VLLM_MOE_LORA_TWO_KERNEL=1`` (applied in every vLLM worker by ``new_inference_worker_wrap``).
 """

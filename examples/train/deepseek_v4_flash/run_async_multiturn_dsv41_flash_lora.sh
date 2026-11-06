@@ -9,7 +9,7 @@ set -x
 # Defaults are 1 trainer node + 2 sampler nodes (8 + 16 GPUs). On 2 nodes: NUM_ENGINES=1.
 #
 # MODEL_PATH: the release in its own format, text only. Build it (all layers, minutes; or a layer slice) with
-#   KEEP_QUANT=1 DSV41_LOCAL_DIR=<release dir> python examples/train/deepseek_v4_flash/dev/convert_dsv41_bf16_parallel.py <out>
+#   python examples/train/deepseek_v4_flash/make_text_only_checkpoint.py <release dir> <release dir>  (in place)
 # vLLM serves it as released; Megatron dequantizes the FP8 / MXFP4 weights to BF16 on load (the frozen LoRA base).
 #
 # DATA_DIR / ENV_CLASS: gsm8k_multi_turn is a stand-in for a long-horizon multi-turn environment:
@@ -18,7 +18,7 @@ set -x
 #
 #   bash examples/train/deepseek_v4_flash/run_async_multiturn_dsv41_flash_lora.sh [overrides]
 
-: "${MODEL_PATH:?text-only FP8/MXFP4 DeepSeek-V4.1-Flash dir (convert_dsv41_bf16_parallel.py with KEEP_QUANT=1)}"
+: "${MODEL_PATH:?text-only FP8/MXFP4 DeepSeek-V4.1-Flash dir (make_text_only_checkpoint.py)}"
 : "${DATA_DIR:=$HOME/data/gsm8k_multi_turn}"
 : "${ENV_CLASS:=gsm8k_multi_turn}"
 : "${NUM_TRAIN_NODES:=1}"
@@ -68,7 +68,7 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # Chunked-prefill token budget per engine step. vLLM's default (2048) leaves ~1,400 tokens next to 640 running decodes
 # while each multi-turn observation is ~1,870 tokens, so requests queue for admission and steps mix a little prefill
 # into every decode (the mixed steps run piecewise CUDA graphs, launch-bound). 8x B200, TP8, LoRA on, 640 sessions
-# (bench dsv41_inference_diag.py), gen tok/s/GPU: 2048 -> 479, 16384 -> 743, 32768 -> 898 (pure decode 576 -> 1257 /
+# (vLLM inference bench), gen tok/s/GPU: 2048 -> 479, 16384 -> 743, 32768 -> 898 (pure decode 576 -> 1257 /
 # 1197). Costs KV cache: 78.9 -> 73.6 -> 68.0 GiB/GPU.
 : "${MAX_NUM_BATCHED_TOKENS:=32768}"
 : "${ENTRYPOINT:=examples.train.fully_async.main_fully_async}"
@@ -77,7 +77,7 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # steps run fully eagerly. vLLM's default grid plus 1152..8192. 8x B200, TP8, LoRA on with an active rank-32 adapter,
 # 640 staggered sessions: 386 -> 462 gen tok/s/GPU; pure decode 607 -> 831; eager steps 61 -> 2 per 30 s; KV cache
 # 68.0 -> 62.3 GiB/GPU.
-# Tuned block sizes for vLLM's fused MoE-LoRA kernels (vllm_tuned_configs/, see make_moe_lora_configs.py). Without
+# Tuned block sizes for vLLM's fused MoE-LoRA kernels (vllm_tuned_configs/). Without
 # them a 640-token decode step pads each of 384 experts' ~10 rows to a 128-row block. 8x B200, TP8, active rank-32
 # adapter, 640 staggered sessions: 462 -> 570 gen tok/s/GPU. Relative path: Ray workers run from the repo root.
 # LoRA MoE on FlashInfer's TRT-LLM MXFP4 kernel instead of Marlin (patches/vllm/patch_mxfp4_trtllm_lora_moe.py):

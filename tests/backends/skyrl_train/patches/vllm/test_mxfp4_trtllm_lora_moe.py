@@ -1,7 +1,7 @@
 """CPU tests for ``patch_mxfp4_trtllm_lora_moe``: env gating and MXFP4 MoE backend registration.
 
 The kernel itself needs a Blackwell GPU and a model; its throughput and numerics were checked end to end with
-``dsv41_inference_diag.py`` (see the patch docstring). Here: the patch is inert without the env var, and with it the
+the vLLM inference bench (see the patch docstring). Here: the patch is inert without the env var, and with it the
 LoRA-capable experts class is offered under FLASHINFER_TRTLLM_MXFP4_BF16, which the generic priority list now tries
 just before Marlin.
 """
