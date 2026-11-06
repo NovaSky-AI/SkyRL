@@ -67,6 +67,11 @@ class WorkerDispatch:
         # Seconds the last save_weights_for_sampler spent on the transfer itself,
         # excluding the pause/resume bracket. None until the first sync.
         self.last_weight_sync_seconds: Optional[float] = None
+        # Seconds spent moving colocated models between CPU and GPU since the last
+        # get_timing_metrics() call, keyed by "<model>_backload" / "<model>_offload".
+        self._colocate_seconds: Dict[str, float] = {}
+        # Colocated sync stages around the transfer (residency swaps), by stage name.
+        self.last_weight_sync_stage_seconds: Dict[str, float] = {}
 
         # Actor groups by name.
         # TODO: Remove these role-specific identifiers. We will move to using model IDs and add support for generic models beyond these.
@@ -163,9 +168,14 @@ class WorkerDispatch:
             return [m for m in ["policy", "ref"] if m in self._actor_groups]
         return [model]
 
+    def _add_colocate_seconds(self, key: str, start: float) -> None:
+        self._colocate_seconds[key] = self._colocate_seconds.get(key, 0.0) + time.perf_counter() - start
+
     def _offload_inactive_model(self, model: str) -> None:
         """Offload an inactive colocated model to CPU."""
+        start = time.perf_counter()
         self._actor_groups[model].offload_to_cpu()
+        self._add_colocate_seconds(f"{model}_offload", start)
         self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
     def _ensure_on_gpu(self, model: str, need_optimizer: bool = True, need_model: bool = True) -> None:
@@ -192,10 +202,12 @@ class WorkerDispatch:
         backload_optimizer = need_optimizer and not state.optimizer_on_gpu
 
         if backload_model or backload_optimizer:
+            start = time.perf_counter()
             self._actor_groups[model].backload_to_gpu(
                 backload_optimizer=backload_optimizer,
                 backload_model=backload_model,
             )
+            self._add_colocate_seconds(f"{model}_backload", start)
             if backload_model:
                 self._gpu_state[model].model_on_gpu = True
             if backload_optimizer:
@@ -209,10 +221,12 @@ class WorkerDispatch:
         if model not in self._actor_groups:
             return
 
+        start = time.perf_counter()
         self._actor_groups[model].offload_to_cpu(
             offload_optimizer=offload_optimizer,
             offload_model=offload_model,
         )
+        self._add_colocate_seconds(f"{model}_offload", start)
 
         if offload_model:
             self._gpu_state[model].model_on_gpu = False
@@ -784,11 +798,16 @@ class WorkerDispatch:
         ``sync_weights_only_transfer`` is the weight transfer alone, reported apart
         from the trainer's ``sync_weights``, which also brackets the generation
         pause/resume (seconds of coordinator quiesce under vLLM DP). Empty until the
-        first sync.
+        first sync. ``colocate_<model>_{backload,offload}`` are the seconds spent moving
+        colocated models between CPU and GPU since the previous call (these moves happen
+        inside other timed phases, e.g. the first forward or the weight sync).
         """
-        if self.last_weight_sync_seconds is None:
-            return {}
-        return {"sync_weights_only_transfer": self.last_weight_sync_seconds}
+        metrics = {f"colocate_{key}": seconds for key, seconds in self._colocate_seconds.items()}
+        self._colocate_seconds = {}
+        if self.last_weight_sync_seconds is not None:
+            metrics["sync_weights_only_transfer"] = self.last_weight_sync_seconds
+            metrics.update({f"sync_weights_{name}": t for name, t in self.last_weight_sync_stage_seconds.items()})
+        return metrics
 
     async def _prepare_for_weight_sync(self, adapter_only_sync: bool = False) -> None:
         """Prepare colocated trainer/engine residency for sampler weight sync."""
@@ -893,14 +912,21 @@ class WorkerDispatch:
             self.last_weight_sync_seconds = time.perf_counter() - start
 
         # Sync weights to inference engine
+        stages = self.last_weight_sync_stage_seconds = {}
+        start = time.perf_counter()
         await self._prepare_for_weight_sync(adapter_only_sync=adapter_only_sync)
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
         if self.colocate_all:
+            stages["prepare"] = time.perf_counter() - start
+            start = time.perf_counter()
             await self._inference_engine_client.wake_up(tags=["weights"])
+            stages["wake_weights"] = time.perf_counter() - start
             await _broadcast_and_finish()
+            start = time.perf_counter()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
+            stages["wake_kv_cache"] = time.perf_counter() - start
         else:
             strategy = self.cfg.trainer.strategy
             is_lora = self.cfg.trainer.policy.model.lora.rank > 0

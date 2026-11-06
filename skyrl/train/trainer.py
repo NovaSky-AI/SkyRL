@@ -2,6 +2,7 @@ import asyncio
 import math
 import os
 import shutil
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -418,7 +419,8 @@ class RayPPOTrainer:
 
                         if self.colocate_all:
                             # if we are not continuing sampling, we sleep the inference engine
-                            await self.inference_engine_client.sleep()
+                            with Timer("inference_engine_sleep", self.all_timings):
+                                await self.inference_engine_client.sleep()
 
                         # The train rollout for this step is done generating; close
                         # its metrics window. ``vllm/eval/*`` is collected separately
@@ -1644,17 +1646,25 @@ class RayPPOTrainer:
         # serialization is fully off the critical path during training.
         all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
 
-        # Training loop over epochs and mini-batches
+        # Training loop over epochs and mini-batches. forward/backward and optimizer time are
+        # summed over mini-batches into timing/<model>_forward_backward and timing/<model>_optim_step.
+        fwd_bwd_seconds = optim_seconds = 0.0
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
+                started = time.perf_counter()
                 status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                fwd_bwd_seconds += time.perf_counter() - started
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
                 # Optimizer step after each mini batch
+                started = time.perf_counter()
                 grad_norm = self.dispatch.optim_step(model)
+                optim_seconds += time.perf_counter() - started
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
+        self.all_timings[f"{model}_forward_backward"] = fwd_bwd_seconds
+        self.all_timings[f"{model}_optim_step"] = optim_seconds
 
         # Reduce metrics across all mini-batches and epochs
         reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)
