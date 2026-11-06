@@ -15,7 +15,8 @@
 # Env (defaults in brackets): MODEL_PATH, DATA_DIR (from long_horizon_dataset.py --max-turns MAX_TURNS), OUT
 # [/root/data/skyrl-logs/<run>], MAX_TURNS [69], MAX_MODEL_LEN [262144], CP [8], VLLM_DP [8], TRAIN_BATCH_SIZE [16],
 # N_SAMPLES_PER_PROMPT [8], MAX_STALENESS_STEPS [4], MAX_TRAINING_STEPS [4], OFFLOAD_GB [24], GEN_STAGGER_S [0],
-# RUN_NAME, CKPT_PATH. Shorter rollouts: MAX_TURNS=16 MAX_MODEL_LEN=65536 CP=4 (and a matching dataset).
+# RUN_NAME, CKPT_PATH. One mini-batch per step, so the old logprobs come from the training forward
+# (trainer.old_logprobs_from_first_minibatch) and the separate logprob forward pass is skipped. Shorter rollouts: MAX_TURNS=16 MAX_MODEL_LEN=65536 CP=4 (and a matching dataset).
 set -o pipefail
 cd "$(dirname "$0")/../../../.."
 : "${RUN_NAME:=dsv41_depthfirst_sim}"
@@ -35,6 +36,7 @@ RECIPE="${RECIPE:-examples/train/deepseek_v4_flash/run_async_multiturn_dsv41_fla
 bash "$RECIPE" "${LONG_ARGS[@]}" \
   "generator.sampling_params.additional_kwargs={ignore_eos: true}" \
   trainer.fully_async.generation_worker_start_stagger_s="${GEN_STAGGER_S:-0}" \
+  trainer.old_logprobs_from_first_minibatch=true \
   trainer.log_path="$OUT" "$@" > "$OUT/run.log" 2>&1
 rc=$?
 echo "rc=$rc" >> "$OUT/run.log"

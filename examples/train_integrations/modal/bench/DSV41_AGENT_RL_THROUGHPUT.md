@@ -1,16 +1,16 @@
 # DeepSeek-V4.1-Flash LoRA RL on Modal: long multi-turn agent workload, 16 GPUs
 
 An end-to-end fully-async RL run (vLLM sampling and Megatron training at the same time, on separate GPUs) shaped
-like a long tool-use agent workload, which reports sampler and trainer throughput from the same run.
+like a long tool-use agent workload at full context, which reports sampler and trainer throughput from the same run.
 
-| | this run |
+| | this run (defaults) |
 |---|---|
-| GPUs | 16x B300: 1 Megatron trainer node + 1 vLLM node |
+| GPUs | 16x B200 (`GPU=B300:8` for B300): 1 Megatron trainer node + 1 vLLM node |
 | model | `deepseek-ai/DeepSeek-V4.1-Flash` (released FP8 / MXFP4 weights), LoRA r32 on attention, shared and routed experts |
-| rollout | 16 turns; each turn the policy generates exactly 1,065 tokens (`ignore_eos`) and the environment answers with a ~1,870-token tool observation; ~45k tokens per rollout |
-| concurrency | 640 rollouts in flight = 80 per vLLM GPU (16 prompts x 8 samples per step, up to 4 steps stale) |
-| trainer | context parallel 4 x data parallel 2, expert parallel 8, packed sequences, full recompute, frozen base weights stored as MXFP8 |
-| sampler | vLLM TP8, MXFP4 MoE + LoRA on FlashInfer's TRT-LLM kernel, prefix caching, 32k prefill budget, mixed-step CUDA graphs |
+| rollout | 69 turns; each turn the policy generates exactly 1,065 tokens (`ignore_eos`) and the environment answers with a ~1,870-token tool observation; contexts grow to ~200k tokens |
+| concurrency | 640 rollouts in flight = 80 per vLLM GPU; 128 rollouts (16 prompts x 8) per optimizer step, so ~5 steps of async policy lag |
+| trainer | context parallel 8 (one 200k-token sequence per 8-GPU node), expert parallel 8, packed sequences, stateful full recompute, frozen base weights stored as MXFP8 |
+| sampler | vLLM with data-parallel attention + expert parallelism (DP8 + EP8: each GPU caches only its own sessions' KV, ~93M tokens per B200 node), MXFP4 MoE + LoRA on FlashInfer's TRT-LLM kernel, two-kernel MoE-LoRA with tuned tiles, prefix caching with session-sticky routing |
 | algorithm | GRPO-style group advantages, rollout-anchored importance-sampling loss, routing replay (R3), score centering |
 
 ## Run it
@@ -18,45 +18,58 @@ like a long tool-use agent workload, which reports sampler and trainer throughpu
 Prerequisites: the Modal CLI logged in, a W&B secret named `wandb` (or `MODAL_SECRETS= LOGGER=console`).
 
 ```bash
-# once (~1-2 h, CPU only): download the model to the `dsv41-models` volume and make it text-only in place,
-# build the dataset, stage FlashInfer's kernel package on the volume
+# once (CPU only): download the model to the `dsv41-models` volume and make it text-only in place,
+# build the 69-turn dataset, stage FlashInfer's kernel package on the volume
 bash examples/train_integrations/modal/bench/launch_depthfirst_sim.sh setup
 
-# the run (detached; ~45 min startup, then a step every few minutes)
+# the run (detached): ~50 min startup, ~1.5-2 h of 69-turn rollouts, then a training step every ~35 min
 bash examples/train_integrations/modal/bench/launch_depthfirst_sim.sh run
 ```
 
-Logs: `skyrl-logs/dsv41_depthfirst_sim/run.log` on the `skyrl-data` volume, W&B project `dsv41_long_horizon`.
-Knobs (env): `MAX_TURNS`, `MAX_MODEL_LEN`, `TRAIN_BATCH_SIZE`, `N_SAMPLES_PER_PROMPT`, `MAX_STALENESS_STEPS`,
-`MAX_TRAINING_STEPS`, `GEN_STAGGER_S`, `MODELS_VOLUME`, `GPU`.
+Logs: `skyrl-logs/<RUN_NAME>/run.log` on the `skyrl-data` volume (RUN_NAME defaults to `dsv41_depthfirst_sim`), W&B
+project `dsv41_long_horizon`. Knobs (env): `GPU`, `MAX_TURNS`, `MAX_MODEL_LEN`, `CP`, `VLLM_DP`, `TRAIN_BATCH_SIZE`,
+`N_SAMPLES_PER_PROMPT`, `MAX_STALENESS_STEPS`, `MAX_TRAINING_STEPS`, `MODELS_VOLUME`, `TIMEOUT`.
 
 ## What to read off
 
-- **Sampler**: vLLM's `Avg generation throughput` (per 10 s, in `run.log`) divided by 8 GPUs.
+- **Sampler**: every `/skyrl/v1/generate` request is one turn of exactly 1,065 generated tokens, so the most exact rate
+  is the vLLM servers' `http_requests_total{handler="/skyrl/v1/generate"}` counters (`/metrics` on each DP server)
+  over a time window x 1,065 / 8 GPUs. vLLM's `Avg generation throughput` log lines undercount under DP8: Ray
+  deduplicates the 8 engines' near-identical lines.
 - **Trainer**: tokens per step (`generate/avg_num_tokens` x 128) over `timing/policy_forward_backward` (forward +
   backward) or over `timing/run_training` (also the old-logprob forward pass), divided by 8 GPUs.
 
-## Measured
+## Measured (16x B200, defaults, depthfirst-length rollouts)
 
-Steady state (steps 2+), 128 rollouts x ~45.1k tokens = 5.77M tokens per step:
+Each training step: 128 rollouts x ~200.7k tokens = ~25.7M tokens.
 
-| | B300 (Modal, 640 rollouts in flight) | B200 (384 in flight) |
+| | Modal B200 (this launcher) | Anyscale B200 (same config) |
 |---|---|---|
-| trainer, forward + backward | **~2,470 tok/s/GPU** (~292 s / step) | ~2,130 tok/s/GPU (~339 s) |
-| trainer, incl. the old-logprob forward pass | ~1,700 tok/s/GPU (~422 s) | ~1,450 tok/s/GPU (~498 s) |
-| step time | ~7.5 min | ~8.7 min |
-| sampler, generated tokens (e2e, per-minute avg) | ~730-1,000 tok/s/GPU (~1,100 in pure decode) | ~650-690 tok/s/GPU (~1,070 in pure decode) |
-| trainer peak memory | 105 GB | 103 GB |
-| trainer vs. sampler logprob gap (mean abs) | 0.012 | 0.012 |
+| decode, ~20k-108k context | | **~1,420 tok/s/GPU** |
+| decode, ~120k-196k context | | ~1,130-1,340 tok/s/GPU |
+| trainer forward + backward (step 2) | **~2,600 tok/s/GPU** (1,234 s) | ~2,300 tok/s/GPU (1,406 s) |
+| trainer, whole step incl. the old-logprob forward pass (step 2) | **~1,890 tok/s/GPU** (1,699 s) | ~1,570 tok/s/GPU (2,049 s) |
+| trainer peak memory | | 129.5 GB (of 178) |
+| trainer vs. sampler logprob gap (mean abs, 200k rollouts) | | 0.0087 |
 
-For B200: `GPU=B200:8 MAX_STALENESS_STEPS=2 GEN_STAGGER_S=60` (384 rollouts fit its smaller KV cache).
+Decode is counted from the vLLM servers' completed turns; on Modal it is in W&B / `run.log`.
+
+The "whole step" rows above include a separate old-logprob forward pass (~25-35% of a 200k step). The launcher now
+sets `trainer.old_logprobs_from_first_minibatch=true`: with one mini-batch per step the old logprobs come from the
+training forward itself and that pass is skipped (validated on B200: `run_training` time = `policy_train` time), so a
+step costs about the forward + backward time.
 
 ## Caveats
 
+- Weight sync under data-parallel serving (VLLM_DP > 1): vLLM's DP ranks step in lockstep, so pausing them in "keep"
+  mode (in-flight requests frozen) and then pushing the new LoRA weights over NCCL can deadlock (ranks still in the
+  DP all-reduce never join the weight broadcast). It shows up at the first sync that happens while rollouts are being
+  generated (step 2 here). `RemoteInferenceClient.pause_generation` now pauses in "wait" mode under DP (in-flight turns
+  finish first, so every rank is idle before the update); `SKYRL_DP_PAUSE_MODE` overrides it.
+
 - Synthetic workload: GSM8k prompts, generated filler observations, and `ignore_eos` turns. It is a throughput run;
   rewards and learning are not meaningful.
-- ~45k-token rollouts, not ~200k: 640 rollouts of ~200k tokens do not fit the TP8 KV cache. For ~200k rollouts set
-  `MAX_TURNS=69 MAX_MODEL_LEN=262144` and fewer rollouts in flight (e.g. `MAX_STALENESS_STEPS=1`); the trainer config
-  is the one validated at 200k on B300 (~3,500 tok/s/GPU forward + backward, 198 GB peak).
+- All 640 rollouts start together, so their contexts move in lockstep (a production fleet is spread over 0-200k);
+  decode at ~100k is the closest match to a fleet averaging ~100k.
 - Numerics: BF16 compute with the base weights dequantized from the released FP8 / MXFP4 per layer; the sampler
   runs the released FP8 / MXFP4 weights.
