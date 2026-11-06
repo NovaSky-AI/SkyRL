@@ -117,7 +117,7 @@ def test_keys_are_required_whenever_the_servers_are_exposed() -> None:
     assert required("skycap.require_api_key=true")
 
 
-def test_each_server_gets_its_ownexposure_type() -> None:
+def test_each_server_gets_its_own_exposure() -> None:
     assert exposure_for(None, None, 2) is None
     assert exposure_for("cloudflare", {"timeout": 30.0}, 2) == ("cloudflare", {"timeout": 30.0})
     # external_host: server i listens on port + i, from 11500 unless a port is given.

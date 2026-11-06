@@ -81,6 +81,7 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    """How agents inside remote sandboxes reach the servers."""
     include_images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
     with the model's processor and its default settings (so the engine takes no ``mm_processor_kwargs``),
@@ -90,7 +91,6 @@ class SkycapConfig:
     """Whether a trajectory's harness routes answer only its own key, which the generator hands its agent. ``None``
     (default): whenever ``skycap.exposure`` is set, so routes reachable from outside the cluster can't be written to
     by whoever learns a URL."""
-    """How agents inside remote sandboxes reach the servers."""
 
 
 def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
