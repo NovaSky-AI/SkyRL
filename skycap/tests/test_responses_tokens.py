@@ -220,17 +220,23 @@ async def test_a_raw_content_server_answers_responses_parsed_and_chat_raw() -> N
     async with token_stack(completion=thinking_then_tool, use_raw_content=True) as stack:
         created = await stack.create()
         replies = await tool_loop(stack, created)
+        responses_calls = [c for n in (await document(stack, created["id"]))["nodes"] for c in n["calls"]]
         finished = await stack.finish(created["id"])
         chatted = await stack.create()
         chat = await client(chatted["base_url"]).chat.completions.create(
             model="policy", messages=[user("use a TOOL")], tools=CHAT_TOOLS
         )
+        chat_calls = [c for n in (await document(stack, chatted["id"]))["nodes"] for c in n["calls"]]
 
     assert [item.type for item in replies[0].output] == ["reasoning", "function_call"]
     assert finished["unbridged_calls"] == 0 and len(finished["samples"]) == 1
     # The chat route keeps the raw completion: thinking inline, the call unparsed.
     assert chat.choices[0].message.content == "THINK:plan|CALL:search:{}"
     assert not chat.choices[0].message.tool_calls
+    # The record says what each call got, not the server's setting.
+    assert [c["raw_content"] for c in responses_calls] == [False] * 3 and [c["raw_content"] for c in chat_calls] == [
+        True
+    ]
 
 
 async def test_the_responses_route_takes_the_trajectorys_own_key() -> None:
