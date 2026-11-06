@@ -325,6 +325,23 @@ def _build_skyrl_ipc_engine() -> type:
     class SkyrlIPCWeightTransferEngine(SkyrlReceiveLifecycleMixin, IPCWeightTransferEngine):
         """vLLM's CUDA IPC receive engine plus SkyRL receive targets."""
 
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            # Per-transfer receive counters, read by the ``skyrl_debug_memory_stats`` worker RPC.
+            self.skyrl_receive_stats = {"chunks": 0, "bytes": 0, "tensors": 0}
+
+        def receive_weights(self, update_info: Any) -> None:
+            sizes = getattr(update_info, "tensor_sizes", None) or []
+            stats = self.skyrl_receive_stats
+            stats["chunks"] += 1
+            stats["bytes"] += int(sum(sizes))
+            stats["tensors"] += len(getattr(update_info, "names", None) or [])
+            super().receive_weights(update_info)
+
+        def start_weight_update(self) -> None:
+            self.skyrl_receive_stats = {"chunks": 0, "bytes": 0, "tensors": 0}
+            super().start_weight_update()
+
         def skyrl_release_receive_buffers(self) -> None:
             # The importer holds this worker's mapping of the trainer's packed
             # IPC buffer. Closing it once per export releases the producer-side

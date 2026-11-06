@@ -596,6 +596,29 @@ The fully-async path is driven entirely from SkyRL — no vLLM patch. It deliber
 
 Validated in `validate_inference_engine_cfg`. vLLM-version coupled (mirrors `GPUWorker.sleep`/`wake_up` and the `CuMemAllocator` API) — re-verify on vLLM bumps via the GPU weight-sync test.
 
+## Colocated sync instrumentation (debug)
+
+Code: `weight_sync/colocated/instrumentation.py`. Off unless asked for; nothing here changes
+what a sync sends or loads.
+
+- `SKYRL_COLOCATED_SYNC_DEBUG=1` (trainer env): `Worker.broadcast_to_inference_engines` wraps
+  the send in a `PhaseRecorder` and `instrument_send`. It records per-rank torch peaks, the true
+  shared-device peak (a `mem_get_info` poller, which sees the colocated vLLM worker too), time
+  spent inside the export generator, exported bytes, and rank 0's `update_weights` round-trip
+  count and latency. Read it back with `Worker.get_last_weight_sync_stats`.
+- `SKYRL_COLOCATED_SYNC_TRAINER_CAP_GIB` (test only): caps the trainer's CUDA allocations
+  during the send, to reproduce "vLLM weights fill the GPU" OOMs on a small model.
+- Worker-extension RPCs (via `/collective_rpc`):
+  - `skyrl_debug_weight_checksums`: integer checksum of every parameter and buffer, for byte
+    parity checks.
+  - `skyrl_debug_memory_stats`: torch, device and CuMem-by-tag memory, plus the IPC receive
+    engine's per-transfer counters (`skyrl_receive_stats`: chunks, bytes, tensors).
+  - `skyrl_debug_weight_allocation_map`: layer -> CuMem `weights` allocation map.
+  - `skyrl_debug_benchmark_create_and_map`: times CuMem re-mapping of fresh allocations.
+- GPU harness: `tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_colocated_weight_sync.py`
+  (byte parity of every vLLM tensor after level-2 sleep + sync, per-sync memory/time lines, and
+  the CuMem probe). CPU: `tests/backends/skyrl_train/weight_sync/test_colocated_instrumentation.py`.
+
 ## Convention: vLLM imports
 
 `vllm` is a Linux-only optional dep, and half the CPU suite runs without the wheel. Two
