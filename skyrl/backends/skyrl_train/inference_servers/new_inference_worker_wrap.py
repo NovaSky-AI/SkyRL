@@ -223,6 +223,14 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_moe_lora_two_kernel import ( 
 
 apply_moe_lora_two_kernel_patch()
 
+# Opt-in (SKYRL_VLLM_MOE_LORA_INT64_OFFSETS=1): int64 token offsets in the two-kernel MoE-LoRA path. Needed under
+# DP attention + EP, where the MoE layer sees every DP rank's tokens and the int32 output offset overflows.
+from skyrl.backends.skyrl_train.patches.vllm.patch_moe_lora_int64_offsets import (  # noqa: E402
+    apply_moe_lora_int64_offsets_patch,
+)
+
+apply_moe_lora_int64_offsets_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
