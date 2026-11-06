@@ -37,6 +37,12 @@ set -x
 : "${CKPT_PATH:=$HOME/ckpts/$RUN_NAME}"
 : "${ENABLE_ROUTING_REPLAY:=true}"
 : "${INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION:=0.85}"
+# vLLM layout per 8-GPU engine: TP8 (default) replicates the attention KV cache on every GPU; VLLM_DP=8 runs
+# data-parallel attention + expert-parallel MoE (TP1 x DP8 x EP8), so each GPU caches only its own sessions (~8x the
+# KV capacity: long rollouts at high concurrency).
+: "${VLLM_DP:=1}"
+VLLM_TP=$(( 8 / VLLM_DP ))
+VLLM_EP=1; [ "$VLLM_DP" -gt 1 ] && VLLM_EP=8
 # Score centering needs a bounded sampler support (top_k > 1); 20 as examples/train/top_p_replay.
 : "${TOP_K:=20}"
 : "${TOP_P:=1.0}"
@@ -168,7 +174,9 @@ uv run --isolated --extra megatron -m "$ENTRYPOINT" \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.num_engines=$NUM_ENGINES \
-  generator.inference_engine.tensor_parallel_size=8 \
+  generator.inference_engine.tensor_parallel_size=$VLLM_TP \
+  generator.inference_engine.data_parallel_size=$VLLM_DP \
+  generator.inference_engine.expert_parallel_size=$VLLM_EP \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.gpu_memory_utilization=$INFERENCE_ENGINE_GPU_MEMORY_UTILIZATION \
   generator.inference_engine.enforce_eager=false \
