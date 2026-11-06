@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from skyrl.train.config.sft_config import (
     SFTConfig,
     SFTPlacementConfig,
@@ -85,3 +87,24 @@ def test_sft_run_eval_opts_out_of_per_token_outputs(mock_dispatch):
     for call in mock_dispatch.forward.call_args_list:
         assert call.kwargs["loss_fn"] == "cross_entropy"
         assert call.kwargs["return_per_token_outputs"] is False
+
+
+def _batch_check_trainer(*, batch_size: int, num_gpus: int, tp: int, cp: int) -> SFTTrainer:
+    """Bare SFTTrainer carrying only the config ``_validate_batch_parallelism`` reads."""
+    cfg = SFTConfig(strategy="megatron", batch_size=batch_size, micro_train_batch_size_per_gpu=1)
+    cfg.placement = SFTPlacementConfig(num_nodes=1, num_gpus_per_node=num_gpus)
+    cfg.megatron_config.tensor_model_parallel_size = tp
+    cfg.megatron_config.pipeline_model_parallel_size = 1
+    cfg.megatron_config.context_parallel_size = cp
+    trainer = SFTTrainer.__new__(SFTTrainer)
+    trainer.sft_cfg = cfg
+    return trainer
+
+
+def test_validate_batch_parallelism_counts_context_parallelism():
+    # 16 GPUs at TP2/CP8 -> DP = 16 / (2 * 8) = 1, so batch_size=2 is valid.
+    _batch_check_trainer(batch_size=2, num_gpus=16, tp=2, cp=8)._validate_batch_parallelism()
+    # 16 GPUs at TP2/CP2 -> DP = 4: batch_size=4 is valid, batch_size=2 is not.
+    _batch_check_trainer(batch_size=4, num_gpus=16, tp=2, cp=2)._validate_batch_parallelism()
+    with pytest.raises(ValueError, match=r"must be divisible by data-parallel size \(4\)"):
+        _batch_check_trainer(batch_size=2, num_gpus=16, tp=2, cp=2)._validate_batch_parallelism()
