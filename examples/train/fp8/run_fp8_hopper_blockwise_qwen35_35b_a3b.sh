@@ -66,6 +66,7 @@ uv run --env-file "$ENV_FILE" --isolated --extra megatron -m examples.train.algo
   trainer.algorithm.overlong_buffer_len=4096 \
   trainer.algorithm.overlong_buffer_penalty_factor=1.0 \
   trainer.algorithm.loss_reduction=token_mean \
+  trainer.algorithm.grpo_norm_by_std=true \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.clip_ratio_c=10.0 \
   trainer.algorithm.eps_clip_low=0.2 \

@@ -28,6 +28,9 @@ from transformers import AutoTokenizer
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.tracking import Tracking
+from tests.backends.skyrl_train.gpu.gpu_ci.megatron.megatron_tiny_models.create_beam_tiny import (
+    create_beam_tiny,
+)
 from tests.backends.skyrl_train.gpu.utils import import_worker, ray_init_for_tests
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -37,6 +40,8 @@ GLM5_3_FLASH_MODEL_NAME = "eatang/GLM-5.3-Flash-4layer"
 # 4-layer Qwen3.8-Flash-Next slice (3 GDN + 1 QSA attention, PLE, 512-expert MoE, gated
 # hyper-connections), the same checkpoint as the qwen3.8 megatron parity rows.
 QWEN3_8_FLASH_NEXT_MODEL_NAME = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-Flash-Next-4layer")
+# Tiny random Beam, built on first use; the same checkpoint as the beam-tiny megatron parity rows.
+BEAM_TINY = os.environ.get("SKYRL_BEAM_TINY_PATH", "/tmp/skyrl-beam-tiny-random")
 NUM_GPUS = 2
 
 
@@ -138,6 +143,13 @@ def get_test_trainer_config(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
         cfg.trainer.policy.megatron_config.mtp_num_layers = 0
         cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
+
+    if "beam" in model_name.lower():
+        # Beam (BeamBridge -> HybridModel): attention and the dense MLP on TP2, the MoE layers on EP2.
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
 
     if lora:
         lora_cfg = cfg.trainer.policy.model.lora
@@ -247,6 +259,10 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         # optimizer on the GPU (as in the 4-node recipes) and expert-DP 1 on 4 GPUs, it peaks at
         # ~85 GB/GPU, more than this suite's GPUs have.
         pytest.param("megatron", False, True, QWEN3_8_FLASH_NEXT_MODEL_NAME, None, marks=pytest.mark.megatron),
+        # Tiny random Beam (megatron_tiny_models/create_beam_tiny.py): HybridModel with an fp32 router
+        # (keep_in_fp32 params in the distributed optimizer), sandwich norms and gate biases.
+        pytest.param("megatron", False, True, BEAM_TINY, None, marks=pytest.mark.megatron),
+        pytest.param("megatron", False, False, BEAM_TINY, None, marks=pytest.mark.megatron),
     ],
     ids=[
         "fsdp_no_lora",
@@ -256,6 +272,8 @@ def create_minimal_trainer(cfg: SkyRLTrainConfig):
         "megatron_optimizer_partial_cpu_offload",
         "megatron_glm5_3_flash_lora",
         "megatron_qwen3_8_flash_next_lora",
+        "megatron_beam_tiny_lora",
+        "megatron_beam_tiny_fullft",
     ],
 )
 def test_trainer_full_checkpointing(
@@ -272,6 +290,8 @@ def test_trainer_full_checkpointing(
     7. Verifying all state matches
     8. Continuing training to ensure it works
     """
+    if model_name == BEAM_TINY:
+        create_beam_tiny(BEAM_TINY)
     cfg = get_test_trainer_config(strategy, fsdp_cpu_offload, model_name, lora, optimizer_offload_fraction)
 
     checkpoint_dir = None

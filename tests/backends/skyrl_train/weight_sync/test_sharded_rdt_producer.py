@@ -275,6 +275,7 @@ def _loop_engine(server, n_groups, *, lookahead):
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
     e._groups = [list(g) for g in groups]
+    e._group_dtypes = [[torch.float32] for _ in groups]
     e._owned_idx = list(range(n_groups))
     e._held_names = None
     e._inflight = _ResidencyDict()

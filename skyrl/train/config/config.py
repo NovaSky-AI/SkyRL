@@ -18,6 +18,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Type, TypeVar,
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl.train.fused_lm_head import FUSED_LM_HEAD_BACKENDS, FusedLmHeadBackend
 from skyrl_gym.envs.search.env import SearchEnvConfig
 from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
 
@@ -634,6 +635,40 @@ class MegatronConfig(BaseConfig):
     """TransformerEngine amax history reduction, e.g. ``"most_recent"`` or ``"max"``. Folded
     into ``transformer_config_kwargs["fp8_amax_compute_algo"]``; an explicit kwarg takes
     precedence."""
+    fp8_exclude_modules: Optional[List[str]] = None
+    """Megatron module-path globs whose linear layers train in BF16 while the rest use FP8.
+
+    Patterns use ``fnmatch`` syntax and match Megatron module paths such as
+    ``decoder.layers.3.self_attention.linear_qkv``, ``decoder.layers.3.self_attention.in_proj``
+    (GDN), ``decoder.layers.3.mlp.experts.linear_fc1``, ``decoder.layers.3.mlp.shared_experts.linear_fc2``
+    and ``output_layer`` (an FP8 layer only with ``fp8_output_proj`` and ``fp8_recipe=mxfp8``).
+    Examples: ``["*.shared_experts.*"]``, ``["*.self_attention.*"]``. A pattern that matches none of
+    the layers Megatron can run in FP8 raises when the model is built. Megatron
+    numbers ``layers.N`` within each pipeline stage, so layer-indexed patterns are rejected when
+    ``pipeline_model_parallel_size > 1`` (except ``mtp.layers.N``, whose numbering does not depend on
+    the pipeline split); use ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` for layer ranges.
+
+    Built into Megatron's per-module ``quant_recipe``. These are training-side names only; the
+    rollout's FP8 modules are set separately by ``generator.inference_engine.fp8_weight_sync_exclude_modules``.
+    Mutually exclusive with ``te_precision_config_file``."""
+    num_layers_at_start_in_bf16: int = 0
+    """Number of leading transformer layers trained in BF16 instead of FP8. Layer numbers are global, so this
+    works under pipeline parallelism. If this conflicts with a custom ``te_precision_config_file`` which indicates
+    a layer to be FP8, this config wins and the layer is kept in BF16, unless that file's config for the layer sets
+    ``override_nonquantized_autocast: true`` (Megatron defaults it to false), in which case the file wins and the
+    layer runs in FP8."""
+    num_layers_at_end_in_bf16: int = 0
+    """Number of trailing transformer layers trained in BF16 instead of FP8; see
+    ``num_layers_at_start_in_bf16``."""
+    te_precision_config_file: Optional[str] = None
+    """Path to a Megatron per-module precision YAML (the ``--te-precision-config-file`` format),
+    loaded as ``quant_recipe`` on every training worker, so it must be readable there.
+
+    The file holds named ``configs`` (TE quantization recipes, e.g. BF16, ``blockwise``, ``mxfp8``)
+    and ordered glob ``matchers`` over Megatron module paths; the first matching matcher picks a
+    module's config, and unmatched modules use the global ``fp8`` / ``fp8_recipe``.
+    Layer-indexed patterns are rejected under pipeline parallelism, as for ``fp8_exclude_modules``.
+    Mutually exclusive with ``fp8_exclude_modules``."""
     transformer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
     )
@@ -648,14 +683,20 @@ class MegatronConfig(BaseConfig):
     (``NVTE_FP8_BLOCK_SCALING_FP32_SCALES``, ``VLLM_USE_DEEP_GEMM_E8M0``) is defaulted and
     validated per architecture at startup and forwarded to all Ray actors."""
     empty_cuda_cache: Optional[bool] = None
-    """Manually empty torch's CUDA cache between the forward/backward pass and the optimizer step.
-    This frees reserved-but-unallocated memory and can help avoid OOMs in the optimizer.
+    """Empty torch's CUDA cache after each forward/backward and forward-only pass.
 
-    ``None`` (default) empties it unless the optimizer is fully offloaded to CPU
-    (``optimizer_cpu_offload=True`` with ``optimizer_offload_fraction=1.0``): the optimizer step then
-    allocates little GPU memory, and under ``expandable_segments`` the empty releases every cached page
-    to the driver, which the next forward pass maps again (seconds per step at high memory use).
-    ``True`` / ``False`` force it on / off. Forward-only passes empty the cache unless this is ``False``."""
+    The empty after a forward/backward pass runs before the optimizer step. Emptying frees
+    reserved-but-unallocated memory, which can help avoid OOMs from fragmentation.
+
+    ``None`` (default) skips both empties when the trainer runs with ``expandable_segments``
+    (``trainer.use_expandable_segments``, on by default): that allocator does not fragment, so the
+    empty buys no headroom inside the process, while it releases every cached page to the driver and
+    the next pass maps them all again (seconds per step at high memory use; up to ~3x slower steps on
+    long-context MoE runs). The trainer still empties the cache around offload and weight sync. Without
+    ``expandable_segments``, ``None`` empties after each pass, except after forward/backward when the
+    optimizer is fully offloaded to CPU (``optimizer_cpu_offload=True`` with
+    ``optimizer_offload_fraction=1.0``), whose step allocates little GPU memory.
+    ``True`` / ``False`` force both empties on / off."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use
@@ -701,12 +742,12 @@ class MegatronConfig(BaseConfig):
     """Copy shards to host memory on the training rank before handing them to the async
     checkpoint writer, instead of letting the writer pull them over CUDA IPC.
 
-    Enable this when using async save on machines with restricted ptrace permissions. 
+    Enable this when using async save on machines with restricted ptrace permissions.
     megatron-core hands the writer the *GPU* tensors and copies them in the writer process;
-    with ``expandable_segments:True`` those handles are file descriptors that the writer 
-    imports via ``pidfd_getfd``, which needs ptrace-attach permission on the rank. 
-    Where that is refused (e.g. ``kernel.yama.ptrace_scope=1``, as on some CI runners) 
-    the writer dies with ``pidfd_getfd: Operation not permitted`` and every rank then 
+    with ``expandable_segments:True`` those handles are file descriptors that the writer
+    imports via ``pidfd_getfd``, which needs ptrace-attach permission on the rank.
+    Where that is refused (e.g. ``kernel.yama.ptrace_scope=1``, as on some CI runners)
+    the writer dies with ``pidfd_getfd: Operation not permitted`` and every rank then
     hangs on the preload barrier.
 
     Off by default: prestaging shrinks the rank's blocking
@@ -714,6 +755,12 @@ class MegatronConfig(BaseConfig):
     See ``_stage_async_request_to_host``."""
 
     def __post_init__(self):
+
+        from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+            is_fp8_enabled,
+            reject_stage_local_layer_patterns,
+        )
+
         # Backfill defaults for any keys the user didn't override so an override dict
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
@@ -728,6 +775,25 @@ class MegatronConfig(BaseConfig):
         ):
             if value is not None:
                 self.transformer_config_kwargs.setdefault(key, value)
+        if not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False)) and (
+            self.fp8_exclude_modules or self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0
+        ):
+            raise ValueError(
+                "FP8 disabled but one or more of these quantization config is requested: exclude modules, num start/end layers to keep at BF16. "
+            )
+        if self.num_layers_at_start_in_bf16 < 0 or self.num_layers_at_end_in_bf16 < 0:
+            raise ValueError("num_layers_at_start_in_bf16 and num_layers_at_end_in_bf16 must be >= 0")
+        if self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0:
+            self.transformer_config_kwargs.setdefault("first_last_layers_bf16", True)
+            self.transformer_config_kwargs.setdefault("num_layers_at_start_in_bf16", self.num_layers_at_start_in_bf16)
+            self.transformer_config_kwargs.setdefault("num_layers_at_end_in_bf16", self.num_layers_at_end_in_bf16)
+        if self.fp8_exclude_modules and self.te_precision_config_file:
+            raise ValueError(
+                "fp8_exclude_modules and te_precision_config_file both set per-module precision; "
+                "Please only use one of the two."
+            )
+        if self.pipeline_model_parallel_size > 1:
+            reject_stage_local_layer_patterns(self.fp8_exclude_modules or [], "fp8_exclude_modules")
         for k, v in DEFAULT_TRANSFORMER_CONFIG_KWARGS.items():
             self.transformer_config_kwargs.setdefault(k, copy.deepcopy(v))
         if self.optimizer_config_kwargs is None:
@@ -735,14 +801,22 @@ class MegatronConfig(BaseConfig):
         for k, v in DEFAULT_MEGATRON_OPTIMIZER_KWARGS.items():
             self.optimizer_config_kwargs.setdefault(k, copy.deepcopy(v))
 
-    def empty_cuda_cache_after_backward(self) -> bool:
+    def empty_cuda_cache_after_backward(self, expandable_segments: bool = False) -> bool:
         """Whether to empty the CUDA cache after the forward/backward pass (resolves ``empty_cuda_cache=None``)."""
         if self.empty_cuda_cache is not None:
             return self.empty_cuda_cache
+        if expandable_segments:
+            return False
         optimizer_on_cpu = bool(self.optimizer_config_kwargs.get("optimizer_cpu_offload")) and (
             float(self.optimizer_config_kwargs.get("optimizer_offload_fraction") or 0.0) >= 1.0
         )
         return not optimizer_on_cpu
+
+    def empty_cuda_cache_after_forward(self, expandable_segments: bool = False) -> bool:
+        """Whether to empty the CUDA cache after a forward-only pass (resolves ``empty_cuda_cache=None``)."""
+        if self.empty_cuda_cache is not None:
+            return self.empty_cuda_cache
+        return not expandable_segments
 
 
 # ---------------------------------------------------------------------------
@@ -926,12 +1000,12 @@ class CISPOConfig(BaseConfig):
 
     cispo_eps_clip_low: float = 1.0
     """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
-    
+
     The lower bound used is ``1-cispo_eps_clip_low``. The default lower bound is 0 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
     """
     cispo_eps_clip_high: float = 4.0
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping).
-    
+
     The upper bound used is ``1+cispo_eps_clip_high``. The default upper bound is 5 following the ScaleRL recipe: https://arxiv.org/abs/2510.13786
     """
     cispo_anchor: str = "old"
@@ -1019,15 +1093,16 @@ class AlgorithmConfig(BaseConfig):
     temperature: Optional[float] = None
     """Temperature for scaling logits in policy loss computation.
     If ``None``, will be set to the temperature provided by ``generator.sampling_params.temperature`` during config validation.
-    
+
     NOTE: When using HTTP endpoints directly, make sure to set this value to the temperature used during generation
     """
     advantage_batch_normalize: bool = False
     """Normalize advantages by the (global) training-batch mean and standard deviation."""
     value_head_prefix: str = "value_head"
     """Name used to identify the value head in the critic model."""
-    policy_loss_type: str = "regular"
-    """Type of policy loss to use, or custom via ``PolicyLossRegistry``:
+    policy_loss_type: str = "dppo"
+    """Policy loss, defaulting to ``"dppo"``; register a custom one via ``PolicyLossRegistry``.
+    Available losses:
 
     - ``"regular"``: vanilla PPO loss with token-level importance sampling.
     - ``"dual_clip"``: dual-clip PPO loss (https://arxiv.org/pdf/1912.09729).
@@ -1051,8 +1126,9 @@ class AlgorithmConfig(BaseConfig):
     - ``"reinforce"``: plain policy gradient ``-A log π`` with no importance ratio, the objective
       score centering builds on (https://arxiv.org/abs/2609.20807).
     """
-    loss_reduction: str = "token_mean"
-    """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
+    loss_reduction: str = "prompt_mean"
+    """Loss reduction defaults to ``"prompt_mean"`` and rescales advantages per mini-batch.
+    Available modes:
 
     - ``"token_mean"``: average loss over all valid tokens in the batch, as in DAPO
       (https://dapo-sia.github.io/).
@@ -1067,9 +1143,10 @@ class AlgorithmConfig(BaseConfig):
       tokens its responses contain.
     - ``"token_mean_legacy"``: also accepted, retaining the previous ``"token_mean"`` behavior.
     """
-    grpo_norm_by_std: bool = True
-    """Normalize advantages by the standard deviation in GRPO.
-    Set to False for Dr. GRPO (https://arxiv.org/abs/2503.20783)."""
+    grpo_norm_by_std: bool = False
+    """Normalize advantages by the per-prompt reward standard deviation in GRPO.
+    ``False`` (the default) follows Dr. GRPO (https://arxiv.org/abs/2503.20783); set ``True`` for
+    the original GRPO normalization."""
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
     zero_variance_filter_tol: float = 1e-6
@@ -1097,7 +1174,7 @@ class AlgorithmConfig(BaseConfig):
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
-    enable_score_centering: bool = False
+    enable_score_centering: Optional[bool] = None
     """Score centering (https://arxiv.org/abs/2609.20807): subtract each token's expected weighted
     score under the sampler, cancelling the drift a training-inference mismatch adds to the policy
     gradient.
@@ -1110,7 +1187,11 @@ class AlgorithmConfig(BaseConfig):
     ``cispo_anchor="rollout"`` (its clamp) or ``"dppo"`` (its trust region). Incompatible with
     ``off_policy_correction.tis_ratio_type`` and the token-mask IS thresholds, which weight only the
     sampled token by ``π_old / π_rollout``; sequence and outlier masks apply to both terms but are
-    approximate, because each depends on the sampled token's own ratio."""
+    approximate, because each depends on the sampled token's own ratio.
+
+    ``None`` (the default) resolves at config construction: ``True`` when
+    ``enable_sample_support_replay`` is on and the loss and off-policy correction settings above
+    allow it, otherwise ``False``. ``True`` raises if they do not."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1264,7 +1345,7 @@ class DeltaWeightSyncConfig(BaseConfig):
         "vllm_multi_thread_safetensors"
     )
     """Receiver reload iterator for the prepared local checkpoint.
-    
+
     `vllm_multi_thread_safetensors` loads safetensor files from disk to CPU storage with N parallel workers using vLLM's native safetensors iterator. Tensors are then loaded onto GPU memory iterately.
 
     `vllm_fastsafetensors` loads tensors from safetensor files on disk directly into GPU memory in a highly parallelized way.
@@ -1318,7 +1399,29 @@ class InferenceEngineConfig(BaseConfig):
     ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
     this needs (``quantization``, ``load_format="dummy"``, and the matching
     ``hf_overrides.quantization_config`` with per-model ignored layers) are applied
-    automatically; the first weight sync supplies real weights before any generation."""
+    automatically, and a user-supplied ``quantization_config`` is rejected; the first weight sync
+    supplies real weights before any generation.
+
+    Which modules are FP8 is the model spec's policy, minus ``fp8_weight_sync_exclude_modules``.
+    This is configured independently of the trainer's FP8 settings."""
+    fp8_weight_sync_exclude_modules: Optional[List[str]] = None
+    """HF module-name globs to keep in ``model_dtype`` on the FP8 rollout, on top of the model spec.
+
+    Patterns use ``fnmatch`` syntax and match the names of the tensors synced as FP8, as the HF
+    checkpoint names them, without the ``.weight`` suffix, e.g.
+    ``model.language_model.layers.3.self_attn.q_proj``. Routed experts are their exported tensors:
+    Qwen3.5's stacked ``<layer>.mlp.experts.gate_up_proj`` / ``down_proj``, GLM-5's per-expert
+    ``<layer>.mlp.experts.<n>.gate_proj``, ... Examples:
+    ``["*.layers.0.*", "*.layers.39.*"]`` (first and last layer of a 40-layer model),
+    ``["*.mlp.shared_expert.*"]``, ``["*.layers.3.mlp.experts.*"]``.
+
+    SkyRL uses this for both the vLLM engine initialization and weight sync, so the two steps are always
+    in sync. Patterns are matched only against tensors the model spec syncs as FP8; a pattern that
+    matches none of them is an error. A layer's routed experts run at one precision in vLLM, so
+    excluding only some of them is an error too. Modules vLLM fuses into one must be excluded
+    together (for Qwen3.5: ``q_proj``/``k_proj``/``v_proj``, ``gate_proj``/``up_proj``,
+    ``in_proj_qkv``/``in_proj_z``), or vLLM fails at engine init.
+    Requires ``fp8_weight_sync_mode``."""
     run_engines_locally: bool = True
     """Launch inference servers during the training run in the current Ray cluster.
     When ``False``, point SkyRL at an external HTTP/vLLM deployment via ``external_proxy_url`` and/or
@@ -1406,7 +1509,7 @@ class InferenceEngineConfig(BaseConfig):
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
     distributed_executor_backend: str = "ray"
     """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
-    or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
+    or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine
     placement groups are created when ``"mp"`` is used."""
     language_model_only: bool = False
     """When True, pass ``language_model_only=True`` to the vLLM engine so that
@@ -1675,8 +1778,8 @@ class TrainerConfig(BaseConfig):
     """Micro batch size during the forward pass, i.e. log probability or value computation.
     Common to both policy and critic. Each mini batch is split into micro batches of this size."""
     max_tokens_per_microbatch: int = -1
-    """Maximum number of tokens per microbatch for both forward and training steps. When > 0, microbatches 
-    are formed by bin-packing samples based on their token counts (from attention_mask) instead of using a 
+    """Maximum number of tokens per microbatch for both forward and training steps. When > 0, microbatches
+    are formed by bin-packing samples based on their token counts (from attention_mask) instead of using a
     fixed sample count, and micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu are ignored.
     -1 means disabled (use sample-based micro_train_batch_size_per_gpu / micro_forward_batch_size_per_gpu).
     Applies to both forward and training micro-batching.
@@ -1717,6 +1820,13 @@ class TrainerConfig(BaseConfig):
     See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    log_mfu: bool = True
+    """Log model FLOPs utilization (MFU) metrics for policy training each step.
+
+    Logs ``trainer/mfu``, ``trainer/mfu_e2e``, ``trainer/model_tflops_per_gpu``,
+    ``trainer/flops_per_token`` and, under full activation recompute, ``trainer/hfu_est``. Megatron
+    only; not logged for LoRA or with active MTP heads, and the utilization ratios are not logged for
+    FP8 training or on GPUs without a known peak."""
     tags: Optional[List[str]] = None
     """Optional list of tags to apply to the W&B run. Has no effect on other backends."""
     dump_data_batch: bool = False
@@ -1761,9 +1871,13 @@ class TrainerConfig(BaseConfig):
     materialized. Metric-only entropy and ``use_entropy_loss`` share the same
     projection. Uses ``logprobs_chunk_size`` to bound peak memory."""
     fused_lm_head_logprob_backend: str = "torch"
-    """Fused LM-head backend: ``"torch"`` (default) or ``"triton"``.
-    The Triton backend requires CUDA + triton and falls back to ``"torch"``
-    when unavailable. Ignored unless ``fused_lm_head_logprob`` is true."""
+    """Fused LM-head backend: ``"torch"``, ``"triton"``, or
+    ``"triton_block_sparse"``. The block-sparse backend preserves token order
+    and skips wholly inactive loss-mask row tiles for SFT or RL. It can regress
+    near a fully active mask; select it only after benchmarking representative
+    masks and sharding. Sample-support replay is not supported. Triton backends
+    require CUDA + triton and fall back to ``"torch"`` when unavailable.
+    Ignored unless ``fused_lm_head_logprob`` is true."""
 
     grafana_annotations: GrafanaAnnotationsConfig = field(default_factory=GrafanaAnnotationsConfig)
     """Optional Grafana run annotation publishing, disabled by default."""
@@ -1817,11 +1931,16 @@ class TrainerConfig(BaseConfig):
                 "adapter on output_layer; remove output_layer from trainer.policy.model.lora.target_modules "
                 "or disable fused_lm_head_logprob."
             )
-        if self.fused_lm_head_logprob_backend not in ("torch", "triton"):
+        if self.fused_lm_head_logprob_backend not in FUSED_LM_HEAD_BACKENDS:
             raise ValueError(
-                "fused_lm_head_logprob_backend must be 'torch' or 'triton', "
+                f"fused_lm_head_logprob_backend must be one of {FUSED_LM_HEAD_BACKENDS}, "
                 f"got {self.fused_lm_head_logprob_backend!r}."
             )
+        if (
+            self.fused_lm_head_logprob_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE
+            and not self.fused_lm_head_logprob
+        ):
+            raise ValueError("fused_lm_head_logprob_backend='triton_block_sparse' requires fused_lm_head_logprob=True.")
         if self.vocab_entropy_chunk_size is not None and (
             isinstance(self.vocab_entropy_chunk_size, bool)
             or not isinstance(self.vocab_entropy_chunk_size, int)
@@ -1993,6 +2112,34 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
 # ---------------------------------------------------------------------------
 
 
+def _score_centering_incompatibility(algorithm: AlgorithmConfig) -> Optional[str]:
+    """Why score centering cannot run with ``algorithm``, or ``None`` if it can."""
+    if not algorithm.enable_sample_support_replay:
+        return "trainer.algorithm.enable_score_centering requires enable_sample_support_replay"
+    from skyrl.backends.skyrl_train.utils.ppo_utils import score_centering_weight
+
+    try:
+        # Raises for a loss whose weight is not relative to the sampler.
+        score_centering_weight(algorithm.policy_loss_type, algorithm)
+    except ValueError as e:
+        return str(e)
+    off_policy = algorithm.off_policy_correction
+    # The deprecated use_tis becomes tis_ratio_type="token" only later, in validate_cfg.
+    if off_policy.tis_ratio_type is not None or algorithm.use_tis:
+        return (
+            "score centering does not compose with off_policy_correction.tis_ratio_type (or the deprecated "
+            "use_tis), which weights only the sampled token by pi_old / pi_rollout; the loss's own weight is "
+            "the importance correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
+        )
+    if off_policy.token_mask_is_threshold_low is not None or off_policy.token_mask_is_threshold_high is not None:
+        return (
+            "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
+            "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
+            "importance weight that score centering applies to every support member"
+        )
+    return None
+
+
 @dataclass
 class SkyRLTrainConfig(BaseConfig):
     """Root configuration object for SkyRL training with the ``fsdp`` and ``megatron`` backends.
@@ -2035,31 +2182,11 @@ class SkyRLTrainConfig(BaseConfig):
                 )
 
         algorithm = self.trainer.algorithm
-        if algorithm.enable_score_centering:
-            from skyrl.backends.skyrl_train.utils.ppo_utils import (
-                score_centering_weight,
-            )
-
-            if not algorithm.enable_sample_support_replay:
-                raise ValueError("trainer.algorithm.enable_score_centering requires enable_sample_support_replay")
-            # Raises for a loss whose weight is not relative to the sampler.
-            score_centering_weight(algorithm.policy_loss_type, algorithm)
-            off_policy = algorithm.off_policy_correction
-            if off_policy.tis_ratio_type is not None:
-                raise ValueError(
-                    "score centering does not compose with off_policy_correction.tis_ratio_type, which weights "
-                    "only the sampled token by pi_old / pi_rollout; the loss's own weight is the importance "
-                    "correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
-                )
-            if (
-                off_policy.token_mask_is_threshold_low is not None
-                or off_policy.token_mask_is_threshold_high is not None
-            ):
-                raise ValueError(
-                    "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
-                    "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
-                    "importance weight that score centering applies to every support member"
-                )
+        if algorithm.enable_score_centering is not False:
+            reason = _score_centering_incompatibility(algorithm)
+            if algorithm.enable_score_centering and reason is not None:
+                raise ValueError(reason)
+            algorithm.enable_score_centering = reason is None
 
         # Eval requests opt out of capture and do not use these constraints.
         if self.generator.inference_engine.enable_return_sample_support_set:

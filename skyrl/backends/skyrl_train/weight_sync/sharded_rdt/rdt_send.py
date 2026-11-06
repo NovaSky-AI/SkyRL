@@ -16,6 +16,7 @@ import contextlib
 import logging
 import os
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, Iterator, List, Optional
 
 import torch
@@ -30,6 +31,7 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import 
 from skyrl.backends.skyrl_train.weight_sync.sources import (
     FsdpWeightSource,
     MegatronWeightSource,
+    wire_dtype,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,7 +169,7 @@ class RdtFsdpWeightSource(FsdpWeightSource, GroupedWeightSource):
     Same state_dict and ``full_tensor()`` gather as
     ``weight_sync.sources.FsdpWeightSource``; only the order differs. RDT needs
     each ``model.layers.<N>.*`` block contiguous so ``layerwise_groups``
-    partitions ``metadata()`` exactly -- that partition is the group index the
+    partitions ``metadata`` exactly -- that partition is the group index the
     consumers' pull plans and the producer's free barrier are keyed on. The push
     backends transfer any permutation identically, so they use the plain source.
     """
@@ -183,15 +185,16 @@ class RdtFsdpWeightSource(FsdpWeightSource, GroupedWeightSource):
         self._names = [names[i] for i in order]
         self._shapes = [shapes[names[i]] for i in order]
 
+    @cached_property
     def metadata(self) -> List[ParamMeta]:
         return [ParamMeta(name, self._dtype, tuple(shape)) for name, shape in zip(self._names, self._shapes)]
 
-    def __iter__(self) -> Iterator[tuple]:
+    def iter_full(self) -> Iterator[tuple]:
         # The caller selects this rank's CUDA device before iterating; a worker
         # thread does not inherit it (see Worker._weight_sync_thread).
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
         prefix = self.weight_prefix
-        # The same handle metadata() was built from, so names and gather match
+        # The same handle metadata was built from, so names and gather match
         # what the consumer engine baked its plan over.
         sd = self.model.state_dict()
         for name in self._names:
@@ -269,7 +272,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
     Ordering contract: expert names are emitted immediately after the bridge's
     non-expert names of the same layer, so each ``model.layers.N.*`` block stays
     contiguous and ``layerwise_groups`` partitions the combined list cleanly.
-    ``metadata()`` and ``__iter__`` derive from the same plan, so they always
+    ``metadata`` and ``iter_full()`` derive from the same plan, so they always
     agree. Dense models have no expert tasks and degenerate to the plain
     filtered==full export.
 
@@ -300,7 +303,6 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         self._bridge = bridge
         self._module = module
         self._dtype = dtype
-        self._meta: Optional[List[ParamMeta]] = None
         self._verified = False
         # Per-layer expert HF name lists, built once (see _expert_names_for).
         self._expert_names: dict = {}
@@ -343,7 +345,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         # delegates to the plain RdtMegatronWeightSource instead and iteration
         # refuses to run.
         self._demoted = False
-        # Per-layer (F, H) recorded as layers are walked, so metadata() can
+        # Per-layer (F, H) recorded as layers are walked, so metadata can
         # synthesize the shapes of foreign experts (their tensors are None).
         self._layer_geom: dict = {}
         self._group_stages: List[set] = []  # group idx -> stages that produce it
@@ -647,7 +649,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         each a contiguous slab. ``unbind`` batches the view creation: 3 dispatcher
         calls per layer instead of 3E ``__getitem__`` plus 3E no-op
         ``.contiguous()``."""
-        # Recorded BEFORE the expert names are emitted, so metadata() can
+        # Recorded BEFORE the expert names are emitted, so metadata can
         # synthesize foreign experts' shapes (their tensors are None).
         self._layer_geom[lay.layer] = (lay.F, lay.H)
         fc1_local, fc2_local = self._local_layer_stacks(lay, adapter_ctx)
@@ -711,11 +713,11 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         return non_expert, layers, adapter_ctx
 
     def _iter_groups_impl(self, collect_meta: bool) -> Iterator[tuple]:
-        """Single group-batched walk driving metadata(), __iter__ AND
+        """Single group-batched walk driving metadata, iter_full() AND
         iter_groups() so their order agrees by construction. Yields
         ``(names, tensors)`` parallel lists per layerwise group — pre /
         model.layers.N / post, the same contiguous partition
-        ``layerwise_groups`` derives from metadata() — with each layer's
+        ``layerwise_groups`` derives from metadata — with each layer's
         stacked expert views appended at its boundary. Batching by group keeps
         the per-tensor handoff (~37k generator yields + per-name gather-loop
         bookkeeping per sync at 235B, ~0.9s of pure Python) off the sync
@@ -728,7 +730,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             torch.cuda.set_device(torch.cuda.current_device())
         _gen = self._walk_groups()
         if self._pp_local and not collect_meta:
-            # The partition only exists once metadata() has assembled it, which is
+            # The partition only exists once metadata has assembled it, which is
             # why the metadata pass itself is not reordered — it is reordered
             # wholesale by layerwise_groups afterwards.
             _gen = self._walk_in_group_order(_gen)
@@ -791,9 +793,11 @@ class MegatronStackedWeightSource(GroupedWeightSource):
                     names, tensors = [], []
                 prev_layer = layer
                 # Warm steady state: bridge already yields target dtype on-device —
-                # skip the no-op .to()/.contiguous() dispatches.
-                if tensor.dtype != self._dtype or (target_dev is not None and tensor.device != target_dev):
-                    tensor = tensor.to(device=target_dev, dtype=self._dtype)
+                # skip the no-op .to()/.contiguous() dispatches. fp32 / integer parameters
+                # (e.g. the MoE router) keep their dtype, as on the push backends.
+                dtype = wire_dtype(tensor, self._dtype)
+                if tensor.dtype != dtype or (target_dev is not None and tensor.device != target_dev):
+                    tensor = tensor.to(device=target_dev, dtype=dtype)
                 tensor = tensor.detach()
                 if not tensor.is_contiguous():
                     tensor = tensor.contiguous()
@@ -818,7 +822,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
 
     def _iter_impl(self, collect_meta: bool) -> Iterator[tuple]:
         """Flattened per-(name, tensor) view of the group walk — used by
-        metadata() and the fallback per-name __iter__."""
+        metadata and the fallback per-name iter_full()."""
         for names, tensors in self._iter_groups_impl(collect_meta):
             yield from zip(names, tensors)
             # Drop the group before the `for` asks for the next one: until the
@@ -837,20 +841,21 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         F, H = self._layer_geom[self._layer_of_hf_name(name)]
         return (H, F) if ".down_proj." in name else (F, H)
 
+    @cached_property
     def metadata(self) -> List[ParamMeta]:
-        if self._meta is None:
-            meta: List[ParamMeta] = []
-            for name, tensor in self._iter_impl(collect_meta=True):
-                shape = self._foreign_expert_shape(name) if tensor is None else tuple(tensor.shape)
-                meta.append(ParamMeta(name, self._dtype, shape))
-                del tensor
-            self._meta = self._assemble_pp_metadata(meta) if self._pp_local else meta
-        return self._meta
+        meta: List[ParamMeta] = []
+        for name, tensor in self._iter_impl(collect_meta=True):
+            # Foreign experts are never materialized; experts are always stacked in the wire dtype.
+            shape = self._foreign_expert_shape(name) if tensor is None else tuple(tensor.shape)
+            dtype = self._dtype if tensor is None else tensor.dtype
+            meta.append(ParamMeta(name, dtype, shape))
+            del tensor
+        return self._assemble_pp_metadata(meta) if self._pp_local else meta
 
     def _assemble_pp_metadata(self, local: List[ParamMeta]) -> List[ParamMeta]:
         """Whole-model metadata from the per-stage PP-local walks.
 
-        The RDT contract needs ``metadata()`` to describe the WHOLE model
+        The RDT contract needs ``metadata`` to describe the WHOLE model
         identically on every rank — the trainer engine cross-checks a digest of
         it, and the consumers' pull plans are built from the sender's copy alone —
         but a PP-local walk only covers this stage. So the stages exchange what
@@ -866,21 +871,23 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         that.
         """
         _pp_size, my_pp = self._pp_geometry()
-        gathered = self._exchange_pp_names([(m.name, list(m.shape)) for m in local])
+        gathered = self._exchange_pp_names([(m.name, list(m.shape), str(m.dtype).split(".")[-1]) for m in local])
 
         shapes: dict = {}
+        dtypes: dict = {}
         stages_of: dict = {}
         for stage, entries in enumerate(gathered):
-            for name, shape in entries or []:
+            for name, shape, *dtype in entries or []:
                 # A name two stages both produce (a tied weight) keeps the first
                 # shape and records both stages, so its group reads as shared.
                 shapes.setdefault(name, tuple(shape))
+                dtypes.setdefault(name, getattr(torch, dtype[0]) if dtype else self._dtype)
                 stages_of.setdefault(name, set()).add(stage)
         groups = layerwise_groups(list(shapes))
         self._group_stages = [set().union(*(stages_of[n] for n in g)) for g in groups]
         self._owned_group_idx = [gi for gi, st in enumerate(self._group_stages) if my_pp in st]
         self._group_index_of_name = {n: gi for gi, g in enumerate(groups) for n in g}
-        return [ParamMeta(n, self._dtype, shapes[n]) for g in groups for n in g]
+        return [ParamMeta(n, dtypes[n], shapes[n]) for g in groups for n in g]
 
     def _walk_in_group_order(self, gen: Iterator[tuple]) -> Iterator[tuple]:
         """Reorder a PP-local walk into the assembled partition's group order.
@@ -902,7 +909,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             if gi is None:
                 raise RuntimeError(
                     f"PP-local walk yielded a group starting {names[0]!r}, which is "
-                    "not in the assembled partition; metadata() and the walk disagree."
+                    "not in the assembled partition; metadata and the walk disagree."
                 )
             held[gi] = (names, tensors)
             # `held` is the legitimate hold (bounded to 2 below); the loop
@@ -922,7 +929,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             yield held.pop(gi)
 
     def _exchange_pp_names(self, mine: list) -> list:
-        """All-gather ``[(name, shape)]`` over the PP group; one entry per stage."""
+        """All-gather ``[(name, shape, dtype_name)]`` over the PP group; one entry per stage."""
         from megatron.core import parallel_state
 
         pp_size, _my_pp = self._pp_geometry()
@@ -964,7 +971,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         source when a group spans two pipeline stages (see ``held_names``)."""
         if not self._pp_local:
             return None
-        self.metadata()  # populates _group_stages / _owned_group_idx
+        self.metadata  # noqa: B018 -- populates _group_stages / _owned_group_idx
         shared = [gi for gi, st in enumerate(self._group_stages) if len(st) > 1]
         if shared:
             logger.warning(
@@ -997,7 +1004,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         """Per-metadata-name EP owner: the expert-parallel rank holding it, or
         ``-1`` for names every EP rank replicates. Pure function of the names,
         so every rank derives the same list."""
-        meta = self.metadata()
+        meta = self.metadata
         e_max: dict = {}
         parsed: list = []
         for m in meta:
@@ -1026,7 +1033,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         owned = self._owned_group_indices()  # may demote at pp>1
         if self._demoted:
             return None
-        meta = self.metadata()
+        meta = self.metadata
         names = [m.name for m in meta]
         groups = layerwise_groups(names)
         gis = range(len(groups)) if owned is None else owned
@@ -1046,11 +1053,11 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         """Group-batched iteration for the gather loop: ``(names, tensors)``
         parallel lists per layerwise group, one generator handoff per group
         instead of per tensor. Optional WeightSource extension — the vendored
-        gather loop uses it when present and falls back to __iter__."""
+        gather loop uses it when present and falls back to iter_full()."""
         self._maybe_verify()
         return self._iter_groups_impl(collect_meta=False)
 
-    def __iter__(self) -> Iterator[tuple]:
+    def iter_full(self) -> Iterator[tuple]:
         self._maybe_verify()
         return self._iter_impl(collect_meta=False)
 

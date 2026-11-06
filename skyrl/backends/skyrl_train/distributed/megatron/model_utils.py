@@ -25,6 +25,7 @@ import torch
 import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.utils.packed_tensor import lengths_from_offsets
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 
 
 @torch.no_grad()
@@ -274,6 +275,21 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None
 
 
+def _capped_chunk_logits(
+    logits: torch.Tensor, softcap: Optional[float], temperature: float
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Apply a final logit softcap, then the temperature, to fp32 chunk logits.
+
+    Returns ``(softcap * tanh(z / softcap) / temperature, tanh(z / softcap))``; backward needs the
+    tanh (``d/dz = (1 - tanh²) / temperature``). Without a softcap the callers fold the
+    temperature into the weight, and this returns ``(logits, None)``.
+    """
+    if softcap is None:
+        return logits, None
+    tanh = torch.tanh(logits / softcap)
+    return tanh * (softcap / temperature), tanh
+
+
 class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
     """Fused LM-head + distributed token-logprob, chunked over the sequence.
 
@@ -299,6 +315,9 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         hidden: [B, S, H]                (decoder output, this CP/TP rank)
         weight: [V//TP, H]               (output-layer weight, this TP rank)
         target: [B, S]                   (already rolled by the caller)
+        softcap: final logit softcap (``softcap * tanh(logits / softcap)``, e.g. Beam), or None.
+        temperature: applied after the softcap; only used with a softcap (otherwise the caller
+            folds it into ``weight``).
     """
 
     @staticmethod
@@ -314,6 +333,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         inference_only: bool = False,
         compute_entropy: bool = False,
         entropy_requires_grad: bool = False,
+        softcap: Optional[float] = None,
+        temperature: float = 1.0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if entropy_requires_grad and not compute_entropy:
             raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
@@ -340,6 +361,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             logits = torch.matmul(hidden[:, chunk_start:chunk_end, :].to(weight.dtype), weight.t()).to(
                 dtype=torch.float32
             )
+            logits, _ = _capped_chunk_logits(logits, softcap, temperature)
 
             distributed_log_probs = _compute_distributed_log_softmax(logits, group=tp_group)
             if compute_entropy:
@@ -371,6 +393,8 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
             ctx.chunk_size = chunk_size
             ctx.tp_group = tp_group
             ctx.entropy_requires_grad = entropy_requires_grad
+            ctx.softcap = softcap
+            ctx.temperature = temperature
 
         if not compute_entropy:
             return log_probs
@@ -401,8 +425,15 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
         # weight grad is accumulated in fp32. The full [B, S, V//TP] logit grad
         # is never built — each chunk's logit grad is immediately projected onto
         # grad_hidden / grad_weight and then freed.
+        # A frozen output layer (LoRA, or any run that does not train the LM head) needs no
+        # weight gradient: skip the per-chunk [V//TP, H] GEMM and the fp32 accumulator.
+        compute_weight_grad = ctx.needs_input_grad[1]
         grad_hidden = torch.empty_like(hidden)
-        grad_weight = torch.zeros((partition_vocab_size, hidden_size), dtype=torch.float32, device=weight.device)
+        grad_weight = (
+            torch.zeros((partition_vocab_size, hidden_size), dtype=torch.float32, device=weight.device)
+            if compute_weight_grad
+            else None
+        )
 
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * chunk_size
@@ -411,6 +442,7 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
 
             h_chunk = hidden[:, chunk_start:chunk_end, :]
             logits = torch.matmul(h_chunk.to(weight.dtype), weight.t()).to(dtype=torch.float32)
+            logits, tanh = _capped_chunk_logits(logits, ctx.softcap, ctx.temperature)
             distributed_log_probs = _compute_distributed_log_softmax(logits, group=tp_group)
             if ctx.entropy_requires_grad:
                 softmax_output = distributed_log_probs.exp()
@@ -449,22 +481,27 @@ class FusedLinearChunkedDistributedLogprob(torch.autograd.Function):
                     * (distributed_log_probs + chunk_entropy.unsqueeze(-1))
                     * chunk_grad_entropy.unsqueeze(-1)
                 )
+            if tanh is not None:
+                # Chain through the softcap and temperature: d/dz = (1 - tanh²) / T.
+                grad_logits.mul_(tanh.square_().neg_().add_(1.0).div_(ctx.temperature))
 
             grad_logits = grad_logits.to(dtype=weight.dtype)  # [B, cs, V//TP]
 
             # Project chunk logit-grad back to hidden / weight grads.
             grad_hidden[:, chunk_start:chunk_end, :] = torch.matmul(grad_logits, weight)
-            grad_logits_2d = grad_logits.reshape(-1, partition_vocab_size)
-            h_2d = h_chunk.reshape(-1, hidden_size)
-            # Run the [V//TP, H] weight-grad matmul in the low-precision compute
-            # dtype (grad_logits.dtype == weight.dtype) so it hits Tensor Cores,
-            # then cast up to fp32 for the accumulator. This matches what
-            # ColumnParallelLinear's own backward does and is much faster / uses
-            # less memory than an fp32 matmul, while the cross-chunk accumulation
-            # still happens in fp32.
-            grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
+            if compute_weight_grad:
+                grad_logits_2d = grad_logits.reshape(-1, partition_vocab_size)
+                h_2d = h_chunk.reshape(-1, hidden_size)
+                # Run the [V//TP, H] weight-grad matmul in the low-precision compute
+                # dtype (grad_logits.dtype == weight.dtype) so it hits Tensor Cores,
+                # then cast up to fp32 for the accumulator. This matches what
+                # ColumnParallelLinear's own backward does and is much faster / uses
+                # less memory than an fp32 matmul, while the cross-chunk accumulation
+                # still happens in fp32.
+                grad_weight.add_(torch.matmul(grad_logits_2d.t(), h_2d.to(dtype=grad_logits.dtype)).to(torch.float32))
 
-        grads = (grad_hidden, grad_weight.to(weight.dtype), None, None, None, None, None, None, None, None)
+        grad_weight_out = grad_weight.to(weight.dtype) if compute_weight_grad else None
+        grads = (grad_hidden, grad_weight_out, None, None, None, None, None, None, None, None, None, None)
         return grads[: len(ctx.needs_input_grad)]
 
 
@@ -478,19 +515,31 @@ def _fused_lm_head_logprob_apply(
     chunk_size: int,
     tp_group: torch.distributed.ProcessGroup,
     inference_only: bool,
+    active_mask: Optional[torch.Tensor] = None,
     compute_entropy: bool = False,
     entropy_requires_grad: bool = False,
+    softcap: Optional[float] = None,
+    temperature: float = 1.0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Dispatch the fused LM-head token-logprob to the requested backend.
 
-    ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; ``"triton"``
-    uses ``FusedLinearLogprobTriton`` when CUDA + triton are available and
-    otherwise warns and falls back to torch. Both return TP-combined ``[B, S]``
-    log-probs and, when requested, entropy.
+    ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; both Triton
+    backends use ``FusedLinearLogprobTriton`` when CUDA + triton are available
+    and otherwise warn and fall back to torch. Both return TP-combined ``[B, S]``
+    log-probs and, when requested, entropy. Only the torch backend applies a final
+    logit ``softcap`` (and then ``temperature``); with a softcap, both Triton
+    backends fall back to it.
     """
     if entropy_requires_grad and not compute_entropy:
         raise ValueError("entropy_requires_grad=True requires compute_entropy=True")
-    if backend == "triton":
+    triton_backends = (FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE)
+    if backend in triton_backends and softcap is not None:
+        warnings.warn(
+            f"fused_lm_head_logprob_backend={backend!r} has no final logit softcap; using the PyTorch backend.",
+            stacklevel=2,
+        )
+        backend = FusedLmHeadBackend.TORCH
+    if backend in triton_backends:
         try:
             from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
                 TRITON_AVAILABLE,
@@ -509,17 +558,18 @@ def _fused_lm_head_logprob_apply(
                 chunk_size,
                 tp_group,
                 inference_only,
+                active_mask,
                 compute_entropy,
                 entropy_requires_grad,
             )
         except (ImportError, RuntimeError) as e:
             warnings.warn(
-                f"fused_lm_head_logprob_backend='triton' unavailable ({e}); falling back to the "
+                f"fused_lm_head_logprob_backend={backend!r} unavailable ({e}); falling back to the "
                 "pure-PyTorch backend. Use a CUDA environment with Triton available to run the fused Triton kernel.",
                 stacklevel=2,
             )
 
-    return FusedLinearChunkedDistributedLogprob.apply(  # type: ignore[no-any-return]
+    result = FusedLinearChunkedDistributedLogprob.apply(
         hidden,
         weight,
         target,
@@ -530,7 +580,21 @@ def _fused_lm_head_logprob_apply(
         inference_only,
         compute_entropy,
         entropy_requires_grad,
+        softcap,
+        temperature,
     )
+    if compute_entropy:
+        logprobs, entropy = result
+    else:
+        logprobs = result
+    if active_mask is not None:
+        active_mask = active_mask.to(device=logprobs.device, dtype=torch.bool)
+        logprobs = logprobs.masked_fill(~active_mask, 0.0)
+    if not compute_entropy:
+        return logprobs  # type: ignore[no-any-return]
+    if active_mask is not None:
+        entropy = entropy.masked_fill(~active_mask, 0.0)
+    return logprobs, entropy
 
 
 def from_parallel_logits_to_logprobs(
@@ -771,8 +835,10 @@ def from_parallel_hidden_to_logprobs(
     chunk_size: Optional[int] = None,
     temperature: float = 1.0,
     fused_backend: str = "torch",
+    active_mask: Optional[torch.Tensor] = None,
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
+    softcap: Optional[float] = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fused-LM-head variant of :func:`from_parallel_logits_to_logprobs`.
 
@@ -785,13 +851,21 @@ def from_parallel_hidden_to_logprobs(
     ``temperature`` scaling is applied by dividing the weight (``hidden @
     (W/T)ᵀ == logits/T``); autograd then chains the ``1/T`` factor onto both
     ``grad_hidden`` and ``grad_weight`` exactly, so the op itself stays
-    temperature-agnostic. ``return_entropy`` reuses the same projection; set
+    temperature-agnostic. With a final logit ``softcap`` (the output layer's
+    ``softcap * tanh(logits / softcap)``) the temperature has to follow the cap,
+    so the op applies both itself. ``return_entropy`` reuses the same projection; set
     ``entropy_requires_grad`` when entropy contributes to the RL loss.
     """
     if entropy_requires_grad and not return_entropy:
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
-    if temperature != 1.0:
+    if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
+    if active_mask is not None:
+        expected_shape = (target.shape[0], target.shape[1] - 1)
+        if active_mask.shape != expected_shape:
+            raise ValueError(f"Expected active_mask shape {expected_shape}, got {tuple(active_mask.shape)}")
+        active_mask = torch.nn.functional.pad(active_mask.to(device=target.device, dtype=torch.bool), (0, 1))
+
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     pad_len = hidden.shape[1] * cp_size - target.shape[1]
@@ -800,6 +874,10 @@ def from_parallel_hidden_to_logprobs(
 
     cp_rank = torch.distributed.get_rank(cp_group)
     target = _get_tokens_on_this_cp_rank(target, cp_rank, cp_size, seq_dim=1)
+    if active_mask is not None:
+        if pad_len > 0:
+            active_mask = torch.nn.functional.pad(active_mask, (0, pad_len), value=False)
+        active_mask = _get_tokens_on_this_cp_rank(active_mask, cp_rank, cp_size, seq_dim=1)
 
     seq_len_local = hidden.shape[1]
     eff_chunk = chunk_size if (chunk_size is not None and chunk_size < seq_len_local) else seq_len_local
@@ -813,8 +891,11 @@ def from_parallel_hidden_to_logprobs(
         eff_chunk,
         tp_group,
         inference_only,
+        active_mask,
         return_entropy,
         entropy_requires_grad,
+        softcap=softcap,
+        temperature=temperature,
     )
     if return_entropy:
         logprobs, entropy = result
@@ -895,8 +976,10 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     temperature: float = 1.0,
     fused_backend: str = "torch",
+    active_mask: Optional[torch.Tensor] = None,
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
+    softcap: Optional[float] = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fused-LM-head variant of
     :func:`from_parallel_logits_to_logprobs_packed_sequences`.
@@ -904,14 +987,18 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     Identical packed-sequence / CP / scatter-back logic, but the output
     projection is fused into the chunked logprob op (``hidden`` [1, T//CP, H] +
     ``lm_head_weight`` [V//TP, H] instead of logits [1, T//CP, V//TP]).
-    ``temperature`` is applied by dividing the weight (see
-    ``from_parallel_hidden_to_logprobs``). Optional entropy uses the same packed
+    ``temperature`` and ``softcap`` are applied as in
+    ``from_parallel_hidden_to_logprobs``. Optional entropy uses the same packed
     CP gather and scatter-back layout as log-probs.
     """
     if entropy_requires_grad and not return_entropy:
         raise ValueError("entropy_requires_grad=True requires return_entropy=True")
-    if temperature != 1.0:
+    if temperature != 1.0 and softcap is None:
         lm_head_weight = lm_head_weight / temperature
+    if active_mask is not None:
+        if active_mask.shape != target.shape:
+            raise ValueError(f"Expected packed active_mask shape {tuple(target.shape)}, got {tuple(active_mask.shape)}")
+        active_mask = active_mask.to(device=target.device, dtype=torch.bool).squeeze(0)
     hidden = hidden.squeeze(0)
     target = target.squeeze(0)
 
@@ -936,7 +1023,15 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     else:
         rolled_targets = rolled_targets_full
 
-    # Add batch dimension back for the fused logprob op.
+    if active_mask is not None:
+        if cp_size > 1:
+            local_active_mask = torch.zeros_like(rolled_targets, dtype=torch.bool)
+            local_active_mask[local_indices[current_rank_mask]] = active_mask[current_rank_mask]
+            active_mask = local_active_mask
+        active_mask = active_mask.unsqueeze(0)
+
+    # Add batch dimension back for the fused logprob op after CP-local scatters,
+    # whose indices address the one-dimensional packed token layout.
     rolled_targets = rolled_targets.unsqueeze(0)
     hidden = hidden.unsqueeze(0)
 
@@ -952,8 +1047,11 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         eff_chunk,
         group,
         inference_only,
+        active_mask,
         return_entropy,
         entropy_requires_grad,
+        softcap=softcap,
+        temperature=temperature,
     )
     if return_entropy:
         probs, entropy_probs = result
