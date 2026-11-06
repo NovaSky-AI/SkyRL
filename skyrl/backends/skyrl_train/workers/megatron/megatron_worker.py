@@ -473,7 +473,17 @@ class MegatronWorker:
         # downgrade to selective recompute of the remaining modules instead of failing.
         # Tied to the vendored mHC layer: see patches/megatron/README.md (Megatron-LM#7521) for
         # when to change or delete this.
-        if getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
+        if getattr(provider, "dsv4_version", None) == "v4.1" and provider.recompute_granularity == "full":
+            # DeepSeek-V4.1: full recompute through SkyRL's stateful layer checkpoint, which carries the
+            # cross-layer CSA2 / mHC state (deepseek_v41/recompute.py, shape of Megatron-LM#8018); megatron-core's
+            # own block recompute stays off.
+            provider.dsv41_stateful_recompute = True
+            provider.recompute_granularity = None
+            provider.recompute_modules = None
+            provider.recompute_method = None
+            provider.recompute_num_layers = None
+            logger.info("DeepSeek-V4.1: full activation recompute via the stateful layer checkpoint")
+        elif getattr(provider, "enable_mhc_connections", False) and provider.recompute_granularity == "full":
             provider.recompute_granularity = "selective"
             provider.recompute_modules = [m for m in (provider.recompute_modules or ["core_attn"]) if m != "mhc"]
             provider.recompute_method = None
@@ -783,6 +793,14 @@ class MegatronWorker:
         )
 
         patch_moe_release_dispatcher_probs()
+
+        # Same for hybrid mHC attention layers (DeepSeek-V4 / V4.1): the fast path leaves the input-layernorm
+        # offload interface, and with it the layer's input and graph, on the layer until its next forward.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_hybrid_mhc_release_attn_norm_manager import (
+            patch_hybrid_mhc_release_attn_norm_manager,
+        )
+
+        patch_hybrid_mhc_release_attn_norm_manager()
 
         # Let the TileLang SparseMLA kernel take NoPE MLA (q/k width 512) and top-k widths that
         # are not a multiple of 64 (GLM-5.3-Flash k-pool: 2051); otherwise DSA falls back to a

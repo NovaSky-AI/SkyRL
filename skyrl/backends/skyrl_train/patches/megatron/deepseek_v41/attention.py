@@ -228,6 +228,26 @@ def forward_state() -> ForwardState:
     return _state.value
 
 
+_replay = threading.local()
+
+
+@contextmanager
+def reuse_selection(global_indices: Optional[torch.Tensor], candidate_blocks: Optional[torch.Tensor]):
+    """While a layer is replayed for backward (``recompute.py``), hand its index-source attention the top-k (and
+    candidate blocks) it computed in the forward, instead of scoring and selecting again: they are integers (no
+    gradient), the forward kept them alive for the later layers anyway, and reusing them guarantees the replay
+    attends to exactly the positions the forward did (a top-k with ties need not)."""
+    _replay.selection = (global_indices, candidate_blocks)
+    try:
+        yield
+    finally:
+        _replay.selection = None
+
+
+def _replayed_selection():
+    return getattr(_replay, "selection", None)
+
+
 def is_v41(config) -> bool:
     return getattr(config, "dsv4_version", None) == "v4.1"
 
@@ -594,7 +614,13 @@ class CompressedSparseAttention2(MegatronModule):
             if state.global_kv is not None:
                 n_c = state.global_kv.size(0)
                 if self.is_index_source:
-                    state.global_indices = self._select_topk(x, qr, state, sq, n_c)
+                    replayed = _replayed_selection()
+                    if replayed is not None and replayed[0] is not None:
+                        state.global_indices = replayed[0]
+                        if self.is_candidate_source:
+                            state.candidate_blocks = replayed[1]
+                    else:
+                        state.global_indices = self._select_topk(x, qr, state, sq, n_c)
                 compressed_idxs = torch.where(state.global_indices >= 0, state.global_indices + sq, -1)
                 kv_full = torch.cat([kv, state.global_kv], dim=0)
 
