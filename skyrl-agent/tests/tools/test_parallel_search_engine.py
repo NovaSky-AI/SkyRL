@@ -1,6 +1,7 @@
 """Synthetic protocol and registry compatibility checks; no live provider calls."""
 
 import json
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,11 +16,20 @@ from skyrl_agent.tools.parallel_search_engine import ParallelSearchEngine, _Para
 PASSAGE = "alpha\u0085beta\u2028gamma\u2029delta"
 
 
-@pytest.mark.parametrize("fail", [False, True])
-def test_held_open_transport(monkeypatch, fail):
+@pytest.mark.parametrize("failure", [None, "rpc", "http", "connection"])
+@pytest.mark.parametrize("teardown_failure", [None, "http", "connection"])
+def test_held_open_transport(monkeypatch, caplog, failure, teardown_failure):
     requests_seen = []
+    local_closes = []
     release = threading.Event()
     closed = threading.Event()
+    original_close = requests.Session.close
+
+    def close_session(session):
+        local_closes.append(session)
+        original_close(session)
+
+    monkeypatch.setattr(requests.Session, "close", close_session)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -29,7 +39,11 @@ def test_held_open_transport(monkeypatch, fail):
 
         def do_DELETE(self):
             requests_seen.append(("DELETE", self.headers))
-            self.send_response(200)
+            if teardown_failure == "connection":
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            self.send_response(500 if teardown_failure == "http" else 200)
             self.send_header("Content-Length", "0")
             self.end_headers()
 
@@ -37,6 +51,15 @@ def test_held_open_transport(monkeypatch, fail):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             method = request["method"]
             requests_seen.append((method, self.headers))
+            if method == "tools/call" and failure == "connection":
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            if method == "tools/call" and failure == "http":
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if "id" not in request:
                 self.send_response(202)
                 self.send_header("Content-Length", "0")
@@ -47,7 +70,7 @@ def test_held_open_transport(monkeypatch, fail):
                 reply["result"] = {"protocolVersion": "2025-03-26"}
             elif method == "tools/list":
                 reply["result"] = {"tools": [{"name": "web_search"}]}
-            elif fail:
+            elif failure == "rpc":
                 reply["error"] = {"code": -32042, "message": "synthetic failure"}
             else:
                 reply["result"] = {
@@ -83,12 +106,22 @@ def test_held_open_transport(monkeypatch, fail):
     try:
         with ThreadPoolExecutor() as executor:
             result = executor.submit(TOOL_REGISTRY["parallel_search_engine"]().call, {"query": ["test"]}).result(2)
-        if fail:
+        if failure == "rpc":
             assert "MCP error -32042: synthetic failure" in result["error"]
+        elif failure == "http":
+            assert "502" in result["error"]
+        elif failure == "connection":
+            assert "Connection aborted" in result["error"]
         else:
             assert PASSAGE in result["results"]
             assert "https://example.org/source" in result["results"]
-        assert closed.wait(1)
+        if failure in (None, "rpc"):
+            assert closed.wait(1)
+        assert len(local_closes) == 1
+        if teardown_failure:
+            assert caplog.messages == ["Parallel MCP session termination failed; preserving the search outcome."]
+        else:
+            assert not caplog.messages
         assert [method for method, _ in requests_seen] == [
             "initialize",
             "notifications/initialized",

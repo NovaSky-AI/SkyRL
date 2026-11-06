@@ -1,11 +1,15 @@
 """Opt-in anonymous web search through Parallel's Streamable HTTP MCP endpoint."""
 
 import json
+import logging
 
 import requests
 
 from skyrl_agent.tools.base import BaseTool, register_tool
 from skyrl_agent.tools.youcom_search_engine import YouComSearchEngine, _SKYRL_AGENT_VERSION
+
+
+logger = logging.getLogger(__name__)
 
 
 class _ParallelSession:
@@ -97,6 +101,9 @@ class _ParallelSession:
                         # Some Streamable HTTP servers do not support explicit session termination.
                         if response.status_code not in (404, 405):
                             response.raise_for_status()
+            except Exception:
+                # Remote cleanup must not replace the search result or its original error.
+                logger.warning("Parallel MCP session termination failed; preserving the search outcome.")
             finally:
                 self.http.close()
 
