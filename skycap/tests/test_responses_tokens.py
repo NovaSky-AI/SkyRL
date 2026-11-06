@@ -258,6 +258,7 @@ STREAMED = {"model": "policy", "input": "hi", "stream": True}
 @pytest.fixture
 def fast_keepalive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server_module, "KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(server_module, "EARLY_AFTER_SECONDS", 0.05)
 
 
 async def test_a_stream_answers_at_once_and_keeps_alive_until_its_turn_is_sampled(fast_keepalive) -> None:
@@ -280,10 +281,18 @@ async def test_a_stream_answers_at_once_and_keeps_alive_until_its_turn_is_sample
 
 async def test_a_failure_after_the_stream_started_is_a_failed_response(fast_keepalive) -> None:
     async with token_stack(completion=lambda prompt, sampling: None) as stack:
+        stack.engine.delay = 0.2
         status, body, _ = await post(stack, await stack.create(), STREAMED)
 
     assert status == 200 and event_types(body) == ["response.created", "response.failed"]
     assert b"engine returned HTTP 500" in body
+
+
+async def test_a_streamed_call_skycap_refuses_keeps_its_status(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        status, body, content_type = await post(stack, await stack.create(), {**STREAMED, "truncation": "auto"})
+
+    assert status == 400 and content_type == "application/json" and b"truncation" in body
 
 
 @pytest.mark.parametrize("leaves", [False, True], ids=["first client waits", "first client leaves"])

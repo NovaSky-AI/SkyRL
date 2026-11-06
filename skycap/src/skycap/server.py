@@ -74,6 +74,9 @@ logger = logging.getLogger(__name__)
 KEEPALIVE_SECONDS = SKYCAP_STREAM_KEEPALIVE_SECONDS
 #: An SSE comment: bytes on the wire that every SSE client skips.
 KEEPALIVE = b": keepalive\n\n"
+#: Seconds a streamed call may take before it is answered early. A refusal returns well within it, so it keeps
+#: its HTTP status; only a call that samples is answered before its outcome.
+EARLY_AFTER_SECONDS = 1.0
 
 
 class Backend(Protocol):
@@ -496,8 +499,10 @@ class CaptureServer:
         A token-mode turn is sampled whole before it is answered, so a long one sent nothing for minutes, and
         whatever sat between skycap and the client gave up first: a Cloudflare quick tunnel fails a response
         that hasn't started within ~125 s, a client's stream idle timeout ends the call. The call itself runs
-        as before, through the trajectory's replay cache, so a retry still gets its reply. The status is sent
-        before the call has an outcome, so a failure arrives in the stream (``Dialect.failed_stream``).
+        as before, through the trajectory's replay cache, so a retry still gets its reply. A call that ends
+        within ``EARLY_AFTER_SECONDS`` (a refusal) is answered as on the buffered path, with its own status; after
+        that the status is sent before the call has an outcome, so a failure arrives in the stream
+        (``Dialect.failed_stream``).
         """
         reply = asyncio.ensure_future(
             trajectory.replay.call(request.headers, raw, lambda: self._start(trajectory, request, chat, raw))
@@ -505,6 +510,9 @@ class CaptureServer:
         response = web.StreamResponse(headers={"Cache-Control": "no-cache"})
         response.content_type = "text/event-stream"
         try:
+            await asyncio.wait({reply}, timeout=EARLY_AFTER_SECONDS)
+            if reply.done():
+                return reply.result()
             await response.prepare(request)
             # Headers alone can wait in the writer's buffer; a comment puts the first byte on the wire.
             await response.write(KEEPALIVE)
