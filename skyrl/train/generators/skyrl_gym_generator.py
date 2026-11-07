@@ -909,30 +909,65 @@ class SkyRLGymGenerator(GeneratorInterface):
             [] if raw_rollout_sample_support is not None else None
         )
 
-        for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
-            # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
-            reward = env_step_output["reward"]
-            rewards.append(reward)
+        parallel_env_steps = self.skyrl_gym_cfg.parallel_env_steps
+        env_step_outputs = None
+        step_tasks: list[asyncio.Task] = []
+        closed_envs: set[int] = set()
+        try:
+            if parallel_env_steps:
+                step_tasks = [
+                    asyncio.create_task(self._run_in_executor_if_available(env.step, output))
+                    for env, output in zip(envs, outputs)
+                ]
+                env_step_outputs = await asyncio.gather(*step_tasks)
 
-            if len(response) > max_tokens:
-                response = response[:max_tokens]
-            loss_masks.append([1] * len(response))
-            truncated_responses.append(response)
-            if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response)]
-                truncated_logprobs.append(sample_logprobs)
-            if raw_rollout_expert_indices is not None:
-                sample_indices = raw_rollout_expert_indices[i]
-                prompt_len = len(prompt_token_ids[i])
-                truncated_indices.append(sample_indices[: prompt_len + len(response)])
-            if raw_rollout_sample_support is not None:
-                truncated_sample_support.append(raw_rollout_sample_support[i][: len(response)])
+            for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
+                # step on environment and compute reward
+                if parallel_env_steps:
+                    env_step_output = env_step_outputs[i]
+                else:
+                    env_step_output = await self._run_in_executor_if_available(env.step, output)
+                reward = env_step_output["reward"]
+                rewards.append(reward)
 
-            # Get environment-specific metrics
-            env_metrics.append(env.get_metrics())
-            # Close the environment
-            await self._run_in_executor_if_available(env.close)
+                if len(response) > max_tokens:
+                    response = response[:max_tokens]
+                loss_masks.append([1] * len(response))
+                truncated_responses.append(response)
+                if logprobs is not None:
+                    sample_logprobs = logprobs[i][: len(response)]
+                    truncated_logprobs.append(sample_logprobs)
+                if raw_rollout_expert_indices is not None:
+                    sample_indices = raw_rollout_expert_indices[i]
+                    prompt_len = len(prompt_token_ids[i])
+                    truncated_indices.append(sample_indices[: prompt_len + len(response)])
+                if raw_rollout_sample_support is not None:
+                    truncated_sample_support.append(raw_rollout_sample_support[i][: len(response)])
+
+                # Get environment-specific metrics
+                env_metrics.append(env.get_metrics())
+                if not parallel_env_steps:
+                    await self._run_in_executor_if_available(env.close)
+                    closed_envs.add(i)
+        finally:
+            if parallel_env_steps and step_tasks:
+                await asyncio.gather(*step_tasks, return_exceptions=True)
+
+            if parallel_env_steps:
+                remaining_close_tasks = [
+                    self._run_in_executor_if_available(env.close) for i, env in enumerate(envs) if i not in closed_envs
+                ]
+                if remaining_close_tasks:
+                    await asyncio.gather(*remaining_close_tasks, return_exceptions=True)
+            else:
+                for i, env in enumerate(envs):
+                    if i not in closed_envs:
+                        try:
+                            await self._run_in_executor_if_available(env.close)
+                        except Exception:
+                            pass
+                        finally:
+                            closed_envs.add(i)
 
         rollout_metrics = get_rollout_metrics(truncated_responses, rewards, env_metrics, env_classes, loss_masks)
 
