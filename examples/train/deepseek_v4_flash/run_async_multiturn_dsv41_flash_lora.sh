@@ -89,7 +89,10 @@ MEGATRON_EP=$(( NUM_TRAIN_NODES * 8 ))
 # steps are pure decode (FULL CUDA graphs) instead of mixed eager steps when the rollouts' turns are out of sync.
 # Depthfirst sim (8x B200, DP8 x EP8, active r32 adapter, 640 rollouts, starts staggered over 90 s), gen tok/s/GPU over
 # turns 17-56 (~50k-165k context): 1 -> 1,074, 64 -> 1,161 (+8%; +12-25% at shorter contexts). Scheduling only.
-: "${PREFILL_SCHEDULE_INTERVAL:=$( [ "${VLLM_DP:-1}" -gt 1 ] && echo 64 || echo 1 )}"
+# Opt-in (default 1) after a hang: an 8-layer slice at 128 sessions per node (16 per rank, turns nearly in lockstep)
+# stalled with 1 running / 15 deferred requests per rank until the workers' RPCs timed out; the same run without it
+# completed. Not seen at 640 per node (2 h sim) or on the full model at 128 per node.
+: "${PREFILL_SCHEDULE_INTERVAL:=1}"
 : "${ENTRYPOINT:=examples.train.fully_async.main_fully_async}"
 # CUDA-graph capture sizes: vLLM's default grid stops at 1024 tokens (Blackwell), but multi-turn steps mix an
 # observation prefill into the running decodes (640 decodes + a chunk is ~1.7-8k tokens), and without a graph those
