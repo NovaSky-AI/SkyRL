@@ -216,10 +216,16 @@ class DistributedTorchRayActor:
                 ("maskp", POINTER(c_ulong)),
             ]
 
+        # CDLL(None) loads the running program instead of raising.
+        libnuma_path = find_library("numa")
+        if libnuma_path is None:
+            logger.warning("Skipping NUMA affinity setup because libnuma is not installed")
+            _SET_AFFINITY = True
+            return
         try:
-            LIBNUMA = CDLL(find_library("numa"))
+            LIBNUMA = CDLL(libnuma_path)
         except Exception as e:
-            logger.error(f"Skipping NUMA affinity setup because libnuma is not installed: {e}")
+            logger.warning(f"Skipping NUMA affinity setup because {libnuma_path} could not be loaded: {e}")
             _SET_AFFINITY = True
             return
 
