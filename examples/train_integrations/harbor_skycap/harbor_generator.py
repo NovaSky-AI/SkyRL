@@ -26,7 +26,7 @@ import re
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -42,6 +42,7 @@ from skycap.paths import load_rule
 from tqdm import tqdm
 
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
+from skyrl.integration.sandbox_helpers.quota import require_concurrency_cap
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -49,7 +50,7 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
-from skyrl.train.utils.rate_limiter import RateLimiterConfig, create_rate_limiter
+from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
 from .compose import TrialOutcome, compose, split
@@ -155,13 +156,10 @@ class HarborSkycapGenerator(GeneratorInterface):
         kwargs.pop("collect_rollout_details", None)
         self.include_images = include_images
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
-        if remote_sandboxes(self._template) and not max_concurrency(getattr(generator_cfg, "rate_limit", None)):
-            # A provider's sandboxes count against an account quota others share, and every trial of a batch
-            # (eval: the whole eval set) would start one at once.
-            raise ValueError(
-                f"harbor_trial_config.environment runs sandboxes remotely ({environment_name(self._template)}): "
-                "cap how many run at once with generator.rate_limit.enabled=true and "
-                "generator.rate_limit.max_concurrency=<n>"
+        if remote_sandboxes(self._template):
+            require_concurrency_cap(
+                getattr(generator_cfg, "rate_limit", None),
+                f"harbor_trial_config.environment ({environment_name(self._template)})",
             )
 
     async def close(self) -> None:
@@ -410,12 +408,3 @@ def environment_name(template: Dict[str, Any]) -> str:
 def remote_sandboxes(template: Dict[str, Any]) -> bool:
     """Whether the trial's sandboxes run remotely (Daytona, Modal, ...)."""
     return environment_name(template) not in LOCAL_ENVIRONMENTS
-
-
-def max_concurrency(rate_limit: Any) -> Optional[int]:
-    """``generator.rate_limit``'s cap on trials in flight, or None when it sets none."""
-    if isinstance(rate_limit, Mapping):
-        rate_limit = RateLimiterConfig(**rate_limit)
-    if rate_limit is None or not rate_limit.enabled:
-        return None
-    return rate_limit.max_concurrency

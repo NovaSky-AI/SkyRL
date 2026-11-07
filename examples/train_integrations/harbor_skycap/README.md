@@ -97,15 +97,15 @@ may share. The generator refuses Daytona, Modal or a custom environment without
 a cap on trials in flight (`generator.rate_limit.enabled=true
 generator.rate_limit.max_concurrency=<n>`); eval and retries count against it too.
 
-When the trainer dies, Harbor never deletes its sandboxes. `daytona.py`'s
-`LabelledDaytonaEnvironment` labels each one and gives it a hard lifetime, so a
+When the trainer dies, Harbor never deletes its sandboxes.
+`skyrl.integration.harbor.environments.LabelledDaytonaEnvironment` labels each one and gives it a hard lifetime, so a
 run's leftovers can be found and deleted without touching anyone else's:
 
 ```bash
-  harbor_trial_config.environment.import_path=examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment \
+  harbor_trial_config.environment.import_path=skyrl.integration.harbor.environments:LabelledDaytonaEnvironment \
   harbor_trial_config.environment.kwargs.labels.owner=<you> harbor_trial_config.environment.kwargs.labels.run=<run> \
   harbor_trial_config.environment.kwargs.ttl_minutes=180
-uv run --isolated --extra harbor python -m examples.train_integrations.harbor_skycap.daytona cleanup --label owner=<you> --label run=<run>
+uv run --isolated --extra daytona python -m skyrl.integration.sandbox_helpers.daytona cleanup --label owner=<you> --label run=<run>
 ```
 
 ## Images
