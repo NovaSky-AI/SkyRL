@@ -818,6 +818,23 @@ class MegatronConfig(BaseConfig):
             return self.empty_cuda_cache
         return not expandable_segments
 
+    def check_expert_grid(self, world_size: int, prefix: str) -> None:
+        """Raise unless Megatron's expert grid (pp * ep * etp) divides ``world_size``, as Megatron requires at
+        startup even for a dense model. ``prefix`` is where this config sits, for the error message."""
+        pp, ep = self.pipeline_model_parallel_size, self.expert_model_parallel_size
+        # Megatron's own fallback: an unset expert_tensor_parallel_size is the tensor parallel size.
+        etp = (
+            self.tensor_model_parallel_size
+            if self.expert_tensor_parallel_size is None
+            else self.expert_tensor_parallel_size
+        )
+        if world_size % (pp * ep * etp):
+            raise ValueError(
+                f"world_size {world_size} should be divisible by Megatron's expert grid (pp * ep * etp) {pp * ep * etp}. "
+                f"{prefix}.expert_model_parallel_size and expert_tensor_parallel_size lay it out, and Megatron builds "
+                "it even for a dense model, where expert_model_parallel_size=1 works."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Placement
