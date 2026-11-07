@@ -9,6 +9,7 @@ import pytest
 import ray
 
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
@@ -184,9 +185,9 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
 
 
 @pytest.mark.asyncio
-async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
+async def test_set_optimizer_hparams_updates_learning_rate(ray_init_fixture, cfg):
     """
-    Test that set_lr updates the optimizer's learning rate.
+    Test that set_optimizer_hparams updates the optimizer's learning rate.
     """
     cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.strategy = "fsdp"
@@ -209,7 +210,15 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
         new_lr = 1e-5
         assert new_lr != initial_lr, "New LR should differ from initial for valid test"
 
-        ray.get(actor_group.async_run_ray_method("pass_through", "set_lr", learning_rate=new_lr))
+        ray.get(
+            actor_group.async_run_ray_method(
+                "pass_through",
+                "set_optimizer_hparams",
+                adam_params=types.AdamParams(
+                    learning_rate=new_lr, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0, grad_clip_norm=0.0
+                ),
+            )
+        )
 
         # Verify the learning rate was updated
         updated_lrs = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
