@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 #: Seconds between the comments an early-answered stream is sent while its turn samples (``skycap.env_vars``).
 KEEPALIVE_SECONDS = SKYCAP_STREAM_KEEPALIVE_SECONDS
+assert KEEPALIVE_SECONDS > 0
 #: An SSE comment: bytes on the wire that every SSE client skips.
 KEEPALIVE = b": keepalive\n\n"
 #: Seconds a streamed call may take before it is answered early. A refusal returns well within it, so it keeps
