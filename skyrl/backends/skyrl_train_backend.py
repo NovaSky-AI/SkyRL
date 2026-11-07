@@ -11,7 +11,7 @@ from typing import Callable, Literal
 import ray
 import torch
 from pydantic import BaseModel
-from ray.util.placement_group import placement_group
+from ray.util.placement_group import placement_group, remove_placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
@@ -40,6 +40,7 @@ from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
+    cleanup_on_error,
     get_ray_pg_ready_with_timeout,
     initialize_ray,
 )
@@ -327,40 +328,43 @@ class SkyRLTrainBackend(AbstractBackend):
             record_memory=cfg.trainer.policy.record_memory,
         )
 
-        # set to a large number for megatron scheduler init
-        # lr will be managed externally via set_lr()
-        policy_num_training_steps = 1e9
-        ray.get(
-            policy_model.async_init_model(
-                cfg.trainer.policy.model.path,
-                num_training_steps=policy_num_training_steps,
+        with cleanup_on_error(policy_model.shutdown, "Shutting down the policy workers"):
+            # set to a large number for megatron scheduler init
+            # lr will be managed externally via set_lr()
+            policy_num_training_steps = 1e9
+            ray.get(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=policy_num_training_steps,
+                )
             )
-        )
-        ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
+            ray.get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
+            )
 
-        if is_lora and cfg.trainer.strategy == "megatron":
-            # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
-            # the freshly-initialised LoRA into a per-worker pristine slot, then
-            # register the first adapter under `model_id`. Must happen while the
-            # model + optimizer are still GPU-resident (i.e. before the offload).
-            # currently, this is only supported for megatron backend
-            ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
-            ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
-            ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
+            if is_lora and cfg.trainer.strategy == "megatron":
+                # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
+                # the freshly-initialised LoRA into a per-worker pristine slot, then
+                # register the first adapter under `model_id`. Must happen while the
+                # model + optimizer are still GPU-resident (i.e. before the offload).
+                # currently, this is only supported for megatron backend
+                ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
+                ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
+                ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
 
-        if colocate_all:
-            policy_model.offload_to_cpu()
+            if colocate_all:
+                policy_model.offload_to_cpu()
 
-        # Create unified dispatch that manages all actor groups
-        self._dispatch = WorkerDispatch(
-            cfg=cfg,
-            policy_actor_group=policy_model,
-            inference_engine_client=self._inference_engine_client,
-        )
+            # Create unified dispatch that manages all actor groups
+            self._dispatch = WorkerDispatch(
+                cfg=cfg,
+                policy_actor_group=policy_model,
+                inference_engine_client=self._inference_engine_client,
+            )
 
-        # Mark the offloaded policy model in dispatch state
-        if colocate_all:
-            self._dispatch.mark_as_offloaded("policy")
+            # Mark the offloaded policy model in dispatch state
+            if colocate_all:
+                self._dispatch.mark_as_offloaded("policy")
 
         logger.info("init policy model done")
 
@@ -397,12 +401,20 @@ class SkyRLTrainBackend(AbstractBackend):
             colocate_all=colocate_all,
             sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
         )
-        self._dispatch.register_actor_group("critic", critic_model)
-        self._dispatch.init_model("critic", cfg.trainer.critic.model.path, num_training_steps=1e9)
-        ray.get(critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
-        if colocate_all:
-            critic_model.offload_to_cpu()
-            self._dispatch.mark_as_offloaded("critic")
+
+        def release_critic():
+            self._dispatch.unregister_actor_group("critic")
+            critic_model.shutdown()
+
+        with cleanup_on_error(release_critic, "Shutting down the critic workers"):
+            self._dispatch.register_actor_group("critic", critic_model)
+            self._dispatch.init_model("critic", cfg.trainer.critic.model.path, num_training_steps=1e9)
+            ray.get(
+                critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
+            )
+            if colocate_all:
+                critic_model.offload_to_cpu()
+                self._dispatch.mark_as_offloaded("critic")
         logger.info("init critic model done")
 
     def init_weight_sync_state(self):
@@ -625,31 +637,36 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # First-time setup OR critic creation (existing path).
         if model_role == "policy":
-            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+            # Restored on failure rather than reset: an inference-only runtime may have built it while sampling.
+            cfg_before = self._cfg
+            with cleanup_on_error(
+                lambda: self._discard_partial_runtime(cfg_before), "Discarding the partially built runtime"
+            ):
+                self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
 
-            if not ray.is_initialized():
-                logger.info("Initializing Ray with runtime environment")
-                initialize_ray(self._cfg)
+                if not ray.is_initialized():
+                    logger.info("Initializing Ray with runtime environment")
+                    initialize_ray(self._cfg)
 
-            self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
+                self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self.config.runtime_role == "inference":
-                PolicyWorker = None
-            elif self._cfg.trainer.strategy == "fsdp":
-                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
-                    PolicyWorker,
-                )
-            elif self._cfg.trainer.strategy == "megatron":
-                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                    PolicyWorker,
-                )
-            else:
-                raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-            if PolicyWorker is not None:
-                logger.info("Building models.")
-                self._build_policy(PolicyWorker, model_id=model_id)
-            if is_lora:
-                self._base_lora_signature = self._lora_signature_from(lora_config)
+                if self.config.runtime_role == "inference":
+                    PolicyWorker = None
+                elif self._cfg.trainer.strategy == "fsdp":
+                    from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                        PolicyWorker,
+                    )
+                elif self._cfg.trainer.strategy == "megatron":
+                    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                        PolicyWorker,
+                    )
+                else:
+                    raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
+                if PolicyWorker is not None:
+                    logger.info("Building models.")
+                    self._build_policy(PolicyWorker, model_id=model_id)
+                if is_lora:
+                    self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
             if model_role in self._model_ids_to_role.values():
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
@@ -687,6 +704,15 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info("Placement group ready!")
 
         return ResolvedPlacementGroup(pg)
+
+    def _discard_partial_runtime(self, cfg_before) -> None:
+        """Undo a first ``create_model`` that failed part-way, so the next one starts from scratch."""
+        self._cfg = cfg_before
+        self._dispatch = None
+        self._base_lora_signature = None
+        colocate_pg, self._colocate_pg = self._colocate_pg, None
+        if colocate_pg is not None:
+            remove_placement_group(colocate_pg.pg)
 
     def _unload_inference_adapter(self, model_id: str) -> None:
         """Drop a deleted tenant's LoRA adapter from the inference engines.
