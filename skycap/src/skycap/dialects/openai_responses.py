@@ -80,6 +80,9 @@ class ResponsesDialect(Dialect):
     # own item, so parsed replies already come back unchanged. A call on a raw-content server is refused (400)
     # rather than answered against the server's setting; the chat route still serves such harnesses.
     raw_content = False
+    # A stream reports its failures as `response.failed` events, which is how OpenAI reports one that fails after
+    # it started, so a streamed call can be answered before its turn is sampled.
+    streams_early = True
 
     def parse_request(self, body: Any) -> CallRequest:
         if not isinstance(body, dict):
@@ -134,6 +137,14 @@ class ResponsesDialect(Dialect):
         """
         if call is None or not call.stream or code != "context_length_exceeded":
             return super().error(call, message, status, kind=kind, code=code)
+        return web.Response(
+            body=self.failed_stream(call, message, code=code),
+            content_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    def failed_stream(self, call: CallRequest, message: str, *, code: str | None = None) -> bytes:
+        """``response.created``, then ``response.failed`` carrying the error."""
         failed = {
             **_echo(call),
             "id": f"resp_{secrets.token_hex(16)}",
@@ -147,8 +158,7 @@ class ResponsesDialect(Dialect):
         }
         events = _Events()
         body = events("response.created", response={**failed, "status": "in_progress", "error": None})
-        body += events("response.failed", response=failed)
-        return web.Response(body=body, content_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+        return body + events("response.failed", response=failed)
 
     def unsupported_in_token_mode(self, call: CallRequest) -> str | None:
         if call.body.get("truncation") == "auto":
