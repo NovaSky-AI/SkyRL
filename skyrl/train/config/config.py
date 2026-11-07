@@ -1470,6 +1470,12 @@ class InferenceEngineConfig(BaseConfig):
     Used together with ``trainer.policy.megatron_config.moe_enable_routing_replay``."""
     enable_return_sample_support_set: bool = False
     """Return the bounded sampler support used to renormalize rollout logprobs."""
+    candidate_top_k: Optional[int] = None
+    """Capture each response position's top ``candidate_top_k`` tokens instead of the sampler's support.
+    Requires a width greater than 1 and an untruncated sampler (``sampling_params.top_k=-1``, ``top_p=1.0``,
+    ``min_p=0.0``). Rows are the plain top-k, so the sampled token may be outside its row. Member logprobs are
+    the sampler's processed ones, which are the policy's own at temperature 1. ``None`` records the sampler's
+    own support, bounded by ``sampling_params.top_k``, for sample-support replay."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -2193,8 +2199,27 @@ class SkyRLTrainConfig(BaseConfig):
             sampling_params = self.generator.sampling_params
             if sampling_params.temperature <= 0:
                 raise ValueError("sample-support capture requires generator.sampling_params.temperature > 0")
-            if sampling_params.top_k <= 1:
+            # An explicit candidate_top_k sets the width; otherwise the support is the sampler's own.
+            candidate_top_k = self.generator.inference_engine.candidate_top_k
+            if sampling_params.top_k <= 1 and candidate_top_k is None:
                 raise ValueError("sample-support capture requires generator.sampling_params.top_k > 1")
+            if candidate_top_k is not None and candidate_top_k <= 1:
+                raise ValueError(
+                    f"generator.inference_engine.candidate_top_k must be greater than 1, got {candidate_top_k}"
+                )
+            if candidate_top_k is not None and self.trainer.algorithm.enable_sample_support_replay:
+                raise ValueError(
+                    "sample-support replay renormalizes over the sampler's own support; unset candidate_top_k"
+                )
+            # A truncated sampler would mask candidates to -inf and renormalize the rest, so the rows would no
+            # longer be the policy's top-k.
+            if candidate_top_k is not None and (
+                sampling_params.top_k > 0 or sampling_params.top_p < 1.0 or sampling_params.min_p > 0.0
+            ):
+                raise ValueError(
+                    "generator.inference_engine.candidate_top_k needs an untruncated sampler: set "
+                    "generator.sampling_params.top_k=-1, top_p=1.0 and min_p=0.0"
+                )
             if sampling_params.repetition_penalty != 1.0:
                 raise ValueError("sample-support capture requires repetition_penalty=1.0")
             if sampling_params.additional_kwargs:

@@ -649,6 +649,63 @@ def test_sample_support_capture_rejects_unsupported_sampling_modifiers(override,
         )
 
 
+def test_candidate_capture_sets_its_own_width_under_untruncated_sampling():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.inference_engine.candidate_top_k=16",
+            "generator.sampling_params.top_k=-1",
+        ]
+    )
+    assert cfg.generator.inference_engine.candidate_top_k == 16
+    with pytest.raises(ValueError, match="top_k > 1"):
+        SkyRLTrainConfig.from_cli_overrides(
+            ["generator.inference_engine.enable_return_sample_support_set=true", "generator.sampling_params.top_k=-1"]
+        )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "generator.sampling_params.top_k=50",
+        "generator.sampling_params.top_p=0.95",
+        "generator.sampling_params.min_p=0.05",
+    ],
+)
+def test_candidate_capture_rejects_a_truncated_sampler(override):
+    with pytest.raises(ValueError, match="candidate_top_k needs an untruncated sampler"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.inference_engine.candidate_top_k=16",
+                override,
+            ]
+        )
+
+
+@pytest.mark.parametrize("width", [1, 0, -4])
+def test_candidate_capture_rejects_a_width_of_one_or_less(width):
+    with pytest.raises(ValueError, match="candidate_top_k must be greater than 1"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                f"generator.inference_engine.candidate_top_k={width}",
+            ]
+        )
+
+
+def test_candidate_capture_rejects_sample_support_replay():
+    with pytest.raises(ValueError, match="unset candidate_top_k"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.inference_engine.candidate_top_k=16",
+                "generator.sampling_params.top_k=8",
+            ]
+        )
+
+
 def test_routed_expert_capture_rejects_the_vision_language_generator():
     with pytest.raises(ValueError, match="vision_language_generator"):
         SkyRLTrainConfig.from_cli_overrides(
