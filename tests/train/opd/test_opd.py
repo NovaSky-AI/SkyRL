@@ -5,6 +5,7 @@ uv run --isolated --extra dev pytest tests/train/opd/test_opd.py
 """
 
 import asyncio
+import random
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,6 +36,7 @@ from skyrl.train.opd.teacher_client import (
 from skyrl.train.opd.teacher_launch import _teacher_start_port
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
+    ROLLOUT_CORRECT_KEY,
     STUDENT_LOGPROB_FLOOR,
     TEACHER_LOGPROBS_KEY,
     apply_opd_to_advantages,
@@ -969,6 +971,69 @@ def test_trainer_end_to_end_advantages_pure(tokenizer):
     assert torch.allclose(batch["advantages"], expected)
     assert TEACHER_LOGPROBS_KEY not in batch  # popped, never shipped to workers
     assert "opd/reverse_kl" in trainer.all_metrics
+
+
+def test_trainer_logs_the_rollout_metrics_from_the_real_rewards(tokenizer):
+    out = _generator_output()
+    out["stop_reasons"] = ["length", "stop"]
+    trainer = _trainer(use_task_reward=False, kl_coef=2.0, tokenizer=tokenizer)
+
+    out, uids = trainer.postprocess_generator_output(out, ["u", "u"])
+    batch = trainer.convert_to_training_input(out, uids)
+    batch["action_log_probs"] = torch.tensor([[-1.0, -1.0, -1.0], [0.0, -2.0, -2.0]])
+    batch["values"] = None
+    trainer.compute_advantages_and_returns(batch)
+
+    assert trainer.all_metrics["opd/truncation_rate"] == 0.5
+    assert trainer.all_metrics["opd/repetition_rate"] == 0.0  # both rollouts are too short to check
+    # Pure mode zeroed the rewards, but row 0 (reward 1.0) still counts as correct: log q - log p averages
+    # 0.6 on it and 1.35 on row 1's two trained tokens.
+    assert trainer.all_metrics["opd/informativeness"] == pytest.approx(0.6 - 1.35)
+    assert ROLLOUT_CORRECT_KEY not in batch  # popped, never shipped to workers
+
+
+def test_trainer_repetition_rate_counts_looping_token_ids():
+    out = _generator_output()
+    rng = random.Random(0)
+    out["response_ids"] = [[17, 42, 99] * 1_000, [rng.randrange(150_000) for _ in range(3_000)]]
+    out["loss_masks"] = [[1] * 3_000, [1] * 3_000]
+    trainer = _trainer(use_task_reward=True)
+
+    trainer.postprocess_generator_output(out, ["u", "u"])
+
+    assert trainer.all_metrics["opd/repetition_rate"] == 0.5  # the loop, not the varied rollout
+
+
+def test_trainer_padding_rows_do_not_count_toward_informativeness(tokenizer):
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer)
+    trainer.dispatch.get_lcm_dp_size.return_value = 4  # two rows padded to four
+
+    out, uids = trainer.postprocess_generator_output(_generator_output(), ["u", "u"])
+    batch = trainer.convert_to_training_input(out, uids)
+
+    assert batch[ROLLOUT_CORRECT_KEY].tolist() == [True, False, False, False]
+    # Padding rows copy row 0's tensors, a correct rollout, but their loss mask is all zero.
+    batch["action_log_probs"] = torch.tensor([[-1.0, -1.0, -1.0], [0.0, -2.0, -2.0]] + [[-1.0, -1.0, -1.0]] * 2)
+    batch["values"] = None
+    trainer.compute_advantages_and_returns(batch)
+    assert trainer.all_metrics["opd/informativeness"] == pytest.approx(0.6 - 1.35)
+
+
+def test_trainer_needs_correctness_from_postprocess():
+    trainer = _trainer(use_task_reward=False)
+    with pytest.raises(RuntimeError, match="rollout_correct"):
+        trainer.convert_to_training_input(_generator_output(), ["u", "u"])
+
+
+def test_trainer_skips_truncation_without_stop_reasons():
+    out = _generator_output()
+    out["stop_reasons"] = None
+    trainer = _trainer(use_task_reward=False)
+
+    trainer.postprocess_generator_output(out, ["u", "u"])
+
+    assert "opd/truncation_rate" not in trainer.all_metrics
+    assert trainer.all_metrics["opd/repetition_rate"] == 0.0
 
 
 def batch_teacher(batch) -> torch.Tensor:
