@@ -466,6 +466,13 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
+        if megatron_config.expert_nvfp4:
+            from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+                configure_expert_nvfp4,
+            )
+
+            configure_expert_nvfp4(provider)
+
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
         # the residual it would re-materialize is the n-stream tensor consumed by the mHC
         # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
@@ -1756,6 +1763,47 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
 
         source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
+        megatron_config = self.cfg.policy.megatron_config
+        if megatron_config.expert_nvfp4:
+            from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
+                Nvfp4WeightQuantSettings,
+                nvfp4_bf16_layers,
+            )
+            from skyrl.backends.skyrl_train.weight_sync.sources import (
+                SerializedNvfp4WeightSource,
+            )
+
+            if backend not in {"nccl", "ipc"}:
+                raise ValueError(
+                    f"expert_nvfp4 weight sync requires the NCCL or CUDA-IPC push backend, got {backend!r}"
+                )
+            stacked_num_experts, min_packed_bytes = None, 0
+            if megatron_config.expert_nvfp4_stacked_sync:
+                from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import (
+                    max_stacked_wire_bytes,
+                )
+
+                hf = self.strategy.hf_config
+                hf = getattr(hf, "text_config", None) or hf
+                stacked_num_experts = next(
+                    (
+                        getattr(hf, k)
+                        for k in ("num_experts", "n_routed_experts", "num_local_experts")
+                        if getattr(hf, k, None)
+                    ),
+                    None,
+                )
+                moe_inter = getattr(hf, "moe_intermediate_size", None)
+                if not stacked_num_experts or not moe_inter:
+                    raise ValueError("expert_nvfp4_stacked_sync: cannot read num_experts / moe_intermediate_size")
+                min_packed_bytes = max_stacked_wire_bytes(stacked_num_experts, hf.hidden_size, moe_inter)
+            return SerializedNvfp4WeightSource(
+                source,
+                Nvfp4WeightQuantSettings.from_te_recipe(),
+                bf16_layers=nvfp4_bf16_layers(self.strategy.hf_config.num_hidden_layers, megatron_config),
+                stacked_num_experts=stacked_num_experts,
+                min_packed_buffer_bytes=min_packed_bytes,
+            )
         if self._serialized_fp8_config is not None:
             from skyrl.backends.skyrl_train.weight_sync.sources import (
                 SerializedFp8WeightSource,
