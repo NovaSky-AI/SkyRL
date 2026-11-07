@@ -32,6 +32,39 @@ QWEN3_ACC_THINKING_TEMPLATE_PATH = os.path.join(
 )
 
 
+def test_get_generation_prompt_ids_explicit_controls_override_kwargs():
+    calls = []
+
+    class Tokenizer:
+        def apply_chat_template(self, _messages, **kwargs):
+            calls.append(kwargs)
+            return [1, 2] if not kwargs["add_generation_prompt"] else [1, 2, 3]
+
+    tokenizer_kwargs = {
+        "add_generation_prompt": False,
+        "return_dict": True,
+        "tokenize": False,
+        "custom_option": "preserved",
+    }
+    generation_prompt_ids = get_generation_prompt_ids(Tokenizer(), tokenizer_kwargs=tokenizer_kwargs)
+
+    assert generation_prompt_ids == [3]
+    assert calls == [
+        {
+            "add_generation_prompt": False,
+            "return_dict": False,
+            "tokenize": True,
+            "custom_option": "preserved",
+        },
+        {
+            "add_generation_prompt": True,
+            "return_dict": False,
+            "tokenize": True,
+            "custom_option": "preserved",
+        },
+    ]
+
+
 @pytest.fixture
 def qwen3_acc_thinking_template():
     """Load the qwen3_acc_thinking.jinja2 template."""
