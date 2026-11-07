@@ -4,30 +4,62 @@ title: Using SkyRL as a Library
 
 To use SkyRL as a dependency in your project, configure your `pyproject.toml` with `uv`. You can install from either PyPI (stable releases) or Git (latest development version).
 
-Some additional dependencies that depend on custom indexes/wheels, such as flash-attn and flashinfer-jit-cache. Below is an example configuration using uv:
+SkyRL's own `pyproject.toml` takes some packages from custom indexes and settles a few version conflicts with `override-dependencies`. uv applies neither of these to a project that depends on SkyRL, so your `pyproject.toml` has to declare them. The two options need different configurations.
+
+## Option A: PyPI
+
+A published wheel carries no uv sources, so list the packages that come from custom indexes and point each at its index. `[tool.uv.sources]` only applies to packages your project lists, so each package with a source also goes in `dependencies`:
 
 ```toml
 [project]
 dependencies = [
-    # Option A: Install from PyPI (stable release)
     "skyrl[fsdp]",
-    # Option B: Install from Git (latest)
-    # "skyrl[fsdp]",
-
-    "flashinfer-jit-cache==0.6.13",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11"
+    # flashinfer-jit-cache is metadata-only and depends on per-arch packages that are
+    # published only on flashinfer's cu130 index.
+    "flashinfer-jit-cache==0.7.2.post1",
+    "flashinfer-jit-cache-sm80==0.7.2.post1",
+    "flashinfer-jit-cache-sm89==0.7.2.post1",
+    "flashinfer-jit-cache-sm90a==0.7.2.post1",
+    "flashinfer-jit-cache-sm100a==0.7.2.post1",
+    "flashinfer-jit-cache-sm103a==0.7.2.post1",
+    "flashinfer-jit-cache-sm120f==0.7.2.post1",
+    "flashinfer-jit-cache-sm110a==0.7.2.post1; platform_machine == 'aarch64'",
+    "flashinfer-jit-cache-sm121a==0.7.2.post1; platform_machine == 'aarch64'",
+    "flashinfer-cubin==0.7.2.post1",
+    "flash-attn==2.8.3.post1+cu.13.0.torch.2.14",
+    "causal-conv1d==1.7.0",
 ]
 
 [tool.uv.sources]
 flashinfer-jit-cache = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm80 = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm89 = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm90a = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm100a = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm103a = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm120f = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm110a = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm121a = { index = "flashinfer-cu130" }
+flashinfer-cubin = { index = "flashinfer" }
 flash-attn = { index = "astral-cu130" }
-# Only needed for Option B (Git install):
-# skyrl-gym = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-gym" }
-# skyrl = { git = "https://github.com/NovaSky-AI/SkyRL" }
+causal-conv1d = { index = "astral-cu130" }
+
+[tool.uv]
+# flashinfer-jit-cache's metadata requires the aarch64-only packages on every
+# architecture; keep them to aarch64.
+override-dependencies = [
+    "flashinfer-jit-cache-sm110a==0.7.2.post1; platform_machine == 'aarch64'",
+    "flashinfer-jit-cache-sm121a==0.7.2.post1; platform_machine == 'aarch64'",
+]
 
 [[tool.uv.index]]
 name = "flashinfer-cu130"
 url = "https://flashinfer.ai/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer"
+url = "https://flashinfer.ai/whl/"
 explicit = true
 
 [[tool.uv.index]]
@@ -36,12 +68,41 @@ url = "https://wheels.astral.sh/simple/cu130/"
 explicit = true
 ```
 
-**Option A (PyPI)**: Use `skyrl[fsdp]`. No additional sources needed.
+## Option B: Git
 
-**Option B (Git)**: Uncomment the `skyrl-gym` and `skyrl` sources to install from the latest commit.
+uv applies SkyRL's own sources to a Git dependency, so the custom-index packages resolve without being listed. SkyRL's overrides still don't apply. Its `flash-attn` is a combined FA2+FA4 wheel whose FA4 dependencies conflict with vLLM's pins, so copy those overrides:
 
-SkyRL is built against CUDA 13 and torch 2.11, so both indexes above are the cu130
-variants. `flash-attn` comes from Astral's prebuilt GPU wheel index, which stamps
-each wheel with the (CUDA, torch) pair it was built against as a PEP 440 local
-version — the pin has to name that build exactly. Keep it at `2.8.3`, not
-`2.8.3.post1`: Transformer Engine only accepts flash-attn up to `2.8.3`.
+```toml
+[project]
+dependencies = ["skyrl[fsdp]"]
+
+[tool.uv.sources]
+skyrl = { git = "https://github.com/NovaSky-AI/SkyRL" }
+skyrl-gym = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-gym" }
+flashinfer-jit-cache-sm110a = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm121a = { index = "flashinfer-cu130" }
+
+[tool.uv]
+override-dependencies = [
+    # FA4 needs apache-tvm-ffi 0.1.12; vLLM 0.33 pins 0.1.11.
+    "tilelang==0.1.13",
+    "apache-tvm-ffi==0.1.12",
+    "nvidia-cutlass-dsl[cu13]==4.8.0",
+    "quack-kernels[cu13]==0.6.5",
+    "flashinfer-jit-cache-sm110a==0.7.2.post1; platform_machine == 'aarch64'",
+    "flashinfer-jit-cache-sm121a==0.7.2.post1; platform_machine == 'aarch64'",
+]
+
+[[tool.uv.index]]
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
+explicit = true
+```
+
+## Versions
+
+SkyRL is built against CUDA 13 and torch 2.14, so the indexes above are the cu130 variants. `flash-attn` and
+`causal-conv1d` come from Astral's prebuilt GPU wheel index, which stamps each wheel with the (CUDA, torch) pair
+it was built against as a PEP 440 local version. The `flash-attn` pin names that build exactly; for
+`causal-conv1d` the index source is enough, since its wheels require the matching torch. When you upgrade
+SkyRL, take the versions above from its `pyproject.toml`.
