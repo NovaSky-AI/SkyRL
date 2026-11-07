@@ -396,6 +396,11 @@ class BasePPOExp:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")
             raise
         finally:
+            if self.trainer is not None:
+                try:
+                    self.trainer.shutdown()
+                except Exception:
+                    logger.exception("Failed to shut down trainer resources")
             if annotation is not None:
                 annotation.finish()
             if self.tracker is not None:
