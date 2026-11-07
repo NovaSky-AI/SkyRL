@@ -174,3 +174,20 @@ def test_compact_support_rejects_malformed_logprobs(logprobs, message):
         CompactSampleSupport.from_token_ids(
             np.array([1, 2, 3], dtype=SAMPLE_SUPPORT_DTYPE), [2, 1], top_k=2, logprobs=logprobs
         )
+
+
+def test_candidate_grid_pads_short_and_empty_rows():
+    support = csr([[5, 6, -1], [-1, -1, -1], [7, 8, 9]])
+
+    np.testing.assert_array_equal(support.candidate_grid(), [[5, 6, -1], [-1, -1, -1], [7, 8, 9]])
+
+
+def test_logprob_grid_matches_the_candidate_grid():
+    support = csr([[5, 6], [-1, -1], [7, -1]], logprobs=[[-0.5, -1.0], [0.0, 0.0], [-0.25, 0.0]])
+
+    grid = support.logprob_grid()
+
+    np.testing.assert_array_equal(grid, [[-0.5, -1.0], [-np.inf, -np.inf], [-0.25, -np.inf]])
+    assert grid.dtype == np.float32
+    with pytest.raises(ValueError, match="no member logprobs"):
+        csr([[5, 6]]).logprob_grid()

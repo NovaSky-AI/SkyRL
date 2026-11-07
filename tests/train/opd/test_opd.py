@@ -5,9 +5,15 @@ uv run --isolated --extra dev pytest tests/train/opd/test_opd.py
 """
 
 import asyncio
+import base64
+import io
+import math
 import random
+import sys
+import types
+from argparse import Namespace
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -15,6 +21,9 @@ import pytest
 import torch
 from loguru import logger
 
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+)
 from skyrl.train.generators.base import (
     BatchMetadata,
     GeneratorInput,
@@ -26,12 +35,16 @@ from skyrl.train.opd.config import (
     OPDConfig,
     OPDExpConfig,
     TeacherEngineConfig,
+    teacher_logprob_width,
+    teacher_topk,
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
     SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
+    parse_scoring_response,
+    scoring_request,
 )
 from skyrl.train.opd.teacher_launch import _teacher_start_port
 from skyrl.train.opd.trainer import OPDTrainer
@@ -44,19 +57,42 @@ from skyrl.train.opd.utils import (
     split_generator_input,
 )
 from skyrl.train.trainer import RayPPOTrainer
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
 
 
+def _encode(array) -> str:
+    """A base64 ``.npy`` float32 array, as vLLM sends ``prompt_token_id_logprobs``."""
+    buffer = io.BytesIO()
+    np.save(buffer, np.asarray(array, dtype=np.float32), allow_pickle=False)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _id_scores(ids) -> np.ndarray:
+    """The fake teacher's logprob of token id t, -t/100; ``-1`` padding scores -inf, as in vLLM."""
+    ids = np.asarray(ids)
+    return np.where(ids >= 0, -ids / 100.0, -np.inf).astype(np.float32)
+
+
+def _answer(request: Dict[str, Any]) -> Dict[str, Any]:
+    """vLLM's answer to a scoring request, from ``_id_scores``."""
+    return {"prompt_token_id_logprobs": _encode(_id_scores(request["sampling_params"]["prompt_logprob_token_ids"]))}
+
+
+def _width(request: Dict[str, Any]) -> int:
+    return np.asarray(request["sampling_params"]["prompt_logprob_token_ids"]).shape[1]
+
+
 class FakeTeacher(TeacherLogprobClient):
-    """Deterministic teacher: logprob of token id t is -t/100. Optional delay and in-flight tracking."""
+    """Answers like vLLM with ``_id_scores``. Records each request; optional delay and in-flight tracking."""
 
     def __init__(self, max_concurrency: int = 32, delay: float = 0.0):
         super().__init__(max_concurrency=max_concurrency)
         self.delay = delay
-        self.calls: List[tuple] = []
+        self.calls: List[Dict[str, Any]] = []
         self.in_flight = 0
         self.max_in_flight = 0
         self.closed = False
@@ -64,37 +100,65 @@ class FakeTeacher(TeacherLogprobClient):
     async def aclose(self) -> None:
         self.closed = True
 
-    async def _compute_logprobs(self, prompt_ids, response_ids):
-        self.calls.append((tuple(prompt_ids), tuple(response_ids)))
+    async def _post_generate(self, request):
+        self.calls.append(request)
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
             if self.delay:
                 await asyncio.sleep(self.delay)
-            return [-t / 100.0 for t in response_ids]
+            return _answer(request)
         finally:
             self.in_flight -= 1
 
 
-class WrongLengthTeacher(TeacherLogprobClient):
-    async def _compute_logprobs(self, prompt_ids, response_ids):
-        return [0.0] * (len(response_ids) + 1)
+# RankedTeacher's own ranking: token 51 first, then 50, 52, 53, ...; log q = -0.1 * rank there, -9 elsewhere.
+TEACHER_RANKING = [51, 50] + list(range(52, 82))
 
 
-class MissingLogprobTeacher(TeacherLogprobClient):
-    async def _compute_logprobs(self, prompt_ids, response_ids):
-        return [-0.5, None] + [-0.5] * (len(response_ids) - 2)
+def _ranked_scores(ids) -> np.ndarray:
+    """RankedTeacher's logprob of each id; ``-1`` padding scores -inf, as in vLLM."""
+    rank = {token: r for r, token in enumerate(TEACHER_RANKING, start=1)}
+    ids = np.asarray(ids)
+    scores = np.vectorize(lambda token: -0.1 * rank.get(int(token), 90), otypes=[np.float64])(ids)
+    return np.where(ids >= 0, scores, -np.inf).astype(np.float32)
 
 
-class NonFiniteTeacher(TeacherLogprobClient):
-    """Answers with one bad value first, then well-formed logprobs."""
+def _prompt_logprobs(token_ids: List[int], k: int, scores=_ranked_scores) -> List[Optional[Dict[str, Any]]]:
+    """vLLM's ``prompt_logprobs=k`` for one sequence: ``None`` at position 0, then the teacher's top ``k`` plus the
+    sequence token itself when it is outside them, keyed by the id as a string."""
 
-    def __init__(self, value: float):
+    def entry(token: int) -> Dict[str, Any]:
+        top = {str(t): {"logprob": float(scores(t)), "rank": r} for r, t in enumerate(TEACHER_RANKING[:k], 1)}
+        top.setdefault(str(token), {"logprob": float(scores(token)), "rank": 1000})
+        return top
+
+    return [None] + [entry(token) for token in token_ids[1:]]
+
+
+class RankedTeacher(FakeTeacher):
+    """Scores with ``_ranked_scores`` and answers ``prompt_logprobs`` with ``TEACHER_RANKING``'s top ``k``."""
+
+    async def _post_generate(self, request):
+        self.calls.append(request)
+        params = request["sampling_params"]
+        answer = {"prompt_token_id_logprobs": _encode(_ranked_scores(params["prompt_logprob_token_ids"]))}
+        if params.get("prompt_logprobs"):
+            answer["prompt_logprobs"] = _prompt_logprobs(request["token_ids"], params["prompt_logprobs"])
+        return answer
+
+
+class CannedTeacher(TeacherLogprobClient):
+    """Answers every request with ``response``, or raises it."""
+
+    def __init__(self, response: Union[Dict[str, Any], Exception]):
         super().__init__()
-        self.value = value
+        self.response = response
 
-    async def _compute_logprobs(self, prompt_ids, response_ids):
-        return [self.value] + [-0.5] * (len(response_ids) - 1)
+    async def _post_generate(self, request):
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
 
 
 # ---------------------------------------------------------------------------
@@ -281,35 +345,151 @@ def test_log_ratio_percentiles_cover_masked_tokens_only():
 @pytest.mark.asyncio
 async def test_base_client_empty_response_short_circuits():
     teacher = FakeTeacher()
-    assert await teacher.compute_logprobs([1, 2], []) == []
+    scores = await teacher.compute_logprobs([1, 2], np.empty((0, 3), dtype=np.int32))
+    assert scores.logprobs.shape == (0, 3)
     assert teacher.calls == []
 
 
 @pytest.mark.asyncio
-async def test_base_client_length_invariant():
-    with pytest.raises(RuntimeError, match="returned 3 logprobs for 2"):
-        await WrongLengthTeacher().compute_logprobs([1], [5, 6])
+async def test_base_client_scores_the_candidate_matrix():
+    teacher = FakeTeacher()
+    candidates = np.array([[5, 7, -1], [6, 8, 9]], dtype=np.int32)
+
+    scores = await teacher.compute_logprobs([1, 2], candidates)
+
+    np.testing.assert_array_equal(scores.logprobs, _id_scores(candidates))
+    assert teacher.calls == [scoring_request([1, 2], candidates)]
 
 
 @pytest.mark.asyncio
-async def test_base_client_rejects_missing_logprobs():
-    with pytest.raises(RuntimeError, match=r"position\(s\) \[1\] \(token ids \[6\]\); the teacher's vocabulary"):
-        await MissingLogprobTeacher().compute_logprobs([1], [5, 6, 7])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-async def test_base_client_rejects_non_finite(value):
-    teacher = NonFiniteTeacher(value)
-    with pytest.raises(RuntimeError, match="non-finite"):
-        await teacher.compute_logprobs([1], [2, 3])
+async def test_base_client_rejects_a_non_matrix():
+    with pytest.raises(ValueError, match=r"\[tokens, width\]"):
+        await FakeTeacher().compute_logprobs([1], np.array([5, 6], dtype=np.int32))
 
 
 @pytest.mark.asyncio
 async def test_base_client_limits_concurrency():
     teacher = FakeTeacher(max_concurrency=2, delay=0.05)
-    await asyncio.gather(*(teacher.compute_logprobs([1], [i]) for i in range(6)))
+    await asyncio.gather(*(teacher.compute_logprobs([1], np.array([[i]], dtype=np.int32)) for i in range(6)))
     assert teacher.max_in_flight == 2
+
+
+def test_scoring_request_windows_the_prefill_to_the_response():
+    candidates = np.array([[30, 7], [31, -1], [32, 9]], dtype=np.int32)
+
+    request = scoring_request([10, 11], candidates)
+
+    assert request["token_ids"] == [10, 11, 30, 31, 32]
+    params = request["sampling_params"]
+    # Row i scores sequence token start + i + 1, so rows 0..2 are the three response tokens.
+    assert params["prompt_logprob_start"] == 1
+    assert params["prompt_logprob_token_ids"] == candidates.tolist()
+    assert params["max_tokens"] == 1 and params["temperature"] == 1.0 and params["detokenize"] is False
+    assert "prompt_logprobs" not in params
+    assert scoring_request([10, 11], candidates, topk=8)["sampling_params"]["prompt_logprobs"] == 8
+
+
+@pytest.mark.parametrize(
+    "response, message",
+    [
+        ({}, "no prompt_token_id_logprobs"),
+        ({"prompt_token_id_logprobs": _encode(np.zeros((2, 1)))}, r"expected \(2, 2\) scores, got \(2, 1\)"),
+        ({"prompt_token_id_logprobs": _encode([[-0.5, -1.0], [np.nan, -1.0]])}, "non-finite"),
+        ({"prompt_token_id_logprobs": _encode([[-0.5, np.inf], [-0.5, -1.0]])}, "non-finite"),
+        ({"prompt_token_id_logprobs": _encode([[-0.5, -np.inf], [-0.5, -1.0]])}, "non-finite"),
+    ],
+)
+def test_parse_scoring_response_rejects_malformed_answers(response, message):
+    candidates = np.array([[5, 6], [7, 8]], dtype=np.int32)
+    with pytest.raises(RuntimeError, match=message):
+        parse_scoring_response(response, [10], candidates)
+
+
+def test_parse_scoring_response_accepts_minus_inf_on_padding():
+    candidates = np.array([[5, -1]], dtype=np.int32)
+
+    scores = parse_scoring_response({"prompt_token_id_logprobs": _encode([[-0.5, -np.inf]])}, [10], candidates)
+
+    assert scores.logprobs.dtype == np.float32
+    assert scores.logprobs[0, 0] == -0.5 and np.isneginf(scores.logprobs[0, 1])
+    assert scores.topk_ids is None and scores.topk_logprobs is None
+
+
+def test_parse_scoring_response_reads_the_teachers_top_k_at_the_response_positions():
+    prompt, candidates = [10, 11], np.array([[51], [60]], dtype=np.int32)
+    response = {
+        "prompt_token_id_logprobs": _encode(_ranked_scores(candidates)),
+        "prompt_logprobs": _prompt_logprobs([10, 11, 51, 60], 2),
+    }
+
+    scores = parse_scoring_response(response, prompt, candidates, topk=2)
+
+    # Entries 2 and 3 predict the response tokens. Token 60, outside the top 2, rides along in vLLM's entry 3
+    # and is dropped; token 51 is in the top 2, so entry 2 holds exactly 2.
+    np.testing.assert_array_equal(scores.topk_ids, [[51, 50], [51, 50]])
+    np.testing.assert_allclose(scores.topk_logprobs, [[-0.1, -0.2], [-0.1, -0.2]], rtol=1e-6)
+    assert scores.topk_ids.dtype == np.int32 and scores.topk_logprobs.dtype == np.float32
+
+
+@pytest.mark.parametrize(
+    "prompt_logprobs, message",
+    [
+        (None, "no prompt_logprobs"),
+        ([None, {"51": {"logprob": -0.1}}], "for 3 tokens, got 2"),
+        ([None, {"51": {"logprob": -0.1}}, {"51": {"logprob": -0.1}}], "hold 2 tokens"),
+        (
+            [
+                None,
+                {"51": {"logprob": -0.1}, "50": {"logprob": -0.2}},
+                {"51": {"logprob": np.nan}, "50": {"logprob": 0}},
+            ],
+            "non-finite top-k",
+        ),
+    ],
+)
+def test_parse_scoring_response_rejects_a_missing_or_short_top_k(prompt_logprobs, message):
+    candidates = np.array([[51], [60]], dtype=np.int32)
+    response = {"prompt_token_id_logprobs": _encode(_ranked_scores(candidates)), "prompt_logprobs": prompt_logprobs}
+    with pytest.raises(RuntimeError, match=message):
+        parse_scoring_response(response, [10], candidates, topk=2)
+
+
+@pytest.mark.asyncio
+async def test_base_client_returns_the_teachers_top_k_only_when_asked():
+    teacher = RankedTeacher()
+    candidates = np.array([[51, 52], [60, -1]], dtype=np.int32)
+
+    plain = await teacher.compute_logprobs([1, 2], candidates)
+    ranked = await teacher.compute_logprobs([1, 2], candidates, topk=3)
+    empty = await teacher.compute_logprobs([1, 2], np.empty((0, 2), dtype=np.int32), topk=3)
+
+    assert plain.topk_ids is None and "prompt_logprobs" not in teacher.calls[0]["sampling_params"]
+    np.testing.assert_array_equal(ranked.topk_ids, [[51, 50, 52], [51, 50, 52]])
+    np.testing.assert_array_equal(ranked.logprobs, plain.logprobs)
+    assert empty.topk_ids.shape == (0, 3) and empty.topk_logprobs.shape == (0, 3)
+
+
+@pytest.mark.asyncio
+async def test_preflight_scores_one_token_at_the_width():
+    teacher = RankedTeacher()
+    await teacher.preflight(17)
+    await teacher.preflight(17, topk=16)
+    plain, ranked = teacher.calls
+    assert plain["token_ids"] == [0, 0] and _width(plain) == 17
+    assert "prompt_logprobs" not in plain["sampling_params"]
+    assert ranked["sampling_params"]["prompt_logprobs"] == 16
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [{}, RuntimeError("teacher HTTP 400: prompt_logprob_token_ids requires the V2 model runner")],
+)
+async def test_preflight_names_what_the_server_needs(response):
+    with pytest.raises(RuntimeError, match=r"teacher preflight failed: .*V2 model runner and --max-logprobs >= 17"):
+        await CannedTeacher(response).preflight(17)
+    with pytest.raises(RuntimeError, match=r"--max-logprobs >= 20"):
+        await CannedTeacher(response).preflight(1, topk=20)
 
 
 # ---------------------------------------------------------------------------
@@ -317,15 +497,43 @@ async def test_base_client_limits_concurrency():
 # ---------------------------------------------------------------------------
 
 
-def _vllm_response(prompt_len: int, ids: List[int], logprobs: List[float]) -> Dict[str, Any]:
-    """A vLLM completions choice with prompt_logprobs: None at position 0, then {id: {"logprob"}} per
-    token (JSON keys are strings). Each entry also carries an alternative, as a k>0 server would,
-    to show the lookup by sent id ignores extra entries."""
-    entries: List[Any] = [None] + [{"7": {"logprob": -9.0, "rank": 1}} for _ in range(prompt_len - 1)]
-    entries += [
-        {"7": {"logprob": -0.01, "rank": 1}, str(tid): {"logprob": lp, "rank": 2}} for tid, lp in zip(ids, logprobs)
-    ]
-    return {"choices": [{"text": "x", "logprobs": None, "prompt_logprobs": entries}]}
+class FakeResponse:
+    request_info = SimpleNamespace(real_url="http://router:9000/inference/v1/generate")
+    history = ()
+
+    def __init__(self, status, payload=None):
+        self.status, self.payload = status, payload
+
+    async def text(self):
+        return "busy" if self.status >= 500 else "bad request"
+
+    async def json(self):
+        return self.payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeSession:
+    closed = False
+
+    def __init__(self, responses: List[FakeResponse]):
+        self.urls: List[str] = []
+        self.responses = responses
+
+    def post(self, url, json):
+        self.urls.append(url)
+        return self.responses.pop(0)
+
+
+def _with_session(client: VLLMTeacherClient, session: FakeSession) -> None:
+    async def fake_get_session():
+        return session
+
+    client._get_session = fake_get_session  # type: ignore[method-assign]
 
 
 def test_vllm_client_rejects_missing_model_and_bad_url():
@@ -338,21 +546,21 @@ def test_vllm_client_rejects_missing_model_and_bad_url():
 
 
 @pytest.mark.asyncio
-async def test_vllm_request_and_parse():
+async def test_vllm_client_sends_the_scoring_request_with_its_model():
     client = VLLMTeacherClient("teacher", server_url="http://a:8000/")
     assert client.server_url == "http://a:8000"
     seen: Dict[str, Any] = {}
 
     async def fake_post(body):
         seen.update(body)
-        return _vllm_response(prompt_len=2, ids=[30, 31, 32], logprobs=[-0.5, -0.25, -0.125])
+        return _answer(body)
 
     client._post = fake_post  # type: ignore[method-assign]
-    out = await client.compute_logprobs([10, 11], [30, 31, 32])
+    candidates = np.array([[30, 7], [31, -1]], dtype=np.int32)
+    scores = await client.compute_logprobs([10, 11], candidates)
 
-    assert out == [-0.5, -0.25, -0.125]
-    assert seen["prompt"] == [10, 11, 30, 31, 32]
-    assert seen["model"] == "teacher" and seen["max_tokens"] == 1 and seen["prompt_logprobs"] == 0
+    np.testing.assert_array_equal(scores.logprobs, _id_scores(candidates))
+    assert seen == {**scoring_request([10, 11], candidates), "model": "teacher"}
 
 
 @pytest.mark.asyncio
@@ -360,64 +568,26 @@ async def test_vllm_client_retries_on_the_same_endpoint():
     # One endpoint per teacher: a retry backs off and goes to the same URL; balancing replicas is the
     # endpoint's (router's) job.
     client = VLLMTeacherClient("teacher", server_url="http://router:9000", max_retries=1)
+    session = FakeSession([FakeResponse(503), FakeResponse(200, {"prompt_token_id_logprobs": _encode([[-0.5]])})])
+    _with_session(client, session)
 
-    class FakeResponse:
-        request_info = SimpleNamespace(real_url="http://router:9000/v1/completions")
-        history = ()
+    scores = await client.compute_logprobs([10], np.array([[30]], dtype=np.int32))
 
-        def __init__(self, status, payload=None):
-            self.status, self.payload = status, payload
-
-        async def text(self):
-            return "busy"
-
-        async def json(self):
-            return self.payload
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-    class FakeSession:
-        closed = False
-
-        def __init__(self):
-            self.urls = []
-            self.responses = [FakeResponse(503), FakeResponse(200, _vllm_response(1, [30], [-0.5]))]
-
-        def post(self, url, json):
-            self.urls.append(url)
-            return self.responses.pop(0)
-
-    session = FakeSession()
-
-    async def fake_get_session():
-        return session
-
-    client._get_session = fake_get_session  # type: ignore[method-assign]
-    assert await client.compute_logprobs([10], [30]) == [-0.5]
-    assert session.urls == ["http://router:9000/v1/completions"] * 2
+    assert scores.logprobs.tolist() == [[-0.5]]
+    assert session.urls == ["http://router:9000/inference/v1/generate"] * 2
 
 
 @pytest.mark.asyncio
-async def test_vllm_wrong_token_id_and_short_response_raise():
-    client = VLLMTeacherClient("teacher", server_url="http://a:8000")
+async def test_vllm_client_does_not_retry_a_client_error():
+    # A 4xx is the server refusing the request, e.g. an id outside the teacher's vocabulary or a width
+    # above --max-logprobs; retrying cannot help.
+    client = VLLMTeacherClient("teacher", server_url="http://router:9000", max_retries=3)
+    session = FakeSession([FakeResponse(400)])
+    _with_session(client, session)
 
-    async def scored_a_different_token(body):
-        return _vllm_response(prompt_len=1, ids=[99], logprobs=[-1.0])  # we sent 30
-
-    client._post = scored_a_different_token  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="vocabulary may differ"):
-        await client.compute_logprobs([10], [30])
-
-    async def too_short(body):
-        return {"choices": [{"prompt_logprobs": [None]}]}
-
-    client._post = too_short  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="prompt logprobs"):
-        await client.compute_logprobs([10], [30])
+    with pytest.raises(RuntimeError, match="teacher HTTP 400 .*bad request"):
+        await client.compute_logprobs([10], np.array([[30]], dtype=np.int32))
+    assert len(session.urls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +682,17 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
             ["trainer.teacher.model=m", "trainer.teacher.inference_engine.speculative_config={method: mtp}"],
             "speculative_config does not apply",
         ),
+        (
+            ["trainer.teacher.model=m", "trainer.teacher.inference_engine.candidate_top_k=4"],
+            "candidate_top_k does not apply",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.teacher.inference_engine.enable_return_sample_support_logprobs=true",
+            ],
+            "enable_return_sample_support_logprobs does not apply",
+        ),
         (["trainer.teacher.model=m", "trainer.teacher.inference_engine.num_engines=0"], "at least one GPU"),
         (
             [
@@ -553,6 +734,71 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
             "are alternatives",
         ),
         (["trainer.teacher.model=m", "generator.step_wise_trajectories=true"], "step_wise"),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=16",
+                "trainer.algorithm.opd.topk_metrics.top_k=7",
+            ],
+            "at least 8",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=-1",
+            ],
+            "num_rows must be",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=16",
+                "trainer.algorithm.enable_sample_support_replay=true",
+                "generator.inference_engine.enable_return_sample_support_set=true",
+                "generator.sampling_params.top_k=8",
+            ],
+            "replay needs the sampler's own support",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=16",
+                "generator.sampling_params.top_k=50",
+            ],
+            "top_k=-1",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=16",
+                "generator.sampling_params.temperature=0.7",
+            ],
+            "temperature=1",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=16",
+                "generator.sampling_params.min_p=0.05",
+            ],
+            "min_p=0",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=16",
+                "generator.sampling_params.repetition_penalty=1.1",
+            ],
+            "repetition_penalty=1",
+        ),
+        (
+            [
+                "trainer.teacher.model=m",
+                "trainer.algorithm.opd.topk_metrics.num_rows=16",
+                "generator.vision_language_generator=true",
+            ],
+            "vision_language_generator",
+        ),
     ],
 )
 def test_validate_opd_cfg_rejects(overrides, message):
@@ -603,6 +849,28 @@ def test_validate_opd_cfg_accepts_zero_advantage_bounds():
             ]
         )
     )
+
+
+def test_validate_opd_cfg_turns_on_candidate_capture_for_the_top_k_metrics():
+    cfg = OPDExpConfig.from_cli_overrides(
+        [
+            "trainer.teacher.model=m",
+            "trainer.algorithm.opd.topk_metrics.num_rows=16",
+            "trainer.algorithm.opd.topk_metrics.top_k=12",
+        ]
+    )
+    validate_opd_cfg(cfg)
+    ie_cfg = cfg.generator.inference_engine
+    assert ie_cfg.enable_return_sample_support_set is True and ie_cfg.candidate_top_k == 12
+    assert ie_cfg.enable_return_sample_support_logprobs is True
+    assert teacher_logprob_width(cfg) == 1 and teacher_topk(cfg) == 12
+
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"])
+    validate_opd_cfg(cfg)
+    ie_cfg = cfg.generator.inference_engine
+    assert ie_cfg.enable_return_sample_support_set is False and ie_cfg.candidate_top_k is None
+    assert ie_cfg.enable_return_sample_support_logprobs is False
+    assert teacher_logprob_width(cfg) == 1 and teacher_topk(cfg) == 0
 
 
 def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo():
@@ -659,63 +927,81 @@ def test_teacher_start_port_is_past_the_students_windows(overrides, expected):
     assert _teacher_start_port(cfg) == expected
 
 
+@pytest.mark.parametrize(
+    "engine_cap, top_k, expected",
+    [(20, 0, 20), (20, 16, 20), (20, 32, 32), (64, 32, 64), (-1, 32, -1)],
+)
+def test_launched_teacher_raises_max_logprobs_to_the_scoring_width(monkeypatch, engine_cap, top_k, expected):
+    from skyrl.train.opd.teacher_launch import launch_teacher
+
+    # Parsed first: the config's own validation imports the real utils module.
+    overrides = ["trainer.teacher.model=m"]
+    if top_k:
+        overrides += [
+            "trainer.algorithm.opd.topk_metrics.num_rows=16",
+            f"trainer.algorithm.opd.topk_metrics.top_k={top_k}",
+        ]
+    cfg = OPDExpConfig.from_cli_overrides(overrides)
+    built = {}
+    # Stand-ins for the vLLM-side modules, which need vllm and vllm_router to import.
+    setup = types.ModuleType("setup")
+    utils = types.ModuleType("utils")
+
+    def fake_impl(ie_cfg, *, make_cli_args, **kwargs):
+        built["args"] = make_cli_args()
+        return "client", "server-setup"
+
+    setup.build_new_inference_client_impl = fake_impl
+    utils.build_frozen_vllm_cli_args = lambda model, ie_cfg, seed: Namespace(max_logprobs=engine_cap)
+    monkeypatch.setitem(sys.modules, "skyrl.backends.skyrl_train.inference_servers.setup", setup)
+    monkeypatch.setitem(sys.modules, "skyrl.backends.skyrl_train.inference_servers.utils", utils)
+
+    assert launch_teacher(cfg) == ("client", "server-setup")
+    assert built["args"].max_logprobs == expected
+
+
 class FakeRemoteInferenceClient:
     """The two RemoteInferenceClient methods SkyRLTeacherClient uses."""
 
-    def __init__(self, response):
-        self.response = response
-        self.payloads = []
-        self.torn_down = False
+    def __init__(self):
+        self.requests: List[Dict[str, Any]] = []
+        self.session_closed = False
 
-    async def sample(self, request_payload):
-        self.payloads.append(request_payload)
-        return self.response
+    async def score_tokens(self, request):
+        self.requests.append(request)
+        return _answer(request)
+
+    async def close_http_session(self):
+        self.session_closed = True
 
     async def teardown(self):
-        self.torn_down = True
+        raise AssertionError("the teacher closes only its HTTP session; teardown may one day stop more")
 
 
 @pytest.mark.asyncio
-async def test_skyrl_teacher_client_scores_through_sample():
-    client = FakeRemoteInferenceClient({"type": "sample", "sequences": [], "prompt_logprobs": [None, -0.5, -1.0, -2.0]})
+async def test_skyrl_teacher_client_scores_through_score_tokens():
+    client = FakeRemoteInferenceClient()
     teacher = SkyRLTeacherClient(client, server_setup="server-setup", max_concurrency=4)
     assert teacher.client is client
     assert teacher.server_setup == "server-setup"
+    candidates = np.array([[3, 9], [4, -1]], dtype=np.int32)
 
-    assert await teacher.compute_logprobs([1, 2], [3, 4]) == [-1.0, -2.0]
+    scores = await teacher.compute_logprobs([1, 2], candidates)
 
-    (payload,) = client.payloads
-    body = payload["json"]
-    assert body["prompt"] == {"chunks": [{"type": "encoded_text", "tokens": [1, 2, 3, 4]}]}
-    assert body["num_samples"] == 1
-    assert body["include_prompt_logprobs"] is True
-    assert body["sampling_params"] == {"max_tokens": 1, "temperature": 1.0}
-    assert "model" not in body  # resolved by the client to the name the servers were launched under
+    np.testing.assert_array_equal(scores.logprobs, _id_scores(candidates))
+    # score_tokens names the model the servers were launched under.
+    assert client.requests == [scoring_request([1, 2], candidates)]
 
+    # aclose also runs after the preflight, so it must leave the deployment up.
     await teacher.aclose()
-    assert client.torn_down
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "response, message",
-    [
-        ({"prompt_logprobs": None}, "no prompt_logprobs"),
-        ({"prompt_logprobs": [None, -0.5, -1.0]}, "3 prompt logprobs for 4 tokens"),
-        ({"prompt_logprobs": [None, -0.5, None, -2.0]}, "vocabulary may differ"),
-    ],
-)
-async def test_skyrl_teacher_client_rejects_malformed_answers(response, message):
-    teacher = SkyRLTeacherClient(FakeRemoteInferenceClient(response))
-    with pytest.raises(RuntimeError, match=message):
-        await teacher.compute_logprobs([1, 2], [3, 4])
+    assert client.session_closed
 
 
 def test_opd_exp_launches_the_teacher_for_the_skyrl_backend(monkeypatch):
     import skyrl.train.entrypoints.main_opd as main_opd
 
     cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=Qwen/Qwen3-32B", "trainer.teacher.max_concurrency=8"])
-    fake_client = FakeRemoteInferenceClient({})
+    fake_client = FakeRemoteInferenceClient()
     launched = []
 
     def fake_launch(launch_cfg):
@@ -731,6 +1017,41 @@ def test_opd_exp_launches_the_teacher_for_the_skyrl_backend(monkeypatch):
     assert teacher.client is fake_client
     assert launched == [cfg]
     assert teacher.server_setup == "server-setup"  # the client holds the deployment, keeping its actors alive
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_opd_exp_preflights_the_teacher_before_any_model_loads(monkeypatch, fails):
+    import skyrl.train.entrypoints.main_opd as main_opd
+
+    events: List[Any] = []
+
+    class ProbedTeacher(FakeTeacher):
+        async def preflight(self, width, topk):
+            events.append(("preflight", width, topk))
+            if fails:
+                raise RuntimeError("teacher preflight failed: no V2 runner")
+
+        async def aclose(self):
+            events.append("aclose")
+
+    monkeypatch.setattr(main_opd.OPDExp, "get_teacher_client", lambda self: ProbedTeacher())
+    monkeypatch.setattr(main_opd.BasePPOExp, "_setup_trainer", lambda self: events.append("setup") or "trainer")
+    exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
+    exp.cfg = OPDExpConfig.from_cli_overrides(
+        [
+            "trainer.teacher.model=m",
+            "trainer.algorithm.opd.topk_metrics.num_rows=16",
+            "trainer.algorithm.opd.topk_metrics.top_k=8",
+        ]
+    )
+
+    if fails:
+        with pytest.raises(RuntimeError, match="preflight failed"):
+            exp._setup_trainer()
+        assert events == [("preflight", 1, 8), "aclose"]
+    else:
+        assert exp._setup_trainer() == "trainer"
+        assert events == [("preflight", 1, 8), "aclose", "setup"]
 
 
 def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
@@ -809,6 +1130,21 @@ class FakeGenerator(GeneratorInterface):
         }
 
 
+class SupportFakeGenerator(FakeGenerator):
+    """Also returns each row's captured top-2 with sampler logprobs, as SkyRLGymGenerator does under capture.
+
+    The last token (EOS) has no captured members.
+    """
+
+    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        output = await super().generate(input_batch)
+        output[SAMPLE_SUPPORT_FIELD] = [
+            csr([[50, 51], [52, -1], [-1, -1]], logprobs=[[-0.5, -1.0], [-0.25, 0.0], [0.0, 0.0]])
+            for _ in output["response_ids"]
+        ]
+        return output
+
+
 class TqdmAwareFakeGenerator(FakeGenerator):
     """Takes disable_tqdm, like SkyRLGymGenerator.generate."""
 
@@ -823,6 +1159,7 @@ def _trainer(
     tokenizer=None,
     generator: Optional[GeneratorInterface] = None,
     teacher: Optional[TeacherLogprobClient] = None,
+    topk_rows: int = 0,
 ) -> OPDTrainer:
     cfg = OPDExpConfig()
     cfg.trainer.train_batch_size = 1  # prompts per batch; the two rows below share one uid
@@ -833,6 +1170,9 @@ def _trainer(
     cfg.generator.n_samples_per_prompt = 2
     cfg.trainer.algorithm.opd.use_task_reward = use_task_reward
     cfg.trainer.algorithm.opd.kl_coef = kl_coef
+    # Set directly, without validate_opd_cfg, so the fake generator's 2-wide capture can stand in for top_k >= 8.
+    cfg.trainer.algorithm.opd.topk_metrics.num_rows = topk_rows
+    cfg.trainer.algorithm.opd.topk_metrics.top_k = 2
     trainer = OPDTrainer(
         cfg=cfg,
         tracker=None,
@@ -889,12 +1229,154 @@ async def test_trainer_generate_scores_each_group_as_it_finishes(generator_cls, 
     if generator_cls is TqdmAwareFakeGenerator:
         assert generator.disable_tqdm is True
     assert out["response_ids"] == [[10, 20, 4], [10, 21, 4], [11, 20, 4], [11, 21, 4]]
-    assert out[TEACHER_LOGPROBS_KEY] == [[-t / 100.0 for t in row] for row in out["response_ids"]]
+    for logprobs, response_ids in zip(out[TEACHER_LOGPROBS_KEY], out["response_ids"]):
+        np.testing.assert_array_equal(logprobs, _id_scores(response_ids))
+    assert {_width(request) for request in teacher.calls} == {1}  # top_k=0 scores the sampled token only
     assert [tid.to_string() for tid in out["trajectory_ids"]] == ["0_0", "0_1", "1_0", "1_1"]
     assert "rollout_metrics" not in out
     assert trainer.all_metrics["generate/custom_avg"] == 2.0  # per-group metrics re-aggregated
     assert trainer.all_metrics["opd/teacher_time_exposed"] >= 0.0
     assert trainer.all_metrics["opd/teacher_time_per_group_mean"] >= 0.0
+
+
+def _topk_requests(teacher: FakeTeacher) -> Dict[tuple, Optional[int]]:
+    """Each scoring request's sequence, mapped to the top-k it asked of the teacher (None for none)."""
+    return {tuple(call["token_ids"]): call["sampling_params"].get("prompt_logprobs") for call in teacher.calls}
+
+
+@pytest.mark.asyncio
+async def test_trainer_topk_metrics_ask_the_selected_row_and_drop_the_capture(tokenizer):
+    teacher = RankedTeacher()
+    trainer = _trainer(
+        use_task_reward=False,
+        tokenizer=tokenizer,
+        generator=SupportFakeGenerator(),
+        teacher=teacher,
+        topk_rows=1,
+    )
+
+    out = await trainer.generate(_batch(1, 2, "train"))
+
+    # Every row scores its sampled tokens; only the selected row, the batch's first, asks for the teacher's own top-K.
+    assert {_width(request) for request in teacher.calls} == {1}
+    assert _topk_requests(teacher) == {(1, 0, 10, 20, 4): 2, (1, 0, 10, 21, 4): None}
+    np.testing.assert_array_equal(out[TEACHER_LOGPROBS_KEY][0], _ranked_scores([10, 20, 4]))
+    # The capture was for the metrics only, so the batch trains without it.
+    assert out.get(SAMPLE_SUPPORT_FIELD) is None
+    out, uids = trainer.postprocess_generator_output(out, ["0", "0"])
+    assert trainer.convert_to_training_input(out, uids).get(SAMPLE_SUPPORT_FIELD) is None
+
+
+@pytest.mark.asyncio
+async def test_trainer_logs_the_topk_metrics(tokenizer):
+    trainer = _trainer(
+        use_task_reward=False,
+        tokenizer=tokenizer,
+        generator=SupportFakeGenerator(),
+        teacher=RankedTeacher(),
+        topk_rows=1,
+    )
+
+    await trainer.generate(_batch(1, 2, "train"))
+    metrics = trainer.all_metrics
+
+    # Row 0 only. SupportFakeGenerator: t=0 holds 50 and 51 (log p -0.5, -1.0), t=1 holds 52 (-0.25), and the EOS
+    # nothing, so 2 positions count. RankedTeacher's top 2 is 51 (log q -0.1) and 50 (-0.2) at every position, so
+    # t=0 shares both tokens with the teacher and t=1 none.
+    e = math.exp
+    assert metrics["opd/overlap_positions"] == 2
+    assert metrics["opd/overlap_ratio"] == pytest.approx(0.5)
+    # Eq. 7 at t=0, over {50, 51}: both sides renormalized there, averaged over the 2 shared tokens.
+    p_bar = [e(-0.5) / (e(-0.5) + e(-1.0)), e(-1.0) / (e(-0.5) + e(-1.0))]
+    q_bar = [e(-0.2) / (e(-0.2) + e(-0.1)), e(-0.1) / (e(-0.2) + e(-0.1))]
+    advantage = sum(p * (math.log(q) - math.log(p)) for p, q in zip(p_bar, q_bar)) / 2
+    assert metrics["opd/overlap_token_advantage"] == pytest.approx(advantage)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "num_rows, asked_rows",
+    [
+        # 2 of 4 rows, evenly spaced: rows 0 and 2, the first rollout of each prompt's group.
+        (2, {(1, 0, 10, 20, 4), (1, 1, 11, 20, 4)}),
+        # More rows than the batch has: every row.
+        (16, {(1, 0, 10, 20, 4), (1, 0, 10, 21, 4), (1, 1, 11, 20, 4), (1, 1, 11, 21, 4)}),
+    ],
+)
+async def test_trainer_asks_the_selected_rows_across_groups(num_rows, asked_rows, tokenizer):
+    teacher = RankedTeacher()
+    trainer = _trainer(
+        use_task_reward=False,
+        tokenizer=tokenizer,
+        generator=SupportFakeGenerator(),
+        teacher=teacher,
+        topk_rows=num_rows,
+    )
+
+    await trainer.generate(_batch(2, 2, "train"))
+
+    asked = {sequence for sequence, topk in _topk_requests(teacher).items() if topk}
+    assert asked == asked_rows
+    assert trainer.all_metrics["opd/overlap_positions"] == 2 * len(asked_rows)  # 2 measured positions per row
+
+
+@pytest.mark.asyncio
+async def test_trainer_topk_metrics_need_a_generator_that_forwards_support(tokenizer):
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, generator=FakeGenerator(), topk_rows=1)
+    with pytest.raises(RuntimeError, match="opd.topk_metrics needs 'rollout_sample_support'"):
+        await trainer.generate(_batch(1, 2, "train"))
+
+
+class ShortSupportFakeGenerator(SupportFakeGenerator):
+    """Returns one support entry fewer than it returns responses."""
+
+    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        output = await super().generate(input_batch)
+        output[SAMPLE_SUPPORT_FIELD] = output[SAMPLE_SUPPORT_FIELD][:-1]
+        return output
+
+
+@pytest.mark.asyncio
+async def test_trainer_topk_metrics_refuse_support_that_does_not_cover_every_trajectory(tokenizer):
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, generator=ShortSupportFakeGenerator(), topk_rows=1)
+    with pytest.raises(ValueError, match="1 'rollout_sample_support' entries for 2 trajectories"):
+        await trainer.generate(_batch(1, 2, "train"))
+
+
+class ShortRowsFakeGenerator(SupportFakeGenerator):
+    """Returns support with one row fewer than each response has tokens."""
+
+    async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
+        output = await super().generate(input_batch)
+        output[SAMPLE_SUPPORT_FIELD] = [support[:2] for support in output[SAMPLE_SUPPORT_FIELD]]
+        return output
+
+
+@pytest.mark.asyncio
+async def test_trainer_topk_metrics_refuse_support_rows_that_do_not_cover_every_token(tokenizer):
+    trainer = _trainer(
+        use_task_reward=False,
+        tokenizer=tokenizer,
+        generator=ShortRowsFakeGenerator(),
+        teacher=RankedTeacher(),
+        topk_rows=1,
+    )
+    with pytest.raises(ValueError, match="2 support rows for 3 response tokens"):
+        await trainer.generate(_batch(1, 2, "train"))
+
+
+@pytest.mark.asyncio
+async def test_trainer_without_topk_metrics_leaves_a_generators_support_alone(tokenizer):
+    # Support captured for another purpose, such as replay, keeps its rows and scores only the sampled token.
+    teacher = FakeTeacher()
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, generator=SupportFakeGenerator(), teacher=teacher)
+
+    out = await trainer.generate(_batch(1, 2, "train"))
+
+    assert {_width(request) for request in teacher.calls} == {1}
+    assert set(_topk_requests(teacher).values()) == {None}
+    np.testing.assert_array_equal(dense(out[SAMPLE_SUPPORT_FIELD][0]), [[50, 51], [52, -1], [-1, -1]])
+    assert not any(key.startswith("opd/overlap") for key in trainer.all_metrics)
 
 
 @pytest.mark.asyncio

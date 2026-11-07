@@ -2,7 +2,9 @@
 
 - ``generate_on_input_batch`` runs one ``generator.generate`` call per prompt group concurrently and scores
   each group under the teacher as soon as its rollouts are back, so only the last groups to finish wait on the
-  teacher. The base ``generate`` then logs the rollout metrics and validates the output, as for any trainer.
+  teacher. With ``opd.topk_metrics`` on, the teacher also returns its own top-K on a few rows, which the overlap
+  metrics compare with the student's captured top-K; the captured rows are dropped after. The base ``generate``
+  then logs the rollout metrics and validates the output, as for any trainer.
 - ``postprocess_generator_output`` logs the truncation and repetition rates, records which rollouts are correct,
   and zeroes the rewards in pure mode, after their metrics are logged.
 - ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like ``rollout_logprobs``,
@@ -17,19 +19,26 @@ import inspect
 import time
 from typing import List, Optional, Tuple
 
+import numpy as np
 import torch
 from tqdm.asyncio import tqdm
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    CompactSampleSupport,
+)
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.utils import concatenate_generator_outputs
 from skyrl.train.opd.metrics import (
+    TopKStats,
     informativeness,
     is_repetitive,
     rollout_correct,
+    topk_stats,
     truncation_rate,
 )
-from skyrl.train.opd.teacher_client import TeacherLogprobClient
+from skyrl.train.opd.teacher_client import CandidateScores, TeacherLogprobClient
 from skyrl.train.opd.utils import (
     ROLLOUT_CORRECT_KEY,
     STUDENT_LOGPROB_FLOOR,
@@ -70,32 +79,68 @@ class OPDTrainer(RayPPOTrainer):
         if batch_metadata is not None and batch_metadata.training_phase != "train":
             return await super().generate_on_input_batch(input_batch)
 
-        groups = split_generator_input(input_batch, self.cfg.generator.n_samples_per_prompt)
+        group_size = self.cfg.generator.n_samples_per_prompt
+        groups = split_generator_input(input_batch, group_size)
+        topk_cfg = self.cfg.trainer.algorithm.opd.topk_metrics
+        # Rows the overlap metrics measure, by batch index, evenly spaced; every row when the batch is smaller.
+        # Group g holds rows g * group_size onward.
+        num_total_rows = len(input_batch["prompts"])
+        num_measured = min(topk_cfg.num_rows, num_total_rows)
+        topk_rows = {(i * num_total_rows) // num_measured for i in range(num_measured)}
         rollout_done_times: List[float] = []
         teacher_times: List[float] = []
+        topk_group_stats: List[TopKStats] = []
 
-        async def generate_and_score(group: GeneratorInput) -> GeneratorOutput:
+        async def generate_and_score(group_index: int, group: GeneratorInput) -> GeneratorOutput:
             output: GeneratorOutput = await self.generator.generate(group, **self._generate_kwargs)
             rollout_done = time.monotonic()
-            output[TEACHER_LOGPROBS_KEY] = list(
-                await asyncio.gather(
-                    *(
-                        self.teacher_client.compute_logprobs(prompt_ids, response_ids)
-                        for prompt_ids, response_ids in zip(output["prompt_token_ids"], output["response_ids"])
+            # The overlap metrics' capture is read here and never trained on, so it leaves the output.
+            supports = output.pop(SAMPLE_SUPPORT_FIELD, None) if topk_cfg.num_rows else None
+            if topk_cfg.num_rows and supports is None:
+                raise RuntimeError(
+                    f"opd.topk_metrics needs {SAMPLE_SUPPORT_FIELD!r} from the generator, which returned none"
+                )
+            responses = output["response_ids"]
+            if supports is not None and len(supports) != len(responses):
+                raise ValueError(f"{len(supports)} {SAMPLE_SUPPORT_FIELD!r} entries for {len(responses)} trajectories")
+            rows = [group_index * group_size + i for i in range(len(responses))]
+            scores = await asyncio.gather(
+                *(
+                    self.teacher_client.compute_logprobs(
+                        prompt_ids,
+                        np.asarray(response_ids, dtype=np.int32).reshape(-1, 1),
+                        topk=topk_cfg.top_k if row in topk_rows else 0,
                     )
+                    for row, prompt_ids, response_ids in zip(rows, output["prompt_token_ids"], responses, strict=True)
                 )
             )
+            output[TEACHER_LOGPROBS_KEY] = [score.logprobs[:, 0].tolist() for score in scores]
+            if supports is not None:
+                topk_group_stats.append(
+                    sum(
+                        (
+                            _row_topk_stats(support, score, loss_mask)
+                            for row, support, score, loss_mask in zip(
+                                rows, supports, scores, output["loss_masks"], strict=True
+                            )
+                            if row in topk_rows
+                        ),
+                        TopKStats(),
+                    )
+                )
             rollout_done_times.append(rollout_done)
             teacher_times.append(time.monotonic() - rollout_done)
             return output
 
         outputs = await tqdm.gather(
-            *(generate_and_score(group) for group in groups),
+            *(generate_and_score(group_index, group) for group_index, group in enumerate(groups)),
             desc="Generating and scoring groups",
             miniters=max(1, len(groups) // 10),
             mininterval=5,
         )
         done = time.monotonic()
+        if topk_group_stats:
+            self.all_metrics.update(sum(topk_group_stats, TopKStats()).metrics())
 
         self.all_metrics["opd/teacher_time_per_group_mean"] = (
             sum(teacher_times) / len(teacher_times) if teacher_times else 0.0
@@ -172,3 +217,12 @@ class OPDTrainer(RayPPOTrainer):
         data["advantages"] = advantages
         self.all_metrics.update(metrics)
         return data
+
+
+def _row_topk_stats(support: CompactSampleSupport, scores: CandidateScores, loss_mask: List[int]) -> TopKStats:
+    """One row's overlap sums. A token with no captured members (an appended EOS, an observation token) has no
+    student top-K and is left out."""
+    if len(support) != len(loss_mask):
+        raise ValueError(f"{len(support)} support rows for {len(loss_mask)} response tokens")
+    mask = np.asarray(loss_mask, dtype=bool) & (support.row_lengths > 0)
+    return topk_stats(support.candidate_grid(), support.logprob_grid(), scores.topk_ids, scores.topk_logprobs, mask)
