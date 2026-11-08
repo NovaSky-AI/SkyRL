@@ -723,6 +723,18 @@ def test_sample_support_capture_accepts_top_k_top_p_and_min_p():
     assert cfg.generator.inference_engine.enable_return_sample_support_set
 
 
+def test_sample_support_capture_accepts_ignore_eos():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.sampling_params.top_k=8",
+            "generator.sampling_params.additional_kwargs={ignore_eos: true}",
+        ]
+    )
+
+    assert cfg.generator.sampling_params.additional_kwargs == {"ignore_eos": True}
+
+
 def test_sample_support_capture_leaves_greedy_eval_sampling_params_alone():
     cfg = SkyRLTrainConfig.from_cli_overrides(
         [
