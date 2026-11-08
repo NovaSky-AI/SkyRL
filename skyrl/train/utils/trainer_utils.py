@@ -504,10 +504,8 @@ def handle_replace_sampling(
         if bad_indices:
             generator_output = slice_generator_output(generator_output, source_indices)
 
-        # Update UIDs accordingly
+        # Keep destination group IDs so copied prompts remain separate groups.
         replaced_uids = uids.copy()
-        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            replaced_uids[bad_idx] = uids[replacement_idx]
 
         logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
         logger.info("==================================================")
