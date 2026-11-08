@@ -1476,7 +1476,8 @@ class RayPPOTrainer:
             )
 
         # Empty cache after all forward passes
-        self.dispatch.empty_cache()
+        if self._empty_cache_between_phases():
+            self.dispatch.empty_cache()
 
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
@@ -1685,9 +1686,26 @@ class RayPPOTrainer:
         for k, v in policy_status.items():
             self.all_metrics.update({f"policy/{k}": v})
 
-        self.dispatch.empty_cache()
+        if self._empty_cache_between_phases():
+            self.dispatch.empty_cache()
 
         return policy_status
+
+    def _empty_cache_between_phases(self) -> bool:
+        """Whether to empty the workers' CUDA caches after the forward passes and after training.
+
+        Megatron follows the per-pass rule (``megatron_config.empty_cuda_cache``, resolved by
+        ``MegatronConfig.empty_cuda_cache_after_forward``): with ``empty_cuda_cache=None`` both are skipped under
+        ``trainer.use_expandable_segments``, whose allocator does not fragment, so an empty buys no headroom
+        inside the process while it releases every cached page to the driver (2.9 s per empty with ~130 GB
+        cached) and the next phase maps them again. A colocated trainer still empties when it offloads for the
+        inference engine (``WorkerDispatch._prepare_for_weight_sync``). Other strategies always empty.
+        """
+        if self.cfg.trainer.strategy != "megatron":
+            return True
+        return self.cfg.trainer.policy.megatron_config.empty_cuda_cache_after_forward(
+            self.cfg.trainer.use_expandable_segments
+        )
 
     def handle_dynamic_sampling(
         self, generator_output: GeneratorOutput, uids: List[str]
