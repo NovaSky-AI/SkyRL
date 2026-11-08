@@ -8,7 +8,7 @@ import ray
 import torch
 from typing import List, Optional, Tuple
 
-from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl.train.fully_async import FullyAsyncRayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
 from skyrl.train.entrypoints.main_base import BasePPOExp
 

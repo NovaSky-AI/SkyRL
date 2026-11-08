@@ -39,7 +39,7 @@ def test_ray_get_with_timeout_raises_requested_exception(monkeypatch):
     ("module_name", "class_name"),
     [
         ("skyrl.train.trainer", "RayPPOTrainer"),
-        ("skyrl.train.fully_async_trainer", "FullyAsyncRayPPOTrainer"),
+        ("skyrl.train.fully_async", "FullyAsyncRayPPOTrainer"),
         ("examples.train.async.async_trainer", "AsyncRayPPOTrainer"),
     ],
 )

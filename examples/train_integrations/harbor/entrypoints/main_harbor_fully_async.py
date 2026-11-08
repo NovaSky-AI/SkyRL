@@ -12,7 +12,7 @@ import sys
 import ray
 import yaml
 
-from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl.train.fully_async import FullyAsyncRayPPOTrainer
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 

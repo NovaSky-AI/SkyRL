@@ -11,25 +11,25 @@ from unittest.mock import AsyncMock
 import pytest
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from skyrl.train.fully_async_trainer import (
+from skyrl.train.fully_async import (
+    AsyncDataloader,
+    AsyncStalenessManager,
     FullyAsyncRayPPOTrainer,
     GeneratedOutputGroup,
-    _AsyncDataloader,
-    _AsyncStalenessManager,
 )
 from skyrl.train.utils.async_utils import BackgroundFailure
 
 
-def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
-    """Build an _AsyncDataloader over a trivial dataset of `num_prompts` single-prompt batches."""
+def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> AsyncDataloader:
+    """Build an AsyncDataloader over a trivial dataset of `num_prompts` single-prompt batches."""
     dataset = [[{"uid": str(i)}] for i in range(num_prompts)]
     # batch_size=1 (one prompt per draw) and identity collate so each batch is a list with one dict.
     loader = StatefulDataLoader(dataset, batch_size=1, collate_fn=lambda batch: batch[0])
-    return _AsyncDataloader(loader, mini_batch_size)
+    return AsyncDataloader(loader, mini_batch_size)
 
 
 # --------------------------------------------------------------------------------------
-# _AsyncStalenessManager
+# AsyncStalenessManager
 # --------------------------------------------------------------------------------------
 
 
@@ -40,7 +40,7 @@ async def test_staleness_manager_filter_restores_capacity():
     This is the deadlock regression: without reclassifying accepted -> filtered, dropped groups
     keep `accepted` climbing against a fixed staleness ceiling and starve the producers.
     """
-    mgr = _AsyncStalenessManager(max_concurrent_generation_groups=4, mini_batch_size=2, max_staleness_steps=1)
+    mgr = AsyncStalenessManager(max_concurrent_generation_groups=4, mini_batch_size=2, max_staleness_steps=1)
     # consumer_capacity = (max_staleness_steps + current_global_step) * mini_batch = (1 + 1) * 2 = 4.
     for _ in range(4):
         await mgr.acquire_submission_slot()
@@ -63,7 +63,7 @@ async def test_staleness_manager_filter_restores_capacity():
 @pytest.mark.asyncio
 async def test_staleness_manager_validate_epoch_end_with_filtered():
     """At epoch end, submitted == accepted + filtered and accepted == trained steps * mini_batch."""
-    mgr = _AsyncStalenessManager(max_concurrent_generation_groups=4, mini_batch_size=2, max_staleness_steps=1)
+    mgr = AsyncStalenessManager(max_concurrent_generation_groups=4, mini_batch_size=2, max_staleness_steps=1)
     # Submit and finish 4 groups; drop 2 of them, train on the remaining 2 (one step).
     for _ in range(4):
         await mgr.acquire_submission_slot()
@@ -78,7 +78,7 @@ async def test_staleness_manager_validate_epoch_end_with_filtered():
 
 
 # --------------------------------------------------------------------------------------
-# _AsyncDataloader
+# AsyncDataloader
 # --------------------------------------------------------------------------------------
 
 

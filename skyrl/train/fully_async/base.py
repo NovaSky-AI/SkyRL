@@ -1,27 +1,43 @@
-"""
-Implementation of fully async training in SkyRL.
+"""Shared training loop for trainers that stream rollouts one group at a time.
 
 For details, see https://docs.skyrl.ai/docs/tutorials/fully_async.
+
+:class:`BaseFullyAsyncTrainer` owns everything that does not depend on where the inference
+engines live: the generation workers, the completed-group buffer, mini-batch collection,
+conversion to a training batch, checkpointing with consumed UIDs, metrics and the epoch
+bookkeeping. A subclass supplies the policy that does depend on it through a few hooks:
+
+- :meth:`_build_admission_controller`: when a worker may submit the next group (a staleness
+  budget for the disaggregated fully-async trainer; a cut fraction of the mini-batch for a
+  colocated partial-rollout trainer).
+- :meth:`_generation_buffer_maxsize`: the bound on completed groups the controller can have
+  buffered ahead of training.
+- :meth:`_validate_mode_config`: placement and capacity assertions.
+- :meth:`_before_training_step`: what happens to the engines before training (nothing when
+  generation keeps running on its own GPUs; pause-and-sleep when they share the trainer's).
+- :meth:`_sync_weights_after_training_step`: the weight-sync bracket (default: pause,
+  broadcast, resume); a colocated subclass wakes the engines and resubmits held requests.
+- :meth:`_after_training_loop`: engine teardown once training is done.
 
 High-level notes:
 - The global_step in each training loop iteration denotes the "current step being worked on", so
 `global_step - 1` is the number of steps the model has finished training.
 - We do not do any cross-epoch asynchrony here, so all the control logics like
   generation workers and data buffer are initialized per-epoch. The async dataloader
-  and staleness manager are also reset / validated at the end of each epoch.
+  and admission controller are also reset / validated at the end of each epoch.
 """
 
 import asyncio
+import enum
 import inspect
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
-from typing import Any, Iterable, List, Optional, Set, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Any, List, Optional, Set, Tuple
 
 import torch
 from loguru import logger
-from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
@@ -33,6 +49,9 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     LOSSES_WITH_OLD_LOGPROBS,
     PolicyLossType,
 )
+from skyrl.train.fully_async.admission import RolloutAdmissionController
+from skyrl.train.fully_async.dataloader import AsyncDataloader
+from skyrl.train.fully_async.group import GeneratedOutputGroup
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
@@ -53,286 +72,50 @@ from skyrl.train.utils.trainer_utils import (
 )
 
 
-@dataclass
-class GeneratedOutputGroup:
-    """
-    The GeneratorOutput for a single group of rollouts, along with the metadata.
+class _StepOutcome(enum.Enum):
+    """What the step loop does after one iteration of :meth:`BaseFullyAsyncTrainer._run_step`."""
 
-    Attributes:
-        generator_output (GeneratorOutput): The GeneratorOutput for a single group of rollouts.
-            That is, the output to the same prompt, but `n_samples_per_prompt` of it.
-
-        uid (str): The uid of the group. Underlyingly, it is the index of the data in train_dataloader.dataset.
-
-        global_step_when_scheduled (int): The global step when the group was scheduled for generation,
-            used for validating the staleness control.
-
-        group_completion_time_s (Optional[float]): Wall-clock time (seconds) for the whole group to
-            finish generation, i.e. the time for the slowest trajectory in the group to complete.
-            None if generation timing was not captured.
-
-        prompts (Optional[List[Any]]): The generator input prompts (in OpenAI message format) for this
-            group, one per trajectory (parallel to ``generator_output["response_ids"]``). Retained so
-            the trajectory logger can render prompt + response, mirroring the synchronous trainer which
-            logs ``generator_input["prompts"]``. None if not captured.
-    """
-
-    generator_output: GeneratorOutput
-    uid: str
-    global_step_when_scheduled: int
-    group_completion_time_s: Optional[float] = None
-    prompts: Optional[List[Any]] = None
+    CONTINUE = "continue"
+    EPOCH_EXHAUSTED = "epoch_exhausted"
+    STOP_TRAINING = "stop_training"
 
 
 @dataclass
-class _RolloutStat:
-    """
-    Global statistics of the trajectories used for staleness control in `_AsyncStalenessManager`.
+class _EpochGeneration:
+    """The generation side of one epoch: the worker tasks and the buffer they fill."""
 
-    Note that these statistics are not per-epoch, but accumulates across all epochs.
+    buffer: asyncio.Queue
+    failure: BackgroundFailure
+    all_generators_done: asyncio.Event
+    generator_tasks: List[asyncio.Task] = field(default_factory=list)
+    generators_done_watcher: Optional[asyncio.Task] = None
 
-    Attributes:
-        submitted (int): The number of trajectories submitted to all generation workers, only used
-            for logging purposes (e.g. compute submitted / accepted ratio to see how many
-            trajectories failed). This is strictly increasing.
-        accepted (int): The number of trajectories finished generation that will be trained on (either
-            already consumed by, or about to be consumed by the training worker). This is strictly
-            increasing in the absence of filtering; ``on_rollout_filtered`` decrements it when an
-            already-generated group is dropped from training (see ``sample_full_batch``).
-        running (int): The number of trajectories currently being generated by the generation workers.
-        filtered (int): The number of finished trajectories that were dropped from training (e.g.
-            zero-variance groups under ``sample_full_batch``). This is strictly increasing. The
-            invariant ``submitted == accepted + filtered + running`` always holds.
+    def background_tasks(self) -> List[asyncio.Task]:
+        tasks = [*self.generator_tasks]
+        if self.generators_done_watcher is not None:
+            tasks.append(self.generators_done_watcher)
+        return tasks
 
-    For details, see https://docs.skyrl.ai/docs/tutorials/fully_async#async-staleness-manager
-    """
-
-    submitted: int = 0
-    accepted: int = 0
-    running: int = 0
-    filtered: int = 0
+    async def stop(self) -> None:
+        """Cancel the workers and the watcher, wait for them, then re-raise a recorded worker failure."""
+        for t in self.generator_tasks:
+            t.cancel()
+        await asyncio.gather(*self.generator_tasks, return_exceptions=True)
+        if self.generators_done_watcher is not None:
+            self.generators_done_watcher.cancel()
+            await asyncio.gather(self.generators_done_watcher, return_exceptions=True)
+        self.failure.raise_if_failed()
 
 
-class _AsyncStalenessManager:
-    """
-    A controller that manages the capacity of the generation workers based on staleness control.
-
-    The goal is to never submit more trajectories to the generation workers than the training worker
-    can consume, so that the trajectories are not too stale (relative to max_staleness_steps).
-    This is enforced via a capacity rule, not a hard **per-group** staleness guarantee: we bound
-    the **aggregate** number of groups that can be ahead of training so that, in **steady state**,
-    staleness remains within the configured budget of `max_staleness_steps`.
-
-    In pathological cases (e.g., very long-running trajectories), an individual group may take
-    more than `max_staleness_steps` of training steps of time to finish generation. For such rare
-    cases, we still accept the trajectory and log the staleness metrics with a warning.
-
-    The key capacity formula is implemented in `_compute_capacity_unlocked`. For details and caveats,
-    see https://docs.skyrl.ai/docs/tutorials/fully_async#async-staleness-manager.
-
-    Reference:
-    - Modeled after AReal's StalenessManager: https://github.com/inclusionAI/AReaL/blob/b755c4447c2fff97889d8828293ee85f17a806f9/areal/core/staleness_manager.py
-    - The idea of this controller is from section 5.1 of AReal's paper: https://arxiv.org/pdf/2505.24298v3
-    """
-
-    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int, max_staleness_steps: int):
-        self.max_concurrent_generation_groups = max_concurrent_generation_groups
-        self.mini_batch_size = mini_batch_size
-        self.max_staleness_steps = max_staleness_steps
-
-        # Control logics.
-        self._stat = _RolloutStat()
-        self._cond = asyncio.Condition()
-
-        # The current version that is being worked on, i.e. FullyAsyncRayPPOTrainer.global_step.
-        # `self._current_global_step - 1` is the number of steps the model has finished training.
-        self._current_global_step = 1
-
-    def load_state_from_checkpoint(self, global_step: int) -> None:
-        """
-        Load the state from a checkpoint.
-        """
-        self._current_global_step = global_step
-        # trainer has already consumed (and hence submitted) this many trajectories.
-        self._stat.accepted = (global_step - 1) * self.mini_batch_size
-        self._stat.submitted = self._stat.accepted
-
-    async def validate_state_at_epoch_end(self, global_step: int) -> None:
-        """
-        Check that the current version and accepted rollouts are consistent with the global step.
-
-        Args:
-            global_step: The global step we are about to train on (after incrementing).
-        """
-        async with self._cond:
-            assert self._stat.running == 0, "We expect no rollouts are running at end of an epoch."
-            consumed = (global_step - 1) * self.mini_batch_size
-            assert (
-                self._stat.accepted == consumed
-            ), f"Unexpected number of accepted rollouts. Got {self._stat.accepted} != {consumed}."
-            assert (
-                self._current_global_step == global_step
-            ), f"Unexpected current version. Got {self._current_global_step} != {global_step}."
-            # All submitted rollouts must have finished as either accepted (trained) or filtered (dropped).
-            assert self._stat.submitted == self._stat.accepted + self._stat.filtered, (
-                "We expect all submitted rollouts to be accepted or filtered at end of an epoch. "
-                f"Got {self._stat.submitted} != {self._stat.accepted} + {self._stat.filtered}."
-            )
-
-    def _compute_capacity_unlocked(self) -> int:
-        # NOTE(Charlie): do not need a self._current_global_step + 1 here unlike AReal because our
-        # `_current_global_step` is "the version being worked on", not already finished steps.
-        consumer_capacity = (self.max_staleness_steps + self._current_global_step) * self.mini_batch_size
-        producer_staleness_capacity = consumer_capacity - (self._stat.accepted + self._stat.running)
-        producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
-        return min(producer_concurrency_capacity, producer_staleness_capacity)
-
-    async def acquire_submission_slot(self) -> None:
-        """Block until there is capacity, then reserve a slot (increments submitted and running).
-
-        This method always uses the latest current version tracked internally, which is
-        updated by `notify_capacity_change(new_global_step)`.
-        """
-        async with self._cond:
-            while self._compute_capacity_unlocked() <= 0:
-                await self._cond.wait()
-            # Reserve slot
-            self._stat.submitted += 1
-            self._stat.running += 1
-
-    async def on_rollout_accepted(self) -> None:
-        async with self._cond:
-            self._stat.accepted += 1
-            self._stat.running -= 1
-            self._cond.notify_all()
-
-    async def on_rollout_filtered(self) -> None:
-        """Reclassify an already-accepted group as filtered when it is dropped from training.
-
-        Without this, dropped groups keep counting toward ``accepted`` while ``current_global_step``
-        only advances on trained steps, shrinking producer capacity on every drop -> deadlock.
-        """
-        async with self._cond:
-            self._stat.accepted -= 1
-            self._stat.filtered += 1
-            self._cond.notify_all()
-
-    async def on_rollout_rejected(self) -> None:
-        """
-        Called when a generation is not accepted, or generation worker runs into error while generating a trajectory.
-
-        Currently, we do not call this method but instead raise errors. We might need to use this when we want to
-        filter out trajectories.
-        """
-        async with self._cond:
-            self._stat.running -= 1
-            self._cond.notify_all()
-
-    async def notify_capacity_change(self, new_global_step: int) -> None:
-        # Called when current_global_step changes (e.g., after a training step)
-        async with self._cond:
-            self._current_global_step = int(new_global_step)
-            self._cond.notify_all()
-
-
-class _AsyncDataloader:
-    """
-    A train dataloader wrapper that accommodates the need of fully async training, including:
-    - Thread-safe dataloader iteration with a lock, as there are multiple parallel generation workers polling data.
-    - Records consumed data UIDs for checkpointing to avoid training on the same data upon resuming.
-    - Set the effective dataloader length to be divisible by mini-batch size, since we cannot rely on `drop_last`
-      because the batch size is 1 in fully async training.
-    """
-
-    def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int):
-        self._train_dataloader = train_dataloader
-        self._train_dataloader_initial_state = train_dataloader.state_dict()
-        self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
-        self._iter = enumerate(self._train_dataloader)
-        self._lock: asyncio.Lock = asyncio.Lock()
-        # `_consumed_data_uids` = do-not-redraw set (trained ∪ filtered); `_filtered_data_uids` =
-        # the dropped (not trained) subset. Both persisted so dropped prompts aren't regenerated on
-        # resume; trained count is `len(consumed) - len(filtered)`.
-        self._consumed_data_uids: Set[str] = set()
-        self._filtered_data_uids: Set[str] = set()
-        self._exhausted: bool = False  # currently not used.
-
-    def load_state_from_checkpoint(
-        self, consumed_data_uids_set: Set[str], filtered_data_uids_set: Optional[Set[str]] = None
-    ) -> None:
-        """
-        Load the state from a checkpoint.
-        """
-        self._consumed_data_uids = consumed_data_uids_set
-        self._filtered_data_uids = filtered_data_uids_set if filtered_data_uids_set is not None else set()
-
-        # Reset in case the dataloader loaded the state from the checkpoint, which we do not want.
-        self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)
-
-    async def reset_at_epoch_end(self) -> None:
-        async with self._lock:
-            self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
-            self._iter = enumerate(self._train_dataloader)
-            self._consumed_data_uids.clear()
-            self._filtered_data_uids.clear()
-            self._exhausted = False
-
-    async def get_next_non_consumed_data(self):
-        """
-        Return the next batch of training data.
-
-        If we loaded from a checkpoint, it will skip the already-consumed data. Returns None if the dataloader is exhausted.
-        """
-        assert self._iter is not None and self._lock is not None, "Dataloader not initialized; call reset() first"
-        async with self._lock:
-            try:
-                while True:
-                    # Keep polling until we get a non-consumed data or the dataloader is exhausted.
-                    iter_idx, rand_prompts = next(self._iter)
-                    if iter_idx >= self._effective_dataloader_length:
-                        raise StopIteration
-                    uid = rand_prompts[0]["uid"]
-                    if uid not in self._consumed_data_uids:
-                        return rand_prompts
-            except StopIteration:
-                self._exhausted = True
-                return None
-
-    async def mark_consumed_uids(self, uids: Iterable[str]) -> None:
-        """Mark UIDs as trained on (and hence consumed)."""
-        assert self._lock is not None, "Dataloader not initialized; call reset() first"
-        async with self._lock:
-            for uid in uids:
-                assert uid not in self._consumed_data_uids, "Duplicate UID found in mini-batch"
-                self._consumed_data_uids.add(uid)
-
-    async def mark_filtered_uids(self, uids: Iterable[str]) -> None:
-        """Mark UIDs as dropped (not trained on): added to the do-not-redraw set and recorded as
-        filtered so they are skipped on resume and excluded from the trained-step count."""
-        assert self._lock is not None, "Dataloader not initialized; call reset() first"
-        async with self._lock:
-            for uid in uids:
-                assert uid not in self._consumed_data_uids, "Duplicate UID found in mini-batch"
-                self._consumed_data_uids.add(uid)
-                self._filtered_data_uids.add(uid)
-
-    def get_consumed_uids_list(self) -> List[str]:
-        return list(self._consumed_data_uids)
-
-    def get_filtered_uids_list(self) -> List[str]:
-        return list(self._filtered_data_uids)
-
-    def num_trained(self) -> int:
-        """Number of UIDs consumed by training (excludes filtered/dropped UIDs)."""
-        return len(self._consumed_data_uids) - len(self._filtered_data_uids)
-
-
-class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+class BaseFullyAsyncTrainer(RayPPOTrainer):
+    """Streams rollouts one group at a time through ``num_parallel_generation_workers`` workers and
+    trains on every ``policy_mini_batch_size`` completed groups. See the module docstring for the
+    hooks a subclass implements."""
 
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)
-        assert cfg is not None, "cfg must be provided to FullyAsyncRayPPOTrainer"
+        assert cfg is not None, f"cfg must be provided to {type(self).__name__}"
 
         # Initialize async-specific knobs
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
@@ -342,25 +125,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         self._phase_gauge = TrainingPhaseGauge()
 
-        self._gen_buffer_maxsize = self.mini_batch_size * (self.max_staleness_steps + 1)
+        self._gen_buffer_maxsize = self._generation_buffer_maxsize()
         self._loop_gauges = ScalarGauges()
         self._loop_gauges.set(
             "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
         )
         self._loop_gauges.set(
             "skyrl_gen_buffer_maxsize", self._gen_buffer_maxsize, "Staleness-bounded generation-buffer capacity."
-        )
-
-        assert (
-            # otherwise wasted throughput
-            self.mini_batch_size <= self.num_parallel_generation_workers
-            and
-            # otherwise would never use all workers due to capacity constraint
-            self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
-        ), (
-            "Invalid num_parallel_generation_workers, the following must hold: "
-            "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
-            f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
         )
 
         # Initialize base trainer
@@ -384,8 +155,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
-        # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
-        assert not self.colocate_all, "colocate_all is not supported for async training yet."
         # Ensure we're using a policy loss that doesn't depend on pi_old ~= pi_rollout
         loss_type = self.cfg.trainer.algorithm.policy_loss_type
         if loss_type == PolicyLossType.CISPO and self.cfg.trainer.algorithm.cispo.cispo_anchor == "rollout":
@@ -398,16 +167,63 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "rollout logprobs (i.e. rollout_is, dppo, reinforce, or cispo with cispo.cispo_anchor='rollout') instead "
             "of recomputing logprobs, since stale policies are not kept for logprob computation."
         )
+        self._validate_mode_config()
 
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
         # Async-specific states
-        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size)
-        self._staleness_manager = _AsyncStalenessManager(
-            max_concurrent_generation_groups=self.num_parallel_generation_workers,
-            mini_batch_size=self.mini_batch_size,
-            max_staleness_steps=self.max_staleness_steps,
-        )
+        self.async_train_dataloader = AsyncDataloader(self.train_dataloader, self.mini_batch_size)
+        self._admission_controller = self._build_admission_controller()
+
+    # ------------------------------------------------------------------
+    # Hooks. See the module docstring for which trainer overrides what.
+    # ------------------------------------------------------------------
+
+    def _generation_buffer_maxsize(self) -> int:
+        """Upper bound on completed groups buffered ahead of training. Called before the base
+        trainer is initialized, so only ``self.mini_batch_size``, ``self.max_staleness_steps`` and
+        ``self.num_parallel_generation_workers`` are available."""
+        raise NotImplementedError
+
+    def _build_admission_controller(self) -> RolloutAdmissionController:
+        """The policy deciding when a generation worker may submit the next group."""
+        raise NotImplementedError
+
+    def _validate_mode_config(self) -> None:
+        """Placement and capacity assertions specific to one trainer. Runs after the base trainer is
+        initialized, with ``self.cfg`` and ``self.colocate_all`` set."""
+
+    async def _before_training_step(self) -> None:
+        """Runs once the mini-batch is collected, before the forward/backward pass. Default: nothing;
+        generation keeps running on its own GPUs."""
+
+    async def _sync_weights_after_training_step(self) -> None:
+        """Push the new policy to the inference engines. The default brackets the transfer with the
+        dispatch's own pause and resume of generation."""
+        async with self._weight_sync_deadline():
+            with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
+                await self.dispatch.save_weights_for_sampler()
+        # `sync_weights` above is the full bracket: it also pauses and
+        # resumes generation, which under vLLM DP costs seconds of
+        # coordinator quiesce that is not weight-sync work. The
+        # dispatch reports the transfer on its own alongside it.
+        self.all_timings.update(self.dispatch.get_timing_metrics())
+
+    async def _after_training_loop(self) -> None:
+        """Runs after the last epoch, before the final checkpoint. Default: nothing."""
+
+    # ------------------------------------------------------------------
+    # Compatibility aliases.
+    # ------------------------------------------------------------------
+
+    @property
+    def _staleness_manager(self) -> RolloutAdmissionController:
+        """Former name of :attr:`_admission_controller`."""
+        return self._admission_controller
+
+    # ------------------------------------------------------------------
+    # Shared loop.
+    # ------------------------------------------------------------------
 
     def _build_callback_input(self, **fields) -> CallbackInput:
         """The base trainer's input, with ``steps_per_epoch`` in training steps (mini-batches).
@@ -418,7 +234,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
-        Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
+        Overrides to build dataloader for fully async training. See `AsyncDataloader` for more details.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
@@ -429,14 +245,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
 
-    async def train(self):
-        """
-        Main fully async training loop for PPO
-        """
-        self.global_step = 0
-        self.epoch = 0
-        resumed_start_epoch = None
+    def _load_resume_state(self) -> Optional[int]:
+        """Restore global_step, the consumed UIDs and the admission controller from a checkpoint.
 
+        Returns the epoch to resume in, or None when starting fresh.
+        """
+        resumed_start_epoch = None
         # Load checkpoint state if resumption is enabled. Also load the data UIDs that are already trained on.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
@@ -449,11 +263,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 ) = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
                 if self.global_step > 0:
-                    # Set async dataloader manager and staleness manager to the loaded state.
+                    # Set async dataloader manager and admission controller to the loaded state.
                     self.async_train_dataloader.load_state_from_checkpoint(
                         loaded_consumed_data_uids_set, loaded_filtered_data_uids_set
                     )
-                    self._staleness_manager.load_state_from_checkpoint(
+                    self._admission_controller.load_state_from_checkpoint(
                         self.global_step + 1
                     )  # +1 due to we haven't incremented yet
                     # Only trained UIDs map to completed steps (filtered UIDs are extra consumption),
@@ -468,6 +282,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     resumed_start_epoch = (
                         loaded_epoch if loaded_epoch is not None else self.global_step // self.num_steps_per_epoch
                     )
+        return resumed_start_epoch
+
+    async def train(self):
+        """
+        Main fully async training loop for PPO
+        """
+        self.global_step = 0
+        self.epoch = 0
+        resumed_start_epoch = self._load_resume_state()
 
         # Initialize weight sync state
         async with self._weight_sync_deadline(), Timer("init_weight_sync_state"):
@@ -504,243 +327,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step += 1  # start training at global_step 1
         stop_training = False
         self._profiler_start()
-        generator_tasks: List[asyncio.Task] = []
-        generators_done_watcher: Optional[asyncio.Task] = None
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
-                self.epoch = epoch
-                self._current_epoch = epoch
-                self._fire("on_epoch_start")
-                # 0. Per-epoch prologue. Note that we do not do any cross-epoch asynchrony here.
-
-                # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
-                generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize)
-                # First generation-worker exception; consumers waiting on the buffer raise it.
-                generation_failure = BackgroundFailure()
-
-                # Maintain self.num_parallel_generation_workers concurrent group-generation workers
-                generator_tasks = [
-                    asyncio.create_task(
-                        self._run_generate_for_a_group_loop(generation_output_group_buffer, generation_failure)
-                    )
-                    for _ in range(self.num_parallel_generation_workers)
-                ]
-
-                # Lets the consumer detect epoch exhaustion (all generators done + buffer empty) instead of
-                # blocking forever on buffer.get() -- under sample_full_batch, drops can exhaust an epoch
-                # before num_steps_per_epoch steps complete.
-                all_generators_done = asyncio.Event()
-                generators_done_watcher = None
-                if self.sample_full_batch:
-                    generators_done_watcher = asyncio.create_task(
-                        self._watch_generators_done(generator_tasks, all_generators_done, generation_failure)
-                    )
-
-                # Steps trained in THIS epoch (not global_step % num_steps_per_epoch: sample_full_batch can
-                # end an epoch early, drifting global_step out of epoch alignment). On resume the dataloader
-                # already reflects this epoch's trained steps. The range below is just an upper bound.
-                trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
-                for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                    async with self._step_deadline(), Timer("step", self.all_timings):
-                        self._loop_gauges.set(
-                            "skyrl_gen_buffer_qsize",
-                            generation_output_group_buffer.qsize(),
-                            "Completed generation groups buffered at step start.",
-                        )
-
-                        # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
-                        # sample_full_batch).
-                        (
-                            cur_generation_group_mini_batch,
-                            cur_dropped_groups,
-                            epoch_exhausted,
-                        ) = await self._collect_generation_mini_batch(
-                            generation_output_group_buffer, all_generators_done, generation_failure
-                        )
-
-                        if epoch_exhausted:
-                            # Exhausted mid mini-batch: discard the partial batch (marked consumed so it
-                            # isn't regenerated on resume) and end the epoch early.
-                            if cur_generation_group_mini_batch:
-                                for _ in cur_generation_group_mini_batch:
-                                    await self._staleness_manager.on_rollout_filtered()
-                                await self.async_train_dataloader.mark_filtered_uids(
-                                    [g.uid for g in cur_generation_group_mini_batch]
-                                )
-                                logger.warning(
-                                    f"sample_full_batch: epoch {epoch} exhausted with a partial mini-batch of "
-                                    f"{len(cur_generation_group_mini_batch)} group(s); discarding and ending the epoch."
-                                )
-                            # Save the end-of-epoch checkpoint the normal is_epoch_end path would have, since
-                            # we break before reaching it.
-                            if self.cfg.trainer.ckpt_interval > 0:
-                                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                                    ckpt_path = await asyncio.to_thread(self.save_checkpoints)
-                                self._fire("on_save", ckpt_path=ckpt_path)
-                            if self.cfg.trainer.hf_save_interval > 0:
-                                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                                    await asyncio.to_thread(self.save_models)
-                            break
-
-                        self._fire("on_step_start")
-
-                        if self.sample_full_batch:
-                            # The collect loop returns exactly mini_batch_size kept groups here.
-                            num_dropped = len(cur_dropped_groups)
-                            keep_rate = self.mini_batch_size / (self.mini_batch_size + num_dropped)
-                            self.all_metrics["async/num_groups_dropped"] = num_dropped
-                            self.all_metrics["async/keep_rate"] = keep_rate
-                            self._loop_gauges.set(
-                                "skyrl_gen_group_keep_rate",
-                                keep_rate,
-                                "Fraction of drained groups kept while collecting the last mini-batch.",
-                            )
-
-                        # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
-                        with self._phase_gauge.timed_phase("convert_to_training_input", self.all_timings):
-                            training_input = await asyncio.to_thread(
-                                self.convert_generation_group_mini_batch_to_training_input,
-                                cur_generation_group_mini_batch,
-                                cur_dropped_groups,
-                            )
-
-                        # 3. Run training and update consumed UIDs.
-                        with self._phase_gauge.timed_phase("run_training", self.all_timings):
-                            status = await self._run_training(training_input)
-                            await self.async_train_dataloader.mark_consumed_uids(
-                                [g.uid for g in cur_generation_group_mini_batch]
-                            )
-                        self._fire("on_step_end", batch=training_input, metrics=status)
-
-                        # Capture callback-driven triggers, then reset.
-                        force_save = self._training_control.should_save
-                        force_eval = self._training_control.should_evaluate
-                        self._training_control.should_save = False
-                        self._training_control.should_evaluate = False
-
-                        # 4. After training: pause generation, sync weights, resume.
-                        async with self._weight_sync_deadline():
-                            with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
-                                await self.dispatch.save_weights_for_sampler()
-                        # `sync_weights` above is the full bracket: it also pauses and
-                        # resumes generation, which under vLLM DP costs seconds of
-                        # coordinator quiesce that is not weight-sync work. The
-                        # dispatch reports the transfer on its own alongside it.
-                        self.all_timings.update(self.dispatch.get_timing_metrics())
-
-                    # A training step completed: count it for this epoch's bookkeeping.
-                    trained_steps_this_epoch += 1
-
-                    # One profiler step per async global step.
-                    self._profiler_step()
-
-                    # 5. Set logs for this training step.
-                    logger.info(status)
-                    self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                    pbar.update(1)
-
-                    # 6. Eval. At interval and at the last step.
-                    # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
-                    interval_eval = self.cfg.trainer.eval_interval > 0 and (
-                        self.global_step % self.cfg.trainer.eval_interval == 0
-                        or self.global_step == self.total_training_steps
-                    )
-                    if force_eval or interval_eval:
-                        self._fire("on_eval_start")
-                        with self._phase_gauge.timed_phase("eval", self.all_timings):
-                            eval_metrics = await self.eval()
-                            self.all_metrics.update(eval_metrics)
-                        self._fire("on_eval_end", metrics=eval_metrics)
-
-                    # 7. Checkpointing. At interval, at the last step of each epoch, and when a callback asks.
-                    is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
-                    ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
-                        is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
-                    )
-                    if force_save or ckpt_interval_save:
-                        async with self._step_deadline():
-                            with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                                ckpt_path = await asyncio.to_thread(self.save_checkpoints)
-                        self._fire("on_save", ckpt_path=ckpt_path)
-                    if self.cfg.trainer.hf_save_interval > 0:
-                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                            async with self._step_deadline():
-                                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                                    await asyncio.to_thread(self.save_models)
-
-                    log_payload = {**self.all_metrics, **{"timing/" + k: v for k, v in self.all_timings.items()}}
-                    if self._ray_gpu_monitor is not None:
-                        log_payload.update(self._ray_gpu_monitor.flush())
-                    if self._vllm_metrics_scraper is not None:
-                        log_payload.update(await self._vllm_metrics_scraper.sample())
-                    self._fire("on_log", logs=log_payload)
-                    self.tracker.log(log_payload, step=self.global_step, commit=True)
-                    self.all_metrics = {}
-                    self.all_timings = {}
-                    self.global_step += 1
-
-                    if (
-                        self.cfg.trainer.max_training_steps is not None
-                        and self.global_step > self.cfg.trainer.max_training_steps
-                    ):
-                        logger.info(
-                            f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early."
-                        )
-                        for t in generator_tasks:
-                            t.cancel()
-                        await asyncio.gather(*generator_tasks, return_exceptions=True)
-                        if generators_done_watcher is not None:
-                            generators_done_watcher.cancel()
-                            await asyncio.gather(generators_done_watcher, return_exceptions=True)
-                        generation_failure.raise_if_failed()
-                        stop_training = True
-                        break
-
-                    # 8. Notify generation workers that the capacity has increased, unblocking them.
-                    await self._staleness_manager.notify_capacity_change(self.global_step)
-                    # Only trained UIDs map to completed steps; filtered/dropped UIDs are extra consumption.
-                    expected_trained_in_epoch = self.mini_batch_size * trained_steps_this_epoch
-                    actual_trained_in_epoch = self.async_train_dataloader.num_trained()
-                    assert actual_trained_in_epoch == expected_trained_in_epoch, (
-                        "Unexpected number of trained (consumed minus filtered) data UIDs. Got: "
-                        f"{actual_trained_in_epoch} != {expected_trained_in_epoch}"
-                    )
-
+                stop_training = await self._run_epoch(epoch, pbar)
                 if stop_training:
-                    self._fire("on_epoch_end")
                     break
-
-                # 9. Per-epoch epilogue.
-                if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
-                    with Timer("update_ref_with_policy", self.all_timings):
-                        await asyncio.to_thread(self.update_ref_with_policy)
-
-                # Cancel generator tasks for this epoch
-                for t in generator_tasks:
-                    t.cancel()
-                await asyncio.gather(*generator_tasks, return_exceptions=True)
-                if generators_done_watcher is not None:
-                    generators_done_watcher.cancel()
-                    await asyncio.gather(generators_done_watcher, return_exceptions=True)
-                generation_failure.raise_if_failed()
-
-                # Per-epoch reset/validation for data loading and staleness management
-                assert all(
-                    t.done() for t in generator_tasks
-                ), "Generator tasks must be done before resetting the dataloader manager and validating the staleness manager."
-                assert (
-                    generation_output_group_buffer.qsize() == 0
-                ), f"We expect all generation output to be consumed by the training worker at end of an epoch, got {generation_output_group_buffer.qsize()}."
-                await self.async_train_dataloader.reset_at_epoch_end()
-                await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
-
-                self._fire("on_epoch_end")
-        except BaseException:
-            tasks_to_stop = [*generator_tasks]
-            if generators_done_watcher is not None:
-                tasks_to_stop.append(generators_done_watcher)
-            await cancel_background_tasks(tasks_to_stop)
-            raise
         finally:
             self._profiler_stop()
             if self._ray_gpu_monitor is not None:
@@ -752,6 +343,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # All epochs completed: advance past the last epoch so resuming from the final checkpoint
             # does not redo the last epoch (whose consumed UIDs were cleared at its epoch end).
             self.epoch = self.cfg.trainer.epochs
+
+        await self._after_training_loop()
 
         # safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
@@ -779,6 +372,224 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._fire("on_train_end")
         self.tracker.finish()
         logger.info("Training done!")
+
+    def _start_epoch_generation(self) -> _EpochGeneration:
+        """Spawn this epoch's generation workers over a fresh buffer. Note that we do not do any
+        cross-epoch asynchrony here."""
+        gen = _EpochGeneration(
+            # Buffer of completed generation, size bounded by capacity - consumed = B * (max_staleness_steps + 1)
+            buffer=asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize),
+            # First generation-worker exception; consumers waiting on the buffer raise it.
+            failure=BackgroundFailure(),
+            # Lets the consumer detect epoch exhaustion (all generators done + buffer empty) instead of
+            # blocking forever on buffer.get() -- under sample_full_batch, drops can exhaust an epoch
+            # before num_steps_per_epoch steps complete.
+            all_generators_done=asyncio.Event(),
+        )
+        # Maintain self.num_parallel_generation_workers concurrent group-generation workers
+        gen.generator_tasks = [
+            asyncio.create_task(self._run_generate_for_a_group_loop(gen.buffer, gen.failure))
+            for _ in range(self.num_parallel_generation_workers)
+        ]
+        if self.sample_full_batch:
+            gen.generators_done_watcher = asyncio.create_task(
+                self._watch_generators_done(gen.generator_tasks, gen.all_generators_done, gen.failure)
+            )
+        return gen
+
+    async def _run_epoch(self, epoch: int, pbar: tqdm) -> bool:
+        """Train every mini-batch of one epoch. Returns True when training should stop early
+        (``max_training_steps`` reached)."""
+        self.epoch = epoch
+        self._current_epoch = epoch
+        self._fire("on_epoch_start")
+        # 0. Per-epoch prologue.
+        gen = self._start_epoch_generation()
+        try:
+            # Steps trained in THIS epoch (not global_step % num_steps_per_epoch: sample_full_batch can
+            # end an epoch early, drifting global_step out of epoch alignment). On resume the dataloader
+            # already reflects this epoch's trained steps. The range below is just an upper bound.
+            trained_steps_this_epoch = self.async_train_dataloader.num_trained() // self.mini_batch_size
+            for _step_idx in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
+                outcome = await self._run_step(gen, epoch, trained_steps_this_epoch, pbar)
+                if outcome is _StepOutcome.EPOCH_EXHAUSTED:
+                    break
+                if outcome is _StepOutcome.STOP_TRAINING:
+                    self._fire("on_epoch_end")
+                    return True
+                trained_steps_this_epoch += 1
+
+            # 9. Per-epoch epilogue.
+            if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
+                with Timer("update_ref_with_policy", self.all_timings):
+                    await asyncio.to_thread(self.update_ref_with_policy)
+
+            # Cancel generator tasks for this epoch
+            await gen.stop()
+
+            # Per-epoch reset/validation for data loading and admission control
+            assert all(
+                t.done() for t in gen.generator_tasks
+            ), "Generator tasks must be done before resetting the dataloader manager and validating the admission controller."
+            assert (
+                gen.buffer.qsize() == 0
+            ), f"We expect all generation output to be consumed by the training worker at end of an epoch, got {gen.buffer.qsize()}."
+            await self.async_train_dataloader.reset_at_epoch_end()
+            await self._admission_controller.validate_state_at_epoch_end(self.global_step)
+
+            self._fire("on_epoch_end")
+            return False
+        except BaseException:
+            await cancel_background_tasks(gen.background_tasks())
+            raise
+
+    async def _run_step(self, gen: _EpochGeneration, epoch: int, trained_steps_before: int, pbar: tqdm) -> _StepOutcome:
+        """One training step: collect a mini-batch, train, sync weights, eval, checkpoint, log.
+
+        ``trained_steps_before`` is the number of steps already trained in this epoch.
+        """
+        async with self._step_deadline(), Timer("step", self.all_timings):
+            self._loop_gauges.set(
+                "skyrl_gen_buffer_qsize",
+                gen.buffer.qsize(),
+                "Completed generation groups buffered at step start.",
+            )
+
+            # 1. Wait until we have a full mini-batch buffered (dropping zero-variance groups if
+            # sample_full_batch).
+            (
+                cur_generation_group_mini_batch,
+                cur_dropped_groups,
+                epoch_exhausted,
+            ) = await self._collect_generation_mini_batch(gen.buffer, gen.all_generators_done, gen.failure)
+
+            if epoch_exhausted:
+                await self._discard_partial_epoch_end_batch(cur_generation_group_mini_batch, epoch)
+                return _StepOutcome.EPOCH_EXHAUSTED
+
+            self._fire("on_step_start")
+
+            if self.sample_full_batch:
+                # The collect loop returns exactly mini_batch_size kept groups here.
+                num_dropped = len(cur_dropped_groups)
+                keep_rate = self.mini_batch_size / (self.mini_batch_size + num_dropped)
+                self.all_metrics["async/num_groups_dropped"] = num_dropped
+                self.all_metrics["async/keep_rate"] = keep_rate
+                self._loop_gauges.set(
+                    "skyrl_gen_group_keep_rate",
+                    keep_rate,
+                    "Fraction of drained groups kept while collecting the last mini-batch.",
+                )
+
+            # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
+            with self._phase_gauge.timed_phase("convert_to_training_input", self.all_timings):
+                training_input = await asyncio.to_thread(
+                    self.convert_generation_group_mini_batch_to_training_input,
+                    cur_generation_group_mini_batch,
+                    cur_dropped_groups,
+                )
+
+            # 3. Run training and update consumed UIDs.
+            await self._before_training_step()
+            with self._phase_gauge.timed_phase("run_training", self.all_timings):
+                status = await self._run_training(training_input)
+                await self.async_train_dataloader.mark_consumed_uids([g.uid for g in cur_generation_group_mini_batch])
+            self._fire("on_step_end", batch=training_input, metrics=status)
+
+            # Capture callback-driven triggers, then reset.
+            force_save = self._training_control.should_save
+            force_eval = self._training_control.should_evaluate
+            self._training_control.should_save = False
+            self._training_control.should_evaluate = False
+
+            # 4. After training: pause generation, sync weights, resume.
+            await self._sync_weights_after_training_step()
+
+        # A training step completed: count it for this epoch's bookkeeping.
+        trained_steps_this_epoch = trained_steps_before + 1
+
+        # One profiler step per async global step.
+        self._profiler_step()
+
+        # 5. Set logs for this training step.
+        logger.info(status)
+        self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+        pbar.update(1)
+
+        # 6. Eval. At interval and at the last step.
+        # NOTE(Charlie): eval does not overlap with training, but overlaps with generation.
+        interval_eval = self.cfg.trainer.eval_interval > 0 and (
+            self.global_step % self.cfg.trainer.eval_interval == 0 or self.global_step == self.total_training_steps
+        )
+        if force_eval or interval_eval:
+            self._fire("on_eval_start")
+            with self._phase_gauge.timed_phase("eval", self.all_timings):
+                eval_metrics = await self.eval()
+                self.all_metrics.update(eval_metrics)
+            self._fire("on_eval_end", metrics=eval_metrics)
+
+        # 7. Checkpointing. At interval, at the last step of each epoch, and when a callback asks.
+        is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
+        ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
+            is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
+        )
+        if force_save or ckpt_interval_save:
+            async with self._step_deadline():
+                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                    ckpt_path = await asyncio.to_thread(self.save_checkpoints)
+            self._fire("on_save", ckpt_path=ckpt_path)
+        if self.cfg.trainer.hf_save_interval > 0:
+            if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                async with self._step_deadline():
+                    with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                        await asyncio.to_thread(self.save_models)
+
+        log_payload = {**self.all_metrics, **{"timing/" + k: v for k, v in self.all_timings.items()}}
+        if self._ray_gpu_monitor is not None:
+            log_payload.update(self._ray_gpu_monitor.flush())
+        if self._vllm_metrics_scraper is not None:
+            log_payload.update(await self._vllm_metrics_scraper.sample())
+        self._fire("on_log", logs=log_payload)
+        self.tracker.log(log_payload, step=self.global_step, commit=True)
+        self.all_metrics = {}
+        self.all_timings = {}
+        self.global_step += 1
+
+        if self.cfg.trainer.max_training_steps is not None and self.global_step > self.cfg.trainer.max_training_steps:
+            logger.info(f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early.")
+            await gen.stop()
+            return _StepOutcome.STOP_TRAINING
+
+        # 8. Notify generation workers that the capacity has increased, unblocking them.
+        await self._admission_controller.notify_capacity_change(self.global_step)
+        # Only trained UIDs map to completed steps; filtered/dropped UIDs are extra consumption.
+        expected_trained_in_epoch = self.mini_batch_size * trained_steps_this_epoch
+        actual_trained_in_epoch = self.async_train_dataloader.num_trained()
+        assert actual_trained_in_epoch == expected_trained_in_epoch, (
+            "Unexpected number of trained (consumed minus filtered) data UIDs. Got: "
+            f"{actual_trained_in_epoch} != {expected_trained_in_epoch}"
+        )
+        return _StepOutcome.CONTINUE
+
+    async def _discard_partial_epoch_end_batch(self, partial_batch: List[GeneratedOutputGroup], epoch: int) -> None:
+        """Exhausted mid mini-batch under ``sample_full_batch``: discard the partial batch (marked consumed
+        so it isn't regenerated on resume), and save the end-of-epoch checkpoint the normal
+        is_epoch_end path would have, since the step loop breaks before reaching it."""
+        if partial_batch:
+            for _ in partial_batch:
+                await self._admission_controller.on_rollout_filtered()
+            await self.async_train_dataloader.mark_filtered_uids([g.uid for g in partial_batch])
+            logger.warning(
+                f"sample_full_batch: epoch {epoch} exhausted with a partial mini-batch of "
+                f"{len(partial_batch)} group(s); discarding and ending the epoch."
+            )
+        if self.cfg.trainer.ckpt_interval > 0:
+            with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                ckpt_path = await asyncio.to_thread(self.save_checkpoints)
+            self._fire("on_save", ckpt_path=ckpt_path)
+        if self.cfg.trainer.hf_save_interval > 0:
+            with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                await asyncio.to_thread(self.save_models)
 
     @staticmethod
     async def _watch_generators_done(
@@ -892,7 +703,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # Drop the zero-variance group: give its capacity back to the producers and mark
                         # its UID consumed (skipped, not regenerated, on resume).
                         dropped_groups.append(group)
-                        await self._staleness_manager.on_rollout_filtered()
+                        await self._admission_controller.on_rollout_filtered()
                         await self.async_train_dataloader.mark_filtered_uids([group.uid])
                 except Exception:
                     self._log_group_processing_error(group, len(kept_groups), len(dropped_groups))
@@ -953,7 +764,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self, generation_output_group_buffer: asyncio.Queue, failure: BackgroundFailure
     ):
         """
-        Generator worker: repeatedly pulls the next prompt (possibly blocked by staleness control),
+        Generator worker: repeatedly pulls the next prompt (possibly blocked by admission control),
         generates one single generation group, respecting a pause/resume event, and enqueues the result.
         An exception is recorded in ``failure`` (waking the consumer) and re-raised.
         """
@@ -980,7 +791,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # 2. Acquire capacity slot.
                 slot_acquired = False
-                await self._staleness_manager.acquire_submission_slot()
+                await self._admission_controller.acquire_submission_slot()
                 slot_acquired = True
 
                 # 3. Generate one rollout group
@@ -1009,15 +820,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
                     )
                 except asyncio.QueueFull:
-                    raise AssertionError("Generation buffer should never be full given staleness control.")
-                await self._staleness_manager.on_rollout_accepted()
+                    raise AssertionError("Generation buffer should never be full given admission control.")
+                await self._admission_controller.on_rollout_accepted()
                 slot_acquired = False
         except asyncio.CancelledError:
-            # Expected on epoch end / shutdown: release any held slot so staleness accounting stays
+            # Expected on epoch end / shutdown: release any held slot so admission accounting stays
             # consistent, then exit cleanly.
             if "slot_acquired" in locals() and slot_acquired:
                 try:
-                    await self._staleness_manager.on_rollout_rejected()
+                    await self._admission_controller.on_rollout_rejected()
                 except Exception:
                     pass
             return
