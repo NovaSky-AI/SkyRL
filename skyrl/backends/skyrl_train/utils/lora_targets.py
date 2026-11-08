@@ -157,8 +157,7 @@ def check_megatron_lora_group_support(
             isinstance(target_modules, str) and target_modules.lower() == "all-linear"
         ):
             adapts_attn = any(
-                (m.rsplit(".", 1)[-1] if isinstance(m, str) else m) in MEGATRON_ATTN_TARGETS
-                for m in target_modules
+                (m.rsplit(".", 1)[-1] if isinstance(m, str) else m) in MEGATRON_ATTN_TARGETS for m in target_modules
             )
         else:
             adapts_attn = train_attn
