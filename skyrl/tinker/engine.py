@@ -19,6 +19,7 @@ from sqlmodel import Session, create_engine, func, select, update
 from skyrl.backends.utils import log_timing
 from skyrl.env_vars import SKYRL_TINKER_CONTINUOUS_SAMPLING
 from skyrl.tinker import types
+from skyrl.tinker.checkpoint_utils import checkpoint_file_path, delete_checkpoint_file
 from skyrl.tinker.config import EngineConfig, TinkerTorchProfilerConfig, add_model
 from skyrl.tinker.db_models import (
     CheckpointDB,
@@ -477,6 +478,61 @@ class TinkerEngine:
                         f"model_id={model_id}, checkpoint_id={checkpoint_id}, checkpoint_type={checkpoint_type}"
                     )
                 session.commit()
+
+            if status == CheckpointStatus.COMPLETED:
+                try:
+                    self._prune_old_checkpoints(model_id, checkpoint_type)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to prune old checkpoints for model '{model_id}', type '{checkpoint_type}': {e}"
+                    )
+
+    def _prune_old_checkpoints(self, model_id: str, checkpoint_type: types.CheckpointType) -> list[str]:
+        """Prune old completed checkpoints for (model_id, checkpoint_type) to retain only the newest K.
+
+        If checkpoint_retention_k is not configured or <= 0, this is a no-op.
+        Only COMPLETED checkpoints count toward the retention limit.
+        Checkpoints are sorted by created_at descending, then checkpoint_id descending.
+        Older checkpoints exceeding the limit are deleted from the database first,
+        and then their underlying files are deleted.
+        """
+        k = self.config.checkpoint_retention_k
+        if k is None or k <= 0:
+            return []
+
+        with Session(self.db_engine) as session:
+            statement = (
+                select(CheckpointDB)
+                .where(CheckpointDB.model_id == model_id)
+                .where(CheckpointDB.checkpoint_type == checkpoint_type)
+                .where(CheckpointDB.status == CheckpointStatus.COMPLETED)
+                .order_by(CheckpointDB.created_at.desc(), CheckpointDB.checkpoint_id.desc())
+            )
+            completed_checkpoints = session.exec(statement).all()
+
+            if len(completed_checkpoints) <= k:
+                return []
+
+            to_delete = completed_checkpoints[k:]
+            deleted_ids = [ckpt.checkpoint_id for ckpt in to_delete]
+
+            for ckpt in to_delete:
+                session.delete(ckpt)
+            session.commit()
+
+        # Delete checkpoint files outside of the database session
+        for ckpt_id in deleted_ids:
+            path = checkpoint_file_path(self.config.checkpoints_base, model_id, ckpt_id, checkpoint_type)
+            try:
+                delete_checkpoint_file(path)
+                logger.info(
+                    f"[checkpoint retention] Deleted old {checkpoint_type.value} checkpoint '{ckpt_id}' "
+                    f"for model '{model_id}' (retaining newest {k})"
+                )
+            except Exception as e:
+                logger.warning(f"[checkpoint retention] Failed to delete checkpoint file at {path}: {e}")
+
+        return deleted_ids
 
     def _load_requests(self, session: Session, requests: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
         """Append each request's request_data to its tuple, dropping any request that no longer exists.

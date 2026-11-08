@@ -4,11 +4,18 @@ from unittest.mock import MagicMock
 
 import pytest
 from cloudpathlib import AnyPath
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import FutureDB, ModelDB, RequestStatus, SessionDB
+from skyrl.tinker.db_models import (
+    CheckpointDB,
+    CheckpointStatus,
+    FutureDB,
+    ModelDB,
+    RequestStatus,
+    SessionDB,
+)
 from skyrl.tinker.engine import (
     TinkerEngine,
     prepare_model_pass_batch,
@@ -578,8 +585,6 @@ import asyncio  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
-from sqlmodel import select  # noqa: E402
-
 
 class _FakeContinuousBackend:
     """Fake skyrl-train backend exposing the continuous-sampling surface.
@@ -842,3 +847,280 @@ def test_serial_fallback_when_continuous_disabled(continuous_engine):
     assert serial_batches == [[str(rid1), str(rid2)]]
     assert _future_status(engine, rid1) == RequestStatus.COMPLETED
     assert _future_status(engine, rid2) == RequestStatus.COMPLETED
+
+
+def test_checkpoint_retention_prunes_older_training_checkpoints(tmp_path):
+    checkpoints_base = AnyPath(tmp_path)
+    engine = object.__new__(TinkerEngine)
+    engine.config = SimpleNamespace(
+        checkpoints_base=checkpoints_base,
+        checkpoint_retention_k=2,
+    )
+    engine.backend = MagicMock()
+    engine.backend.has_model.return_value = True
+    engine.db_engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine.db_engine)
+
+    model_id = "test_model"
+
+    for i in range(4):
+        ckpt_id = f"ckpt_{i}"
+        with Session(engine.db_engine) as session:
+            session.add(
+                CheckpointDB(
+                    model_id=model_id,
+                    checkpoint_id=ckpt_id,
+                    checkpoint_type=types.CheckpointType.TRAINING,
+                    status=CheckpointStatus.PENDING,
+                )
+            )
+            session.commit()
+
+        def fake_save(path, _model_id, name=ckpt_id):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"weights_{name}".encode())
+
+        engine.backend.save_checkpoint.side_effect = fake_save
+        engine.process_save_weights(model_id, types.SaveWeightsInput(path=ckpt_id))
+
+    # With k=2, only ckpt_2 and ckpt_3 should remain
+    with Session(engine.db_engine) as session:
+        remaining_db = session.exec(
+            select(CheckpointDB)
+            .where(CheckpointDB.model_id == model_id)
+            .where(CheckpointDB.checkpoint_type == types.CheckpointType.TRAINING)
+            .order_by(CheckpointDB.checkpoint_id)
+        ).all()
+        assert [c.checkpoint_id for c in remaining_db] == ["ckpt_2", "ckpt_3"]
+        assert all(c.status == CheckpointStatus.COMPLETED for c in remaining_db)
+
+    # Disk files: ckpt_0 and ckpt_1 should be unlinked; ckpt_2 and ckpt_3 should exist
+    assert not (checkpoints_base / model_id / "ckpt_0.tar.gz").exists()
+    assert not (checkpoints_base / model_id / "ckpt_1.tar.gz").exists()
+    assert (checkpoints_base / model_id / "ckpt_2.tar.gz").exists()
+    assert (checkpoints_base / model_id / "ckpt_3.tar.gz").exists()
+
+
+def test_checkpoint_retention_disabled_by_default(tmp_path):
+    checkpoints_base = AnyPath(tmp_path)
+    engine = object.__new__(TinkerEngine)
+    engine.config = SimpleNamespace(
+        checkpoints_base=checkpoints_base,
+        checkpoint_retention_k=None,
+    )
+    engine.backend = MagicMock()
+    engine.backend.has_model.return_value = True
+    engine.db_engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine.db_engine)
+
+    model_id = "test_model"
+
+    for i in range(4):
+        ckpt_id = f"ckpt_{i}"
+        with Session(engine.db_engine) as session:
+            session.add(
+                CheckpointDB(
+                    model_id=model_id,
+                    checkpoint_id=ckpt_id,
+                    checkpoint_type=types.CheckpointType.TRAINING,
+                    status=CheckpointStatus.PENDING,
+                )
+            )
+            session.commit()
+
+        def fake_save(path, _model_id, name=ckpt_id):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"weights_{name}".encode())
+
+        engine.backend.save_checkpoint.side_effect = fake_save
+        engine.process_save_weights(model_id, types.SaveWeightsInput(path=ckpt_id))
+
+    with Session(engine.db_engine) as session:
+        remaining_db = session.exec(
+            select(CheckpointDB)
+            .where(CheckpointDB.model_id == model_id)
+            .where(CheckpointDB.checkpoint_type == types.CheckpointType.TRAINING)
+        ).all()
+        assert len(remaining_db) == 4
+
+    for i in range(4):
+        assert (checkpoints_base / model_id / f"ckpt_{i}.tar.gz").exists()
+
+
+def test_checkpoint_retention_failed_checkpoints_do_not_count_or_trigger(tmp_path):
+    checkpoints_base = AnyPath(tmp_path)
+    engine = object.__new__(TinkerEngine)
+    engine.config = SimpleNamespace(
+        checkpoints_base=checkpoints_base,
+        checkpoint_retention_k=2,
+    )
+    engine.backend = MagicMock()
+    engine.backend.has_model.return_value = True
+    engine.db_engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine.db_engine)
+
+    model_id = "test_model"
+
+    # Save ckpt_0 successfully
+    with Session(engine.db_engine) as session:
+        session.add(
+            CheckpointDB(
+                model_id=model_id,
+                checkpoint_id="ckpt_0",
+                checkpoint_type=types.CheckpointType.TRAINING,
+                status=CheckpointStatus.PENDING,
+            )
+        )
+        session.commit()
+
+    def fake_save_ok(path, _model_id):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"weights")
+
+    engine.backend.save_checkpoint.side_effect = fake_save_ok
+    engine.process_save_weights(model_id, types.SaveWeightsInput(path="ckpt_0"))
+
+    # ckpt_1 fails during save
+    with Session(engine.db_engine) as session:
+        session.add(
+            CheckpointDB(
+                model_id=model_id,
+                checkpoint_id="ckpt_1",
+                checkpoint_type=types.CheckpointType.TRAINING,
+                status=CheckpointStatus.PENDING,
+            )
+        )
+        session.commit()
+
+    def fake_save_fail(path, _model_id):
+        raise RuntimeError("disk full")
+
+    engine.backend.save_checkpoint.side_effect = fake_save_fail
+    with pytest.raises(RuntimeError, match="disk full"):
+        engine.process_save_weights(model_id, types.SaveWeightsInput(path="ckpt_1"))
+
+    # ckpt_1 is FAILED, ckpt_0 is still COMPLETED
+    with Session(engine.db_engine) as session:
+        ckpt_1 = session.get(CheckpointDB, (model_id, "ckpt_1", types.CheckpointType.TRAINING))
+        assert ckpt_1.status == CheckpointStatus.FAILED
+        ckpt_0 = session.get(CheckpointDB, (model_id, "ckpt_0", types.CheckpointType.TRAINING))
+        assert ckpt_0.status == CheckpointStatus.COMPLETED
+
+    # Save ckpt_2 successfully
+    with Session(engine.db_engine) as session:
+        session.add(
+            CheckpointDB(
+                model_id=model_id,
+                checkpoint_id="ckpt_2",
+                checkpoint_type=types.CheckpointType.TRAINING,
+                status=CheckpointStatus.PENDING,
+            )
+        )
+        session.commit()
+
+    engine.backend.save_checkpoint.side_effect = fake_save_ok
+    engine.process_save_weights(model_id, types.SaveWeightsInput(path="ckpt_2"))
+
+    # Completed checkpoints are ckpt_0 and ckpt_2 (count = 2 <= k), so neither is pruned
+    with Session(engine.db_engine) as session:
+        completed = session.exec(
+            select(CheckpointDB)
+            .where(CheckpointDB.model_id == model_id)
+            .where(CheckpointDB.status == CheckpointStatus.COMPLETED)
+        ).all()
+        assert {c.checkpoint_id for c in completed} == {"ckpt_0", "ckpt_2"}
+    assert (checkpoints_base / model_id / "ckpt_0.tar.gz").exists()
+    assert (checkpoints_base / model_id / "ckpt_2.tar.gz").exists()
+
+
+def test_checkpoint_retention_per_type_isolation(tmp_path):
+    checkpoints_base = AnyPath(tmp_path)
+    engine = object.__new__(TinkerEngine)
+    engine.config = SimpleNamespace(
+        checkpoints_base=checkpoints_base,
+        checkpoint_retention_k=1,
+    )
+    engine.backend = MagicMock()
+    engine.backend.has_model.return_value = True
+    engine.db_engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(engine.db_engine)
+
+    model_id = "test_model"
+
+    # Save 2 training checkpoints
+    for name in ["train_0", "train_1"]:
+        with Session(engine.db_engine) as session:
+            session.add(
+                CheckpointDB(
+                    model_id=model_id,
+                    checkpoint_id=name,
+                    checkpoint_type=types.CheckpointType.TRAINING,
+                    status=CheckpointStatus.PENDING,
+                )
+            )
+            session.commit()
+
+        def fake_train_save(path, _model_id):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"t")
+
+        engine.backend.save_checkpoint.side_effect = fake_train_save
+        engine.process_save_weights(model_id, types.SaveWeightsInput(path=name))
+
+    # Save 2 sampler checkpoints
+    for name in ["sampler_0", "sampler_1"]:
+        with Session(engine.db_engine) as session:
+            session.add(
+                CheckpointDB(
+                    model_id=model_id,
+                    checkpoint_id=name,
+                    checkpoint_type=types.CheckpointType.SAMPLER,
+                    status=CheckpointStatus.PENDING,
+                )
+            )
+            session.commit()
+
+        def fake_sampler_save(path, _model_id, persist=True):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"s")
+
+        engine.backend.save_sampler_checkpoint.side_effect = fake_sampler_save
+        engine.process_save_weights_for_sampler(model_id, types.SaveWeightsForSamplerInput(path=name))
+
+    # Each type retains k=1: train_1 and sampler_1
+    with Session(engine.db_engine) as session:
+        remaining = session.exec(select(CheckpointDB).where(CheckpointDB.model_id == model_id)).all()
+        assert {(r.checkpoint_id, r.checkpoint_type) for r in remaining} == {
+            ("train_1", types.CheckpointType.TRAINING),
+            ("sampler_1", types.CheckpointType.SAMPLER),
+        }
+
+    assert not (checkpoints_base / model_id / "train_0.tar.gz").exists()
+    assert (checkpoints_base / model_id / "train_1.tar.gz").exists()
+    assert not (checkpoints_base / model_id / "sampler_weights" / "sampler_0.tar.gz").exists()
+    assert (checkpoints_base / model_id / "sampler_weights" / "sampler_1.tar.gz").exists()
+
+
+def test_checkpoint_retention_cli_and_config():
+    import argparse
+
+    from skyrl.tinker.config import add_model, config_to_argv
+
+    parser = argparse.ArgumentParser()
+    add_model(parser, EngineConfig)
+
+    # Default is None
+    args = parser.parse_args(["--base-model", BASE_MODEL])
+    cfg = EngineConfig.model_validate(vars(args))
+    assert cfg.checkpoint_retention_k is None
+    argv = config_to_argv(cfg)
+    assert "--checkpoint-retention-k" not in argv
+
+    # Explicit K
+    args = parser.parse_args(["--base-model", BASE_MODEL, "--checkpoint-retention-k", "3"])
+    cfg = EngineConfig.model_validate(vars(args))
+    assert cfg.checkpoint_retention_k == 3
+    argv = config_to_argv(cfg)
+    assert "--checkpoint-retention-k" in argv
+    idx = argv.index("--checkpoint-retention-k")
+    assert argv[idx + 1] == "3"
