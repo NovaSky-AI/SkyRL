@@ -644,7 +644,7 @@ class MegatronWorker:
         # `language_model_only` swaps in a text-only bridge only for some architectures
         # (Qwen3.5, Kimi K2.5), so also ask the provider whether it builds a vision tower.
         transformer_config_kwargs = getattr(self.cfg.policy.megatron_config, "transformer_config_kwargs", None) or {}
-        mla_down_proj_fusion = bool(OmegaConf.select(transformer_config_kwargs, "mla_down_proj_fusion", default=False))
+        mla_down_proj_fusion = bool(transformer_config_kwargs.get("mla_down_proj_fusion", False))
         check_megatron_lora_group_support(
             lora_config.train_attn,
             lora_config.train_mlp,
