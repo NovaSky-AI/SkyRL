@@ -3,7 +3,6 @@ import json
 import os
 import random
 import re
-import shutil
 import signal
 import threading
 from contextlib import asynccontextmanager, nullcontext, suppress
@@ -34,6 +33,12 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.env_vars import SKYRL_HTTP_CONNECTION_LIMIT
 from skyrl.tinker import types
+from skyrl.tinker.checkpoint_utils import (
+    checkpoint_file_path as _checkpoint_file_path,
+)
+from skyrl.tinker.checkpoint_utils import (
+    delete_checkpoint_file,
+)
 from skyrl.tinker.config import (
     EngineConfig,
     TinkerTorchProfilerConfig,
@@ -1946,10 +1951,9 @@ async def validate_checkpoint(
 def checkpoint_file_path(
     request: Request, unique_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType
 ) -> Any:
-    checkpoint_dir = request.app.state.engine_config.checkpoints_base / unique_id
-    if checkpoint_type == types.CheckpointType.SAMPLER:
-        checkpoint_dir = checkpoint_dir / "sampler_weights"
-    return checkpoint_dir / f"{checkpoint_id}.tar.gz"
+    return _checkpoint_file_path(
+        request.app.state.engine_config.checkpoints_base, unique_id, checkpoint_id, checkpoint_type
+    )
 
 
 def parse_checkpoint_delete_path(
@@ -1974,23 +1978,6 @@ def parse_checkpoint_delete_path(
         raise HTTPException(status_code=422, detail="Invalid checkpoint_id")
 
     return checkpoint_id, inferred_checkpoint_type
-
-
-def delete_checkpoint_file(checkpoint_path: Any) -> None:
-    # Only remove the checkpoint artifact itself; leave the enclosing directories in
-    # place. The run may still be active, and every save path recreates its directory
-    # on demand (parents=True / makedirs), so pruning them here is pointless churn that
-    # couples a per-checkpoint delete to run-wide directory state.
-    if checkpoint_path.is_dir():
-        if hasattr(checkpoint_path, "rmtree"):
-            checkpoint_path.rmtree()
-        else:
-            shutil.rmtree(checkpoint_path)
-    else:
-        try:
-            checkpoint_path.unlink()
-        except FileNotFoundError:
-            return
 
 
 @app.get("/api/v1/training_runs")

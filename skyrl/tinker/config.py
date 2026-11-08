@@ -107,6 +107,18 @@ class EngineConfig(BaseModel):
         default=300,
         description="Seconds without heartbeat before session is considered stale. Set to -1 to disable cleanup.",
     )
+    checkpoint_retention_k: int | None = Field(
+        default=None,
+        description=(
+            "If set to K > 0, retain only the K most recent completed checkpoints per model. "
+            "Older completed checkpoints are deleted automatically after a new checkpoint saves successfully. "
+            "Disabled by default (None)."
+        ),
+        json_schema_extra={
+            "argparse_type": lambda v: None if v in ("None", "", "-1") else int(v),
+            "env_var": "SKYRL_CHECKPOINT_RETENTION_K",
+        },
+    )
     torch_profiler: dict = Field(
         default_factory=dict,
         description=(
