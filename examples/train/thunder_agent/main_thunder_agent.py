@@ -14,7 +14,7 @@ from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.entrypoints.main_base import BasePPOExp
-from skyrl.train.fully_async import FullyAsyncRayPPOTrainer
+from skyrl.train.streaming import FullyAsyncRayPPOTrainer
 
 
 class FullyAsyncThunderAgentExp(BasePPOExp):

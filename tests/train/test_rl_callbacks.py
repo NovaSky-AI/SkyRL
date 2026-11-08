@@ -439,7 +439,7 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
     Generation is stubbed: each step's mini-batch comes straight from ``_collect_generation_mini_batch``, so the
     test only exercises the orchestration in ``FullyAsyncRayPPOTrainer.train()``.
     """
-    from skyrl.train.fully_async import FullyAsyncRayPPOTrainer
+    from skyrl.train.streaming import FullyAsyncRayPPOTrainer
 
     cfg = _build_test_cfg()
     cfg.trainer.fully_async.enabled = True

@@ -3,14 +3,14 @@
 For details, see https://docs.skyrl.ai/docs/tutorials/fully_async.
 """
 
-from skyrl.train.fully_async.admission import (
+from skyrl.train.streaming.admission import (
     AsyncStalenessManager,
     RolloutAdmissionController,
 )
-from skyrl.train.fully_async.base import BaseFullyAsyncTrainer
+from skyrl.train.streaming.base import StreamingRayPPOTrainerBase
 
 
-class FullyAsyncRayPPOTrainer(BaseFullyAsyncTrainer):
+class FullyAsyncRayPPOTrainer(StreamingRayPPOTrainerBase):
     """Disaggregated fully-async PPO: generation runs continuously on dedicated inference GPUs,
     bounded by :class:`AsyncStalenessManager` so no group is more than ``max_staleness_steps``
     policy versions behind training, and the weight sync pauses and resumes the engines in place."""
@@ -40,5 +40,5 @@ class FullyAsyncRayPPOTrainer(BaseFullyAsyncTrainer):
         )
         # Generation and training overlap, so they need separate GPUs. A colocated variant (partial
         # rollout: cut generation at a fraction of the mini-batch, train, resume under the new
-        # weights) is a sibling subclass of BaseFullyAsyncTrainer, not a mode of this one.
+        # weights) is a sibling subclass of StreamingRayPPOTrainerBase, not a mode of this one.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."

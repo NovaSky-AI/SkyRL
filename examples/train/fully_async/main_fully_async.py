@@ -6,7 +6,7 @@ import sys
 
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
-from skyrl.train.fully_async import FullyAsyncRayPPOTrainer
+from skyrl.train.streaming import FullyAsyncRayPPOTrainer
 import asyncio
 from skyrl.train.utils import initialize_ray
 import ray

@@ -769,7 +769,7 @@ def _make_arctic_fully_async_trainer_class():
     fully-async module (and its extra dependencies) when only the
     sync trainer is needed.
     """
-    from skyrl.train.fully_async import FullyAsyncRayPPOTrainer
+    from skyrl.train.streaming import FullyAsyncRayPPOTrainer
 
     class _ArcticFullyAsyncPPOTrainer(FullyAsyncRayPPOTrainer):
         """Fully-async PPO Trainer backed by Arctic RL server (DeepSpeed).

@@ -6,13 +6,13 @@ from typing import Iterable, List, Optional, Set
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 
-class AsyncDataloader:
+class StreamingDataloader:
     """
-    A train dataloader wrapper that accommodates the need of fully async training, including:
+    A train dataloader wrapper that accommodates the need of streaming (per-group) training, including:
     - Thread-safe dataloader iteration with a lock, as there are multiple parallel generation workers polling data.
     - Records consumed data UIDs for checkpointing to avoid training on the same data upon resuming.
     - Set the effective dataloader length to be divisible by mini-batch size, since we cannot rely on `drop_last`
-      because the batch size is 1 in fully async training.
+      because the batch size is 1 in streaming training.
     """
 
     def __init__(self, train_dataloader: StatefulDataLoader, mini_batch_size: int):

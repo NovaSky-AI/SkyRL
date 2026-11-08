@@ -1,8 +1,10 @@
 """Shared training loop for trainers that stream rollouts one group at a time.
 
-For details, see https://docs.skyrl.ai/docs/tutorials/fully_async.
+The fully-async trainer (https://docs.skyrl.ai/docs/tutorials/fully_async) is one such trainer; a
+colocated partial-rollout trainer is another. Both train on mini-batches of groups that finished
+under an older policy version, so they share this loop and differ only in the hooks below.
 
-:class:`BaseFullyAsyncTrainer` owns everything that does not depend on where the inference
+:class:`StreamingRayPPOTrainerBase` owns everything that does not depend on where the inference
 engines live: the generation workers, the completed-group buffer, mini-batch collection,
 conversion to a training batch, checkpointing with consumed UIDs, metrics and the epoch
 bookkeeping. A subclass supplies the policy that does depend on it through a few hooks:
@@ -49,15 +51,15 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     LOSSES_WITH_OLD_LOGPROBS,
     PolicyLossType,
 )
-from skyrl.train.fully_async.admission import RolloutAdmissionController
-from skyrl.train.fully_async.dataloader import AsyncDataloader
-from skyrl.train.fully_async.group import GeneratedOutputGroup
 from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
     prepare_generator_input,
 )
+from skyrl.train.streaming.admission import RolloutAdmissionController
+from skyrl.train.streaming.dataloader import StreamingDataloader
+from skyrl.train.streaming.group import GeneratedOutputGroup
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
 from skyrl.train.utils.async_utils import BackgroundFailure, cancel_background_tasks
@@ -73,7 +75,7 @@ from skyrl.train.utils.trainer_utils import (
 
 
 class _StepOutcome(enum.Enum):
-    """What the step loop does after one iteration of :meth:`BaseFullyAsyncTrainer._run_step`."""
+    """What the step loop does after one iteration of :meth:`StreamingRayPPOTrainerBase._run_step`."""
 
     CONTINUE = "continue"
     EPOCH_EXHAUSTED = "epoch_exhausted"
@@ -107,10 +109,10 @@ class _EpochGeneration:
         self.failure.raise_if_failed()
 
 
-class BaseFullyAsyncTrainer(RayPPOTrainer):
+class StreamingRayPPOTrainerBase(RayPPOTrainer):
     """Streams rollouts one group at a time through ``num_parallel_generation_workers`` workers and
-    trains on every ``policy_mini_batch_size`` completed groups. See the module docstring for the
-    hooks a subclass implements."""
+    trains on every ``policy_mini_batch_size`` completed groups. Not a trainer by itself: see the module
+    docstring for the hooks a subclass implements. Reads its knobs from ``trainer.fully_async``."""
 
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
@@ -172,7 +174,7 @@ class BaseFullyAsyncTrainer(RayPPOTrainer):
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
         # Async-specific states
-        self.async_train_dataloader = AsyncDataloader(self.train_dataloader, self.mini_batch_size)
+        self.async_train_dataloader = StreamingDataloader(self.train_dataloader, self.mini_batch_size)
         self._admission_controller = self._build_admission_controller()
 
     # ------------------------------------------------------------------
@@ -234,7 +236,7 @@ class BaseFullyAsyncTrainer(RayPPOTrainer):
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
-        Overrides to build dataloader for fully async training. See `AsyncDataloader` for more details.
+        Overrides to build dataloader for fully async training. See `StreamingDataloader` for more details.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size

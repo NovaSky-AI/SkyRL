@@ -11,21 +11,21 @@ from unittest.mock import AsyncMock
 import pytest
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from skyrl.train.fully_async import (
-    AsyncDataloader,
+from skyrl.train.streaming import (
     AsyncStalenessManager,
     FullyAsyncRayPPOTrainer,
     GeneratedOutputGroup,
+    StreamingDataloader,
 )
 from skyrl.train.utils.async_utils import BackgroundFailure
 
 
-def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> AsyncDataloader:
-    """Build an AsyncDataloader over a trivial dataset of `num_prompts` single-prompt batches."""
+def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> StreamingDataloader:
+    """Build an StreamingDataloader over a trivial dataset of `num_prompts` single-prompt batches."""
     dataset = [[{"uid": str(i)}] for i in range(num_prompts)]
     # batch_size=1 (one prompt per draw) and identity collate so each batch is a list with one dict.
     loader = StatefulDataLoader(dataset, batch_size=1, collate_fn=lambda batch: batch[0])
-    return AsyncDataloader(loader, mini_batch_size)
+    return StreamingDataloader(loader, mini_batch_size)
 
 
 # --------------------------------------------------------------------------------------
@@ -78,7 +78,7 @@ async def test_staleness_manager_validate_epoch_end_with_filtered():
 
 
 # --------------------------------------------------------------------------------------
-# AsyncDataloader
+# StreamingDataloader
 # --------------------------------------------------------------------------------------
 
 

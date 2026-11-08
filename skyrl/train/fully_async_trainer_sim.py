@@ -14,7 +14,7 @@ import asyncio
 
 from loguru import logger
 
-from skyrl.train.fully_async import FullyAsyncRayPPOTrainer
+from skyrl.train.streaming import FullyAsyncRayPPOTrainer
 from skyrl.train.utils.trainer_utils import ResumeMode
 
 

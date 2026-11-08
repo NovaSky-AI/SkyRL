@@ -10,7 +10,7 @@ SkyRL supports fully async training for any generator that implements the `Gener
 
 We treat "fully async training" synonymous to the terms **"in-flight weight update"** and **"multi-turn partial rollout"**, as discussed in works like AReal, PipelineRL, ScaleRL, etc.
 
-The core logic of fully async training lives in [skyrl/train/fully_async/](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl/train/fully_async), a subclass of the synchronous trainer class in [trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/trainer.py). This trainer works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
+The core logic of fully async training lives in [skyrl/train/streaming/](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl/train/streaming), a subclass of the synchronous trainer class in [trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/trainer.py). This trainer works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
 
 ![Systems Diagram of Fully Async Training in SkyRL](/images/tutorials/skyrl_fully_async.png)
 
@@ -56,7 +56,7 @@ This effectively addresses the straggler issues. While it may sound unintuitive 
 
 ## II. How to use fully async training in SkyRL?
 
-The fully async trainer class is implemented in `skyrl/train/fully_async/trainer.py::FullyAsyncRayPPOTrainer` (the loop itself is in `base.py::BaseFullyAsyncTrainer`), subclassing the synchronous trainer class `trainer.py::RayPPOTrainer`.
+The fully async trainer class is implemented in `skyrl/train/streaming/trainer.py::FullyAsyncRayPPOTrainer` (the loop itself is in `base.py::StreamingRayPPOTrainerBase`), subclassing the synchronous trainer class `trainer.py::RayPPOTrainer`.
 
 This trainer class is generator-agnostic, meaning it can support any generator that implements the `GeneratorInterface` interface, including your arbitrary agent harness.
 
@@ -161,7 +161,7 @@ There are 5 core components:
 1. K `GenerationWorker`: workers that produce the trajectories. Each is simply an `asyncio.Task` that runs `AnyGenerator.generate()`. K is `trainer.fully_async.num_parallel_generation_workers`. `AnyGenerator` means that it works with any generator.
 2. `TrainingWorker`: simply a single thread that runs the training loop.
 3. `GenerationOutputGroupBuffer`: a buffer that stores the generated groups of output.
-4. `AsyncDataloader`: a thin wrapper of the dataloader, polled by the generation workers to get data.
+4. `StreamingDataloader`: a thin wrapper of the dataloader, polled by the generation workers to get data.
 5. `AsyncStalenessManager`: a controller that manages the staleness control to ensure no trajectory is dropped for being too stale.
 
 Note that all the control logics pertain to a single epoch. We do not do any cross-epoch asynchrony.
@@ -177,10 +177,10 @@ physical `RemoteInferenceClient` in the back serving the actual LLM inference.
 
 Each generation worker runs the following steps in a while loop:
 
-1. Get a single data from the `AsyncDataloader`. Might await on staleness control based on `AsyncStalenessManager` (i.e. too many data accumulated in the buffer and a new generation will result in staleness violation).
+1. Get a single data from the `StreamingDataloader`. Might await on staleness control based on `AsyncStalenessManager` (i.e. too many data accumulated in the buffer and a new generation will result in staleness violation).
 2. Generate one group of trajectories. Can be single-turn or multi-turn, `SkyRLGymGenerator` or your own generator.
 3. Enqueue the generated group to the `GenerationOutputGroupBuffer`.
-4. Repeat from step 1 until the `AsyncDataloader` is exhausted for this epoch.
+4. Repeat from step 1 until the `StreamingDataloader` is exhausted for this epoch.
 
 ### 2. Training Worker (i.e. the training loop)
 
@@ -191,7 +191,7 @@ It follows the following steps in a for-loop over the number of steps per epoch:
 1. Get precisely `trainer.policy_mini_batch_size` groups from the `GenerationOutputGroupBuffer`.
    The staleness controller enforces a global capacity bound that aims to keep batches within `trainer.fully_async.max_staleness_steps` steps stale. However, it does not strictly guarantee it. See [async-staleness-manager](#async-staleness-manager) for more details.
 2. Train on the generated groups.
-3. Mark the data that we used to train as "consumed" to the `AsyncDataloader`, so that when we resume
+3. Mark the data that we used to train as "consumed" to the `StreamingDataloader`, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
 4. Make `AnyGenerator` (really the `RemoteInferenceClient` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
 5. Update the global step and hence the capacity controlled by the `AsyncStalenessManager`, potentially unblocking
@@ -215,10 +215,10 @@ The async dataloader is a thin wrapper around the `torchdata.stateful_dataloader
   - We cannot rely on `drop_last` because the batch size is 1 in fully async training (since each generation worker works on a single group at a time).
   - We also cannot trim the `train_dataset` before building the dataloader, because it will affect the random permutations of the dataset, and the data order of async training will be different from synchronous training. However if we keep the datasets the same, even if the batch size of the dataloader is different, the permutation is the same after aggregating the batches of size one to the same size as the mini-batch size.
 
-The `AsyncDataloader` is used in the following cases:
+The `StreamingDataloader` is used in the following cases:
 
-- The generation workers poll data from the `AsyncDataloader` to generate trajectories.
-- The trainer marks the data that has been used to train as "consumed" to the `AsyncDataloader`
+- The generation workers poll data from the `StreamingDataloader` to generate trajectories.
+- The trainer marks the data that has been used to train as "consumed" to the `StreamingDataloader`
 - Upon checkpointing, save the consumed data UIDs along with other checkpointing states, so that when we resume training from a checkpoint, we know what data has been trained on for this epoch and hence can be skipped.
 - Reset to the initial state at the end of each epoch.
 
@@ -278,7 +278,7 @@ Possible ways for handling such rare groups that violate the `S` bound:
 - Drop the trajectory group using `AsyncStalenessManager.on_rollout_rejected()` **(not supported yet but should be hackable)**
 
   - Matches AReal's behavior if the `should_accept_fn` is based on per-sample staleness.
-- Drop the trajectory group and resample. Would require logics to `AsyncDataloader` to requeue the data. **(not supported yet but should be hackable)**
+- Drop the trajectory group and resample. Would require logics to `StreamingDataloader` to requeue the data. **(not supported yet but should be hackable)**
 
 #### Checkpointing semantics
 
@@ -291,7 +291,7 @@ With `sample_full_batch`, consumed state is split into **trained** and **filtere
 </Callout>
 
 <Callout type="info">
-Our capacity formula uses `current_global_step` directly (no `+1`) because in SkyRL `current_global_step` denotes the version being worked on, whereas AReal's derivation counts completed versions. This matches the implementation in `skyrl/train/fully_async/admission.py`.
+Our capacity formula uses `current_global_step` directly (no `+1`) because in SkyRL `current_global_step` denotes the version being worked on, whereas AReal's derivation counts completed versions. This matches the implementation in `skyrl/train/streaming/admission.py`.
 </Callout>
 
 ## IV. More Implementation Details
@@ -324,7 +324,7 @@ See the following two PRs for more details:
 The main challenge of performing checkpointing and resuming in fully async training is that, the 
 dataloader's state is not reliable (which is usually used to save checkpoint in sync training). While some data could be retrieved, upon checkpointing, we have no clue whether a data has already been trained or not.
 
-To address this, our `AsyncDataloader` records the data UIDs that have been consumed by the trainer. Upon resuming from a checkpoint, we load the consumed data UIDs and skip the data that has already been trained. Therefore, the state of the dataloader is not used at all.
+To address this, our `StreamingDataloader` records the data UIDs that have been consumed by the trainer. Upon resuming from a checkpoint, we load the consumed data UIDs and skip the data that has already been trained. Therefore, the state of the dataloader is not used at all.
 
 ## V. Future Work
 
