@@ -4,7 +4,7 @@ Kept separate from ``workers/model_wrapper.py`` so the logic can be imported --
 and unit tested -- without pulling in ``flash_attn``, which is GPU-only.
 """
 
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 import torch.nn as nn
 from loguru import logger
@@ -61,6 +61,10 @@ MEGATRON_ALL_LINEAR_TARGETS = {
         ("in_proj", "attn"),
         ("out_proj", "attn"),
     ),
+}
+
+MEGATRON_ATTN_TARGETS: set[str] = {
+    name for targets in MEGATRON_ALL_LINEAR_TARGETS.values() for name, group in targets if group == "attn"
 }
 
 
@@ -132,6 +136,7 @@ def check_megatron_lora_group_support(
     has_vision_tower: bool,
     multi_latent_attention: bool = False,
     mla_down_proj_fusion: bool = False,
+    target_modules: Optional[Union[str, Iterable[str]]] = None,
 ) -> None:
     """Reject narrowing or configurations on Megatron models where LoRA is unsupported.
 
@@ -141,18 +146,29 @@ def check_megatron_lora_group_support(
         has_vision_tower: Whether the model being built includes a vision encoder.
         multi_latent_attention: Deprecated; retained for backwards compatibility.
         mla_down_proj_fusion: Whether MLA down projection fusion is enabled.
+        target_modules: The resolved or configured LoRA target modules, if available.
 
     Raises:
         ValueError: If narrowing is requested on a model with a vision tower, or if
             attention LoRA is configured with MLA down projection fusion.
     """
-    if train_attn and mla_down_proj_fusion:
-        raise ValueError(
-            "LoRA on attention modules is not supported with Megatron MLA down projection fusion "
-            "(`mla_down_proj_fusion=True`) because adapter export and weight synchronization "
-            "require separate `linear_q_down_proj` and `linear_kv_down_proj`. "
-            "Set `mla_down_proj_fusion=False` when training attention with LoRA."
-        )
+    if mla_down_proj_fusion:
+        if target_modules is not None and not (
+            isinstance(target_modules, str) and target_modules.lower() == "all-linear"
+        ):
+            adapts_attn = any(
+                (m.rsplit(".", 1)[-1] if isinstance(m, str) else m) in MEGATRON_ATTN_TARGETS
+                for m in target_modules
+            )
+        else:
+            adapts_attn = train_attn
+        if adapts_attn:
+            raise ValueError(
+                "LoRA on attention modules is not supported with Megatron MLA down projection fusion "
+                "(`mla_down_proj_fusion=True`) because adapter export and weight synchronization "
+                "require separate `linear_q_down_proj` and `linear_kv_down_proj`. "
+                "Set `mla_down_proj_fusion=False` when training attention with LoRA."
+            )
     if train_attn and train_mlp:
         return
     # The vision tower and its patch merger reuse the language model's module names

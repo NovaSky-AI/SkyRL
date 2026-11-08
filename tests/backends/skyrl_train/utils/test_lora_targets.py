@@ -446,6 +446,59 @@ def test_megatron_group_support(
         assert "target_modules" in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    ("target_modules", "should_fail"),
+    [
+        (["linear_fc1", "linear_fc2"], False),
+        (["linear_fc1_up", "linear_fc1_gate", "linear_fc2"], False),
+        (["linear_q_proj"], True),
+        (["linear_q_down_proj"], True),
+        (["linear_qkv_down_proj"], True),
+        (["linear_proj"], True),
+        (["linear_fc1", "linear_q_proj"], True),
+        ("all-linear", True),
+    ],
+    ids=[
+        "mlp_only",
+        "canonical_mlp_only",
+        "q_proj_attn",
+        "q_down_proj_attn",
+        "fused_down_proj_attn",
+        "linear_proj_attn",
+        "mixed_mlp_and_attn",
+        "all_linear_with_attn",
+    ],
+)
+def test_megatron_mla_down_proj_fusion_with_explicit_targets(
+    target_modules: list[str] | str,
+    should_fail: bool,
+) -> None:
+    """Explicit targets adapting only MLP pass with mla_down_proj_fusion; attention targets fail."""
+    kwargs = dict(
+        train_attn=True,
+        train_mlp=True,
+        has_vision_tower=False,
+        mla_down_proj_fusion=True,
+        target_modules=target_modules,
+    )
+    if should_fail:
+        with pytest.raises(ValueError, match="mla_down_proj_fusion"):
+            check_megatron_lora_group_support(**kwargs)
+    else:
+        check_megatron_lora_group_support(**kwargs)
+
+
+def test_megatron_mla_down_proj_fusion_with_all_linear_mlp_only() -> None:
+    """all-linear with train_attn=False passes with mla_down_proj_fusion."""
+    check_megatron_lora_group_support(
+        train_attn=False,
+        train_mlp=True,
+        has_vision_tower=False,
+        mla_down_proj_fusion=True,
+        target_modules="all-linear",
+    )
+
+
 def test_a_name_shared_across_groups_is_rejected() -> None:
     """GPT-BigCode names both the MLP and the attention output projection `c_proj`.
 

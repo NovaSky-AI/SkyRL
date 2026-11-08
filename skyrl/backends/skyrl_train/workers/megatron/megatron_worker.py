@@ -600,21 +600,6 @@ class MegatronWorker:
             lora_config.train_mlp,
             init_adapter_path=lora_config.init_adapter_path,
         )
-        # `language_model_only` swaps in a text-only bridge only for some architectures
-        # (Qwen3.5, Kimi K2.5), so also ask the provider whether it builds a vision tower.
-        transformer_config_kwargs = getattr(self.cfg.policy.megatron_config, "transformer_config_kwargs", None) or {}
-        mla_down_proj_fusion = bool(
-            transformer_config_kwargs.get("mla_down_proj_fusion", False)
-            if isinstance(transformer_config_kwargs, dict)
-            else getattr(transformer_config_kwargs, "mla_down_proj_fusion", False)
-        )
-        check_megatron_lora_group_support(
-            lora_config.train_attn,
-            lora_config.train_mlp,
-            has_vision_tower=self.is_vlm or getattr(self.provider, "vision_config", None) is not None,
-            multi_latent_attention=bool(getattr(self.provider, "multi_latent_attention", False)),
-            mla_down_proj_fusion=mla_down_proj_fusion,
-        )
         if experts_shared_outer_loras:
             apply_packed_per_expert_sharded_state_dict_patch()
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
@@ -655,6 +640,19 @@ class MegatronWorker:
             if not (lora_config.train_attn and lora_config.train_mlp) and self._rank == 0:
                 group = "attn" if lora_config.train_attn else "mlp"
                 logger.info(f"LoRA restricted to {group} modules: {target_modules}")
+
+        # `language_model_only` swaps in a text-only bridge only for some architectures
+        # (Qwen3.5, Kimi K2.5), so also ask the provider whether it builds a vision tower.
+        transformer_config_kwargs = getattr(self.cfg.policy.megatron_config, "transformer_config_kwargs", None) or {}
+        mla_down_proj_fusion = bool(OmegaConf.select(transformer_config_kwargs, "mla_down_proj_fusion", default=False))
+        check_megatron_lora_group_support(
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            has_vision_tower=self.is_vlm or getattr(self.provider, "vision_config", None) is not None,
+            multi_latent_attention=bool(getattr(self.provider, "multi_latent_attention", False)),
+            mla_down_proj_fusion=mla_down_proj_fusion,
+            target_modules=target_modules,
+        )
 
         if lora_type == "lora":
             from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
