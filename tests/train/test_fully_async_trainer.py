@@ -296,3 +296,106 @@ def test_should_keep_group_token_level_rewards():
         )
         is True
     )
+
+
+# ---------------------------------------------------------------------------
+# Subclass hooks
+# ---------------------------------------------------------------------------
+
+
+def test_subclass_hooks_run_in_order_around_the_step(monkeypatch):
+    """A subclass sees its hooks in this order per step: before training, training, checkpoint (when
+    ``checkpoint_before_weight_sync`` is set), weight sync. ``_after_training_loop`` runs once, before the
+    final checkpoint."""
+    from unittest.mock import MagicMock
+
+    from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+    from tests.train.test_rl_callbacks import (
+        _FAKE_CKPT_PATH,
+        DummyDataset,
+        _build_test_cfg,
+        _stub_training_input,
+    )
+
+    order = []
+
+    class _Hooked(FullyAsyncRayPPOTrainer):
+        checkpoint_before_weight_sync = True
+
+        def _validate_placement_and_capacity(self) -> None:
+            order.append("validate")
+
+        async def _before_training_step(self) -> None:
+            order.append("before")
+
+        async def _sync_weights_after_training_step(self) -> None:
+            order.append("sync")
+
+        async def _after_training_loop(self) -> None:
+            order.append("after_loop")
+
+    cfg = _build_test_cfg()
+    cfg.trainer.fully_async.enabled = True
+    cfg.trainer.fully_async.num_parallel_generation_workers = cfg.trainer.train_batch_size
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+    cfg.trainer.algorithm.policy_loss_type = "rollout_is"
+    cfg.generator.batched = False
+    cfg.trainer.ckpt_interval = 1
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 2
+    trainer = _Hooked(
+        cfg=cfg,
+        tracker=MagicMock(),
+        tokenizer=tokenizer,
+        train_dataset=DummyDataset(size=4),
+        eval_dataset=DummyDataset(size=2),
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    assert order == ["validate"]
+
+    dispatch_mock = MagicMock()
+    dispatch_mock.save_weights_for_sampler = AsyncMock(side_effect=lambda *a, **k: order.append("initial_sync"))
+    dispatch_mock.get_timing_metrics = MagicMock(return_value={})
+    trainer.dispatch = dispatch_mock
+    monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
+    monkeypatch.setattr(trainer, "_run_generate_for_a_group_loop", AsyncMock(return_value=None))
+    step_groups = iter([["uid-0", "uid-1"], ["uid-2", "uid-3"]])
+
+    async def _collect(*_args, **_kwargs):
+        return [SimpleNamespace(uid=uid) for uid in next(step_groups)], [], False
+
+    async def _train(*_args, **_kwargs):
+        order.append("train")
+        return {"policy_loss": 0.1}
+
+    def _save():
+        order.append("ckpt")
+        return _FAKE_CKPT_PATH
+
+    monkeypatch.setattr(trainer, "_collect_generation_mini_batch", _collect)
+    monkeypatch.setattr(
+        trainer, "convert_generation_group_mini_batch_to_training_input", lambda *_args: _stub_training_input()
+    )
+    monkeypatch.setattr(trainer, "_run_training", _train)
+    monkeypatch.setattr(trainer, "eval", AsyncMock(return_value={"eval/score": 0.5}))
+    monkeypatch.setattr(trainer, "save_checkpoints", _save)
+    monkeypatch.setattr(trainer._staleness_manager, "validate_state_at_epoch_end", AsyncMock(return_value=None))
+
+    asyncio.run(trainer.train())
+
+    assert order == [
+        "validate",
+        "initial_sync",
+        "before",
+        "train",
+        "ckpt",
+        "sync",
+        "before",
+        "train",
+        "ckpt",
+        "sync",
+        "after_loop",
+        "ckpt",
+    ], order

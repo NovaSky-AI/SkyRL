@@ -9,6 +9,16 @@ High-level notes:
 - We do not do any cross-epoch asynchrony here, so all the control logics like
   generation workers and data buffer are initialized per-epoch. The async dataloader
   and staleness manager are also reset / validated at the end of each epoch.
+
+A subclass changes how generation and training share the GPUs through these hooks of
+`FullyAsyncRayPPOTrainer`. The defaults keep the fully-async behavior described above.
+- `_generation_buffer_maxsize`: the largest number of finished groups the buffer holds.
+- `_build_staleness_manager`: the controller that admits generation groups.
+- `_validate_placement_and_capacity`: the checks on `colocate_all` and `num_parallel_generation_workers`.
+- `_before_training_step`: runs after the mini-batch is collected and before training.
+- `_sync_weights_after_training_step`: pushes the new weights to the inference engines.
+- `_after_training_loop`: runs after the last epoch and before the final checkpoint.
+- `checkpoint_before_weight_sync`: writes the step's checkpoint before the weight sync instead of after eval.
 """
 
 import asyncio
@@ -342,25 +352,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         self._phase_gauge = TrainingPhaseGauge()
 
-        self._gen_buffer_maxsize = self.mini_batch_size * (self.max_staleness_steps + 1)
+        self._gen_buffer_maxsize = self._generation_buffer_maxsize()
         self._loop_gauges = ScalarGauges()
         self._loop_gauges.set(
             "skyrl_mini_batch_size", self.mini_batch_size, "Generation groups consumed per training step."
         )
         self._loop_gauges.set(
             "skyrl_gen_buffer_maxsize", self._gen_buffer_maxsize, "Staleness-bounded generation-buffer capacity."
-        )
-
-        assert (
-            # otherwise wasted throughput
-            self.mini_batch_size <= self.num_parallel_generation_workers
-            and
-            # otherwise would never use all workers due to capacity constraint
-            self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
-        ), (
-            "Invalid num_parallel_generation_workers, the following must hold: "
-            "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
-            f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
         )
 
         # Initialize base trainer
@@ -384,8 +382,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
-        # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
-        assert not self.colocate_all, "colocate_all is not supported for async training yet."
         # Ensure we're using a policy loss that doesn't depend on pi_old ~= pi_rollout
         loss_type = self.cfg.trainer.algorithm.policy_loss_type
         if loss_type == PolicyLossType.CISPO and self.cfg.trainer.algorithm.cispo.cispo_anchor == "rollout":
@@ -398,16 +394,104 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "rollout logprobs (i.e. rollout_is, dppo, reinforce, or cispo with cispo.cispo_anchor='rollout') instead "
             "of recomputing logprobs, since stale policies are not kept for logprob computation."
         )
+        self._validate_placement_and_capacity()
 
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
         # Async-specific states
         self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size)
-        self._staleness_manager = _AsyncStalenessManager(
+        self._staleness_manager = self._build_staleness_manager()
+
+    # ------------------------------------------------------------------
+    # Hooks. The module docstring lists them. The defaults are the fully-async behavior.
+    # ------------------------------------------------------------------
+
+    checkpoint_before_weight_sync: bool = False
+    """Write the step's checkpoint before the weight sync instead of after eval.
+
+    A subclass whose inference engines share the GPUs with training sets this flag, so that the
+    checkpoint runs while the engines sleep."""
+
+    def _generation_buffer_maxsize(self) -> int:
+        """Return the largest number of finished groups the buffer holds.
+
+        ``__init__`` calls this hook before the base trainer is initialized. Only
+        ``self.mini_batch_size``, ``self.max_staleness_steps`` and
+        ``self.num_parallel_generation_workers`` are set at that time."""
+        # The staleness manager admits at most mini_batch_size * (max_staleness_steps + 1) finished
+        # groups ahead of training.
+        return self.mini_batch_size * (self.max_staleness_steps + 1)
+
+    def _build_staleness_manager(self) -> _AsyncStalenessManager:
+        """Return the controller that decides when a generation worker may submit the next group."""
+        return _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
             max_staleness_steps=self.max_staleness_steps,
         )
+
+    def _validate_placement_and_capacity(self) -> None:
+        """Check the GPU placement and the number of generation workers.
+
+        ``__init__`` calls this hook after the base trainer is initialized, so ``self.cfg`` and
+        ``self.colocate_all`` are set."""
+        assert (
+            # otherwise wasted throughput
+            self.mini_batch_size <= self.num_parallel_generation_workers
+            and
+            # otherwise would never use all workers due to capacity constraint
+            self.num_parallel_generation_workers <= self.mini_batch_size * (self.max_staleness_steps + 1)
+        ), (
+            "Invalid num_parallel_generation_workers, the following must hold: "
+            "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
+            f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
+        )
+        # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
+        assert not self.colocate_all, "colocate_all is not supported for async training yet."
+
+    async def _before_training_step(self) -> None:
+        """Run after the mini-batch is collected and before the forward and backward passes.
+
+        The default does nothing: generation runs on its own GPUs while training runs."""
+
+    async def _sync_weights_after_training_step(self) -> None:
+        """Push the new weights to the inference engines.
+
+        The default lets the dispatch pause generation, transfer the weights, and resume generation."""
+        async with self._weight_sync_deadline():
+            with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
+                await self.dispatch.save_weights_for_sampler()
+        # `sync_weights` above is the full bracket: it also pauses and
+        # resumes generation, which under vLLM DP costs seconds of
+        # coordinator quiesce that is not weight-sync work. The
+        # dispatch reports the transfer on its own alongside it.
+        self.all_timings.update(self.dispatch.get_timing_metrics())
+
+    async def _after_training_loop(self) -> None:
+        """Run after the last epoch and before the final checkpoint. The default does nothing."""
+
+    async def _save_step_checkpoints(self, force_save: bool, is_epoch_end: bool) -> None:
+        """Write the step's checkpoint and its Hugging Face (HF) export.
+
+        The loop writes each one at its interval, at the last step of the epoch, or when a callback
+        requested a save."""
+        ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
+            is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
+        )
+        if force_save or ckpt_interval_save:
+            async with self._step_deadline():
+                with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
+                    ckpt_path = await asyncio.to_thread(self.save_checkpoints)
+            self._fire("on_save", ckpt_path=ckpt_path)
+        if self.cfg.trainer.hf_save_interval > 0:
+            if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                async with self._step_deadline():
+                    with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
+                        await asyncio.to_thread(self.save_models)
+
+    # ------------------------------------------------------------------
+    # The training loop.
+    # ------------------------------------------------------------------
 
     def _build_callback_input(self, **fields) -> CallbackInput:
         """The base trainer's input, with ``steps_per_epoch`` in training steps (mini-batches).
@@ -605,6 +689,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             )
 
                         # 3. Run training and update consumed UIDs.
+                        await self._before_training_step()
                         with self._phase_gauge.timed_phase("run_training", self.all_timings):
                             status = await self._run_training(training_input)
                             await self.async_train_dataloader.mark_consumed_uids(
@@ -618,18 +703,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self._training_control.should_save = False
                         self._training_control.should_evaluate = False
 
-                        # 4. After training: pause generation, sync weights, resume.
-                        async with self._weight_sync_deadline():
-                            with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
-                                await self.dispatch.save_weights_for_sampler()
-                        # `sync_weights` above is the full bracket: it also pauses and
-                        # resumes generation, which under vLLM DP costs seconds of
-                        # coordinator quiesce that is not weight-sync work. The
-                        # dispatch reports the transfer on its own alongside it.
-                        self.all_timings.update(self.dispatch.get_timing_metrics())
+                        # A training step completed: count it for this epoch's bookkeeping.
+                        trained_steps_this_epoch += 1
+                        is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
+                        if self.checkpoint_before_weight_sync:
+                            await self._save_step_checkpoints(force_save, is_epoch_end)
 
-                    # A training step completed: count it for this epoch's bookkeeping.
-                    trained_steps_this_epoch += 1
+                        # 4. After training: pause generation, sync weights, resume.
+                        await self._sync_weights_after_training_step()
 
                     # One profiler step per async global step.
                     self._profiler_step()
@@ -653,20 +734,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self._fire("on_eval_end", metrics=eval_metrics)
 
                     # 7. Checkpointing. At interval, at the last step of each epoch, and when a callback asks.
-                    is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
-                    ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
-                        is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
-                    )
-                    if force_save or ckpt_interval_save:
-                        async with self._step_deadline():
-                            with self._phase_gauge.timed_phase("save_checkpoints", self.all_timings):
-                                ckpt_path = await asyncio.to_thread(self.save_checkpoints)
-                        self._fire("on_save", ckpt_path=ckpt_path)
-                    if self.cfg.trainer.hf_save_interval > 0:
-                        if is_epoch_end or self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                            async with self._step_deadline():
-                                with self._phase_gauge.timed_phase("save_hf_model", self.all_timings):
-                                    await asyncio.to_thread(self.save_models)
+                    if not self.checkpoint_before_weight_sync:
+                        await self._save_step_checkpoints(force_save, is_epoch_end)
 
                     log_payload = {**self.all_metrics, **{"timing/" + k: v for k, v in self.all_timings.items()}}
                     if self._ray_gpu_monitor is not None:
@@ -752,6 +821,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # All epochs completed: advance past the last epoch so resuming from the final checkpoint
             # does not redo the last epoch (whose consumed UIDs were cleared at its epoch end).
             self.epoch = self.cfg.trainer.epochs
+
+        await self._after_training_loop()
 
         # safety net: always save final checkpoint at end of training.
         if self.cfg.trainer.ckpt_interval > 0:
