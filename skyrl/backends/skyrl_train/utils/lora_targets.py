@@ -27,9 +27,17 @@ LORA_UNEMBED_MODULES = frozenset({"lm_head", "embed_tokens"})
 # whose own name is listed and only warns about a name that matches nothing, so one list
 # serves every architecture. Gated DeltaNet (under `self_attention`) and Mamba (under
 # `mixer`) both name their projections `in_proj`/`out_proj`; both count as attention.
+# Multi-latent attention (MLA) names its projections `linear_q_proj`, `linear_q_down_proj`,
+# `linear_q_up_proj`, `linear_kv_down_proj`, `linear_kv_up_proj`, and `linear_qkv_down_proj`.
 MEGATRON_ALL_LINEAR_TARGETS = {
     "lora": (
         ("linear_qkv", "attn"),
+        ("linear_q_proj", "attn"),
+        ("linear_q_down_proj", "attn"),
+        ("linear_q_up_proj", "attn"),
+        ("linear_kv_down_proj", "attn"),
+        ("linear_kv_up_proj", "attn"),
+        ("linear_qkv_down_proj", "attn"),
         ("linear_proj", "attn"),
         ("linear_fc1", "mlp"),
         ("linear_fc2", "mlp"),
@@ -40,6 +48,12 @@ MEGATRON_ALL_LINEAR_TARGETS = {
         ("linear_q", "attn"),
         ("linear_k", "attn"),
         ("linear_v", "attn"),
+        ("linear_q_proj", "attn"),
+        ("linear_q_down_proj", "attn"),
+        ("linear_q_up_proj", "attn"),
+        ("linear_kv_down_proj", "attn"),
+        ("linear_kv_up_proj", "attn"),
+        ("linear_qkv_down_proj", "attn"),
         ("linear_proj", "attn"),
         ("linear_fc1_up", "mlp"),
         ("linear_fc1_gate", "mlp"),
@@ -116,20 +130,29 @@ def check_megatron_lora_group_support(
     train_mlp: bool,
     *,
     has_vision_tower: bool,
-    multi_latent_attention: bool,
+    multi_latent_attention: bool = False,
+    mla_down_proj_fusion: bool = False,
 ) -> None:
-    """Reject narrowing on Megatron models where the ``"all-linear"`` halves do not match the groups.
+    """Reject narrowing or configurations on Megatron models where LoRA is unsupported.
 
     Args:
         train_attn: Whether to adapt the attention group.
         train_mlp: Whether to adapt the MLP group.
         has_vision_tower: Whether the model being built includes a vision encoder.
-        multi_latent_attention: Whether the model uses multi-latent attention (MLA).
+        multi_latent_attention: Deprecated; retained for backwards compatibility.
+        mla_down_proj_fusion: Whether MLA down projection fusion is enabled.
 
     Raises:
-        ValueError: If narrowing is requested on a model with a vision tower, or attention-only
-            LoRA on an MLA model.
+        ValueError: If narrowing is requested on a model with a vision tower, or if
+            attention LoRA is configured with MLA down projection fusion.
     """
+    if train_attn and mla_down_proj_fusion:
+        raise ValueError(
+            "LoRA on attention modules is not supported with Megatron MLA down projection fusion "
+            "(`mla_down_proj_fusion=True`) because adapter export and weight synchronization "
+            "require separate `linear_q_down_proj` and `linear_kv_down_proj`. "
+            "Set `mla_down_proj_fusion=False` when training attention with LoRA."
+        )
     if train_attn and train_mlp:
         return
     # The vision tower and its patch merger reuse the language model's module names
@@ -139,14 +162,6 @@ def check_megatron_lora_group_support(
             "`train_attn`/`train_mlp` narrowing is not supported for vision-language models on the "
             "Megatron backend. Set both to True and name the modules to adapt in "
             "`trainer.policy.model.lora.target_modules` instead."
-        )
-    if multi_latent_attention and not train_mlp:
-        raise ValueError(
-            "Attention-only LoRA (`train_mlp=False`) is not supported for multi-latent attention models "
-            'on the Megatron backend: `trainer.policy.model.lora.target_modules="all-linear"` adapts only '
-            "`linear_proj` of their attention. Set both to True and name the modules to adapt in "
-            "`trainer.policy.model.lora.target_modules` instead, e.g. `linear_q_down_proj`, "
-            "`linear_q_up_proj`, `linear_kv_down_proj`, `linear_kv_up_proj`, `linear_proj`."
         )
 
 
