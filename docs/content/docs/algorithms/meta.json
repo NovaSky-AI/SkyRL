@@ -1,6 +1,7 @@
 {
   "title": "Algorithms",
   "pages": [
+    "overview",
     "dapo",
     "off_policy_correction",
     "custom_algorithms"

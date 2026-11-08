@@ -1,0 +1,148 @@
+---
+title: "Supported Algorithms"
+description: "Choose advantage estimators, policy losses, and training recipes in SkyRL."
+---
+
+SkyRL exposes advantage estimation, policy loss, and loss reduction as separate configuration choices. This page maps the built-in options to their configuration keys and example scripts for the `skyrl.train` frontend.
+
+<Callout type="info">
+These options apply to the FSDP and Megatron training stack. GAE requires a critic and is supported with FSDP; the Megatron backend does not support a critic. Other combinations can have additional constraints described below and in the linked guides.
+</Callout>
+
+## Choosing an algorithm
+
+An **advantage estimator** converts rewards, and optionally critic values, into advantages. A **policy loss** uses those advantages to compute the policy update. A **recipe** such as DAPO combines these choices with sampling, filtering, reward shaping, and other settings.
+
+The relevant configuration fields are:
+
+| Field | Purpose | Current default |
+| --- | --- | --- |
+| `trainer.algorithm.advantage_estimator` | How to compute advantages | `grpo` |
+| `trainer.algorithm.policy_loss_type` | Which policy objective to optimize | `dppo` |
+| `trainer.algorithm.loss_reduction` | How to weight tokens, sequences, or prompt groups | `prompt_mean` |
+| `trainer.algorithm.grpo_norm_by_std` | Whether GRPO divides by the within-group reward standard deviation | `false` |
+
+Setting `advantage_estimator=grpo` alone therefore does **not** select the PPO clipping loss or reproduce the original GRPO recipe. Set the loss and reduction explicitly when comparing objectives. For example, these overrides select group-relative advantages with standard-deviation normalization and the token-level PPO clipping loss:
+
+```bash
+trainer.algorithm.advantage_estimator=grpo \
+trainer.algorithm.grpo_norm_by_std=true \
+trainer.algorithm.policy_loss_type=regular \
+trainer.algorithm.loss_reduction=sequence_mean
+```
+
+The snippets on this page are algorithm overrides to add to a training command; they are not complete launch commands. Follow the [GSM8K quickstart](/docs/getting-started/quickstart) for data preparation, model placement, and launching training. Example scripts below include those settings, but their model sizes, GPU counts, and batch sizes need to match your hardware.
+
+## Advantage estimators
+
+Select an estimator with `trainer.algorithm.advantage_estimator`. Group-based estimators compare responses belonging to the same prompt; configure the group size with `generator.n_samples_per_prompt`.
+
+| Estimator | Configuration value | Behavior and requirements | Example |
+| --- | --- | --- | --- |
+| GRPO | `grpo` | Subtracts the prompt group's mean reward; optionally divides by its standard deviation with `grpo_norm_by_std=true`. Use multiple responses per prompt for a group-relative baseline. | [GSM8K](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/gsm8k/run_gsm8k.sh) |
+| GAE | `gae` | Uses critic values, `gamma`, and `lambd` to estimate advantages and returns. Requires `trainer.critic.model.path` and FSDP. | See the [configuration reference](/docs/api-ref/skyrl/config). |
+| RLOO | `rloo` | Uses a leave-one-out baseline across responses to the same prompt. With only one response, this implementation sets its advantage to zero. | [RLOO](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/rloo/run_rloo.sh) |
+| REINFORCE++ | `reinforce++` | Computes discounted returns using `gamma`, then whitens them over valid response tokens. | [REINFORCE++](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/reinforce++/run_reinforce++.sh) |
+| MAXRL | `maxrl` | Normalizes group-relative rewards by the group's mean reward rather than its standard deviation. | [MAXRL](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/maxrl/run_maxrl_gsm8k.sh) |
+
+GAE and REINFORCE++ are not supported with `generator.step_wise_trajectories=true`.
+
+## Policy losses
+
+Select a loss with `trainer.algorithm.policy_loss_type`. This selection is independent of the advantage estimator; for example, GSPO and CISPO examples use the default GRPO estimator.
+
+| Loss | Configuration value | Main settings and behavior |
+| --- | --- | --- |
+| PPO clipping | `regular` | Token-level importance ratios with `eps_clip_low` and `eps_clip_high`. |
+| Dual-clip PPO | `dual_clip` | PPO clipping plus `clip_ratio_c` for negative advantages. Used by the DAPO examples. |
+| DPPO | `dppo` | Divergence-based masking with `dppo.dppo_type` (`binary_tv` or `binary_kl`) and `dppo.delta_low` / `delta_high`. Uses rollout logprobs when available, otherwise old logprobs. |
+| GSPO | `gspo` | Implements GSPO-token with sequence-level importance weights. Uses `eps_clip_low` / `eps_clip_high`; the example uses `sequence_mean` reduction. |
+| CISPO | `cispo` | Clips detached importance weights in the policy gradient using the `cispo` configuration. |
+| SAPO | `sapo` | Uses a smooth gate with separate `sapo.tau_pos` and `sapo.tau_neg` temperatures. The example uses `sequence_mean` reduction. |
+| Clip-Cov | `clip_cov` | Covariance-based token selection, configured with `clip_cov.clip_ratio`, `clip_cov.clip_cov_lb`, and `clip_cov.clip_cov_ub`. |
+| KL-Cov | `kl_cov` | KL regularization on covariance-selected tokens, configured with `kl_cov.kl_cov_frac` and `kl_cov.ppo_kl_coef`. |
+| Rollout IS | `rollout_is` | Uses rollout logprobs and zeroes importance weights outside the `eps_clip_low` / `eps_clip_high` band. Requires rollout logprobs. |
+| REINFORCE | `reinforce` | Plain advantage-weighted log probability, without an importance ratio. This is a policy loss, distinct from the `reinforce++` advantage estimator. |
+
+The registry also exposes `cross_entropy` and `importance_sampling` for callers that supply the corresponding inputs. See the [implementations in `ppo_utils.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/backends/skyrl_train/utils/ppo_utils.py) for their input contracts, and the [SFT guide](/docs/sft/overview) for supervised training.
+
+### CISPO
+
+[CISPO](https://arxiv.org/abs/2506.13585) clips the importance weight and detaches it before multiplying by the advantage and log probability. Unlike PPO's clipped surrogate, a capped weight can still contribute a gradient.
+
+```bash
+trainer.algorithm.policy_loss_type=cispo \
+trainer.algorithm.cispo.cispo_anchor=old \
+trainer.algorithm.cispo.cispo_eps_clip_low=1.0 \
+trainer.algorithm.cispo.cispo_eps_clip_high=4.0
+```
+
+The clip parameters are **offsets**: the bounds above are `1 - 1.0 = 0` and `1 + 4.0 = 5`. These are the values in the [CISPO GSM8K example](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/cispo/run_cispo_gsm8k.sh).
+
+The default `cispo_anchor=old` uses recomputed old-policy logprobs. For a rollout-anchored objective, set `cispo_anchor=rollout` and return rollout logprobs with `generator.sampling_params.logprobs=1`. That anchor already performs the importance correction, so it cannot be combined with `off_policy_correction.tis_ratio_type`.
+
+### GSPO
+
+SkyRL implements the **GSPO-token** variant of [GSPO](https://arxiv.org/abs/2507.18071): importance weights are computed from the mean log ratio over valid tokens in each response, while allowing token-level advantages.
+
+```bash
+trainer.algorithm.policy_loss_type=gspo \
+trainer.algorithm.loss_reduction=sequence_mean \
+trainer.algorithm.eps_clip_low=0.2 \
+trainer.algorithm.eps_clip_high=0.2
+```
+
+The [GSPO GSM8K script](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/gspo/run_gspo_gsm8k.sh) extends the base GSM8K script and selects the GSPO loss and sequence-mean reduction. The clip values above are configurable defaults, not a claim to reproduce the paper's training setup.
+
+### SAPO
+
+[SAPO](https://arxiv.org/abs/2511.20347) replaces hard clipping with a smooth gate. `tau_pos` controls the gate for positive advantages, and `tau_neg` controls it for non-positive advantages.
+
+```bash
+trainer.algorithm.policy_loss_type=sapo \
+trainer.algorithm.loss_reduction=sequence_mean \
+trainer.algorithm.sapo.tau_pos=1.0 \
+trainer.algorithm.sapo.tau_neg=1.05
+```
+
+These settings match the [SAPO GSM8K script](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/sapo/run_sapo_gsm8k.sh). There is also a [Qwen3-4B AIME example](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/sapo/run_sapo_qwen3_4b_aime.sh). The implementation recommends `sequence_mean` reduction for both SAPO and GSPO and logs a warning for other reductions.
+
+## Recipes and loss reduction
+
+Recipes configure several parts of the training pipeline rather than introducing a single registry key.
+
+| Recipe | Configuration and entry point |
+| --- | --- |
+| DAPO | GRPO advantages with standard-deviation normalization, `dual_clip` loss, dynamic sampling, token-level reduction, and overlong handling. Follow the [DAPO walkthrough](/docs/algorithms/dapo) and [GSM8K script](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/dapo/run_dapo_gsm8k.sh). |
+| Dr. GRPO | Set `advantage_estimator=grpo`, `grpo_norm_by_std=false`, `loss_reduction=seq_mean_token_sum_norm`, and an explicit `max_seq_len` normalization constant. The [example script](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/algorithms/drgrpo/run_drgrpo_gsm8k.sh) disables KL loss but inherits the default policy loss; pass `policy_loss_type=regular` if you want PPO clipping. |
+| Clip-Cov / KL-Cov | See the [configuration and scripts](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/algorithms/clip_cov_kl_cov). Off-policy correction is not supported with these two losses. |
+
+`loss_reduction` determines how variable-length responses contribute to the update:
+
+- `token_mean`: average over valid tokens in the batch.
+- `sequence_mean`: average valid-token losses within each response, then average responses.
+- `prompt_mean`: average valid-token losses within each prompt group, then average prompt groups. This is the default.
+- `seq_mean_token_sum_norm`: sum token losses per response, normalize by `max_seq_len`, then average responses. This mode requires an explicit `trainer.algorithm.max_seq_len`.
+
+The trainer applies reduction by scaling advantages before calling the policy loss. If you implement a custom loss, follow the [custom algorithm guide](/docs/algorithms/custom_algorithms#how-the-built-in-ppo-loss-composes-the-config) to avoid applying the reduction twice.
+
+## Flash-RL-style truncated importance sampling
+
+Training and inference can assign different probabilities to the same tokens because of numerical differences or asynchronous policy updates. Truncated importance sampling (TIS) is a correction component that can be added to a supported policy loss, rather than a separate advantage estimator.
+
+For example, add token-level TIS to the PPO clipping objective:
+
+```bash
+trainer.algorithm.policy_loss_type=regular \
+trainer.algorithm.off_policy_correction.tis_ratio_type=token \
+trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0 \
+generator.sampling_params.logprobs=1
+```
+
+The correction uses `exp(old_logprobs - rollout_logprobs)` and caps the importance weight. For a sequence-level weight, use `tis_ratio_type=sequence` and `sequence_tis_ratio_clip_high` instead. Use these configuration fields rather than the deprecated `use_tis` and `tis_imp_ratio_cap` flags.
+
+TIS cannot be combined with CISPO's `rollout` anchor or with score centering (`enable_score_centering=true`). Clip-Cov and KL-Cov also reject off-policy correction. See the [off-policy correction guide](/docs/algorithms/off_policy_correction) for the distinction between old-policy and rollout-policy probabilities, sequence masking, and token filtering.
+
+## Extending the built-in options
+
+The [advantage and policy-loss registries](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/backends/skyrl_train/utils/ppo_utils.py) are the source of the supported configuration values. The [configuration reference](/docs/api-ref/skyrl/config) documents individual fields, and [Implementing Custom Algorithms](/docs/algorithms/custom_algorithms) explains how to register an estimator or loss and how to customize the trainer for reward shaping or execution changes.
