@@ -140,12 +140,18 @@ class _AsyncStalenessManager:
     The key capacity formula is implemented in `_compute_capacity_unlocked`. For details and caveats,
     see https://docs.skyrl.ai/docs/tutorials/fully_async#async-staleness-manager.
 
+    With ``max_staleness_steps=None`` the manager has no staleness term. It admits a group while fewer
+    than ``max_concurrent_generation_groups`` groups are not yet trained on. A finished group that
+    waits in the buffer still holds its slot. The colocated partial-rollout trainer uses this mode: it
+    cuts generation when ``mini_batch_size`` groups have finished and resumes the cut groups under the
+    new weights, so a resumed group already holds a slot and is never blocked.
+
     Reference:
     - Modeled after AReal's StalenessManager: https://github.com/inclusionAI/AReaL/blob/b755c4447c2fff97889d8828293ee85f17a806f9/areal/core/staleness_manager.py
     - The idea of this controller is from section 5.1 of AReal's paper: https://arxiv.org/pdf/2505.24298v3
     """
 
-    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int, max_staleness_steps: int):
+    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int, max_staleness_steps: Optional[int]):
         self.max_concurrent_generation_groups = max_concurrent_generation_groups
         self.mini_batch_size = mini_batch_size
         self.max_staleness_steps = max_staleness_steps
@@ -192,7 +198,14 @@ class _AsyncStalenessManager:
     def _compute_capacity_unlocked(self) -> int:
         # NOTE(Charlie): do not need a self._current_global_step + 1 here unlike AReal because our
         # `_current_global_step` is "the version being worked on", not already finished steps.
-        consumer_capacity = (self.max_staleness_steps + self._current_global_step) * self.mini_batch_size
+        if self.max_staleness_steps is None:
+            # No staleness term: at most `max_concurrent_generation_groups` groups are not yet trained
+            # on. The steps before `_current_global_step` consumed `mini_batch_size` groups each.
+            consumer_capacity = (
+                self._current_global_step - 1
+            ) * self.mini_batch_size + self.max_concurrent_generation_groups
+        else:
+            consumer_capacity = (self.max_staleness_steps + self._current_global_step) * self.mini_batch_size
         producer_staleness_capacity = consumer_capacity - (self._stat.accepted + self._stat.running)
         producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
         return min(producer_concurrency_capacity, producer_staleness_capacity)
