@@ -183,7 +183,7 @@ def _check_eval_sampling(cfg: Any) -> None:
     """Raise when eval is on and ``generator.eval_sampling_params`` differ from what skycap samples with.
 
     skycap's servers apply ``generator.sampling_params`` to every call, eval calls included, so the trainer's
-    logprobs match what was sampled; eval settings that differ would be ignored without a word.
+    logprobs match what was sampled.
     """
     if cfg.trainer.eval_interval <= 0 or not cfg.data.val_data:
         return

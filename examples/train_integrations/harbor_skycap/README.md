@@ -49,26 +49,6 @@ trials through the same generator. Three things differ from training:
 Eval metrics are grouped by the directories in `data.val_data`
 (`eval/<directory name>/avg_score`, `pass_at_<n>`).
 
-### CodeContests: `run_codecontests.sh`
-
-The recipe trains on CodeContests with checkpoints, exports and a held-out
-eval on by default:
-
-```bash
-RUN_NAME=codecontests-1 NUM_TASKS=256 NUM_PROMPTS=8 GROUP_SIZE=8 STRATEGY=megatron \
-  bash examples/train_integrations/harbor_skycap/run_codecontests.sh
-```
-
-It shuffles all task names once with `SPLIT_SEED`, holds out the first
-`EVAL_TASKS` (32) and trains on the next `NUM_TASKS`, evaluating 2 samples per
-held-out task before the first step, every `EVAL_INTERVAL` (10) steps and after
-the last. It checkpoints every 5 steps (the last 5 kept) and writes a merged
-Hugging Face model to `exports/global_step_<N>/policy` at every epoch end.
-Everything lands in `$OUTPUT_ROOT/$RUN_NAME`, on `/mnt/cluster_storage` when
-the node has it. Launching again with the same `RUN_NAME` resumes from the
-latest checkpoint on the same split; the run needs the parallelism it saved
-with. See the header of the script for every knob.
-
 ## Which paths train
 
 `skycap.train_paths` picks the rows of each rollout:
