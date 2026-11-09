@@ -13,7 +13,7 @@ High-level notes:
 A subclass changes how generation and training share the GPUs through these hooks of
 `FullyAsyncRayPPOTrainer`. The defaults keep the fully-async behavior described above.
 - `_generation_buffer_maxsize`: the largest number of finished groups the buffer holds.
-- `_build_staleness_manager`: the controller that admits generation groups.
+- `_build_admission_controller`: the controller that admits generation groups into flight.
 - `_validate_placement_and_capacity`: the checks on `colocate_all` and `num_parallel_generation_workers`.
 - `_before_training_step`: runs after the mini-batch is collected and before training.
 - `_sync_weights_after_training_step`: pushes the new weights to the inference engines.
@@ -400,7 +400,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Async-specific states
         self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size)
-        self._staleness_manager = self._build_staleness_manager()
+        self._staleness_manager = self._build_admission_controller()
 
     # ------------------------------------------------------------------
     # Hooks. The module docstring lists them. The defaults are the fully-async behavior.
@@ -422,8 +422,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # groups ahead of training.
         return self.mini_batch_size * (self.max_staleness_steps + 1)
 
-    def _build_staleness_manager(self) -> _AsyncStalenessManager:
-        """Return the controller that decides when a generation worker may submit the next group."""
+    def _build_admission_controller(self) -> _AsyncStalenessManager:
+        """Return the controller that decides when a generation worker may submit the next group.
+
+        The default bounds staleness: a group is trained at most ``max_staleness_steps`` steps after
+        it was scheduled. A subclass returns a controller with its own admission rule."""
         return _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
