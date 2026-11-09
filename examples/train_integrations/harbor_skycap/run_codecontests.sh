@@ -235,7 +235,7 @@ else
 fi
 mkdir -p "$RUN_DIR"
 # Rebuilt from the same seed on every launch, so a resumed run trains and evaluates on the same tasks.
-python3 examples/train_integrations/harbor_skycap/split_tasks.py --tasks-dir "$TASKS_DIR" --run-dir "$RUN_DIR" \
+python3 examples/train_integrations/harbor/split_tasks.py --tasks-dir "$TASKS_DIR" --run-dir "$RUN_DIR" \
   --eval "$EVAL_TASKS" --train "$NUM_TASKS" --seed "$SPLIT_SEED" --tasks "$TASKS"
 NUM_TASKS="$(wc -l < "$RUN_DIR/train_tasks.txt" | tr -d ' ')"
 if (( NUM_PROMPTS > NUM_TASKS )); then
