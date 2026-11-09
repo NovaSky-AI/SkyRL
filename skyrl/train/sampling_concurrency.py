@@ -20,6 +20,8 @@ def build_sampling_concurrency_controller(
     concurrency_cfg = generator_cfg.sampling_concurrency
     if not concurrency_cfg.enabled:
         return None
+    if concurrency_cfg.admission_scope == "trajectory" and generator_cfg.batched:
+        raise ValueError("trajectory sampling admission requires unbatched trajectory generation")
     if concurrency_cfg.policy == "fixed":
         policy = FixedConcurrencyPolicy()
     elif concurrency_cfg.policy == "engine_load":
@@ -65,6 +67,7 @@ def build_sampling_client(
         inference_engine_client,
         controller=controller,
         feedback_producer=feedback_producer,
+        admission_scope=generator_cfg.sampling_concurrency.admission_scope,
     )
     if controller is not None:
         logger.info(

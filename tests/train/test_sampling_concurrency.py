@@ -65,3 +65,14 @@ def test_builds_lightweight_client_around_service_even_when_adaptive_control_is_
 
     assert isinstance(client, SamplingClient)
     assert client._service.controller is None
+
+
+def test_factory_selects_trajectory_scope_and_rejects_unwrapped_batched_generation():
+    config = GeneratorConfig()
+    config.sampling_concurrency.enabled = True
+    config.sampling_concurrency.admission_scope = "trajectory"
+    client = build_sampling_client(MagicMock(), config)
+    assert client._service.admission_scope == "trajectory"
+    config.batched = True
+    with pytest.raises(ValueError, match="requires unbatched"):
+        build_sampling_client(MagicMock(), config)

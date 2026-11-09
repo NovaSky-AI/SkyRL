@@ -15,9 +15,13 @@ import asyncio
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, Protocol, TypeVar, cast
+
+from loguru import logger
 
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
@@ -25,12 +29,14 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineOutput,
 )
 from skyrl.utils.adaptive_concurrency import (
+    ConcurrencyDecision,
     SamplingCompletion,
     SamplingConcurrencyController,
 )
 
 _ResultT = TypeVar("_ResultT")
 SamplingOperation = Literal["generate", "sample", "chat_completion", "completion"]
+_trajectory_context: ContextVar[tuple[object, str] | None] = ContextVar("sampling_trajectory", default=None)
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,15 @@ class SamplingRequest:
     payload: InferenceEngineInput | dict[str, Any]
     attempt_id: str | None = None
     model: str | None = None
+
+
+class TrajectoryShed(RuntimeError):
+    """A hard-pressure decision terminated one rollout at a sampling boundary."""
+
+    def __init__(self, attempt_id: str, reason: str) -> None:
+        self.attempt_id = attempt_id
+        self.reason = reason
+        super().__init__(f"trajectory {attempt_id!r} shed because of {reason}")
 
 
 class SamplingFeedbackProducer(Protocol):
@@ -65,6 +80,14 @@ class _SamplingWork(Generic[_ResultT]):
     completion: asyncio.Future[_ResultT]
     task: asyncio.Task[None] | None = None
     dispatched_at_s: float | None = None
+    shed_reason: str | None = None
+
+
+@dataclass
+class _TrajectoryLease:
+    owner: asyncio.Task[Any]
+    admitted_at_s: float | None = None
+    shed_reason: str | None = None
 
 
 class SamplingService:
@@ -82,16 +105,25 @@ class SamplingService:
         *,
         controller: SamplingConcurrencyController | None = None,
         feedback_producer: SamplingFeedbackProducer | None = None,
+        admission_scope: Literal["request", "trajectory"] = "request",
     ) -> None:
+        if admission_scope not in ("request", "trajectory"):
+            raise ValueError(f"Unknown sampling admission scope: {admission_scope}")
         self._backend = backend
         self._controller = controller
         self._feedback_producer = feedback_producer
+        self.admission_scope = admission_scope
+        self._trajectories: dict[str, _TrajectoryLease] = {}
         self._work: dict[str, _SamplingWork[Any]] = {}
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._owner_ready = threading.Event()
         self._http_proxy = None
+        self._revoked_attempts: dict[str, str] = {}
+        self._attempt_started_at_s: dict[str, float] = {}
         self._started = False
         self._closed = False
+        if self._controller is not None:
+            self._controller.set_decision_handler(self._apply_decision)
 
     @property
     def controller(self) -> SamplingConcurrencyController | None:
@@ -129,11 +161,76 @@ class SamplingService:
 
         if self._closed:
             raise RuntimeError("sampling service is closed")
+        if self.admission_scope == "trajectory" and self._controller is not None:
+            raise ValueError("trajectory admission requires direct SamplingClient trajectory leases")
         if self._http_proxy is None:
             from skyrl.train.sampling_http_proxy import SamplingHTTPProxy
 
             self._http_proxy = SamplingHTTPProxy(self)
         return self._http_proxy.endpoint_url
+
+    @asynccontextmanager
+    async def trajectory(self, attempt_id: str) -> AsyncIterator[None]:
+        """Hold a permit while the caller runs and cleans up one trajectory.
+
+        Child requests share the lease rather than reacquiring its permit.
+        The caller still owns its environment and tools; the service retains
+        only the task handle needed for pressure-driven cancellation.
+        """
+        if self._closed:
+            raise RuntimeError("sampling service is closed")
+        if self.admission_scope != "trajectory" or self._controller is None:
+            yield
+            return
+        self.start()
+        if not attempt_id or attempt_id in self._trajectories:
+            raise ValueError("Trajectory admission requires a unique nonempty attempt ID")
+        parent = _trajectory_context.get()
+        if parent is not None and parent[0] is self:
+            raise ValueError("Nested trajectory leases would reacquire the same admission window")
+        owner = asyncio.current_task()
+        assert owner is not None
+        lease = _TrajectoryLease(owner=owner)
+        self._trajectories[attempt_id] = lease
+        try:
+            async with self._controller.slot():
+                lease.admitted_at_s = started = time.monotonic()
+                token = _trajectory_context.set((self, attempt_id))
+                completed = False
+                try:
+                    yield
+                    if lease.shed_reason is not None:
+                        if owner.cancelling() > 1:
+                            raise asyncio.CancelledError
+                        owner.uncancel()
+                        raise TrajectoryShed(attempt_id, lease.shed_reason)
+                    completed = True
+                except asyncio.CancelledError:
+                    # A concurrent caller/shutdown cancellation must retain
+                    # cancellation semantics rather than become a retry.
+                    if lease.shed_reason is None or owner.cancelling() > 1:
+                        raise
+                    owner.uncancel()
+                    raise TrajectoryShed(attempt_id, lease.shed_reason) from None
+                finally:
+                    _trajectory_context.reset(token)
+                    children = [
+                        w.task
+                        for w in self._work.values()
+                        if w.attempt_id == attempt_id and w.task is not None and not w.task.done()
+                    ]
+                    for task in children:
+                        task.cancel()
+                    if children:
+                        await asyncio.gather(*children, return_exceptions=True)
+                    lease.admitted_at_s = None
+                    if children and completed:
+                        raise RuntimeError("Trajectory ended with active sampling requests")
+            await self._controller.on_completion(SamplingCompletion(duration_s=time.monotonic() - started))
+        finally:
+            self._trajectories.pop(attempt_id, None)
+            self._revoked_attempts.pop(attempt_id, None)
+            self._attempt_started_at_s.pop(attempt_id, None)
 
     async def submit(self, request: SamplingRequest) -> Any:
         """Submit one request-shaped unit of sampling work."""
@@ -211,6 +308,18 @@ class SamplingService:
         invoke: Callable[[], Awaitable[_ResultT]],
     ) -> _ResultT:
         self.start()
+        context = _trajectory_context.get()
+        if context is not None and context[0] is self:
+            attempt_id = context[1]
+        if self.admission_scope == "trajectory" and self._controller is not None:
+            lease = self._trajectories.get(attempt_id)
+            if lease is None or lease.admitted_at_s is None:
+                raise ValueError("Trajectory sampling requires an active trajectory lease")
+        if attempt_id is not None and attempt_id in self._revoked_attempts:
+            raise TrajectoryShed(attempt_id, self._revoked_attempts[attempt_id])
+        submitted_at_s = time.monotonic()
+        if attempt_id is not None:
+            self._attempt_started_at_s.setdefault(attempt_id, submitted_at_s)
         loop = asyncio.get_running_loop()
         request_id = uuid.uuid4().hex
         completion: asyncio.Future[_ResultT] = loop.create_future()
@@ -218,7 +327,7 @@ class SamplingService:
             request_id=request_id,
             operation=operation,
             attempt_id=attempt_id,
-            submitted_at_s=time.monotonic(),
+            submitted_at_s=submitted_at_s,
             completion=completion,
         )
         self._work[request_id] = work
@@ -228,8 +337,7 @@ class SamplingService:
             return await completion
         except asyncio.CancelledError:
             # A dead generator must not leave an orphan request consuming engine
-            # capacity. Policy-driven shedding is layered on this same ownership
-            # point in the next stack entry.
+            # capacity. Policy-driven shedding uses this same ownership point.
             work.task.cancel()
             await asyncio.gather(work.task, return_exceptions=True)
             raise
@@ -242,9 +350,11 @@ class SamplingService:
         started_at_s = 0.0
         succeeded = False
         try:
-            if self._controller is None:
+            lease = self._trajectories.get(work.attempt_id)
+            if self._controller is None or (lease is not None and lease.admitted_at_s is not None):
                 work.dispatched_at_s = started_at_s = time.monotonic()
                 result = await invoke()
+                succeeded = True
             else:
                 async with self._controller.slot():
                     work.dispatched_at_s = started_at_s = time.monotonic()
@@ -256,7 +366,10 @@ class SamplingService:
             if not work.completion.done():
                 work.completion.set_result(result)
         except asyncio.CancelledError:
-            if not work.completion.done():
+            if work.shed_reason is not None and work.attempt_id is not None:
+                if not work.completion.done():
+                    work.completion.set_exception(TrajectoryShed(work.attempt_id, work.shed_reason))
+            elif not work.completion.done():
                 work.completion.cancel()
             raise
         except BaseException as exc:
@@ -268,11 +381,79 @@ class SamplingService:
             _ = succeeded
             self._work.pop(work.request_id, None)
 
+    def _apply_decision(self, decision: ConcurrencyDecision) -> None:
+        """Cancel the youngest distinct dispatched attempts selected by a hard cut."""
+
+        logger.info(
+            "Sampling concurrency decision: limit={} reason={} shed_count={} in_flight={} pending={}",
+            decision.desired_limit,
+            decision.reason,
+            decision.shed_count,
+            self.in_flight,
+            self.pending,
+        )
+        if decision.shed_count < 1:
+            return
+        if self.admission_scope == "trajectory":
+            candidates = sorted(
+                (
+                    item
+                    for item in self._trajectories.items()
+                    if item[1].admitted_at_s is not None
+                    and item[1].shed_reason is None
+                    and not item[1].owner.done()
+                    and not item[1].owner.cancelling()
+                ),
+                key=lambda item: item[1].admitted_at_s,
+                reverse=True,
+            )
+            for attempt_id, lease in candidates[: decision.shed_count]:
+                lease.shed_reason = decision.reason
+                self._revoked_attempts[attempt_id] = decision.reason
+                lease.owner.cancel()
+            return
+        candidates = sorted(
+            (
+                work
+                for work in self._work.values()
+                if work.attempt_id is not None
+                and work.dispatched_at_s is not None
+                and work.task is not None
+                and not work.task.done()
+            ),
+            key=lambda work: self._attempt_started_at_s[cast(str, work.attempt_id)],
+            reverse=True,
+        )
+        selected_attempts: set[str] = set()
+        for work in candidates:
+            assert work.attempt_id is not None
+            if work.attempt_id in selected_attempts:
+                continue
+            work.shed_reason = decision.reason
+            self._revoked_attempts[work.attempt_id] = decision.reason
+            selected_attempts.add(work.attempt_id)
+            work.task.cancel()
+            if len(selected_attempts) >= decision.shed_count:
+                break
+
+    async def finish_attempt(self, attempt_id: str) -> None:
+        """Forget terminal shed state after generator cleanup completes."""
+
+        attempt_id = str(attempt_id)
+        if attempt_id in self._trajectories:
+            return  # The caller's trajectory context owns final lease cleanup.
+        self._revoked_attempts.pop(attempt_id, None)
+        self._attempt_started_at_s.pop(attempt_id, None)
+
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self._controller is not None:
+            self._controller.set_decision_handler(None)
         tasks = [work.task for work in self._work.values() if work.task is not None]
+        tasks.extend(lease.owner for lease in self._trajectories.values() if lease.owner is not asyncio.current_task())
+        tasks = list(set(tasks))
         for task in tasks:
             task.cancel()
         if tasks:
@@ -334,6 +515,10 @@ class SamplingClient(InferenceEngineInterface):
         """Bind the service lifecycle to the current training event loop."""
 
         self._service.start()
+
+    def trajectory(self, attempt_id: str) -> AbstractAsyncContextManager[None]:
+        """Declare the lifetime of one generator-owned trajectory."""
+        return self._service.trajectory(attempt_id)
 
     async def submit(self, request: SamplingRequest) -> Any:
         """Submit an explicit request through the shared sampling queue."""
@@ -429,7 +614,10 @@ class SamplingClient(InferenceEngineInterface):
         return await self._backend.resume_generation()
 
     async def finish_session(self, session_id: str) -> None:
-        return await self._backend.finish_session(session_id)
+        try:
+            return await self._backend.finish_session(session_id)
+        finally:
+            await self._service.finish_attempt(session_id)
 
     async def get_world_size(self) -> tuple[int, int]:
         return await self._backend.get_world_size()

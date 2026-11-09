@@ -103,6 +103,24 @@ async def test_controller_co_locates_policy_and_request_limiter():
 
 
 @pytest.mark.asyncio
+async def test_controller_forwards_decisions_to_service_owned_effect_handler():
+    class ShedPolicy:
+        def on_feedback(self, feedback, policy_context):
+            return ConcurrencyDecision(desired_limit=1, reason="hard_pressure", shed_count=2)
+
+        def on_completion(self, completion, policy_context):
+            return None
+
+    decisions = []
+    controller = SamplingConcurrencyController(policy=ShedPolicy(), initial_limit=4, decision_handler=decisions.append)
+
+    decision = await controller.on_feedback(SamplingFeedback())
+
+    assert decision == ConcurrencyDecision(desired_limit=1, reason="hard_pressure", shed_count=2)
+    assert decisions == [decision]
+
+
+@pytest.mark.asyncio
 async def test_controller_forwards_request_completion_to_policy():
     class CompletionPolicy:
         completion = None
@@ -205,7 +223,7 @@ def test_engine_load_policy_soft_trims_kv_pressure():
     assert decision == ConcurrencyDecision(desired_limit=74, reason="kv_soft_trim")
 
 
-def test_engine_load_policy_hard_trim_drains_existing_work():
+def test_engine_load_policy_hard_trim_requests_active_shedding():
     policy = EngineLoadConcurrencyPolicy(min_limit=1, max_limit=128)
 
     decision = policy.on_feedback(
@@ -213,7 +231,7 @@ def test_engine_load_policy_hard_trim_drains_existing_work():
         context(current_limit=100, in_flight=90),
     )
 
-    assert decision == ConcurrencyDecision(desired_limit=69, reason="kv_hard_trim")
+    assert decision == ConcurrencyDecision(desired_limit=69, reason="kv_hard_trim", shed_count=21)
 
 
 def test_engine_load_policy_cuts_on_preemption_and_persistent_capacity_queue():
@@ -222,7 +240,7 @@ def test_engine_load_policy_cuts_on_preemption_and_persistent_capacity_queue():
         engine_feedback(kv_usage=0.5, preemptions_delta=1),
         context(current_limit=100, in_flight=100),
     )
-    assert preemption == ConcurrencyDecision(desired_limit=80, reason="engine_preemptions")
+    assert preemption == ConcurrencyDecision(desired_limit=80, reason="engine_preemptions", shed_count=20)
 
     queue_policy = EngineLoadConcurrencyPolicy(min_limit=1, max_limit=128)
     for _ in range(queue_policy.QUEUE_PERSISTENCE_POLLS - 1):
@@ -237,17 +255,17 @@ def test_engine_load_policy_cuts_on_preemption_and_persistent_capacity_queue():
         engine_feedback(kv_usage=0.5, running=10, waiting=6, waiting_capacity=6),
         context(current_limit=100, in_flight=100),
     )
-    assert queue == ConcurrencyDecision(desired_limit=90, reason="engine_queue_overload")
+    assert queue == ConcurrencyDecision(desired_limit=90, reason="engine_queue_overload", shed_count=10)
 
 
 def test_engine_load_policy_escalates_persistent_pressure_after_drain():
     policy = EngineLoadConcurrencyPolicy(min_limit=1, max_limit=128)
     pressure = engine_feedback(kv_usage=0.99, preemptions_delta=10)
     first = policy.on_feedback(pressure, context(current_limit=64, in_flight=64))
-    assert first == ConcurrencyDecision(51, "engine_preemptions")
+    assert first == ConcurrencyDecision(51, "engine_preemptions", 13)
     assert policy.on_feedback(pressure, context(current_limit=51, in_flight=64)) is None
     second = policy.on_feedback(pressure, context(current_limit=51, in_flight=51))
-    assert second == ConcurrencyDecision(25, "engine_preemptions")
+    assert second == ConcurrencyDecision(25, "engine_preemptions", 26)
 
 
 def test_engine_load_policy_grows_by_turnover_only_while_recent_scrape_is_clear():
@@ -315,6 +333,8 @@ def test_contracts_reject_invalid_values():
         ConcurrencyContext(current_limit=1, in_flight=0, observed_at_s=float("inf"))
     with pytest.raises(ValueError, match="duration_s"):
         SamplingCompletion(duration_s=-1)
+    with pytest.raises(ValueError, match="shed_count"):
+        ConcurrencyDecision(desired_limit=1, shed_count=-1)
 
 
 @pytest.mark.asyncio

@@ -1562,18 +1562,22 @@ class InferenceEngineConfig(BaseConfig):
 
 @dataclass
 class SamplingConcurrencyConfig(BaseConfig):
-    """Opt-in service-side admission for individual inference requests."""
+    """Opt-in service admission for inference requests or whole trajectories."""
 
     enabled: bool = False
     """Enable the resizable sampling-service admission window."""
     policy: Literal["fixed", "engine_load"] = "fixed"
     """Built-in policy. ``engine_load`` consumes managed vLLM KV, queue, and preemption metrics."""
+    admission_scope: Literal["request", "trajectory"] = "request"
+    """Count requests, or hold permits across complete trajectories and tool waits."""
     initial_limit: int = 8
-    """Initial number of inference requests admitted concurrently."""
+    """Initial number of requests or trajectories admitted concurrently."""
     min_limit: int = 1
     max_limit: int = 256
 
     def __post_init__(self) -> None:
+        if self.admission_scope not in ("request", "trajectory"):
+            raise ValueError("generator.sampling_concurrency.admission_scope must be request or trajectory")
         if self.min_limit < 1:
             raise ValueError(f"generator.sampling_concurrency.min_limit must be at least 1, got {self.min_limit}")
         if not self.min_limit <= self.initial_limit <= self.max_limit:

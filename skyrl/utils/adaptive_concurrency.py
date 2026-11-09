@@ -97,7 +97,7 @@ class VLLMEngineSamplingFeedback(SamplingFeedback):
 
 @dataclass(frozen=True)
 class SamplingCompletion:
-    """Lifecycle event emitted after one admitted inference request completes."""
+    """Lifecycle event emitted after one admitted request or trajectory completes."""
 
     duration_s: float
     metrics: Mapping[str, JsonValue] = field(default_factory=dict)
@@ -112,7 +112,7 @@ class SamplingCompletion:
 
 @dataclass(frozen=True)
 class ConcurrencyContext:
-    """Inference-request admission state captured for a policy hook."""
+    """Admission state captured for a policy hook, in the owner's work units."""
 
     current_limit: int
     in_flight: int
@@ -137,10 +137,11 @@ class ConcurrencyContext:
 
 @dataclass(frozen=True)
 class ConcurrencyDecision:
-    """New concurrent inference-request limit requested by a policy."""
+    """Admission resize and optional active-shedding effect."""
 
     desired_limit: int
     reason: str = "unspecified"
+    shed_count: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.desired_limit, bool) or not isinstance(self.desired_limit, int):
@@ -149,6 +150,7 @@ class ConcurrencyDecision:
             raise ValueError(f"desired_limit must be at least 1, got {self.desired_limit}")
         if not self.reason:
             raise ValueError("reason must not be empty")
+        _require_non_negative_int(self.shed_count, path="shed_count")
 
 
 @runtime_checkable
@@ -239,7 +241,7 @@ class SamplingConcurrencyController:
     """Co-locate one concurrency policy with the limiter it controls.
 
     One long-lived sampling service owns the controller, acquires a slot around
-    every physical sampling request, and publishes backend observations to it.
+    each admitted request or trajectory, and publishes backend observations to it.
     Lightweight clients submit work to that service and do not independently
     interpret backend pressure. Policy decisions resize the limiter atomically
     with respect to other policy callbacks.
@@ -251,11 +253,13 @@ class SamplingConcurrencyController:
         policy: ConcurrencyPolicy,
         initial_limit: int,
         clock: Callable[[], float] = time.monotonic,
+        decision_handler: Callable[[ConcurrencyDecision], None] | None = None,
     ) -> None:
         self._policy = policy
         self._limiter = ResizableConcurrencyLimiter(initial_limit)
         self._clock = clock
         self._policy_lock = asyncio.Lock()
+        self._decision_handler = decision_handler
 
     @property
     def policy(self) -> ConcurrencyPolicy:
@@ -282,6 +286,11 @@ class SamplingConcurrencyController:
             observed_at_s=self._clock(),
         )
 
+    def set_decision_handler(self, handler: Callable[[ConcurrencyDecision], None] | None) -> None:
+        """Install the service-owned handler for effects such as shedding."""
+
+        self._decision_handler = handler
+
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
         """Hold one request slot in the shared admission window."""
@@ -306,6 +315,8 @@ class SamplingConcurrencyController:
     async def _apply(self, decision: ConcurrencyDecision | None) -> ConcurrencyDecision | None:
         if decision is not None:
             await self._limiter.resize(decision.desired_limit)
+            if self._decision_handler is not None:
+                self._decision_handler(decision)
         return decision
 
 
@@ -325,7 +336,9 @@ class EngineLoadConcurrencyPolicy:
     The policy grows by pipeline turnover while the most recent scrape is
     clear, soft-trims when KV usage loses headroom, and cuts on preemptions or
     a persistent capacity queue. It is intentionally a state machine only;
-    lowering the admission limit lets existing work drain naturally.
+    lowering the admission limit lets existing work drain naturally on soft
+    pressure. Hard pressure also requests bounded active shedding; the service
+    decides which concrete attempts to cancel.
 
     Thresholds are conservative implementation constants rather than user
     hyperparameters.  The public tuning surface is the initial/min/max window;
@@ -434,7 +447,7 @@ class EngineLoadConcurrencyPolicy:
             self._queue_overload_polls = 0
             self._draining = True
             self._escalated = True
-            return self._resize_down(target, context, reason=reason)
+            return self._resize_down(target, context, reason=reason, shed=True)
 
         if max_usage > self.KV_USAGE_SOFT_CAP and context.in_flight > 0 and self._trim_cooldown_polls == 0:
             target = self._clamp(math.floor(context.in_flight * self.KV_USAGE_TARGET / max_usage))
@@ -443,6 +456,7 @@ class EngineLoadConcurrencyPolicy:
                 target,
                 context,
                 reason="kv_hard_trim" if max_usage > self.KV_USAGE_HARD_CAP else "kv_soft_trim",
+                shed=max_usage > self.KV_USAGE_HARD_CAP,
             )
 
         return None
@@ -484,12 +498,18 @@ class EngineLoadConcurrencyPolicy:
         context: ConcurrencyContext,
         *,
         reason: str,
+        shed: bool = False,
     ) -> ConcurrencyDecision | None:
         target = min(target, context.current_limit)
         self._cap = float(target)
-        if target == context.current_limit:
+        shed_count = max(0, context.in_flight - target) if shed else 0
+        if target == context.current_limit and not shed_count:
             return None
-        return ConcurrencyDecision(desired_limit=target, reason=reason)
+        return ConcurrencyDecision(
+            desired_limit=target,
+            reason=reason,
+            shed_count=shed_count,
+        )
 
     def _clamp(self, value: int) -> int:
         return min(self.max_limit, max(self.min_limit, value))
