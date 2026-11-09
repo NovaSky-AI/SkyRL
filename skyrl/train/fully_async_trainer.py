@@ -844,7 +844,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         kept_indices = zero_variance_filter(
             seq_rewards,
             [group.uid] * len(seq_rewards),
-            loss_masks=group.generator_output["loss_masks"],
+            num_loss_tokens=[sum(mask) for mask in group.generator_output["loss_masks"]],
             tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
         )
         return len(kept_indices) > 0

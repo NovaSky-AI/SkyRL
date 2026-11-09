@@ -1141,7 +1141,7 @@ class RayPPOTrainer:
                     zero_variance_filter(
                         rewards,
                         uids,
-                        loss_masks=generator_output["loss_masks"],
+                        num_loss_tokens=[sum(mask) for mask in generator_output["loss_masks"]],
                         tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
                     )
                 )

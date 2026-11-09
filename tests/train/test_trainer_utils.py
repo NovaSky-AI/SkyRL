@@ -722,18 +722,18 @@ def test_zero_variance_filter_ignores_masked_trajectories():
     # so the group is detected as zero-variance and dropped.
     rewards = [1.0, 1.0, 0.0, 0.0]
     uids = ["a", "a", "a", "a"]
-    loss_masks = [[1, 1], [1, 1], [0, 0], [0, 0]]
+    num_loss_tokens = [2, 2, 0, 0]
 
-    assert zero_variance_filter(rewards, uids, loss_masks=loss_masks) == []
+    assert zero_variance_filter(rewards, uids, num_loss_tokens=num_loss_tokens) == []
 
 
 def test_zero_variance_filter_single_live_trajectory_kept():
     """A group with only one live trajectory (others masked) is kept as a singleton."""
     rewards = [1.0, 0.0]
     uids = ["a", "a"]
-    loss_masks = [[1, 1], [0, 0]]
+    num_loss_tokens = [2, 0]
 
-    assert zero_variance_filter(rewards, uids, loss_masks=loss_masks) == [0, 1]
+    assert zero_variance_filter(rewards, uids, num_loss_tokens=num_loss_tokens) == [0, 1]
 
 
 def test_validate_generator_output_valid_case():

@@ -637,7 +637,7 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
 def zero_variance_filter(
     rewards: List[float],
     uids: List[str],
-    loss_masks: Optional[List[List[int]]] = None,
+    num_loss_tokens: Optional[List[int]] = None,
     tol: float = 0.0,
 ) -> List[int]:
     """
@@ -645,20 +645,20 @@ def zero_variance_filter(
 
     A group (trajectories sharing a uid) is dropped only when it has >1 *live* trajectory and their
     reward spread is within ``tol`` (no GRPO signal); groups with <=1 live trajectory are always kept.
-    A trajectory is "live" if ``sum(loss_mask) > 0`` (or all live when ``loss_masks`` is None) -- so
+    A trajectory is "live" if it has loss tokens (or all live when ``num_loss_tokens`` is None) -- so
     trajectories masked upstream don't make a genuine zero-variance group look varied.
 
     Args:
         rewards: List[float]
         uids: List[str]
-        loss_masks: Optional per-trajectory loss masks, used to determine which trajectories are live.
+        num_loss_tokens: Optional per-trajectory ``sum(loss_mask)``, used to determine which trajectories are live.
         tol: Two rewards within this absolute tolerance count as equal. 0.0 reproduces exact
             (``np.std > 0``) behavior; set a small value (e.g. 1e-6) for float (LLM-judge) rewards.
 
     Returns:
         List[int]
     """
-    is_live = [True] * len(rewards) if loss_masks is None else [sum(mask) > 0 for mask in loss_masks]
+    is_live = [True] * len(rewards) if num_loss_tokens is None else [count > 0 for count in num_loss_tokens]
 
     # Group live rewards by UID.
     uid2live_rewards = defaultdict(list)
