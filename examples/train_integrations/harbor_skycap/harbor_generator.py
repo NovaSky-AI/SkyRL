@@ -204,6 +204,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         output = compose(
             outcomes,
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
+            mask_groups=phase != "eval",
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
@@ -276,7 +277,9 @@ class HarborSkycapGenerator(GeneratorInterface):
             # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
             # than skycap.ttl would otherwise be abandoned as idle before its agent's first call.
             async with self._rate_limiter, self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
-                config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
+                config = self._trial_config(
+                    prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key, phase=phase, step=step
+                )
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
                 attempts.record(results)
@@ -345,10 +348,19 @@ class HarborSkycapGenerator(GeneratorInterface):
         base_url: str,
         cache_salt: Optional[str],
         api_key: Optional[str] = None,
+        *,
+        phase: str = "train",
+        step: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``)."""
+        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``).
+
+        The trial's directory goes under ``<trials_dir>/<phase>/global_step_<step>/``, so a step's eval trials can
+        be read apart from its training trials.
+        """
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
+        if config.get("trials_dir"):
+            config["trials_dir"] = os.path.join(str(config["trials_dir"]), trials_subdir(phase, step))
         key = api_key or PLACEHOLDER_API_KEY
         if self._in_sandbox:
             # Installed agents read their endpoint and key from the sandbox's environment, not from agent kwargs.
@@ -372,6 +384,11 @@ class HarborSkycapGenerator(GeneratorInterface):
                 raise TypeError("harbor_trial_config.agent.kwargs.llm_kwargs.extra_body must be a mapping")
             extra_body["cache_salt"] = cache_salt
         return config
+
+
+def trials_subdir(phase: str, step: Optional[int]) -> str:
+    """Where under ``trials_dir`` a trial of ``phase`` at ``step`` goes; eval-only runs have no step."""
+    return os.path.join(phase, f"global_step_{step}") if step is not None else phase
 
 
 def runs_in_sandbox(agent: Dict[str, Any]) -> bool:

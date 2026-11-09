@@ -415,6 +415,79 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
     assert len(out["rollout_sample_support"]) == len(out["response_ids"])
 
 
+def _outcome(instance: str, repetition: int, reward: float = 0.0, stop_reason: str = "complete") -> TrialOutcome:
+    sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
+    return TrialOutcome(
+        trajectory_id=TrajectoryID(instance, repetition),
+        samples=[] if stop_reason == "error" else [sample],
+        reward=reward,
+        stop_reason=stop_reason,
+    )
+
+
+@pytest.mark.parametrize(
+    "mask_groups, rewards, stop_reasons",
+    [
+        (True, [0.0] * 6, ["error"] * 6),
+        (
+            False,
+            [1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            ["complete", "complete", "agent_timeout", "complete", "error", "complete"],
+        ),
+    ],
+    ids=["training-masks-the-group", "eval-scores-each-trial"],
+)
+def test_a_failed_trial_masks_its_group_in_training_and_only_itself_in_eval(mask_groups, rewards, stop_reasons) -> None:
+    outcomes = [
+        _outcome("a", 0, 1.0),
+        _outcome("a", 1, 1.0),
+        _outcome("a", 2, stop_reason="agent_timeout"),
+        _outcome("a", 3),
+        _outcome("b", 0, stop_reason="error"),
+        _outcome("b", 1, 1.0),
+    ]
+
+    out = compose(outcomes, overlong_filtering=False, mask_groups=mask_groups)
+    validate_generator_output(6, out, step_wise=True)
+    assert out["rewards"] == rewards
+    assert out["stop_reasons"] == stop_reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase, timeout_stop_reason", [("train", "error"), ("eval", "agent_timeout")])
+async def test_the_phase_picks_the_trials_directory_and_whether_groups_are_masked(
+    skycap, trials, generator, phase, timeout_stop_reason
+) -> None:
+    inputs = batch("timeout", "linear")
+    inputs["batch_metadata"] = SimpleNamespace(global_step=3, training_phase=phase)
+
+    out = await generator().generate(inputs, disable_tqdm=True)
+    assert all(str(config["trials_dir"]).endswith(f"trials/{phase}/global_step_3") for config in trials.configs)
+    timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
+    assert [out["stop_reasons"][i] for i in timed_out] == [timeout_stop_reason]
+
+
+@pytest.mark.parametrize(
+    "overrides, error",
+    [
+        ([], r"\(temperature 0.0 vs 1.0\)"),
+        (["trainer.eval_interval=-1"], None),
+        (["generator.eval_sampling_params.temperature=1.0"], None),
+        (["generator.eval_sampling_params.temperature=1.0", "generator.eval_sampling_params.top_p=0.9"], "top_p 0.9"),
+    ],
+    ids=["defaults", "eval-off", "matching", "top-p-differs"],
+)
+def test_eval_must_sample_with_the_settings_skycap_applies(overrides, error) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    cfg = main_harbor_skycap.HarborSkycapConfig.from_cli_overrides(overrides)
+    if error is None:
+        main_harbor_skycap._check_eval_sampling(cfg)
+    else:
+        with pytest.raises(ValueError, match=error):
+            main_harbor_skycap._check_eval_sampling(cfg)
+
+
 @pytest.mark.asyncio
 async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_length_trial(
     skycap, trials, generator
