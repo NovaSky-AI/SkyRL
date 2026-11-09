@@ -733,11 +733,11 @@ class MegatronConfig(BaseConfig):
     without fragmentation. Reconciled across the TP group, so it scales to any parallel size.
     ``None`` uses the exact full-vocab loss. Typical: 64-128."""
     async_dist_ckpt_save: bool = False
-    """Write the torch_dist checkpoint from a background process so training resumes
-    immediately; the pending write is finalized at the next checkpoint and at shutdown.
-    The on-disk format is identical to a synchronous save. Only the sharded
-    model/optimizer state is async -- the rank-0 HF config/tokenizer write stays inline.
-    Falls back to synchronous for cloud paths."""
+    """Write sharded model and optimizer state asynchronously to a filesystem path.
+
+    By default, a background process stages the shards in host memory and writes them in
+    the same format as a synchronous save. Rank 0 still saves the HF config and tokenizer
+    synchronously. Cloud paths use a synchronous save."""
     async_save_prestage_to_cpu: bool = False
     """Copy shards to host memory on the training rank before handing them to the async
     checkpoint writer, instead of letting the writer pull them over CUDA IPC.
@@ -754,19 +754,11 @@ class MegatronConfig(BaseConfig):
     window but delays the background write (per-tensor shared-memory handoff cost).
     See ``_stage_async_request_to_host``."""
     async_save_streaming_write: bool = False
-    """With ``async_dist_ckpt_save``, write the checkpoint from a background thread of the
-    training rank, without a host copy of all shards.
+    """Stream live checkpoint tensors from each rank without staging a full copy in host memory.
 
-    The default async save copies every shard to host memory before the background write.
-    Use this option when that copy does not fit in host memory. The thread reads the live
-    model and optimizer tensors while it writes, and copies one tensor at a time to host
-    memory. Training continues until the next step that changes those tensors (the optimizer
-    step with its gradient sync, an offload or a backload). That step waits for the write to
-    end. Only the work before that step overlaps the write, so the gain is small when the
-    trainer offloads its state right after the checkpoint, as with ``colocate_all``.
-
-    Requires ``async_dist_ckpt_save=True``. Not supported with ``async_save_prestage_to_cpu``,
-    LoRA, or ``ddp_config.overlap_param_gather``. The on-disk format does not change."""
+    A background thread reads the tensors until the write completes. The next optimizer step,
+    offload, or backload waits for it. Requires ``async_dist_ckpt_save=True`` and does not
+    support LoRA, ``async_save_prestage_to_cpu``, or ``ddp_config.overlap_param_gather``."""
 
     def __post_init__(self):
 
