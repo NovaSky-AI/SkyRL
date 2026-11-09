@@ -1,4 +1,4 @@
-"""CPU tests for the serialized NVFP4 expert weight sync (stream transform, env contract, vLLM overrides)."""
+"""CPU tests for the serialized NVFP4 expert weight sync (stream transform, quantizer call, vLLM overrides)."""
 
 import pytest
 import torch
@@ -91,42 +91,6 @@ def test_unpaired_gate_is_an_error(fake_quantizer):
         serializer.finish()
 
 
-def test_runtime_env_derives_matching_flashinfer_settings():
-    env = nvfp4.nvfp4_runtime_env({})
-    assert env["NVTE_BACKWARD_OVERRIDE"] == "dequantized"
-    assert env["NVTE_NVFP4_ROW_SCALED_ACTIVATION"] == "1"
-    assert env["NVTE_NVFP4_4OVER6"] == "all" and env["FLASHINFER_NVFP4_4OVER6"] == "1"
-    assert env["FLASHINFER_NVFP4_4OVER6_ERR_MODE"] == env["NVTE_NVFP4_4OVER6_ERR_MODE"]
-    assert env["FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH"] == "1"
-
-    no_4over6 = nvfp4.nvfp4_runtime_env({"NVTE_NVFP4_4OVER6": "none"})
-    assert no_4over6["FLASHINFER_NVFP4_4OVER6"] == "0"
-
-
-def test_runtime_env_pure_recipe_leaves_te_defaults():
-    env = nvfp4.nvfp4_runtime_env({"SKYRL_NVFP4_RECIPE": "pure"})
-    assert "NVTE_BACKWARD_OVERRIDE" not in env and "NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING" not in env
-    assert env["NVTE_NVFP4_DISABLE_RHT"] == "1"  # TE rejects RHT with row-scaled activations
-    assert env["NVTE_NVFP4_4OVER6"] == "none" and env["FLASHINFER_NVFP4_4OVER6"] == "0"
-
-
-@pytest.mark.parametrize(
-    "environ",
-    [
-        {"FLASHINFER_NVFP4_4OVER6": "0"},  # contradicts the TE 4/6 setting
-        {"NVTE_NVFP4_4OVER6_E4M3_USE_256": "bogus"},
-        # 256 on activations derives FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1; an explicit 0 contradicts it.
-        {"NVTE_NVFP4_4OVER6_E4M3_USE_256": "all", "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "0"},
-        {"NVTE_NVFP4_4OVER6_E4M3_USE_256": "none", "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "1"},
-        {"NVTE_NVFP4_ROW_SCALED_ACTIVATION": "0"},
-        {"SKYRL_NVFP4_RECIPE": "bogus"},
-    ],
-)
-def test_runtime_env_rejects_sampler_mismatch(environ):
-    with pytest.raises(ValueError):
-        nvfp4.nvfp4_runtime_env(environ)
-
-
 def test_vllm_engine_overrides_ignore_bf16_layers():
     overrides = nvfp4.get_nvfp4_vllm_engine_overrides(bf16_layers=range(41, 48))
     assert overrides["quantization"] == "modelopt_fp4" and overrides["load_format"] == "dummy"
@@ -155,7 +119,7 @@ def test_bf16_layers_follow_the_fp8_first_last_layer_knobs():
     )
     assert nvfp4.nvfp4_bf16_layers(4, cfg) == [2, 3]
 
-    class _Provider:  # Megatron's TransformerConfig fields, as configure_expert_nvfp4 sees them
+    class _Provider:  # Megatron's TransformerConfig fields
         first_last_layers_bf16, num_layers_at_start_in_bf16, num_layers_at_end_in_bf16 = True, 1, 1
 
     assert nvfp4.nvfp4_bf16_layers(4, _Provider()) == [0, 3]
@@ -237,46 +201,3 @@ def test_quantizes_with_vllms_global_scale_over_the_whole_matrix(monkeypatch, bl
 def test_settings_reject_unknown_block_scales():
     with pytest.raises(ValueError, match="block_scale"):
         nvfp4.Nvfp4WeightQuantSettings("mse")
-
-
-@pytest.mark.parametrize(
-    "four6, use_256, fi_4over6, fi_256",
-    [
-        ("none", "none", "0", "0"),
-        ("none", "weights", "0", "0"),
-        ("none", "activations", "0", "0"),  # no activation 4/6: the bound does not reach the sampler
-        ("none", "all", "0", "0"),
-        ("weights", "none", "0", "0"),
-        ("weights", "weights", "0", "0"),
-        ("weights", "activations", "0", "0"),
-        ("weights", "all", "0", "0"),
-        ("activations", "none", "1", "0"),
-        ("activations", "weights", "1", "0"),  # weights' 256 travels in the weights' own decode scales
-        ("activations", "activations", "1", "1"),
-        ("activations", "all", "1", "1"),
-        ("all", "none", "1", "0"),
-        ("all", "weights", "1", "0"),
-        ("all", "activations", "1", "1"),
-        ("all", "all", "1", "1"),
-    ],
-)
-def test_runtime_env_e4m3_256_derivation(four6, use_256, fi_4over6, fi_256):
-    env = nvfp4.nvfp4_runtime_env({"NVTE_NVFP4_4OVER6": four6, "NVTE_NVFP4_4OVER6_E4M3_USE_256": use_256})
-    assert env["NVTE_NVFP4_4OVER6"] == four6 and env["NVTE_NVFP4_4OVER6_E4M3_USE_256"] == use_256
-    assert env["FLASHINFER_NVFP4_4OVER6"] == fi_4over6
-    assert env["FLASHINFER_NVFP4_4OVER6_E4M3_USE_256"] == fi_256
-    # A matching explicit FlashInfer setting is accepted.
-    same = nvfp4.nvfp4_runtime_env(
-        {
-            "NVTE_NVFP4_4OVER6": four6,
-            "NVTE_NVFP4_4OVER6_E4M3_USE_256": use_256,
-            "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": fi_256,
-        }
-    )
-    assert same == env
-
-
-def test_runtime_env_defaults_keep_448():
-    env = nvfp4.nvfp4_runtime_env({})
-    assert env["NVTE_NVFP4_4OVER6_E4M3_USE_256"] == "none"
-    assert env["FLASHINFER_NVFP4_4OVER6_E4M3_USE_256"] == "0"

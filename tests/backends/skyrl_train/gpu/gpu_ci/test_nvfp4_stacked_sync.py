@@ -153,14 +153,14 @@ def test_stacked_sync_matches_per_expert_bitwise(tmp_path, tp, ep):
     import cloudpickle
     from vllm import LLM
 
+    from skyrl.backends.skyrl_train.kernels.nvfp4_quant import flashinfer_nvfp4_env
     from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
         get_nvfp4_vllm_engine_overrides,
-        nvfp4_runtime_env,
     )
 
     # The worker function and its helpers travel by value: the workers cannot import this test module.
     cloudpickle.register_pickle_by_value(sys.modules[__name__])
-    os.environ.update(nvfp4_runtime_env(dict(os.environ)))
+    os.environ.update(flashinfer_nvfp4_env(True))  # the engines' activation env (prepare_runtime_environment)
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"  # collective_rpc with a callable
     model_dir = str(tmp_path / "tiny_qwen3_moe")
     _write_tiny_qwen3_moe(model_dir)
