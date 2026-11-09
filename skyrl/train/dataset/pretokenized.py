@@ -160,6 +160,21 @@ def _locate_row(lengths: np.ndarray, flat_idx: int) -> int:
     return int(np.searchsorted(np.cumsum(lengths), flat_idx, side="right"))
 
 
+def sequence_lengths_from_arrow(dataset: Dataset) -> np.ndarray:
+    """Per-row ``input_ids`` lengths from arrow offsets, in bounded chunks.
+
+    For datasets already stored in the trainer's internal row form (e.g. the
+    tokenized-dataset cache), lengths are the only load-time scan needed --
+    validation and truncation already happened when the rows were produced.
+    """
+    arrow_ds = dataset.with_format("arrow")
+    chunks = [
+        _list_lengths(arrow_ds[start : start + _VALIDATION_CHUNK_ROWS], "input_ids")
+        for start in range(0, len(dataset), _VALIDATION_CHUNK_ROWS)
+    ]
+    return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int64)
+
+
 def _validate_and_plan(dataset: Dataset, max_length: Optional[int]) -> tuple[np.ndarray, np.ndarray, int]:
     """Eagerly validate the store and compute the keep/drop plan.
 
@@ -312,11 +327,14 @@ class _NormalizeTransform:
         return out
 
 
-class PretokenizedDataset(SFTDataset):
-    """Map-style view over a validated, memory-mapped pretokenized store.
+class MemoryMappedDataset(SFTDataset):
+    """Map-style view over a validated, memory-mapped arrow store (a
+    pretokenized dataset or the trainer's tokenized-dataset cache).
 
     Wraps an arrow-backed :class:`datasets.Dataset` (with the lazy
-    normalization transform applied) and strips ``None``-valued keys per row:
+    normalization transform applied when rows need normalizing; stores
+    already in the internal row form -- e.g. the tokenized-dataset cache --
+    are wrapped without one) and strips ``None``-valued keys per row:
     mixed text+VLM stores materialize the image columns as ``None`` on text
     rows, and a ``None`` ``pixel_values`` key would break the collator's
     homogeneity check.
@@ -365,7 +383,7 @@ class PretokenizedDataset(SFTDataset):
 def load_from_pretokenized(
     path: str,
     max_length: Optional[int] = None,
-) -> PretokenizedDataset:
+) -> MemoryMappedDataset:
     """Load a pretokenized SFT dataset from a local file or directory.
 
     The pretokenized counterpart of ``SFTTrainer._load_and_tokenize``: returns
@@ -384,7 +402,7 @@ def load_from_pretokenized(
             matching the online tokenization path.
 
     Returns:
-        A :class:`PretokenizedDataset` of normalized examples (``input_ids`` /
+        A :class:`MemoryMappedDataset` of normalized examples (``input_ids`` /
         ``attention_mask`` / ``num_actions`` / window ``loss_mask``, plus
         pass-through columns like ``pixel_values`` / ``image_grid_thw``) ready
         for the SFT collators.
@@ -437,4 +455,4 @@ def load_from_pretokenized(
 
     dataset.set_transform(_NormalizeTransform(max_length))
     logger.info(f"Prepared {num_kept} pretokenized examples (memory-mapped)")
-    return PretokenizedDataset(dataset, lengths)
+    return MemoryMappedDataset(dataset, lengths)
