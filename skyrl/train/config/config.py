@@ -1561,10 +1561,35 @@ class InferenceEngineConfig(BaseConfig):
 
 
 @dataclass
+class SamplingConcurrencyConfig(BaseConfig):
+    """Opt-in service-side admission for individual inference requests."""
+
+    enabled: bool = False
+    """Enable the resizable sampling-service admission window."""
+    policy: Literal["fixed", "engine_load"] = "fixed"
+    """Built-in policy. ``engine_load`` consumes managed vLLM KV, queue, and preemption metrics."""
+    initial_limit: int = 8
+    """Initial number of inference requests admitted concurrently."""
+    min_limit: int = 1
+    max_limit: int = 256
+
+    def __post_init__(self) -> None:
+        if self.min_limit < 1:
+            raise ValueError(f"generator.sampling_concurrency.min_limit must be at least 1, got {self.min_limit}")
+        if not self.min_limit <= self.initial_limit <= self.max_limit:
+            raise ValueError(
+                "generator.sampling_concurrency.initial_limit must be between "
+                f"min_limit ({self.min_limit}) and max_limit ({self.max_limit}), got {self.initial_limit}"
+            )
+
+
+@dataclass
 class GeneratorConfig(BaseConfig):
     """Configuration for generation behavior."""
 
     inference_engine: InferenceEngineConfig = field(default_factory=InferenceEngineConfig)
+    sampling_concurrency: SamplingConcurrencyConfig = field(default_factory=SamplingConcurrencyConfig)
+    """Resizable server-side inference-request admission shared by train and eval."""
     n_samples_per_prompt: int = 5
     """Number of samples to generate per prompt.
     The total size of the training batch is ``trainer.train_batch_size * n_samples_per_prompt``."""
