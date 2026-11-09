@@ -137,6 +137,11 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # max_num_seqs=1024 and 64 heads that is 65536 > 65535 and the CUDA-graph capture / profile
         # run fails with "Triton Error [CUDA]: invalid argument". Stay below the limit.
         cfg.generator.inference_engine.max_num_seqs = 512
+        # megatron-core's DSAttention supports context parallelism only with allgather (the
+        # tp2_cp2 rows); no effect at CP=1.
+        transformer_config_kwargs = dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs or {})
+        transformer_config_kwargs["cp_comm_type"] = "allgather"
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
     if "qwen3.8-flash-next" in model_name.lower():
         # VL checkpoint; patches/megatron/qwen4_exp bridges the language model only, and PLE
         # needs packed (thd) sequences.
@@ -578,6 +583,44 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             2048,
             id="glm-5.3-flash-4layer_h100_tp2_ep4_kpool_beyond_topk",
+            marks=pytest.mark.h100,
+        ),
+        # The two rows above under context parallelism (TP2 x CP2, same 4 GPUs): head-wise
+        # (Ulysses) CP in the KDA layers (mcore_ext/kda.py), megatron-core's allgather CP in the DSA
+        # layers. The beyond-topk row is the one that checks the DSA side: past the budget, pool
+        # selection depends on the k-pool gate score, which megatron-core all-gathers and reorders
+        # with the indexer keys under CP; a rank-local gate score would select the wrong pools.
+        # Same thresholds as the CP=1 rows.
+        pytest.param(
+            2,
+            1,
+            2,
+            4,
+            1,
+            4,
+            4,
+            "eatang/GLM-5.3-Flash-4layer",
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="glm-5.3-flash-4layer_h100_tp2_cp2_ep4",
+            marks=pytest.mark.h100,
+        ),
+        pytest.param(
+            2,
+            1,
+            2,
+            4,
+            1,
+            4,
+            4,
+            "eatang/GLM-5.3-Flash-4layer",
+            5e-1,
+            1e-1,
+            None,
+            2048,
+            id="glm-5.3-flash-4layer_h100_tp2_cp2_ep4_kpool_beyond_topk",
             marks=pytest.mark.h100,
         ),
         # Kimi K3, 4-layer bf16 slice of the real checkpoint (KIMI_K3_4LAYER): KDA (dense MLP),

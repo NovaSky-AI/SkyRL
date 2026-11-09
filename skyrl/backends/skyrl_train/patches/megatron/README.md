@@ -33,6 +33,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1 (two ranks) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
@@ -72,6 +73,11 @@ model, `glm5_next/` is deleted too.
 ### NVIDIA/Megatron-LM#7054: KDA (Kimi Delta Attention)
 
 - **Carried as:** `mcore_ext/kda.py` (`KimiDeltaAttention`, `get_kda_module_spec`).
+  - SkyRL addition: head-wise (Ulysses) context parallelism, reusing megatron-core's
+    `GatedDeltaNet` all-to-all helpers (`ssm/gated_delta_net/common.py`). #7054 has its own
+    head-/chunk-wise CP (`cp_partition_mode`); compare against it before switching. The DSA
+    layers need no SkyRL change under CP: megatron-core's `DSAttention` all-gathers the indexer
+    keys and the k-pool gate score (`cp_comm_type=allgather`).
 - **Landed?** megatron-core defines a KDA module or `experimental_attention_variant="kda"`, and
   `TransformerConfig` has `kda_gate_lower_bound`
   (`grep -rn "KimiDeltaAttention\|kda_gate_lower_bound" .venv/.../megatron/core`).
@@ -81,7 +87,8 @@ model, `glm5_next/` is deleted too.
   - `glm5_next/bridge.py`: re-check the KDA parameter names (`q/k/v_conv1d`, `A_log`, `dt_bias`,
     `f_a/f_b/g_a/g_b_proj`) against upstream's module.
   - Delete `mcore_ext/kda.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`,
+  `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py`; the GLM roundtrip rows.
 
 ### NVIDIA/Megatron-LM#7521: mHC (manifold-constrained hyper-connections)
 
@@ -106,6 +113,11 @@ Two pieces, which may land separately.
     so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
     data, routing sends some expert ranks several times their share of tokens; chunking bounds their
     dispatch/expert/combine buffers.
+  - `chunked_mlp` keeps in sync with NVIDIA/Megatron-LM#8463 (equal MoE call counts, router
+    replay per chunk, quantile balancing rejected for padded chunks, replay row-count check).
+    Under selective `"moe"` recompute with router replay, it checkpoints each chunk itself so the
+    rerun replays the chunk's slice. Once the pin includes #8463, pass the slice as
+    `MoELayer.forward(replay_topk_idx=...)` instead and drop that checkpoint (`_checkpoint`).
   - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
     `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
     `TransformerLayer._forward_mlp`.
