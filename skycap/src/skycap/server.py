@@ -48,6 +48,7 @@ import logging
 import socket
 import time
 from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -55,6 +56,7 @@ import orjson
 from aiohttp import web
 
 from skycap import record
+from skycap.client import CaptureError, FinishResult, PathRuleError, RecordLocation
 from skycap.dialects.base import CallRequest, DialectType, RequestError, error_body
 from skycap.mirror import RecordMirror
 from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
@@ -95,6 +97,18 @@ def node_address() -> str:
 
 def _json(payload: Any, status: int = 200) -> web.Response:
     return web.Response(body=orjson.dumps(payload), status=status, content_type="application/json")
+
+
+def _finish_body(result: FinishResult) -> bytes:
+    return orjson.dumps(
+        {
+            "id": result.id,
+            "status": result.status,
+            "samples": [s.to_json() for s in result.samples],
+            "unbridged_calls": result.unbridged_calls,
+            "record": asdict(result.record) if result.record is not None else None,
+        }
+    )
 
 
 def _openai_error(message: str, status: int, *, code: str | None = None) -> web.Response:
@@ -362,28 +376,28 @@ class CaptureServer:
             created["exposed_base_url"] = f"{self.exposed_url}/t/{trajectory.id}/v1"
         return _json(created)
 
-    async def finish(self, request: web.Request) -> web.Response:
-        body = await _read_json(request, default={})
-        annotations = body.get("annotations") if isinstance(body, dict) else None
+    async def finish_trajectory(
+        self, trajectory_id: str, annotations: dict[str, Any] | None = None, *, paths: str = "all"
+    ) -> FinishResult:
+        """End a trajectory and return its samples, as ``POST /trajectories/{id}/finish`` does.
+
+        For a caller in the server's own process, which needs no JSON round trip. Raises
+        ``CaptureError`` as the route answers errors, and ``PathRuleError`` if the rule raised.
+        """
         if annotations is not None and not isinstance(annotations, dict):
-            return _json({"error": "`annotations` must be an object"}, 400)
-        paths = body.get("paths", "all") if isinstance(body, dict) else "all"
+            raise CaptureError("`annotations` must be an object", 400)
         if not isinstance(paths, str):
-            return _json({"error": "`paths` must be a string"}, 400)
-        trajectory = await self._lookup(request.match_info["id"])
+            raise CaptureError("`paths` must be a string", 400)
+        trajectory = await self._lookup(trajectory_id)
         if trajectory is None:
-            return _json({"error": "unknown trajectory"}, 404)
+            raise CaptureError("unknown trajectory", 404)
         if trajectory.ended and _changes(trajectory.annotations, annotations):
-            # A repeat is answered as the first finish was. New annotations on it would be
-            # silently lost, so they are refused instead.
-            return _json({"error": "trajectory already finished; its annotations can't change"}, 409)
+            raise CaptureError("trajectory already finished; its annotations can't change", 409)
         if trajectory.samples is not None:
-            # Likewise, the record says which rule trained it, so a repeat can't ask for another. A repeat
-            # naming that rule is answered from the recorded rows, so the server needn't still have it.
             if trajectory.samples["paths"] != paths:
-                return _json({"error": f"trajectory already finished with paths={trajectory.samples['paths']!r}"}, 409)
+                raise CaptureError(f"trajectory already finished with paths={trajectory.samples['paths']!r}", 409)
         elif paths not in self.path_rules:
-            return _json({"error": f"`paths` must be one of {sorted(self.path_rules)}"}, 400)
+            raise CaptureError(f"`paths` must be one of {sorted(self.path_rules)}", 400)
         # Already written and dropped from memory: a repeat, a retry after a path rule failed, or the first finish
         # of one the TTL or a shutdown wrote.
         popped = trajectory.id not in self.trajectories
@@ -392,7 +406,7 @@ class CaptureServer:
         except Exception as error:  # noqa: BLE001 - a custom rule's failure, reported to the caller
             logger.exception("path rule %r failed on %s", paths, trajectory.id)
             message = f"path rule {paths!r} failed: {type(error).__name__}: {error}"
-            return _json({"error": message, "code": PATH_RULE_FAILED}, 500)
+            raise PathRuleError(message, 500) from error
         if popped and any(sample.media for sample in samples):
             # The samples were rebuilt from the record, which keeps an image's placeholders and hash but not its
             # processed arrays (pixel_values, image_grid_thw; see record._Columns.add): they are large, and they
@@ -404,15 +418,27 @@ class CaptureServer:
                 "%s: a finish answered from the record of a trajectory with images has no samples", trajectory.id
             )
             samples = []
-        return _json(
-            {
-                "id": trajectory.id,
-                "status": trajectory.status,
-                "samples": [s.to_json() for s in samples],
-                "unbridged_calls": trajectory.graph.unbridged_calls(),
-                "record": self.location(trajectory),
-            }
+        return FinishResult(
+            id=trajectory.id,
+            status=trajectory.status,
+            samples=samples,
+            unbridged_calls=trajectory.graph.unbridged_calls(),
+            record=RecordLocation.from_json(self.location(trajectory)),
         )
+
+    async def finish(self, request: web.Request) -> web.Response:
+        body = await _read_json(request, default={})
+        annotations = body.get("annotations") if isinstance(body, dict) else None
+        paths = body.get("paths", "all") if isinstance(body, dict) else "all"
+        try:
+            result = await self.finish_trajectory(request.match_info["id"], annotations, paths=paths)
+        except PathRuleError as error:
+            return _json({"error": str(error), "code": PATH_RULE_FAILED}, error.status or 500)
+        except CaptureError as error:
+            return _json({"error": str(error)}, error.status or 500)
+        # Token-mode samples carry base64 routes, hundreds of MB at long context: encode off the loop.
+        body = await asyncio.to_thread(_finish_body, result)
+        return web.Response(body=body, content_type="application/json")
 
     async def get(self, request: web.Request) -> web.Response:
         trajectory_id = request.match_info["id"]

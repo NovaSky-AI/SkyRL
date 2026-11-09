@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from skycap.client import FinishResult
 from skycap.env_vars import (
     SKYCAP_EXPOSURE_STOP_GRACE,
     SKYCAP_START_EXPOSURE_TIMEOUT,
@@ -222,6 +223,26 @@ class CaptureService:
             return False
         self._thread = None
         return True
+
+    def finish(
+        self,
+        trajectory_id: str,
+        annotations: dict[str, Any] | None = None,
+        timeout: float | None = None,
+        *,
+        paths: str = "all",
+    ) -> FinishResult:
+        """Finish a trajectory from this process, as ``POST /trajectories/{id}/finish`` would.
+
+        Runs on the server's loop, so any thread may call it. Returns once the trajectory is
+        ended and written; raises ``CaptureError`` as the route answers errors.
+        """
+        if self._loop is None:
+            raise RuntimeError("skycap is not running")
+        future = asyncio.run_coroutine_threadsafe(
+            self.server.finish_trajectory(trajectory_id, annotations, paths=paths), self._loop
+        )
+        return future.result(timeout)
 
     def _run(self) -> None:
         try:

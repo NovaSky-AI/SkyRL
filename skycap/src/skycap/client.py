@@ -134,16 +134,7 @@ class Trajectory:
         self.finishing = annotations or {}
         if paths is not None:
             self.paths = paths
-        body = await self._pool._post(
-            f"{self.server}/trajectories/{self.id}/finish", {"annotations": self.finishing, "paths": self.paths}
-        )
-        self.result = FinishResult(
-            id=body["id"],
-            status=body["status"],
-            samples=[Sample.from_json(s) for s in body["samples"]],
-            unbridged_calls=body.get("unbridged_calls", 0),
-            record=RecordLocation.from_json(body.get("record")),
-        )
+        self.result = await self._pool.finish(self, self.finishing)
         return self.result
 
     async def document(self) -> dict[str, Any]:
@@ -253,6 +244,24 @@ class CapturePool:
             raise
         if trajectory.result is None:
             await trajectory.finish()
+
+    async def finish(self, trajectory: Trajectory, annotations: dict[str, Any]) -> FinishResult:
+        """Finish ``trajectory`` on its server and return its samples.
+
+        ``Trajectory.finish`` and ``trajectory()`` finish through here. A subclass may finish
+        another way, for example in the server's own process (``CaptureServer.finish_trajectory``).
+        """
+        body = await self._post(
+            f"{trajectory.server}/trajectories/{trajectory.id}/finish",
+            {"annotations": annotations, "paths": trajectory.paths},
+        )
+        return FinishResult(
+            id=body["id"],
+            status=body["status"],
+            samples=[Sample.from_json(s) for s in body["samples"]],
+            unbridged_calls=body.get("unbridged_calls", 0),
+            record=RecordLocation.from_json(body.get("record")),
+        )
 
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         http = await self._http()

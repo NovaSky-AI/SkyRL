@@ -199,3 +199,33 @@ def test_a_pool_closes_cleanly_after_its_event_loop_has_ended(caplog) -> None:
     finally:
         service.stop()
     assert not [r for r in caplog.records if "Unclosed" in r.getMessage()]
+
+
+class _RecordingPool(CapturePool):
+    """Finishes like the base pool, and records each finish it is asked for."""
+
+    def __init__(self, urls: list[str]) -> None:
+        super().__init__(urls)
+        self.finished: list[tuple[str, dict]] = []
+
+    async def finish(self, trajectory, annotations):
+        self.finished.append((trajectory.id, annotations))
+        return await super().finish(trajectory, annotations)
+
+
+async def test_a_pool_subclass_finishes_every_trajectory_the_context_manager_ends(servers) -> None:
+    urls, _ = servers
+    async with _RecordingPool(urls) as pool:
+        async with pool.trajectory() as finished:
+            await finished.finish({"reward": 1.0})
+        async with pool.trajectory() as forgotten:
+            pass
+        with pytest.raises(RuntimeError):
+            async with pool.trajectory() as crashed:
+                raise RuntimeError("harness crashed")
+
+    assert pool.finished == [
+        (finished.id, {"reward": 1.0}),
+        (forgotten.id, {}),
+        (crashed.id, {"error": "RuntimeError"}),
+    ]

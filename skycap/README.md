@@ -216,6 +216,12 @@ The timeouts around it (starting the server with an exposure, the cloudflared
 download, how long a stop waits for an exposure that is still opening) are
 environment variables, listed with their defaults in `skycap/env_vars.py`.
 
+The embedding process can also finish a trajectory itself, getting its samples
+without a JSON round trip: `service.finish(trajectory_id, {"reward": 1.0})`
+answers as `POST /trajectories/{id}/finish` does. A `CapturePool` subclass that
+overrides `finish(trajectory, annotations)` keeps `pool.trajectory()`'s
+always-finish behaviour while finishing that way.
+
 ## Capture a rollout
 
 ```python
