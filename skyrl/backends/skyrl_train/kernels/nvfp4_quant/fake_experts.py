@@ -15,6 +15,11 @@ The round trip a bf16 fprop / dgrad multiplies is the decode of those bytes, ``b
 (:func:`.decode.dequantize_rows`). The packed operand of the NVFP4 tensor-core GEMM is the same call with 128x4
 swizzled scales.
 
+On sm_100 both run as one fused kernel (:mod:`.fused_rt`: FlashInfer's quantizer arithmetic and the decode in
+registers, bit-identical to the FlashInfer bytes and their decode), after a per-expert amax pre-pass, or in a
+single pass when the experts' amax is unchanged since their last round trip (speculative amax, verified in the same
+pass). FlashInfer ``fp4_quantize`` + the decode is the fallback (``SKYRL_QAT_NVFP4_FUSED=0``, other GPUs).
+
 The experts are read as one ``(E, N, K)`` tensor (:func:`stack_experts`). Megatron's DDP maps every parameter into
 one contiguous buffer when it owns the params (bf16 params with the distributed optimizer), laid out in reverse
 registration order (``params[::-1]``) with each start aligned to 64 elements, so a grouped linear's equally sized
@@ -33,6 +38,7 @@ from skyrl.backends.skyrl_train.kernels.nvfp4_quant import (
     BLOCK_SCALE_FOUR_OVER_SIX,
     check_block_scale,
     flashinfer_block_scale_env,
+    fused_rt,
     nvfp4_global_scale,
 )
 from skyrl.backends.skyrl_train.kernels.nvfp4_quant.decode import dequantize_rows
@@ -172,10 +178,15 @@ class PackedExperts:
 
 def fake_quantize_expert_weights(weights: Sequence[torch.Tensor], block_scale: str) -> list[torch.Tensor]:
     """``dequant(quant(w))`` of each ``(N, K)`` bf16 expert weight on the rollouts' grid (see the module docstring):
-    one FlashInfer quantize and one decode for all experts. CUDA only."""
+    one fused round trip (sm_100), else one FlashInfer quantize and one decode, for all experts. CUDA only."""
+    check_block_scale(block_scale)
     stack = stack_experts(weights)
     w3 = stack.data
     e, n, k = w3.shape
+    if fused_rt.supports(w3):
+        y = torch.empty((e, n, k), dtype=torch.bfloat16, device=w3.device)
+        fused_rt.expert_quantize(w3, block_scale == BLOCK_SCALE_FOUR_OVER_SIX, out=y, speculate=not stack.copied)
+        return stack.in_expert_order(y.unbind(0))
     gs, alpha = global_scales(w3)
     q, sf = quantize(w3, gs, block_scale)
     stack.data = w3 = None  # a stacked copy is freed before the round trip is allocated
@@ -189,9 +200,26 @@ def pack_expert_weights(weights: Sequence[torch.Tensor], block_scale: str, keep_
     :meth:`PackedExperts.dequantize`."""
     from flashinfer import block_scale_interleave
 
+    check_block_scale(block_scale)
     stack = stack_experts(weights)
     w3 = stack.data
     e, n, k = w3.shape
+    if fused_rt.supports(w3):
+        if n % 128 or k % 64:
+            raise ValueError(f"swizzled NVFP4 expert scales need N % 128 == 0 and K % 64 == 0, got {(n, k)}")
+        dev = w3.device
+        q = torch.empty((e, n, k // 2), dtype=torch.uint8, device=dev)
+        sf = torch.empty((e, n * (k // 16)), dtype=torch.uint8, device=dev)
+        lin = torch.empty((e, n, k // 16), dtype=torch.uint8, device=dev) if keep_linear else None
+        _, alpha = fused_rt.expert_quantize(
+            w3,
+            block_scale == BLOCK_SCALE_FOUR_OVER_SIX,
+            codes=q,
+            sf_linear=lin,
+            sf_swizzled=sf,
+            speculate=not stack.copied,
+        )
+        return PackedExperts(q, sf, alpha, stack.reversed, lin)
     gs, alpha = global_scales(w3)
     if not keep_linear:
         q, sf = quantize(w3, gs, block_scale, swizzled=True)
@@ -202,7 +230,7 @@ def pack_expert_weights(weights: Sequence[torch.Tensor], block_scale: str, keep_
 
 
 def reference_round_trip(w3: torch.Tensor, block_scale: str) -> torch.Tensor:
-    """Test reference: the ``(E, N, K)`` round trip from FlashInfer's bytes, decoded in torch."""
+    """Test reference: the ``(E, N, K)`` round trip from FlashInfer's bytes (always FlashInfer), decoded in torch."""
     e, n, k = w3.shape
     gs, alpha = global_scales(w3)
     q, sf = quantize(w3, gs, block_scale)

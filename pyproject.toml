@@ -283,6 +283,8 @@ include-package-data = true
 # alone does not cover them
 [tool.setuptools.package-data]
 "*" = ["*.patch"]
+# Compiled at runtime with nvcc and loaded with ctypes (kernels/nvfp4_quant/fused_rt.py).
+"skyrl.backends.skyrl_train.kernels.nvfp4_quant" = ["csrc/*.cu"]
 
 [tool.setuptools.dynamic]
 version = {attr = "skyrl.__version__"}
