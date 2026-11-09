@@ -88,6 +88,9 @@ class OPDTrainer(RayPPOTrainer):
         topk_row_stats: List[TopKStats] = []
 
         async def generate_and_score(row: GeneratorInput, measure_topk: bool) -> GeneratorOutput:
+            # TODO (kyuds): current generator setup will return top-K support regardless of whether
+            # this information is used to compute top-K metrics. We should develop a way to not return
+            # unused data.
             output: GeneratorOutput = await self.generator.generate(row, **self._generate_kwargs)
             rollout_done = time.monotonic()
             score = await self.teacher_client.compute_logprobs(
@@ -96,8 +99,6 @@ class OPDTrainer(RayPPOTrainer):
                 topk=topk_cfg.top_k if measure_topk else 0,
             )
             output[TEACHER_LOGPROBS_KEY] = [score.logprobs[:, 0].tolist()]
-            # Capture runs on every row while the overlap metrics are on. It is read on measured rows only and
-            # never trained on, so it always leaves the output.
             supports = output.pop(SAMPLE_SUPPORT_FIELD, None) if topk_cfg.num_rows else None
             if measure_topk:
                 if supports is None or len(supports) != 1:
