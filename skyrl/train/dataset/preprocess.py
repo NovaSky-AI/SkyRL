@@ -1,10 +1,13 @@
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from jaxtyping import Bool, Float
 
+from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
@@ -16,6 +19,7 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertIndices,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
     CompactSampleSupport,
     PackedSampleSupport,
 )
@@ -208,7 +212,7 @@ def convert_prompts_responses_to_batch_tensors(
     pad_token_id: int,
     prompts: List[List[int]],
     responses: List[List[int]],
-    rewards: List[Union[List[float], torch.Tensor]],
+    rewards: Optional[List[Union[List[float], torch.Tensor]]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
     rollout_expert_indices: Optional[List[RoutedExpertIndices]] = None,
@@ -218,7 +222,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch response_len"],
-    Float[torch.Tensor, "batch response_len"],
+    Optional[Float[torch.Tensor, "batch response_len"]],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
     Optional[PackedTensor],
@@ -266,7 +270,7 @@ def convert_prompts_responses_to_batch_tensors(
         pad_token_id: Token id used to left-pad ``sequences``
         prompts: List of tokenized prompts
         responses: List of tokenized responses
-        rewards: List of rewards for each response (lists or 1D tensors)
+        rewards: List of rewards for each response (lists or 1D tensors), or ``None``
         loss_masks: List of loss masks for each response
         logprobs: List of rollout log probs for each response
         max_seq_len: Optional. If provided and ``max(prompt_i + response_i)``
@@ -276,7 +280,7 @@ def convert_prompts_responses_to_batch_tensors(
         sequences: ``(batch, max_total)`` where ``max_total = max(prompt_i + response_i)``.
         attention_mask: ``(batch, max_total)``
         response_mask: ``(batch, max_response)`` — right-aligned response indicator.
-        rewards: ``(batch, max_response)`` — right-aligned.
+        rewards: ``(batch, max_response)`` — right-aligned, or ``None``.
         loss_masks: ``(batch, max_response)`` — right-aligned.
         logprobs: ``(batch, max_response)`` — right-aligned, or ``None``.
         rollout_expert_indices: ``PackedTensor`` whose values are
@@ -334,14 +338,16 @@ def convert_prompts_responses_to_batch_tensors(
     for i, lm in enumerate(loss_masks):
         ret_loss_masks_np[i, max_response - len(lm) :] = lm
 
-    # Tensor rewards need explicit CPU/detach handling before NumPy packing.
-    ret_rewards_np = np.zeros((num_samples, max_response), dtype=np.float32)
-    for i, custom_reward in enumerate(rewards):
-        reward_arr = _reward_to_numpy(custom_reward)
-        ret_rewards_np[i, max_response - reward_arr.shape[0] :] = reward_arr
-
     ret_loss_masks = torch.from_numpy(ret_loss_masks_np)
-    ret_rewards = torch.from_numpy(ret_rewards_np)
+
+    ret_rewards = None
+    if rewards is not None:
+        # Tensor rewards need explicit CPU/detach handling before NumPy packing.
+        ret_rewards_np = np.zeros((num_samples, max_response), dtype=np.float32)
+        for i, custom_reward in enumerate(rewards):
+            reward_arr = _reward_to_numpy(custom_reward)
+            ret_rewards_np[i, max_response - reward_arr.shape[0] :] = reward_arr
+        ret_rewards = torch.from_numpy(ret_rewards_np)
 
     # Rollout logprobs are right-aligned like rewards and loss masks.
     logprobs_tensor = None
@@ -380,6 +386,85 @@ def convert_prompts_responses_to_batch_tensors(
         rollout_expert_indices_tensor,
         sample_support_tensor,
     )
+
+
+@dataclass(frozen=True)
+class RowCollation:
+    """How ``rows_to_training_input`` collates rows into a padded batch."""
+
+    pad_token_id: int
+    max_seq_len: Optional[int]
+    # Off-policy correction is on: every row must carry its rollout logprobs.
+    require_rollout_logprobs: bool
+
+
+def rows_to_training_input(rows: Mapping[str, Any], collation: RowCollation) -> TrainingInputBatch:
+    """Collate generated rows into a padded ``TrainingInputBatch``.
+
+    ``rows`` holds ``GeneratorOutput``'s per-row lists (``prompt_token_ids``, ``response_ids``,
+    ``loss_masks`` and, when present, ``rewards``, ``rollout_logprobs``, ``rollout_expert_indices``,
+    ``rollout_sample_support``, ``pixel_values`` and ``image_grid_thw``). Rows may be read-only;
+    every output tensor is a new buffer. Without ``rewards`` the batch has no rewards tensor.
+
+    Pure: it depends on nothing but its arguments, so a trainer or a worker can call it.
+    """
+    pixel_values = rows.get("pixel_values")
+    image_grid_thw = rows.get("image_grid_thw")
+    if pixel_values is not None:
+        assert image_grid_thw is not None, "Both pixel_values and image_grid_thw must exist for multi-modal inputs"
+        assert len(pixel_values) == len(image_grid_thw), "Number of pixel values should match number of image grid thw"
+        pixel_values = TensorList(pixel_values)
+        image_grid_thw = TensorList(image_grid_thw)
+
+    rollout_expert_indices = rows.get("rollout_expert_indices")
+    (
+        sequences,
+        attention_mask,
+        response_mask,
+        rewards,
+        loss_mask,
+        rollout_logprobs,
+        rollout_expert_indices_tensor,
+        rollout_sample_support,
+    ) = convert_prompts_responses_to_batch_tensors(
+        collation.pad_token_id,
+        rows["prompt_token_ids"],
+        rows["response_ids"],
+        rows.get("rewards"),
+        rows["loss_masks"],
+        rows.get("rollout_logprobs"),
+        rollout_expert_indices,
+        rows.get("rollout_sample_support"),
+        max_seq_len=collation.max_seq_len,
+    )
+    router_padding_mask = None
+    if rollout_expert_indices is not None:
+        router_padding_mask = make_router_padding_mask(
+            attention_mask, [len(indices) for indices in rollout_expert_indices]
+        )
+    if collation.require_rollout_logprobs:
+        assert (
+            rollout_logprobs is not None
+        ), "expected non-null rollout logprobs tensor when off_policy_correction is enabled"
+        assert rollout_logprobs.shape == loss_mask.shape, "Logprobs should look like responses"
+
+    training_input = TrainingInputBatch(
+        {
+            "sequences": sequences,  # Full trajectories (padded and concatenated prompts and responses)
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "rewards": rewards,
+            "loss_mask": loss_mask,
+            "rollout_logprobs": rollout_logprobs,
+            "rollout_expert_indices": rollout_expert_indices_tensor,
+            "router_padding_mask": router_padding_mask,
+            SAMPLE_SUPPORT_FIELD: rollout_sample_support,
+            "pixel_values": pixel_values,
+            "image_grid_thw": image_grid_thw,
+        },
+    )
+    training_input.metadata = {}
+    return training_input
 
 
 def compute_prompt_boundaries(uids: List[str]) -> List[Tuple[int, int]]:

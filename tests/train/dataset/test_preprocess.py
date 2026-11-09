@@ -19,9 +19,11 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 )
 from skyrl.train.dataset.preprocess import (
     ROUTED_EXPERT_TORCH_DTYPES,
+    RowCollation,
     build_sample_support,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
+    rows_to_training_input,
 )
 from tests.backends.skyrl_train.sample_support_helpers import csr
 
@@ -720,3 +722,53 @@ def test_convert_batch_tensors_always_carries_csr_support(tokenizer):
     assert isinstance(ragged, PackedRaggedTensor)
     assert ragged.row_lengths.tolist() == [2, 1, 2, 1]
     assert ragged.sequence_lengths.tolist() == [2, 2]
+
+
+def _read_only(values, dtype):
+    array = np.asarray(values, dtype=dtype)
+    array.flags.writeable = False
+    return array
+
+
+def test_rows_to_training_input_collates_read_only_rows_like_the_converter(tokenizer):
+    routes = [_read_only([[[1, 2]], [[3, 4]], [[5, 6]]], np.uint8), _read_only([[[7, 8]], [[9, 1]]], np.uint8)]
+    rows = {
+        "prompt_token_ids": [_read_only([10, 11], np.int32), _read_only([12], np.int32)],
+        "response_ids": [_read_only([13, 14], np.int32), _read_only([15, 16], np.int32)],
+        "loss_masks": [_read_only([1, 0], np.int8), _read_only([1, 1], np.int8)],
+        "rewards": [[0.0, 1.0], [0.0, 0.5]],
+        "rollout_logprobs": [_read_only([-0.1, -0.2], np.float32), _read_only([-0.3, -0.4], np.float32)],
+        "rollout_expert_indices": routes,
+    }
+
+    batch = rows_to_training_input(
+        rows, RowCollation(pad_token_id=tokenizer.pad_token_id, max_seq_len=None, require_rollout_logprobs=True)
+    )
+    expected = convert_prompts_responses_to_batch_tensors(
+        tokenizer.pad_token_id,
+        [list(p) for p in rows["prompt_token_ids"]],
+        [list(r) for r in rows["response_ids"]],
+        rows["rewards"],
+        [list(m) for m in rows["loss_masks"]],
+        [list(lp) for lp in rows["rollout_logprobs"]],
+        [r.copy() for r in routes],
+    )
+
+    for key, value in zip(
+        ["sequences", "attention_mask", "response_mask", "rewards", "loss_mask", "rollout_logprobs"], expected
+    ):
+        assert torch.equal(batch[key], value), key
+    assert torch.equal(batch["rollout_expert_indices"].values, expected[6].values)
+    assert batch.metadata == {}
+    assert batch["router_padding_mask"] is not None
+
+
+def test_rows_to_training_input_without_rewards_has_no_rewards_tensor(tokenizer):
+    batch = rows_to_training_input(
+        {"prompt_token_ids": [[10]], "response_ids": [[11, 12]], "loss_masks": [[1, 1]]},
+        RowCollation(pad_token_id=tokenizer.pad_token_id, max_seq_len=None, require_rollout_logprobs=False),
+    )
+
+    assert batch["rewards"] is None
+    assert batch["loss_mask"].tolist() == [[1.0, 1.0]]
+    assert batch.batch_size == 1
