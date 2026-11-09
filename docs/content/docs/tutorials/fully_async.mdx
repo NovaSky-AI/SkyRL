@@ -106,6 +106,8 @@ For fully async specifically, the following are the main knobs to tune:
   cache is reused within a weight version and not shared across versions.
 - `trainer.fully_async.save_during_eval`: When `true`, the checkpoint and the HF model export that are due at an eval
   step run on the trainer workers while the eval runs on the inference engines. The next step starts when both end.
+  This also applies to callback-requested evals and checkpoints. `on_save` fires when the checkpoint completes,
+  which can be before `on_eval_end`. Use this option when your eval and its callbacks can run without the trainer workers.
   Defaults to `false`, which runs the eval first and the saves after it.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.

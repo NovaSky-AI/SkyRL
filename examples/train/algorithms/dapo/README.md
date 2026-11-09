@@ -141,6 +141,8 @@ def skyrl_entrypoint(cfg):
     exp.run()
 ```
 
+`main_dapo.py` handles both reward formats. For sequence-level rewards (`List[float]`, e.g. from batched generation), the penalty is subtracted from each reward. For per-token rewards (`List[List[float]]`, e.g. from non-batched generation with `generator.batched=false`, which is required to pass `generator.chat_template_kwargs`), the penalty is subtracted from the last token's reward. Responses longer than `generator.sampling_params.max_generate_length` get a reward of 0. `main_dapo.py` does not support `generator.step_wise_trajectories=true`.
+
 To add the overlong buffer length and penalty factor parameters to the config, you can subclass ``AlgorithmConfig`` with additional fields and use ``make_config`` to create a custom config class. See ``main_dapo.py`` for the full example:
 
 ```bash

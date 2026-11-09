@@ -1,10 +1,74 @@
 """Recipe/architecture helpers shared by FP8 packing, weight sync, and workers."""
 
-from typing import Any, MutableMapping, Optional
+import fnmatch
+import re
+from typing import Any, MutableMapping, Optional, Sequence
 
 from loguru import logger
 
 AUTO_FP8_RECIPE = "auto"
+
+
+def fp8_exclude_recipe(exclude_modules: Sequence[str]) -> dict:
+    """Build a Megatron per-module precision recipe that keeps the given modules in BF16.
+
+    Input is list of globs over Megatron module names, such as
+    ``["decoder.layers.0.*", "*.mlp.linear_fc2"]``
+    """
+    return {
+        "configs": {
+            "bf16": {
+                "transformer_engine_config_type": "TEQuantizationParams",
+                "training_recipe": {},
+            }
+        },
+        "matchers": {
+            f"fp8_exclude_{idx}": {"config": "bf16", "type": "glob", "pattern": pattern, "enabled": True}
+            for idx, pattern in enumerate(exclude_modules)
+        },
+    }
+
+
+def reject_stage_local_layer_patterns(patterns: Sequence[str], source: str) -> None:
+    """Raise if a module-path glob selects layers by index; This is used to ensure that the user does
+    not try to select specific layers when PP > 1, since each pipeline stage numbers its decoder layers
+    from 0, so ``decoder.layers.0.*`` would match the first layer of every stage.
+
+    This does not include MTP layers since they all sit on one stage in their own ``mtp.layers`` list, so
+    ``mtp.layers.N`` names the same layer under any pipeline split and is allowed.
+    """
+    layer_indexed = [p for p in patterns if re.search(r"layers\.[0-9\[?]", p) and not p.startswith("mtp.")]
+    if layer_indexed:
+        raise ValueError(
+            f"{source} patterns {layer_indexed} select layers by index, but Megatron numbers "
+            "layers within each pipeline stage when pipeline_model_parallel_size > 1. Use "
+            "num_layers_at_start_in_bf16 / num_layers_at_end_in_bf16 for layer ranges."
+        )
+
+
+def validate_fp8_exclude_modules_matched(model_chunks: Sequence[Any], exclude_modules: Sequence[str]) -> None:
+    """Validates that every pattern in `exclude_modules` matches at least one module, and
+    raises otherwise. It only considers module names that the exclude list can apply to,
+    which excludes intermediate module names that don't have weights (like `decoder.layers`)
+    and those that are not TE layers (embedding, MoE router).
+
+    Collective: every rank calls it.
+    """
+    import torch
+
+    names = []
+    for chunk in model_chunks:
+        while hasattr(chunk, "module"):
+            chunk = chunk.module
+        # include only modules that the exclude list can apply to
+        # filtered using `finish_init` which only applies to end modules with names that are TE layers
+        # excluding intermediate layers (like `decoder.layers`) and those that are not TE layers (embedding, MoE router)
+        names.extend(name for name, module in chunk.named_modules() if hasattr(module, "finish_init"))
+    counts = torch.tensor([sum(fnmatch.fnmatch(name, pattern) for name in names) for pattern in exclude_modules])
+    torch.distributed.all_reduce(counts)
+    unmatched = [pattern for pattern, count in zip(exclude_modules, counts.tolist()) if count == 0]
+    if unmatched:
+        raise ValueError(f"fp8_exclude_modules patterns {unmatched} match none of the layers Megatron can run in FP8. ")
 
 
 def is_fp8_enabled(fp8: Any) -> bool:

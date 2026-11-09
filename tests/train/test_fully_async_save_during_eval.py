@@ -16,6 +16,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl.train.utils.callbacks import (
+    CallbackHandler,
+    TrainingCallback,
+    TrainingControl,
+)
 from skyrl.train.utils.metrics import ScalarGauges, TrainingPhaseGauge
 from skyrl.train.utils.trainer_utils import ResumeMode
 
@@ -78,6 +83,9 @@ def _make_trainer(
     trainer.num_parallel_generation_workers = MINI_BATCH_SIZE
     trainer._gen_buffer_maxsize = MINI_BATCH_SIZE
     trainer.sample_full_batch = False
+    trainer.train_dataloader = None
+    trainer._training_control = TrainingControl()
+    trainer._callback_handler = CallbackHandler()
     trainer.async_train_dataloader = _FakeAsyncDataloader()
     trainer._staleness_manager = SimpleNamespace(
         notify_capacity_change=AsyncMock(), validate_state_at_epoch_end=AsyncMock()
@@ -156,8 +164,31 @@ async def test_checkpoint_and_hf_model_save_run_during_eval():
     assert eval_start < ckpt_start <= ckpt_end <= save_start < eval_end
     # Both ended before the step logged its timings.
     step_timings = next(data for step, data in trainer.logged if step == 1 and "timing/eval" in data)
-    assert {"timing/eval", "timing/save_hf_model"} <= set(step_timings)
-    assert any(step == 1 and data.get("eval/score") == 1.0 for step, data in trainer.logged)
+    assert {"timing/eval", "timing/save_checkpoints", "timing/save_hf_model"} <= set(step_timings)
+    assert step_timings["eval/score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_callback_requested_checkpoint_and_eval_overlap():
+    trainer = _make_trainer(save_during_eval=True, ckpt_interval=0)
+    trainer.cfg.trainer.eval_interval = 0
+    saved_paths = []
+
+    class RequestSaveAndEval(TrainingCallback):
+        def on_step_end(self, trainer, callback_input, control):
+            control.should_save = True
+            control.should_evaluate = True
+
+        def on_save(self, trainer, callback_input, control):
+            saved_paths.append(callback_input.ckpt_path)
+
+    trainer.add_callback(RequestSaveAndEval())
+    await trainer.train()
+
+    eval_start, eval_end = trainer.intervals[("eval", 1)]
+    ckpt_start, ckpt_end = trainer.intervals[("save_checkpoints", 1)]
+    assert eval_start < ckpt_start <= ckpt_end < eval_end
+    assert saved_paths == ["global_step_1"]
 
 
 @pytest.mark.asyncio

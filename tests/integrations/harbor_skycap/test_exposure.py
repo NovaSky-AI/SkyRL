@@ -140,11 +140,10 @@ def test_installed_agents_run_in_the_sandbox_and_terminus_does_not() -> None:
 
 # -- the URL each agent gets ----------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_an_agent_in_the_sandbox_calls_skycap_on_its_exposed_url(exposed, trials, monkeypatch) -> None:
+@pytest.mark.parametrize("agent", ["mini-swe-agent", "codex"])
+async def test_an_agent_in_the_sandbox_calls_skycap_on_its_exposed_url(agent, exposed, trials, monkeypatch) -> None:
     monkeypatch.delenv("MSWEA_API_KEY", raising=False)
-    gen = HarborSkycapGenerator(
-        generator_cfg(), agent_cfg("mini-swe-agent"), [exposed.url], SimpleNamespace(weight_version=7)
-    )
+    gen = HarborSkycapGenerator(generator_cfg(), agent_cfg(agent), [exposed.url], SimpleNamespace(weight_version=7))
     try:
         out = await gen.generate(batch("linear", "summarize"), disable_tqdm=True)
     finally:

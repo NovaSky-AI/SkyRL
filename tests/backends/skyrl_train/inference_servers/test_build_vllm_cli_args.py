@@ -7,6 +7,7 @@ import pytest
 
 from skyrl.backends.skyrl_train.inference_servers.utils import (
     _apply_serialized_fp8_weight_sync_defaults,
+    build_frozen_vllm_cli_args,
     build_vllm_cli_args,
     get_pd_cli_args,
     get_pd_p2p_connector_name,
@@ -18,7 +19,7 @@ from skyrl.train.config import SkyRLTrainConfig
 def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
     ie_cfg.fp8_weight_sync_mode = "blockwise"
@@ -41,13 +42,12 @@ def test_serialized_fp8_weight_sync_defaults_configure_vllm_checkpoint_fp8(monke
     [
         {"quantization": "awq"},
         {"load_format": "safetensors"},
-        {"hf_overrides": {"quantization_config": {"weight_block_size": [64, 128]}}},
     ],
 )
 def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwargs, monkeypatch):
     import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
 
-    monkeypatch.setattr(inference_utils, "_serialized_fp8_ignored_layers", lambda _model_path, _wire_format=None: [])
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
 
@@ -59,22 +59,28 @@ def test_serialized_fp8_weight_sync_rejects_conflicting_vllm_settings(engine_kwa
         )
 
 
-@pytest.mark.parametrize(
-    "engine_kwargs",
-    [
-        {"hf_overrides": []},
-        {"hf_overrides": {"quantization_config": []}},
-    ],
-)
-def test_serialized_fp8_weight_sync_rejects_non_mapping_overrides(engine_kwargs):
+def test_serialized_fp8_weight_sync_rejects_non_mapping_overrides():
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
 
     with pytest.raises(ValueError, match="must be a dict"):
         _apply_serialized_fp8_weight_sync_defaults(
             cfg.generator.inference_engine,
-            engine_kwargs,
+            {"hf_overrides": []},
             model_path="qwen35-test",
+        )
+
+
+@pytest.mark.parametrize("user_quantization_config", [{"weight_block_size": [64, 128]}, {"store_dtype": "mxfp4"}, []])
+def test_serialized_fp8_rejects_a_user_quantization_config(user_quantization_config):
+    """FP8 weight sync owns the engine's quantization config: it must describe exactly what the trainer sends."""
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+    engine_kwargs = {"hf_overrides": {"quantization_config": user_quantization_config}}
+
+    with pytest.raises(ValueError, match="hf_overrides.quantization_config cannot be set"):
+        _apply_serialized_fp8_weight_sync_defaults(
+            cfg.generator.inference_engine, engine_kwargs, model_path="qwen35-test"
         )
 
 
@@ -155,6 +161,37 @@ def test_build_vllm_cli_args_succeeds_on_gpu_less_host(monkeypatch):
 
 
 @pytest.mark.vllm
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            ["generator.inference_engine.engine_init_kwargs.logprobs_mode=raw_logprobs"],
+            "generator.inference_engine.engine_init_kwargs.logprobs_mode must be 'processed_logprobs'",
+        ),
+        (
+            ["generator.inference_engine.weight_sync_backend=sharded_rdt", "trainer.placement.colocate_all=true"],
+            "weight_sync_backend='sharded_rdt' requires non-colocated",
+        ),
+        (
+            [
+                "trainer.strategy=megatron",
+                "generator.inference_engine.fp8_weight_sync_mode=blockwise",
+                "generator.inference_engine.engine_init_kwargs.quantization=awq",
+            ],
+            "quantization must be 'fp8' when FP8 weight sync is enabled",
+        ),
+    ],
+)
+def test_build_vllm_cli_args_rejects_invalid_settings(overrides, message, monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_serialized_fp8_engine_exclude_list", lambda *_args: [])
+
+    with pytest.raises(ValueError, match=message):
+        build_vllm_cli_args(SkyRLTrainConfig.from_cli_overrides(overrides))
+
+
+@pytest.mark.vllm
 def test_default_logprobs_mode_is_processed_logprobs():
     args = build_vllm_cli_args(SkyRLTrainConfig())
 
@@ -174,6 +211,125 @@ def test_sample_support_uses_processed_top_k_logprobs():
 
     assert args.max_logprobs == 8
     assert args.logprobs_mode == "processed_logprobs"
+
+
+@pytest.mark.vllm
+def test_build_frozen_vllm_cli_args_serves_a_model_that_is_only_read():
+    cfg = SkyRLTrainConfig()
+    cfg.generator.sampling_params.top_k = 8
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.served_model_name = "teacher"
+    ie_cfg.tensor_parallel_size = 4
+    ie_cfg.enable_return_routed_experts = True  # policy-only settings the frozen role must not apply
+    ie_cfg.enable_return_sample_support_set = True
+    ie_cfg.engine_init_kwargs = {"max_model_len": 4096, "enforce_eager": True}
+
+    args = build_frozen_vllm_cli_args("Qwen/Qwen3-32B", ie_cfg, seed=7)
+    policy_args = build_vllm_cli_args(cfg)
+
+    assert args.model == "Qwen/Qwen3-32B"
+    assert args.served_model_name == ["teacher"]
+    assert args.tensor_parallel_size == 4
+    assert args.seed == 7
+    assert args.enable_sleep_mode is False
+    assert args.enable_lora is False
+    assert args.weight_transfer_config is None
+    assert args.enable_return_routed_experts is False
+    assert args.logprobs_mode == "processed_logprobs"  # every SkyRL-launched engine, frozen ones included
+    assert args.max_logprobs != 8  # sample-support capture is the policy's
+    assert args.max_model_len == 4096
+    assert args.enforce_eager is True  # engine_init_kwargs applies last, over the config field
+    # the role-independent fields are the same ones the policy gets
+    for name in ("worker_extension_cls", "generation_config", "gpu_memory_utilization", "max_num_seqs", "dtype"):
+        assert getattr(args, name) == getattr(policy_args, name)
+    assert policy_args.weight_transfer_config is not None
+    assert policy_args.max_logprobs == 8
+
+
+def test_build_frozen_vllm_cli_args_rejects_other_logprobs_modes(monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_base_vllm_cli_args", lambda *_: Namespace())
+    ie_cfg = SkyRLTrainConfig().generator.inference_engine
+    ie_cfg.engine_init_kwargs = {"logprobs_mode": "raw_logits"}
+
+    with pytest.raises(ValueError, match="logprobs_mode must be 'processed_logprobs'"):
+        build_frozen_vllm_cli_args("Qwen/Qwen3-32B", ie_cfg, seed=7)
+
+
+def _megatron_lora_cfg(*overrides):
+    return SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.model.lora.rank=64",
+            "trainer.policy.megatron_config.lora_config.merge_lora=false",
+            *overrides,
+        ]
+    )
+
+
+_SCALE = "generator.inference_engine.scale_moe_lora_rank=true"
+_NORMALIZE = "trainer.policy.megatron_config.lora_config.normalize_moe_lora=true"
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "overrides,topk,expected",
+    [
+        # 64 // top-8.
+        ([_SCALE, _NORMALIZE], 8, 8),
+        # Rounded up to the expert tensor parallel size, which defaults to the TP size.
+        ([_SCALE, _NORMALIZE, "trainer.policy.megatron_config.tensor_model_parallel_size=16"], 8, 16),
+        ([_SCALE, _NORMALIZE, "trainer.policy.megatron_config.expert_tensor_parallel_size=64"], 8, None),
+        # No top-k in the HF config: the experts keep max_lora_rank.
+        ([_SCALE, _NORMALIZE], None, None),
+        # Off by default.
+        ([_NORMALIZE], 8, None),
+    ],
+)
+def test_scale_moe_lora_rank_is_passed_through_additional_config(monkeypatch, overrides, topk, expected):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_moe_router_topk", lambda _model_path: topk)
+    args = build_vllm_cli_args(_megatron_lora_cfg(*overrides))
+
+    assert args.enable_lora and args.max_lora_rank == 64
+    assert (args.additional_config or {}).get("max_expert_lora_rank") == expected
+
+
+@pytest.mark.vllm
+def test_scale_moe_lora_rank_merges_with_engine_additional_config(monkeypatch):
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    monkeypatch.setattr(inference_utils, "_moe_router_topk", lambda _model_path: 8)
+    cfg = _megatron_lora_cfg(_SCALE, _NORMALIZE)
+    cfg.generator.inference_engine.engine_init_kwargs = {"additional_config": {"other": 1}}
+    args = build_vllm_cli_args(cfg)
+
+    assert args.additional_config == {"other": 1, "max_expert_lora_rank": 8}
+
+
+@pytest.mark.parametrize(
+    "hf_config,expected",
+    [
+        ({"num_experts_per_tok": 8}, 8),
+        ({"text_config": {"num_experts_per_tok": 4}}, 4),
+        ({"moe_topk": [6]}, 6),
+        ({"hidden_size": 16}, None),
+    ],
+)
+def test_moe_router_topk_reads_hf_config(monkeypatch, hf_config, expected):
+    import transformers
+
+    import skyrl.backends.skyrl_train.inference_servers.utils as inference_utils
+
+    def from_pretrained(*_args, **_kwargs):
+        text_config = hf_config.get("text_config")
+        fields = {k: v for k, v in hf_config.items() if k != "text_config"}
+        return SimpleNamespace(**fields, text_config=SimpleNamespace(**text_config) if text_config else None)
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", from_pretrained)
+    assert inference_utils._moe_router_topk("model") == expected
 
 
 def test_resolve_policy_model_name_uses_served_model_name():
@@ -197,8 +353,8 @@ def test_serialized_fp8_threads_the_wire_format_into_the_ignore_list(monkeypatch
     seen = []
     monkeypatch.setattr(
         inference_utils,
-        "_serialized_fp8_ignored_layers",
-        lambda _model_path, wire_format=None: seen.append(wire_format) or [],
+        "_serialized_fp8_engine_exclude_list",
+        lambda _model_path, wire_format, _exclude_modules: seen.append(wire_format) or [],
     )
     cfg = SkyRLTrainConfig()
     ie_cfg = cfg.generator.inference_engine
@@ -209,6 +365,38 @@ def test_serialized_fp8_threads_the_wire_format_into_the_ignore_list(monkeypatch
 
     assert seen == ["mxfp8"]
     assert engine_kwargs["quantization"] == "compressed-tensors"
+
+
+def test_serialized_fp8_exclusions_reach_the_engine_ignore_list(monkeypatch):
+    import transformers
+
+    hf_config = SimpleNamespace(
+        model_type="qwen3_5_moe",
+        text_config=SimpleNamespace(
+            model_type="qwen3_5_moe_text",
+            layer_types=["linear_attention", "full_attention"],
+            shared_expert_intermediate_size=512,
+        ),
+    )
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: hf_config)
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.fp8_weight_sync_mode = "blockwise"
+    ie_cfg.fp8_weight_sync_exclude_modules = ["*.layers.1.self_attn.*", "*.layers.0.mlp.experts.*"]
+    engine_kwargs = {}
+
+    _apply_serialized_fp8_weight_sync_defaults(ie_cfg, engine_kwargs, model_path="qwen35-test")
+
+    ignored = engine_kwargs["hf_overrides"]["quantization_config"]["ignored_layers"]
+    assert set(ignored[-7:]) == {
+        "model.language_model.layers.0.mlp.experts.0.gate_proj",
+        "model.language_model.layers.0.mlp.experts.0.up_proj",
+        "model.language_model.layers.0.mlp.experts.0.down_proj",
+        "model.language_model.layers.1.self_attn.q_proj",
+        "model.language_model.layers.1.self_attn.k_proj",
+        "model.language_model.layers.1.self_attn.v_proj",
+        "model.language_model.layers.1.self_attn.o_proj",
+    }
 
 
 class TestGetPDP2PConnectorName:
@@ -286,6 +474,18 @@ class TestGetPDCLIArgs:
         role_kwargs = {"kv_transfer_config": {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}}
         out = get_pd_cli_args(args, role="decode", role_init_kwargs=role_kwargs)
         assert out.kv_transfer_config["kv_role"] == "kv_consumer"
+
+    @pytest.mark.parametrize("role_additional_config", [{"other": 1}, '{"other": 1}'])
+    def test_role_additional_config_merges_with_base(self, role_additional_config):
+        # The base args carry the derived MoE expert LoRA slot rank; a role's own
+        # additional_config must not drop it.
+        args = Namespace(
+            additional_config={"max_expert_lora_rank": 8},
+            kv_transfer_config={"kv_connector": "NixlConnector"},
+        )
+        out = get_pd_cli_args(args, role="decode", role_init_kwargs={"additional_config": role_additional_config})
+        assert out.additional_config == {"max_expert_lora_rank": 8, "other": 1}
+        assert args.additional_config == {"max_expert_lora_rank": 8}
 
     def test_missing_kv_transfer_config_raises(self):
         args = Namespace()
