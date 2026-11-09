@@ -118,6 +118,14 @@ def _build_skyrl_nccl_trainer() -> "tuple[type, type]":
     ):
         init_info_cls = SkyrlNCCLTrainerInitInfo
 
+        def send_weights(self) -> None:
+            # Since vLLM 0.33 a round whose metadata equals the previous one ships an empty update info,
+            # and the worker reuses the info it cached under its `self.model`. SkyRL's receivers swap in
+            # a per-round proxy as `self.model` (FP8 load proxy, LoRA staging), so that lookup misses, the
+            # worker receives nothing and the trainer's broadcast hangs. Always ship the names.
+            self._sent_meta = None
+            super().send_weights()
+
     return SkyrlNCCLTrainerInitInfo, SkyrlNCCLTrainerWeightTransferEngine
 
 
@@ -230,7 +238,20 @@ def build_trainer_engine(
 
         rdt_send.log_source_choice(source)
 
-    engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
+    if backend in ("nccl", "ipc"):
+        # vLLM's NCCL/IPC trainer_init reads `source.metadata` for its ownership checks. For a
+        # Megatron source that is a full dry export, which at init can run against an offloaded
+        # (zero-sized) model -- e.g. colocated multi-LoRA, where the bridge's LoRA merge then fails.
+        # Every SkyRL push source has every rank own every parameter, so the checks are vacuous:
+        # seed the cached property empty for the call and drop it, so metadata is first computed
+        # at the first send (as before vLLM 0.33). sharded_rdt and delta read real metadata at init.
+        source.__dict__["metadata"] = []
+        try:
+            engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
+        finally:
+            source.__dict__.pop("metadata", None)
+    else:
+        engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
     engine.skyrl_draft_source = draft_source
 
     if backend == "sharded_rdt":

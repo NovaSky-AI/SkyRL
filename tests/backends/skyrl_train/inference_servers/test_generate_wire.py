@@ -21,11 +21,14 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_ndarray,
     pack_routed_experts,
     pack_sample_support,
+    pack_sample_support_logprobs,
     unpack_ndarray,
 )
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense
 
 _FLOAT32 = frozenset({np.dtype(np.float32)})
 _INT16 = frozenset({np.dtype(np.int16)})
+_INT32 = frozenset({np.dtype(np.int32)})
 
 
 def _support_envelope(support: np.ndarray) -> dict:
@@ -204,30 +207,69 @@ def test_decode_rejects_noncanonical_dtype():
         decode_packed_routed_experts(payload)
 
 
-def test_packed_sample_support_round_trip():
-    support = np.array([[7, 152064, -1, -1], [9, 10, 11, -1], [12, -1, -1, -1]], dtype=np.int32)
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[7, 152064, -1, -1], [-1, -1, -1, -1], [9, 10, 11, 12], [13, -1, -1, -1]],
+        np.empty((0, 4), dtype=np.int32),
+        [[-1, -1]],
+    ],
+)
+def test_packed_sample_support_round_trip(rows):
+    support = csr(rows)
 
     decoded = decode_packed_sample_support(orjson.loads(orjson.dumps(pack_sample_support(support))))
 
-    assert decoded.dtype == np.int32
-    assert decoded.flags.c_contiguous
-    assert np.array_equal(decoded, support)
+    assert decoded.top_k == support.top_k
+    assert decoded.token_ids.dtype == np.int32
+    assert np.array_equal(decoded.offsets, support.offsets)
+    assert np.array_equal(decoded.token_ids, support.token_ids)
+
+
+def test_packed_sample_support_decodes_from_a_spliced_body():
+    support = csr([[1, 2], [-1, -1], [3, -1]])
+    raw = orjson.dumps(_body(rollout_sample_support=pack_sample_support(support)))
+
+    envelope = load_packed_body(raw)["choices"][0][PackedField.ROLLOUT_SAMPLE_SUPPORT]
+    decoded = decode_packed_sample_support(envelope)
+
+    assert isinstance(envelope[PackedArrayKey.DATA], memoryview)
+    assert np.array_equal(dense(decoded), dense(support))
+
+
+def _raw_support_envelope(data, **sidecar) -> dict:
+    return pack_ndarray(np.asarray(data, dtype=np.int32), allowed_dtypes=_INT32, extra=sidecar)
 
 
 # Shape, base64, byte-size and dtype allow-listing are covered generically by the
-# pack_ndarray/unpack_ndarray tests; these two semantic invariants are not.
+# pack_ndarray/unpack_ndarray tests; these are the CSR envelope's own invariants.
 @pytest.mark.parametrize(
-    "support,message",
+    "envelope,message",
     [
-        (np.array([[-2, 1]], dtype=np.int32), "-1 padding"),
-        (np.array([[1, -1, 2]], dtype=np.int32), "trailing"),
+        (_raw_support_envelope([1, 7], top_k=2), "carries no num_rows"),
+        (_raw_support_envelope([1, 7], num_rows=1), "carries no top_k"),
+        (_raw_support_envelope([1, 7], num_rows=3, top_k=2), "invalid num_rows"),
+        (_raw_support_envelope([1, 7], num_rows=-1, top_k=2), "invalid num_rows"),
+        (_raw_support_envelope([1, 7], num_rows=True, top_k=2), "invalid num_rows"),
+        (_raw_support_envelope([1, 7], num_rows=1.0, top_k=2), "invalid num_rows"),
+        (_raw_support_envelope([1, 7], num_rows=1, top_k="2"), "invalid top_k"),
+        (_raw_support_envelope([2, -1, 7], num_rows=2, top_k=2), "ascend"),
+        (_raw_support_envelope([3, 7, 8, 9], num_rows=1, top_k=2), "at most"),
+        (_raw_support_envelope([2, 7], num_rows=1, top_k=2), "span the members"),
+        (_raw_support_envelope([0], num_rows=1, top_k=0), "positive top_k"),
+        (_raw_support_envelope([1, -7], num_rows=1, top_k=2), "nonnegative IDs"),
     ],
 )
-def test_sample_support_wire_rejects_bad_padding(support, message):
+def test_sample_support_wire_rejects_malformed_envelopes(envelope, message):
     with pytest.raises(ValueError, match=message):
-        pack_sample_support(support)
-    with pytest.raises(ValueError, match=message):
-        decode_packed_sample_support(pack_ndarray(support, allowed_dtypes=frozenset({np.dtype(np.int32)})))
+        decode_packed_sample_support(envelope)
+
+
+def test_sample_support_wire_rejects_a_dense_grid():
+    with pytest.raises(ValueError, match="1-D|ndim|dimension"):
+        decode_packed_sample_support(
+            pack_ndarray(np.array([[1, -1]], dtype=np.int32), allowed_dtypes=_INT32, extra={"num_rows": 1, "top_k": 2})
+        )
 
 
 @pytest.mark.parametrize(
@@ -414,3 +456,52 @@ def test_load_packed_body_rejects_an_unterminated_blob():
 
     with pytest.raises(ValueError, match="unterminated"):
         load_packed_body(truncated)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[7, 152064, -1, -1], [-1, -1, -1, -1], [9, 10, 11, 12], [13, -1, -1, -1]],
+        np.empty((0, 4), dtype=np.int32),
+        [[-1, -1]],
+    ],
+)
+def test_packed_sample_support_logprobs_round_trip(rows):
+    rows = np.asarray(rows, dtype=np.int32)
+    support = csr(rows, logprobs=-0.5 * np.abs(rows).astype(np.float32))
+
+    decoded = decode_packed_sample_support(
+        orjson.loads(orjson.dumps(pack_sample_support(support))),
+        orjson.loads(orjson.dumps(pack_sample_support_logprobs(support))),
+    )
+
+    assert decoded.logprobs.dtype == np.float32
+    np.testing.assert_array_equal(decoded.logprobs, support.logprobs)
+    np.testing.assert_array_equal(decoded.token_ids, support.token_ids)
+
+
+def test_packed_sample_support_logprobs_decode_from_a_spliced_body():
+    support = csr([[1, 2], [-1, -1], [3, -1]], logprobs=[[-0.25, -1.5], [0, 0], [0.0, 0]])
+    raw = orjson.dumps(
+        _body(
+            rollout_sample_support=pack_sample_support(support),
+            rollout_sample_support_logprobs=pack_sample_support_logprobs(support),
+        )
+    )
+
+    choice = load_packed_body(raw)["choices"][0]
+    decoded = decode_packed_sample_support(
+        choice[PackedField.ROLLOUT_SAMPLE_SUPPORT], choice[PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS]
+    )
+
+    np.testing.assert_array_equal(decoded.logprobs, [-0.25, -1.5, 0.0])
+
+
+def test_sample_support_logprobs_must_match_the_members():
+    support = csr([[1, 2]], logprobs=[[-0.5, -1.0]])
+    short = pack_ndarray(np.zeros(1, dtype=np.float32), allowed_dtypes=frozenset({np.dtype(np.float32)}))
+
+    with pytest.raises(ValueError, match="columns must align"):
+        decode_packed_sample_support(pack_sample_support(support), short)
+    with pytest.raises(ValueError, match="carries no member logprobs"):
+        pack_sample_support_logprobs(csr([[1, 2]]))

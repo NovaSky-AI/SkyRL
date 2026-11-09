@@ -98,7 +98,8 @@ def _streaming_strategy(**config) -> megatron_strategy.MegatronStrategy:
 
 
 def _model(tensors: dict):
-    module = SimpleNamespace(sharded_state_dict=lambda: _sharded(tensors))
+    module = torch.nn.Module()
+    module.sharded_state_dict = lambda: _sharded(tensors)
     return SimpleNamespace(actor_module=[module])
 
 
@@ -219,6 +220,7 @@ def test_optim_step_waits_before_grad_sync(save_strategy, write_gate, tmp_path):
     tensors = {"router.expert_bias": torch.zeros(4)}
     expected = {name: tensor.clone() for name, tensor in tensors.items()}
     worker = MegatronPolicyWorkerBase.__new__(MegatronPolicyWorkerBase)
+    worker.cfg = SimpleNamespace(log_mfu=False)
     worker.strategy = save_strategy
     worker.optimizer = _Optimizer({})
     worker.scheduler = Mock()

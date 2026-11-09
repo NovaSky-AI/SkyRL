@@ -25,16 +25,27 @@ the tensors already live there and, because the sender casts to ``lora_dtype``
 first, ``from_lora_tensors``'s per-key ``.to()`` returns the same tensor, so
 aliases created by :func:`expand_lora_aliases` keep sharing storage. Loading on
 CPU would pin a private copy per key and re-inflate a deduplicated adapter to
-its public size.
+its public size, and vLLM's MoE packing (``PackedLoRALayerWeights.pack_moe``)
+is much slower on the host.
 
 ``add_lora`` still flows API server -> engine core -> every worker, so the
 adapter name in the OpenAI-compatible model registry stays correct and
 ``load_inplace=True`` replaces the previous generation exactly as the
-directory path does. Staged tensors stay registered after the load: the
-``LoRAModel`` shares their storage (same device and dtype), so this costs
-nothing, and it lets vLLM rebuild the adapter after an LRU eviction the way it
-would re-read a directory. The next sync for the same name replaces them;
+directory path does. Staged tensors stay registered after the load, so vLLM
+can rebuild the adapter after an LRU eviction the way it would re-read a
+directory. The next sync for the same name replaces them;
 ``discard_in_memory_adapter`` frees them on unload.
+
+``WorkerLoRAManager.add_adapter`` (and the LRU variant's) is wrapped too. Once
+it has activated a GPU-built adapter, i.e. copied this worker's slice into
+vLLM's pre-allocated LoRA slots, :func:`offload_in_memory_adapter` moves the
+registered ``LoRAModel`` and the staged tensors to pinned host memory, where
+the directory path keeps the ``LoRAModel`` as well. Generation reads only the
+slots. The ``LoRAModel`` holds ``pack_moe``'s stacked copy of every local
+expert's factors, allocated outside vLLM's sleep-mode pool. vLLM re-activates an
+evicted adapter by copying from these host tensors (``set_lora``), and a
+rebuild from host-staged tensors builds (and runs ``pack_moe``) on the host,
+as the directory path does.
 
 Sharing storage has one consequence: vLLM applies ``lora_alpha / r`` by
 multiplying ``lora_b`` *in place* on every load (``LoRALayerWeights.optimize``),
@@ -59,6 +70,12 @@ from skyrl.backends.skyrl_train.weight_sync.lora_target import (
 
 _PATCHED = False
 _ORIGINAL_LOAD_ADAPTER = None
+_ORIGINAL_ADD_ADAPTER: Dict[type, Any] = {}
+
+# ``lora_int_id``s whose ``LoRAModel`` was built on the GPU and not yet moved
+# to the host. ``LRUCacheWorkerLoRAManager.add_adapter`` runs on every
+# scheduler step, so the wrapper only offloads ids listed here.
+_AWAITING_OFFLOAD: set[int] = set()
 
 
 @dataclass
@@ -177,17 +194,23 @@ def _load_in_memory_adapter(manager, lora_request, staged: StagedLoRAAdapter):
     if moe_ep_spec is not None:
         tensors = {k: v for k, v in tensors.items() if not _is_remote_expert_key(k, moe_ep_spec)}
 
+    # Build where the staged tensors live: on the GPU right after a sync, on
+    # the host once offload_in_memory_adapter has moved them (a rebuild after
+    # an LRU eviction then works like a load from a directory).
+    build_on_host = next(iter(staged.tensors.values())).device.type == "cpu"
     lora = manager._lora_model_cls.from_lora_tensors(
         lora_model_id=lora_request.lora_int_id,
         tensors=tensors,
         peft_helper=peft_helper,
-        device=manager.device,
+        device="cpu" if build_on_host else manager.device,
         dtype=manager.lora_config.lora_dtype,
         model_vocab_size=manager.vocab_size,
         weights_mapper=weights_mapper,
         skip_prefixes=skip_prefixes,
     )
     lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
+    if not build_on_host:
+        _AWAITING_OFFLOAD.add(lora_request.lora_int_id)
     return lora
 
 
@@ -205,8 +228,74 @@ def _patched_load_adapter(self, lora_request):
     return _load_in_memory_adapter(self, lora_request, staged)
 
 
+def _to_host(tensor, moved: Dict[tuple, torch.Tensor]):
+    """Returns a pinned host copy of a CUDA ``tensor``, else ``tensor`` unchanged.
+
+    ``moved`` maps each copied tensor's ``(data_ptr, dtype, shape, stride)`` to
+    its host copy, so tensors that are the same view of one GPU storage share
+    one host copy.
+    """
+    if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+        return tensor
+    key = (tensor.data_ptr(), tensor.dtype, tuple(tensor.shape), tensor.stride())
+    host = moved.get(key)
+    if host is None:
+        host = torch.empty(tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True)
+        host.copy_(tensor, non_blocking=True)
+        moved[key] = host
+    return host
+
+
+def offload_in_memory_adapter(manager, lora_request) -> None:
+    """Moves an activated in-memory adapter's tensors from the GPU to pinned host memory.
+
+    Covers the registered ``LoRAModel``'s ``lora_a`` / ``lora_b`` (single
+    tensors or per-slice lists) and the staged tensors for
+    ``lora_request.lora_name``. Tensors that shared GPU storage share the host
+    copy. Releases the freed blocks with ``torch.cuda.empty_cache`` so that
+    other processes on the GPU (a colocated trainer) can use them.
+    """
+    lora_model = manager._adapter_manager.get_adapter(lora_request.lora_int_id)
+    if lora_model is None:
+        return
+    moved: Dict[tuple, torch.Tensor] = {}
+    for weights in lora_model.loras.values():
+        for attr in ("lora_a", "lora_b"):
+            value = getattr(weights, attr, None)
+            if isinstance(value, list):
+                setattr(weights, attr, [_to_host(t, moved) for t in value])
+            else:
+                setattr(weights, attr, _to_host(value, moved))
+            # Drops the reference to the GPU tensor so that empty_cache below can release it.
+            del value
+    staged = _STAGED.get(lora_request.lora_name)
+    if staged is not None:
+        staged.tensors = {k: _to_host(v, moved) for k, v in staged.tensors.items()}
+    if moved:
+        # Waits for the non_blocking copies before returning the GPU blocks to the driver.
+        torch.cuda.current_stream().synchronize()
+        moved.clear()
+        torch.cuda.empty_cache()
+
+
+def _make_patched_add_adapter(original):
+    def _patched_add_adapter(self, lora_request):
+        loaded = original(self, lora_request)
+        # An id stays listed if ``original`` raised; the next successful call offloads it.
+        if lora_request.lora_int_id in _AWAITING_OFFLOAD:
+            from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+            _AWAITING_OFFLOAD.discard(lora_request.lora_int_id)
+            # vLLM runs add_adapter's own device work under the same context.
+            with gpu_sync_allowed():
+                offload_in_memory_adapter(self, lora_request)
+        return loaded
+
+    return _patched_add_adapter
+
+
 def apply_lora_in_memory_patch() -> None:
-    """Install the wrapper on ``WorkerLoRAManager`` (idempotent, worker-process local)."""
+    """Install the wrappers on vLLM's worker LoRA managers (idempotent, worker-process local)."""
     global _PATCHED, _ORIGINAL_LOAD_ADAPTER
     if _PATCHED:
         return
@@ -215,10 +304,19 @@ def apply_lora_in_memory_patch() -> None:
     except ModuleNotFoundError:
         # Trainer processes import the worker-extension module too.
         return
+    from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+
     _ORIGINAL_LOAD_ADAPTER = WorkerLoRAManager._load_adapter
     WorkerLoRAManager._load_adapter = _patched_load_adapter
+    # LRUCacheWorkerLoRAManager overrides add_adapter without calling super().
+    for cls in (WorkerLoRAManager, LRUCacheWorkerLoRAManager):
+        _ORIGINAL_ADD_ADAPTER[cls] = cls.__dict__["add_adapter"]
+        cls.add_adapter = _make_patched_add_adapter(_ORIGINAL_ADD_ADAPTER[cls])
     _PATCHED = True
-    logger.debug("in-memory LoRA patch installed on vllm WorkerLoRAManager._load_adapter")
+    logger.debug(
+        "in-memory LoRA patch installed on vllm WorkerLoRAManager._load_adapter and on "
+        "add_adapter of WorkerLoRAManager and LRUCacheWorkerLoRAManager"
+    )
 
 
 def is_patched() -> bool:

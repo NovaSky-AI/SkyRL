@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 from aiohttp import web
 
-from skycap.openai_chat import error_body
+from skycap.dialects.base import error_body
 
 RETRY_COUNT_HEADER = "x-stainless-retry-count"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"

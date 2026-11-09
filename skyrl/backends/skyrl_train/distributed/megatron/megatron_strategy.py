@@ -32,9 +32,17 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_grads_to_gpu,
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
+    megatron_grad_buffers_resident,
     offload_megatron_grads_to_cpu,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+    CHECKPOINT_SUBDIR as OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+    OffloadedDistributedOptimizer,
+    disk_state_stores,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.streaming_checkpoint import (
     StreamingCheckpointWrite,
@@ -45,6 +53,9 @@ from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
+)
+from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
+    sync_params_for_export,
 )
 
 # Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
@@ -147,7 +158,21 @@ def _patched_load_parameter_state_from_dp_reshardable(self, state_dict):
     ``_set_main_param_and_optimizer_states`` overwrites it with the stale one.
     ``load_parameter_state_from_fs_model_space`` already filters ``step``;
     here we save/restore it around the original method instead.
+
+    With a HybridDeviceOptimizer, ``load_state_dict`` also gives *every* param a
+    per-param ``step``, including those of the GPU sub-optimizer (TE FusedAdam),
+    which keeps its step in the param group and saves none per param. The original
+    then looks that ``step`` up in the checkpoint and raises ``KeyError``, so drop
+    it from those params first.
     """
+    if isinstance(self.optimizer, HybridDeviceOptimizer):
+        for sub_opt in self.optimizer.sub_optimizers:
+            if isinstance(sub_opt, (torch.optim.Adam, torch.optim.AdamW)):
+                continue
+            for p in sub_opt.state:
+                self.optimizer.state[self.optimizer.inner_param_to_orig_param[p]].pop("step", None)
+                sub_opt.state[p].pop("step", None)
+
     correct_step = None
     for v in self.optimizer.state.values():
         if "step" in v and isinstance(v["step"], torch.Tensor):
@@ -334,13 +359,88 @@ class MegatronStrategy(DistributedStrategy):
         """
         optimizers = getattr(optimizer, "chained_optimizers", [optimizer])
         for opt in optimizers:
+            if isinstance(opt, OffloadedDistributedOptimizer):
+                continue  # its state is on disk, checkpointed by save_to()
             init_fn = getattr(opt, "init_state_fn", None)
             inner_opt = getattr(opt, "optimizer", None)
             cfg = getattr(opt, "config", None)
             if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
+            elif (
+                init_fn is None
+                and hasattr(inner_opt, "sub_optimizers")
+                and hasattr(inner_opt, "_sync_sub_optimizers_state_to_hdo")
+                and len(inner_opt.state) == 0
+            ):
+                # HybridDeviceOptimizer (optimizer_cpu_offload): megatron-core builds it with init_state_fn=None
+                # and fills its state from the sub-optimizers only after a step. Create the state each
+                # sub-optimizer's first step would, then mirror it into the HDO.
+                for sub_opt in inner_opt.sub_optimizers:
+                    # The GPU sub-optimizer (optimizer_offload_fraction < 1) is TransformerEngine's FusedAdam: its
+                    # moment dtypes, scales and master params are its own, and its step count lives in the group.
+                    # Let it initialize itself exactly as its step() would.
+                    te_initialize_state = getattr(sub_opt, "initialize_state", None)
+                    for group in sub_opt.param_groups:
+                        if te_initialize_state is not None and "step" not in group and group["params"]:
+                            # FusedAdam keeps one step count per group and creates it on its first step(); the
+                            # checkpoint loader matches param groups including it. Start it at 0 so the next
+                            # step() makes it 1, as on a fresh run.
+                            group["step"] = (
+                                torch.tensor([0], dtype=torch.int, device=group["params"][0].device)
+                                if getattr(sub_opt, "capturable", False)
+                                else 0
+                            )
+                        # torch's Adam/AdamW (the CPU sub-optimizer): fused / capturable kernels need `step` on the
+                        # param's device, otherwise it is a CPU scalar.
+                        on_param_device = group.get("fused") or group.get("capturable")
+                        for p in group["params"]:
+                            if len(sub_opt.state[p]) != 0:
+                                continue
+                            if te_initialize_state is not None:
+                                remainders = getattr(sub_opt, "store_param_remainders", False)
+                                te_initialize_state(p, bool(remainders) and p.dtype == torch.bfloat16)
+                                continue
+                            sub_opt.state[p]["step"] = torch.tensor(
+                                0.0, dtype=torch.float32, device=p.device if on_param_device else "cpu"
+                            )
+                            sub_opt.state[p]["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                            sub_opt.state[p]["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                inner_opt._sync_sub_optimizers_state_to_hdo()
 
-    def save_checkpoint(
+    def _release_grad_buffers(self, model: MegatronModelWrapper) -> bool:
+        """Free the DDP grad buffers for checkpoint I/O if they hold no gradients; return whether it did."""
+        if getattr(model, "_pending_grad_sync", None) is not None or not megatron_grad_buffers_resident(
+            model.actor_module
+        ):
+            return False
+        offload_megatron_grads_to_cpu(model.actor_module)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        return True
+
+    def save_checkpoint(self, model: MegatronModelWrapper, *args, **kwargs):
+        # The grad buffers are idle at a checkpoint; freeing them leaves room for the optimizer state copies
+        # that TE's FusedAdam.state_dict makes. They come back zeroed.
+        grads_released = self._release_grad_buffers(model)
+        try:
+            return self._save_checkpoint(model, *args, **kwargs)
+        finally:
+            if grads_released:
+                load_megatron_grads_to_gpu(model.actor_module)
+            torch.cuda.empty_cache()
+
+    def load_checkpoint(self, model: MegatronModelWrapper, *args, **kwargs):
+        # As in save_checkpoint; the buffers are restored after the loaded state dicts are freed, and the
+        # load's transient memory is returned so NCCL can allocate at the first step after a resume.
+        grads_released = self._release_grad_buffers(model)
+        try:
+            return self._load_checkpoint(model, *args, **kwargs)
+        finally:
+            if grads_released:
+                load_megatron_grads_to_gpu(model.actor_module)
+            torch.cuda.empty_cache()
+
+    def _save_checkpoint(
         self,
         model: MegatronModelWrapper,
         ckpt_dir: str,
@@ -350,9 +450,12 @@ class MegatronStrategy(DistributedStrategy):
         tokenizer: Optional[PreTrainedTokenizer] = None,
     ):
         global _async_calls
+        if disk_state_stores(optimizer) and io.is_cloud_path(ckpt_dir):
+            raise NotImplementedError("optimizer_offload_to_disk checkpoints require a local ckpt_path.")
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
+        sync_params_for_export(model, optimizer)
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
         unwrapped_model = model[0]
         while hasattr(unwrapped_model, "module"):
@@ -427,6 +530,10 @@ class MegatronStrategy(DistributedStrategy):
             else:
                 assert async_save_request is None, "save() must not return a request when sync"
 
+            # Offloaded optimizer state is not in the distributed checkpoint: each rank copies its own files.
+            for store in disk_state_stores(optimizer):
+                store.save_to(os.path.join(work_dir, OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR))
+
             # Only global rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
                 hf_dir = os.path.join(work_dir, "huggingface")
@@ -474,6 +581,12 @@ class MegatronStrategy(DistributedStrategy):
         if streaming_write is not None:
             streaming_write.finish()
 
+    @staticmethod
+    def release_optimizer_state_files(optimizer) -> None:
+        """Delete the files of an ``optimizer_offload_to_disk`` optimizer; the optimizer is unusable afterwards."""
+        for store in disk_state_stores(optimizer):
+            store.close()
+
     def _get_rank_path(self, ckpt_dir):
         tp_rank = mpu.get_tensor_model_parallel_rank()
         pp_rank = mpu.get_pipeline_model_parallel_rank()
@@ -503,7 +616,7 @@ class MegatronStrategy(DistributedStrategy):
             torch.save({"model_state_dict": model_state_dict}, adapter_path)
             self.print(f"Saved {len(model_state_dict)} LoRA adapter parameters to {adapter_path}")
 
-    def load_checkpoint(
+    def _load_checkpoint(
         self,
         model: MegatronModelWrapper,
         ckpt_dir: str,
@@ -515,6 +628,8 @@ class MegatronStrategy(DistributedStrategy):
     ):
         if not ckpt_dir or not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+        if load_optimizer_states and disk_state_stores(optimizer) and io.is_cloud_path(ckpt_dir):
+            raise NotImplementedError("optimizer_offload_to_disk checkpoints require a local ckpt_path.")
 
         # A reload must observe a fully-written checkpoint.
         self.finalize_pending_saves()
@@ -559,6 +674,8 @@ class MegatronStrategy(DistributedStrategy):
                 "model" in state_dict
             ), f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
+            del state_dict["model"]  # free the loaded weights before the optimizer load
+            torch.cuda.empty_cache()
             self.print("Loaded model state dict.")
         else:
             self._load_lora_adapters(unwrapped_model, ckpt_dir)
@@ -569,6 +686,8 @@ class MegatronStrategy(DistributedStrategy):
             ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             with _without_stub_optimizers(optimizer):
                 optimizer.load_state_dict(state_dict["optimizer"])
+            for store in disk_state_stores(optimizer):
+                store.load_from(os.path.join(ckpt_dir, OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR))
             self.print("Loaded optimizer state dict.")
 
         if scheduler and load_lr_scheduler_states:
