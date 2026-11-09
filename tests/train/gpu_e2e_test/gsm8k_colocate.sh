@@ -13,12 +13,16 @@ TRAIN_ACC_MIN_VALUE=0.69
 NUM_TOKENS_MAX_VALUE=232
 LOGPROBS_DIFF_MAX_VALUE=0.0104
 
+# Keep the training settings used to calibrate the thresholds above.
 # The anyscale job's working_dir is the repo root, so we can use relative paths.
 bash examples/train/gsm8k/run_gsm8k.sh \
   trainer.epochs=1 \
   trainer.eval_before_train=true \
   trainer.micro_forward_batch_size_per_gpu=16 \
   trainer.micro_train_batch_size_per_gpu=16 \
+  trainer.algorithm.policy_loss_type=regular \
+  trainer.algorithm.loss_reduction=token_mean \
+  trainer.algorithm.grpo_norm_by_std=true \
   trainer.project_name=\"gsm8k_ci\" \
   trainer.run_name=\"$RUN_NAME\"
 
