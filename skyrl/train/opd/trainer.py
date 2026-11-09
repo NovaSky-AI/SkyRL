@@ -28,7 +28,6 @@ from tqdm.asyncio import tqdm
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
-    CompactSampleSupport,
 )
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.utils import concatenate_generator_outputs
@@ -37,10 +36,10 @@ from skyrl.train.opd.metrics import (
     TopKStats,
     is_repetitive,
     rollout_correct,
-    topk_stats,
+    row_topk_stats,
     truncation_rate,
 )
-from skyrl.train.opd.teacher_client import CandidateScores, TeacherLogprobClient
+from skyrl.train.opd.teacher_client import TeacherLogprobClient
 from skyrl.train.opd.utils import (
     ROLLOUT_CORRECT_KEY,
     TEACHER_INDEX_KEY,
@@ -133,7 +132,7 @@ class OPDTrainer(RayPPOTrainer):
                         f"opd.topk_metrics needs one {SAMPLE_SUPPORT_FIELD!r} entry per trajectory from "
                         f"the generator, got {'none' if supports is None else len(supports)}"
                     )
-                topk_row_stats[name].append(_row_topk_stats(supports[0], score, output["loss_masks"][0]))
+                topk_row_stats[name].append(row_topk_stats(supports[0], score, output["loss_masks"][0]))
             rollout_done_times.append(rollout_done)
             teacher_times[name].append(time.monotonic() - rollout_done)
             return output
@@ -228,12 +227,3 @@ class OPDTrainer(RayPPOTrainer):
         data["advantages"] = advantages
         self.all_metrics.update(metrics)
         return data
-
-
-def _row_topk_stats(support: CompactSampleSupport, scores: CandidateScores, loss_mask: List[int]) -> TopKStats:
-    """One row's overlap sums. A token with no captured members (an appended EOS, an observation token) has no
-    student top-K and is left out."""
-    if len(support) != len(loss_mask):
-        raise ValueError(f"{len(support)} support rows for {len(loss_mask)} response tokens")
-    mask = np.asarray(loss_mask, dtype=bool) & (support.row_lengths > 0)
-    return topk_stats(support.candidate_grid(), support.logprob_grid(), scores.topk_ids, scores.topk_logprobs, mask)

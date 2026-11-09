@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
 import torch
 
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.opd.config import DEFAULT_TEACHER
-from skyrl.train.opd.metrics import informativeness
+from skyrl.train.opd.metrics import term_metrics
 
 if TYPE_CHECKING:
     from skyrl.train.opd.config import OPDConfig
@@ -152,7 +150,7 @@ def apply_opd_to_advantages(
         rows = teacher_index == d
         if not rows.any():
             continue
-        teacher_metrics = _term_metrics(
+        teacher_metrics = term_metrics(
             advantages[rows],
             opd_term[rows],
             reverse_kl[rows],
@@ -166,36 +164,3 @@ def apply_opd_to_advantages(
         teacher_metrics["prompt_share"] = int(rows.sum()) / total_rows
         metrics.update({f"opd/teacher/{name}/{key}": value for key, value in teacher_metrics.items()})
     return new_advantages, metrics
-
-
-def _term_metrics(
-    advantages: torch.Tensor,
-    opd_term: torch.Tensor,
-    reverse_kl: torch.Tensor,
-    divergence_clipped: torch.Tensor,
-    advantage_clipped: torch.Tensor,
-    mask: torch.Tensor,
-    correct: Optional[torch.Tensor],
-) -> Dict[str, float]:
-    """``apply_opd_to_advantages``'s metrics over the rows it is given, one teacher's."""
-    mask_f = mask.to(dtype=advantages.dtype)
-    metrics = {
-        "reverse_kl": masked_mean(reverse_kl, mask_f).item(),
-        "reverse_kl_abs_max": reverse_kl.abs().max().item() if reverse_kl.numel() else 0.0,
-        "adv_rl_abs_mean": masked_mean(advantages.abs(), mask_f).item(),
-        "adv_opd_abs_mean": masked_mean(opd_term.abs(), mask_f).item(),
-        "divergence_clip_fraction": masked_mean(divergence_clipped.to(mask_f.dtype), mask_f).item(),
-        "advantage_clip_fraction": masked_mean(advantage_clipped.to(mask_f.dtype), mask_f).item(),
-    }
-    log_ratio = -reverse_kl[mask]
-    if log_ratio.numel():
-        # Percentiles of the raw log-ratio, to pick the advantage bounds from a run. NumPy, because torch.quantile
-        # refuses inputs above 2**24 elements and a math step has about 25M tokens.
-        low, high = np.quantile(log_ratio.float().cpu().numpy(), [0.01, 0.99])
-        metrics["log_ratio_p01"], metrics["log_ratio_p99"] = float(low), float(high)
-    if correct is not None:
-        # -reverse_kl is log q - log p on trainable tokens and 0 elsewhere, which the mask leaves out anyway.
-        value = informativeness(-reverse_kl, mask, correct)
-        if value is not None:
-            metrics["informativeness"] = value
-    return metrics
