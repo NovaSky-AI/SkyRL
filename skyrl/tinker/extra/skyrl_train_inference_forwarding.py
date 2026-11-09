@@ -111,8 +111,8 @@ class SkyRLTrainInferenceForwardingClient:
         checkpoint_id: str,
         *,
         base_model: str | None = None,
-    ):
-        """Forward a sample request to vLLM and store its result."""
+    ) -> bool:
+        """Forward to vLLM, persist the result, and report success."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
@@ -123,17 +123,20 @@ class SkyRLTrainInferenceForwardingClient:
 
         if self.external_future_store is not None:
             await self.external_future_store.complete(request_id, result, status)
-            return
+            return status == RequestStatus.COMPLETED
 
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future is None:
+                # Row was deleted between scheduling and completion (cancelled
+                # request, stale-session GC). Nothing to write back.
                 logger.warning("FutureDB row %s missing on completion write; skipping", request_id)
-                return
+                return False
             future.result_data = result.model_dump_json()
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
+        return status == RequestStatus.COMPLETED
 
     async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
         # Retry only failures where the request demonstrably did not execute:

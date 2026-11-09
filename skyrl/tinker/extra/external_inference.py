@@ -37,6 +37,8 @@ def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None
 class ExternalInferenceClient:
     """Client for calling external inference engines (e.g., vLLM)."""
 
+    # API-side forwarding can provide an in-memory store. Engine-owned durable
+    # admission leaves it unset and writes results back to FutureDB instead.
     def __init__(self, engine_config: EngineConfig, db_engine, external_future_store=None):
         self.base_url = f"{engine_config.external_inference_url}/v1"
         self.api_key = engine_config.external_inference_api_key
@@ -53,8 +55,8 @@ class ExternalInferenceClient:
         checkpoint_id: str,
         *,
         base_model: str | None = None,
-    ):
-        """Background task to call external engine and store result in database."""
+    ) -> bool:
+        """Call the external engine, persist its result, and report success."""
         try:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
@@ -72,19 +74,20 @@ class ExternalInferenceClient:
 
         if self.external_future_store is not None:
             await self.external_future_store.complete(request_id, result, status)
-            return
+            return status == RequestStatus.COMPLETED
 
         # Engine-owned dispatch persists completion under the original future ID.
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
             if future is None:
                 logger.warning("FutureDB row %s missing on completion write; skipping", request_id)
-                return
+                return False
             # `result_data` is a text column holding pre-serialized JSON.
             future.result_data = result.model_dump_json()
             future.status = status
             future.completed_at = datetime.now(timezone.utc)
             await session.commit()
+        return status == RequestStatus.COMPLETED
 
     async def _forward_to_engine(
         self,

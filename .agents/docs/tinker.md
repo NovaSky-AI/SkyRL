@@ -59,6 +59,12 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
   returns interrupted rows to `PENDING`, retaining the original future IDs.
   `sampling_concurrency.enabled` with `initial_limit` bounds dispatched sampling
   requests when a fixed window is needed.
+- `sampling_concurrency.policy: engine_load` uses direct managed-vLLM metrics
+  to resize that window. It requires a non-colocated combined SkyRL-Train
+  runtime without PD disaggregation. Soft pressure drains active requests;
+  hard pressure cancels selected forwarding tasks before requeueing their
+  durable rows. Tinker counts sampling requests; the caller owns tool waits
+  and any surrounding multi-turn rollout.
 - `forward_backward` and `forward` requests are batched using look-ahead scheduling -- the engine groups all pending ops before the next barrier (`optim_step` or `load_weights`).
 - `sample` requests are batched ensuring one checkpoint_id per model_id per batch.
 - `optim_step`, `create_model`, `save_weights`, `load_weights` are processed individually and act as barriers.
