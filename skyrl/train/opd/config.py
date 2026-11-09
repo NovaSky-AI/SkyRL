@@ -70,9 +70,9 @@ class OPDTopKMetricsConfig(BaseConfig):
     """
 
     num_rows: int = 0
-    """Rows per step and teacher, evenly spaced over each teacher's rows, on which the overlap metrics are measured;
-    ``0`` is off. Each asks its teacher for its own top ``top_k``, which vLLM returns as JSON over the whole
-    sequence."""
+    """Rows per step and teacher on which the overlap metrics are measured; ``0`` is off.
+    The rows are evenly spaced over each teacher's rows. Each asks its teacher for its own top ``top_k``, which vLLM
+    returns as JSON over the whole sequence."""
     top_k: int = 16
     """K, the number of top tokens of each distribution compared; at least 8. 16 is the paper's."""
 
@@ -103,7 +103,7 @@ class OPDConfig(BaseConfig):
     topk_metrics: OPDTopKMetricsConfig = field(default_factory=OPDTopKMetricsConfig)
     """Top-K overlap metrics: overlap ratio and overlap-token advantage. Off by default."""
     route_key: str = "skyrl_mopd_domain"
-    """Which row label names the teacher of each prompt group under ``trainer.teachers``.
+    """Which row label names each row's teacher under ``trainer.teachers``.
     It names an ``env_extras`` field: any dataset column besides the prompt and ``env_class``."""
 
 
@@ -177,14 +177,15 @@ def _as_teacher_config(name: str, entry: Any) -> TeacherConfig:
 class OPDTrainerConfig(TrainerConfig):
     algorithm: OPDAlgorithmConfig = field(default_factory=OPDAlgorithmConfig)
     teacher: Optional[TeacherConfig] = None
-    """The frozen teacher, a sibling of ``trainer.ref``; it scores every row. For several teachers, set
-    ``trainer.teachers`` instead. Once built, the config moves it to ``trainer.teachers`` as ``default`` and
+    """The frozen teacher, a sibling of ``trainer.ref``; it scores every row.
+    For several teachers, set ``trainer.teachers`` instead. Once built, the config moves it to ``trainer.teachers`` as ``default`` and
     resets this field to ``None``."""
     teachers: Optional[Dict[str, TeacherConfig]] = None
     """Several frozen teachers by name, for multi-teacher OPD (MOPD); each entry is a ``trainer.teacher`` block.
     Each prompt group is scored by the teacher its ``opd.route_key`` label names. Exclusive with ``trainer.teacher``."""
 
     def __post_init__(self):
+        super().__post_init__()  # TrainerConfig's defaults and checks, such as the reference model's path
         if self.teacher is not None and self.teachers is not None:
             raise ValueError(
                 "trainer.teacher and trainer.teachers are alternatives; set one: trainer.teacher is a single teacher "

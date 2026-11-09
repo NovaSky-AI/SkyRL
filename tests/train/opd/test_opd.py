@@ -1009,6 +1009,15 @@ def test_a_default_is_normalized_into_the_teacher_map():
     }
 
 
+def test_opd_trainer_config_keeps_the_base_post_init():
+    # TrainerConfig.__post_init__ defaults the reference model to the policy, which a KL loss needs.
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.policy.model.path=Qwen/Qwen3-0.6B"])
+    assert cfg.trainer.ref.model.path == "Qwen/Qwen3-0.6B"
+    # And its checks still run.
+    with pytest.raises(ValueError, match="logprobs_chunk_size must be a positive integer"):
+        OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.logprobs_chunk_size=0"])
+
+
 @pytest.mark.parametrize(
     "overrides, message",
     [
