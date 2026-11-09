@@ -13,7 +13,7 @@
 - ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)`` on trainable
   tokens, after the configured advantage estimator and regulated by the ``opd`` stabilization settings.
 
-Every teacher metric is logged per teacher, under ``opd/teacher/<name>/``; a single ``trainer.teacher`` is ``default``.
+Every teacher metric is logged per teacher, under ``opd/teacher/<name>/``; a single ``trainer.teacher`` is ``_``.
 """
 
 import asyncio
@@ -74,7 +74,7 @@ class OPDTrainer(RayPPOTrainer):
             await asyncio.gather(*(client.aclose() for client in self.teacher_clients.values()))
 
     def _route(self, row: GeneratorInput) -> str:
-        """One row's teacher: the default teacher, or the one its ``opd.route_key`` label names."""
+        """One row's teacher: the single ``trainer.teacher``, or the one its ``opd.route_key`` label names."""
         if DEFAULT_TEACHER in self.teacher_clients:
             return DEFAULT_TEACHER
         key = self.cfg.trainer.algorithm.opd.route_key

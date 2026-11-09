@@ -196,8 +196,8 @@ def test_apply_opd_to_advantages_pure_and_mixed():
     adv, metrics = apply_opd_to_advantages(zero_adv, student, teacher, mask, OPDConfig(kl_coef=2.0))
     # -coef * (student - teacher) * mask
     assert adv.tolist() == [[-1.0, 2.0, 0.0]]
-    assert metrics["opd/teacher/default/reverse_kl"] == pytest.approx((0.5 + -1.0) / 2)
-    assert metrics["opd/teacher/default/reverse_kl_abs_max"] == pytest.approx(1.0)
+    assert metrics["opd/teacher/_/reverse_kl"] == pytest.approx((0.5 + -1.0) / 2)
+    assert metrics["opd/teacher/_/reverse_kl_abs_max"] == pytest.approx(1.0)
     assert metrics["opd/kl_coef"] == 2.0
 
     rl_adv = torch.tensor([[0.7, 0.7, 0.7]])
@@ -225,8 +225,8 @@ def test_apply_opd_to_advantages_without_stabilization_is_unchanged():
 
     reverse_kl = torch.where(mask.bool(), student - teacher, torch.zeros_like(student))
     assert torch.equal(new, advantages - 0.7 * reverse_kl)
-    assert metrics["opd/teacher/default/divergence_clip_fraction"] == 0.0
-    assert metrics["opd/teacher/default/advantage_clip_fraction"] == 0.0
+    assert metrics["opd/teacher/_/divergence_clip_fraction"] == 0.0
+    assert metrics["opd/teacher/_/advantage_clip_fraction"] == 0.0
 
 
 @pytest.mark.parametrize(
@@ -268,7 +268,7 @@ def test_divergence_clip_drops_only_confident_disagreements():
 
     assert clipped[0, 0] == 0.0
     assert torch.equal(clipped[0, 1:], plain[0, 1:])
-    assert metrics["opd/teacher/default/divergence_clip_fraction"] == pytest.approx(0.25)
+    assert metrics["opd/teacher/_/divergence_clip_fraction"] == pytest.approx(0.25)
 
 
 @pytest.mark.parametrize(
@@ -288,7 +288,7 @@ def test_advantage_clip_bounds_the_log_ratio(bounds, expected):
     )
 
     assert new[0].tolist() == pytest.approx(expected)
-    assert metrics["opd/teacher/default/advantage_clip_fraction"] == pytest.approx(
+    assert metrics["opd/teacher/_/advantage_clip_fraction"] == pytest.approx(
         sum(a != e for a, e in zip([-3, -0.5, 0.5, 3], expected)) / 4
     )
 
@@ -308,7 +308,7 @@ def test_log_compression_keeps_kl_coef_outside():
     assert compressed[0].tolist() == pytest.approx(
         [-2.0 * np.log1p(3.0), 0.0, 2.0 * np.log1p(0.5), 2.0 * np.log1p(3.0)]
     )
-    assert metrics["opd/teacher/default/advantage_clip_fraction"] == 0.0
+    assert metrics["opd/teacher/_/advantage_clip_fraction"] == 0.0
 
 
 def test_stabilization_leaves_the_task_advantage_and_masked_tokens_alone():
@@ -321,7 +321,7 @@ def test_stabilization_leaves_the_task_advantage_and_masked_tokens_alone():
     )
 
     assert new.tolist() == [[4.5, 5.0]]  # the task advantage is not clipped; the masked token gets no term
-    assert metrics["opd/teacher/default/advantage_clip_fraction"] == 1.0  # over the one masked-in token
+    assert metrics["opd/teacher/_/advantage_clip_fraction"] == 1.0  # over the one masked-in token
 
 
 def test_log_ratio_percentiles_cover_masked_tokens_only():
@@ -332,13 +332,13 @@ def test_log_ratio_percentiles_cover_masked_tokens_only():
 
     _, metrics = apply_opd_to_advantages(torch.zeros(1, 100), student, student + log_ratio, mask, OPDConfig())
     low, high = np.quantile(log_ratio[0, 50:].numpy(), [0.01, 0.99])
-    assert metrics["opd/teacher/default/log_ratio_p01"] == pytest.approx(low)
-    assert metrics["opd/teacher/default/log_ratio_p99"] == pytest.approx(high)
+    assert metrics["opd/teacher/_/log_ratio_p01"] == pytest.approx(low)
+    assert metrics["opd/teacher/_/log_ratio_p99"] == pytest.approx(high)
 
     _, empty = apply_opd_to_advantages(
         torch.zeros(1, 100), student, student + log_ratio, torch.zeros(1, 100), OPDConfig()
     )
-    assert "opd/teacher/default/log_ratio_p01" not in empty and "opd/teacher/default/log_ratio_p99" not in empty
+    assert "opd/teacher/_/log_ratio_p01" not in empty and "opd/teacher/_/log_ratio_p99" not in empty
 
 
 def test_apply_opd_to_advantages_reports_each_teachers_rows():
@@ -364,7 +364,7 @@ def test_apply_opd_to_advantages_reports_each_teachers_rows():
     # 5 trainable tokens over 3 real rows; the padding row belongs to no teacher.
     assert metrics["opd/teacher/math/token_share"] == pytest.approx(3 / 5)
     assert metrics["opd/teacher/code/prompt_share"] == pytest.approx(1 / 3)
-    assert not any(key.startswith("opd/teacher/default/") for key in metrics)
+    assert not any(key.startswith("opd/teacher/_/") for key in metrics)
 
     with pytest.raises(ValueError, match="teacher_index"):
         apply_opd_to_advantages(
@@ -997,14 +997,14 @@ def test_validate_opd_cfg_builds_teachers_set_after_parsing():
         validate_opd_cfg(cfg)
 
 
-def test_a_default_is_normalized_into_the_teacher_map():
+def test_a_single_teacher_is_normalized_into_the_teacher_map():
     cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.max_retries=1"])
     assert cfg.trainer.teacher is None
     assert cfg.trainer.teachers == {DEFAULT_TEACHER: TeacherConfig(model="m", max_retries=1)}
     # Building again from the normalized fields leaves them as they are.
     assert dataclasses.replace(cfg.trainer) == cfg.trainer
     # default alone in the map is the same config.
-    assert OPDExpConfig.from_cli_overrides(["trainer.teachers.default.model=m"]).trainer.teachers == {
+    assert OPDExpConfig.from_cli_overrides(["trainer.teachers._.model=m"]).trainer.teachers == {
         DEFAULT_TEACHER: TeacherConfig(model="m")
     }
 
@@ -1025,7 +1025,7 @@ def test_opd_trainer_config_keeps_the_base_post_init():
         (["trainer.teacher.model=m", "trainer.teachers.math.model=m"], "are alternatives; set one"),
         # Any trainer.teacher setting counts, not only its model.
         (["trainer.teacher.max_retries=1", "trainer.teachers.math.model=m"], "are alternatives; set one"),
-        (_two_teachers("trainer.teachers.default.model=m"), "reserved for trainer.teacher"),
+        (_two_teachers("trainer.teachers._.model=m"), "reserved for trainer.teacher"),
     ],
 )
 def test_opd_config_needs_exactly_one_of_teacher_and_teachers(overrides, message):
@@ -1434,9 +1434,9 @@ async def test_trainer_generate_scores_each_row_as_it_finishes(generator_cls, to
     assert "rollout_metrics" not in out
     assert trainer.all_metrics["generate/custom_avg"] == 1.0  # per-row metrics re-aggregated
     assert trainer.all_metrics["opd/teacher_time_exposed"] >= 0.0
-    assert trainer.all_metrics["opd/teacher/default/time_per_row_mean"] >= 0.0
+    assert trainer.all_metrics["opd/teacher/_/time_per_row_mean"] >= 0.0
     assert out[TEACHER_INDEX_KEY] == [0, 0, 0, 0]
-    assert trainer.all_metrics["opd/teacher/default/rows"] == 4  # a single trainer.teacher logs as `default`
+    assert trainer.all_metrics["opd/teacher/_/rows"] == 4  # a single trainer.teacher logs as `_`
 
 
 def _topk_requests(teacher: FakeTeacher) -> Dict[tuple, Optional[int]]:
@@ -1484,13 +1484,13 @@ async def test_trainer_logs_the_topk_metrics(tokenizer):
     # nothing, so 2 positions count. RankedTeacher's top 2 is 51 (log q -0.1) and 50 (-0.2) at every position, so
     # t=0 shares both tokens with the teacher and t=1 none.
     e = math.exp
-    assert metrics["opd/teacher/default/overlap_positions"] == 2
-    assert metrics["opd/teacher/default/overlap_ratio"] == pytest.approx(0.5)
+    assert metrics["opd/teacher/_/overlap_positions"] == 2
+    assert metrics["opd/teacher/_/overlap_ratio"] == pytest.approx(0.5)
     # Eq. 7 at t=0, over {50, 51}: both sides renormalized there, averaged over the 2 shared tokens.
     p_bar = [e(-0.5) / (e(-0.5) + e(-1.0)), e(-1.0) / (e(-0.5) + e(-1.0))]
     q_bar = [e(-0.2) / (e(-0.2) + e(-0.1)), e(-0.1) / (e(-0.2) + e(-0.1))]
     advantage = sum(p * (math.log(q) - math.log(p)) for p, q in zip(p_bar, q_bar)) / 2
-    assert metrics["opd/teacher/default/overlap_token_advantage"] == pytest.approx(advantage)
+    assert metrics["opd/teacher/_/overlap_token_advantage"] == pytest.approx(advantage)
 
 
 @pytest.mark.asyncio
@@ -1517,9 +1517,7 @@ async def test_trainer_asks_the_selected_rows_across_the_batch(num_rows, asked_r
 
     asked = {sequence for sequence, topk in _topk_requests(teacher).items() if topk}
     assert asked == asked_rows
-    assert trainer.all_metrics["opd/teacher/default/overlap_positions"] == 2 * len(
-        asked_rows
-    )  # 2 measured positions per row
+    assert trainer.all_metrics["opd/teacher/_/overlap_positions"] == 2 * len(asked_rows)  # 2 measured positions per row
 
 
 @pytest.mark.asyncio
@@ -1663,7 +1661,7 @@ def test_trainer_end_to_end_advantages_pure(tokenizer):
     expected = -2.0 * (student - batch_teacher(batch)) * batch["loss_mask"]
     assert torch.allclose(batch["advantages"], expected)
     assert TEACHER_LOGPROBS_KEY not in batch  # popped, never shipped to workers
-    assert "opd/teacher/default/reverse_kl" in trainer.all_metrics
+    assert "opd/teacher/_/reverse_kl" in trainer.all_metrics
 
 
 def test_trainer_logs_the_rollout_metrics_from_the_real_rewards(tokenizer):
@@ -1681,7 +1679,7 @@ def test_trainer_logs_the_rollout_metrics_from_the_real_rewards(tokenizer):
     assert trainer.all_metrics["opd/repetition_rate"] == 0.0  # both rollouts are too short to check
     # Pure mode zeroed the rewards, but row 0 (reward 1.0) still counts as correct: log q - log p averages
     # 0.6 on it and 1.35 on row 1's two trained tokens.
-    assert trainer.all_metrics["opd/teacher/default/informativeness"] == pytest.approx(0.6 - 1.35)
+    assert trainer.all_metrics["opd/teacher/_/informativeness"] == pytest.approx(0.6 - 1.35)
     assert ROLLOUT_CORRECT_KEY not in batch  # popped, never shipped to workers
 
 
@@ -1709,7 +1707,7 @@ def test_trainer_padding_rows_do_not_count_toward_informativeness(tokenizer):
     batch["action_log_probs"] = torch.tensor([[-1.0, -1.0, -1.0], [0.0, -2.0, -2.0]] + [[-1.0, -1.0, -1.0]] * 2)
     batch["values"] = None
     trainer.compute_advantages_and_returns(batch)
-    assert trainer.all_metrics["opd/teacher/default/informativeness"] == pytest.approx(0.6 - 1.35)
+    assert trainer.all_metrics["opd/teacher/_/informativeness"] == pytest.approx(0.6 - 1.35)
 
 
 def test_trainer_needs_correctness_from_postprocess():
@@ -1857,7 +1855,7 @@ def test_trainer_logs_the_term_metrics_and_shares_per_teacher(tokenizer):
     # One rollout each: neither teacher has both a correct and an incorrect one.
     assert not any(key.endswith("informativeness") for key in metrics)
     # Per teacher only; the coefficient is a setting, logged once.
-    assert "opd/reverse_kl" not in metrics and "opd/teacher/default/reverse_kl" not in metrics
+    assert "opd/reverse_kl" not in metrics and "opd/teacher/_/reverse_kl" not in metrics
     assert metrics["opd/kl_coef"] == 1.0 and "opd/teacher/math/kl_coef" not in metrics
 
 

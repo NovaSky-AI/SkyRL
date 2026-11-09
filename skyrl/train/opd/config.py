@@ -6,7 +6,7 @@ Adds two blocks to the standard config and changes two algorithm defaults:
   independent: a reference-KL penalty can still be turned on alongside them). ``trainer.teacher`` is one teacher
   that scores every row; ``trainer.teachers`` names several and routes each prompt group to the one its
   ``opd.route_key`` label names (multi-teacher OPD, MOPD). Set one of the two. Once built, the config holds the
-  teachers in ``trainer.teachers`` only: a single ``trainer.teacher`` becomes ``{"default": teacher}`` and
+  teachers in ``trainer.teachers`` only: a single ``trainer.teacher`` becomes ``{"_": teacher}`` and
   ``trainer.teacher`` is reset to ``None``, so the rest of the code has one path. Each teacher's ``backend`` picks one
   of two exclusive homes: launched by this job (``skyrl``, the default) or vLLM servers you run (``vllm``).
 - ``trainer.algorithm.opd``: the distillation knobs, ``opd.topk_metrics`` (the top-K overlap metrics) and
@@ -35,7 +35,7 @@ from skyrl.train.config.config import BaseConfig, build_nested_dataclass
 from skyrl.train.opd.teacher_client import normalize_server_url
 
 TEACHER_BACKENDS = ("skyrl", "vllm")
-DEFAULT_TEACHER = "default"
+DEFAULT_TEACHER = "_"
 """``trainer.teacher``'s name once normalized into ``trainer.teachers``: it scores every row, with no route label.
 Reserved: ``trainer.teachers`` may use it only alone, as the normalized form does."""
 # Teacher names appear in metric keys.
@@ -178,8 +178,8 @@ class OPDTrainerConfig(TrainerConfig):
     algorithm: OPDAlgorithmConfig = field(default_factory=OPDAlgorithmConfig)
     teacher: Optional[TeacherConfig] = None
     """The frozen teacher, a sibling of ``trainer.ref``; it scores every row.
-    For several teachers, set ``trainer.teachers`` instead. Once built, the config moves it to ``trainer.teachers`` as ``default`` and
-    resets this field to ``None``."""
+    For several teachers, set ``trainer.teachers`` instead. Once built, the config moves it to ``trainer.teachers``
+    as ``_`` and resets this field to ``None``."""
     teachers: Optional[Dict[str, TeacherConfig]] = None
     """Several frozen teachers by name, for multi-teacher OPD (MOPD); each entry is a ``trainer.teacher`` block.
     Each prompt group is scored by the teacher its ``opd.route_key`` label names. Exclusive with ``trainer.teacher``."""
