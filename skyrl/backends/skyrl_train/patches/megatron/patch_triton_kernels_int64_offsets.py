@@ -85,7 +85,10 @@ def _patched_sources(source: str, patch: KernelPatch) -> Dict[str, str]:
             text = _dedent(lines[start : node.end_lineno])
             if text.count(patch.int32_line.strip()) != 1:
                 return {}
-            out[node.name] = text.replace(patch.int32_line, patch.int64_line)
+            patched = text.replace(patch.int32_line, patch.int64_line)
+            if patched == text:  # e.g. a trailing comment on the row-id line: do not report an unpatched kernel
+                return {}
+            out[node.name] = patched
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Name) and target.id in patch.wrappers:
@@ -106,7 +109,10 @@ def _apply_one(patch: KernelPatch) -> bool:
     with open(module.__file__) as f:
         sources = _patched_sources(f.read(), patch)
     if not sources:
-        logger.info(f"{patch.module}: int32 row offsets not found in the pinned source; int64 patch not applied")
+        logger.warning(
+            f"{patch.module}: int32 row offsets not found in the installed source; int64 patch not applied "
+            "(long-context runs may hit illegal memory accesses if upstream did not fix this)"
+        )
         return False
     body = "\n\n".join(sources[name] for name in patch.kernels + patch.wrappers)
     text = (
@@ -115,14 +121,23 @@ def _apply_one(patch: KernelPatch) -> bool:
         "globals().update({k: v for k, v in vars(_source).items() if not k.startswith('__')})\n\n\n" + body
     )
     digest = hashlib.sha256(text.encode()).hexdigest()[:16]
-    # Triton reads a kernel's source from its file, so the module lives on disk (one per source version).
-    directory = os.path.join(tempfile.gettempdir(), "skyrl_generated_kernels")
-    os.makedirs(directory, exist_ok=True)
+    # Triton reads a kernel's source from its file, so the module lives on disk (one per source version), in a
+    # per-user directory only this user can write. An existing file is executed only if its content is exactly the
+    # text generated here; anything else is rewritten.
+    directory = os.path.join(tempfile.gettempdir(), f"skyrl_generated_kernels_{os.getuid()}")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    stat = os.stat(directory)
+    if stat.st_uid != os.getuid() or stat.st_mode & 0o022:
+        raise RuntimeError(f"{directory} must be owned by the current user and not group/world-writable")
     stem = patch.module.rsplit(".", 1)[-1]
     path = os.path.join(directory, f"{stem}_int64_{digest}.py")
-    if not os.path.exists(path):
+    existing = None
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    if existing != text:
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, path)
     spec = importlib.util.spec_from_file_location(f"skyrl_{stem}_int64_{digest}", path)
