@@ -105,6 +105,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         records: Optional[RecordLog] = None,
         include_images: bool = False,
         check_first_batch: bool = True,
+        train_on_timeouts: bool = False,
     ) -> None:
         """
         Args:
@@ -118,6 +119,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
             check_first_batch: raise when not one trajectory of the first ``generate`` call has anything to train
                 (``skycap.check_first_batch``).
+            train_on_timeouts: a trial that hit Harbor's time limit trains with reward 0 instead of masking its
+                task (``skycap.train_on_timeouts``).
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -158,6 +161,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.include_images = include_images
         self._check_first_batch = check_first_batch
         self._first_batch_done = False
+        self.train_on_timeouts = train_on_timeouts
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
 
     async def close(self) -> None:
@@ -218,6 +222,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             outcomes,
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
             mask_groups=phase != "eval",
+            mask_timeouts=not self.train_on_timeouts,
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
@@ -298,7 +303,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None
                 if exception == "AgentTimeoutError":
-                    # Masked, not retried, as the sibling does.
+                    # Not retried. Masked with its task, as the sibling does, unless train_on_timeouts.
                     reward, stop_reason = 0.0, "agent_timeout"
                 elif await asyncio.to_thread(_ran_out_of_context, results):
                     # Trains with reward 0, as the sibling does.
