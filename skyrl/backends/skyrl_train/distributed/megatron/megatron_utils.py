@@ -21,7 +21,6 @@
 # limitations under the License.
 
 import logging
-import math
 import os
 import re
 from typing import Any, Dict, Iterator, List, Optional, Union
@@ -41,11 +40,7 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
-from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_cp_chunk_token_align,
-    get_packed_seq_align_size,
-    get_unpacked_seq_align_size,
-)
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenLayout
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -695,165 +690,23 @@ def load_megatron_optimizer(optimizers):
                     v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
 
 
-def preprocess_packed_seqs(
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    pre_process: bool = True,
-    sub_seq_lengths: Optional[list[list[int]]] = None,
-    fp8_enabled: bool = False,
-    fp8_recipe: Optional[str] = None,
-    shard_for_cp: bool = True,
-) -> tuple[torch.Tensor, PackedSeqParams]:
-    """
-    Preprocess packed sequences.
-
-    Two modes:
-
-    - ``sub_seq_lengths is None`` (default): each row is assumed to hold a
-      single sub-sequence whose length is recovered from
-      ``attention_mask.sum(dim=-1)``. ``cu_seqlens`` enumerates one entry
-      per row. This is the historical SkyRL behavior used by the RL path
-      and the existing SFT path without mini-batch packing.
-    - ``sub_seq_lengths is not None``: each row may contain multiple
-      sub-sequences. ``sub_seq_lengths[r]`` lists their valid token counts.
-      Each sub-sequence begins at the next ``align_size`` boundary, so internal
-      alignment padding may separate adjacent sub-sequences; any remaining
-      trailing tokens are pad. ``cu_seqlens`` enumerates every sub-sequence
-      across every row.
-
-    CP splits sequence into CP*2 chunks, and each GPU gets 2 chunks (GPU0
-    gets first and last chunks, GPU1 gets second and second last chunks,
-    and so on), this is for load balancing with causal masking.
-    See https://github.com/NVIDIA/TransformerEngine/issues/1368
-
-    ``shard_for_cp=False`` keeps the full packed stream on every CP rank (each
-    sub-sequence still padded to the CP alignment) for models that apply the CP
-    split themselves, such as Megatron-Bridge's Qwen3VLModel: its mRoPE positions
-    and image-feature placement need the whole stream.
-    """
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    cp_rank = mpu.get_context_parallel_rank()
-    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
-
-    batch_size = input_ids.shape[0]
-
-    if sub_seq_lengths is not None:
-        if cp_size > 1 and get_cp_chunk_token_align() != 1:
-            # The controller's collator lays sub-sequences out without the model's chunk alignment.
-            raise NotImplementedError(
-                "Mini-batch packing (sub_seq_lengths) under context parallelism does not support models "
-                "that align CP chunks to token blocks (e.g. Qwen4Exp)."
-            )
-        if len(sub_seq_lengths) != batch_size:
-            raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
-
-        # Flatten per-sub-seq lengths into a single 1-D tensor; the i-th
-        # entry of the flattened list maps to the i-th cu_seqlens segment.
-        flat_seqlens: list[int] = []
-        # Per-row, per-sub-seq starting column within the original padded row.
-        # We need this to gather sub-seq tokens from the padded input_ids.
-        # NOTE: the controller-side collator (``PackedDataCollator``)
-        # advances ``row_offset += round_up(length, align_size)`` between
-        # consecutive sub-sequences in the same row so that flash-attn varlen
-        # sees TP/CP-aligned segment boundaries. We MUST mirror that here —
-        # otherwise sub-seq i (for i > 0) would be read starting inside the
-        # alignment-pad gap of sub-seq i-1, returning pad tokens.
-        row_index_of_subseq: list[int] = []
-        intra_row_offset_of_subseq: list[int] = []
-        for r, lens in enumerate(sub_seq_lengths):
-            running = 0
-            for length in lens:
-                length_int = int(length)
-                flat_seqlens.append(length_int)
-                row_index_of_subseq.append(r)
-                intra_row_offset_of_subseq.append(running)
-                # Pad each sub-seq independently to align_size, matching the
-                # collator's row layout.
-                pad = (align_size - length_int % align_size) % align_size
-                running += length_int + pad
-
-        seqlens_in_batch = torch.tensor(flat_seqlens, dtype=torch.int32, device=input_ids.device)
-        num_subseqs = len(flat_seqlens)
-    else:
-        seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-        num_subseqs = batch_size
-
-    pad_size = (align_size - seqlens_in_batch % align_size) % align_size
-    seqlens_in_batch_padded = seqlens_in_batch + pad_size
-
-    cu_seqlens = torch.zeros(num_subseqs + 1, dtype=torch.int32, device=input_ids.device)
-    cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
-    cu_seqlens_padded = torch.zeros(num_subseqs + 1, dtype=torch.int32, device=input_ids.device)
-    cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
-
-    # ----------------------------------------------------------------------------
-    # Move the index information needed in the subsequent loop to the CPU at once,
-    # to avoid frequent .item() calls in the loop that cause D2H synchronization
-    # ----------------------------------------------------------------------------
-    seqlens_in_batch_cpu: list[int] = seqlens_in_batch.tolist()
-    seqlens_in_batch_padded_cpu: list[int] = seqlens_in_batch_padded.tolist()
-    cu_seqlens_padded_cpu: list[int] = cu_seqlens_padded.tolist()
-
-    # Pure Python int calculation to avoid further synchronization
-    max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
-
-    # Ranks the stream is split across here (1 when the model applies the CP split itself).
-    shard_cp_size = cp_size if shard_for_cp else 1
-    shape = list(input_ids.shape[1:])
-    shape[0] = sum(seqlens_in_batch_padded_cpu) // shard_cp_size
-    if pre_process:
-        input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
-        for i in range(num_subseqs):
-            if sub_seq_lengths is not None:
-                row_idx = row_index_of_subseq[i]
-                offset = intra_row_offset_of_subseq[i]
-                seqlen = seqlens_in_batch_cpu[i]
-                seq_tokens = input_ids[row_idx, offset : offset + seqlen]
-            else:
-                seqlen = seqlens_in_batch_cpu[i]
-                seq_tokens = input_ids[i, attention_mask[i]]
-
-            if shard_cp_size <= 1:
-                start_idx = cu_seqlens_padded_cpu[i]
-                input_ids_rmpad[start_idx : start_idx + seqlen] = seq_tokens
-                continue
-
-            seqlen_padded_i = seqlens_in_batch_padded_cpu[i]
-            seqlen_cp = seqlen_padded_i // cp_size
-            half_seqlen = seqlen_cp // 2
-            start_idx = cu_seqlens_padded_cpu[i] // cp_size
-            d = seq_tokens
-            if d.shape[0] < seqlen_padded_i:
-                d = torch.nn.functional.pad(d, (0, seqlen_padded_i - d.shape[0]))
-            input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[
-                half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
-            ]
-
-            remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
-            remain_end = seqlen_padded_i - half_seqlen * cp_rank
-            remain_end = min(remain_end, d.shape[0])
-            remain_len = remain_end - remain_start
-            if remain_len > 0:
-                input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
-                    remain_start:remain_end
-                ]
-
+def packed_seq_params_for(layout: TokenLayout) -> PackedSeqParams:
+    """Transformer Engine's THD parameters for a packed layout."""
+    cu_seqlens_padded = layout.cu_seqlens_padded
+    # Pure Python lengths, so building the parameters syncs nothing.
+    padded_lengths = cu_seqlens_padded.diff().tolist()
+    max_seqlen = max(padded_lengths, default=0)
     # Mamba derives per-token document labels from the global padded token count.
-    packed_seq_params = PackedSeqParams(
+    return PackedSeqParams(
         qkv_format="thd",
         cu_seqlens_q=cu_seqlens_padded,
-        max_seqlen_q=max_seqlen_in_batch,
+        max_seqlen_q=max_seqlen,
         cu_seqlens_kv=cu_seqlens_padded,
-        max_seqlen_kv=max_seqlen_in_batch,
+        max_seqlen_kv=max_seqlen,
         cu_seqlens_q_padded=cu_seqlens_padded,
         cu_seqlens_kv_padded=cu_seqlens_padded,
-        total_tokens=cu_seqlens_padded_cpu[-1],
+        total_tokens=sum(padded_lengths),
     )
-    if pre_process:
-        return input_ids_rmpad.unsqueeze(0), packed_seq_params
-    else:
-        return input_ids, packed_seq_params
 
 
 def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
@@ -872,76 +725,6 @@ def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
 
     chunks = model if isinstance(model, (list, tuple)) else [model]
     return bool(chunks) and all(isinstance(unwrap_model(chunk), Qwen3VLModel) for chunk in chunks)
-
-
-def remove_left_padding(
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    position_ids: torch.Tensor,
-    pre_process: bool = True,
-    fp8_enabled: bool = False,
-    fp8_recipe: Optional[str] = None,
-    seq_align: int = 1,
-):
-    """
-    Remove left padding from input_ids, attention_mask and position_ids
-    return new_input_ids, new_attention_mask, new_position_ids
-
-    ``seq_align`` additionally rounds the padded length up to a multiple of it (combined with the
-    TP / FP8 alignment by lcm), e.g. ``mlp_chunks_for_training`` so every rank splits into as many chunks.
-    """
-    assert attention_mask.ndim == 2
-    assert position_ids.ndim == 2
-    cp_size = mpu.get_context_parallel_world_size()
-    assert cp_size == 1, "Context parallel size without seq_pack is not supported"
-    batch_size = input_ids.shape[0]
-    shape = list(input_ids.shape)  # batch_size, seq_len,...
-    seq_lens = attention_mask.sum(dim=1)
-    seq_len = seq_lens.max().item()
-    align_size = get_unpacked_seq_align_size(
-        mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe
-    )
-    align_size = math.lcm(align_size, seq_align)
-    pad_size = (align_size - seq_len % align_size) % align_size
-    seq_len = seq_len + pad_size
-    shape[1] = seq_len
-    if pre_process:
-        new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
-    new_attention_mask = torch.zeros(
-        dtype=attention_mask.dtype, device=attention_mask.device, size=(batch_size, seq_len)
-    )
-    new_position_ids = torch.zeros(dtype=position_ids.dtype, device=position_ids.device, size=(batch_size, seq_len))
-    for i in range(batch_size):
-        if pre_process:
-            new_input_ids[i, : seq_lens[i]] = input_ids[i, attention_mask[i]]
-        new_attention_mask[i, : seq_lens[i]] = attention_mask[i, attention_mask[i]]
-        new_position_ids[i, : seq_lens[i]] = position_ids[i, attention_mask[i]]
-    if pre_process:
-        return new_input_ids, new_attention_mask, new_position_ids
-    else:
-        return input_ids, new_attention_mask, new_position_ids
-
-
-def recover_left_padding(
-    result,
-    attention_mask: torch.Tensor,
-    original_attention_mask: torch.Tensor,
-    origin_seqlen: int,
-    post_process: bool = True,
-):
-    """
-    Recover left padding from result
-    return result
-    """
-    if not post_process:
-        return result
-    shape = list(result.shape)
-    batch_size = shape[0]
-    shape[1] = origin_seqlen
-    new_result = torch.zeros(dtype=result.dtype, device=result.device, size=shape)
-    for i in range(batch_size):
-        new_result[i, original_attention_mask[i]] = result[i, attention_mask[i]]
-    return new_result
 
 
 def get_model_config(model):
@@ -1014,7 +797,7 @@ def broadcast_object_across_pp_ranks(obj, allow_missing: bool = False):
 def to_te_attention_mask(attention_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     """Convert a 2-D keep-mask to a 4-D padding mask for Transformer Engine attention.
 
-    ``remove_left_padding`` returns a 2-D ``[batch, seq]`` keep-mask where 1 marks a real token.
+    An unpacked layout's model mask is a 2-D ``[batch, seq]`` keep-mask where 1 marks a real token.
     Transformer Engine's sliding-window ``get_full_mask`` expects a mask broadcastable to
     ``[batch, 1, q_seq, kv_seq]``; a 2-D mask collides the batch dimension with the sequence
     dimension and fails for ``micro_batch_size > 1``. Return a ``[batch, 1, 1, seq]`` padding mask

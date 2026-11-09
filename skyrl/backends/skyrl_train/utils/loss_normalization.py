@@ -11,8 +11,6 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
 
-MINIBATCH_LOSS_NORMALIZATION = "minibatch_loss_normalization"
-
 
 @dataclass(frozen=True)
 class MinibatchLossNormalization:

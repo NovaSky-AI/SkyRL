@@ -8,17 +8,13 @@ import numpy as np
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
-    align_token_metadata,
-    build_token_metadata_layout,
-)
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenLayout
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
 from skyrl.backends.skyrl_train.utils import replay_utils
 from skyrl.backends.skyrl_train.utils.replay_utils import (
-    _split_replay_indices,
     make_replay_padding_indices,
     replay_padding_row,
 )
@@ -56,30 +52,22 @@ def _reference_padded_routes(
 
 def _reference_replay_data(
     padded_routes: torch.Tensor,
-    attention_mask: torch.Tensor,
+    layout: TokenLayout,
     local_layers: list[int],
     *,
-    packed: bool,
     tp_size: int,
     tp_rank: int,
 ) -> list[torch.Tensor]:
     """Gather real-token routes from the padded reference tensor."""
-    layout = build_token_metadata_layout(
-        attention_mask,
-        padded_routes.device,
-        packed=packed,
-        fp8_enabled=False,
-    )
     local = padded_routes.index_select(2, torch.tensor(local_layers, dtype=torch.long))
-    aligned = align_token_metadata(
-        local,
-        layout,
-        replay_padding_row(TOPK, dtype=padded_routes.dtype),
-    )
+    aligned = layout.place(local, 0)
+    aligned[layout.padding_mask] = replay_padding_row(TOPK, dtype=padded_routes.dtype)
     if tp_size > 1:
         chunk = aligned.shape[1] // tp_size
         aligned = aligned[:, tp_rank * chunk : (tp_rank + 1) * chunk, :, :]
-    return _split_replay_indices(aligned)
+    # [batch, tokens, layers, topk] -> per-layer [tokens * batch, topk] (Megatron's sequence-major
+    # router order), widened to int32.
+    return aligned.permute(2, 1, 0, 3).contiguous().to(torch.int32).flatten(1, 2).unbind(0)
 
 
 @pytest.fixture
@@ -105,7 +93,7 @@ def parallel_state(monkeypatch):
 
 @pytest.fixture
 def router_replay(monkeypatch):
-    """Capture what ``setup_per_microbatch_replay_forward`` hands Megatron."""
+    """Capture what ``install_replay_forward`` hands Megatron."""
     module = types.ModuleType("megatron.core.transformer.moe.router_replay")
 
     class RouterReplay:
@@ -123,11 +111,6 @@ def router_replay(monkeypatch):
     module.RouterReplay = RouterReplay
     module.RouterReplayAction = SimpleNamespace(REPLAY_FORWARD="replay_forward")
     monkeypatch.setitem(sys.modules, "megatron.core.transformer.moe.router_replay", module)
-    monkeypatch.setattr(
-        replay_utils,
-        "scatter_router_padding_mask_for_model",
-        lambda mask, model, model_config: mask,
-    )
     return RouterReplay
 
 
@@ -218,28 +201,33 @@ def _run_both_paths(
         )
 
     tp_rank = tp_size - 1
-    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: tp_size, raising=False)
-    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: tp_rank, raising=False)
-    router_replay.global_router_replay_instances = [object() for _ in local_layers]
-    monkeypatch.setattr(replay_utils, "_get_current_pp_stage_layer_range", lambda model_config: stage_range)
+    router_replay.global_router_replay_instances = [SimpleNamespace(layer_number=layer + 1) for layer in local_layers]
 
-    layout = build_token_metadata_layout(attention_mask, packed_routes.device, packed=packed, fp8_enabled=False)
-    replay_utils.setup_per_microbatch_replay_forward(
+    cp_size = parallel_state.get_context_parallel_world_size()
+    layout = TokenLayout.build(
+        attention_mask,
+        packed=packed,
+        tp_size=parallel_state.get_tensor_model_parallel_world_size(),
+        cp_size=cp_size,
+        cp_rank=parallel_state.get_context_parallel_rank() if cp_size > 1 else 0,
+    )
+    local_routes, _ = replay_utils.select_rank_replay_routes(
         packed_routes,
         router_padding_mask,
-        attention_mask,
-        model=object(),
-        model_config=SimpleNamespace(fp8=None, sequence_parallel=False),
-        metadata_layout=layout,
-        remove_microbatch_padding=packed,
+        layout,
+        router_replay_instances=router_replay.global_router_replay_instances,
+        stage_layer_range=stage_range,
+        hybrid_layer_pattern=None,
+        tp_size=tp_size,
+        tp_rank=tp_rank,
     )
+    replay_utils.install_replay_forward(local_routes)
     new_replay_data = [tensor.clone() for tensor in router_replay.replay_data]
 
     reference = _reference_replay_data(
         padded_routes,
-        attention_mask,
+        layout,
         local_layers,
-        packed=packed,
         tp_size=tp_size,
         tp_rank=tp_rank,
     )

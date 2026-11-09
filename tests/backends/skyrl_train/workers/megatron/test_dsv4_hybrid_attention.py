@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
 
 pytestmark = pytest.mark.megatron
 
@@ -56,20 +55,6 @@ def test_other_models_keep_the_mlp_chunk_alignment_only():
     wrapper = _wrapper(None, [4, 128], mlp_chunks=3)
     assert not wrapper._implicit_causal_mask_only
     assert wrapper._seq_align == 3
-
-
-def test_dsv4_hybrid_passes_no_explicit_attention_mask():
-    mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
-    assert _wrapper("dsv4_hybrid", [0, 4, 128])._model_attention_mask(mask) is None
-
-
-def test_other_models_get_the_te_attention_mask():
-    from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-        to_te_attention_mask,
-    )
-
-    mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
-    assert torch.equal(_wrapper(None)._model_attention_mask(mask), to_te_attention_mask(mask))
 
 
 def _provider(variant, granularity, modules):

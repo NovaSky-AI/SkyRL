@@ -3,7 +3,7 @@
 Both ranks build the same KDA layer twice: once on the 2-rank CP group, once on a single-rank CP
 group (the reference, which sees the whole packed batch). The CP module gets each sequence split
 into ``2 * cp`` chunks in megatron's load-balanced order (rank r holds chunks r and 2cp-1-r), as
-``preprocess_packed_seqs`` lays it out. Outputs and input gradients must match the reference rows,
+``TokenLayout`` lays it out. Outputs and input gradients must match the reference rows,
 and parameter gradients summed over the CP group must match the reference's.
 
 Run with:

@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
-    TokenMetadataLayout,
+    TokenLayout,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
@@ -31,23 +31,12 @@ def _attention_mask(lengths: List[Tuple[int, int]]) -> torch.Tensor:
     return mask
 
 
-def _layout(lengths: List[Tuple[int, int]], *, packed: bool = False, align: int = 1) -> TokenMetadataLayout:
+def _layout(lengths: List[Tuple[int, int]], *, packed: bool = False, align: int = 1) -> TokenLayout:
+    """``align`` pads each packed sequence as CP = align / 2 does, before the CP split."""
     mask = _attention_mask(lengths)
-    totals = [prompt + response for prompt, response in lengths]
     if not packed:
-        return TokenMetadataLayout(
-            attention_mask=mask,
-            sequence_lengths=totals,
-            aligned_sequence_length=mask.shape[1],
-        )
-    padded = [total + (-total % align) for total in totals]
-    return TokenMetadataLayout(
-        attention_mask=mask,
-        sequence_lengths=totals,
-        aligned_sequence_length=sum(padded),
-        padded_sequence_lengths=padded,
-        cu_seqlens_padded=torch.tensor([0, *torch.tensor(padded).cumsum(0).tolist()], dtype=torch.int32),
-    )
+        return TokenLayout.build(mask, packed=False, tp_size=1)
+    return TokenLayout.build(mask, packed=True, tp_size=1, cp_size=max(align // 2, 1)).full()
 
 
 def _support(lengths: List[Tuple[int, int]]) -> PackedRaggedTensor:
@@ -114,7 +103,7 @@ def test_row_ids_accept_an_empty_padding_segment():
     support = ragged_support([torch.empty((0, TOP_K))])
     mask = torch.zeros((1, 4), dtype=torch.bool)
     mask[0, 0] = True
-    layout = TokenMetadataLayout(attention_mask=mask, sequence_lengths=[1], aligned_sequence_length=4)
+    layout = TokenLayout.build(mask, packed=False, tp_size=1)
 
     row_ids = align_sample_support_row_ids(support, layout)
 
@@ -124,11 +113,7 @@ def test_row_ids_accept_an_empty_padding_segment():
 def test_row_ids_reject_a_trajectory_with_no_prompt_token():
     """With no prompt there is no position whose logit predicts the first response token."""
     support = ragged_support([torch.zeros((3, TOP_K))])
-    layout = TokenMetadataLayout(
-        attention_mask=torch.ones((1, 3), dtype=torch.bool),
-        sequence_lengths=[3],
-        aligned_sequence_length=3,
-    )
+    layout = TokenLayout.build(torch.ones((1, 3), dtype=torch.bool), packed=False, tp_size=1)
 
     with pytest.raises(ValueError, match="predicts its first response token"):
         align_sample_support_row_ids(support, layout)

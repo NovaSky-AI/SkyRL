@@ -6,9 +6,8 @@ from enum import StrEnum
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
-    TokenMetadataLayout,
-    align_token_metadata,
-    scatter_packed_token_values_to_batch,
+    PackedScatter,
+    TokenLayout,
 )
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberWeight
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
@@ -20,6 +19,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SampleSupportColumn,
     align_sample_support_row_ids,
     packed_support_logprobs,
+    sample_support_token_rows,
 )
 
 
@@ -571,14 +571,10 @@ def sample_support_scores(
 
 def sample_support_row_ids_in_batch_positions(
     sample_support: PackedSampleSupport,
-    layout: TokenMetadataLayout,
+    layout: TokenLayout,
 ) -> torch.Tensor:
-    """Map support rows into canonical left-padded batch coordinates."""
-    row_ids = align_sample_support_row_ids(sample_support, layout)
-    sequence_length = layout.attention_mask.shape[1]
-    padding_widths = sequence_length - layout.attention_mask.sum(dim=1).to(torch.long)
-    positions = torch.arange(sequence_length, device=row_ids.device).unsqueeze(0) - padding_widths.unsqueeze(1)
-    return torch.where(positions >= 0, row_ids.gather(1, positions.clamp(min=0)), SAMPLE_SUPPORT_NO_ROW)
+    """Map support rows into canonical batch coordinates."""
+    return layout.to_batch(sample_support_token_rows(sample_support, layout), SAMPLE_SUPPORT_NO_ROW)
 
 
 def score_aligned_sample_support(
@@ -620,15 +616,68 @@ def score_aligned_sample_support(
     return scores
 
 
-def compute_sample_support_scores(
-    logits_or_hidden: torch.Tensor,
+@dataclass(frozen=True)
+class PreparedSampleSupport:
+    """Sample-support inputs laid out against one rank's model outputs.
+
+    ``row_ids`` names rows of ``support`` where a position is scored, and
+    ``SAMPLE_SUPPORT_NO_ROW`` elsewhere. ``sampled_ids`` and ``loss_mask`` are the next-token
+    ids and response mask at the same positions. ``scatter`` is set when packed and places
+    packed scores back at canonical batch positions.
+    """
+
+    sampled_ids: torch.Tensor
+    row_ids: torch.Tensor
+    loss_mask: torch.Tensor
+    support: PackedSampleSupport
+    scatter: PackedScatter | None = None
+
+
+def prepare_sample_support_inputs(
     sequences: torch.Tensor,
     loss_mask: torch.Tensor | None,
     sample_support: PackedSampleSupport | None,
     num_actions: int,
+    layout: TokenLayout | None,
+) -> PreparedSampleSupport:
+    """Lay out one microbatch's sample support against this rank's model outputs.
+
+    Pure host-side layout: packed outputs are this CP rank's next-token positions, unpacked
+    outputs are canonical ``[batch, seq_len - 1]``. The support rows are kept whole: compacting
+    them per CP rank would resize the TP all-reduce of per-row statistics and so change its
+    summation order.
+    """
+    if sample_support is None:
+        raise ValueError(missing_sample_support_message("Megatron"))
+    if loss_mask is None:
+        raise ValueError("sample-support replay requires the response loss mask")
+    if layout is None:
+        raise ValueError("sample-support replay requires the microbatch's token layout")
+
+    target_loss_mask = torch.zeros_like(sequences, dtype=torch.bool)
+    target_loss_mask[:, -num_actions:] = loss_mask.to(torch.bool)
+    if layout.packed:
+        row_ids = align_sample_support_row_ids(sample_support, layout)
+        aligned_sampled_ids = layout.place(sequences, 0, next_token=True)
+        aligned_loss_mask = layout.place(target_loss_mask, False, next_token=True)
+    else:
+        # The domain ends at real token L_i - 2, so dropping the last column loses no row.
+        row_ids = sample_support_row_ids_in_batch_positions(sample_support, layout)[:, :-1]
+        aligned_sampled_ids = sequences[:, 1:]
+        aligned_loss_mask = target_loss_mask[:, 1:]
+    return PreparedSampleSupport(
+        sampled_ids=aligned_sampled_ids,
+        row_ids=row_ids,
+        loss_mask=aligned_loss_mask,
+        support=sample_support,
+        scatter=layout.packed_scatter() if layout.packed else None,
+    )
+
+
+def score_prepared_sample_support(
+    logits_or_hidden: torch.Tensor,
+    prepared: PreparedSampleSupport,
     *,
-    packed: bool,
-    metadata_layout: TokenMetadataLayout | None,
     vocab_start_index: int,
     vocab_end_index: int,
     tp_group: torch.distributed.ProcessGroup | None,
@@ -639,34 +688,14 @@ def compute_sample_support_scores(
     entropy_requires_grad: bool = False,
     centering_weight: MemberWeight | None = None,
 ) -> SampleSupportScores:
-    """Score support-conditioned logprobs in canonical trainer layout."""
-    if sample_support is None:
-        raise ValueError(missing_sample_support_message("Megatron"))
-    if loss_mask is None:
-        raise ValueError("sample-support replay requires the response loss mask")
-    if metadata_layout is None:
-        raise ValueError("sample-support replay requires the shared token metadata layout")
-
-    target_loss_mask = torch.zeros_like(sequences, dtype=torch.bool)
-    target_loss_mask[:, -num_actions:] = loss_mask.to(torch.bool)
-    if packed:
-        row_ids = align_sample_support_row_ids(sample_support, metadata_layout)
-        aligned_sampled_ids = align_token_metadata(sequences, metadata_layout, 0, next_token=True)
-        aligned_loss_mask = align_token_metadata(target_loss_mask, metadata_layout, False, next_token=True)
-        aligned_source = logits_or_hidden
-    else:
-        # The domain ends at real token L_i - 2, so dropping the last column loses no row.
-        row_ids = sample_support_row_ids_in_batch_positions(sample_support, metadata_layout)[:, :-1]
-        aligned_sampled_ids = sequences[:, 1:]
-        aligned_loss_mask = target_loss_mask[:, 1:]
-        aligned_source = logits_or_hidden[:, :-1]
-
+    """Score prepared support-conditioned logprobs in canonical trainer layout."""
+    scatter = prepared.scatter
     scores = score_aligned_sample_support(
-        aligned_source,
-        aligned_sampled_ids,
-        row_ids,
-        aligned_loss_mask,
-        sample_support,
+        logits_or_hidden if scatter is not None else logits_or_hidden[:, :-1],
+        prepared.sampled_ids,
+        prepared.row_ids,
+        prepared.loss_mask,
+        prepared.support,
         vocab_start_index=vocab_start_index,
         vocab_end_index=vocab_end_index,
         tp_group=tp_group,
@@ -677,16 +706,16 @@ def compute_sample_support_scores(
         chunk_size=chunk_size,
         centering_weight=centering_weight,
     )
-    if not packed:
+    if scatter is None:
         return scores
 
     def to_batch(values: torch.Tensor | None) -> torch.Tensor | None:
-        return None if values is None else scatter_packed_token_values_to_batch(values, metadata_layout, 0)
+        return None if values is None else scatter.scatter(values, 0)
 
     return SampleSupportScores(
         logprobs=to_batch(scores.logprobs),
         entropy=to_batch(scores.entropy),
-        valid_mask=scatter_packed_token_values_to_batch(scores.valid_mask, metadata_layout, False),
+        valid_mask=scatter.scatter(scores.valid_mask, False),
         centering_term=to_batch(scores.centering_term),
         centering_term_negative=to_batch(scores.centering_term_negative),
         sampler_logprobs=to_batch(scores.sampler_logprobs),

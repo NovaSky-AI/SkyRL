@@ -15,15 +15,13 @@ import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
-    TokenMetadataLayout,
+    TokenLayout,
     TokenMetadataTrace,
-    align_packed_token_metadata,
 )
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import (
     PackedRaggedTensor,
     RaggedRows,
 )
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
 # Outer ``cu_seqlens`` hold one segment of rows per trajectory; inner offsets name each row's members.
 PackedSampleSupport: TypeAlias = PackedRaggedTensor
@@ -149,27 +147,23 @@ def packed_support_logprobs(support: PackedSampleSupport) -> torch.Tensor | None
     )
 
 
-def align_sample_support_row_ids(
+def sample_support_token_rows(
     sample_support: PackedSampleSupport,
-    layout: TokenMetadataLayout,
+    layout: TokenLayout,
 ) -> torch.Tensor:
-    """Map model positions to packed support rows.
+    """The support row scoring the prediction made at each real token, or ``SAMPLE_SUPPORT_NO_ROW``.
 
     Support for response tokens occupies ``[prompt_len - 1, sequence_len - 1)`` because
     position ``t`` predicts token ``t + 1``. Derive IDs per micro-batch because slicing and
-    padding rebase the packed row space.
+    padding rebase the packed row space. ``sample_support`` and ``layout`` share a device: the
+    host when Megatron builds a rank's microbatch, the GPU under FSDP.
     """
     segment_lengths = sample_support.sequence_lengths.to(torch.long)
-    if segment_lengths.numel() != len(layout.sequence_lengths):
+    trajectory_lengths = layout.cu_lengths.diff()
+    if segment_lengths.numel() != trajectory_lengths.numel():
         raise ValueError(
-            f"Sample support holds {segment_lengths.numel()} segments for "
-            f"{len(layout.sequence_lengths)} trajectories"
+            f"Sample support holds {segment_lengths.numel()} segments for {trajectory_lengths.numel()} trajectories"
         )
-    trajectory_lengths = torch.as_tensor(
-        layout.sequence_lengths,
-        dtype=torch.long,
-        device=segment_lengths.device,
-    )
     # The first response token is predicted at prompt_len - 1.
     segment_starts = trajectory_lengths - segment_lengths - 1
     if segment_lengths.numel() and int(segment_starts.min()) < 0:
@@ -178,16 +172,22 @@ def align_sample_support_row_ids(
             f"predicts its first response token, got lengths {segment_lengths.tolist()} for "
             f"trajectories {trajectory_lengths.tolist()}"
         )
-    row_ids = PackedTensor(
-        torch.arange(int(sample_support.cu_seqlens[-1]), dtype=torch.long, device=sample_support.device),
-        sample_support.cu_seqlens,
-    )
-    return align_packed_token_metadata(
-        row_ids,
-        layout,
-        SAMPLE_SUPPORT_NO_ROW,
-        segment_starts=segment_starts.tolist(),
-    )
+    num_rows = int(sample_support.cu_seqlens[-1])
+    rows = torch.arange(num_rows, dtype=torch.long, device=segment_lengths.device)
+    row_offsets = sample_support.cu_seqlens[:-1].to(torch.long)
+    token_starts = layout.cu_lengths[:-1] + segment_starts
+    tokens = torch.repeat_interleave(token_starts - row_offsets, segment_lengths, output_size=num_rows) + rows
+    token_rows = torch.full((layout.source.numel(),), SAMPLE_SUPPORT_NO_ROW, dtype=torch.long, device=rows.device)
+    token_rows[tokens] = rows
+    return token_rows
+
+
+def align_sample_support_row_ids(
+    sample_support: PackedSampleSupport,
+    layout: TokenLayout,
+) -> torch.Tensor:
+    """Map this rank's model positions to packed support rows."""
+    return layout.place_ordinals(sample_support_token_rows(sample_support, layout), SAMPLE_SUPPORT_NO_ROW)
 
 
 class SampleSupportTrace:

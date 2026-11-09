@@ -247,7 +247,7 @@ def test_shift_mask_right_padded_is_unaffected():
 
 def test_left_pad_zero_logits_do_not_inflate_loss():
     # End-to-end (loss-level) reproduction of Bug A: emulate the de-pad pipeline, which ZERO-fills
-    # pad positions (postprocess_packed_seqs / recover_left_padding both use torch.zeros). With a
+    # pad positions (both packed and unpacked canonical-layout recovery fill zeros). With a
     # perfectly-aligned student at the real positions, the draft soft-CE must equal the teacher's
     # entropy over the real supervised positions -- the leaked uniform pad position must NOT inflate
     # it. Also asserts the leak (had it survived) is bounded by log(V), per the two-bug analysis.

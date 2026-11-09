@@ -76,8 +76,8 @@ AVG_DIFF_TOL = 9e-2
 # ---------------------------------------------------------------------------
 class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
     """Adds one method returning full ``[B, seq_len-1]`` logprobs in canonical
-    (B, T) order, delegating to the SAME production preprocess and packed
-    logprob utilities that ``forward_backward`` uses.
+    (B, T) order, laying each micro-batch out with the production
+    ``TokenLayout`` and scoring it with the packed logprob utilities.
 
     This mirrors the micro-batch construction in
     ``MegatronPolicyWorkerBase.forward_backward`` (including the
@@ -92,16 +92,14 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
 
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
             make_batch_generator,
-            preprocess_packed_seqs,
-            recover_left_padding,
-            remove_left_padding,
+            packed_seq_params_for,
         )
         from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
             from_parallel_logits_to_logprobs,
             from_parallel_logits_to_logprobs_packed_sequences,
         )
-        from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
-            _pack_sequence_values,
+        from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+            TokenLayout,
         )
         from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 
@@ -187,38 +185,32 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
             position_ids = batch["position_ids"]
             sub_seq_lengths = batch["sub_seq_lengths_list"]
             batch["sub_seq_lengths_list"] = sub_seq_lengths
+            is_first_stage = mpu.is_pipeline_first_stage(ignore_virtual=True)
+            layout = TokenLayout.build(
+                attention_mask,
+                packed=remove_microbatch_padding,
+                sub_seq_lengths=sub_seq_lengths if remove_microbatch_padding else None,
+                tp_size=mpu.get_tensor_model_parallel_world_size(),
+                cp_size=mpu.get_context_parallel_world_size(),
+                cp_rank=mpu.get_context_parallel_rank(),
+            )
+            new_sequences = layout.place(sequences, 0) if is_first_stage else sequences
             if remove_microbatch_padding:
-                new_sequences, packed_seq_params = preprocess_packed_seqs(
-                    sequences,
-                    attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                    sub_seq_lengths=sub_seq_lengths,
-                )
+                packed_seq_params = packed_seq_params_for(layout)
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = _pack_sequence_values(
-                    sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
-                )
+                batch["packed_targets"] = layout.full().place(sequences, 0)
                 new_attention_mask = None
                 new_position_ids = None
             else:
-                new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
-                    sequences,
-                    attention_mask,
-                    position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-                )
+                new_attention_mask = ~layout.padding_mask
+                new_position_ids = layout.place(position_ids, 0)
                 packed_seq_params = None
 
             outputs = model(new_sequences, new_position_ids, new_attention_mask, packed_seq_params=packed_seq_params)
 
-            if not remove_microbatch_padding:
-                outputs = recover_left_padding(
-                    outputs,
-                    new_attention_mask,
-                    attention_mask,
-                    seq_len,
-                    post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
-                )
+            if not remove_microbatch_padding and mpu.is_pipeline_last_stage(ignore_virtual=True):
+                # Back to canonical [B, seq_len, ...], zeros at padding.
+                outputs = layout.to_batch(outputs[~layout.padding_mask], 0)
             return outputs, partial(collection_func, data=batch)
 
         forward_backward_func = get_forward_backward_func()
@@ -508,8 +500,8 @@ def test_sft_packing_cp_logprob_parity(ray_init_fixture):
             group.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
             # (b) Capture full canonical logprobs for the parity comparison.
-            #     This is the parity-critical step (runs the SAME preprocess
-            #     and packed-logprob scatter as forward_backward). Run it FIRST
+            #     This is the parity-critical step (runs the production token
+            #     layout and packed-logprob scatter). Run it FIRST
             #     while GPU memory is freshest.
             lp_refs = group.async_run_ray_method("mesh", "forward_capture_full_logprobs", data=collated)
             gathered = WorkerOutput.cat(group.actor_infos, ray.get(lp_refs))

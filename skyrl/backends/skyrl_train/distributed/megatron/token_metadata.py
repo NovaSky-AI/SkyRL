@@ -1,7 +1,8 @@
-"""Token-aligned metadata layout transforms shared by training features."""
+"""Where each real token of a microbatch sits in one rank's model input."""
 
+import dataclasses
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,305 +10,287 @@ import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_cp_chunk_token_align,
     get_packed_seq_align_size,
     get_unpacked_seq_align_size,
 )
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import RaggedRows
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.packed_tensor import cu_seqlens_from_lengths
 
 # Megatron is imported lazily inside functions so that non-Megatron backends can
-# import this module for its layout dataclass and padding transforms.
+# import this module for its layout and trace.
 
-
-def _new_metadata_tensor(
-    source: torch.Tensor,
-    shape: tuple[int, ...],
-    padding_value: torch.Tensor | bool | int,
-) -> torch.Tensor:
-    output = torch.empty(shape, dtype=source.dtype, device=source.device)
-    output[...] = padding_value
-    return output
+# Marks a layout position that holds no real token.
+NO_TOKEN = -1
 
 
 @dataclass(frozen=True)
-class TokenMetadataLayout:
-    """One shared description of Megatron's token padding and CP sharding."""
+class TokenLayout:
+    """Where each real token of a ``[batch, seq]`` microbatch sits in one rank's model input.
 
-    attention_mask: torch.Tensor
-    sequence_lengths: list[int]
-    aligned_sequence_length: int
-    padded_sequence_lengths: list[int] | None = None
-    # Retained to reconstruct CP-sharded packed outputs in canonical batch order.
-    cu_seqlens_padded: torch.Tensor | None = None
-    context_parallel_size: int = 1
-    context_parallel_rank: int = 0
-
-
-def build_token_metadata_layout(
-    attention_mask: torch.Tensor,
-    device: torch.device,
-    *,
-    packed: bool,
-    fp8_enabled: bool,
-    fp8_recipe: Optional[str] = None,
-    seq_align: int = 1,
-) -> TokenMetadataLayout:
-    """Compute the shared layout once for all replayed token metadata.
-
-    ``seq_align`` must match the extra unpacked-length alignment ``remove_left_padding`` applied to the model
-    input, so replayed metadata covers every token.
+    Real tokens are numbered by ordinal, segment by segment: one segment per row, or one per
+    sub-sequence under controller packing. Packed, segments are padded and laid end to end
+    (``cu_seqlens_padded``), and a CP rank holds a front and a mirrored back chunk of each one;
+    unpacked, each row's real tokens start at column 0 of a ``[batch, aligned_len]`` block. Every
+    token-aligned field reaches the model's layout through :meth:`place`.
     """
-    import megatron.core.parallel_state as mpu
 
-    aligned_attention_mask = attention_mask.to(device=device, dtype=torch.bool)
-    sequence_lengths_tensor = aligned_attention_mask.sum(dim=1, dtype=torch.int32)
-    sequence_lengths = sequence_lengths_tensor.tolist()
-    tp_size = mpu.get_tensor_model_parallel_world_size()
+    # Flat ``[batch * seq]`` position of every real token, in ordinal order.
+    source: torch.Tensor
+    # ``[segments + 1]`` int64 ordinal offset of each segment.
+    cu_lengths: torch.Tensor
+    batch_shape: tuple[int, int]
+    # The ordinal at each of this rank's positions, NO_TOKEN at padding: ``[1, T // CP]`` packed,
+    # ``[batch, aligned_len]`` unpacked.
+    ordinals: torch.Tensor
+    # Packed only: each padded segment's offset, as ``PackedSeqParams`` carries them.
+    cu_seqlens_padded: Optional[torch.Tensor] = None
+    cp_size: int = 1
+    cp_rank: int = 0
 
-    if not packed:
-        align_size = math.lcm(
-            get_unpacked_seq_align_size(tp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe), seq_align
+    @classmethod
+    def build(
+        cls,
+        attention_mask: torch.Tensor,
+        *,
+        packed: bool,
+        tp_size: int,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+        sub_seq_lengths: Optional[list[list[int]]] = None,
+        fp8_enabled: bool = False,
+        fp8_recipe: Optional[str] = None,
+        seq_align: int = 1,
+    ) -> "TokenLayout":
+        """Lay out ``attention_mask``'s real tokens for one rank.
+
+        Packed, every segment is padded to the TP / CP / FP8 alignment (``get_packed_seq_align_size``).
+        ``sub_seq_lengths`` (packed only) names the sub-sequences of each row, at the collator's
+        aligned row offsets; otherwise a row's attended tokens are its one segment. ``seq_align``
+        (unpacked only) additionally rounds the width up to a multiple of it, combined with the TP / FP8
+        alignment by lcm.
+        """
+        mask = attention_mask.to(torch.bool)
+        batch, seq = mask.shape
+        align = (
+            get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
+            if packed
+            else None
         )
-        max_sequence_length = max(sequence_lengths)
-        aligned_sequence_length = max_sequence_length + (-max_sequence_length % align_size)
-        return TokenMetadataLayout(
-            attention_mask=aligned_attention_mask,
-            sequence_lengths=sequence_lengths,
-            aligned_sequence_length=aligned_sequence_length,
-        )
-
-    cp_size = mpu.get_context_parallel_world_size()
-    align_size = get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe)
-    padded_sequence_lengths_tensor = sequence_lengths_tensor + (-sequence_lengths_tensor % align_size)
-    padded_sequence_lengths = padded_sequence_lengths_tensor.tolist()
-    cu_seqlens_padded = torch.cat(
-        (
-            torch.zeros(1, dtype=torch.int32, device=device),
-            padded_sequence_lengths_tensor.cumsum(dim=0),
-        )
-    )
-    return TokenMetadataLayout(
-        attention_mask=aligned_attention_mask,
-        sequence_lengths=sequence_lengths,
-        aligned_sequence_length=sum(padded_sequence_lengths),
-        padded_sequence_lengths=padded_sequence_lengths,
-        cu_seqlens_padded=cu_seqlens_padded,
-        context_parallel_size=cp_size,
-        context_parallel_rank=mpu.get_context_parallel_rank() if cp_size > 1 else 0,
-    )
-
-
-def canonical_token_metadata_layout(attention_mask: torch.Tensor) -> TokenMetadataLayout:
-    """Describe an unsharded ``[batch, seq_len]`` layout."""
-    mask = attention_mask.to(torch.bool)
-    return TokenMetadataLayout(
-        attention_mask=mask,
-        sequence_lengths=mask.sum(dim=1, dtype=torch.int32).tolist(),
-        aligned_sequence_length=mask.shape[1],
-    )
-
-
-def align_token_metadata(
-    metadata: torch.Tensor,
-    layout: TokenMetadataLayout,
-    padding_value: torch.Tensor | bool | int,
-    *,
-    next_token: bool = False,
-) -> torch.Tensor:
-    """Apply padding, optional next-token shifting, and CP sharding."""
-    if metadata.device != layout.attention_mask.device:
-        raise ValueError("Token-aligned metadata and attention_mask must be on the same device")
-    if metadata.shape[:2] != layout.attention_mask.shape:
-        raise ValueError(
-            f"Token-aligned metadata shape {metadata.shape[:2]} does not match "
-            f"attention_mask shape {layout.attention_mask.shape}"
-        )
-
-    return _align_token_rows(
-        lambda row_index: metadata[row_index, layout.attention_mask[row_index]],
-        metadata,
-        metadata.shape[2:],
-        layout,
-        padding_value,
-        next_token=next_token,
-    )
-
-
-def align_packed_token_metadata(
-    metadata: PackedTensor,
-    layout: TokenMetadataLayout,
-    padding_value: torch.Tensor | bool | int,
-    *,
-    next_token: bool = False,
-    segment_starts: Sequence[int] | None = None,
-) -> torch.Tensor:
-    """Align metadata that already arrives packed as ``[sum(seqlen), *row_shape]``.
-
-    This relies on left padding, which makes each trajectory's real tokens contiguous.
-    Without ``segment_starts``, segments must match ``layout.sequence_lengths``;
-    otherwise each segment is placed at its specified real-token offset.
-    """
-    if metadata.device != layout.attention_mask.device:
-        raise ValueError("Token-aligned metadata and attention_mask must be on the same device")
-    if len(metadata) != len(layout.sequence_lengths):
-        raise ValueError(
-            f"Packed metadata holds {len(metadata)} segments for {len(layout.sequence_lengths)} trajectories"
-        )
-    segment_lengths = metadata.sequence_lengths.tolist()
-    if segment_starts is None:
-        if segment_lengths != list(layout.sequence_lengths):
-            raise ValueError(
-                f"Packed metadata segments {segment_lengths} do not match "
-                f"trajectory lengths {list(layout.sequence_lengths)}"
-            )
-    else:
-        if len(segment_starts) != len(metadata):
-            raise ValueError(f"Got {len(segment_starts)} segment starts for {len(metadata)} segments")
-        for row_index, (start, length) in enumerate(zip(segment_starts, segment_lengths, strict=True)):
-            if start < 0 or start + length > layout.sequence_lengths[row_index]:
-                raise ValueError(
-                    f"Segment {row_index} spans real tokens [{start}, {start + length}) of a "
-                    f"{layout.sequence_lengths[row_index]}-token trajectory"
+        if packed and sub_seq_lengths is not None:
+            if cp_size > 1 and get_cp_chunk_token_align() != 1:
+                # The controller's collator lays sub-sequences out without the model's chunk alignment.
+                raise NotImplementedError(
+                    "Mini-batch packing (sub_seq_lengths) under context parallelism does not support models "
+                    "that align CP chunks to token blocks (e.g. Qwen4Exp)."
                 )
+            source, lengths = _sub_sequence_tokens(sub_seq_lengths, batch, seq, align, mask.device)
+        else:
+            source = mask.reshape(-1).nonzero().squeeze(1)
+            lengths = mask.sum(dim=1).tolist()
+        cu_lengths = cu_seqlens_from_lengths(lengths, device=mask.device).to(torch.long)
 
-    return _align_token_rows(
-        metadata.segment,
-        metadata.values,
-        metadata.row_shape,
-        layout,
-        padding_value,
-        next_token=next_token,
-        segment_starts=segment_starts,
-    )
+        if not packed:
+            if cp_size != 1:
+                raise ValueError("context parallelism requires packed sequences")
+            longest = max(lengths, default=0)
+            align = math.lcm(get_unpacked_seq_align_size(tp_size, fp8_enabled, fp8_recipe), seq_align)
+            width = longest + (-longest % align)
+            columns = torch.arange(width, device=mask.device)[None, :]
+            row_lengths = cu_lengths.diff()[:, None]
+            ordinals = torch.where(columns < row_lengths, cu_lengths[:-1, None] + columns, NO_TOKEN)
+            return cls(source=source, cu_lengths=cu_lengths, batch_shape=(batch, seq), ordinals=ordinals)
 
-
-def _align_token_rows(
-    rows_for: Callable[[int], torch.Tensor],
-    source: torch.Tensor,
-    row_shape: tuple[int, ...] | torch.Size,
-    layout: TokenMetadataLayout,
-    padding_value: torch.Tensor | bool | int,
-    *,
-    next_token: bool = False,
-    segment_starts: Sequence[int] | None = None,
-) -> torch.Tensor:
-    """Place each trajectory's real-token rows into Megatron's layout and CP-shard them.
-
-    ``rows_for(row_index)`` yields one trajectory's rows. They land at the front of its
-    padded region unless ``segment_starts`` names a per-trajectory destination offset.
-    """
-    if layout.padded_sequence_lengths is None:
-        if next_token:
-            raise ValueError("next-token metadata alignment is only used for packed sequences")
-        aligned = _new_metadata_tensor(
-            source,
-            (len(layout.sequence_lengths), layout.aligned_sequence_length, *row_shape),
-            padding_value,
+        padded = torch.as_tensor(lengths, dtype=torch.long)
+        padded = padded + (-padded % align)
+        cu_seqlens_padded = cu_seqlens_from_lengths(padded.tolist(), device=mask.device)
+        return cls(
+            source=source,
+            cu_lengths=cu_lengths,
+            batch_shape=(batch, seq),
+            ordinals=_packed_ordinals(cu_lengths, cu_seqlens_padded, cp_size, cp_rank).unsqueeze(0),
+            cu_seqlens_padded=cu_seqlens_padded,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
         )
-        for row_index, sequence_length in enumerate(layout.sequence_lengths):
-            rows = rows_for(row_index)
-            start = 0 if segment_starts is None else segment_starts[row_index]
-            end = sequence_length if segment_starts is None else start + rows.shape[0]
-            aligned[row_index, start:end] = rows
-        return aligned
 
-    packed = _new_metadata_tensor(
-        source,
-        (layout.aligned_sequence_length, *row_shape),
-        padding_value,
-    )
-    offset = 0
-    for row_index, (sequence_length, padded_length) in enumerate(
-        zip(layout.sequence_lengths, layout.padded_sequence_lengths, strict=True)
-    ):
-        rows = rows_for(row_index)
-        start = offset if segment_starts is None else offset + segment_starts[row_index]
-        end = offset + sequence_length if segment_starts is None else start + rows.shape[0]
-        packed[start:end] = rows
-        # Match Megatron's [seq0, pad0, seq1, pad1, ...] microbatch layout.
-        offset += padded_length
+    @property
+    def packed(self) -> bool:
+        return self.cu_seqlens_padded is not None
 
-    if next_token:
-        # Each packed logit predicts the next token within its own padded sequence.
-        shifted = _new_metadata_tensor(source, packed.shape, padding_value)
+    @property
+    def sequence_lengths(self) -> list[int]:
+        return self.cu_lengths.diff().tolist()
+
+    @property
+    def padding_mask(self) -> torch.Tensor:
+        """True at this rank's positions that hold no real token."""
+        return self.ordinals == NO_TOKEN
+
+    def next_token_mask(self) -> torch.Tensor:
+        """True at positions whose token is followed by another real token of its segment."""
+        return self._positions(next_token=True) != NO_TOKEN
+
+    def full(self) -> "TokenLayout":
+        """This packed layout before CP sharding."""
+        if not self.packed:
+            raise ValueError("only a packed layout is CP-sharded")
+        if self.cp_size == 1:
+            return self
+        ordinals = _packed_ordinals(self.cu_lengths, self.cu_seqlens_padded, 1, 0).unsqueeze(0)
+        return dataclasses.replace(self, ordinals=ordinals, cp_size=1, cp_rank=0)
+
+    def place(self, values: torch.Tensor, fill, *, next_token: bool = False) -> torch.Tensor:
+        """Place ``[batch, seq, ...]`` ``values`` in this layout, ``fill`` where no token is.
+
+        ``next_token`` places at each position the value of the token after it, as next-token
+        targets are; a segment's last token and padding get ``fill``.
+        """
+        if values.shape[:2] != self.batch_shape:
+            raise ValueError(f"values of shape {tuple(values.shape)} do not match the batch {self.batch_shape}")
+        flat = values.reshape(-1, *values.shape[2:])
+        return self._fill(self._positions(next_token), lambda ordinals: flat[self.source[ordinals]], flat, fill)
+
+    def place_ordinals(self, values: torch.Tensor, fill, *, next_token: bool = False) -> torch.Tensor:
+        """Place per-ordinal ``[num_tokens, ...]`` ``values`` (one row per real token) in this layout."""
+        if values.shape[0] != self.source.numel():
+            raise ValueError(f"{values.shape[0]} token rows for a layout of {self.source.numel()} tokens")
+        return self._fill(self._positions(next_token), lambda ordinals: values[ordinals], values, fill)
+
+    def to_batch(self, values: torch.Tensor, fill) -> torch.Tensor:
+        """Scatter per-ordinal ``values`` back to canonical ``[batch, seq, ...]`` positions."""
+        out = torch.full(
+            (self.batch_shape[0] * self.batch_shape[1], *values.shape[1:]),
+            fill,
+            dtype=values.dtype,
+            device=values.device,
+        )
+        out[self.source] = values
+        return out.view(*self.batch_shape, *values.shape[1:])
+
+    def packed_scatter(self) -> "PackedScatter":
+        """Where this rank's packed next-token outputs land in canonical ``[batch, seq - 1]``.
+
+        Computed here, on the host, so scattering on the device indexes with integers and needs no sync.
+        """
+        if not self.packed:
+            raise ValueError("scattering packed outputs requires a packed layout")
+        full = self.full()
+        predicting = full.next_token_mask().squeeze(0)
+        sources = self.source[full.ordinals.squeeze(0)[predicting]]
+        seq = self.batch_shape[1]
+        return PackedScatter(
+            positions=predicting.nonzero().squeeze(1),
+            rows=sources // seq,
+            cols=sources % seq,
+            batch_shape=self.batch_shape,
+            cu_seqlens_padded=self.cu_seqlens_padded,
+            cp_size=self.cp_size,
+        )
+
+    def recover(self) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        """Unpacked: each token's flat layout row, its flat canonical row, and per-row counts."""
+        if self.packed:
+            raise ValueError("only an unpacked layout is restored row by row")
+        return self.ordinals.reshape(-1).ne(NO_TOKEN).nonzero().squeeze(1), self.source, self.sequence_lengths
+
+    def _positions(self, next_token: bool) -> torch.Tensor:
+        if not next_token:
+            return self.ordinals
+        ends = self.cu_lengths[1:]
+        segment_end = ends[torch.searchsorted(ends, self.ordinals.clamp(min=0), right=True).clamp(max=ends.numel() - 1)]
+        successor = self.ordinals + 1
+        return torch.where((self.ordinals != NO_TOKEN) & (successor < segment_end), successor, NO_TOKEN)
+
+    @staticmethod
+    def _fill(positions: torch.Tensor, gather, like: torch.Tensor, fill) -> torch.Tensor:
+        out = torch.full((*positions.shape, *like.shape[1:]), fill, dtype=like.dtype, device=like.device)
+        valid = positions != NO_TOKEN
+        out[valid] = gather(positions[valid])
+        return out
+
+
+@dataclass(frozen=True)
+class PackedScatter:
+    """Scatters one rank's packed next-token outputs ``[1, T // CP]`` to canonical ``[batch, seq - 1]``;
+    position ``t`` of the result predicts token ``t + 1``. Built by ``TokenLayout.packed_scatter``."""
+
+    # Positions of the CP-gathered packed stream whose token is followed by another real token of its
+    # segment, and the canonical row and column each one predicts at.
+    positions: torch.Tensor
+    rows: torch.Tensor
+    cols: torch.Tensor
+    batch_shape: tuple[int, int]
+    cu_seqlens_padded: torch.Tensor
+    cp_size: int
+
+    def scatter(self, model_values: torch.Tensor, fill) -> torch.Tensor:
+        """Gather the other CP ranks' shares, then place each predicting position at its canonical one."""
+        if model_values.ndim != 2 or model_values.shape[0] != 1:
+            raise ValueError(f"Expected packed model values with shape [1, tokens], got {tuple(model_values.shape)}")
+        values = model_values.squeeze(0)
+        if self.cp_size > 1:
+            import megatron.core.parallel_state as mpu
+
+            from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
+                allgather_cp_sharded_packed_tensor,
+            )
+
+            values = allgather_cp_sharded_packed_tensor(
+                values, self.cu_seqlens_padded, mpu.get_context_parallel_group()
+            )
+        batch, seq = self.batch_shape
+        out = torch.full((batch, seq - 1), fill, dtype=values.dtype, device=values.device)
+        out[self.rows, self.cols] = values[self.positions]
+        return out
+
+
+def _sub_sequence_tokens(
+    sub_seq_lengths: list[list[int]], batch: int, seq: int, sequence_align: int, device: torch.device
+) -> tuple[torch.Tensor, list[int]]:
+    """Flat positions and lengths of controller-packed sub-sequences, at the collator's row offsets."""
+    if len(sub_seq_lengths) != batch:
+        raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch}")
+    starts: list[int] = []
+    lengths: list[int] = []
+    for row, row_lengths in enumerate(sub_seq_lengths):
+        row_lengths = [int(length) for length in row_lengths]
         offset = 0
-        for padded_length in layout.padded_sequence_lengths:
-            shifted[offset : offset + padded_length - 1] = packed[offset + 1 : offset + padded_length]
-            offset += padded_length
-        packed = shifted
-
-    if layout.context_parallel_size > 1:
-        out = _new_metadata_tensor(
-            source,
-            (packed.shape[0] // layout.context_parallel_size, *packed.shape[1:]),
-            padding_value,
-        )
-        src_offset = 0
-        dst_offset = 0
-        for padded_length in layout.padded_sequence_lengths:
-            # CP uses matching front/back chunks of each padded sequence.
-            length_per_cp = padded_length // layout.context_parallel_size
-            half = length_per_cp // 2
-            front_start = src_offset + half * layout.context_parallel_rank
-            back_start = src_offset + padded_length - half * (layout.context_parallel_rank + 1)
-            out[dst_offset : dst_offset + half] = packed[front_start : front_start + half]
-            out[dst_offset + half : dst_offset + length_per_cp] = packed[back_start : back_start + half]
-            src_offset += padded_length
-            dst_offset += length_per_cp
-        packed = out
-
-    return packed.unsqueeze(0)
+        for length in row_lengths:
+            if offset + length > seq:
+                raise ValueError("sub_seq_lengths extends beyond the packed batch row")
+            starts.append(row * seq + offset)
+            lengths.append(length)
+            # Each sub-sequence starts at the previous one's end rounded up to the alignment.
+            offset += length + (-length % sequence_align)
+    return _concatenated_ranges(torch.tensor(starts, dtype=torch.long), lengths).to(device), lengths
 
 
-def scatter_packed_token_values_to_batch(
-    model_values: torch.Tensor,
-    layout: TokenMetadataLayout,
-    padding_value: bool | int,
+def _concatenated_ranges(starts: torch.Tensor, lengths: Sequence[int]) -> torch.Tensor:
+    """``cat([arange(start, start + length) ...])`` without a Python loop over tensors."""
+    counts = torch.as_tensor(lengths, dtype=torch.long, device=starts.device)
+    offsets = counts.cumsum(0) - counts
+    return torch.repeat_interleave(starts - offsets, counts) + torch.arange(int(counts.sum()), device=starts.device)
+
+
+def _packed_ordinals(
+    cu_lengths: torch.Tensor, cu_seqlens_padded: torch.Tensor, cp_size: int, cp_rank: int
 ) -> torch.Tensor:
-    """Scatter packed model outputs into canonical ``[batch, seq_len - 1]`` positions."""
-    if layout.padded_sequence_lengths is None or layout.cu_seqlens_padded is None:
-        raise ValueError("Scattering packed token values requires a packed metadata layout")
-    if model_values.ndim != 2 or model_values.shape[0] != 1:
-        raise ValueError(f"Expected packed model values with shape [1, tokens], got {model_values.shape}")
-
-    values = model_values.squeeze(0)
-    if layout.context_parallel_size > 1:
-        import megatron.core.parallel_state as mpu
-
-        from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-            allgather_cp_sharded_packed_tensor,
-        )
-
-        values = allgather_cp_sharded_packed_tensor(
-            values,
-            layout.cu_seqlens_padded,
-            mpu.get_context_parallel_group(),
-        )
-
-    from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
-        _packed_sequence_indices,
-    )
-
-    _, _, sequence_indices, sequence_offsets, _ = _packed_sequence_indices(
-        layout.cu_seqlens_padded,
-        values.shape[0],
-        values.device,
-    )
-    valid_counts = torch.tensor(layout.sequence_lengths, dtype=torch.long, device=values.device) - 1
-    packed_mask = sequence_offsets < valid_counts[sequence_indices]
-
-    attention_mask = layout.attention_mask
-    token_ordinals = attention_mask.to(torch.long).cumsum(dim=1)
-    output_mask = attention_mask[:, :-1] & (
-        token_ordinals[:, :-1] < torch.tensor(layout.sequence_lengths, device=values.device).unsqueeze(1)
-    )
-    batch_values = _new_metadata_tensor(
-        model_values,
-        (attention_mask.shape[0], attention_mask.shape[1] - 1),
-        padding_value,
-    )
-    batch_values[output_mask] = values[packed_mask]
-    return batch_values
+    """The ordinal at each of a CP rank's packed positions, NO_TOKEN at padding."""
+    cu_padded = cu_seqlens_padded.to(torch.long)
+    padded = cu_padded.diff()
+    if cp_size > 1 and bool((padded % (2 * cp_size)).any()):
+        raise ValueError(f"packed segment lengths {padded.tolist()} are not divisible by 2 * CP={2 * cp_size}")
+    local = padded // cp_size
+    segment = torch.repeat_interleave(torch.arange(padded.numel(), device=padded.device), local)
+    offset = torch.arange(int(local.sum()), device=padded.device) - (cu_padded[:-1] // cp_size)[segment]
+    if cp_size > 1:
+        # Each rank holds chunk ``cp_rank`` and its mirror ``2 * CP - 1 - cp_rank`` of every segment.
+        half = (local // 2)[segment]
+        back = padded[segment] - half * (cp_rank + 1) + (offset - half)
+        offset = torch.where(offset < half, half * cp_rank + offset, back)
+    lengths = cu_lengths.diff()
+    return torch.where(offset < lengths[segment], cu_lengths[:-1][segment] + offset, NO_TOKEN)
 
 
 def _widen_dtype(current: np.dtype, incoming: np.dtype) -> np.dtype:
