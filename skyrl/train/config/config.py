@@ -1230,6 +1230,13 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
+    stale_group_policy: str = "ignore"
+    """What the colocated partial-rollout trainer does with a group that reaches ``max_staleness_steps``
+    cuts. The staleness of a group is the number of cuts it survived, not the ``async/staleness`` metric,
+    which also counts the steps the group waited in the buffer. ``ignore`` trains on the group and
+    logs a warning. ``wait`` delays the next cut until every such group has finished. ``drop`` does not
+    resume such a group: the client returns its request with stop reason ``abort``, and the trainer
+    discards the group and does not draw its prompt again. The fully-async trainer ignores this field."""
     sample_full_batch: bool = False
     """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
     mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).

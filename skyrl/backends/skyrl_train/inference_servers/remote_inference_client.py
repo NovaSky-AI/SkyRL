@@ -552,6 +552,14 @@ class RemoteInferenceClient(InferenceEngineInterface):
     by default: the other trainers never abort in-flight requests, or they want ``abort`` reported as
     the stop reason."""
 
+    max_resumes_per_request: Optional[int] = None
+    """The number of times the client resubmits one held request. ``None`` means no limit. When a
+    request that has generated at least one token is aborted once more than this, the client returns
+    it with stop reason ``abort`` and the tokens generated so far. An abort before the first token
+    does not count: the resubmission is the same as a new request. The colocated partial-rollout
+    trainer sets it to ``max_staleness_steps`` under ``stale_group_policy="drop"``. Only used with
+    ``resume_aborted_requests``."""
+
     # Private fields excluded from repr for cleaner output
     _generate_client: Optional[RemoteGenerateClient] = field(default=None, repr=False)
     # Set while the inference engines accept requests. An aborting pause clears it. Resume or wake sets it.
@@ -828,6 +836,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         generated_logprobs: List[float] = []
         request_params = dict(sampling_params)
         max_tokens = request_params.get("max_tokens")
+        aborts = 0
         while True:
             await self._get_generation_gate().wait()
             try:
@@ -846,6 +855,18 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 if exc.status != 503:
                     raise
                 self._count_resume_stat("retried_503")
+                if self._get_generation_gate().is_set():
+                    # A 503 with the gate closed is the expected race with the pause call. A 503 with
+                    # the gate open means an engine rejects requests after the resume. Count those
+                    # and log the first bodies after each `pop_resume_stats`, with the session id so
+                    # the router log attributes them to an engine.
+                    self._count_resume_stat("retried_503_gate_open")
+                    if self._resume_stats.get("_logged_503", 0) < 3:
+                        self._resume_stats["_logged_503"] = self._resume_stats.get("_logged_503", 0) + 1
+                        logger.info(
+                            f"503 with the gate open from {exc.request_info.url} (session_id={session_id}, "
+                            f"aborts={aborts}): {exc.message!r}"
+                        )
                 # A paused engine rejects new requests with 503. Either the gate is already closed
                 # and the loop waits on it, or this request raced the pause call. Wait a short time
                 # and retry.
@@ -859,15 +880,34 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 break
             self._count_resume_stat("aborted_requests")
             self._count_resume_stat("aborted_segment_tokens", len(result.response_ids))
-            # The resubmission re-prefills the prompt and all tokens generated so far, because sleep
-            # drops the KV cache.
-            self._count_resume_stat("resume_prefill_tokens", len(prompt_token_ids) + len(generated_ids))
+            if generated_ids:
+                # An abort before the first token leaves the request as new. It ages no token, so
+                # it does not count against the resume budget. The caller also cannot handle an
+                # empty response.
+                aborts += 1
+            if self.max_resumes_per_request is not None and aborts > self.max_resumes_per_request:
+                # The request reached its resume budget. Return it with stop reason "abort" so the
+                # caller can drop it.
+                self._count_resume_stat("not_resumed_requests")
+                logger.debug(
+                    f"Not resuming a request after {aborts} aborts "
+                    f"(max_resumes_per_request={self.max_resumes_per_request}); returning stop reason abort."
+                )
+                break
             if max_tokens is not None:
                 remaining = max_tokens - len(generated_ids)
                 if remaining <= 0:
                     result = replace(result, stop_reason="length")
                     break
                 request_params["max_tokens"] = remaining
+            # The resubmission re-prefills the prompt and all tokens generated so far, because sleep
+            # drops the KV cache.
+            self._count_resume_stat("resume_prefill_tokens", len(prompt_token_ids) + len(generated_ids))
+        if result.stop_reason != "abort":
+            # The request completed. Record the number of cuts it survived for the staleness metrics.
+            self._count_resume_stat("completed_requests")
+            self._count_resume_stat("cuts_survived_sum", aborts)
+            self._resume_stats["cuts_survived_max"] = max(self._resume_stats.get("cuts_survived_max", 0), aborts)
         return self._generate_result_to_dict(
             replace(
                 result,
@@ -885,10 +925,26 @@ class RemoteInferenceClient(InferenceEngineInterface):
         - ``aborted_requests``: requests that the engine aborted and the client held.
         - ``aborted_segment_tokens``: tokens that those requests generated in the aborted segment.
         - ``resume_prefill_tokens``: prompt and generated tokens that the resubmission re-prefilled.
-        - ``retried_503``: requests that a paused engine rejected and the client retried."""
+        - ``retried_503``: requests that a paused engine rejected and the client retried.
+        - ``retried_503_gate_open``: the part of ``retried_503`` that arrived while the gate was open.
+        - ``not_resumed_requests``: requests returned with stop reason ``abort`` because they reached
+          ``max_resumes_per_request``.
+        - ``completed_requests``: requests that completed with a stop reason other than ``abort``.
+        - ``cuts_survived_sum``: the total number of aborts that the completed requests survived.
+        - ``cuts_survived_max``: the largest number of aborts that one completed request survived."""
         stats = {
             k: self._resume_stats.get(k, 0)
-            for k in ("aborted_requests", "aborted_segment_tokens", "resume_prefill_tokens", "retried_503")
+            for k in (
+                "aborted_requests",
+                "aborted_segment_tokens",
+                "resume_prefill_tokens",
+                "retried_503",
+                "retried_503_gate_open",
+                "not_resumed_requests",
+                "completed_requests",
+                "cuts_survived_sum",
+                "cuts_survived_max",
+            )
         }
         self._resume_stats.clear()
         return stats
