@@ -167,7 +167,7 @@ async def generator(skycap):
     """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
     made = []
 
-    def make(train_paths: str = "all", **cfg) -> HarborSkycapGenerator:
+    def make(train_paths: str = "all", train_on_timeouts: bool = False, **cfg) -> HarborSkycapGenerator:
         made.append(
             HarborSkycapGenerator(
                 generator_cfg(**cfg),
@@ -175,6 +175,7 @@ async def generator(skycap):
                 [skycap.url],
                 SimpleNamespace(weight_version=7),
                 train_paths=train_paths,
+                train_on_timeouts=train_on_timeouts,
             )
         )
         return made[-1]
@@ -415,6 +416,17 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
     assert len(out["rollout_sample_support"]) == len(out["response_ids"])
 
 
+@pytest.mark.asyncio
+async def test_with_train_on_timeouts_a_timed_out_trial_trains_as_a_failure(skycap, trials, generator) -> None:
+    out = await generator(train_on_timeouts=True).generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
+    validate_generator_output(4, out, step_wise=True)
+
+    timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
+    assert all(out["rewards"][i] == 0.0 and any(out["loss_masks"][i]) for i in timed_out)
+    assert {out["stop_reasons"][i] for i in timed_out} == {"agent_timeout"}
+    assert out["rollout_metrics"]["generate/skycap/num_masked_instances"] == 0
+
+
 def _outcome(instance: str, repetition: int, reward: float = 0.0, stop_reason: str = "complete") -> TrialOutcome:
     sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
     return TrialOutcome(
@@ -426,18 +438,29 @@ def _outcome(instance: str, repetition: int, reward: float = 0.0, stop_reason: s
 
 
 @pytest.mark.parametrize(
-    "mask_groups, rewards, stop_reasons",
+    "mask_groups, mask_timeouts, rewards, stop_reasons, trained",
     [
-        (True, [0.0] * 6, ["error"] * 6),
+        (True, True, [0.0] * 6, ["error"] * 6, [False] * 6),
         (
             False,
+            True,
             [1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             ["complete", "complete", "agent_timeout", "complete", "error", "complete"],
+            [True, True, False, True, False, True],
+        ),
+        (
+            True,
+            False,
+            [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            ["complete", "complete", "agent_timeout", "complete", "error", "error"],
+            [True, True, True, True, False, False],
         ),
     ],
-    ids=["training-masks-the-group", "eval-scores-each-trial"],
+    ids=["training-masks-the-group", "eval-scores-each-trial", "training-on-timeouts"],
 )
-def test_a_failed_trial_masks_its_group_in_training_and_only_itself_in_eval(mask_groups, rewards, stop_reasons) -> None:
+def test_a_failed_trial_masks_its_group_in_training_and_only_itself_in_eval(
+    mask_groups, mask_timeouts, rewards, stop_reasons, trained
+) -> None:
     outcomes = [
         _outcome("a", 0, 1.0),
         _outcome("a", 1, 1.0),
@@ -447,10 +470,11 @@ def test_a_failed_trial_masks_its_group_in_training_and_only_itself_in_eval(mask
         _outcome("b", 1, 1.0),
     ]
 
-    out = compose(outcomes, overlong_filtering=False, mask_groups=mask_groups)
+    out = compose(outcomes, overlong_filtering=False, mask_groups=mask_groups, mask_timeouts=mask_timeouts)
     validate_generator_output(6, out, step_wise=True)
     assert out["rewards"] == rewards
     assert out["stop_reasons"] == stop_reasons
+    assert [any(mask) for mask in out["loss_masks"]] == trained
 
 
 @pytest.mark.asyncio
