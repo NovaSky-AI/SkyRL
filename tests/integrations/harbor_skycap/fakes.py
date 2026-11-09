@@ -195,7 +195,13 @@ class FakeTrial:
         # As the agent finds its endpoint: an installed one in the sandbox's environment, Terminus-2 in its kwargs.
         # Harbor's Codex reads only OPENAI_BASE_URL (it writes it into Codex's config.toml) and ignores api_base.
         env = self.config["agent"].get("env") or {}
-        if self.config["agent"]["name"] == "codex":
+        from harbor.agents.installed.codex import Codex
+
+        from examples.train_integrations.harbor_skycap.harbor_generator import (
+            agent_class,
+        )
+
+        if issubclass(agent_class(self.config["agent"]) or object, Codex):
             base_url = env.get("OPENAI_BASE_URL")
         else:
             base_url = env.get("OPENAI_API_BASE") or kwargs["api_base"]
