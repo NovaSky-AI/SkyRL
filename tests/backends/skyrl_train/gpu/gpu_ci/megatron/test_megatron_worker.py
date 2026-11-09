@@ -16,12 +16,14 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossType
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl.train.config import (
     SkyRLLoraConfig,
     SkyRLTrainConfig,
     TorchProfilerConfig,
 )
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 from skyrl.train.utils.utils import (
     print_mem,
     validate_cfg,
@@ -506,19 +508,23 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         "gpus_per_node",
         "remove_microbatch_padding",
         "use_entropy_loss",
+        "fused_lm_head_backend",
         "lora",
         "cp_comm_type",
     ),
     [
-        ("policy", 2, 2, 1, 1, 1, 4, True, False, False, None),
-        ("policy", 2, 2, 1, 1, 1, 4, True, True, False, None),
-        ("policy", 2, 2, 1, 1, 1, 4, True, False, True, None),
-        ("policy", 2, 2, 1, 1, 1, 4, False, False, False, None),
-        ("policy", 2, 1, 2, 1, 1, 4, True, False, False, None),
-        ("policy", 2, 1, 2, 1, 1, 4, True, True, False, None),
-        ("policy", 2, 1, 2, 1, 1, 4, True, False, False, "a2a"),
-        ("policy", 4, 1, 1, 4, 1, 4, True, False, False, None),
-        ("policy", 4, 1, 1, 4, 1, 4, True, False, True, None),
+        ("policy", 2, 2, 1, 1, 1, 4, True, False, None, False, None),
+        ("policy", 2, 2, 1, 1, 1, 4, True, True, None, False, None),
+        ("policy", 2, 2, 1, 1, 1, 4, True, False, None, True, None),
+        ("policy", 2, 2, 1, 1, 1, 4, False, False, None, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, False, None, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, True, None, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, True, "torch", False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, True, "triton", False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, True, FusedLmHeadBackend.TRITON_BLOCK_SPARSE, False, None),
+        ("policy", 2, 1, 2, 1, 1, 4, True, False, None, False, "a2a"),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, None, False, None),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, None, True, None),
     ],
     ids=[
         "tp2_pp2_policy_seq_packing",
@@ -527,6 +533,9 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         "tp2_pp2_policy_unpacked",
         "tp2_cp2_policy_seq_packing_no_entropy_loss",
         "tp2_cp2_policy_seq_packing_with_entropy_loss",
+        "tp2_cp2_policy_seq_packing_fused_torch_entropy_loss",
+        "tp2_cp2_policy_seq_packing_fused_triton_entropy_loss",
+        "tp2_cp2_policy_seq_packing_fused_triton_block_sparse_entropy_loss",
         "tp2_cp2_policy_seq_packing_no_entropy_loss_a2a",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
         "tp4_pp1_cp1_ep4_etp1_policy_seq_packing_lora",
@@ -544,6 +553,7 @@ async def test_megatron_train(
     gpus_per_node,
     remove_microbatch_padding,
     use_entropy_loss,
+    fused_lm_head_backend,
     lora,
     cp_comm_type,
 ):
@@ -568,6 +578,12 @@ async def test_megatron_train(
     if use_entropy_loss:
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
+    if fused_lm_head_backend is not None:
+        cfg.trainer.fused_lm_head_logprob = True
+        cfg.trainer.fused_lm_head_logprob_backend = fused_lm_head_backend
+        if fused_lm_head_backend == FusedLmHeadBackend.TRITON_BLOCK_SPARSE:
+            cfg.trainer.algorithm.policy_loss_type = PolicyLossType.ROLLOUT_IS
+            batch["action_log_probs"] = None
     if lora:
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 

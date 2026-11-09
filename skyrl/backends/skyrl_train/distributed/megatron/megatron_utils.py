@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 import re
 from typing import Any, Dict, Iterator, List, Optional, Union
@@ -41,6 +42,7 @@ from megatron.core.transformer.moe.moe_utils import (
 from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_cp_chunk_token_align,
     get_packed_seq_align_size,
     get_unpacked_seq_align_size,
 )
@@ -386,6 +388,20 @@ def load_megatron_grads_to_gpu(models):
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
 
 
+def megatron_grad_buffers_resident(models) -> bool:
+    """Whether the grad buffers are on the GPU (not released by :func:`offload_megatron_grads_to_cpu`)."""
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                if buffer.grad_data is not None and buffer.grad_data.untyped_storage().size() == 0:
+                    return False
+        else:
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None and not param.grad.is_cuda:
+                    return False
+    return True
+
+
 # Frozen (requires_grad=False, non-adapter) weights are immutable for the
 # whole run, so their CPU offload copies can live in file-backed mmap storage
 # instead of RAM: the pages are then *clean page cache* the kernel can evict
@@ -626,6 +642,10 @@ def load_megatron_copy_params(optimizers):
 
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
+    from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+        OffloadedDistributedOptimizer,
+    )
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -635,6 +655,9 @@ def offload_megatron_optimizer(optimizers):
         if _opt.optimizer is None:
             # Stub sub-optimizer with no params on this rank, e.g. the dense group when
             # LoRA only targets expert linears.
+            continue
+        if isinstance(_opt, OffloadedDistributedOptimizer):
+            # Its main params and moments are on disk between steps.
             continue
         offload_megatron_copy_params(_opt)
         opt_state_dict_values = _opt.optimizer.state.values()
@@ -647,13 +670,17 @@ def offload_megatron_optimizer(optimizers):
 
 @torch.no_grad()
 def load_megatron_optimizer(optimizers):
+    from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+        OffloadedDistributedOptimizer,
+    )
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
         return [opt]
 
     for _opt in _iter_opts(optimizers):
-        if _opt.optimizer is None:
+        if _opt.optimizer is None or isinstance(_opt, OffloadedDistributedOptimizer):
             continue
         load_megatron_copy_params(_opt)
         # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu
@@ -712,6 +739,12 @@ def preprocess_packed_seqs(
     batch_size = input_ids.shape[0]
 
     if sub_seq_lengths is not None:
+        if cp_size > 1 and get_cp_chunk_token_align() != 1:
+            # The controller's collator lays sub-sequences out without the model's chunk alignment.
+            raise NotImplementedError(
+                "Mini-batch packing (sub_seq_lengths) under context parallelism does not support models "
+                "that align CP chunks to token blocks (e.g. Qwen4Exp)."
+            )
         if len(sub_seq_lengths) != batch_size:
             raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
 
@@ -848,10 +881,14 @@ def remove_left_padding(
     pre_process: bool = True,
     fp8_enabled: bool = False,
     fp8_recipe: Optional[str] = None,
+    seq_align: int = 1,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
     return new_input_ids, new_attention_mask, new_position_ids
+
+    ``seq_align`` additionally rounds the padded length up to a multiple of it (combined with the
+    TP / FP8 alignment by lcm), e.g. ``mlp_chunks_for_training`` so every rank splits into as many chunks.
     """
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
@@ -864,6 +901,7 @@ def remove_left_padding(
     align_size = get_unpacked_seq_align_size(
         mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe
     )
+    align_size = math.lcm(align_size, seq_align)
     pad_size = (align_size - seq_len % align_size) % align_size
     seq_len = seq_len + pad_size
     shape[1] = seq_len

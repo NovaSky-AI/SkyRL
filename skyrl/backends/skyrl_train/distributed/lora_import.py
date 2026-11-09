@@ -36,6 +36,10 @@ _TINKER_GDN_QKV_RE = re.compile(r"^(?P<prefix>.*\.linear_attn)\.(?P<proj>in_proj
 # language model (``model.layers`` vs ``model.language_model.layers``).
 _NAMESPACE_RE = re.compile(r"^(?:model\.)?(?:language_model\.)?(?:model\.)?")
 
+# Tinker's own export names the output projection ``model.unembed_tokens``; HF and PEFT
+# call the same (untied) linear ``lm_head``.
+_TINKER_LM_HEAD_RE = re.compile(r"^(?:model\.)?(?:language_model\.)?(?:model\.)?unembed_tokens$")
+
 
 @dataclass
 class LoraPiece:
@@ -167,16 +171,21 @@ def parse_peft_adapter(config: Mapping[str, Any], state: Mapping[str, torch.Tens
     lora_a: Dict[str, torch.Tensor] = {}
     lora_b: Dict[str, torch.Tensor] = {}
     order: List[str] = []
+    source_names: Dict[str, str] = {}  # module -> name in the file, for rank / alpha pattern lookups
     for name, tensor in state.items():
         module_name = strip_peft_prefix(name)
         if module_name.endswith(LORA_A_SUFFIX):
-            module = module_name[: -len(LORA_A_SUFFIX)]
+            source = module_name[: -len(LORA_A_SUFFIX)]
+            module = _alias_module(source)
             lora_a[module] = tensor
         elif module_name.endswith(LORA_B_SUFFIX):
-            module = module_name[: -len(LORA_B_SUFFIX)]
+            source = module_name[: -len(LORA_B_SUFFIX)]
+            module = _alias_module(source)
             lora_b[module] = tensor
         else:
             raise ValueError(f"init_adapter_path: unexpected non-LoRA tensor {name!r} in {ADAPTER_WEIGHTS_FILE}")
+        if source_names.setdefault(module, source) != source:
+            raise ValueError(f"init_adapter_path: {source_names[module]!r} and {source!r} both name {module!r}")
         if module not in order:
             order.append(module)
 
@@ -195,16 +204,25 @@ def parse_peft_adapter(config: Mapping[str, Any], state: Mapping[str, torch.Tens
         if a.shape[0] != b.shape[1]:
             raise ValueError(f"init_adapter_path: {module} lora_A rank {a.shape[0]} != lora_B rank {b.shape[1]}")
         rank = int(a.shape[0])
-        config_rank = peft_module_rank(config, module)
+        source = source_names[module]
+        config_rank = peft_module_rank(config, source)
         if rank != config_rank:
             raise ValueError(
                 f"init_adapter_path: {module} tensors have rank {rank} but adapter_config.json gives "
                 f"{config_rank} (r / rank_pattern); the config must describe the tensors"
             )
-        pieces[module] = LoraPiece(module=module, lora_a=a, lora_b=b, scale=peft_module_scale(config, module, rank))
+        pieces[module] = LoraPiece(module=module, lora_a=a, lora_b=b, scale=peft_module_scale(config, source, rank))
     if not pieces:
         raise ValueError("init_adapter_path: the adapter contains no LoRA tensors")
+    targets = config.get("target_modules")
+    if isinstance(targets, (list, tuple, set)) and any(_TINKER_LM_HEAD_RE.match(t) for t in targets):
+        config["target_modules"] = sorted({"lm_head" if _TINKER_LM_HEAD_RE.match(t) else t for t in targets})
     return PeftLoraAdapter(config=config, pieces=pieces)
+
+
+def _alias_module(module: str) -> str:
+    """HF name of a module the adapter file may spell differently (Tinker's ``unembed_tokens``)."""
+    return "lm_head" if _TINKER_LM_HEAD_RE.match(module) else module
 
 
 # ---------------------------------------------------------------------------

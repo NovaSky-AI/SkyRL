@@ -94,6 +94,9 @@ def _run_pd_routing_verification(kv_connector: str) -> None:
         cfg,
         tp_size=1,
         num_inference_engines=2,
+        # Non-colocated, so no sleep mode: from vLLM 0.33 MooncakeConnector refuses sleep mode
+        # unless it runs over RDMA, and this test uses the TCP transport.
+        colocate_all=False,
         enable_pd=True,
         num_prefill=1,
         engine_init_kwargs={

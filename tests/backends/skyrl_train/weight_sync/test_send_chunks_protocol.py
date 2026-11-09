@@ -13,12 +13,12 @@ def test_serialized_fp8_source_metadata_matches_the_weight_stream():
     from skyrl.backends.skyrl_train.weight_sync.sources import SerializedFp8WeightSource
 
     class Source:
-        def __iter__(self):
+        def iter_full(self):
             yield "model.layers.0.mlp.down_proj.weight", torch.ones(128, 128, dtype=torch.bfloat16)
 
     source = SerializedFp8WeightSource(Source(), SerializedFp8Config(spec=QWEN35_FP8_SPEC))
-    metadata = source.metadata()
-    streamed = list(source)
+    metadata = source.metadata
+    streamed = list(source.iter_full())
 
     assert [(item.name, item.dtype, item.shape) for item in metadata] == [
         (name, tensor.dtype, tuple(tensor.shape)) for name, tensor in streamed

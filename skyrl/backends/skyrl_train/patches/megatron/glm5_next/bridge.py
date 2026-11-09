@@ -157,6 +157,10 @@ class Glm5NextBridge(MegatronModelBridge):
         provider.linear_key_head_dim = text_config.linear_head_dim
         provider.linear_value_head_dim = text_config.linear_head_dim
         provider.linear_conv_kernel_dim = text_config.linear_conv_kernel_dim
+        provider.kimi_kda_layers = tuple(i + 1 for i, t in enumerate(layer_types) if t == "linear_attention")
+        provider.kimi_linear_head_dim = text_config.linear_head_dim
+        provider.kimi_linear_num_heads = text_config.linear_num_heads
+        provider.kimi_linear_conv_kernel_size = text_config.linear_conv_kernel_dim
         provider.kda_gate_lower_bound = text_config.linear_lower_bound
 
         # NoPE MLA + DSA on the full-attention layers.
@@ -178,6 +182,10 @@ class Glm5NextBridge(MegatronModelBridge):
         provider.dsa_indexer_loss_coeff = 0.0
         provider.dsa_indexer_kpool = text_config.index_kpool
         provider.dsa_indexer_kpool_always_select_tail = text_config.index_kpool_always_select_tail
+        if provider.dsa_indexer_kpool > 1:
+            # The pooled indexer keeps the head-gate projection in FP32.
+            provider.dsa_indexer_weights_proj_output_dtype = "fp32"
+            provider.dsa_indexer_weights_proj_use_quantization = False
         indexer_types = [
             t for t, layer_type in zip(text_config.indexer_types, layer_types) if layer_type != "linear_attention"
         ]
@@ -275,8 +283,7 @@ class Glm5NextBridge(MegatronModelBridge):
         ]
         mappings.append(RowParallelMapping(f"{megatron_attn}.o_proj.weight", f"{hf_attn}.o_proj.weight"))
 
-        # DSA k-pool compression parameters. Glm5NextDSAIndexer (vendored NVIDIA/Megatron-LM#7522)
-        # only creates these when dsa_indexer_kpool > 1 and initializes them randomly
+        # DSA k-pool compression parameters. megatron-core's DSAIndexer only creates these when dsa_indexer_kpool > 1 and initializes them randomly
         # (nn.init.normal_ on the gate), so a pooled run without these mappings would silently
         # train against random pooling weights. They are bare nn.Parameters on DSAIndexer rather
         # than module weights, so AutoMapping cannot infer a parallelism type for them

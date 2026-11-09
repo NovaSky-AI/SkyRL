@@ -186,18 +186,18 @@ The same holds true for error messages:
 Do:
 
 ```python
-        if self._callback_handler.callbacks:
-            raise NotImplementedError(
-                "Callbacks are not yet supported by `FullyAsyncRayPPOTrainer`. "
+        if cfg.trainer.critic.model.path:
+            raise ValueError(
+                "A critic is not supported by the Megatron backend. "
             )
 ```
 
 Don't: 
 
 ```python
-        if self._callback_handler.callbacks:
-            raise NotImplementedError(
-                "Callbacks are not yet supported by `FullyAsyncRayPPOTrainer`. "
-                "Track in a follow-up; the sync RayPPOTrainer and SFTTrainer do support them."
+        if cfg.trainer.critic.model.path:
+            raise ValueError(
+                "A critic is not supported by the Megatron backend. "
+                "Track in a follow-up; the FSDP backend does support one."
             )
 ```

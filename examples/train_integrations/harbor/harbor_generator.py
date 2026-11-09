@@ -238,6 +238,12 @@ class HarborGenerator(GeneratorInterface):
             max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """
         ie_cfg = generator_cfg.inference_engine
+        if ie_cfg.enable_return_sample_support_set:
+            # The agent samples through the OpenAI chat API, which returns no sampler support.
+            raise ValueError(
+                "HarborGenerator cannot capture sampler support; use the harbor_skycap integration for "
+                "sample-support replay, or set generator.inference_engine.enable_return_sample_support_set=false."
+            )
         self.base_url = inference_engine_client.get_endpoint_url()
         # Kept so we can notify the router when a session (trial attempt) ends,
         # which lets session-aware routing policies rebalance new trajectories.
