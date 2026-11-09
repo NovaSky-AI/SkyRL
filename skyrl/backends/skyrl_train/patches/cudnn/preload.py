@@ -82,7 +82,8 @@ def _loaded_cudnn_dirs(maps_path: str = "/proc/self/maps") -> set[str]:
     """Directories of the ``libcudnn*`` objects already mapped into this process."""
     try:
         with open(maps_path) as maps:
-            paths = {line.split()[-1] for line in maps if "libcudnn" in line}
+            fields = (line.rstrip("\n").split(None, 5) for line in maps if "libcudnn" in line)
+            paths = {f[5].removesuffix(" (deleted)") for f in fields if len(f) == 6}
     except OSError:
         return set()
     return {os.path.dirname(p) for p in paths if p.startswith("/")}
