@@ -2,7 +2,7 @@ import math
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import megatron.core.parallel_state as mpu
 import torch
@@ -72,6 +72,9 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     score_prepared_sample_support,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.workers.megatron.lazy_microbatches import (
+    summarize_microbatches,
+)
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
@@ -300,7 +303,7 @@ class MegatronModelWrapper:
 
     def forward(
         self,
-        micro_batches: List[HostMicrobatch],
+        micro_batches: Sequence[HostMicrobatch],
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
@@ -463,8 +466,8 @@ class MegatronModelWrapper:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        replay_enabled = any(batch.rollout_expert_indices is not None for batch in micro_batches)
-        with router_replay_schedule(replay_enabled):
+        summary = summarize_microbatches(micro_batches)
+        with router_replay_schedule(summary.num_without_routes < len(micro_batches)):
             output = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,
@@ -479,18 +482,15 @@ class MegatronModelWrapper:
             log_probs = [o["log_probs"] for o in output]
             log_probs = torch.cat(log_probs, dim=0)
             # take last num_actions tokens per micro; concatenate later
-            # Assume all micros have same num_actions
-            num_actions = micro_batches[0].num_actions
-            log_probs = log_probs[:, -num_actions:]
+            log_probs = log_probs[:, -summary.num_actions :]
         else:
-            # return dummy tensor for non-last pp stages
-            device = micro_batches[0].sequences.device
-            log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
+            # return dummy tensor for non-last pp stages (microbatches are held on the host)
+            log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16)
         return log_probs
 
     def forward_backward_mini_batch(
         self,
-        micro_batches: List[HostMicrobatch],
+        micro_batches: Sequence[HostMicrobatch],
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
@@ -538,6 +538,7 @@ class MegatronModelWrapper:
         mtp_loss_weight = float(mcfg.mtp_loss_weight)
         mtp_loss_chunk_size = mcfg.mtp_loss_chunk_size
         mtp_loss_topk = mcfg.mtp_loss_topk
+        summary = summarize_microbatches(micro_batches)
 
         if mtp_enabled:
             # The decoupled draft training records the MTP block's inputs with a forward pre-hook
@@ -1094,10 +1095,10 @@ class MegatronModelWrapper:
         # batch should be a list of micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        replay_enabled = any(batch.rollout_expert_indices is not None for batch in micro_batches)
+        replay_enabled = summary.num_without_routes < len(micro_batches)
 
         grad_scaling = (
-            self._per_token_grad_scaling(micro_batches[0].loss.num_tokens_global)
+            self._per_token_grad_scaling(summary.num_tokens_global)
             if per_token_loss and not forward_only
             else nullcontext()
         )

@@ -183,8 +183,6 @@ class HostMicrobatch:
     rollout_sample_support: Optional[PackedSampleSupport] = None
     pixel_values: Optional[TensorList] = None
     image_grid_thw: Optional[TensorList] = None
-    # A microbatch of padding rows only, which equalizes microbatch counts across DP ranks.
-    is_padding_batch: bool = False
     loss: LossTensors = field(default_factory=LossTensors)
 
     @property
