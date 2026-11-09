@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 import re
 from typing import Any, Dict, Iterator, List, Optional, Union
@@ -41,6 +42,7 @@ from megatron.core.transformer.moe.moe_utils import (
 from megatron.core.utils import get_attr_wrapped_model, unwrap_model
 
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_cp_chunk_token_align,
     get_packed_seq_align_size,
     get_unpacked_seq_align_size,
 )
@@ -386,6 +388,20 @@ def load_megatron_grads_to_gpu(models):
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
 
 
+def megatron_grad_buffers_resident(models) -> bool:
+    """Whether the grad buffers are on the GPU (not released by :func:`offload_megatron_grads_to_cpu`)."""
+    for model_chunk in models:
+        if isinstance(model_chunk, DDP):
+            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                if buffer.grad_data is not None and buffer.grad_data.untyped_storage().size() == 0:
+                    return False
+        else:
+            for _, param in model_chunk.named_parameters():
+                if param.grad is not None and not param.grad.is_cuda:
+                    return False
+    return True
+
+
 # Frozen (requires_grad=False, non-adapter) weights are immutable for the
 # whole run, so their CPU offload copies can live in file-backed mmap storage
 # instead of RAM: the pages are then *clean page cache* the kernel can evict
@@ -626,6 +642,10 @@ def load_megatron_copy_params(optimizers):
 
 @torch.no_grad()
 def offload_megatron_optimizer(optimizers):
+    from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+        OffloadedDistributedOptimizer,
+    )
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
@@ -635,6 +655,9 @@ def offload_megatron_optimizer(optimizers):
         if _opt.optimizer is None:
             # Stub sub-optimizer with no params on this rank, e.g. the dense group when
             # LoRA only targets expert linears.
+            continue
+        if isinstance(_opt, OffloadedDistributedOptimizer):
+            # Its main params and moments are on disk between steps.
             continue
         offload_megatron_copy_params(_opt)
         opt_state_dict_values = _opt.optimizer.state.values()
@@ -647,13 +670,17 @@ def offload_megatron_optimizer(optimizers):
 
 @torch.no_grad()
 def load_megatron_optimizer(optimizers):
+    from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
+        OffloadedDistributedOptimizer,
+    )
+
     def _iter_opts(opt):
         if isinstance(opt, ChainedOptimizer):
             return opt.chained_optimizers
         return [opt]
 
     for _opt in _iter_opts(optimizers):
-        if _opt.optimizer is None:
+        if _opt.optimizer is None or isinstance(_opt, OffloadedDistributedOptimizer):
             continue
         load_megatron_copy_params(_opt)
         # if we are using HybridDeviceOptimizer, we need to only move gpu optimizer state to gpu
@@ -675,6 +702,7 @@ def preprocess_packed_seqs(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     fp8_enabled: bool = False,
     fp8_recipe: Optional[str] = None,
+    shard_for_cp: bool = True,
 ) -> tuple[torch.Tensor, PackedSeqParams]:
     """
     Preprocess packed sequences.
@@ -697,6 +725,11 @@ def preprocess_packed_seqs(
     gets first and last chunks, GPU1 gets second and second last chunks,
     and so on), this is for load balancing with causal masking.
     See https://github.com/NVIDIA/TransformerEngine/issues/1368
+
+    ``shard_for_cp=False`` keeps the full packed stream on every CP rank (each
+    sub-sequence still padded to the CP alignment) for models that apply the CP
+    split themselves, such as Megatron-Bridge's Qwen3VLModel: its mRoPE positions
+    and image-feature placement need the whole stream.
     """
     tp_size = mpu.get_tensor_model_parallel_world_size()
     cp_size = mpu.get_context_parallel_world_size()
@@ -706,6 +739,12 @@ def preprocess_packed_seqs(
     batch_size = input_ids.shape[0]
 
     if sub_seq_lengths is not None:
+        if cp_size > 1 and get_cp_chunk_token_align() != 1:
+            # The controller's collator lays sub-sequences out without the model's chunk alignment.
+            raise NotImplementedError(
+                "Mini-batch packing (sub_seq_lengths) under context parallelism does not support models "
+                "that align CP chunks to token blocks (e.g. Qwen4Exp)."
+            )
         if len(sub_seq_lengths) != batch_size:
             raise ValueError(f"sub_seq_lengths has {len(sub_seq_lengths)} rows but batch size is {batch_size}")
 
@@ -759,8 +798,10 @@ def preprocess_packed_seqs(
     # Pure Python int calculation to avoid further synchronization
     max_seqlen_in_batch = max(seqlens_in_batch_padded_cpu)
 
+    # Ranks the stream is split across here (1 when the model applies the CP split itself).
+    shard_cp_size = cp_size if shard_for_cp else 1
     shape = list(input_ids.shape[1:])
-    shape[0] = sum(seqlens_in_batch_padded_cpu) // cp_size
+    shape[0] = sum(seqlens_in_batch_padded_cpu) // shard_cp_size
     if pre_process:
         input_ids_rmpad = torch.zeros(shape, dtype=input_ids.dtype, device=input_ids.device)
         for i in range(num_subseqs):
@@ -773,7 +814,7 @@ def preprocess_packed_seqs(
                 seqlen = seqlens_in_batch_cpu[i]
                 seq_tokens = input_ids[i, attention_mask[i]]
 
-            if cp_size <= 1:
+            if shard_cp_size <= 1:
                 start_idx = cu_seqlens_padded_cpu[i]
                 input_ids_rmpad[start_idx : start_idx + seqlen] = seq_tokens
                 continue
@@ -815,13 +856,12 @@ def preprocess_packed_seqs(
         return input_ids, packed_seq_params
 
 
-def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -> bool:
-    """Whether the model packs sequences inside its own ``forward``.
+def model_owns_vlm_packing(model: Union[nn.Module, List[nn.Module]]) -> bool:
+    """Whether the VLM handles a packed [1, T] stream itself.
 
-    True for ``Qwen3VLModel`` (e.g. Qwen3.5 via the VL bridge), which would
-    double-pack and corrupt the GDN ``cu_seqlens`` under SkyRL sample packing, so
-    :class:`MegatronModelWrapper` refuses packing for it. Returns ``False`` when
-    mbridge / Qwen3VL is not importable, so other models are unaffected.
+    True when every model chunk is Megatron-Bridge's ``Qwen3VLModel`` (Qwen3-VL,
+    Qwen3.5-VL), which rebuilds 3D mRoPE positions per packed sub-sequence from
+    ``packed_seq_params``.
     """
     try:
         from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import (
@@ -831,12 +871,7 @@ def model_packs_sequences_internally(model: Union[nn.Module, List[nn.Module]]) -
         return False
 
     chunks = model if isinstance(model, (list, tuple)) else [model]
-    for chunk in chunks:
-        unwrapped = unwrap_model(chunk)
-        unwrapped_list = unwrapped if isinstance(unwrapped, (list, tuple)) else [unwrapped]
-        if any(isinstance(m, Qwen3VLModel) for m in unwrapped_list):
-            return True
-    return False
+    return bool(chunks) and all(isinstance(unwrap_model(chunk), Qwen3VLModel) for chunk in chunks)
 
 
 def remove_left_padding(
@@ -846,10 +881,14 @@ def remove_left_padding(
     pre_process: bool = True,
     fp8_enabled: bool = False,
     fp8_recipe: Optional[str] = None,
+    seq_align: int = 1,
 ):
     """
     Remove left padding from input_ids, attention_mask and position_ids
     return new_input_ids, new_attention_mask, new_position_ids
+
+    ``seq_align`` additionally rounds the padded length up to a multiple of it (combined with the
+    TP / FP8 alignment by lcm), e.g. ``mlp_chunks_for_training`` so every rank splits into as many chunks.
     """
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
@@ -862,6 +901,7 @@ def remove_left_padding(
     align_size = get_unpacked_seq_align_size(
         mpu.get_tensor_model_parallel_world_size(), fp8_enabled=fp8_enabled, fp8_recipe=fp8_recipe
     )
+    align_size = math.lcm(align_size, seq_align)
     pad_size = (align_size - seq_len % align_size) % align_size
     seq_len = seq_len + pad_size
     shape[1] = seq_len

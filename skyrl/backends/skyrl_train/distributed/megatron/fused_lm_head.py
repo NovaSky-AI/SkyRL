@@ -58,7 +58,15 @@ def call_model_with_fused_lm_head(
     if unwrapped_model.config.use_mup:
         raise NotImplementedError("fused_lm_head_logprob does not support MuP logit scaling")
     # Standard GPTModel objects directly take `output_processor`, just call the model like normal
-    if "output_processor" in inspect.signature(unwrapped_model.forward).parameters:
+    # VL wrappers (e.g. Megatron-Bridge's Qwen3VLModel) take **kwargs and pass them to a GPT-style language
+    # model that takes `output_processor`. A wrapper without **kwargs would reject the hook.
+    wrapper_params = inspect.signature(unwrapped_model.forward).parameters
+    language_model = getattr(unwrapped_model, "language_model", None)
+    if "output_processor" in wrapper_params or (
+        language_model is not None
+        and any(p.kind is inspect.Parameter.VAR_KEYWORD for p in wrapper_params.values())
+        and "output_processor" in inspect.signature(language_model.forward).parameters
+    ):
         return model(
             *args,
             output_processor=output_processor,
@@ -76,7 +84,7 @@ def call_model_with_fused_lm_head(
     # Manually mark output layer as not offloadable; this is normally done by Megatron post-processing, but we disable that
     if unwrapped_model.config.fine_grained_activation_offloading:
         for parameter in unwrapped_model.output_layer.parameters():
-            off_interface.mark_not_offloadable(parameter)
+            off_interface.mark_not_offload(parameter)
 
     # Disable post-processing since we manually handle the LM head output downstream
     unwrapped_model.post_process = False

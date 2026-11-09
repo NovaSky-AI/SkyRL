@@ -63,6 +63,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
   trainer.algorithm.overlong_buffer_penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  trainer.algorithm.grpo_norm_by_std=true \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.sampling_params.temperature=$TEMPERATURE \

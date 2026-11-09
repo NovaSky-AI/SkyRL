@@ -20,12 +20,18 @@ and is not known this early, so callers multiply by ``dtype.itemsize``.
 
 import logging
 import math
+import re
 from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["max_param_numel"]
+
+# Checkpoint tensors that never cross the wire, so they must not set the floor. DeepSeek-V4.1's Engram hash
+# tables (~384M x 256 FP8 each) are frozen buffers the inference engine loads itself; sized in bf16 they would
+# demand a 183 GiB transfer buffer.
+_NOT_SYNCED = re.compile(r"(^|\.)engram\.embed\.(weight|scale)$")
 
 
 def max_param_numel(model_path: str) -> int:
@@ -38,7 +44,7 @@ def max_param_numel(model_path: str) -> int:
             trigger a download.
 
     Returns:
-        The largest ``prod(shape)`` across every tensor, or ``0`` if the shapes
+        The largest ``prod(shape)`` across every synced tensor, or ``0`` if the shapes
         cannot be read (no safetensors files, a ``.bin`` checkpoint, an
         unresolvable path). ``0`` means "no floor from the checkpoint"; callers
         fall back to their configured size.
@@ -59,6 +65,8 @@ def max_param_numel(model_path: str) -> int:
         try:
             with safe_open(path, framework="pt", device="cpu") as handle:
                 for key in handle.keys():
+                    if _NOT_SYNCED.search(key):
+                        continue
                     # get_slice reads the file's header entry; it does not read
                     # or map the tensor data.
                     largest = max(largest, math.prod(handle.get_slice(key).get_shape()))

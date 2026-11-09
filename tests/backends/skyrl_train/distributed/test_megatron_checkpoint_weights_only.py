@@ -62,6 +62,7 @@ def strategy_module(monkeypatch):
     stub("nvidia_resiliency_ext.checkpointing.async_ckpt.core", AsyncCallsQueue=Mock())
     stub(
         "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils",
+        megatron_grad_buffers_resident=lambda models: False,
         **{
             name: Mock()
             for name in (
@@ -73,6 +74,12 @@ def strategy_module(monkeypatch):
                 "offload_megatron_optimizer",
             )
         },
+    )
+    stub(
+        "skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk",
+        CHECKPOINT_SUBDIR="optimizer_offload_to_disk",
+        OffloadedDistributedOptimizer=DistributedOptimizer,
+        disk_state_stores=lambda optimizer: [],
     )
     stub("skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper", MegatronModelWrapper=object)
     path = Path(__file__).parents[4] / "skyrl/backends/skyrl_train/distributed/megatron/megatron_strategy.py"

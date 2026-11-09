@@ -130,7 +130,7 @@ async def test_the_plain_harbor_generator_logs_a_start_timeout_rescued_by_a_retr
     client = SimpleNamespace(get_endpoint_url=lambda: "http://engine", finish_session=finish_session)
     cfg = OmegaConf.create(
         {
-            "inference_engine": {"served_model_name": "policy"},
+            "inference_engine": {"served_model_name": "policy", "enable_return_sample_support_set": False},
             "step_wise_trajectories": True,
             "merge_stepwise_output": True,
             "apply_overlong_filtering": False,
@@ -159,3 +159,12 @@ async def test_the_plain_harbor_generator_logs_a_start_timeout_rescued_by_a_retr
     assert metrics["generate/harbor/num_failed_attempts/EnvironmentStartTimeoutError"] == 1
     assert metrics["generate/harbor/environment_setup_time_max"] == pytest.approx(START_TIMEOUT)
     assert metrics["generate/harbor/agent_execution_time_mean"] == pytest.approx(AGENT)
+
+
+def test_the_plain_harbor_generator_rejects_sample_support_capture() -> None:
+    client = SimpleNamespace(get_endpoint_url=lambda: "http://engine")
+    cfg = OmegaConf.create(
+        {"inference_engine": {"served_model_name": "policy", "enable_return_sample_support_set": True}}
+    )
+    with pytest.raises(ValueError, match="harbor_skycap"):
+        HarborGenerator(cfg, {}, client, tokenizer=None, max_seq_len=1024)
