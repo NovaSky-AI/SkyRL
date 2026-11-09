@@ -21,6 +21,7 @@ from skyrl.backends.skyrl_train.rollout_shard import (
     ShardRows,
     StoredSampleSupport,
     build_training_batch,
+    dump_training_batch,
     fetch_payloads,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorBatch
@@ -41,7 +42,7 @@ from skyrl.train.dataset.preprocess import RowCollation, rows_to_training_input
 from skyrl.train.generators.base import StoredRolloutGroup
 
 COLLATION = RowCollation(pad_token_id=0, max_seq_len=None, require_rollout_logprobs=True)
-R3 = replace(COLLATION, routes_expected=True)
+R3_SSR = replace(COLLATION, routes_expected=True, support_expected=True)
 ADVANTAGES = (0.5, 0.0, -0.25, 1.0, 2.0)
 
 
@@ -114,7 +115,7 @@ def _shard(trajectories, rows, advantages, collation=COLLATION, padding=False):
 
 def _routed_shard(support_id_bits=None):
     trajectories, rows = _routed(support_id_bits)
-    return _shard(trajectories, rows, ADVANTAGES, collation=R3), trajectories
+    return _shard(trajectories, rows, ADVANTAGES, collation=R3_SSR), trajectories
 
 
 def _tensors(field):
@@ -286,6 +287,34 @@ def test_a_stalled_fetch_raises_instead_of_waiting_for_ever(monkeypatch):
     monkeypatch.setattr(rollout_shard, "SKYRL_PAYLOAD_FETCH_TIMEOUT_S", 0.5)
     with pytest.raises(TimeoutError, match="SKYRL_PAYLOAD_FETCH_TIMEOUT_S"):
         fetch_payloads([never.remote()])
+
+
+def test_a_dump_saves_the_shard_collated_whole(tmp_path):
+    group, output = _group()
+    shard = _shard(group.trajectories, output, (1.0, 1.0, 1.0))
+    path = tmp_path / "dumped_data" / "global_step_3_training_input_dp0.pkl"
+
+    ray.get(dump_training_batch.remote(shard, (0.5, -0.5, 2.0), str(path)))
+
+    with open(path, "rb") as f:
+        dumped = pickle.load(f)
+    expected = build_training_batch(shard)
+    for key in ("sequences", "attention_mask", "advantages", "loss_mask"):
+        assert torch.equal(dumped[key], expected[key])
+    # Each row's unscaled advantage over its response tokens, as the unstreamed dump holds it.
+    unscaled = torch.tensor([0.5, -0.5, 2.0])[:, None] * expected["response_mask"].float()
+    assert torch.equal(dumped[rollout_shard.UNSCALED_ADVANTAGES], unscaled)
+
+
+def test_a_failed_dump_raises_where_its_step_waits_for_it(tmp_path):
+    group, output = _group()
+    shard = _shard(group.trajectories, output, (1.0, 1.0, 1.0))
+    # A directory where the file should go.
+    path = tmp_path / "taken"
+    path.mkdir()
+
+    with pytest.raises(ray.exceptions.RayTaskError):
+        ray.get(dump_training_batch.remote(shard, (1.0, 1.0, 1.0), str(path)))
 
 
 def test_microbatch_outputs_restore_input_order_without_a_collated_batch():

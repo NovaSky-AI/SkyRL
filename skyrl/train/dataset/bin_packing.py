@@ -182,33 +182,49 @@ class Balanced(SeqPacker):
     def _pack_implementation(self, sequence_lengths: List[int]) -> List[List[int]]:
         # No _validate_sequence_lengths() call: capacity is a soft cap (see
         # class docstring) so oversized sequences fall through to their own bin.
-        # Sort by length only (stable), so equal-length sequences keep their
-        # original relative order.
-        indexed = [(length, i) for i, length in enumerate(sequence_lengths)]
-        indexed.sort(key=lambda x: x[0], reverse=True)
+        return _least_loaded(sequence_lengths, self.bin_capacity, num_bins=0)
 
-        bins: List[List[int]] = []
-        # Min-heap of (current_total_tokens, bin_idx); the root is always the
-        # least-loaded bin.
-        bin_tokens_heap: List[Tuple[int, int]] = []
+    @staticmethod
+    def partition(sequence_lengths: List[int], num_bins: int) -> List[List[int]]:
+        """Exactly ``num_bins`` bins with balanced totals and no capacity.
 
-        for length, idx in indexed:
-            placed = False
-            # Only the least-loaded bin needs checking: if the emptiest bin
-            # cannot fit the sequence, no fuller bin can either.
-            if bin_tokens_heap:
-                bin_tokens, bin_idx = bin_tokens_heap[0]
-                new_bin_tokens = bin_tokens + length
-                if new_bin_tokens <= self.bin_capacity:
-                    bins[bin_idx].append(idx)
-                    heapq.heapreplace(bin_tokens_heap, (new_bin_tokens, bin_idx))
-                    placed = True
+        The same placement, longest first into the least-loaded bin, starting from ``num_bins``
+        empty bins: with at least ``num_bins`` items, every bin gets one.
+        """
+        if num_bins < 1:
+            raise ValueError("num_bins must be positive")
+        return _least_loaded(sequence_lengths, float("inf"), num_bins=num_bins)
 
-            if not placed:
-                bins.append([idx])
-                heapq.heappush(bin_tokens_heap, (length, len(bins) - 1))
 
-        return bins
+def _least_loaded(sequence_lengths: List[int], capacity: float, num_bins: int) -> List[List[int]]:
+    """Longest first, each into the least-loaded bin when it fits, else a new bin; ``num_bins`` start empty."""
+    # Sort by length only (stable), so equal-length sequences keep their
+    # original relative order.
+    indexed = [(length, i) for i, length in enumerate(sequence_lengths)]
+    indexed.sort(key=lambda x: x[0], reverse=True)
+
+    bins: List[List[int]] = [[] for _ in range(num_bins)]
+    # Min-heap of (current_total_tokens, bin_idx); the root is always the
+    # least-loaded bin.
+    bin_tokens_heap: List[Tuple[int, int]] = [(0, i) for i in range(num_bins)]
+
+    for length, idx in indexed:
+        placed = False
+        # Only the least-loaded bin needs checking: if the emptiest bin
+        # cannot fit the sequence, no fuller bin can either.
+        if bin_tokens_heap:
+            bin_tokens, bin_idx = bin_tokens_heap[0]
+            new_bin_tokens = bin_tokens + length
+            if new_bin_tokens <= capacity:
+                bins[bin_idx].append(idx)
+                heapq.heapreplace(bin_tokens_heap, (new_bin_tokens, bin_idx))
+                placed = True
+
+        if not placed:
+            bins.append([idx])
+            heapq.heappush(bin_tokens_heap, (length, len(bins) - 1))
+
+    return bins
 
 
 _PACKERS = {

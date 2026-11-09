@@ -19,7 +19,7 @@
 from collections import defaultdict
 from enum import StrEnum
 from functools import wraps
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import ray
@@ -421,6 +421,20 @@ class AdvantageEstimator(StrEnum):
     MAXRL = "maxrl"
 
 
+# Outcome estimators whose advantage for a trajectory depends only on its group's rewards.
+GROUP_LOCAL_ADVANTAGE_ESTIMATORS = frozenset(
+    {AdvantageEstimator.GRPO, AdvantageEstimator.RLOO, AdvantageEstimator.MAXRL}
+)
+
+
+class LossReduction(StrEnum):
+    TOKEN_MEAN = "token_mean"
+    TOKEN_MEAN_LEGACY = "token_mean_legacy"
+    SEQUENCE_MEAN = "sequence_mean"
+    SEQ_MEAN_TOKEN_SUM_NORM = "seq_mean_token_sum_norm"
+    PROMPT_MEAN = "prompt_mean"
+
+
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
     """
     Registry for advantage estimator functions.
@@ -483,6 +497,23 @@ LOSSES_WITH_OLD_LOGPROBS = frozenset(
         PolicyLossType.SAPO,
         PolicyLossType.CROSS_ENTROPY,
         PolicyLossType.IMPORTANCE_SAMPLING,
+    }
+)
+
+# RL losses that sum independent per-row terms, each scaling with the pre-scaled advantages, so
+# splitting a mini-batch across forward_backward calls leaves its gradient unchanged. The
+# covariance losses select tokens from statistics of the whole microbatch.
+ROW_SEPARABLE_POLICY_LOSSES = frozenset(
+    {
+        PolicyLossType.REGULAR,
+        PolicyLossType.DUAL_CLIP,
+        PolicyLossType.GSPO,
+        PolicyLossType.CISPO,
+        PolicyLossType.ROLLOUT_IS,
+        PolicyLossType.SAPO,
+        PolicyLossType.IMPORTANCE_SAMPLING,
+        PolicyLossType.DPPO,
+        PolicyLossType.REINFORCE,
     }
 )
 
@@ -1219,6 +1250,13 @@ def reduce_loss(
     return (loss * loss_mask).sum() if loss_mask is not None else loss.sum()
 
 
+def batch_normalize_advantages(advantages: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """Z-score ``advantages`` by their ``weights``-weighted mean and standard deviation."""
+    mean = masked_mean(advantages, weights)
+    rstd = masked_mean((advantages - mean).pow(2), weights).clamp(min=1e-8).rsqrt()
+    return (advantages - mean) * rstd
+
+
 def apply_loss_reduction_to_advantages_minibatch(
     advantages: torch.Tensor,
     loss_mask: torch.Tensor,
@@ -1250,18 +1288,10 @@ def apply_loss_reduction_to_advantages_minibatch(
         Scaled advantages tensor.
     """
     batch_size = advantages.shape[0]
-    trained_rows = loss_mask.sum(dim=-1) > 0
-    # A step that trains nothing still scales finitely, so its masked loss stays zero.
-    num_sequences = max(1.0, float(trained_rows.sum()) if normalization is None else normalization.num_sequences)
-    normalized_advantages = torch.zeros_like(advantages)
 
-    # Option 1: token mean
-    if loss_reduction == "token_mean":
-        num_loss_tokens = float(loss_mask.sum()) if normalization is None else normalization.num_loss_tokens
-        normalized_advantages = advantages / max(1.0, num_loss_tokens)
-
-    # Option 1b: legacy token-mean that normalizes per-microbatch then averages across microbatches.
-    elif loss_reduction == "token_mean_legacy":
+    # Legacy token-mean that normalizes per-microbatch then averages across microbatches.
+    if loss_reduction == LossReduction.TOKEN_MEAN_LEGACY:
+        normalized_advantages = torch.zeros_like(advantages)
         # FIXME(Charlie): For step-wise training, mini_batch_size can be variable, so the number of
         # microbatches depends on how we pad.
         num_micro_batches = batch_size // micro_batch_size
@@ -1273,31 +1303,64 @@ def apply_loss_reduction_to_advantages_minibatch(
             mb_advantages = mb_advantages / mb_loss_mask.sum().clamp(min=1)
             mb_advantages /= num_micro_batches
             normalized_advantages[start_idx:end_idx] = mb_advantages
+        return normalized_advantages
 
-    # Option 2: sequence mean
-    elif loss_reduction == "sequence_mean":
-        normalized_advantages = advantages / (num_sequences * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
+    if loss_reduction == LossReduction.PROMPT_MEAN and prompt_boundaries is None:
+        raise ValueError("`prompt_mean` loss reduction requires `prompt_boundaries`")
+    row_loss_tokens = loss_mask.sum(dim=-1).tolist()
+    row_prompts = [prompt for prompt, (start, end) in enumerate(prompt_boundaries or []) for _ in range(start, end)]
+    scales = loss_reduction_row_scales(
+        loss_reduction,
+        row_loss_tokens,
+        row_prompts,
+        num_sequences=(
+            sum(tokens > 0 for tokens in row_loss_tokens) if normalization is None else normalization.num_sequences
+        ),
+        num_loss_tokens=sum(row_loss_tokens) if normalization is None else normalization.num_loss_tokens,
+        max_seq_len=max_seq_len,
+    )
+    return advantages * torch.tensor(scales, dtype=advantages.dtype, device=advantages.device)[:, None]
 
-    # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
-    elif loss_reduction == "seq_mean_token_sum_norm":
-        normalized_advantages = advantages / (num_sequences * max_seq_len)
 
-    # Option 4: Prompt level mean - token mean within each prompt, then average over all prompts.
-    # A "prompt" is a group of sequences sharing the same prompt (e.g. the n_samples_per_prompt
-    # GRPO responses). Scale token [i, t] in prompt p by 1 / (num_prompts * tokens_in_prompt_p)
-    # so that summing the per-token policy loss yields mean_p(token_mean within prompt p).
-    elif loss_reduction == "prompt_mean":
-        if prompt_boundaries is None:
-            raise ValueError("`prompt_mean` loss reduction requires `prompt_boundaries`")
-        num_prompts = max(1, sum(bool(trained_rows[p_start:p_end].any()) for p_start, p_end in prompt_boundaries))
-        for p_start, p_end in prompt_boundaries:
-            prompt_tokens = loss_mask[p_start:p_end].sum().clamp(min=1)
-            normalized_advantages[p_start:p_end] = advantages[p_start:p_end] / (num_prompts * prompt_tokens)
+def loss_reduction_row_scales(
+    loss_reduction: str,
+    row_loss_tokens: Sequence[float],
+    row_prompts: Sequence[int],
+    *,
+    num_sequences: float,
+    num_loss_tokens: float,
+    max_seq_len: int,
+) -> List[float]:
+    """The factor each row's advantages are scaled by so that summing gives ``loss_reduction``.
 
-    else:
-        raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
+    Every reduction but "token_mean_legacy" scales all tokens of a row by one factor that depends
+    only on counts, so a step whose rows are spread over many ranks can be scaled from its metadata
+    alone. ``row_prompts[i]`` is the index of row ``i``'s prompt ("prompt_mean" only); the counts
+    are the step's. Only trained rows (those with a loss token) and trained prompts count in a mean.
 
-    return normalized_advantages
+    Reductions:
+        token_mean: every loss token of the step weighs the same.
+        sequence_mean: token mean within each row, then mean over the step's trained rows.
+        seq_mean_token_sum_norm: Dr. GRPO; token sum over a constant ``max_seq_len``, then mean
+            over trained rows.
+        prompt_mean: token mean within each prompt's rows (e.g. its n_samples_per_prompt GRPO
+            responses), then mean over the step's trained prompts.
+    """
+    # A step that trains nothing still scales finitely, so its masked loss stays zero.
+    num_sequences = max(1.0, num_sequences)
+    if loss_reduction == LossReduction.TOKEN_MEAN:
+        return [1.0 / max(1.0, num_loss_tokens)] * len(row_loss_tokens)
+    if loss_reduction == LossReduction.SEQUENCE_MEAN:
+        return [1.0 / (num_sequences * max(1, tokens)) for tokens in row_loss_tokens]
+    if loss_reduction == LossReduction.SEQ_MEAN_TOKEN_SUM_NORM:
+        return [1.0 / (num_sequences * max_seq_len)] * len(row_loss_tokens)
+    if loss_reduction == LossReduction.PROMPT_MEAN:
+        prompt_tokens: Dict[int, float] = defaultdict(float)
+        for prompt, tokens in zip(row_prompts, row_loss_tokens, strict=True):
+            prompt_tokens[prompt] += tokens
+        num_prompts = max(1, sum(tokens > 0 for tokens in prompt_tokens.values()))
+        return [1.0 / (num_prompts * max(1, prompt_tokens[prompt])) for prompt in row_prompts]
+    raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
 
 
 # NOTE (erictang000): below ported from verl

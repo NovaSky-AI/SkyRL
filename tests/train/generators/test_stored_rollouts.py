@@ -16,7 +16,6 @@ from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.train.dataset.preprocess import RowCollation, rows_to_training_input
 from skyrl.train.generators.base import (
     GeneratorInterface,
-    RolloutSummary,
     StoredRolloutGroup,
     SupportCounts,
     TrajectoryID,
@@ -70,7 +69,12 @@ def test_a_stored_group_round_trips_and_splits_at_trajectory_boundaries():
     assert first.metadata["trajectory_time_splits"] == {"llm": [1.0, 2.0], "env": [0.1, 0.2]}
     assert set(ray.get(first.payload)) == {"prompt_token_ids", "response_ids", "loss_masks", "rollout_logprobs"}
     assert stored.group_fields == {"rollout_metrics": {"generate/custom_mean": 1.5}, "rollout_expert_indices": None}
-    assert stored.summary == RolloutSummary(rewards=[0.0, 1.0, 0.5], num_loss_tokens=[2, 1, 0])
+    summary = stored.summary
+    assert (summary.rewards, summary.num_loss_tokens) == ([0.0, 1.0, 0.5], [2, 1, 0])
+    assert (summary.prompt_lengths, summary.response_lengths) == ([1, 3, 1], [2, 1, 3])
+    assert summary.turn_token_counts == [[2], [1], []]
+    view = stored.metadata_view()
+    assert set(view) == set(output) - PAYLOAD_KEYS and view["rewards"] == output["rewards"]
 
     for key, value in output.items():
         if key in stored.group_fields:
@@ -123,7 +127,7 @@ async def test_generate_to_ray_keeps_trainer_scalars_beside_the_payloads(rewards
 
     stored = await _Generator(output).generate_to_ray(None)
 
-    assert stored.summary == RolloutSummary(rewards=expected_rewards, num_loss_tokens=[2, 0])
+    assert (stored.summary.rewards, stored.summary.num_loss_tokens) == (expected_rewards, [2, 0])
     assert {key: _rows(stored, key) for key in output} == output
 
 
@@ -135,6 +139,17 @@ def test_a_producer_attaches_the_payloads_it_stored_itself():
         group.attach_payloads([ray.put(payloads[0])])
     group.attach_payloads([ray.put(payload) for payload in payloads])
     assert _rows(group, "response_ids") == _step_wise_output()["response_ids"]
+
+
+def test_rollout_metrics_from_summaries_equal_those_from_the_outputs():
+    from skyrl.train.generators.utils import RolloutMetricInputs
+
+    output = _step_wise_output()
+    output["trajectory_generation_times"] = [1.0, 2.0, 3.0]
+    stored = StoredRolloutGroup.from_output(output)
+
+    from_summary = RolloutMetricInputs.from_summary(stored.summary, stored.metadata_view(), step_wise=True)
+    assert from_summary.metrics() == RolloutMetricInputs.from_generator_output(output, step_wise=True).metrics()
 
 
 def _stored_rows(payloads):

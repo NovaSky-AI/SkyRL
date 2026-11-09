@@ -7,6 +7,8 @@ the lengths alone and collate each one from its payloads only when they train it
 a node holds the payloads of the microbatches in flight, never a collated copy of the shard.
 """
 
+import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
@@ -124,6 +126,10 @@ def encode_payload(payload: Dict[str, list], *, support_id_bits: Optional[int] =
 def unpack_support(rows: List[Any]) -> List[Any]:
     """Stored sample-support rows as ``CompactSampleSupport``, the form collation reads."""
     return [row.unpack() if isinstance(row, StoredSampleSupport) else row for row in rows]
+
+
+# Stdlib logging: Ray pickles this module's remote functions, and a loguru handler can't be.
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -247,3 +253,21 @@ def pull_payloads(refs: List[ObjectRef]) -> None:
     if _PULLS is None:
         _PULLS = ThreadPoolExecutor(max_workers=PULL_AHEAD_MICROBATCHES, thread_name_prefix="skyrl-payload-pull")
     _PULLS.submit(ray.wait, refs, num_returns=len(refs), timeout=SKYRL_PAYLOAD_FETCH_TIMEOUT_S, fetch_local=True)
+
+
+# A dumped shard's advantages before z-scoring and the loss reduction: the unstreamed dump's advantages.
+UNSCALED_ADVANTAGES = "unscaled_advantages"
+
+
+@ray.remote(num_cpus=1)
+def dump_training_batch(shard: RolloutShard, unscaled_advantages: Tuple[float, ...], path: str) -> None:
+    """Save ``shard`` collated whole to ``path`` (``trainer.dump_data_batch``); nothing trains on it.
+
+    Beside the trained (scaled) ``advantages``, the batch holds each row's ``unscaled_advantages``
+    (one per row, before z-scoring and the loss reduction) over its response tokens.
+    """
+    batch = build_training_batch(shard)
+    unscaled = torch.tensor(unscaled_advantages, dtype=torch.float32)
+    batch[UNSCALED_ADVANTAGES] = unscaled[:, None] * batch["response_mask"].float()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    batch.save(path)

@@ -186,7 +186,8 @@ Each group's trials share one server actor, chosen round-robin. The actor finish
 trajectory in its own process and keeps the samples (`skyrl.train.generators.skycap_store`);
 the generator gets back only the checks it retries on. Once the group's trials end, the actor
 composes the group and returns each trajectory's rows as a Ray object owned by the generator,
-so the rows stay in that node's object store: `generate_to_ray`. `generate` returns the same
+so the rows stay in that node's object store: `generate_to_ray`, which the fully-async
+trainer uses with `trainer.fully_async.store_groups_in_ray=true`. `generate` returns the same
 rows to the caller. Given only URLs (servers it did not start), the generator finishes over HTTP
 and composes in its own process instead.
 

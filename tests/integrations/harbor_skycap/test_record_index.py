@@ -34,6 +34,8 @@ from examples.train_integrations.harbor_skycap.record_index import (  # noqa: E4
 )
 from skycap import CapturePool  # noqa: E402
 from skycap import record as skycap_record  # noqa: E402
+from skyrl.train.generators.base import RolloutMetadataView, TrajectoryID  # noqa: E402
+from skyrl.train.streamed_training import StreamedRolloutRows  # noqa: E402
 from skyrl.train.utils.callbacks import CallbackInput  # noqa: E402
 from tests.integrations.harbor_skycap import (
     test_harbor_skycap as harbor_tests,  # noqa: E402
@@ -316,6 +318,26 @@ def entries(records: RecordLog, *names: str) -> RecordLog:
         trajectory = SimpleNamespace(id=f"tr_{name}", result=result, finishing={"reward": 1.0})
         records.add("train", SimpleNamespace(instance_id=name, repetition_id=0), 0, trajectory)
     return records
+
+
+def test_a_streamed_step_marks_trained_only_the_trajectories_it_trained() -> None:
+    # Every kept row, as an unstreamed step passes them: a/0 has two step-wise rows, b's group was
+    # dropped by the zero-variance filter, and a/1 trained nothing.
+    ids = [TrajectoryID("a", 0), TrajectoryID("a", 0), TrajectoryID("a", 1), TrajectoryID("b", 0)]
+    rows = StreamedRolloutRows(
+        view=RolloutMetadataView(),
+        uids=["a", "a", "a", "b"],
+        advantages=[1.0, 1.0, -1.0, 0.0],
+        response_lengths=[2, 2, 2, 2],
+        loss_tokens=[0, 2, 0, 2],
+        trained_loss_tokens=[0, 2, 0, 0],
+    )
+    streamed = CallbackInput(
+        global_step=1, epoch=0, total_steps=9, steps_per_epoch=9, streamed_rows=rows, trajectory_ids=ids
+    )
+    unstreamed = step_end(1, ids, loss_masks=[[0, 0], [1, 1], [0, 0], [0, 0]])
+
+    assert record_index.trained_keys(streamed) == record_index.trained_keys(unstreamed) == {("a", 0)}
 
 
 def test_an_error_that_may_pass_is_retried(warnings) -> None:
