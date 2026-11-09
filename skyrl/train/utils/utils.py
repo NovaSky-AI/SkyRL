@@ -29,6 +29,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.kernels.nvfp4_quant import (
+    BLOCK_SCALE_FOUR_OVER_SIX,
+    flashinfer_nvfp4_env,
+)
 from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
@@ -387,6 +391,63 @@ def _validate_draft_weight_sync_cfg(cfg: SkyRLTrainConfig):
         )
 
 
+def _validate_expert_nvfp4_cfg(cfg: SkyRLTrainConfig):
+    """Check ``trainer.policy.megatron_config.expert_nvfp4`` against the training setup and the rollouts it must
+    match (``workers/megatron/quantization/expert_nvfp4.py``)."""
+    from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+        EXPERT_NVFP4_MODE_W4A4,
+        EXPERT_NVFP4_MODES,
+    )
+
+    mc = cfg.trainer.policy.megatron_config
+    if not mc.expert_nvfp4:
+        return
+    name = "trainer.policy.megatron_config.expert_nvfp4"
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError(f"{name} needs trainer.strategy=megatron")
+    if mc.expert_nvfp4_mode not in EXPERT_NVFP4_MODES:
+        raise ValueError(f"{name}_mode must be one of {list(EXPERT_NVFP4_MODES)}, got {mc.expert_nvfp4_mode!r}")
+    ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.fp8_weight_sync_mode is not None:
+        raise ValueError(
+            f"{name} ships its own ModelOpt NVFP4 experts and is mutually exclusive with fp8_weight_sync_mode"
+        )
+    from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+
+    backend = get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all)
+    if backend not in {"nccl", "ipc"}:
+        raise ValueError(f"{name} weight sync needs the NCCL or CUDA-IPC backend, got {backend!r}")
+    policy_cfg = cfg.trainer.policy
+    if policy_cfg.model.lora.rank > 0 or policy_cfg.model.fake_int4_qat.enabled:
+        raise ValueError(f"{name} requires full-parameter training without fake_int4_qat")
+    if cfg.trainer.mtp.enabled:
+        raise ValueError(f"{name} does not support MTP training or draft sync")
+    if not mc.moe_grouped_gemm:
+        raise ValueError(f"{name} requires moe_grouped_gemm=true")
+    kwargs = mc.transformer_config_kwargs
+    if is_fp8_enabled(kwargs.get("fp8")) or kwargs.get("fp4") or kwargs.get("quant_recipe") is not None:
+        raise ValueError(f"{name} conflicts with global fp8/fp4 or a quant_recipe")
+    # Each expert's global (per-tensor) scale must come from the whole matrix, as on the sampler.
+    etp = mc.expert_tensor_parallel_size or mc.tensor_model_parallel_size
+    if etp != 1:
+        unset = "" if mc.expert_tensor_parallel_size else ", which Megatron takes from tensor_model_parallel_size"
+        raise ValueError(
+            f"{name} needs whole experts per rank: set trainer.policy.megatron_config.expert_tensor_parallel_size: 1 "
+            f"(got {etp}{unset})"
+        )
+    if mc.expert_nvfp4_mode == EXPERT_NVFP4_MODE_W4A4:
+        # The trainer (expert TP 1) quantizes each fc2 input per token over the whole intermediate row. vLLM does the
+        # same under expert parallelism, but over a 1/R shard when its experts are tensor-sharded R ways (DP x TP).
+        shards = 1 if ie_cfg.expert_parallel_size > 1 else ie_cfg.data_parallel_size * ie_cfg.tensor_parallel_size
+        if shards != 1:
+            raise ValueError(
+                f"{name}_mode=w4a4 cannot match the rollouts' per-token fc2-input scales: vLLM shards each expert's "
+                f"intermediate {shards} ways (no expert parallelism; DP x TP), the trainer holds whole rows. Use "
+                "expert parallelism on the engines (generator.inference_engine.expert_parallel_size), or "
+                "expert_nvfp4_mode=w4a16."
+            )
+
+
 def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_s: Optional[float]) -> None:
     for name, value in (("step_timeout_s", step_timeout_s), ("weight_sync_timeout_s", weight_sync_timeout_s)):
         if value is None:
@@ -453,6 +514,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     # side (vLLM MTP speculative decoding) so both stay consistent.
     _apply_mtp_config(cfg)
     _validate_draft_weight_sync_cfg(cfg)
+    _validate_expert_nvfp4_cfg(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,
@@ -1059,11 +1121,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Engram table placement, faulthandler).
         env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
 
-        # Expert NVFP4: the TE recipe and the matching sampler-side FlashInfer settings, on every actor.
-        if cfg.trainer.policy.megatron_config.expert_nvfp4:
-            from skyrl.backends.skyrl_train.weight_sync.nvfp4 import nvfp4_runtime_env
-
-            env_vars.update(nvfp4_runtime_env(dict(os.environ)))
+        # Expert NVFP4: FlashInfer's NVFP4 env for the engines' per-token activation quantization (the trainer sets
+        # it around its own launches), every key explicit so stray shell values cannot change the grid.
+        megatron_cfg = cfg.trainer.policy.megatron_config
+        if megatron_cfg.expert_nvfp4:
+            env_vars.update(flashinfer_nvfp4_env(megatron_cfg.expert_nvfp4_block_scale == BLOCK_SCALE_FOUR_OVER_SIX))
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"

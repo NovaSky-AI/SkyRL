@@ -1,14 +1,15 @@
 set -x
 
 # Colocated DAPO for Qwen3-30B-A3B-Base with routed-expert NVFP4 in BOTH the Megatron trainer and the vLLM
-# sampler (humans& "The 4-bitter Lesson" recipe): per-token NVFP4 activations, 4/6 block scaling, dequantized
-# backward, routed experts of the last 7 of 48 layers in BF16. The trainer's NVFP4 expert weights are synced to vLLM
-# as ModelOpt NVFP4 tensors and loaded without re-quantization. Requires SM100 (B200/B300). One node of 8xB200.
+# sampler: the sampler serves W4A4 (per-token NVFP4 activations, 4/6 block scales), the routed experts of the last
+# 7 of 48 layers stay BF16, and the trainer's NVFP4 expert weights are synced to vLLM as ModelOpt NVFP4 tensors and
+# loaded without re-quantization. Requires SM100 (B200/B300). One node of 8xB200.
 #
-# Same recipe as run_megatron_dapo_qwen3_30b_a3b.sh apart from placement and the NVFP4 flags below. The TE recipe
-# defaults come from `trainer.policy.megatron_config.expert_nvfp4`; individual knobs can be overridden with the
-# NVTE_NVFP4_* / NVTE_BACKWARD_OVERRIDE environment, and SKYRL_NVFP4_RECIPE=pure selects TE's stock NVFP4 recipe.
-# vLLM runs its experts expert-parallel so each rank quantizes full-width down_proj inputs, as the trainer does.
+# EXPERT_NVFP4_MODE (trainer.policy.megatron_config.expert_nvfp4_mode) picks what the trainer rounds: w4a16 (the
+# default, the routed-expert weights only; best rollout-trainer logprob match) or w4a4 (the per-token expert inputs
+# too, with the fprops on NVFP4 tensor cores; on the default alltoall dispatcher). Same recipe as
+# run_megatron_dapo_qwen3_30b_a3b.sh apart from placement and the NVFP4 flags below. vLLM runs its experts
+# expert-parallel so each rank quantizes full-width down_proj inputs, as the trainer does.
 
 # bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_nvfp4.sh
@@ -22,6 +23,7 @@ NUM_GPUS_PER_NODE=8
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="wandb"  # change to "console" to print to stdout
+EXPERT_NVFP4_MODE="${EXPERT_NVFP4_MODE:-w4a16}"
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
@@ -64,6 +66,7 @@ TIS_TYPE=token
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.expert_nvfp4=true \
+  trainer.policy.megatron_config.expert_nvfp4_mode=$EXPERT_NVFP4_MODE \
   trainer.policy.megatron_config.num_layers_at_end_in_bf16=7 \
   generator.inference_engine.expert_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   data.train_data="['$TRAIN_FILE']" \
@@ -124,10 +127,10 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_30b_a3b_base_nvfp4_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_nvfp4_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
+  trainer.run_name="dapo_qwen3_30b_a3b_base_nvfp4_${EXPERT_NVFP4_MODE}_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_nvfp4_${EXPERT_NVFP4_MODE}_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_nvfp4_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_nvfp4_${EXPERT_NVFP4_MODE}_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   $@
