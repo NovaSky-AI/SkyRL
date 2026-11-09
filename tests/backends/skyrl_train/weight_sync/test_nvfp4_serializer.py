@@ -5,14 +5,12 @@ import torch
 
 from skyrl.backends.skyrl_train.weight_sync import nvfp4
 
-_SETTINGS = nvfp4.Nvfp4WeightQuantSettings(
-    use_4over6=True, e4m3_max=448, err_mode="MSE", row_scaled_activation=True, backward_override="dequantized"
-)
+_SETTINGS = nvfp4.Nvfp4WeightQuantSettings("four_over_six")
 
 
 @pytest.fixture
 def fake_quantizer(monkeypatch):
-    """Replace the TE kernel (GPU-only) with a shape-correct stub that records the quantized matrices."""
+    """Replace the FlashInfer kernel (GPU-only) with a shape-correct stub that records the quantized matrices."""
     calls = []
 
     def quantize(weight, settings):
@@ -202,77 +200,43 @@ def test_spec_serializer_rejects_what_the_kernel_rejects():
         list(serializer("model.layers.0.mlp.experts.1.up_proj.weight", nvfp4.TensorSpec(torch.bfloat16, (8, 32))))
 
 
-class _FakeNVFP4Quantizer:
-    """Deterministic CPU stand-in for TE's NVFP4Quantizer: quantize() is a pure function of its input."""
+def _fake_quantize_experts(calls=None):
+    def quantize_experts(w, gs, block_scale):
+        if calls is not None:
+            calls.append((w.clone(), gs.clone(), block_scale))
+        e, n, k = w.shape
+        return torch.zeros(e, n, k // 2, dtype=torch.uint8), torch.zeros(e, n, k // 16, dtype=torch.float8_e4m3fn)
 
-    constructed = 0
-
-    def __init__(self, **kwargs):
-        type(self).constructed += 1
-        self.kwargs = kwargs
-
-    def quantize(self, src):
-        from types import SimpleNamespace
-
-        rows, cols = src.shape
-        packed = (src.float().abs() * 7).to(torch.uint8)[:, : cols // 2]
-        scale = (src.float().abs().reshape(rows, cols // 16, 16).amax(-1) * 3).to(torch.uint8)
-        return SimpleNamespace(
-            _rowwise_data=packed.contiguous(),
-            _rowwise_scale_inv=scale.contiguous(),
-            _amax_rowwise=src.float().abs().amax().reshape(1),
-        )
+    return quantize_experts
 
 
-def _bits(t):
-    return t.view(torch.uint8) if t.dtype == torch.float8_e4m3fn else t
-
-
-@pytest.fixture
-def fake_te(monkeypatch):
-    import sys
-    import types
-
-    mod = types.ModuleType("transformer_engine.pytorch.tensor.nvfp4_tensor")
-    mod.NVFP4Quantizer = _FakeNVFP4Quantizer
-    for name in ("transformer_engine", "transformer_engine.pytorch", "transformer_engine.pytorch.tensor"):
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.tensor.nvfp4_tensor", mod)
-    monkeypatch.setattr(nvfp4, "_QUANTIZER_CACHE", {})
-    _FakeNVFP4Quantizer.constructed = 0
-    return _FakeNVFP4Quantizer
-
-
-def test_quantizer_is_built_once_and_reuse_is_identical(fake_te):
-    gen = torch.Generator().manual_seed(0)
-    weights = [torch.randn(20, 64, generator=gen) for _ in range(5)]
-    cached = [nvfp4.quantize_nvfp4_matrix(w, _SETTINGS) for w in weights]
-    assert fake_te.constructed == 1
-    kwargs = next(iter(nvfp4._QUANTIZER_CACHE.values())).kwargs
-    assert kwargs["nvfp4_use_4over6"] is True and kwargs["nvfp4_4over6_err_mode"] == "MSE"
-    assert kwargs["with_rht"] is False and kwargs["stochastic_rounding"] is False
-
-    for w, got in zip(weights, cached):
-        nvfp4._QUANTIZER_CACHE.clear()  # a fresh quantizer per matrix, as before the cache
-        fresh = nvfp4.quantize_nvfp4_matrix(w, _SETTINGS)
-        for a, b in zip(got, fresh):
-            assert a.dtype == b.dtype and a.shape == b.shape
-            assert torch.equal(_bits(a), _bits(b))
-
-    other = nvfp4.Nvfp4WeightQuantSettings(
-        use_4over6=False, e4m3_max=448, err_mode="MAE", row_scaled_activation=True, backward_override=None
-    )
-    nvfp4.quantize_nvfp4_matrix(weights[0], other)
-    assert len(nvfp4._QUANTIZER_CACHE) == 2  # different settings never share a quantizer
-
-
-def test_spec_matches_real_quantize_outputs(fake_te):
-    """Pins ``_emit_spec`` to what ``quantize_nvfp4_matrix`` + ``_emit`` produce (incl. the 16-row padding path)."""
+def test_spec_matches_real_quantize_outputs(monkeypatch):
+    """Pins ``_emit_spec`` to what ``quantize_nvfp4_matrix`` + ``_emit`` produce."""
+    monkeypatch.setattr(nvfp4, "quantize_experts", _fake_quantize_experts())
     for rows in (16, 20, 3):
         w = torch.randn(rows, 48)
         real = list(nvfp4._emit("p", "down_proj", *nvfp4.quantize_nvfp4_matrix(w, _SETTINGS)))
         spec = list(nvfp4._emit_spec("p", "down_proj", rows, 48))
         assert [(n, t.dtype, tuple(t.shape)) for n, t in real] == [(n, s.dtype, tuple(s.shape)) for n, s in spec]
+
+
+@pytest.mark.parametrize("block_scale", ["absmax", "four_over_six"])
+def test_quantizes_with_vllms_global_scale_over_the_whole_matrix(monkeypatch, block_scale):
+    """One ``quantize_experts`` call per matrix with vLLM's global scale over the whole ``[gate; up]`` matrix and the
+    configured block scale, so the bytes are the trainer's round trip's."""
+    calls = []
+    monkeypatch.setattr(nvfp4, "quantize_experts", _fake_quantize_experts(calls))
+    w = torch.cat((torch.full((6, 32), 1.0), torch.full((6, 32), -3.0)))
+    packed, scales, decode = nvfp4.quantize_nvfp4_matrix(w, nvfp4.Nvfp4WeightQuantSettings(block_scale))
+    ((qw, gs, bs),) = calls
+    assert torch.equal(qw, w[None]) and bs == block_scale
+    assert gs.item() == pytest.approx(6 * 448 / 3.0) and decode.item() == pytest.approx(3.0 / (6 * 448))
+    assert packed.shape == (12, 16) and scales.shape == (12, 2)
+
+
+def test_settings_reject_unknown_block_scales():
+    with pytest.raises(ValueError, match="block_scale"):
+        nvfp4.Nvfp4WeightQuantSettings("mse")
 
 
 @pytest.mark.parametrize(

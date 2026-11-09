@@ -16,9 +16,9 @@ in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout, over all *global* expert
   ``<layer>.w2_input_scale``      float32        ``[E]``
 
 named ``__skyrl_nvfp4_stacked__:<hf layer prefix>.<leaf>`` (``<layer>`` = ``model.layers.<i>.mlp.experts``).
-Quantization is unchanged -- the same TE call per expert on the same ``[gate; up]`` matrix -- and each result is
-written into a preallocated stack, so the bytes are exactly the per-expert stream's bytes, concatenated in the
-order vLLM's ``FusedMoE.weight_loader`` would place them (gate into rows ``[0, N)``, up into ``[N, 2N)``).
+Quantization is unchanged -- the same ``quantize_nvfp4_matrix`` call per expert on the same ``[gate; up]``
+matrix -- and each result is written into a preallocated stack, so the bytes are exactly the per-expert stream's
+bytes, concatenated in the order vLLM's ``FusedMoE.weight_loader`` would place them (gate into rows ``[0, N)``, up into ``[N, 2N)``).
 BF16 layers (``num_layers_at_{start,end}_in_bf16``) are untouched, as are all non-expert tensors.
 
 The receiver is ``nvfp4_stacked_receive.py``; ``unstack_to_per_expert`` turns a stacked layer back into the
