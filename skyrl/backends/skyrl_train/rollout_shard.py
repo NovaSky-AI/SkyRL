@@ -12,7 +12,6 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -20,8 +19,12 @@ import ray
 import torch
 from ray import ObjectRef
 
+from skyrl.backends.skyrl_train.fields import (
+    BatchMetadataKey,
+    GeneratorOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.training_batch import (
-    REAL_SAMPLE_MASK,
     TrainingInputBatch,
     padding_rows,
 )
@@ -31,25 +34,8 @@ from skyrl.env_vars import SKYRL_PAYLOAD_FETCH_TIMEOUT_S
 from skyrl.train.dataset.preprocess import RowCollation, rows_to_training_input
 from skyrl.utils import stage_trace
 
-
-class RolloutPayloadKey(StrEnum):
-    """``GeneratorOutput`` keys holding a row's token payload.
-
-    A stored trajectory keeps these in the Ray object store; every other key is metadata the
-    driver may read.
-    """
-
-    PROMPT_TOKEN_IDS = "prompt_token_ids"
-    RESPONSE_IDS = "response_ids"
-    LOSS_MASKS = "loss_masks"
-    ROLLOUT_LOGPROBS = "rollout_logprobs"
-    ROLLOUT_EXPERT_INDICES = "rollout_expert_indices"
-    ROLLOUT_SAMPLE_SUPPORT = "rollout_sample_support"
-    PIXEL_VALUES = "pixel_values"
-    IMAGE_GRID_THW = "image_grid_thw"
-
-
-PAYLOAD_KEYS = frozenset(RolloutPayloadKey)
+# Stdlib logging: Ray pickles this module's remote functions, and a loguru handler can't be.
+logger = logging.getLogger(__name__)
 
 
 def support_id_bits(vocab_size: int) -> int:
@@ -102,10 +88,10 @@ def _map_rows(fn, rows: List[Any]) -> List[Any]:
 
 
 _ENCODERS = {
-    RolloutPayloadKey.PROMPT_TOKEN_IDS: _token_ids,
-    RolloutPayloadKey.RESPONSE_IDS: _token_ids,
-    RolloutPayloadKey.LOSS_MASKS: _float32,
-    RolloutPayloadKey.ROLLOUT_LOGPROBS: _float32,
+    GeneratorOutputKey.PROMPT_TOKEN_IDS: _token_ids,
+    GeneratorOutputKey.RESPONSE_IDS: _token_ids,
+    GeneratorOutputKey.LOSS_MASKS: _float32,
+    GeneratorOutputKey.ROLLOUT_LOGPROBS: _float32,
 }
 
 
@@ -117,9 +103,9 @@ def encode_payload(payload: Dict[str, list], *, support_id_bits: Optional[int] =
     ``support_id_bits``, each row's sample-support member ids are packed at that width.
     """
     stored = {key: _map_rows(_ENCODERS[key], rows) if key in _ENCODERS else rows for key, rows in payload.items()}
-    support = stored.get(RolloutPayloadKey.ROLLOUT_SAMPLE_SUPPORT)
+    support = stored.get(GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT)
     if support_id_bits is not None and support is not None:
-        stored[RolloutPayloadKey.ROLLOUT_SAMPLE_SUPPORT] = _map_rows(
+        stored[GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT] = _map_rows(
             lambda rows: StoredSampleSupport.pack(rows, support_id_bits), support
         )
     return stored
@@ -130,15 +116,11 @@ def unpack_support(rows: List[Any]) -> List[Any]:
     return [row.unpack() if isinstance(row, StoredSampleSupport) else row for row in rows]
 
 
-# Stdlib logging: Ray pickles this module's remote functions, and a loguru handler can't be.
-logger = logging.getLogger(__name__)
-
-
 @dataclass(frozen=True)
 class RolloutShard:
     """One policy DP rank's rows of a mini-batch.
 
-    ``payload_refs`` are stored trajectories (each a dict of ``RolloutPayloadKey`` -> per-row list).
+    ``payload_refs`` are stored trajectories (each a dict of ``PAYLOAD_KEYS`` -> per-row list).
     Rows are numbered across them, in order. ``row_advantages`` holds each row's advantage, already
     scaled by the loss reduction, so a row's token advantages are this value over its response tokens.
     """
@@ -164,24 +146,24 @@ def build_training_batch(shard: RolloutShard) -> TrainingInputBatch:
 
 def _support_unpacked(rows: Dict[str, list]) -> Dict[str, list]:
     """Stored rows as collation reads them: only these rows' sample-support ids are unpacked."""
-    key = RolloutPayloadKey.ROLLOUT_SAMPLE_SUPPORT
+    key = GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT
     return {**rows, key: unpack_support(rows[key])} if key in rows else rows
 
 
 def _with_advantages(batch: TrainingInputBatch, advantages: torch.Tensor, padding: bool) -> TrainingInputBatch:
     """``batch`` with each row's advantage over its response tokens, or marked as padding."""
-    response_mask = batch["response_mask"]
-    batch["advantages"] = advantages[:, None] * response_mask.float()
-    batch.metadata["response_length"] = response_mask.shape[1]
+    response_mask = batch[TrainingField.RESPONSE_MASK]
+    batch[TrainingField.ADVANTAGES] = advantages[:, None] * response_mask.float()
+    batch.metadata[BatchMetadataKey.RESPONSE_LENGTH] = response_mask.shape[1]
     if padding:
         # Rows that train nothing, as ``pad_training_input_batch`` pads.
-        batch["advantages"] = torch.zeros_like(batch["advantages"])
-        batch["loss_mask"] = padding_rows("loss_mask", batch["loss_mask"], batch.batch_size)
-        if batch.get("router_padding_mask") is not None:
-            batch["router_padding_mask"] = padding_rows(
-                "router_padding_mask", batch["router_padding_mask"], batch.batch_size
-            )
-        batch[REAL_SAMPLE_MASK] = padding_rows(REAL_SAMPLE_MASK, batch.real_sample_mask, batch.batch_size)
+        batch[TrainingField.ADVANTAGES] = torch.zeros_like(batch[TrainingField.ADVANTAGES])
+        for key in (TrainingField.LOSS_MASK, TrainingField.ROUTER_PADDING_MASK):
+            if batch.get(key) is not None:
+                batch[key] = padding_rows(key, batch[key], batch.batch_size)
+        batch[TrainingField.REAL_SAMPLE_MASK] = padding_rows(
+            TrainingField.REAL_SAMPLE_MASK, batch.real_sample_mask, batch.batch_size
+        )
     return batch
 
 
@@ -228,7 +210,7 @@ class ShardRows:
             batch, torch.tensor(self.shard.row_advantages, dtype=torch.float32)[index], self.shard.padding
         )
         if self.old_logprobs is not None:
-            batch["action_log_probs"] = self.old_logprobs[index]
+            batch[TrainingField.ACTION_LOG_PROBS] = self.old_logprobs[index]
         stage_trace.record("mb.collate", t_collate, time.perf_counter(), rows=len(rows))
         return batch
 
@@ -280,6 +262,6 @@ def dump_training_batch(shard: RolloutShard, unscaled_advantages: Tuple[float, .
     """
     batch = build_training_batch(shard)
     unscaled = torch.tensor(unscaled_advantages, dtype=torch.float32)
-    batch[UNSCALED_ADVANTAGES] = unscaled[:, None] * batch["response_mask"].float()
+    batch[UNSCALED_ADVANTAGES] = unscaled[:, None] * batch[TrainingField.RESPONSE_MASK].float()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     batch.save(path)

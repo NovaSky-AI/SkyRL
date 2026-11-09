@@ -7,9 +7,9 @@ import numpy as np
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_FIELD,
     CompactSampleSupport,
 )
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
@@ -90,7 +90,7 @@ def training_batch() -> TrainingInputBatch:
             "advantages": loss_mask.float() * (loss_mask.new_tensor([[1.0], [-1.0]]) / loss_mask.sum()),
             "action_log_probs": None,
             "base_action_log_probs": None,
-            SAMPLE_SUPPORT_FIELD: sample_support,
+            TrainingField.ROLLOUT_SAMPLE_SUPPORT: sample_support,
         }
     )
     batch.metadata = {"response_length": response_mask.shape[1], "global_step": 0}

@@ -18,6 +18,11 @@ from loguru import logger
 from tqdm.asyncio import tqdm
 
 import skyrl_gym
+from skyrl.backends.skyrl_train.fields import (
+    GeneratorInputKey,
+    GeneratorOutputKey,
+    InferenceEngineOutputKey,
+)
 from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInput,
@@ -479,11 +484,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                 llm_call_start_time = time.monotonic()
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
                 time_splits["llm"] += time.monotonic() - llm_call_start_time
-                output = engine_output["responses"][0]
-                output_ids = engine_output["response_ids"][0]
-                stop_reason = engine_output["stop_reasons"][0]
-                response_logprobs = engine_output.get("response_logprobs", None)
-                rollout_expert_indices = engine_output.get("rollout_expert_indices", None)
+                output = engine_output[InferenceEngineOutputKey.RESPONSES][0]
+                output_ids = engine_output[InferenceEngineOutputKey.RESPONSE_IDS][0]
+                stop_reason = engine_output[InferenceEngineOutputKey.STOP_REASONS][0]
+                response_logprobs = engine_output.get(InferenceEngineOutputKey.RESPONSE_LOGPROBS, None)
+                rollout_expert_indices = engine_output.get(InferenceEngineOutputKey.ROLLOUT_EXPERT_INDICES, None)
                 if response_logprobs is not None:
                     response_logprobs = response_logprobs[0]
                     if self.custom_chat_template is not None:
@@ -508,7 +513,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     assert (
                         self.custom_chat_template is None
                     ), "Sample-support bookkeeping is not supported with custom chat template"
-                    raw_sample_support = engine_output.get("rollout_sample_support", None)
+                    raw_sample_support = engine_output.get(InferenceEngineOutputKey.ROLLOUT_SAMPLE_SUPPORT, None)
                     if raw_sample_support is None:
                         raise ValueError("Sample-support generation did not return a support set")
                     sample_support_rows = raw_sample_support[0]
@@ -890,14 +895,14 @@ class SkyRLGymGenerator(GeneratorInterface):
             cache_salt=cache_salt,
         )
         engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
-        outputs = engine_output["responses"]
-        responses = engine_output["response_ids"]
-        stop_reasons = engine_output["stop_reasons"]
-        logprobs = engine_output.get("response_logprobs", None)
+        outputs = engine_output[InferenceEngineOutputKey.RESPONSES]
+        responses = engine_output[InferenceEngineOutputKey.RESPONSE_IDS]
+        stop_reasons = engine_output[InferenceEngineOutputKey.STOP_REASONS]
+        logprobs = engine_output.get(InferenceEngineOutputKey.RESPONSE_LOGPROBS, None)
         raw_rollout_expert_indices = (
-            engine_output.get("rollout_expert_indices", None) if capture_routed_experts else None
+            engine_output.get(InferenceEngineOutputKey.ROLLOUT_EXPERT_INDICES, None) if capture_routed_experts else None
         )
-        raw_rollout_sample_support = engine_output.get("rollout_sample_support", None)
+        raw_rollout_sample_support = engine_output.get(InferenceEngineOutputKey.ROLLOUT_SAMPLE_SUPPORT, None)
 
         truncated_responses = []
         rewards = []
@@ -941,15 +946,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_masks = apply_overlong_filtering(loss_masks, stop_reasons)
 
         generator_output: GeneratorOutput = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": truncated_responses,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
-            "stop_reasons": stop_reasons,
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": truncated_logprobs,
-            "rollout_expert_indices": truncated_indices,
-            "rollout_sample_support": truncated_sample_support,
+            GeneratorOutputKey.PROMPT_TOKEN_IDS: prompt_token_ids,
+            GeneratorOutputKey.RESPONSE_IDS: truncated_responses,
+            GeneratorOutputKey.REWARDS: rewards,
+            GeneratorOutputKey.LOSS_MASKS: loss_masks,
+            GeneratorOutputKey.STOP_REASONS: stop_reasons,
+            GeneratorOutputKey.ROLLOUT_METRICS: rollout_metrics,
+            GeneratorOutputKey.ROLLOUT_LOGPROBS: truncated_logprobs,
+            GeneratorOutputKey.ROLLOUT_EXPERT_INDICES: truncated_indices,
+            GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT: truncated_sample_support,
         }
 
         return generator_output
@@ -965,13 +970,13 @@ class SkyRLGymGenerator(GeneratorInterface):
         Returns:
             GeneratorOutput
         """
-        prompts = input_batch["prompts"]
-        env_classes = input_batch["env_classes"]
-        env_extras = input_batch["env_extras"]
-        trajectory_ids = input_batch.get("trajectory_ids", None)
+        prompts = input_batch[GeneratorInputKey.PROMPTS]
+        env_classes = input_batch[GeneratorInputKey.ENV_CLASSES]
+        env_extras = input_batch[GeneratorInputKey.ENV_EXTRAS]
+        trajectory_ids = input_batch.get(GeneratorInputKey.TRAJECTORY_IDS, None)
         if self.generator_cfg.step_wise_trajectories:
             assert trajectory_ids is not None, "`trajectory_ids` is a required field for step wise training"
-        sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
+        sampling_params: Optional[dict] = input_batch.get(GeneratorInputKey.SAMPLING_PARAMS, None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
 
@@ -980,7 +985,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         cache_salt = self._compute_cache_salt()
 
         # The phase controls per-request sample-support capture.
-        batch_metadata = input_batch.get("batch_metadata", None)
+        batch_metadata = input_batch.get(GeneratorInputKey.BATCH_METADATA, None)
         training_phase: TrainingPhase = (
             batch_metadata.training_phase if batch_metadata is not None else TRAINING_PHASE_TRAIN
         )
@@ -1137,25 +1142,25 @@ class SkyRLGymGenerator(GeneratorInterface):
             loss_masks = apply_overlong_filtering(loss_masks, stop_reasons)
 
         generator_output: GeneratorOutput = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": responses,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
-            "stop_reasons": stop_reasons,
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": rollout_logprobs,
-            "trajectory_ids": out_trajectory_ids,
+            GeneratorOutputKey.PROMPT_TOKEN_IDS: prompt_token_ids,
+            GeneratorOutputKey.RESPONSE_IDS: responses,
+            GeneratorOutputKey.REWARDS: rewards,
+            GeneratorOutputKey.LOSS_MASKS: loss_masks,
+            GeneratorOutputKey.STOP_REASONS: stop_reasons,
+            GeneratorOutputKey.ROLLOUT_METRICS: rollout_metrics,
+            GeneratorOutputKey.ROLLOUT_LOGPROBS: rollout_logprobs,
+            GeneratorOutputKey.TRAJECTORY_IDS: out_trajectory_ids,
             # NOTE: for completion metrics, we output the completion time
-            "trajectory_generation_times": out_trajectory_generation_times,
-            "trajectory_time_splits": out_trajectory_time_splits,
-            "rollout_expert_indices": rollout_expert_indices,
-            "rollout_sample_support": rollout_sample_support,
-            "is_last_step": is_last_step,
-            "env_metrics": env_metrics,
+            GeneratorOutputKey.TRAJECTORY_GENERATION_TIMES: out_trajectory_generation_times,
+            GeneratorOutputKey.TRAJECTORY_TIME_SPLITS: out_trajectory_time_splits,
+            GeneratorOutputKey.ROLLOUT_EXPERT_INDICES: rollout_expert_indices,
+            GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT: rollout_sample_support,
+            GeneratorOutputKey.IS_LAST_STEP: is_last_step,
+            GeneratorOutputKey.ENV_METRICS: env_metrics,
         }
         if has_vision_features:
-            generator_output["pixel_values"] = pixel_values
-            generator_output["image_grid_thw"] = image_grid_thw
+            generator_output[GeneratorOutputKey.PIXEL_VALUES] = pixel_values
+            generator_output[GeneratorOutputKey.IMAGE_GRID_THW] = image_grid_thw
 
         return generator_output
 

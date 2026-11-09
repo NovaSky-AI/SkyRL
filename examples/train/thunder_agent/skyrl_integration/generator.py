@@ -20,6 +20,7 @@ from examples.train_integrations.harbor.harbor_generator import (
     HarborAgentOutput,
     HarborGenerator,
 )
+from skyrl.backends.skyrl_train.fields import GeneratorInputKey, GeneratorOutputKey
 from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInterface,
@@ -99,9 +100,9 @@ class ThunderAgentHarborGenerator(HarborGenerator):
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """Parent generate(), plus Harbor rollout logprobs when training requests them."""
-        prompts = input_batch["prompts"]
-        trajectory_ids = input_batch["trajectory_ids"]
-        sampling_params = input_batch.get("sampling_params")
+        prompts = input_batch[GeneratorInputKey.PROMPTS]
+        trajectory_ids = input_batch[GeneratorInputKey.TRAJECTORY_IDS]
+        sampling_params = input_batch.get(GeneratorInputKey.SAMPLING_PARAMS)
 
         if trajectory_ids is None:
             raise ValueError("`trajectory_ids` is required in the input batch")
@@ -152,13 +153,13 @@ class ThunderAgentHarborGenerator(HarborGenerator):
         )
 
         generator_output: GeneratorOutput = {
-            "prompt_token_ids": [output.prompt_ids for output in all_outputs],
-            "response_ids": [output.response_ids for output in all_outputs],
-            "rewards": [output.reward for output in all_outputs],
-            "loss_masks": [output.loss_mask for output in all_outputs],
-            "stop_reasons": [output.stop_reason for output in all_outputs],
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": rollout_logprobs,
+            GeneratorOutputKey.PROMPT_TOKEN_IDS: [output.prompt_ids for output in all_outputs],
+            GeneratorOutputKey.RESPONSE_IDS: [output.response_ids for output in all_outputs],
+            GeneratorOutputKey.REWARDS: [output.reward for output in all_outputs],
+            GeneratorOutputKey.LOSS_MASKS: [output.loss_mask for output in all_outputs],
+            GeneratorOutputKey.STOP_REASONS: [output.stop_reason for output in all_outputs],
+            GeneratorOutputKey.ROLLOUT_METRICS: rollout_metrics,
+            GeneratorOutputKey.ROLLOUT_LOGPROBS: rollout_logprobs,
         }
         return generator_output
 

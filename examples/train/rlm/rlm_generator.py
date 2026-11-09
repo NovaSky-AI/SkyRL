@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 
 from examples.train.rlm.openrouter_client import OpenRouterInferenceClient
+from skyrl.backends.skyrl_train.fields import InferenceEngineOutputKey
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
 )
@@ -260,7 +261,7 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 sampling_params=sampling_params,
             )
             output = await target_engine.generate(engine_input)
-            return output["responses"]
+            return output[InferenceEngineOutputKey.RESPONSES]
 
         def callback(prompts: List[str]) -> List[str]:
             future = asyncio.run_coroutine_threadsafe(_generate(prompts), loop)

@@ -8,10 +8,10 @@ import torch
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenLayout,
 )
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_NO_ROW,
     align_sample_support_row_ids,
 )
@@ -89,13 +89,17 @@ def test_row_ids_follow_megatron_packed_padding(align):
 @pytest.mark.parametrize("selection", ["chunk", "slice"])
 def test_row_ids_rebase_under_batch_selection(selection):
     support = _support(LENGTHS)
-    batch = TrainingInputBatch({"attention_mask": _attention_mask(LENGTHS).long(), SAMPLE_SUPPORT_FIELD: support})
+    batch = TrainingInputBatch(
+        {"attention_mask": _attention_mask(LENGTHS).long(), TrainingField.ROLLOUT_SAMPLE_SUPPORT: support}
+    )
     selected = batch.chunk(1)[1] if selection == "chunk" else batch.slice(1, 2)
 
-    row_ids = align_sample_support_row_ids(selected[SAMPLE_SUPPORT_FIELD], _layout(LENGTHS[1:]))
+    row_ids = align_sample_support_row_ids(selected[TrainingField.ROLLOUT_SAMPLE_SUPPORT], _layout(LENGTHS[1:]))
 
     assert row_ids[row_ids >= 0].tolist() == [0, 1]
-    assert _rows(selected[SAMPLE_SUPPORT_FIELD], row_ids[row_ids >= 0]) == _rows(support, torch.tensor([3, 4]))
+    assert _rows(selected[TrainingField.ROLLOUT_SAMPLE_SUPPORT], row_ids[row_ids >= 0]) == _rows(
+        support, torch.tensor([3, 4])
+    )
 
 
 def test_row_ids_accept_an_empty_padding_segment():

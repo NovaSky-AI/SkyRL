@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     all_reduce_metrics,
     reduce_metrics,
@@ -226,7 +226,7 @@ def test_forward_inputs_keep_the_loss_mask_only_for_support_scoring(sample_suppo
     )
     batch.metadata = {"response_length": 2}
     if sample_support:
-        batch[SAMPLE_SUPPORT_FIELD] = ragged_support([[[2, 4], [3, 5]]])
+        batch[TrainingField.ROLLOUT_SAMPLE_SUPPORT] = ragged_support([[[2, 4], [3, 5]]])
     selected = select_forward_inputs(batch)
     assert ("loss_mask" in selected) == sample_support
     if "loss_mask" in selected:

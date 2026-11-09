@@ -7,6 +7,10 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float
 
+from skyrl.backends.skyrl_train.fields import (
+    GeneratorOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
@@ -19,7 +23,6 @@ from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertIndices,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_FIELD,
     CompactSampleSupport,
     PackedSampleSupport,
 )
@@ -447,17 +450,21 @@ def rows_to_training_input(
 
     Pure: it depends on nothing but its arguments, so a trainer or a worker can call it.
     """
-    pixel_values = rows.get("pixel_values")
-    image_grid_thw = rows.get("image_grid_thw")
+    pixel_values = rows.get(GeneratorOutputKey.PIXEL_VALUES)
+    image_grid_thw = rows.get(GeneratorOutputKey.IMAGE_GRID_THW)
     if pixel_values is not None:
         assert image_grid_thw is not None, "Both pixel_values and image_grid_thw must exist for multi-modal inputs"
         assert len(pixel_values) == len(image_grid_thw), "Number of pixel values should match number of image grid thw"
         pixel_values = TensorList(pixel_values)
         image_grid_thw = TensorList(image_grid_thw)
 
-    rollout_expert_indices = rows.get("rollout_expert_indices")
+    rollout_expert_indices = rows.get(GeneratorOutputKey.ROLLOUT_EXPERT_INDICES)
     # Rows with nothing to train (every rollout failed) have nothing to replay, as validate_generator_output allows.
-    if collation.routes_expected and rollout_expert_indices is None and any(any(m) for m in rows["loss_masks"]):
+    if (
+        collation.routes_expected
+        and rollout_expert_indices is None
+        and any(any(m) for m in rows[GeneratorOutputKey.LOSS_MASKS])
+    ):
         raise ValueError("router replay is on, but the rows carry no rollout_expert_indices")
     (
         sequences,
@@ -470,19 +477,21 @@ def rows_to_training_input(
         rollout_sample_support,
     ) = convert_prompts_responses_to_batch_tensors(
         collation.pad_token_id,
-        rows["prompt_token_ids"],
-        rows["response_ids"],
-        rows.get("rewards"),
-        rows["loss_masks"],
-        rows.get("rollout_logprobs"),
+        rows[GeneratorOutputKey.PROMPT_TOKEN_IDS],
+        rows[GeneratorOutputKey.RESPONSE_IDS],
+        rows.get(GeneratorOutputKey.REWARDS),
+        rows[GeneratorOutputKey.LOSS_MASKS],
+        rows.get(GeneratorOutputKey.ROLLOUT_LOGPROBS),
         rollout_expert_indices,
-        rows.get("rollout_sample_support"),
+        rows.get(GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT),
         max_seq_len=collation.max_seq_len,
         padded_shape=padded_shape,
     )
     if collation.support_expected or collation.support_scores_expected:
         _check_trained_rows_have_support(
-            rows.get("rollout_sample_support"), rows["loss_masks"], scores_expected=collation.support_scores_expected
+            rows.get(GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT),
+            rows[GeneratorOutputKey.LOSS_MASKS],
+            scores_expected=collation.support_scores_expected,
         )
     router_padding_mask = None
     if rollout_expert_indices is not None:
@@ -497,17 +506,17 @@ def rows_to_training_input(
 
     training_input = TrainingInputBatch(
         {
-            "sequences": sequences,  # Full trajectories (padded and concatenated prompts and responses)
-            "attention_mask": attention_mask,
-            "response_mask": response_mask,
-            "rewards": rewards,
-            "loss_mask": loss_mask,
-            "rollout_logprobs": rollout_logprobs,
-            "rollout_expert_indices": rollout_expert_indices_tensor,
-            "router_padding_mask": router_padding_mask,
-            SAMPLE_SUPPORT_FIELD: rollout_sample_support,
-            "pixel_values": pixel_values,
-            "image_grid_thw": image_grid_thw,
+            TrainingField.SEQUENCES: sequences,  # Full trajectories (padded and concatenated prompts and responses)
+            TrainingField.ATTENTION_MASK: attention_mask,
+            TrainingField.RESPONSE_MASK: response_mask,
+            TrainingField.REWARDS: rewards,
+            TrainingField.LOSS_MASK: loss_mask,
+            TrainingField.ROLLOUT_LOGPROBS: rollout_logprobs,
+            TrainingField.ROLLOUT_EXPERT_INDICES: rollout_expert_indices_tensor,
+            TrainingField.ROUTER_PADDING_MASK: router_padding_mask,
+            TrainingField.ROLLOUT_SAMPLE_SUPPORT: rollout_sample_support,
+            TrainingField.PIXEL_VALUES: pixel_values,
+            TrainingField.IMAGE_GRID_THW: image_grid_thw,
         },
     )
     training_input.metadata = {}

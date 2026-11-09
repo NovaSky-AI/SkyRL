@@ -20,6 +20,11 @@ from skyrl.backends.renderer import (
     VLLMRenderer,
     render_model_input,
 )
+from skyrl.backends.skyrl_train.fields import (
+    BatchMetadataKey,
+    InferenceEngineOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.inference_servers.utils import resolve_policy_model_name
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
@@ -919,10 +924,10 @@ class SkyRLTrainBackend(AbstractBackend):
         response_mask_tensor = torch.tensor(response_masks, dtype=torch.long)
 
         batch_dict = {
-            "sequences": sequences_tensor,
-            "attention_mask": attention_mask_tensor,
-            "loss_mask": loss_mask_tensor,
-            "response_mask": response_mask_tensor,
+            TrainingField.SEQUENCES: sequences_tensor,
+            TrainingField.ATTENTION_MASK: attention_mask_tensor,
+            TrainingField.LOSS_MASK: loss_mask_tensor,
+            TrainingField.RESPONSE_MASK: response_mask_tensor,
         }
 
         # Include RL fields (action_log_probs, advantages) when data is present
@@ -932,7 +937,7 @@ class SkyRLTrainBackend(AbstractBackend):
         has_returns = any(len(r) > 0 for r in prepared_batch.all_returns)
         if has_logprobs:
             action_log_probs_tensor = torch.tensor(action_log_probs_list, dtype=torch.float32)
-            batch_dict["action_log_probs"] = action_log_probs_tensor
+            batch_dict[TrainingField.ACTION_LOG_PROBS] = action_log_probs_tensor
             if has_rollout_logprobs:
                 # SkyRL extension: the client sent the rollout-engine logprobs separately
                 # (`loss_fn_inputs["rollout_logprobs"]`) and `logprobs` holds the training
@@ -940,7 +945,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 # `action_log_probs` come from a forward pass and `rollout_logprobs` from the
                 # engine, so `off_policy_correction` (geometric/product sequence masking, TIS)
                 # measures the real train/inference mismatch.
-                batch_dict["rollout_logprobs"] = torch.tensor(rollout_logprobs_list, dtype=torch.float32)
+                batch_dict[TrainingField.ROLLOUT_LOGPROBS] = torch.tensor(rollout_logprobs_list, dtype=torch.float32)
             else:
                 # Tinker datums carry the *sampling* (rollout-engine) logprobs.
                 # Mirror them into `rollout_logprobs` so the policy workers emit
@@ -948,9 +953,9 @@ class SkyRLTrainBackend(AbstractBackend):
                 # (`minibatch_rollout_logprobs_abs_diff_*`), surfaced by
                 # `_extract_metrics` below. With identical tensors every
                 # `off_policy_correction` ratio is exactly 1, so masking/TIS are no-ops.
-                batch_dict["rollout_logprobs"] = action_log_probs_tensor
+                batch_dict[TrainingField.ROLLOUT_LOGPROBS] = action_log_probs_tensor
         if has_advantages:
-            batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
+            batch_dict[TrainingField.ADVANTAGES] = torch.tensor(advantages_list, dtype=torch.float32)
         if role == "critic":
             if has_values != has_returns:
                 raise ValueError("Critic batches must provide both values and returns, or neither")
@@ -962,13 +967,13 @@ class SkyRLTrainBackend(AbstractBackend):
             ):
                 raise ValueError("Critic batches with values/returns must align with response-token lengths")
             if has_values:
-                batch_dict["values"] = torch.tensor(values_list, dtype=torch.float32)
-                batch_dict["returns"] = torch.tensor(returns_list, dtype=torch.float32)
+                batch_dict[TrainingField.VALUES] = torch.tensor(values_list, dtype=torch.float32)
+                batch_dict[TrainingField.RETURNS] = torch.tensor(returns_list, dtype=torch.float32)
 
         # In mixed batches (some vision, some text-only), text-only samples
         # get an empty tensor placeholder so the TensorList length matches the batch size.
         # Empty tensors contribute zero rows when torch.cat'd downstream.
-        for mm_key in ("pixel_values", "image_grid_thw"):
+        for mm_key in (TrainingField.PIXEL_VALUES, TrainingField.IMAGE_GRID_THW):
             values = [
                 r.multi_modal_kwargs.get(mm_key) if r.multi_modal_kwargs is not None else None for r in rendered_inputs
             ]
@@ -982,7 +987,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 batch_dict[mm_key] = TensorList([v if v is not None else placeholder for v in values])
 
         batch = TrainingInputBatch(batch_dict)
-        batch.metadata = {"response_length": max_response_len}
+        batch.metadata = {BatchMetadataKey.RESPONSE_LENGTH: max_response_len}
         return batch
 
     def _pad_batch(
@@ -1649,7 +1654,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 prompt_logprobs = None
                 topk = None
                 if prompt_logprobs_requested:
-                    prompt_logprobs = first_output.get("prompt_logprobs")
+                    prompt_logprobs = first_output.get(InferenceEngineOutputKey.PROMPT_LOGPROBS)
                     if prompt_logprobs is None:
                         logger.warning(f"Request {request_id} asked for prompt logprobs but the engine returned none")
                     if topk_prompt_logprobs > 0:

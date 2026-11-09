@@ -38,6 +38,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skycap import CapturePool, CaptureService, Sample
 from skycap.client import RecordLocation, Trajectory
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
 from skyrl.train.generators.base import GeneratorOutput, StoredRolloutGroup
 from skyrl.utils import stage_trace
 
@@ -192,9 +193,9 @@ class StoredPools:
                 logger.warning(f"skycap server {pool.urls[0]} died; running its group on another server")
                 continue
             if deaths:
-                if stored.group_fields.get("rollout_metrics") is None:
-                    stored.group_fields["rollout_metrics"] = {}
-                stored.group_fields["rollout_metrics"][SERVER_DIED_METRIC] = deaths
+                if stored.group_fields.get(GeneratorOutputKey.ROLLOUT_METRICS) is None:
+                    stored.group_fields[GeneratorOutputKey.ROLLOUT_METRICS] = {}
+                stored.group_fields[GeneratorOutputKey.ROLLOUT_METRICS][SERVER_DIED_METRIC] = deaths
             return stored
 
 

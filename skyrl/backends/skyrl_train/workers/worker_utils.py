@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl.backends.skyrl_train.fields import BatchMetadataKey, TrainingField
 from skyrl.backends.skyrl_train.rollout_shard import (
     PULL_AHEAD_MICROBATCHES,
     ShardRows,
@@ -12,13 +13,11 @@ from skyrl.backends.skyrl_train.rollout_shard import (
 )
 from skyrl.backends.skyrl_train.training_batch import (
     PACKED_FIELD_PADDING,
-    REAL_SAMPLE_MASK,
     TensorBatch,
     TrainingInputBatch,
     make_packed_field_padding,
     packed_dummy_row_segments,
 )
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.dataset.bin_packing import make_seq_packer
 from skyrl.train.dataset.replay_buffer import Experience
@@ -163,22 +162,22 @@ class BaseBatchIterator:
     @property
     def seq_len(self) -> int:
         """Every microbatch's padded sequence width."""
-        return self.data["sequences"].shape[1]
+        return self.data[TrainingField.SEQUENCES].shape[1]
 
     @property
     def num_actions(self) -> int:
-        return self.data.metadata["response_length"]
+        return self.data.metadata[BatchMetadataKey.RESPONSE_LENGTH]
 
     @property
     def has_routes(self) -> bool:
         """Every real microbatch carries R3 routes."""
-        return self.data.get("rollout_expert_indices") is not None
+        return self.data.get(TrainingField.ROLLOUT_EXPERT_INDICES) is not None
 
     def row_seqlens(self) -> List[List[int]]:
         """Each row's attended sub-sequence lengths (one per row without controller packing)."""
-        sub_seq_lengths = self.data.get("sub_seq_lengths")
+        sub_seq_lengths = self.data.get(TrainingField.SUB_SEQ_LENGTHS)
         if sub_seq_lengths is None:
-            return [[int(n)] for n in self.data["attention_mask"].sum(dim=-1).tolist()]
+            return [[int(n)] for n in self.data[TrainingField.ATTENTION_MASK].sum(dim=-1).tolist()]
         return [[int(n) for n in row.tolist()] for row in sub_seq_lengths]
 
     def __iter__(self) -> Iterator[TrainingInputBatch]:
@@ -212,31 +211,31 @@ class BaseBatchIterator:
         # TODO (sumanthrh): other keys are not permitted right now, can go into info
         # TODO: this conversion is hidden right now, might need to be surfaced in worker explicitly.
         exp = Experience(
-            sequences=batch["sequences"],
-            action_log_probs=batch.get("action_log_probs"),
-            base_action_log_probs=batch.get("base_action_log_probs"),
-            values=batch.get("values"),
-            returns=batch.get("returns"),
-            advantages=batch.get("advantages"),
-            attention_mask=batch.get("attention_mask"),
-            loss_mask=batch.get("loss_mask"),
-            response_mask=batch.get("response_mask"),
-            num_actions=batch.metadata["response_length"],  # int
-            rollout_logprobs=batch.get("rollout_logprobs"),
-            rollout_expert_indices=batch.get("rollout_expert_indices"),
-            router_padding_mask=batch.get("router_padding_mask"),
-            rollout_sample_support=batch.get(SAMPLE_SUPPORT_FIELD),
+            sequences=batch[TrainingField.SEQUENCES],
+            action_log_probs=batch.get(TrainingField.ACTION_LOG_PROBS),
+            base_action_log_probs=batch.get(TrainingField.BASE_ACTION_LOG_PROBS),
+            values=batch.get(TrainingField.VALUES),
+            returns=batch.get(TrainingField.RETURNS),
+            advantages=batch.get(TrainingField.ADVANTAGES),
+            attention_mask=batch.get(TrainingField.ATTENTION_MASK),
+            loss_mask=batch.get(TrainingField.LOSS_MASK),
+            response_mask=batch.get(TrainingField.RESPONSE_MASK),
+            num_actions=batch.metadata[BatchMetadataKey.RESPONSE_LENGTH],  # int
+            rollout_logprobs=batch.get(TrainingField.ROLLOUT_LOGPROBS),
+            rollout_expert_indices=batch.get(TrainingField.ROLLOUT_EXPERT_INDICES),
+            router_padding_mask=batch.get(TrainingField.ROUTER_PADDING_MASK),
+            rollout_sample_support=batch.get(TrainingField.ROLLOUT_SAMPLE_SUPPORT),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},
             # propagate metadata as is
             metadata=batch.metadata,
             # Multi-modal vision fields (may be absent for text-only)
-            pixel_values=batch.get("pixel_values"),
-            image_grid_thw=batch.get("image_grid_thw"),
+            pixel_values=batch.get(TrainingField.PIXEL_VALUES),
+            image_grid_thw=batch.get(TrainingField.IMAGE_GRID_THW),
             # Per-row sub-sequence lengths for sequence packing (None otherwise);
             # chunked per micro-batch by ``TensorBatch.chunk`` like any other field.
-            sub_seq_lengths=batch.get("sub_seq_lengths"),
+            sub_seq_lengths=batch.get(TrainingField.SUB_SEQ_LENGTHS),
             real_sample_mask=batch.real_sample_mask,
         )
         return exp
@@ -337,7 +336,7 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             max_tokens_per_microbatch: Maximum number of tokens per microbatch.
         """
         super().__init__(data)
-        attention_mask = data["attention_mask"]
+        attention_mask = data[TrainingField.ATTENTION_MASK]
         self._plan(attention_mask.sum(dim=1).cpu().tolist(), max_tokens_per_microbatch)
 
     def _plan(self, token_counts: List[int], max_tokens_per_microbatch: int) -> None:
@@ -376,10 +375,10 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         template = self._padding_template()
         # Match the real data's sequence length so every microbatch shares the same
         # seq_len.
-        seq_len = template["sequences"].shape[1]
-        num_actions = template.metadata["response_length"]
+        seq_len = template[TrainingField.SEQUENCES].shape[1]
+        num_actions = template.metadata[BatchMetadataKey.RESPONSE_LENGTH]
         batch_size = 1
-        device = template["sequences"].device
+        device = template[TrainingField.SEQUENCES].device
 
         # Keep the full seq_len for shape uniformity, but mark only a single token as
         # valid in the attention mask to keep the row non-degenerate.
@@ -390,23 +389,25 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             {
                 # Fixed ids: a padding microbatch may be built at any point of the schedule, and
                 # drawing them would advance the global RNG there.
-                "sequences": torch.zeros((batch_size, seq_len), dtype=torch.long, device=device),
-                "attention_mask": attention_mask,
-                "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device=device),
-                "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device=device),
-                "values": 0.5 * torch.ones((batch_size, num_actions), device=device),
-                "returns": 0.5 * torch.ones((batch_size, num_actions), device=device),
-                "advantages": 0.6 * torch.ones((batch_size, num_actions), device=device),
+                TrainingField.SEQUENCES: torch.zeros((batch_size, seq_len), dtype=torch.long, device=device),
+                TrainingField.ATTENTION_MASK: attention_mask,
+                TrainingField.ACTION_LOG_PROBS: 0.4 * torch.ones((batch_size, num_actions), device=device),
+                TrainingField.BASE_ACTION_LOG_PROBS: 0.3 * torch.ones((batch_size, num_actions), device=device),
+                TrainingField.VALUES: 0.5 * torch.ones((batch_size, num_actions), device=device),
+                TrainingField.RETURNS: 0.5 * torch.ones((batch_size, num_actions), device=device),
+                TrainingField.ADVANTAGES: 0.6 * torch.ones((batch_size, num_actions), device=device),
                 # Loss mask is all zeros so padding samples don't contribute to the loss.
-                "loss_mask": torch.zeros((batch_size, num_actions), dtype=int, device=device),
-                "response_mask": torch.ones((batch_size, num_actions), dtype=int, device=device),
-                REAL_SAMPLE_MASK: torch.zeros(batch_size, dtype=torch.bool, device=device),
+                TrainingField.LOSS_MASK: torch.zeros((batch_size, num_actions), dtype=int, device=device),
+                TrainingField.RESPONSE_MASK: torch.ones((batch_size, num_actions), dtype=int, device=device),
+                TrainingField.REAL_SAMPLE_MASK: torch.zeros(batch_size, dtype=torch.bool, device=device),
             }
         )
         # Add optional fields to the padding batch.
-        if template.get("rollout_logprobs") is not None:
-            ref_tensor = template["rollout_logprobs"]
-            data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
+        if template.get(TrainingField.ROLLOUT_LOGPROBS) is not None:
+            ref_tensor = template[TrainingField.ROLLOUT_LOGPROBS]
+            data[TrainingField.ROLLOUT_LOGPROBS] = torch.zeros(
+                (batch_size, num_actions), dtype=ref_tensor.dtype, device=device
+            )
         for key in PACKED_FIELD_PADDING:
             # Per-token fields cover the dummy attended token; response fields do not.
             if template.get(key) is not None:
@@ -415,12 +416,12 @@ class TokenBasedBatchIterator(BaseBatchIterator):
                     template[key],
                     segment_lengths=packed_dummy_row_segments(key, batch_size),
                 )
-        if template.get("router_padding_mask") is not None:
-            data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
+        if template.get(TrainingField.ROUTER_PADDING_MASK) is not None:
+            data[TrainingField.ROUTER_PADDING_MASK] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
         data.metadata = {}
         if template.metadata:
             data.metadata.update(template.metadata)
-        data.metadata["is_padding_batch"] = True
+        data.metadata[BatchMetadataKey.IS_PADDING_BATCH] = True
         return data
 
     def _sync_num_microbatches(self) -> int:
@@ -611,17 +612,17 @@ def get_microbatch_iterator(
 
 def select_forward_inputs(batch: TrainingInputBatch) -> TrainingInputBatch:
     """The fields and metadata a forward-only (logprob / value) pass reads from a training batch."""
-    keys = ["sequences", "attention_mask"]
-    metadata_keys = ["response_length"]
-    if batch.get("rollout_expert_indices") is not None:
-        keys.append("rollout_expert_indices")
-    if batch.get("router_padding_mask") is not None:
-        keys.append("router_padding_mask")
-    if batch.get(SAMPLE_SUPPORT_FIELD) is not None:
+    keys = [TrainingField.SEQUENCES, TrainingField.ATTENTION_MASK]
+    metadata_keys = [BatchMetadataKey.RESPONSE_LENGTH]
+    if batch.get(TrainingField.ROLLOUT_EXPERT_INDICES) is not None:
+        keys.append(TrainingField.ROLLOUT_EXPERT_INDICES)
+    if batch.get(TrainingField.ROUTER_PADDING_MASK) is not None:
+        keys.append(TrainingField.ROUTER_PADDING_MASK)
+    if batch.get(TrainingField.ROLLOUT_SAMPLE_SUPPORT) is not None:
         # The scorer validates that captured support backs every loss-active target.
-        keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
-    if batch.get("pixel_values") is not None:
-        keys.append("pixel_values")
-    if batch.get("image_grid_thw") is not None:
-        keys.append("image_grid_thw")
+        keys.extend([TrainingField.ROLLOUT_SAMPLE_SUPPORT, TrainingField.LOSS_MASK])
+    if batch.get(TrainingField.PIXEL_VALUES) is not None:
+        keys.append(TrainingField.PIXEL_VALUES)
+    if batch.get(TrainingField.IMAGE_GRID_THW) is not None:
+        keys.append(TrainingField.IMAGE_GRID_THW)
     return batch.select(keys=keys, metadata_keys=metadata_keys)

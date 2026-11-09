@@ -39,6 +39,7 @@ import numpy as np
 import torch
 from skycap import Sample
 
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
 from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertIndices,
     compact_routed_expert_indices,
@@ -191,14 +192,14 @@ def compose(
     out: Dict[str, List[Any]] = {
         key: []
         for key in (
-            "prompt_token_ids",
-            "response_ids",
-            "rewards",
-            "loss_masks",
-            "stop_reasons",
-            "rollout_logprobs",
-            "trajectory_ids",
-            "is_last_step",
+            GeneratorOutputKey.PROMPT_TOKEN_IDS,
+            GeneratorOutputKey.RESPONSE_IDS,
+            GeneratorOutputKey.REWARDS,
+            GeneratorOutputKey.LOSS_MASKS,
+            GeneratorOutputKey.STOP_REASONS,
+            GeneratorOutputKey.ROLLOUT_LOGPROBS,
+            GeneratorOutputKey.TRAJECTORY_IDS,
+            GeneratorOutputKey.IS_LAST_STEP,
         )
     }
     times: List[Optional[float]] = []
@@ -206,14 +207,14 @@ def compose(
         masked = outcome.trajectory_id.instance_id in masked_instances
         for position, row in enumerate(rows):
             last = position == len(rows) - 1
-            out["prompt_token_ids"].append(row.prompt)
-            out["response_ids"].append(row.response)
-            out["rewards"].append(0.0 if masked else outcome.reward)
-            out["loss_masks"].append(row.loss_mask)
-            out["stop_reasons"].append("error" if masked else outcome.stop_reason)
-            out["rollout_logprobs"].append(row.logprobs)
-            out["trajectory_ids"].append(outcome.trajectory_id)
-            out["is_last_step"].append(last)
+            out[GeneratorOutputKey.PROMPT_TOKEN_IDS].append(row.prompt)
+            out[GeneratorOutputKey.RESPONSE_IDS].append(row.response)
+            out[GeneratorOutputKey.REWARDS].append(0.0 if masked else outcome.reward)
+            out[GeneratorOutputKey.LOSS_MASKS].append(row.loss_mask)
+            out[GeneratorOutputKey.STOP_REASONS].append("error" if masked else outcome.stop_reason)
+            out[GeneratorOutputKey.ROLLOUT_LOGPROBS].append(row.logprobs)
+            out[GeneratorOutputKey.TRAJECTORY_IDS].append(outcome.trajectory_id)
+            out[GeneratorOutputKey.IS_LAST_STEP].append(last)
             times.append(outcome.e2e_time)
 
     vision = _vision_rows(groups) if include_images else {}

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from transformers import PreTrainedTokenizerBase
 
+from skyrl.backends.skyrl_train.fields import InferenceEngineInputKey
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -81,9 +82,9 @@ class OpenRouterInferenceClient(RemoteInferenceClient):
         Decodes prompt_token_ids back to text, builds chat messages, POSTs to
         OpenRouter, and re-tokenizes responses for downstream bookkeeping.
         """
-        prompts = input_batch.get("prompts")
-        prompt_token_ids: Optional[List[List[int]]] = input_batch.get("prompt_token_ids")
-        sampling_params: Dict[str, Any] = input_batch.get("sampling_params") or {}
+        prompts = input_batch.get(InferenceEngineInputKey.PROMPTS)
+        prompt_token_ids: Optional[List[List[int]]] = input_batch.get(InferenceEngineInputKey.PROMPT_TOKEN_IDS)
+        sampling_params: Dict[str, Any] = input_batch.get(InferenceEngineInputKey.SAMPLING_PARAMS) or {}
 
         if prompts is None and prompt_token_ids is None:
             raise ValueError("Either `prompts` or `prompt_token_ids` must be provided.")
