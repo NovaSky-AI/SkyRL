@@ -35,7 +35,7 @@ package you give a source must also appear in your `dependencies`, including eve
 
 ## Option B: Git
 
-uv applies SkyRL's own sources to a Git dependency, so the packages above resolve without extra configuration. You still need SkyRL's overrides. The combined FA2+FA4 `flash-attn` wheel needs FA4 dependencies that conflict with vLLM's pins, and the aarch64-only flashinfer packages need their marker:
+uv applies SkyRL's own sources to a Git dependency, so the packages above resolve without extra configuration. You still need SkyRL's overrides for packages such as `flash-attn` ,where we use a custom wheel with both FA2 and FA2 bundled. The modification needed for your TOML file is shown below:
 
 ```toml
 [project]
