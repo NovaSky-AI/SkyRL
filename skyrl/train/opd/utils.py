@@ -19,32 +19,27 @@ ROLLOUT_CORRECT_KEY = "rollout_correct"
 STUDENT_LOGPROB_FLOOR = -99999.0
 
 
-def split_generator_input(input_batch: GeneratorInput, group_size: int) -> List[GeneratorInput]:
-    """Split a batch into consecutive groups of ``group_size`` rows.
+def split_generator_input(input_batch: GeneratorInput) -> List[GeneratorInput]:
+    """Split a batch into one single-row ``GeneratorInput`` per row, in order.
 
-    ``prepare_generator_input`` lays a batch out prompt-major, ``n_samples_per_prompt`` rows per
-    prompt, so with ``group_size = n_samples_per_prompt`` each group is one prompt's samples. Per-row
-    fields are sliced; ``sampling_params`` and ``batch_metadata`` are shared (the generator never
+    Per-row fields are sliced; ``sampling_params`` and ``batch_metadata`` are shared (the generator never
     mutates them). The inverse of ``concatenate_generator_outputs``.
     """
-    num_rows = len(input_batch["prompts"])
-    if group_size <= 0 or num_rows % group_size != 0:
-        raise ValueError(f"cannot split {num_rows} rows into groups of {group_size}")
 
-    def rows(key: str, start: int):
+    def row(key: str, index: int):
         values = input_batch.get(key)
-        return None if values is None else values[start : start + group_size]
+        return None if values is None else values[index : index + 1]
 
     return [
         {
-            "prompts": rows("prompts", start),
-            "env_classes": rows("env_classes", start),
-            "env_extras": rows("env_extras", start),
+            "prompts": row("prompts", index),
+            "env_classes": row("env_classes", index),
+            "env_extras": row("env_extras", index),
             "sampling_params": input_batch.get("sampling_params"),
-            "trajectory_ids": rows("trajectory_ids", start),
+            "trajectory_ids": row("trajectory_ids", index),
             "batch_metadata": input_batch.get("batch_metadata"),
         }
-        for start in range(0, num_rows, group_size)
+        for index in range(len(input_batch["prompts"]))
     ]
 
 

@@ -1188,44 +1188,42 @@ def _trainer(
     return trainer
 
 
-def test_split_generator_input_slices_rows_and_shares_batch_fields():
+def test_split_generator_input_gives_one_input_per_row():
     batch = _batch(2, 2, "train")
-    groups = split_generator_input(batch, 2)
-    assert len(groups) == 2
-    assert groups[1]["prompts"] == batch["prompts"][2:]
-    assert groups[1]["env_extras"] == batch["env_extras"][2:]
-    assert groups[1]["trajectory_ids"] == batch["trajectory_ids"][2:]
-    assert groups[1]["sampling_params"] is batch["sampling_params"]
-    assert groups[1]["batch_metadata"] is batch["batch_metadata"]
+    rows = split_generator_input(batch)
+    assert len(rows) == 4
+    assert rows[2]["prompts"] == batch["prompts"][2:3]
+    assert rows[2]["env_extras"] == batch["env_extras"][2:3]
+    assert rows[2]["trajectory_ids"] == batch["trajectory_ids"][2:3]
+    assert rows[2]["sampling_params"] is batch["sampling_params"]
+    assert rows[2]["batch_metadata"] is batch["batch_metadata"]
 
     batch["env_extras"] = None
     batch["trajectory_ids"] = None
-    assert split_generator_input(batch, 4)[0]["env_extras"] is None
-    with pytest.raises(ValueError, match="groups of 3"):
-        split_generator_input(batch, 3)
+    assert split_generator_input(batch)[0]["env_extras"] is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("generator_cls", [FakeGenerator, TqdmAwareFakeGenerator])
-async def test_trainer_generate_scores_each_group_as_it_finishes(generator_cls, tokenizer):
-    """Group 0 must be scored while group 1 is still generating; rows come back in input order."""
-    release_group1 = asyncio.Event()
-    generator = generator_cls(hold={1: release_group1})
+async def test_trainer_generate_scores_each_row_as_it_finishes(generator_cls, tokenizer):
+    """Prompt 0's rows must be scored while prompt 1's are still generating; rows come back in input order."""
+    release_prompt1 = asyncio.Event()
+    generator = generator_cls(hold={1: release_prompt1})
     teacher = FakeTeacher()
     trainer = _trainer(use_task_reward=True, tokenizer=tokenizer, generator=generator, teacher=teacher)
 
-    async def release_group1_once_group0_is_scored():
-        # Group 1 cannot return before this fires, so the first two teacher calls must be group 0's.
+    async def release_prompt1_once_prompt0_is_scored():
+        # Prompt 1's rows cannot return before this fires, so the first two teacher calls must be prompt 0's.
         # A trainer that scored only after all generation finished would deadlock here (5 s timeout).
         while len(teacher.calls) < 2:
             await asyncio.sleep(0.001)
-        release_group1.set()
+        release_prompt1.set()
 
-    releaser = asyncio.create_task(release_group1_once_group0_is_scored())
+    releaser = asyncio.create_task(release_prompt1_once_prompt0_is_scored())
     out = await trainer.generate(_batch(2, 2, "train"))
     await releaser
 
-    assert [len(call["prompts"]) for call in generator.calls] == [2, 2]
+    assert [len(call["prompts"]) for call in generator.calls] == [1, 1, 1, 1]  # one generate call per row
     if generator_cls is TqdmAwareFakeGenerator:
         assert generator.disable_tqdm is True
     assert out["response_ids"] == [[10, 20, 4], [10, 21, 4], [11, 20, 4], [11, 21, 4]]
@@ -1234,9 +1232,9 @@ async def test_trainer_generate_scores_each_group_as_it_finishes(generator_cls, 
     assert {_width(request) for request in teacher.calls} == {1}  # top_k=0 scores the sampled token only
     assert [tid.to_string() for tid in out["trajectory_ids"]] == ["0_0", "0_1", "1_0", "1_1"]
     assert "rollout_metrics" not in out
-    assert trainer.all_metrics["generate/custom_avg"] == 2.0  # per-group metrics re-aggregated
+    assert trainer.all_metrics["generate/custom_avg"] == 1.0  # per-row metrics re-aggregated
     assert trainer.all_metrics["opd/teacher_time_exposed"] >= 0.0
-    assert trainer.all_metrics["opd/teacher_time_per_group_mean"] >= 0.0
+    assert trainer.all_metrics["opd/teacher_time_per_row_mean"] >= 0.0
 
 
 def _topk_requests(teacher: FakeTeacher) -> Dict[tuple, Optional[int]]:
@@ -1303,7 +1301,7 @@ async def test_trainer_logs_the_topk_metrics(tokenizer):
         (16, {(1, 0, 10, 20, 4), (1, 0, 10, 21, 4), (1, 1, 11, 20, 4), (1, 1, 11, 21, 4)}),
     ],
 )
-async def test_trainer_asks_the_selected_rows_across_groups(num_rows, asked_rows, tokenizer):
+async def test_trainer_asks_the_selected_rows_across_the_batch(num_rows, asked_rows, tokenizer):
     teacher = RankedTeacher()
     trainer = _trainer(
         use_task_reward=False,
@@ -1322,8 +1320,10 @@ async def test_trainer_asks_the_selected_rows_across_groups(num_rows, asked_rows
 
 @pytest.mark.asyncio
 async def test_trainer_topk_metrics_need_a_generator_that_forwards_support(tokenizer):
-    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, generator=FakeGenerator(), topk_rows=1)
-    with pytest.raises(RuntimeError, match="opd.topk_metrics needs 'rollout_sample_support'"):
+    trainer = _trainer(
+        use_task_reward=False, tokenizer=tokenizer, generator=FakeGenerator(), teacher=RankedTeacher(), topk_rows=1
+    )
+    with pytest.raises(RuntimeError, match="needs one 'rollout_sample_support' entry per trajectory .* got none"):
         await trainer.generate(_batch(1, 2, "train"))
 
 
@@ -1338,8 +1338,14 @@ class ShortSupportFakeGenerator(SupportFakeGenerator):
 
 @pytest.mark.asyncio
 async def test_trainer_topk_metrics_refuse_support_that_does_not_cover_every_trajectory(tokenizer):
-    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, generator=ShortSupportFakeGenerator(), topk_rows=1)
-    with pytest.raises(ValueError, match="1 'rollout_sample_support' entries for 2 trajectories"):
+    trainer = _trainer(
+        use_task_reward=False,
+        tokenizer=tokenizer,
+        generator=ShortSupportFakeGenerator(),
+        teacher=RankedTeacher(),
+        topk_rows=1,
+    )
+    with pytest.raises(RuntimeError, match="needs one 'rollout_sample_support' entry per trajectory .* got 0"):
         await trainer.generate(_batch(1, 2, "train"))
 
 
