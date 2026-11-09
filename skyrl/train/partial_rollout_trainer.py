@@ -68,6 +68,14 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             f"Partial rollout: {self.num_parallel_generation_workers} groups in flight, train on every "
             f"{self.mini_batch_size} finished groups, {cut_fraction:.0%} of in-flight groups cut per step."
         )
+        router_kwargs = self.cfg.generator.inference_engine.router_init_kwargs or {}
+        if router_kwargs.get("policy") != "sticky_least_loaded":
+            logger.warning(
+                "Partial rollout works best with "
+                "generator.inference_engine.router_init_kwargs.policy=sticky_least_loaded. The default "
+                "consistent_hash policy places trajectories by session id, so long trajectories and their "
+                "resumed segments pile up on one engine and can exhaust its KV cache."
+            )
 
     async def _before_training_step(self) -> None:
         # The sleep aborts the in-flight requests, which the client holds, and frees the GPUs for training.

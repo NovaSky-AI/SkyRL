@@ -336,6 +336,8 @@ To address this, our `AsyncDataloader` records the data UIDs that have been cons
 
 So `1 - policy_mini_batch_size / num_parallel_generation_workers` of the in-flight groups are cut per step, and a group's staleness is the number of cuts it survived (`async/staleness_*`). Tokens produced before a cut carry the older policy's rollout logprobs, so use a rollout-logprob loss (`rollout_is`, `dppo`, ...) as for fully async training. The admission controller is the staleness manager with `max_staleness_steps=None`: it admits at most `num_parallel_generation_workers` groups that are not yet trained on, and it never blocks a resumed group. See `examples/train/fully_async/partial_rollout_run_gsm8k.sh`.
 
+Set `generator.inference_engine.router_init_kwargs.policy=sticky_least_loaded`. The default `consistent_hash` router policy places each trajectory by its session id, and a resumed segment goes back to the same engine, so long trajectories pile up on one engine and can exhaust its KV cache. `sticky_least_loaded` places each new trajectory on the engine with the fewest active sessions and keeps resumed segments on their engine. The pool depth trades throughput for staleness: the mean staleness is `(num_parallel_generation_workers - policy_mini_batch_size) / policy_mini_batch_size` steps, and a deeper pool keeps the engines fuller but re-prefills more tokens per step. With `policy_mini_batch_size=32` on 8xH100, 43 groups in flight (staleness 0.34) gave 10 to 13 percent shorter steps than synchronous training, and 64 groups (staleness 1.0) gave 26 percent. Keep the staleness under about 0.5 unless the loss is corrected for it.
+
 ## VI. Future Work
 
 - Validate with correct algorithmic offset (importance weighting)

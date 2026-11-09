@@ -37,6 +37,7 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.algorithm.off_policy_correction.geo_mask_low=$GEO_MASK_LOW \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
+  generator.inference_engine.router_init_kwargs.policy=sticky_least_loaded \
   trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
