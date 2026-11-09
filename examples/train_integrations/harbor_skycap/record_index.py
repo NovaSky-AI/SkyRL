@@ -137,14 +137,18 @@ def trained_keys(callback_input: CallbackInput) -> Optional[Set[Tuple[str, int]]
     """The ``(instance_id, repetition_id)`` of every trajectory with a trained token in the step's batch.
 
     None when the trainer didn't pass the batch's ``trajectory_ids``. Rows past them are the trainer's padding.
+    A streamed step has no batch; its ``streamed_rows`` count each row's trained tokens.
     """
     ids = callback_input.trajectory_ids
     if ids is None:
         return None
-    loss_mask = None if callback_input.batch is None else callback_input.batch.get("loss_mask")
-    if loss_mask is None:
-        return {(str(t.instance_id), t.repetition_id) for t in ids}
-    tokens = loss_mask[: len(ids)].sum(dim=-1).tolist()
+    if callback_input.streamed_rows is not None:
+        tokens = callback_input.streamed_rows.trained_loss_tokens
+    else:
+        loss_mask = None if callback_input.batch is None else callback_input.batch.get("loss_mask")
+        if loss_mask is None:
+            return {(str(t.instance_id), t.repetition_id) for t in ids}
+        tokens = loss_mask[: len(ids)].sum(dim=-1).tolist()
     return {(str(t.instance_id), t.repetition_id) for t, count in zip(ids, tokens) if count > 0}
 
 

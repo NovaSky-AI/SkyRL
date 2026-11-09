@@ -1,6 +1,7 @@
 """Optimizer-step reductions independent of microbatch, call and data-parallel partitioning."""
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -28,6 +29,19 @@ class MinibatchLossNormalization:
     num_model_tokens: float
     num_segments: float
     min_segment_length: float
+
+    @classmethod
+    def from_rows(
+        cls, row_loss_tokens: Sequence[float], row_token_counts: Sequence[int]
+    ) -> "MinibatchLossNormalization":
+        """Count real rows as one optimizer step, from each row's loss tokens and real tokens (one segment each)."""
+        return cls(
+            num_sequences=float(sum(tokens > 0 for tokens in row_loss_tokens)),
+            num_loss_tokens=float(sum(row_loss_tokens)),
+            num_model_tokens=float(sum(row_token_counts)),
+            num_segments=float(len(row_token_counts)),
+            min_segment_length=float(min(row_token_counts, default=math.inf)),
+        )
 
     @classmethod
     def from_batch(

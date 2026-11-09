@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
     from skyrl.train.generators.base import TrajectoryID
+    from skyrl.train.streamed_training import StreamedRolloutRows
 
 
 @dataclass
@@ -47,10 +48,14 @@ class CallbackInput:
     total_steps: int
     steps_per_epoch: int
 
-    # Step events
+    # on_step_end of the RL trainer - the step's training batch. None for a streamed step
+    # (``trainer.fully_async.store_groups_in_ray``), which never builds one: see ``streamed_rows``.
     batch: Optional["TrainingInputBatch"] = None
+    # on_step_end of a streamed step only - its rows' metadata, the rows ``batch`` would hold
+    streamed_rows: Optional["StreamedRolloutRows"] = None
 
-    # on_step_end of the synchronous RL trainer only - the trajectory of each of ``batch``'s rows, before padding
+    # on_step_end of the RL trainer only - the trajectory of each row of the step's kept groups, in
+    # order: ``batch``'s rows before padding, or ``streamed_rows``' rows
     trajectory_ids: Optional[List["TrajectoryID"]] = None
     # on_step_end of the fully-async trainer only - every trajectory the step took from the buffer,
     # trained or dropped; other generated trajectories belong to later steps
@@ -103,10 +108,10 @@ class TrainingCallback:
         """Fires at the end of each epoch."""
 
     def on_step_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
-        """Fires before each training step. ``callback_input.batch`` is populated."""
+        """Fires before each training step."""
 
     def on_step_end(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
-        """Fires after each training step. ``callback_input.batch`` and ``.metrics`` are populated."""
+        """Fires after each training step with ``.metrics``, and ``.batch`` or, streamed, ``.streamed_rows``."""
 
     def on_eval_start(self, trainer, callback_input: CallbackInput, control: TrainingControl) -> None:
         """Fires before an evaluation pass."""

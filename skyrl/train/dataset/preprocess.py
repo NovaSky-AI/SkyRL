@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -396,6 +396,26 @@ def convert_prompts_responses_to_batch_tensors(
     )
 
 
+def _check_trained_rows_have_support(
+    rollout_sample_support: Optional[List[CompactSampleSupport]],
+    loss_masks: Sequence[Sequence[int]],
+    *,
+    scores_expected: bool,
+) -> None:
+    """Refuse a row whose loss tokens sample-support replay (or score centering) cannot train."""
+    for row, mask in enumerate(loss_masks):
+        trained = np.asarray(mask, dtype=bool)
+        if not trained.any():
+            continue
+        if rollout_sample_support is None:
+            raise ValueError(f"row {row} has loss tokens but no rollout_sample_support")
+        support = rollout_sample_support[row]
+        if (trained & (support.row_lengths == 0)).any():
+            raise ValueError(f"row {row} has loss tokens without captured sample support")
+        if scores_expected and support.logprobs is None and support.num_members:
+            raise ValueError(f"row {row}'s sample support carries no sampler member logprobs")
+
+
 @dataclass(frozen=True)
 class RowCollation:
     """How ``rows_to_training_input`` collates rows into a padded batch."""
@@ -406,6 +426,10 @@ class RowCollation:
     require_rollout_logprobs: bool
     # Router replay is on: rows with a loss token must carry their routes.
     routes_expected: bool = False
+    # Sample-support replay is on: every loss token must have captured support.
+    support_expected: bool = False
+    # Score centering is on: that support must carry the sampler's member logprobs.
+    support_scores_expected: bool = False
 
 
 def rows_to_training_input(
@@ -417,7 +441,9 @@ def rows_to_training_input(
     ``loss_masks`` and, when present, ``rewards``, ``rollout_logprobs``, ``rollout_expert_indices``,
     ``rollout_sample_support``, ``pixel_values`` and ``image_grid_thw``). Rows may be read-only;
     every output tensor is a new buffer. Without ``rewards`` the batch has no rewards tensor.
-    ``padded_shape`` is ``convert_prompts_responses_to_batch_tensors``'s.
+    With ``collation.support_expected`` (sample-support replay), a row with a loss token whose support has no
+    members is refused, and with ``support_scores_expected`` (score centering) one whose support lacks the
+    sampler's member logprobs. ``padded_shape`` is ``convert_prompts_responses_to_batch_tensors``'s.
 
     Pure: it depends on nothing but its arguments, so a trainer or a worker can call it.
     """
@@ -454,6 +480,10 @@ def rows_to_training_input(
         max_seq_len=collation.max_seq_len,
         padded_shape=padded_shape,
     )
+    if collation.support_expected or collation.support_scores_expected:
+        _check_trained_rows_have_support(
+            rows.get("rollout_sample_support"), rows["loss_masks"], scores_expected=collation.support_scores_expected
+        )
     router_padding_mask = None
     if rollout_expert_indices is not None:
         router_padding_mask = make_router_padding_mask(
