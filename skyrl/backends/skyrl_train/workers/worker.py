@@ -38,6 +38,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses import (
     apply_monkey_patch,
     set_ulysses_sequence_parallel_group,
 )
+from skyrl.backends.skyrl_train.rollout_shard import RolloutShard, ShardRows
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -66,10 +67,12 @@ from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
+    StoredShardBatchIterator,
     all_reduce_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
     reduce_metrics,
+    select_forward_inputs,
 )
 from skyrl.env_vars import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -1099,11 +1102,28 @@ class PolicyWorkerBase(Worker):
             micro_batch_size=self.cfg.micro_train_batch_size_per_gpu,
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
         )
+        if loss_normalization is None:
+            loss_normalization = MinibatchLossNormalization.from_batch(data, dp_group=self.device_mesh.get_group("dp"))
+        return self._forward_backward_microbatches(
+            microbatch_iterator,
+            loss_normalization,
+            loss_fn=loss_fn,
+            loss_fn_config=loss_fn_config,
+            return_per_token_outputs=return_per_token_outputs,
+        )
+
+    def _forward_backward_microbatches(
+        self,
+        microbatch_iterator: BaseBatchIterator,
+        loss_normalization: MinibatchLossNormalization,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+        return_per_token_outputs: bool = True,
+    ) -> WorkerOutput:
+        """``forward_backward`` over the microbatches ``microbatch_iterator`` builds."""
         all_metrics = defaultdict(list)
         loss_fn_output_batches = []  # per-microbatch; restored to input order below
         dp_group = self.device_mesh.get_group("dp")
-        if loss_normalization is None:
-            loss_normalization = MinibatchLossNormalization.from_batch(data, dp_group=dp_group)
 
         for microbatch in microbatch_iterator:
             experience = BaseBatchIterator.batch_to_experience(microbatch)
@@ -1424,20 +1444,7 @@ class PolicyWorkerBase(Worker):
         ``metrics`` (e.g. SFT eval); it has no effect on the inference path.
         """
         if loss_fn is None:
-            # Inference forward path: run in micro batches and emit per-sample logprobs.
-            # Uses token-based micro-batching when `max_tokens_per_microbatch > 0`, otherwise
-            # falls back to fixed sample-count chunking. `reorder_and_combine_batches` restores
-            # the original sample order (and strips padding) for the token-based iterator.
-            microbatch_iterator = get_microbatch_iterator(
-                data,
-                micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
-                max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
-            )
-            outputs = [self._forward_micro_batch(micro_batch) for micro_batch in microbatch_iterator]
-            output = microbatch_iterator.reorder_and_combine_batches(outputs)
-            if output.device is not None and output.device != torch.device("cpu"):
-                output = output.to("cpu")
-            row_tensor = output["output"]
+            row_tensor = self._forward_logprobs(data)
             loss_fn_outputs = [{"logprobs": row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
             return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
@@ -1462,6 +1469,61 @@ class PolicyWorkerBase(Worker):
         result = all_reduce_metrics(result, self.strategy, group=dp_group, sum_loss_metrics=True)
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=result)
+
+    def _forward_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
+        """Inference forward over ``data``: per-sample logprobs, ``[batch_size, response_length]`` on CPU.
+
+        Uses token-based micro-batching when ``max_tokens_per_microbatch > 0``, otherwise fixed
+        sample-count chunking.
+        """
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
+        return self._forward_logprobs_microbatches(microbatch_iterator)
+
+    def _forward_logprobs_microbatches(self, microbatch_iterator: BaseBatchIterator) -> torch.Tensor:
+        """Inference forward over ``microbatch_iterator``'s microbatches, in its input order.
+
+        ``reorder_and_combine_batches`` restores the input order (and strips padding) for the
+        token-based iterator.
+        """
+        outputs = [self._forward_micro_batch(micro_batch) for micro_batch in microbatch_iterator]
+        output = microbatch_iterator.reorder_and_combine_batches(outputs)
+        if output.device is not None and output.device != torch.device("cpu"):
+            output = output.to("cpu")
+        return output["output"]
+
+    def forward_backward_rollout_shard(
+        self,
+        shard: RolloutShard,
+        loss_normalization: MinibatchLossNormalization,
+        compute_old_logprobs: bool,
+    ) -> WorkerOutput:
+        """``forward_backward`` on this rank's shard of a streamed mini-batch.
+
+        Each microbatch is collated from its stored payloads only when it is built, so nothing holds
+        the shard collated whole. The shard's rows carry their advantages with the loss reduction
+        applied. When the loss reads the pre-update logprobs, a forward pass over the same
+        microbatches computes them first, so only metrics go back to the trainer.
+        """
+        rows = ShardRows(shard)
+        if compute_old_logprobs:
+            rows.old_logprobs = self._old_logprobs(self._shard_microbatches(rows, select=select_forward_inputs))
+        # The trainer of a streamed step reads only metrics: build no per-token outputs.
+        output = self._forward_backward_microbatches(
+            self._shard_microbatches(rows), loss_normalization, return_per_token_outputs=False
+        )
+        return WorkerOutput(metrics=output.metrics)
+
+    def _shard_microbatches(self, rows: ShardRows, select=None) -> StoredShardBatchIterator:
+        """``rows`` as token-batched microbatches, planned as ``forward_backward`` plans a batch."""
+        return StoredShardBatchIterator(rows, self.cfg.max_tokens_per_microbatch, select=select)
+
+    @torch.no_grad()
+    def _old_logprobs(self, microbatch_iterator: StoredShardBatchIterator) -> torch.Tensor:
+        return self._forward_logprobs_microbatches(microbatch_iterator)
 
     def _forward_micro_with_loss(
         self,

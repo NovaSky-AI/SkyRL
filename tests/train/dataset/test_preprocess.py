@@ -2,6 +2,7 @@
 uv run --isolated --extra dev pytest tests/train/dataset/test_preprocess.py
 """
 
+import dataclasses
 import logging
 from typing import List
 from unittest.mock import MagicMock
@@ -772,3 +773,22 @@ def test_rows_to_training_input_without_rewards_has_no_rewards_tensor(tokenizer)
     assert batch["rewards"] is None
     assert batch["loss_mask"].tolist() == [[1.0, 1.0]]
     assert batch.batch_size == 1
+
+
+def test_rows_collated_to_a_padded_shape_match_the_same_rows_collated_with_others(tokenizer):
+    rows = {"prompt_token_ids": [[10], [20, 21, 22]], "response_ids": [[11], [23, 24]], "loss_masks": [[1], [1, 1]]}
+    collation = RowCollation(pad_token_id=tokenizer.pad_token_id, max_seq_len=None, require_rollout_logprobs=False)
+    whole = rows_to_training_input(rows, collation)
+
+    alone = rows_to_training_input(
+        {key: value[:1] for key, value in rows.items()},
+        collation,
+        padded_shape=(whole["sequences"].shape[1], whole["response_mask"].shape[1]),
+    )
+
+    for key in ("sequences", "attention_mask", "response_mask", "loss_mask"):
+        assert torch.equal(alone[key], whole[key][:1]), key
+    with pytest.raises(ValueError, match="do not fit"):
+        rows_to_training_input(rows, collation, padded_shape=(2, 1))
+    with pytest.raises(ValueError, match="carry no rollout_expert_indices"):
+        rows_to_training_input(rows, dataclasses.replace(collation, routes_expected=True))

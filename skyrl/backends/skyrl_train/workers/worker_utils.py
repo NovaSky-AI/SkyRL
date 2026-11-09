@@ -1,10 +1,15 @@
 import math
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set
 
 import torch
 import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl.backends.skyrl_train.rollout_shard import (
+    PULL_AHEAD_MICROBATCHES,
+    ShardRows,
+    pull_payloads,
+)
 from skyrl.backends.skyrl_train.training_batch import (
     PACKED_FIELD_PADDING,
     REAL_SAMPLE_MASK,
@@ -151,6 +156,14 @@ class BaseBatchIterator:
     def __len__(self):
         raise NotImplementedError
 
+    @property
+    def num_rows(self) -> int:
+        return self.data.batch_size
+
+    @property
+    def num_actions(self) -> int:
+        return self.data.metadata["response_length"]
+
     def __iter__(self) -> Iterator[TrainingInputBatch]:
         raise NotImplementedError
 
@@ -165,7 +178,7 @@ class BaseBatchIterator:
     def reorder_and_combine_items(self, outputs: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """Flatten per-sample outputs, one per input row (callers trim their own padding)."""
         flat = [item for batch in outputs for item in batch]
-        if flat and len(flat) != self.data.batch_size:
+        if flat and len(flat) != self.num_rows:
             raise ValueError("Per-sample output count does not match the input batch")
         return flat
 
@@ -289,12 +302,13 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             max_tokens_per_microbatch: Maximum number of tokens per microbatch.
         """
         super().__init__(data)
-        self._max_tokens_per_microbatch = max_tokens_per_microbatch
-
-        # Compute token counts per sample using attention_mask
         attention_mask = data["attention_mask"]
-        self._token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
+        self._plan(attention_mask.sum(dim=1).cpu().tolist(), max_tokens_per_microbatch)
 
+    def _plan(self, token_counts: List[int], max_tokens_per_microbatch: int) -> None:
+        """Pack rows of ``token_counts`` tokens into microbatches, as many on every DP rank."""
+        self._max_tokens_per_microbatch = max_tokens_per_microbatch
+        self._token_counts = token_counts
         # Create microbatches based on token count. The "balanced" packer treats
         # the token budget as a soft cap: a sequence longer than the budget gets
         # its own (over-budget) microbatch rather than raising.
@@ -318,14 +332,19 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         microbatch.metadata = self.data.metadata
         return microbatch
 
+    def _padding_template(self) -> TrainingInputBatch:
+        """A batch with the real microbatches' fields, widths and metadata."""
+        return self.data
+
     def _create_padding_microbatch(self) -> TrainingInputBatch:
         """Create a padding microbatch with loss_mask=0 so it doesn't affect the loss."""
+        template = self._padding_template()
         # Match the real data's sequence length so every microbatch shares the same
         # seq_len.
-        seq_len = self.data["sequences"].shape[1]
-        num_actions = self.data.metadata["response_length"]
+        seq_len = template["sequences"].shape[1]
+        num_actions = template.metadata["response_length"]
         batch_size = 1
-        device = self.data["sequences"].device
+        device = template["sequences"].device
 
         # Keep the full seq_len for shape uniformity, but mark only a single token as
         # valid in the attention mask to keep the row non-degenerate.
@@ -348,22 +367,22 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             }
         )
         # Add optional fields to the padding batch.
-        if self.data.get("rollout_logprobs") is not None:
-            ref_tensor = self.data["rollout_logprobs"]
+        if template.get("rollout_logprobs") is not None:
+            ref_tensor = template["rollout_logprobs"]
             data["rollout_logprobs"] = torch.zeros((batch_size, num_actions), dtype=ref_tensor.dtype, device=device)
         for key in PACKED_FIELD_PADDING:
             # Per-token fields cover the dummy attended token; response fields do not.
-            if self.data.get(key) is not None:
+            if template.get(key) is not None:
                 data[key] = make_packed_field_padding(
                     key,
-                    self.data[key],
+                    template[key],
                     segment_lengths=packed_dummy_row_segments(key, batch_size),
                 )
-        if self.data.get("router_padding_mask") is not None:
+        if template.get("router_padding_mask") is not None:
             data["router_padding_mask"] = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
         data.metadata = {}
-        if self.data.metadata:
-            data.metadata.update(self.data.metadata)
+        if template.metadata:
+            data.metadata.update(template.metadata)
         data.metadata["is_padding_batch"] = True
         return data
 
@@ -457,7 +476,7 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             return []
         if len(batches) != len(self):
             raise ValueError("Output microbatch count does not match the iterator")
-        ordered = [None] * self.data.batch_size
+        ordered = [None] * self.num_rows
         for original_indices, items in zip(self._microbatches, batches):
             if len(items) < len(original_indices):
                 raise ValueError("Microbatch output has fewer items than input samples")
@@ -466,6 +485,62 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         if any(item is None for item in ordered):
             raise ValueError("Microbatch outputs do not cover every input sample")
         return ordered
+
+
+class StoredShardBatchIterator(TokenBasedBatchIterator):
+    """Token-based microbatches of a stored shard, each collated from its payloads when it is built.
+
+    Plans exactly as ``TokenBasedBatchIterator`` does over the shard collated whole (the same row
+    footprints, packing and DP-synced microbatch count), from the rows' lengths alone. Building
+    microbatch ``i`` starts pulling the payloads of the next ``PULL_AHEAD_MICROBATCHES`` to the node,
+    so no more than those are fetched ahead of use. ``select`` reduces each microbatch to the fields
+    a pass reads (``select_forward_inputs``).
+    """
+
+    def __init__(
+        self,
+        rows: ShardRows,
+        max_tokens_per_microbatch: int,
+        select: Optional[Callable[[TrainingInputBatch], TrainingInputBatch]] = None,
+    ):
+        # No collated batch: the rows stand in for it.
+        BaseBatchIterator.__init__(self, None)
+        self._rows = rows
+        self._select = select
+        self._pulled: Set[int] = set()
+        self._template: Optional[TrainingInputBatch] = None
+        self._plan(rows.token_counts, max_tokens_per_microbatch)
+
+    @property
+    def num_rows(self) -> int:
+        return self._rows.num_rows
+
+    @property
+    def num_actions(self) -> int:
+        return self._rows.padded_shape[1]
+
+    def __iter__(self) -> Iterator[TrainingInputBatch]:
+        for index, indices in enumerate(self._microbatches):
+            self._pull_ahead(index)
+            yield self._create_microbatch_from_indices(indices)
+        for _ in range(self._num_padding_microbatches):
+            yield self._create_padding_microbatch()
+
+    def _pull_ahead(self, index: int) -> None:
+        """Start pulling the payloads of the microbatches after ``index`` that are within reach."""
+        for ahead in range(index + 1, min(index + 1 + PULL_AHEAD_MICROBATCHES, len(self._microbatches))):
+            if ahead not in self._pulled:
+                self._pulled.add(ahead)
+                pull_payloads(self._rows.payload_refs(self._microbatches[ahead]))
+
+    def _create_microbatch_from_indices(self, indices: List[int]) -> TrainingInputBatch:
+        batch = self._rows.collate(indices)
+        return self._select(batch) if self._select is not None else batch
+
+    def _padding_template(self) -> TrainingInputBatch:
+        if self._template is None:
+            self._template = self._create_microbatch_from_indices([0])
+        return self._template
 
 
 def get_microbatch_iterator(
@@ -485,3 +560,21 @@ def get_microbatch_iterator(
         return TokenBasedBatchIterator(data, max_tokens_per_microbatch=max_tokens_per_microbatch)
     else:
         return SampleBasedBatchIterator(data, sample_batch_size=micro_batch_size, drop_last=False)
+
+
+def select_forward_inputs(batch: TrainingInputBatch) -> TrainingInputBatch:
+    """The fields and metadata a forward-only (logprob / value) pass reads from a training batch."""
+    keys = ["sequences", "attention_mask"]
+    metadata_keys = ["response_length"]
+    if batch.get("rollout_expert_indices") is not None:
+        keys.append("rollout_expert_indices")
+    if batch.get("router_padding_mask") is not None:
+        keys.append("router_padding_mask")
+    if batch.get(SAMPLE_SUPPORT_FIELD) is not None:
+        # The scorer validates that captured support backs every loss-active target.
+        keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
+    if batch.get("pixel_values") is not None:
+        keys.append("pixel_values")
+    if batch.get("image_grid_thw") is not None:
+        keys.append("image_grid_thw")
+    return batch.select(keys=keys, metadata_keys=metadata_keys)

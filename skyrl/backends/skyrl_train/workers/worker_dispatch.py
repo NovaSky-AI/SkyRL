@@ -11,17 +11,22 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 from ray import ObjectRef
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
+    ActorInfo,
     MeshDispatch,
     WorkerOutput,
 )
+from skyrl.backends.skyrl_train.rollout_shard import RolloutShard
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
+)
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MinibatchLossNormalization,
 )
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
@@ -437,26 +442,47 @@ class WorkerDispatch:
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` aggregated
             across DP ranks plus scalar ``metrics`` (already all-reduced).
         """
-        self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
-        self.ensure_active_adapter(model, model_id)
-
         # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
         kwargs = dict(worker_kwargs)
         if loss_fn is not None:
             kwargs["loss_fn"] = loss_fn
         if loss_fn_config is not None:
             kwargs["loss_fn_config"] = loss_fn_config
-
-        refs = MeshDispatch.dispatch_from_staged(
-            self._actor_groups[model].actor_infos,
-            "forward_backward",
-            chunk_refs=chunk_refs,
-            **kwargs,
+        return self._forward_backward(
+            model, model_id, lambda info: info.handle.forward_backward.remote(chunk_refs[info.rank.dp], **kwargs)
         )
-        statuses = deadline.ray_get(refs, "forward_backward")
 
+    def _forward_backward(
+        self, model: str, model_id: Optional[str], call: Callable[[ActorInfo], ObjectRef]
+    ) -> WorkerOutput:
+        """Run ``call`` (a worker's training call on its DP rank's batch) on every actor."""
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
+        self.ensure_active_adapter(model, model_id)
+        actor_infos = self._actor_groups[model].actor_infos
+        statuses = deadline.ray_get([call(info) for info in actor_infos], "forward_backward")
         self._save_memory_snapshot(model, "forward_backward")
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
+        return WorkerOutput.cat(actor_infos, statuses)
+
+    def forward_backward_rollout_shards(
+        self,
+        model: str,
+        shards: List[RolloutShard],
+        *,
+        loss_normalization: MinibatchLossNormalization,
+        compute_old_logprobs: bool,
+    ) -> WorkerOutput:
+        """Train every worker on its DP rank's shard (``shards[dp_rank]``) of a streamed mini-batch.
+
+        Workers collate each microbatch from its stored payloads as they reach it. Nothing returns but
+        metrics.
+        """
+        return self._forward_backward(
+            model,
+            None,
+            lambda info: info.handle.forward_backward_rollout_shard.remote(
+                shards[info.rank.dp], loss_normalization=loss_normalization, compute_old_logprobs=compute_old_logprobs
+            ),
+        )
 
     def optim_step(self, model: str, model_id: Optional[str] = None) -> Optional[float]:
         """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.

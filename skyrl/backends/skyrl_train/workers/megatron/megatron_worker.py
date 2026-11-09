@@ -148,6 +148,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
+    StoredShardBatchIterator,
     TokenBasedBatchIterator,
     all_reduce_metrics,
     get_microbatch_iterator,
@@ -856,24 +857,20 @@ class MegatronWorker:
         """
         self._drop_pixel_values_on_non_first_pp_stage(data)
 
+        microbatch_iterator = get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
+        )
+        return self._forward_logprobs_microbatches(microbatch_iterator)
+
+    def _forward_logprobs_microbatches(self, microbatch_iterator: BaseBatchIterator) -> torch.Tensor:
+        """``_forward_logprobs`` over the microbatches ``microbatch_iterator`` builds, in its input order."""
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
-        if use_token_batching:
-            microbatch_iterator = get_microbatch_iterator(
-                data,
-                micro_batch_size=self.cfg.micro_forward_batch_size_per_gpu,
-                max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
-            )
-        else:
-            microbatch_iterator = None
-
-        if microbatch_iterator is not None:
-            micro_batches = microbatch_iterator
-        else:
-            micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
         host_microbatches = [
             self._host_microbatch(BaseBatchIterator.batch_to_experience(micro), scores_only=True)
-            for micro in micro_batches
+            for micro in microbatch_iterator
         ]
 
         if use_token_batching:
@@ -894,19 +891,11 @@ class MegatronWorker:
                 temperature=self.cfg.algorithm.temperature,
             )
 
-        log_probs = log_probs.to("cpu")
-
-        if use_token_batching and microbatch_iterator is not None:
-            # Need to strip padded samples and reorder back to original order
-            output = TrainingOutputBatch({"output": log_probs})
-            output.metadata = data.metadata
+        output = TrainingOutputBatch({"output": log_probs.to("cpu")})
+        if use_token_batching:
             # The output from Megatron is concatenated across microbatches.
             # We need to extract only the real (non-padded) samples and reorder.
             output = self._reorder_megatron_forward_output(output, microbatch_iterator, mbs)
-        else:
-            output = TrainingOutputBatch({"output": log_probs})
-            output.metadata = data.metadata
-
         return output["output"]
 
     def _reorder_megatron_forward_output(
@@ -929,7 +918,7 @@ class MegatronWorker:
         all_log_probs = log_probs.split(padded_mbs, dim=0)
 
         # Build original-order tensor
-        batch_size = microbatch_iterator.data.batch_size
+        batch_size = microbatch_iterator.num_rows
         num_actions = log_probs.shape[1]
         reordered = torch.zeros((batch_size, num_actions), dtype=log_probs.dtype, device=log_probs.device)
 
@@ -1228,6 +1217,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # standard CUDA memory; only subsequent activations use expandable segments.
         self._set_expandable_segments(True)
 
+    @torch.no_grad()
+    def _old_logprobs(self, microbatch_iterator: StoredShardBatchIterator) -> torch.Tensor:
+        log_probs = super()._old_logprobs(microbatch_iterator)
+        if not mpu.is_pipeline_last_stage(ignore_virtual=True):
+            # Only the last stage computes logprobs and the loss; the others carry zeros of the
+            # batch's shape, which their microbatches slice but never read.
+            return torch.zeros((microbatch_iterator.num_rows, microbatch_iterator.num_actions), dtype=torch.float32)
+        return log_probs
+
     def forward(
         self,
         data: TrainingInputBatch,
@@ -1371,14 +1369,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             :class:`WorkerOutput` with per-sample ``loss_fn_outputs`` and scalar
             ``metrics`` (all-reduced across DP).
         """
-        self.model.train()
-        torch.cuda.reset_peak_memory_stats()
-
-        all_metrics = defaultdict(list)
-
         self._drop_pixel_values_on_non_first_pp_stage(data)
-
-        use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
         microbatch_iterator = get_microbatch_iterator(
             data,
@@ -1390,6 +1381,28 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 data,
                 dp_group=mpu.get_data_parallel_group(with_context_parallel=False),
             )
+        return self._forward_backward_microbatches(
+            microbatch_iterator,
+            loss_normalization,
+            loss_fn=loss_fn,
+            loss_fn_config=loss_fn_config,
+            return_per_token_outputs=return_per_token_outputs,
+        )
+
+    def _forward_backward_microbatches(
+        self,
+        microbatch_iterator: BaseBatchIterator,
+        loss_normalization: MinibatchLossNormalization,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+        return_per_token_outputs: bool = True,
+    ) -> WorkerOutput:
+        """``forward_backward`` over the microbatches ``microbatch_iterator`` builds."""
+        self.model.train()
+        torch.cuda.reset_peak_memory_stats()
+
+        all_metrics = defaultdict(list)
+        use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
         # Both iterator modes share the same batch-to-experience conversion.
         micro_buffer = [
