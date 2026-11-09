@@ -8,8 +8,8 @@ batches, so stacked layers span batches -> ``finalize_layerwise_reload``). After
 parameter and buffer and runs greedy decoding with logprobs. Both must match exactly, and the stacked pass must
 have taken the direct path on every NVFP4 layer.
 
-The NVFP4 bytes come from a deterministic stand-in quantizer (valid E2M1 / E4M3 bytes, no TE needed): the
-receiver is under test here, not TE; both paths get the same bytes.
+The NVFP4 bytes come from a deterministic stand-in quantizer (valid E2M1 / E4M3 bytes): the
+receiver is under test here, not the quantizer; both paths get the same bytes.
 
 Needs SM100 (NVFP4 TRT-LLM MoE). Run:
 
@@ -91,9 +91,7 @@ def _worker_sync(worker, mode, seed):
     nvfp4_stacked.quantize_nvfp4_matrix = _fake_quantize
     model = worker.model_runner.model
     device = worker.device
-    settings = nvfp4.Nvfp4WeightQuantSettings(
-        use_4over6=False, e4m3_max=448, err_mode="MAE", row_scaled_activation=True, backward_override=None
-    )
+    settings = nvfp4.Nvfp4WeightQuantSettings("absmax")
     if mode == "stacked":
         serializer = nvfp4_stacked.Nvfp4StackedExpertSerializer(settings, num_experts=NUM_EXPERTS)
     else:

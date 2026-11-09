@@ -1,31 +1,38 @@
 """Serialized NVFP4 weight sync for routed MoE experts (trainer-quantized, loaded as-is by vLLM).
 
-The trainer runs routed-expert GEMMs through Transformer Engine's NVFP4 recipe (``expert_nvfp4``). To make
-the sampler use bitwise the same expert weights, the sync quantizes each exported BF16 expert weight with a
-TE ``NVFP4Quantizer`` built from the *same* recipe the forward uses (``NVFP4BlockScaling()``, configured by
-the ``NVTE_NVFP4_*`` environment), and ships ModelOpt NVFP4 checkpoint tensors. vLLM boots with
+With ``expert_nvfp4`` the trainer computes its routed experts on vLLM's NVFP4 grid, and the sync quantizes each
+exported BF16 expert weight with the same quantizer (FlashInfer ``fp4_quantize`` with vLLM's per-expert global
+scale, ``kernels.nvfp4_quant.quantize_experts``, and ``expert_nvfp4_block_scale``) and ships ModelOpt NVFP4
+checkpoint tensors, so the sampler's expert weights are the bytes the trainer rounds to. vLLM boots with
 ``quantization=modelopt_fp4`` and dummy weights; its layerwise reload only re-lays the tensors out for the
 TRT-LLM MoE kernel, so no re-quantization happens on the sampler.
 
 Per expert projection the stream carries (HF names, as a ModelOpt checkpoint would):
   ``<p>.weight``         uint8 ``[N, K/2]``  packed E2M1, even K element in the low nibble
   ``<p>.weight_scale``   float8_e4m3fn ``[N, K/16]`` block scales, row-major (unswizzled)
-  ``<p>.weight_scale_2`` fp32 scalar, global decode scale ``amax / (6 * e4m3_max)``
+  ``<p>.weight_scale_2`` fp32 scalar, global decode scale ``amax / (6 * 448)``
   ``<p>.input_scale``    fp32 scalar 1.0 (unused under per-token activations; keeps reload layerwise)
 Gate and up of one expert are quantized as one ``[gate; up]`` matrix, matching Megatron's fused fc1
-weight (one TE amax per expert) and vLLM's requirement that w1/w3 share one global scale.
+weight (one global scale per expert) and vLLM's requirement that w1/w3 share one global scale.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Tuple
 
 import torch
 
-NVFP4_BLOCK_SIZE = 16
-_TE_ROW_ALIGNMENT = 16
+from skyrl.backends.skyrl_train.kernels.nvfp4_quant import (
+    NVFP4_GROUP_SIZE,
+    check_block_scale,
+    nvfp4_amax,
+    nvfp4_global_scale,
+    quantize_experts,
+)
+
+NVFP4_BLOCK_SIZE = NVFP4_GROUP_SIZE
 _EXPERT_RE = re.compile(
     r"^(?P<prefix>.*\.layers\.(?P<layer>\d+)\.mlp\.experts\.(?P<expert>\d+))\.(?P<proj>gate_proj|up_proj|down_proj)\.weight$"
 )
@@ -45,67 +52,12 @@ NVFP4_EXPERT_ONLY_IGNORE = (
 
 @dataclass(frozen=True)
 class Nvfp4WeightQuantSettings:
-    """Weight-quantizer settings, taken from the TE NVFP4 recipe the trainer forward uses."""
+    """The trainer's NVFP4 weight grid: ``expert_nvfp4_block_scale`` (absmax or 4/6)."""
 
-    use_4over6: bool
-    e4m3_max: int
-    err_mode: str
-    row_scaled_activation: bool
-    backward_override: Optional[str]
-    two_d: bool = False
+    block_scale: str
 
-    @classmethod
-    def from_te_recipe(cls) -> "Nvfp4WeightQuantSettings":
-        """Mirror TE's ``NVFP4BlockScalingRecipeState.make_quantizers`` for the forward weight slot."""
-        from transformer_engine.common.recipe import NVFP4BlockScaling
-
-        recipe = NVFP4BlockScaling()
-        qparams = recipe.fp4_quant_fwd_weight
-        if qparams.random_hadamard_transform or qparams.stochastic_rounding:
-            raise ValueError("Serialized NVFP4 weight sync expects forward weights without RHT or stochastic rounding")
-        # 2D (16x16) weight blocks are fine: TE's rowwise scales repeat the tile scale on each of its 16 rows, which
-        # vLLM's 1x16 ModelOpt layout represents exactly, as long as the sync quantizes with the same 2D setting.
-        use_4over6 = recipe.nvfp4_4over6 in ("all", "weights")
-        e4m3_max = 448
-        if use_4over6 and recipe.nvfp4_4over6_e4m3_use_256 in ("all", "weights"):
-            e4m3_max = 256
-        return cls(
-            use_4over6=use_4over6,
-            e4m3_max=e4m3_max,
-            err_mode=str(recipe.nvfp4_4over6_err_mode).upper(),
-            row_scaled_activation=bool(recipe.row_scaled_activation),
-            backward_override=recipe.backward_override,
-            two_d=bool(qparams.fp4_2d_quantization),
-        )
-
-
-# One TE quantizer per (settings, device). ``NVFP4Quantizer.quantize`` allocates a fresh output and does
-# not mutate the quantizer (no amax reduction, no stochastic-rounding state), so reusing it is
-# bitwise-identical to constructing one per expert, as the sync used to (~12k times per sync).
-_QUANTIZER_CACHE: Dict[Tuple[Nvfp4WeightQuantSettings, torch.device], Any] = {}
-
-
-def _nvfp4_quantizer(settings: Nvfp4WeightQuantSettings, device: torch.device):
-    key = (settings, device)
-    quantizer = _QUANTIZER_CACHE.get(key)
-    if quantizer is None:
-        from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-
-        quantizer = NVFP4Quantizer(
-            rowwise=True,
-            columnwise=False,
-            with_rht=False,
-            with_post_rht_amax=False,
-            with_2d_quantization=settings.two_d,
-            stochastic_rounding=False,
-            row_scaled_nvfp4=False,
-            nvfp4_use_4over6=settings.use_4over6,
-            nvfp4_e4m3_max=settings.e4m3_max,
-            nvfp4_4over6_err_mode=settings.err_mode,
-            with_random_sign_mask=False,
-        )
-        _QUANTIZER_CACHE[key] = quantizer
-    return quantizer
+    def __post_init__(self) -> None:
+        check_block_scale(self.block_scale)
 
 
 def _check_nvfp4_cols(cols: int) -> None:
@@ -116,22 +68,12 @@ def _check_nvfp4_cols(cols: int) -> None:
 def quantize_nvfp4_matrix(
     weight: torch.Tensor, settings: Nvfp4WeightQuantSettings
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Quantize one ``[N, K]`` matrix with TE's NVFP4 kernel -> (packed uint8, e4m3 block scales, fp32 decode scale)."""
-    rows, cols = weight.shape
-    _check_nvfp4_cols(cols)
-    quantizer = _nvfp4_quantizer(settings, weight.device)
-    pad = (-rows) % _TE_ROW_ALIGNMENT
-    src = weight.contiguous()
-    if pad:
-        src = torch.cat((src, src.new_zeros((pad, cols))), dim=0)
-    q = quantizer.quantize(src)
-    packed = q._rowwise_data.view(torch.uint8)[:rows, : cols // 2].contiguous()
-    block_scale = q._rowwise_scale_inv.view(torch.uint8)[:rows, : cols // NVFP4_BLOCK_SIZE].contiguous()
-    amax = q._amax_rowwise.reshape(-1)[0].float()
-    # TE's global encode scale is (6 * e4m3_max) / amax (1 for an all-zero tensor); vLLM wants the decode scale.
-    encode = torch.where(amax > 0, (6.0 * settings.e4m3_max) / amax, torch.ones_like(amax))
-    encode = torch.clamp(encode, max=torch.finfo(torch.float32).max)
-    return packed, block_scale.view(torch.float8_e4m3fn), torch.reciprocal(encode)
+    """Quantize one ``[N, K]`` matrix -> (packed uint8, e4m3 block scales, fp32 decode scale): vLLM's online
+    arithmetic (one global scale over the whole matrix) and FlashInfer's quantizer, the trainer's own grid."""
+    _check_nvfp4_cols(weight.shape[1])
+    global_scale, decode = nvfp4_global_scale(nvfp4_amax(weight))
+    packed, block_scale = quantize_experts(weight[None], global_scale.reshape(1), settings.block_scale)
+    return packed[0], block_scale[0], decode
 
 
 def _emit(prefix: str, proj: str, packed: torch.Tensor, block_scale: torch.Tensor, decode: torch.Tensor):

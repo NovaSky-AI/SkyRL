@@ -708,6 +708,12 @@ class MegatronConfig(BaseConfig):
 
     ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` keep the routed experts of the first / last
     N layers in BF16, in the trainer and on the sampler (the vLLM ignore list and the weight sync follow them)."""
+    expert_nvfp4_block_scale: Literal["absmax", "four_over_six"] = "four_over_six"
+    """With ``expert_nvfp4``: the E4M3 block scales of the routed experts' NVFP4 weights and per-token activations.
+    ``four_over_six`` (humans&' recipe) picks amax/6 or amax/4 per 16-block, whichever has the lower squared error
+    (FlashInfer's 4over6 with its fast MSE error path, E4M3 bound 448); ``absmax`` (amax/6) is vLLM's own
+    quantizer. The weight sync quantizes the experts with it (FlashInfer ``fp4_quantize`` with vLLM's per-expert
+    global scale), and the vLLM engines' FlashInfer activation quantizer is configured from it."""
     expert_nvfp4_stacked_sync: bool = True
     """With ``expert_nvfp4``: ship each NVFP4 MoE layer's experts to vLLM as 8 tensors stacked over all experts,
     already in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout (``weight_sync/nvfp4_stacked.py``), instead of

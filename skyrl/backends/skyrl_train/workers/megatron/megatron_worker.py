@@ -1770,7 +1770,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 min_packed_bytes = max_stacked_wire_bytes(stacked_num_experts, hf.hidden_size, moe_inter)
             return SerializedNvfp4WeightSource(
                 source,
-                Nvfp4WeightQuantSettings.from_te_recipe(),
+                Nvfp4WeightQuantSettings(megatron_config.expert_nvfp4_block_scale),
                 bf16_layers=nvfp4_bf16_layers(self.strategy.hf_config.num_hidden_layers, megatron_config),
                 stacked_num_experts=stacked_num_experts,
                 min_packed_buffer_bytes=min_packed_bytes,
