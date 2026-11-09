@@ -46,12 +46,12 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     build_logprobs_content,
     pack_routed_experts,
     pack_sample_support,
+    pack_sample_support_logprobs,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
-    SampleSupport,
+    CompactSampleSupport,
 )
 from skyrl.backends.skyrl_train.weight_sync.lora_target import in_memory_lora_path
 from skyrl.env_vars import (
@@ -63,13 +63,47 @@ from skyrl.env_vars import (
 logger = logging.getLogger(__name__)
 
 
+def _multimodal_prompt(token_ids: List[int], features: dict, cache_salt: Optional[str]):
+    """The engine input for a token prompt with multimodal ``features``.
+
+    ``features`` is vLLM's ``MultiModalFeatures`` (per-modality ``mm_hashes``, ``mm_placeholders`` and
+    serialized ``kwargs_data``), as ``/inference/v1/generate`` takes it; this builds the engine input the
+    same way that endpoint does (vllm/entrypoints/scale_out/token_in_token_out/serving.py), so a caller can
+    send images to ``/skyrl/v1/generate`` and keep its routed experts and sample support.
+    """
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+        mm_kwargs_from_features,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        MultiModalFeatures,
+    )
+    from vllm.inputs import mm_input
+    from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+
+    parsed = MultiModalFeatures.model_validate(features)
+    placeholders = {
+        modality: [PlaceholderRange(offset=p.offset, length=p.length) for p in ranges]
+        for modality, ranges in parsed.mm_placeholders.items()
+    }
+    return mm_input(
+        prompt_token_ids=token_ids,
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs_from_features(parsed)),
+        mm_hashes=parsed.mm_hashes,
+        mm_placeholders=placeholders,
+        cache_salt=cache_salt,
+    )
+
+
 def _sample_support_from_flat_logprobs(
     logprobs: FlatLogprobs,
     top_k: int,
-) -> tuple[list[dict[str, float]], SampleSupport]:
-    """Extract sampled scores and post-filter support from vLLM's flat rows.
+    *,
+    with_member_logprobs: bool = False,
+) -> tuple[list[dict[str, float]], CompactSampleSupport]:
+    """Extract sampled scores and post-filter CSR support from vLLM's flat rows.
 
     Each row is ``[sampled token, top-1, ..., top-k]``; filtered candidates are ``-inf``.
+    ``with_member_logprobs`` also keeps each member's processed logprob in the support's logprob column.
     """
     row_width = top_k + 1
     token_ids = np.asarray(logprobs.token_ids, dtype=SAMPLE_SUPPORT_DTYPE).reshape(-1, row_width)
@@ -77,27 +111,24 @@ def _sample_support_from_flat_logprobs(
     sampled_logprobs_values = processed_logprobs[:, 0]
     if not np.isfinite(sampled_logprobs_values).all():
         raise ValueError("sample-support capture received non-finite sampled logprob(s)")
+    sampled = token_ids[:, 0]
     candidate_ids = token_ids[:, 1:]
-    candidate_logprobs = processed_logprobs[:, 1:]
-    support_ids = np.full(candidate_ids.shape, SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_DTYPE)
-    for row_index, (row_ids, row_logprobs) in enumerate(zip(candidate_ids, candidate_logprobs)):
-        # vLLM emits filtered candidates as -inf. Treat all non-finite values
-        # (including NaN and +inf) as absent, then compact the remaining IDs so
-        # the packed representation retains its required trailing padding.
-        finite_ids = row_ids[np.isfinite(row_logprobs)]
-        support_ids[row_index, : len(finite_ids)] = finite_ids
-    sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
+    # vLLM emits filtered candidates as -inf. Treat all non-finite values
+    # (including NaN and +inf) as absent.
+    present = np.isfinite(processed_logprobs[:, 1:])
+    # vLLM's float32 logprobs round-trip exactly through the float64 array.
+    member_logprobs = processed_logprobs[:, 1:].astype(np.float32) if with_member_logprobs else None
 
     # vLLM's approximate top-k/top-p pivot can omit the sampled token. Replace the
-    # weakest valid candidate while preserving the support width and trailing padding.
-    sampled = token_ids[:, 0]
-    valid = support_ids >= 0
-    present = np.any(support_ids == sampled[:, None], axis=1)
-    missing = (~present) & valid.any(axis=1)
-    if np.any(missing):
-        rows = np.flatnonzero(missing)
-        weakest_col = valid.sum(axis=1) - 1
-        support_ids[rows, weakest_col[rows]] = sampled[rows]
+    # weakest valid candidate so the row keeps its size and contains the sample.
+    rows_missing_sample = present.any(axis=1) & ~((candidate_ids == sampled[:, None]) & present).any(axis=1)
+    if np.any(rows_missing_sample):
+        rows = np.flatnonzero(rows_missing_sample)
+        weakest_col = top_k - 1 - np.argmax(present[rows, ::-1], axis=1)
+        candidate_ids = candidate_ids.copy()
+        candidate_ids[rows, weakest_col] = sampled[rows]
+        if member_logprobs is not None:
+            member_logprobs[rows, weakest_col] = sampled_logprobs_values[rows]
         logger.warning(
             "sample-support repair: %d token(s) had the sampled id absent from top-%d support; "
             "overwrote the weakest member to preserve the invariant (vLLM approx top-k/top-p "
@@ -107,7 +138,8 @@ def _sample_support_from_flat_logprobs(
             int(sampled[rows[0]]),
             int(rows[0]),
         )
-    return sampled_logprobs, support_ids
+    sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
+    return sampled_logprobs, CompactSampleSupport.from_masked_rows(candidate_ids, present, member_logprobs)
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -120,7 +152,7 @@ class VLLMServerActor(ServerActorProtocol):
     called from anywhere (other actors, driver, external processes).
 
     Custom endpoints added for SkyRL:
-    - /reset_prefix_cache: Reset prefix cache
+    - /fetch_weights: Apply checkpoint-delta payloads before reload
 
     Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
     /update_weights, /get_world_size) from the RLHF router when VLLM_SERVER_DEV_MODE=1.
@@ -245,14 +277,6 @@ class VLLMServerActor(ServerActorProtocol):
             from skyrl.backends.skyrl_train.inference_servers.utils import (
                 get_pd_p2p_connector_name,
             )
-            from skyrl.backends.skyrl_train.patches.vllm.patch_multi_connector_stats import (
-                apply_multi_connector_stats_patch,
-            )
-
-            # MultiConnector stacks (e.g. Mooncake P2P + store) crash the
-            # AsyncLLM output handler when a child has stats but no prom
-            # metrics; patch before the engine is built in this process.
-            apply_multi_connector_stats_patch()
 
             # Handle both dict and JSON string formats for kv_transfer_config
             kv_config = getattr(self._cli_args, "kv_transfer_config", None)
@@ -479,17 +503,6 @@ class VLLMServerActor(ServerActorProtocol):
                 """Identify the Ray frontend exporting this server's engine metrics."""
                 return Response(content=orjson.dumps(metrics_info), media_type="application/json")
 
-        @app.post("/reset_prefix_cache")
-        async def _reset_prefix_cache(request: Request):
-            """Reset the prefix cache, optionally resetting in-flight requests too."""
-            try:
-                data = await request.json()
-            except Exception:
-                data = {}
-            reset_running_requests = data.get("reset_running_requests", False)
-            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
-            return {"status": "ok"}
-
         @app.post("/fetch_weights")
         async def _fetch_weights(request: Request):
             """Fetch/apply checkpoint-delta payloads before the paused reload phase."""
@@ -559,7 +572,11 @@ class VLLMServerActor(ServerActorProtocol):
         # TODO (sumanthrh): Migrate back to /inference/v1/generate once flashinfer is supported with returning top-k logprobs.
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
-            """SkyRL generate endpoint that returns routed_experts alongside token output."""
+            """SkyRL generate endpoint that returns routed_experts alongside token output.
+
+            Like ``/inference/v1/generate``, a request may carry multimodal ``features`` (images) for its
+            token prompt.
+            """
             body = await request.json()
 
             # Resolve `model` to a loaded LoRA adapter, as the native endpoint does
@@ -579,6 +596,12 @@ class VLLMServerActor(ServerActorProtocol):
             cache_salt = body.get("cache_salt")
 
             capture_sample_support = body.get("return_sample_support", False)
+            capture_sample_support_logprobs = body.get("return_sample_support_logprobs", False)
+            if capture_sample_support_logprobs and not capture_sample_support:
+                raise HTTPException(
+                    status_code=400,
+                    detail="return_sample_support_logprobs requires return_sample_support",
+                )
             if capture_sample_support:
                 # Sample support requires a bounded, non-degenerate top-k set.
                 top_k = sampling_params_dict.get("top_k")
@@ -599,7 +622,15 @@ class VLLMServerActor(ServerActorProtocol):
                     sampling_params_dict.setdefault("detokenize", False)
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
-            if cache_salt is not None:
+            features = body.get("features")
+            if features is not None:
+                try:
+                    prompt = _multimodal_prompt(token_ids, features, cache_salt)
+                # pydantic's ValidationError and undecodable items are ValueErrors; an item that decodes to
+                # something other than a serialized MultiModalKwargsItem raises AttributeError or TypeError.
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise HTTPException(status_code=400, detail=f"invalid features: {error}") from error
+            elif cache_salt is not None:
                 prompt = TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)
             else:
                 prompt = TokensPrompt(prompt_token_ids=token_ids)
@@ -617,14 +648,18 @@ class VLLMServerActor(ServerActorProtocol):
             finish_reason = resp.finish_reason
 
             logprobs = None
-            sample_support = None
+            packed_sample_support = None
+            packed_sample_support_logprobs = None
             if capture_sample_support:
-                content, support_ids = _sample_support_from_flat_logprobs(
+                content, sample_support = _sample_support_from_flat_logprobs(
                     resp.logprobs,
                     sampling_params_dict["top_k"],
+                    with_member_logprobs=capture_sample_support_logprobs,
                 )
                 logprobs = {"content": content}
-                sample_support = pack_sample_support(support_ids)
+                packed_sample_support = pack_sample_support(sample_support)
+                if capture_sample_support_logprobs:
+                    packed_sample_support_logprobs = pack_sample_support_logprobs(sample_support)
             elif resp.logprobs is not None:
                 content, num_clamped = build_logprobs_content(token_ids_out, resp.logprobs)
                 if num_clamped:
@@ -645,7 +680,8 @@ class VLLMServerActor(ServerActorProtocol):
                         "finish_reason": finish_reason,
                         "logprobs": logprobs,
                         PackedField.ROUTED_EXPERTS.value: routed_experts,
-                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: sample_support,
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: packed_sample_support,
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS.value: packed_sample_support_logprobs,
                     }
                 ]
             }
@@ -791,7 +827,7 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     ``--worker-extension-cls``, ...).
     """
     from vllm import AsyncEngineArgs as _AsyncEngineArgs
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.entrypoints.common.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 

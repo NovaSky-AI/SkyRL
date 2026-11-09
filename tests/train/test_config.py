@@ -28,6 +28,7 @@ from skyrl.train.utils.utils import (
     validate_cfg,
     validate_inference_engine_cfg,
     validate_megatron_cfg,
+    validate_optimizer_offload_to_disk_cfg,
 )
 from tests.train.util import example_dummy_config
 
@@ -140,6 +141,15 @@ def test_cli_overrides():
 
     # check that temperature is propagated to algorithm config
     assert cfg.trainer.algorithm.temperature == 0.7
+
+
+def test_algorithm_loss_defaults():
+    """The default objective is DPPO with per-prompt loss reduction and Dr. GRPO advantages."""
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
+    algorithm = cfg.trainer.algorithm
+    assert algorithm.policy_loss_type == "dppo"
+    assert algorithm.loss_reduction == "prompt_mean"
+    assert algorithm.grpo_norm_by_std is False
 
 
 def test_cli_overrides_empty_args():
@@ -418,6 +428,82 @@ def test_megatron_explicit_transformer_config_kwargs_override_top_level_fp8_fiel
     assert cfg.transformer_config_kwargs["fp8"] == "e4m3"
 
 
+def test_megatron_bf16_layer_counts_fold_into_first_last_layers_bf16():
+    from skyrl.train.config.config import MegatronConfig
+
+    cfg = MegatronConfig(fp8="e4m3", num_layers_at_end_in_bf16=2)
+
+    assert cfg.transformer_config_kwargs["first_last_layers_bf16"] is True
+    assert cfg.transformer_config_kwargs["num_layers_at_start_in_bf16"] == 0
+    assert cfg.transformer_config_kwargs["num_layers_at_end_in_bf16"] == 2
+    # Megatron's own defaults (one BF16 layer at each end once enabled) never apply implicitly.
+    assert "first_last_layers_bf16" not in MegatronConfig(fp8="e4m3").transformer_config_kwargs
+
+
+def test_megatron_rejects_two_per_module_precision_sources():
+    from skyrl.train.config.config import MegatronConfig
+
+    with pytest.raises(ValueError, match="only use one"):
+        MegatronConfig(
+            fp8="e4m3", fp8_exclude_modules=["*.shared_experts.*"], te_precision_config_file="/tmp/recipe.yaml"
+        )
+
+
+@pytest.mark.parametrize("pattern", ["decoder.layers.0.*", "*.layers.[0-3].*"])
+def test_megatron_rejects_layer_indexed_fp8_exclusions_under_pipeline_parallelism(pattern):
+    from skyrl.train.config.config import MegatronConfig
+
+    with pytest.raises(ValueError, match="within each pipeline stage"):
+        MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=[pattern])
+    MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=["*.shared_experts.*"])
+    MegatronConfig(fp8="e4m3", pipeline_model_parallel_size=2, fp8_exclude_modules=["mtp.layers.0.*"])
+    MegatronConfig(fp8="e4m3", fp8_exclude_modules=[pattern])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"fp8_exclude_modules": ["*.shared_experts.*"]},
+        {"num_layers_at_start_in_bf16": 1},
+        {"num_layers_at_end_in_bf16": 1},
+    ],
+)
+def test_megatron_rejects_fp8_only_settings_without_fp8(kwargs):
+    from skyrl.train.config.config import MegatronConfig
+
+    with pytest.raises(ValueError, match="FP8 disabled"):
+        MegatronConfig(**kwargs)
+    MegatronConfig(fp8="e4m3", **kwargs)
+    MegatronConfig(transformer_config_kwargs={"fp8": "e4m3"}, **kwargs)
+
+
+def test_fp8_weight_sync_exclusions_require_fp8_weight_sync():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.inference_engine.fp8_weight_sync_exclude_modules = ["*.layers.0.*"]
+
+    with pytest.raises(ValueError, match="requires fp8_weight_sync_mode"):
+        validate_inference_engine_cfg(cfg)
+
+
+def test_cli_overrides_accept_fp8_exclusion_lists():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.strategy=megatron",
+            "trainer.policy.megatron_config.fp8=e4m3",
+            "trainer.policy.megatron_config.fp8_exclude_modules=['*.shared_experts.*']",
+            "trainer.policy.megatron_config.num_layers_at_start_in_bf16=1",
+            "generator.inference_engine.fp8_weight_sync_mode=mxfp8",
+            "generator.inference_engine.fp8_weight_sync_exclude_modules=['*.layers.0.*','*.layers.39.*']",
+        ]
+    )
+
+    megatron_config = cfg.trainer.policy.megatron_config
+    assert list(megatron_config.fp8_exclude_modules) == ["*.shared_experts.*"]
+    assert megatron_config.transformer_config_kwargs["first_last_layers_bf16"] is True
+    assert list(cfg.generator.inference_engine.fp8_weight_sync_exclude_modules) == ["*.layers.0.*", "*.layers.39.*"]
+
+
 @pytest.mark.parametrize(
     "empty_cuda_cache, optimizer_kwargs, expected",
     [
@@ -430,12 +516,33 @@ def test_megatron_explicit_transformer_config_kwargs_override_top_level_fp8_fiel
     ],
 )
 def test_megatron_empty_cuda_cache_after_backward(empty_cuda_cache, optimizer_kwargs, expected):
-    """``empty_cuda_cache=None`` skips the post-backward empty only when the whole optimizer runs on CPU;
-    an explicit bool always wins."""
+    """Without expandable segments, ``empty_cuda_cache=None`` skips the post-backward empty only when the
+    whole optimizer runs on CPU; an explicit bool always wins."""
     from skyrl.train.config.config import MegatronConfig
 
     cfg = MegatronConfig(empty_cuda_cache=empty_cuda_cache, optimizer_config_kwargs=optimizer_kwargs)
     assert cfg.empty_cuda_cache_after_backward() is expected
+    assert cfg.empty_cuda_cache_after_backward(expandable_segments=False) is expected
+
+
+@pytest.mark.parametrize(
+    "empty_cuda_cache, expandable_segments, after_backward, after_forward",
+    [
+        (None, True, False, False),  # the trainer default: expandable segments do not fragment
+        (None, False, True, True),
+        (True, True, True, True),  # an explicit bool always wins
+        (False, False, False, False),
+    ],
+)
+def test_megatron_empty_cuda_cache_with_expandable_segments(
+    empty_cuda_cache, expandable_segments, after_backward, after_forward
+):
+    """``empty_cuda_cache=None`` skips both per-pass empties under expandable segments."""
+    from skyrl.train.config.config import MegatronConfig
+
+    cfg = MegatronConfig(empty_cuda_cache=empty_cuda_cache)
+    assert cfg.empty_cuda_cache_after_backward(expandable_segments) is after_backward
+    assert cfg.empty_cuda_cache_after_forward(expandable_segments) is after_forward
 
 
 def test_megatron_empty_cuda_cache_from_cli_override():
@@ -489,6 +596,8 @@ def test_megatron_validation_rejects_mxfp8_before_blackwell(monkeypatch):
 
 
 def test_megatron_validation_rejects_mxfp8_with_fp8_param(monkeypatch):
+    monkeypatch.setattr(quantization_utils, "has_visible_cuda_device", lambda: True)
+    monkeypatch.setattr(quantization_utils, "is_blackwell_or_newer", lambda: True)
     monkeypatch.setattr(train_utils, "is_blackwell_or_newer", lambda: True)
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
@@ -510,6 +619,20 @@ def test_serialized_fp8_fp32_scales_reject_vllm_e8m0(monkeypatch):
 
     with pytest.raises(ValueError, match="VLLM_USE_DEEP_GEMM_E8M0=0"):
         prepare_runtime_environment(cfg)
+
+
+def test_block_sparse_fused_lm_head_requires_fused_path():
+    with pytest.raises(ValueError, match="requires fused_lm_head_logprob=True"):
+        TrainerConfig(strategy="megatron", fused_lm_head_logprob_backend="triton_block_sparse")
+
+
+def test_block_sparse_fused_lm_head_accepts_backend_selection():
+    cfg = TrainerConfig(
+        strategy="megatron",
+        fused_lm_head_logprob=True,
+        fused_lm_head_logprob_backend="triton_block_sparse",
+    )
+    assert cfg.fused_lm_head_logprob_backend == "triton_block_sparse"
 
 
 @pytest.mark.parametrize(
@@ -1654,3 +1777,146 @@ def test_fused_lm_head_logprob_rejects_output_layer_lora(target_modules, raises)
             TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
     else:
         TrainerConfig(strategy="megatron", fused_lm_head_logprob=True, policy=policy)
+
+
+_SCORE_CENTERING_BASE = [
+    "trainer.algorithm.enable_score_centering=true",
+    "trainer.algorithm.enable_sample_support_replay=true",
+    "trainer.algorithm.policy_loss_type=rollout_is",
+    "generator.inference_engine.enable_return_sample_support_set=true",
+    "generator.sampling_params.top_k=8",
+    "trainer.strategy=megatron",
+]
+
+
+def test_score_centering_accepts_replay_rollout_is_and_a_sequence_mask():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [*_SCORE_CENTERING_BASE, "trainer.algorithm.off_policy_correction.sequence_mask_metric=geometric"]
+    )
+
+    assert cfg.trainer.algorithm.enable_score_centering
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["trainer.algorithm.policy_loss_type=reinforce"],
+        ["trainer.algorithm.policy_loss_type=cispo", "trainer.algorithm.cispo.cispo_anchor=rollout"],
+        ["trainer.algorithm.policy_loss_type=dppo"],
+    ],
+)
+def test_score_centering_accepts_every_sampler_anchored_loss(overrides):
+    cfg = SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, *overrides])
+
+    assert cfg.trainer.algorithm.enable_score_centering
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("trainer.algorithm.enable_sample_support_replay=false", "requires enable_sample_support_replay"),
+        ("trainer.algorithm.policy_loss_type=regular", "weighted relative to the sampler"),
+        ("trainer.algorithm.policy_loss_type=gspo", "weighted relative to the sampler"),
+        ("trainer.algorithm.policy_loss_type=cispo", "weighted relative to the sampler"),
+        ("trainer.algorithm.off_policy_correction.tis_ratio_type=token", "tis_ratio_type"),
+        ("trainer.algorithm.off_policy_correction.tis_ratio_type=sequence", "tis_ratio_type"),
+        ("trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5", "token_mask_is_threshold"),
+        ("trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0", "token_mask_is_threshold"),
+    ],
+)
+def test_score_centering_rejects_what_breaks_its_drift_cancellation(override, message):
+    with pytest.raises(ValueError, match=message):
+        SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, override])
+
+
+_SCORE_CENTERING_AUTO_BASE = [o for o in _SCORE_CENTERING_BASE if not o.startswith("trainer.algorithm.enable_score_")]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        [],
+        ["trainer.algorithm.policy_loss_type=reinforce"],
+        ["trainer.algorithm.policy_loss_type=cispo", "trainer.algorithm.cispo.cispo_anchor=rollout"],
+        ["trainer.algorithm.policy_loss_type=dppo"],
+        ["trainer.algorithm.off_policy_correction.sequence_mask_metric=geometric"],
+    ],
+)
+def test_score_centering_default_enables_with_replay_and_a_sampler_anchored_loss(overrides):
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [*_SCORE_CENTERING_AUTO_BASE, "trainer.algorithm.enable_sample_support_replay=true", *overrides]
+    )
+
+    assert cfg.trainer.algorithm.enable_score_centering is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["trainer.algorithm.enable_sample_support_replay=false"],
+        ["trainer.algorithm.enable_sample_support_replay=true", "trainer.algorithm.policy_loss_type=regular"],
+        ["trainer.algorithm.enable_sample_support_replay=true", "trainer.algorithm.policy_loss_type=cispo"],
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "trainer.algorithm.off_policy_correction.tis_ratio_type=token",
+        ],
+        [
+            "trainer.algorithm.enable_sample_support_replay=true",
+            "trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5",
+        ],
+        # An explicit false wins over a configuration that would otherwise enable it.
+        ["trainer.algorithm.enable_sample_support_replay=true", "trainer.algorithm.enable_score_centering=false"],
+    ],
+)
+def test_score_centering_default_stays_off_where_it_does_not_apply(overrides):
+    cfg = SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_AUTO_BASE, *overrides])
+
+    assert cfg.trainer.algorithm.enable_score_centering is False
+
+
+def test_score_centering_rejects_legacy_use_tis():
+    """use_tis becomes tis_ratio_type="token" only in validate_cfg, after the default resolves."""
+    auto = [*_SCORE_CENTERING_AUTO_BASE, "trainer.algorithm.enable_sample_support_replay=true"]
+    cfg = SkyRLTrainConfig.from_cli_overrides([*auto, "trainer.algorithm.use_tis=true"])
+    assert cfg.trainer.algorithm.enable_score_centering is False
+
+    with pytest.raises(ValueError, match="use_tis"):
+        SkyRLTrainConfig.from_cli_overrides([*_SCORE_CENTERING_BASE, "trainer.algorithm.use_tis=true"])
+
+
+def test_score_centering_default_enables_with_replay_on_the_default_loss():
+    """policy_loss_type defaults to dppo, so turning on replay alone turns on score centering."""
+    overrides = [
+        o
+        for o in _SCORE_CENTERING_AUTO_BASE
+        if not o.startswith("trainer.algorithm.policy_loss_type") and not o.startswith("trainer.algorithm.enable_")
+    ]
+    cfg = SkyRLTrainConfig.from_cli_overrides([*overrides, "trainer.algorithm.enable_sample_support_replay=true"])
+
+    assert cfg.trainer.algorithm.policy_loss_type == "dppo"
+    assert cfg.trainer.algorithm.enable_score_centering is True
+
+
+def test_score_centering_default_is_off_for_the_default_config():
+    assert SkyRLTrainConfig().trainer.algorithm.enable_score_centering is False
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"trainer.strategy": "fsdp"}, "requires trainer.strategy=megatron"),
+        ({"trainer.policy.model.lora.rank": 8}, "does not support LoRA"),
+        ({"trainer.ckpt_path": "s3://bucket/ckpts"}, "local trainer.ckpt_path"),
+        ({"trainer.ref.megatron_config.optimizer_offload_to_disk.dir": "/tmp/state"}, "policy only"),
+    ],
+)
+def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, match):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir = "/tmp/state"
+    for path, value in overrides.items():
+        *parents, name = path.split(".")
+        setattr(_get_nested_attr(cfg, ".".join(parents)), name, value)
+
+    with pytest.raises(ValueError, match=match):
+        validate_optimizer_offload_to_disk_cfg(cfg)

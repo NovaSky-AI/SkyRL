@@ -42,9 +42,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from skycap import hashing
+
+if TYPE_CHECKING:
+    from skycap.tokens.renderer import Media
 
 Author = Literal["client", "model"]
 
@@ -65,6 +68,9 @@ class CallInfo:
     #: token. ``False`` means it was rendered from the messages instead (a harness edit, compaction,
     #: or a turn the renderer wouldn't extend); ``None`` for a trajectory's first call, or text mode.
     bridged: bool | None = None
+    #: The API the call came in on: a ``skycap.dialects.DialectType`` value, e.g. ``openai_responses``.
+    #: ``None`` in records written before dialects.
+    dialect: str | None = None
 
 
 @dataclass(slots=True)
@@ -74,7 +80,8 @@ class NodeTokens:
     For a model node, ``token_ids[:sampled_start]`` is template scaffold the
     model did not produce, and the rest is what it sampled. ``logprobs``,
     ``routed_experts`` and ``sampling_mask`` are aligned to ``token_ids``;
-    ``sampling_mask`` has one support set per sampled token.
+    ``sampling_mask`` has one support set per sampled token, and
+    ``sampling_mask_logprobs``, when captured, the sampler's logprob of each id in it.
 
     ``text`` is what these tokens decode to, special tokens kept, and
     ``text_offsets[k]`` is the UTF-8 byte offset in ``text`` where token ``k``
@@ -84,6 +91,9 @@ class NodeTokens:
     and the tokens before it have empty spans, so every span decodes on its own.
     Both are filled when the trajectory is recorded, so a reader never needs the
     tokenizer.
+
+    ``media`` are the multimodal items whose placeholders sit in these tokens, with offsets relative to them. Only a
+    client node has any.
     """
 
     token_ids: list[int]
@@ -91,8 +101,10 @@ class NodeTokens:
     logprobs: list[float] | None = None
     routed_experts: Any | None = None
     sampling_mask: list[list[int]] | None = None
+    sampling_mask_logprobs: list[list[float]] | None = None
     text: str | None = None
     text_offsets: list[int] | None = None
+    media: list[Media] = field(default_factory=list)
 
 
 @dataclass(slots=True)
