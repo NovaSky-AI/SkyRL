@@ -17,7 +17,6 @@ uv run --isolated --extra dev pytest tests/train/test_rl_callbacks.py -v
 """
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -70,6 +69,7 @@ class RecorderCallback(TrainingCallback):
                     "steps_per_epoch": ci.steps_per_epoch,
                     "has_batch": ci.batch is not None,
                     "trajectory_ids": ci.trajectory_ids,
+                    "consumed_trajectory_ids": ci.consumed_trajectory_ids,
                     "has_metrics": ci.metrics is not None,
                     "metrics_keys": sorted((ci.metrics or {}).keys()),
                     "has_logs": ci.logs is not None,
@@ -439,7 +439,10 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
     Generation is stubbed: each step's mini-batch comes straight from ``_collect_generation_mini_batch``, so the
     test only exercises the orchestration in ``FullyAsyncRayPPOTrainer.train()``.
     """
-    from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+    from skyrl.train.fully_async_trainer import (
+        FullyAsyncRayPPOTrainer,
+        GeneratedOutputGroup,
+    )
 
     cfg = _build_test_cfg()
     cfg.trainer.fully_async.enabled = True
@@ -475,10 +478,20 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
 
     monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
     monkeypatch.setattr(trainer, "_run_generate_for_a_group_loop", AsyncMock(return_value=None))
-    step_groups = iter([["uid-0", "uid-1"], ["uid-2", "uid-3"]])
+
+    def _group(uid: str) -> GeneratedOutputGroup:
+        return GeneratedOutputGroup(
+            generator_output={"trajectory_ids": [TrajectoryID(instance_id=uid, repetition_id=0)]},
+            uid=uid,
+            global_step_when_scheduled=0,
+        )
+
+    # Step 2 also drops a group, which it consumes without training it.
+    step_groups = iter([(["uid-0", "uid-1"], []), (["uid-2", "uid-3"], ["uid-9"])])
 
     async def _collect(*_args, **_kwargs):
-        return [SimpleNamespace(uid=uid) for uid in next(step_groups)], [], False
+        kept, dropped = next(step_groups)
+        return [_group(uid) for uid in kept], [_group(uid) for uid in dropped], False
 
     monkeypatch.setattr(trainer, "_collect_generation_mini_batch", _collect)
     monkeypatch.setattr(
@@ -529,6 +542,11 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
     for snap in snaps_by_event["on_step_end"]:
         assert snap["has_batch"], "on_step_end should see the training batch"
         assert "policy_loss" in snap["metrics_keys"], snap["metrics_keys"]
+    # Each step names its own kept groups' trajectories, and everything it took from the buffer.
+    assert [
+        ([t.instance_id for t in snap["trajectory_ids"]], [t.instance_id for t in snap["consumed_trajectory_ids"]])
+        for snap in snaps_by_event["on_step_end"]
+    ] == [(["uid-0", "uid-1"], ["uid-0", "uid-1"]), (["uid-2", "uid-3"], ["uid-2", "uid-3", "uid-9"])]
     assert [snap["global_step"] for snap in snaps_by_event["on_eval_end"]] == [0, 1, 2]
     assert set(snaps_by_event["on_log"][0]["logs_keys"]) == {"eval/score"}
     # One on_log per step carries the step's metrics, eval metrics and timings together.

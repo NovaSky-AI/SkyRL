@@ -23,7 +23,9 @@ import yaml
 from loguru import logger
 from skycap.exposure import load_exposure
 from skycap.paths import BUILTIN_RULES, load_rule
+from transformers import AutoConfig
 
+from skyrl.backends.skyrl_train.rollout_shard import support_id_bits
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 
@@ -90,7 +92,10 @@ class SkycapConfig:
     wandb: SkycapWandbConfig = field(default_factory=SkycapWandbConfig)
     """The per-step index of the records in W&B."""
     ttl: float = 3600.0
-    """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
+    """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it. Also
+    how long a server keeps the samples of a finished trajectory whose group is never composed."""
+    max_concurrent_finishes: int = 64
+    """Trajectories each server actor may be finishing at once."""
     renderer_pool_size: int = 8
     """Renderers (tokenizer copies) each server renders prompts with in parallel."""
     use_raw_content: bool = True
@@ -173,6 +178,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
         sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
+        max_concurrent_finishes=cfg.skycap.max_concurrent_finishes,
     )
 
 
@@ -214,6 +220,16 @@ class HarborSkycapExp(HarborExp):
             records=self.records,
             include_images=cfg.skycap.include_images,
             check_first_batch=cfg.skycap.check_first_batch,
+            servers=self.skycap,
+            support_id_bits=(
+                support_id_bits(
+                    AutoConfig.from_pretrained(cfg.trainer.policy.model.path, trust_remote_code=True)
+                    .get_text_config()
+                    .vocab_size
+                )
+                if cfg.generator.inference_engine.enable_return_sample_support_set
+                else None
+            ),
         )
         return self.generator
 

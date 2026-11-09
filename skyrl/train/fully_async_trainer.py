@@ -84,6 +84,11 @@ class GeneratedOutputGroup:
     prompts: Optional[List[Any]] = None
 
 
+def _trajectory_ids(groups: List[GeneratedOutputGroup]) -> List[Any]:
+    """The trajectory of each row of the groups' outputs, in order."""
+    return [trajectory_id for group in groups for trajectory_id in group.generator_output["trajectory_ids"]]
+
+
 @dataclass
 class _RolloutStat:
     """
@@ -610,7 +615,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             await self.async_train_dataloader.mark_consumed_uids(
                                 [g.uid for g in cur_generation_group_mini_batch]
                             )
-                        self._fire("on_step_end", batch=training_input, metrics=status)
+                        self._fire(
+                            "on_step_end",
+                            batch=training_input,
+                            metrics=status,
+                            trajectory_ids=_trajectory_ids(cur_generation_group_mini_batch),
+                            consumed_trajectory_ids=_trajectory_ids(
+                                cur_generation_group_mini_batch + cur_dropped_groups
+                            ),
+                        )
 
                         # Capture callback-driven triggers, then reset.
                         force_save = self._training_control.should_save

@@ -52,6 +52,9 @@ class CallbackInput:
 
     # on_step_end of the synchronous RL trainer only - the trajectory of each of ``batch``'s rows, before padding
     trajectory_ids: Optional[List["TrajectoryID"]] = None
+    # on_step_end of the fully-async trainer only - every trajectory the step took from the buffer,
+    # trained or dropped; other generated trajectories belong to later steps
+    consumed_trajectory_ids: Optional[List["TrajectoryID"]] = None
 
     # Step end / eval end
     metrics: Optional[Dict[str, Any]] = None

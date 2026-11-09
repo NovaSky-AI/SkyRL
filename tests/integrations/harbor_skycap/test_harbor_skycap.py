@@ -25,7 +25,6 @@ from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
     TrialOutcome,
     compose,
 )
-from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
 from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
@@ -39,6 +38,7 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support_logprobs,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
+from skyrl.train.generators.skycap_engine import SkyRLEngine  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
 from skyrl.train.utils.rate_limiter import RateLimiterConfig  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402

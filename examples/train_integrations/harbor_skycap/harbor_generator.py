@@ -46,13 +46,20 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
+    StoredRolloutGroup,
     TrajectoryID,
+)
+from skyrl.train.generators.skycap_store import (
+    CapturedFinish,
+    StoredCapturePool,
+    StoredPools,
+    compose_stored_group,
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
-from .compose import TrialOutcome, compose, split
+from .compose import TrialChecks, TrialOutcome, compose
 from .record_index import RecordLog
 
 litellm.suppress_debug_info = True
@@ -106,6 +113,8 @@ class HarborSkycapGenerator(GeneratorInterface):
         records: Optional[RecordLog] = None,
         include_images: bool = False,
         check_first_batch: bool = True,
+        servers: Any = None,
+        support_id_bits: Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -117,8 +126,12 @@ class HarborSkycapGenerator(GeneratorInterface):
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
             include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
-            check_first_batch: raise when not one trajectory of the first ``generate`` call has anything to train
-                (``skycap.check_first_batch``).
+            check_first_batch: raise when not one trajectory of the first ``generate`` or ``generate_to_ray``
+                call has anything to train (``skycap.check_first_batch``).
+            servers: the ``SkycapServers`` behind ``capture_urls``. With them, each group is
+                finished and composed on its server and stays in that node's object store.
+            support_id_bits: the policy vocabulary's id width (``support_id_bits(vocab_size)``), at
+                which a stored group's sample-support member ids are packed.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -137,6 +150,12 @@ class HarborSkycapGenerator(GeneratorInterface):
         self._routed_experts = bool(getattr(generator_cfg.inference_engine, "enable_return_routed_experts", False))
         self.capture_urls = list(capture_urls)
         self.pool = CapturePool(self.capture_urls)
+        self.servers = servers
+        self.support_id_bits = support_id_bits
+        # One pool per server actor; a stored group's trials all use one of them, chosen round-robin.
+        self.stored_pools = StoredPools(
+            [StoredCapturePool(url, servers.actor_for(url)) for url in self.capture_urls] if servers is not None else []
+        )
         self.inference_engine_client = inference_engine_client
         self.records = records
         served = generator_cfg.inference_engine.served_model_name
@@ -162,8 +181,10 @@ class HarborSkycapGenerator(GeneratorInterface):
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
 
     async def close(self) -> None:
-        """Close the pool's HTTP session. The generator can't generate afterwards."""
+        """Close the pools' HTTP sessions. The generator can't generate afterwards."""
         await self.pool.close()
+        for pool in self.stored_pools.pools:
+            await pool.close()
 
     def _cache_salt(self) -> Optional[str]:
         if not getattr(self.generator_cfg, "use_cache_salt", False):
@@ -174,6 +195,50 @@ class HarborSkycapGenerator(GeneratorInterface):
         return build_vllm_cache_salt(weight_version, self._served_model_name)
 
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
+        """Run the batch over every server and compose it here (eval, unstreamed training)."""
+        outcomes, metrics = await self._trials(input_batch, self.pool, [], disable_tqdm)
+        output = compose(outcomes, **self._compose_options())
+        output["rollout_metrics"].update(metrics)
+        return output
+
+    async def generate_to_ray(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> StoredRolloutGroup:
+        if not self.stored_pools.pools:
+            return await super().generate_to_ray(input_batch, disable_tqdm=disable_tqdm)
+        if self.include_images:
+            raise ValueError("a stored group carries no vision features: skycap.include_images needs generate()")
+        return await self.stored_pools.run(lambda pool: self._generate_stored(pool, input_batch, disable_tqdm))
+
+    async def _generate_stored(
+        self, pool: StoredCapturePool, input_batch: GeneratorInput, disable_tqdm: bool
+    ) -> StoredRolloutGroup:
+        finished: List[str] = []
+        try:
+            outcomes, metrics = await self._trials(input_batch, pool, finished, disable_tqdm)
+        except BaseException:
+            # Nothing will be composed: drop the samples the server cached for this group.
+            pool.actor.discard.remote(finished)
+            raise
+        composed = {o.capture_id for o in outcomes}
+        discard = [trajectory_id for trajectory_id in finished if trajectory_id not in composed]
+        group = await compose_stored_group(
+            pool.actor, len(outcomes), outcomes, discard, self._compose_options(), self.support_id_bits
+        )
+        group.group_fields["rollout_metrics"].update(metrics)
+        return group
+
+    def _compose_options(self) -> Dict[str, Any]:
+        return dict(
+            overlong_filtering=self.generator_cfg.apply_overlong_filtering,
+            top_k=self.generator_cfg.sampling_params.top_k,
+            sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
+            routed_experts=self._routed_experts,
+            include_images=self.include_images,
+        )
+
+    async def _trials(
+        self, input_batch: GeneratorInput, pool: CapturePool, finished: List[str], disable_tqdm: bool
+    ) -> tuple[List[TrialOutcome], Dict[str, Any]]:
+        """Run every trial of the batch on ``pool``, recording each trajectory it finishes in ``finished``."""
         prompts = input_batch["prompts"]
         trajectory_ids = input_batch["trajectory_ids"]
         if trajectory_ids is None:
@@ -196,7 +261,9 @@ class HarborSkycapGenerator(GeneratorInterface):
         )
 
         async def worker(index: int, prompt: ConversationType, trajectory_id: TrajectoryID) -> None:
-            outcomes[index] = await self._trial(prompt, trajectory_id, cache_salt, step, phase, attempts[index])
+            outcomes[index] = await self._trial(
+                pool, finished, prompt, trajectory_id, cache_salt, step, phase, attempts[index]
+            )
             progress.update(1)
 
         try:
@@ -205,29 +272,21 @@ class HarborSkycapGenerator(GeneratorInterface):
                     group.create_task(worker(index, prompt, trajectory_id))
         finally:
             progress.close()
-
         if self._check_first_batch and not self._first_batch_done:
             self._first_batch_done = True
-            if not any(outcome is not None and outcome.samples for outcome in outcomes):
+            # A trial with something to train names its capture, whether its samples came back or stayed on the server.
+            if not any(outcome.capture_id is not None for outcome in outcomes):
                 raise RuntimeError(
                     f"No trajectory in the first batch ({len(outcomes)}) has anything to train; each trial's "
                     f"exception.txt and agent logs are under {self._template.get('trials_dir')}. "
                     "skycap.check_first_batch=false skips this check."
                 )
-
-        output = compose(
-            outcomes,
-            overlong_filtering=self.generator_cfg.apply_overlong_filtering,
-            top_k=self.generator_cfg.sampling_params.top_k,
-            sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
-            routed_experts=self._routed_experts,
-            include_images=self.include_images,
-        )
-        output["rollout_metrics"].update(trial_metrics(attempts))
-        return output
+        return outcomes, trial_metrics(attempts)
 
     async def _trial(
         self,
+        pool: CapturePool,
+        finished: List[str],
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
@@ -246,7 +305,9 @@ class HarborSkycapGenerator(GeneratorInterface):
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             attempts.start()
             try:
-                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, phase, attempt, attempts)
+                outcome = await self._attempt(
+                    pool, finished, prompt, trajectory_id, cache_salt, step, phase, attempt, attempts
+                )
             except PathRuleError as error:
                 logger.error(f"{prefix}: path rule {self.train_paths!r} failed, not retrying: {error}")
                 attempts.fail(error)
@@ -269,6 +330,8 @@ class HarborSkycapGenerator(GeneratorInterface):
 
     async def _attempt(
         self,
+        pool: CapturePool,
+        finished: List[str],
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
         cache_salt: Optional[str],
@@ -289,7 +352,8 @@ class HarborSkycapGenerator(GeneratorInterface):
         try:
             # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
             # than skycap.ttl would otherwise be abandoned as idle before its agent's first call.
-            async with self._rate_limiter, self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
+            async with self._rate_limiter, pool.trajectory(meta, paths=self.train_paths) as trajectory:
+                finished.append(trajectory.id)
                 config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
@@ -306,38 +370,38 @@ class HarborSkycapGenerator(GeneratorInterface):
                     logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")
                 else:
                     reward, stop_reason = float(results.verifier_result.rewards["reward"]), "complete"
-                finished = await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
+                await trajectory.finish({"reward": reward, "stop_reason": stop_reason})
         finally:
             # Every attempt that got a trajectory, including one that raised: the pool finished it.
             if self.records is not None and trajectory is not None:
                 self.records.add(phase, trajectory_id, attempt, trajectory)
 
-        if finished.status != "finished":
+        result = trajectory.result
+        if result.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
-            logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
+            logger.warning(f"Trajectory {trajectory_id}: skycap status {result.status!r}, not training on it")
             return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
-        if not any(split(sample) is not None for sample in finished.samples):
+        # A stored pool's finish brings back the checks; samples brought back are checked here.
+        checks = result.checks if isinstance(result, CapturedFinish) else TrialChecks.of(result.samples)
+        if not checks.trainable:
             # Nothing generated (e.g. the harness failed before its first call): retried, then masked,
             # so the trial's reward doesn't enter the group without tokens behind it.
             logger.warning(f"Trajectory {trajectory_id}: skycap captured no trainable tokens")
             return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error")
         # Overlong filtering clears a context-length trial's loss mask, so it trains nothing and needs no routes.
         filtered = stop_reason == "context_length" and self.generator_cfg.apply_overlong_filtering
-        if (
-            self._routed_experts
-            and not filtered
-            and any((row := split(sample)) is not None and row.routes is None for sample in finished.samples)
-        ):
+        if self._routed_experts and not filtered and checks.missing_routes:
             # skycap drops a path's routes when any node on it lacks them; replaying the rest would
             # train those tokens on routes the rollout never took. Retried, then masked.
             logger.warning(f"Trajectory {trajectory_id}: a trained path has no routed experts")
             return TrialOutcome(trajectory_id=trajectory_id, stop_reason="error", missing_routes=True)
         return TrialOutcome(
             trajectory_id=trajectory_id,
-            samples=finished.samples,
+            samples=[] if isinstance(result, CapturedFinish) else result.samples,
             reward=reward,
             stop_reason=stop_reason,
-            unbridged_calls=finished.unbridged_calls,
+            unbridged_calls=result.unbridged_calls,
+            capture_id=trajectory.id,
         )
 
     def _agent_url(self, trajectory: Any) -> str:
